@@ -47,8 +47,6 @@ struct Args {
         default_value = "arbos-agent-0.1.0"
     )]
     daytona_snapshot: String,
-    #[arg(long, env = "ARBOS_DAYTONA_TARGET")]
-    daytona_target: Option<String>,
     /// Inline Dockerfile (e.g. image/Dockerfile.dev-inline) built by Daytona when the snapshot does not exist.
     #[arg(long, env = "ARBOS_DAYTONA_DOCKERFILE")]
     daytona_dockerfile: Option<PathBuf>,
@@ -140,7 +138,6 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| format!("http://{}", args.listen));
 
     let cfg = Config {
-        listen: args.listen.clone(),
         public_url,
         data_dir: args.data.clone(),
         admin_token,
@@ -150,7 +147,6 @@ async fn main() -> anyhow::Result<()> {
         openai_base: args.openai_base.clone(),
         anthropic_base,
         daytona_snapshot: args.daytona_snapshot.clone(),
-        daytona_target: args.daytona_target.clone(),
         daytona_dockerfile: args.daytona_dockerfile.clone(),
         bootstrap_dir: args.bootstrap_dir.clone(),
         agentd_bin: args.agentd_bin.clone(),

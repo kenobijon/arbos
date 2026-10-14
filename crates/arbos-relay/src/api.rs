@@ -56,7 +56,7 @@ pub async fn pair(State(state): State<AppState>, Json(b): Json<PairBody>) -> Api
     let ok = state
         .db
         .redeem_pairing_code(
-            &b.code.trim().to_owned(),
+            b.code.trim(),
             &device_id,
             b.name.as_deref().unwrap_or("device"),
             &hash(&token),
@@ -414,6 +414,7 @@ pub async fn box_hello(
     if project_id != &id {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
+    tracing::info!(project = %id, version = ?b.version, "box hello");
     if b.proto.unwrap_or(arbos_core::PROTO_VERSION) != arbos_core::PROTO_VERSION {
         return Err((
             StatusCode::CONFLICT,

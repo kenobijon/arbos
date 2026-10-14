@@ -20,6 +20,7 @@ use crate::store::Store;
 
 /// Harness-neutral stream (design §4.4.2).
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum AgentEvent {
     TextDelta(String),
     ReasoningDelta(String),
@@ -54,6 +55,7 @@ pub enum AgentEvent {
     },
 }
 
+#[allow(dead_code)]
 pub struct StartRequest {
     pub session_id: String,
     pub cwd: PathBuf,
@@ -62,6 +64,8 @@ pub struct StartRequest {
     pub thinking: String,
 }
 
+/// The full adapter surface from the design; M0 drives start/resume/prompt/stream/read_history.
+#[allow(dead_code)]
 #[async_trait]
 pub trait HarnessAdapter: Send + Sync {
     fn kind(&self) -> Harness;
@@ -785,18 +789,15 @@ impl HarnessAdapter for PiAdapter {
 /// Headless `claude -p --output-format stream-json --input-format stream-json` child per session
 /// (design §4.4.2; sandbox-image.md §2.3). Provider = the relay's Anthropic passthrough through the
 /// loopback stub (`ANTHROPIC_BASE_URL`), so no Anthropic key enters the box.
+type ClaudeChild = (
+    Arc<Mutex<tokio::process::Child>>,
+    Arc<Mutex<tokio::process::ChildStdin>>,
+);
+
 pub struct ClaudeCodeAdapter {
     cfg: Arc<Config>,
     store: Store,
-    children: Mutex<
-        HashMap<
-            String,
-            (
-                Arc<Mutex<tokio::process::Child>>,
-                Arc<Mutex<tokio::process::ChildStdin>>,
-            ),
-        >,
-    >,
+    children: Mutex<HashMap<String, ClaudeChild>>,
     streams: Mutex<HashMap<String, broadcast::Sender<AgentEvent>>>,
 }
 

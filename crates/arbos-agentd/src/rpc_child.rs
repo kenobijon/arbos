@@ -147,10 +147,6 @@ impl RpcChild {
         Ok(r.data.unwrap_or(serde_json::Value::Null))
     }
 
-    pub async fn pid(&self) -> Option<u32> {
-        self.child.lock().await.as_ref().and_then(|c| c.id())
-    }
-
     /// Orderly shutdown: close stdin, wait up to 5 s, then kill.
     pub async fn shutdown(&self) {
         self.stdin.lock().await.take();

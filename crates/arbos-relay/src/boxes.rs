@@ -610,11 +610,7 @@ pub async fn spawn_wake_runner(state: AppState) {
                         tracing::warn!(%project_id, error = %e, "wake failed");
                         let n = state
                             .db
-                            .retry_wake_job(
-                                &project_id,
-                                5_000 * (attempts as i64 + 1),
-                                &e.to_string(),
-                            )
+                            .retry_wake_job(&project_id, 5_000 * (attempts + 1), &e.to_string())
                             .unwrap_or(99);
                         if n >= 3 {
                             let _ = state.db.finish_wake_job(&project_id);

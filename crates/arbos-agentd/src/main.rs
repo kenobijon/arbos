@@ -395,7 +395,9 @@ async fn boot() -> Result<()> {
             Incoming::CaughtUp { chat_id, head_seq } => {
                 tracing::info!(chat_id, head_seq, "room caught up");
             }
-            Incoming::Status { .. } => {}
+            Incoming::Status { chat_id, state } => {
+                tracing::debug!(chat_id, ?state, "relay status");
+            }
         }
     }
     Ok(())

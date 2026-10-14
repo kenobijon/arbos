@@ -24,7 +24,6 @@ pub struct Config {
     pub prime_bin: String,
     pub claude_bin: String,
     pub pi_ext_path: PathBuf,
-    pub local_box: bool,
     pub device_id: String,
 }
 
@@ -81,7 +80,6 @@ impl Config {
             prime_bin: env_or("ARBOS_PRIME_BIN", "prime-agent"),
             claude_bin: env_or("ARBOS_CLAUDE_BIN", "claude"),
             pi_ext_path,
-            local_box,
             device_id,
             project_id,
             state_dir,

@@ -1,7 +1,8 @@
 //! Daytona REST client (D25, D59): the calls the relay uses, typed from the live
 //! OpenAPI document (`https://www.daytona.io/docs/openapi.json`, fetched
 //! 2026-10-14; operationIds noted on each method). Base URL `https://app.daytona.io/api`.
-//! The API key lives only here (D2, D28).
+//! The API key lives only here (D2, D28). The full call set is kept even where M0 does not use it yet.
+#![allow(dead_code)]
 
 use std::time::Duration;
 

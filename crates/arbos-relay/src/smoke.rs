@@ -16,7 +16,7 @@ pub async fn run(dt: &Daytona, snapshot: Option<String>, keep: bool) -> Result<(
     let mut body = CreateSandbox {
         name: Some(format!(
             "arbos-smoke-{}",
-            &arbos_core::ids::ulid()[20..].to_ascii_lowercase()
+            arbos_core::ids::ulid()[20..].to_ascii_lowercase()
         )),
         cpu: Some(2),
         memory: Some(4),

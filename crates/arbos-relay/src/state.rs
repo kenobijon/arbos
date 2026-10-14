@@ -14,7 +14,6 @@ use crate::db::Db;
 
 #[derive(Clone)]
 pub struct Config {
-    pub listen: String,
     pub public_url: String,
     pub data_dir: PathBuf,
     pub admin_token: Option<String>,
@@ -24,7 +23,6 @@ pub struct Config {
     pub openai_base: String,
     pub anthropic_base: String,
     pub daytona_snapshot: String,
-    pub daytona_target: Option<String>,
     /// Inline Dockerfile for Daytona's declarative builder when the snapshot is not registered.
     pub daytona_dockerfile: Option<PathBuf>,
     /// Directory served at `/bootstrap/{file}` to boxes (arbos-agentd binary, arbos-pi-ext.tar).

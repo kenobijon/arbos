@@ -442,7 +442,7 @@ impl Agent {
             "retry" => Ok(()),
             other => Err(anyhow!("unknown command kind {other}")),
         };
-        let mut h = host.lock().await;
+        let h = host.lock().await;
         match res {
             Ok(()) => h.doc.set_command_status(&cmd.id, CommandStatus::Done, None),
             Err(e) => {

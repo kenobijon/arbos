@@ -14,6 +14,9 @@ use arbos_core::ids::{now_ms, ulid};
 #[derive(Clone)]
 pub struct Store(Arc<Mutex<Connection>>);
 
+/// `(cursor, snapshot, acked_vv)` of one room.
+pub type RoomDocRow = (i64, Option<Vec<u8>>, Option<Vec<u8>>);
+
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
@@ -215,7 +218,7 @@ impl Store {
 
     // ---- room docs ----------------------------------------------------------------------------
 
-    pub fn room_doc(&self, room: &str) -> Result<Option<(i64, Option<Vec<u8>>, Option<Vec<u8>>)>> {
+    pub fn room_doc(&self, room: &str) -> Result<Option<RoomDocRow>> {
         self.with(|c| {
             c.query_row(
                 "SELECT cursor, snapshot, acked_vv FROM room_docs WHERE room = ?1",
@@ -239,16 +242,6 @@ impl Store {
                 "INSERT INTO room_docs(room, cursor, snapshot, acked_vv, updated_at) VALUES (?1,?2,?3,?4,?5)
                  ON CONFLICT(room) DO UPDATE SET cursor=excluded.cursor, snapshot=excluded.snapshot, acked_vv=excluded.acked_vv, updated_at=excluded.updated_at",
                 params![room, cursor, snapshot, acked_vv, now_ms()],
-            )
-            .map(|_| ())
-        })
-    }
-
-    pub fn save_room_cursor(&self, room: &str, cursor: i64) -> Result<()> {
-        self.with(|c| {
-            c.execute(
-                "INSERT INTO room_docs(room, cursor, updated_at) VALUES (?1,?2,?3) ON CONFLICT(room) DO UPDATE SET cursor = excluded.cursor, updated_at = excluded.updated_at",
-                params![room, cursor, now_ms()],
             )
             .map(|_| ())
         })
@@ -365,16 +358,6 @@ impl Store {
             c.execute(
                 "UPDATE sessions SET last_cursor = ?2 WHERE id = ?1",
                 params![id, cursor],
-            )
-            .map(|_| ())
-        })
-    }
-
-    pub fn set_session_path(&self, id: &str, path: &str) -> Result<()> {
-        self.with(|c| {
-            c.execute(
-                "UPDATE sessions SET path = ?2 WHERE id = ?1",
-                params![id, path],
             )
             .map(|_| ())
         })

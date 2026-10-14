@@ -50,14 +50,6 @@ pub struct DocHost {
 }
 
 impl DocHost {
-    pub fn mark_dirty(&mut self) {
-        self.doc.doc.commit();
-    }
-
-    fn has_unsent(&self) -> bool {
-        !self.doc.oplog_vv().includes_vv(&self.acked_vv) || self.doc.oplog_vv() != self.acked_vv
-    }
-
     /// Export the next frame if anything changed and nothing is in flight.
     fn next_push(&mut self) -> Option<(String, Vec<u8>)> {
         if self.inflight.is_some() {
@@ -136,10 +128,6 @@ impl DocHost {
             self.doc
                 .finish_message(&id, arbos_core::doc::MessageStatus::Cancelled);
         }
-    }
-
-    pub fn forget_command(&mut self, id: &str) {
-        self.seen_commands.remove(id);
     }
 }
 
