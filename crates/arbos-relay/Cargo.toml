@@ -12,6 +12,7 @@ arbos-core.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-util = { workspace = true, features = ["io"] }
 futures.workspace = true
 axum.workspace = true
 tower-http.workspace = true
@@ -26,3 +27,4 @@ tracing-subscriber.workspace = true
 chrono.workspace = true
 sha2.workspace = true
 hex.workspace = true
+nix.workspace = true
