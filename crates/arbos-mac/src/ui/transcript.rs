@@ -7,8 +7,8 @@ use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
 use gpui::{
-    AnyElement, Context, Entity, FontWeight, ListAlignment, ListScrollEvent, ListState,
-    Render, SharedString, StyledText, TextRun, Window, div, list, prelude::*, px,
+    div, list, prelude::*, px, AnyElement, Context, Entity, FontWeight, ListAlignment,
+    ListScrollEvent, ListState, Render, SharedString, StyledText, TextRun, Window,
 };
 
 use crate::app::{AppEvent, AppState, DetailsTarget};
@@ -16,9 +16,9 @@ use crate::model::{
     Attachment, Id, Message, MessageStatus, Part, Role, StatusKind, ToolCall, ToolStatus,
 };
 use crate::ui::cards;
-use crate::ui::markdown::{Block, inline_spans, split_blocks};
+use crate::ui::markdown::{inline_spans, split_blocks, Block};
 use crate::ui::motion::PulseClock;
-use crate::ui::theme::{BUBBLE_RADIUS, Theme};
+use crate::ui::theme::{Theme, BUBBLE_RADIUS};
 use crate::ui::veil::Veil;
 
 const OVERDRAW_PX: f32 = 320.0;
@@ -167,7 +167,8 @@ impl Transcript {
                 veil.observe(len);
             }
         }
-        self.veils.retain(|id, _| new_rows.iter().any(|r| r.id == *id));
+        self.veils
+            .retain(|id, _| new_rows.iter().any(|r| r.id == *id));
 
         if chat_changed {
             self.rows = new_rows;
@@ -217,7 +218,12 @@ impl Transcript {
         cx.notify();
     }
 
-    fn render_row(&mut self, ix: usize, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_row(
+        &mut self,
+        ix: usize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let Some(row) = self.rows.get(ix).cloned() else {
             return div().into_any_element();
         };
@@ -360,7 +366,9 @@ impl Transcript {
                 )
                 .into_any_element()
             }
-            RowKind::SubagentChip { tool } => cards::subagent_chip(&tool, &theme).into_any_element(),
+            RowKind::SubagentChip { tool } => {
+                cards::subagent_chip(&tool, &theme).into_any_element()
+            }
             RowKind::Diff {
                 path,
                 added,
@@ -396,13 +404,21 @@ impl Transcript {
                     PulseClock::request(cx);
                 }
                 let state = self.state.clone();
-                cards::browser_card(&row.id, &title, &url, &last_action, live, &theme, move |cx| {
-                    state.update(cx, |s, cx| {
-                        if !s.right_panel_open {
-                            s.toggle_right_panel(cx);
-                        }
-                    });
-                })
+                cards::browser_card(
+                    &row.id,
+                    &title,
+                    &url,
+                    &last_action,
+                    live,
+                    &theme,
+                    move |cx| {
+                        state.update(cx, |s, cx| {
+                            if !s.right_panel_open {
+                                s.toggle_right_panel(cx);
+                            }
+                        });
+                    },
+                )
                 .into_any_element()
             }
             RowKind::Error { code, message } => {
@@ -434,7 +450,7 @@ impl Transcript {
 }
 
 fn relative_width(fraction: f32) -> gpui::DefiniteLength {
-    gpui::relative(fraction).into()
+    gpui::relative(fraction)
 }
 
 impl Render for Transcript {
@@ -528,29 +544,32 @@ pub fn build_rows(messages: &[Message], expanded: &HashSet<String>) -> Vec<Row> 
                     .iter()
                     .rposition(|p| matches!(p, Part::Text { .. }));
                 let mut pending_tools: Vec<(String, ToolView)> = Vec::new();
-                let flush_tools = |pending: &mut Vec<(String, ToolView)>, rows: &mut Vec<Row>, live: bool| {
-                    if pending.is_empty() {
-                        return;
-                    }
-                    let first_id = pending[0].0.clone();
-                    let tools: Vec<ToolView> = pending.drain(..).map(|(_, t)| t).collect();
-                    let id = format!("{}#{}.tools", message.id, first_id);
-                    let open = expanded.contains(&id);
-                    let digest: Vec<(String, Option<ToolStatus>, String)> = tools
-                        .iter()
-                        .map(|t| (t.call.id.clone(), t.status, t.output_summary.clone()))
-                        .collect();
-                    rows.push(Row {
-                        version: hash_version(&(digest, open), live),
-                        id,
-                        message_id: message.id.clone(),
-                        kind: RowKind::ToolGroup { tools, live },
-                    });
-                };
+                let flush_tools =
+                    |pending: &mut Vec<(String, ToolView)>, rows: &mut Vec<Row>, live: bool| {
+                        if pending.is_empty() {
+                            return;
+                        }
+                        let first_id = pending[0].0.clone();
+                        let tools: Vec<ToolView> = pending.drain(..).map(|(_, t)| t).collect();
+                        let id = format!("{}#{}.tools", message.id, first_id);
+                        let open = expanded.contains(&id);
+                        let digest: Vec<(String, Option<ToolStatus>, String)> = tools
+                            .iter()
+                            .map(|t| (t.call.id.clone(), t.status, t.output_summary.clone()))
+                            .collect();
+                        rows.push(Row {
+                            version: hash_version(&(digest, open), live),
+                            id,
+                            message_id: message.id.clone(),
+                            kind: RowKind::ToolGroup { tools, live },
+                        });
+                    };
                 for (pix, part) in message.parts.iter().enumerate() {
                     let live_part = streaming && pix + 1 == message.parts.len();
                     match part {
-                        Part::Tool { id, subagent_name, .. } => {
+                        Part::Tool {
+                            id, subagent_name, ..
+                        } => {
                             if let Some(view) = tool_view(part) {
                                 if subagent_name.is_some() {
                                     flush_tools(&mut pending_tools, &mut rows, false);
@@ -604,10 +623,20 @@ pub fn build_rows(messages: &[Message], expanded: &HashSet<String>) -> Vec<Row> 
                                 },
                             });
                         }
-                        Part::Status { id, code, message: text } => {
-                            let live = streaming && matches!(code, StatusKind::Deciding | StatusKind::SubagentWorking);
+                        Part::Status {
+                            id,
+                            code,
+                            message: text,
+                        } => {
+                            let live = streaming
+                                && matches!(
+                                    code,
+                                    StatusKind::Deciding | StatusKind::SubagentWorking
+                                );
                             let kind = match code {
-                                StatusKind::Note | StatusKind::Handoff => RowKind::Note { text: text.clone() },
+                                StatusKind::Note | StatusKind::Handoff => {
+                                    RowKind::Note { text: text.clone() }
+                                }
                                 StatusKind::Deciding
                                 | StatusKind::SubagentWorking
                                 | StatusKind::AskUser
@@ -624,7 +653,11 @@ pub fn build_rows(messages: &[Message], expanded: &HashSet<String>) -> Vec<Row> 
                                 kind,
                             });
                         }
-                        Part::Error { id, code, message: text } => rows.push(Row {
+                        Part::Error {
+                            id,
+                            code,
+                            message: text,
+                        } => rows.push(Row {
                             version: hash_version(&(code, text), false),
                             id: format!("{}#{}", message.id, id),
                             message_id: message.id.clone(),
@@ -687,7 +720,15 @@ pub fn build_rows(messages: &[Message], expanded: &HashSet<String>) -> Vec<Row> 
                 }
                 flush_tools(&mut pending_tools, &mut rows, streaming);
                 if message.status == MessageStatus::Cancelled
-                    && !message.parts.iter().any(|p| matches!(p, Part::Status { code: StatusKind::Note, .. }))
+                    && !message.parts.iter().any(|p| {
+                        matches!(
+                            p,
+                            Part::Status {
+                                code: StatusKind::Note,
+                                ..
+                            }
+                        )
+                    })
                 {
                     rows.push(Row {
                         version: 0,
@@ -732,7 +773,11 @@ fn styled_text(
         ..sans.clone()
     };
     for (span, style) in spans {
-        let mut font = if style.code { mono.clone() } else { sans.clone() };
+        let mut font = if style.code {
+            mono.clone()
+        } else {
+            sans.clone()
+        };
         if style.bold {
             font.weight = FontWeight::SEMIBOLD;
         }
@@ -743,7 +788,11 @@ fn styled_text(
             len: span.len(),
             font,
             color: base_color,
-            background_color: if style.code { Some(theme.code_bg) } else { None },
+            background_color: if style.code {
+                Some(theme.code_bg)
+            } else {
+                None
+            },
             underline: None,
             strikethrough: None,
         });
@@ -758,7 +807,11 @@ fn styled_text(
 }
 
 /// Split runs at chunk boundaries and multiply alpha in (zeron veil.rs).
-fn apply_veil(runs: Vec<TextRun>, spans: &[(std::ops::Range<usize>, f32)], offset: usize) -> Vec<TextRun> {
+fn apply_veil(
+    runs: Vec<TextRun>,
+    spans: &[(std::ops::Range<usize>, f32)],
+    offset: usize,
+) -> Vec<TextRun> {
     if spans.is_empty() {
         return runs;
     }
@@ -806,6 +859,8 @@ fn apply_veil(runs: Vec<TextRun>, spans: &[(std::ops::Range<usize>, f32)], offse
 
 fn render_block(block: &Block, veil: Option<&Veil>, now: Instant, theme: &Theme) -> AnyElement {
     let base = div()
+        .w_full()
+        .min_w_0()
         .max_w(px(ASSISTANT_MAX_WIDTH))
         .text_color(theme.text)
         .text_size(px(13.5))
@@ -848,13 +903,7 @@ fn render_block(block: &Block, veil: Option<&Veil>, now: Instant, theme: &Theme)
                                 .child(marker),
                         )
                         .child(div().flex_1().child(styled_text(
-                            item,
-                            theme.text,
-                            13.5,
-                            theme,
-                            veil,
-                            now,
-                            offset,
+                            item, theme.text, 13.5, theme, veil, now, offset,
                         ))),
                 );
                 offset += item.len() + 1;
@@ -881,7 +930,11 @@ fn render_block(block: &Block, veil: Option<&Veil>, now: Instant, theme: &Theme)
                     .border_color(theme.border)
                     .text_size(px(11.0))
                     .text_color(theme.text_faint)
-                    .child(if lang.is_empty() { "code".to_string() } else { lang.clone() })
+                    .child(if lang.is_empty() {
+                        "code".to_string()
+                    } else {
+                        lang.clone()
+                    })
                     .child(div().child("Copy")),
             );
             let mono = gpui::Font {

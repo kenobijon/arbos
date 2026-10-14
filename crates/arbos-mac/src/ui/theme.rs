@@ -1,7 +1,7 @@
 //! Colours are paint, numbers drive layout (zeron-study §2.4). One global.
 //! Matte is the default; Glass is a macOS-only toggle (D10, §3.11).
 
-use gpui::{App, Global, Hsla, WindowBackgroundAppearance, hsla};
+use gpui::{hsla, App, Global, Hsla, WindowBackgroundAppearance};
 
 pub const RAIL_WIDTH: f32 = 90.0;
 pub const RAIL_WIDTH_COLLAPSED: f32 = 48.0;
@@ -160,7 +160,11 @@ impl Theme {
     /// Floating cards: translucent tint on glass, flat card on matte (§3.11).
     pub fn card(&self) -> Hsla {
         let mut c = self.surface_1;
-        c.a = if self.is_glass() { FROST_TINT_ALPHA } else { 1.0 };
+        c.a = if self.is_glass() {
+            FROST_TINT_ALPHA
+        } else {
+            1.0
+        };
         c
     }
 

@@ -16,21 +16,21 @@ use arbos_core::wire::{
     Ack, BoxState as WireBox, ErrorHeader, Frame, FrameType, Hello, RowHeader, RowsReq,
     State as WireState, StatusHeader, WakeHeader,
 };
-use arbos_core::{PROTO_VERSION, wire};
+use arbos_core::{wire, PROTO_VERSION};
 use futures::future::BoxFuture;
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::mpsc;
-use tokio::time::{Instant, interval, sleep, timeout};
+use tokio::time::{interval, sleep, timeout, Instant};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use super::doc::ChatDoc;
 use super::{ClientCommand, SyncEvent, SyncSource};
 use crate::model::{
-    Attachment, BoxState, Chat, Id, Link, Message, MessageStatus, Part, Project, Role, new_id,
-    now_ms,
+    new_id, now_ms, Attachment, BoxState, Chat, Id, Link, Message, MessageStatus, Part, Project,
+    Role,
 };
 
 const HELLO_DEADLINE: Duration = Duration::from_secs(15);
@@ -205,9 +205,9 @@ fn open_room(shared: &Arc<Shared>, project_id: &str, chat_id: &str) {
             let _ = change_tx.send(touched);
         }
     }));
-    let local_sub = doc.doc.subscribe_local_update(Box::new(move |bytes| {
-        local_tx.send(bytes.clone()).is_ok()
-    }));
+    let local_sub = doc
+        .doc
+        .subscribe_local_update(Box::new(move |bytes| local_tx.send(bytes.clone()).is_ok()));
     {
         let mut subs = shared.subscriptions.lock().unwrap();
         subs.push(sub);
@@ -243,7 +243,9 @@ async fn forward_changes(
             continue;
         }
         let docs = shared.docs.lock().unwrap();
-        let Some(doc) = docs.get(&chat_id) else { continue };
+        let Some(doc) = docs.get(&chat_id) else {
+            continue;
+        };
         for ix in touched.messages {
             if let Some(mut message) = doc.read_message(ix) {
                 apply_pending(&shared, &mut message);

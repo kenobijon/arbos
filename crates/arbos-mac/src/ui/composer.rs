@@ -6,19 +6,18 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::{
-    App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId, ElementInputHandler,
-    Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId,
-    InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PaintQuad, Pixels, Point, Render, SharedString, Style, TextAlign, TextRun,
-    UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div, fill, point, prelude::*,
-    px, relative, size,
+    actions, div, fill, point, prelude::*, px, relative, size, App, Bounds, ClipboardItem, Context,
+    CursorStyle, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter,
+    FocusHandle, Focusable, GlobalElementId, InspectorElementId, IntoElement, LayoutId,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render,
+    SharedString, Style, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::app::{AppState, ComposerMode};
 use crate::model::Effort;
 use crate::sync::fixture::MODELS;
-use crate::ui::theme::{COMPOSER_HEIGHT, PANEL_RADIUS, Theme};
+use crate::ui::theme::{Theme, COMPOSER_HEIGHT, PANEL_RADIUS};
 
 actions!(
     composer,
@@ -42,6 +41,8 @@ actions!(
 );
 
 pub const MAX_LINES: usize = 10;
+
+pub type SubmitHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 const INPUT_LINE_HEIGHT: f32 = 20.0;
 const INPUT_FONT_SIZE: f32 = 13.5;
 
@@ -67,7 +68,7 @@ pub struct ComposerInput {
     is_selecting: bool,
     /// Runs deferred, after this entity's update ends, so the owner may read
     /// and update the input freely.
-    pub on_submit: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+    pub on_submit: Option<SubmitHandler>,
 }
 
 impl ComposerInput {
@@ -253,7 +254,9 @@ impl ComposerInput {
         if self.content.is_empty() {
             return 0;
         }
-        let Some(layout) = self.layout.as_ref() else { return 0 };
+        let Some(layout) = self.layout.as_ref() else {
+            return 0;
+        };
         index_for_position(&layout.lines, layout.bounds, position, self.content.len())
     }
 
@@ -392,7 +395,11 @@ impl EntityInputHandler for ComposerInput {
         })
     }
 
-    fn marked_text_range(&self, _window: &mut Window, _cx: &mut Context<Self>) -> Option<Range<usize>> {
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
         self.marked_range
             .as_ref()
             .map(|range| self.range_to_utf16(range))
@@ -414,7 +421,8 @@ impl EntityInputHandler for ComposerInput {
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
-        self.content = self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
+        self.content =
+            self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         self.marked_range.take();
         cx.notify();
@@ -433,7 +441,8 @@ impl EntityInputHandler for ComposerInput {
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
-        self.content = self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
+        self.content =
+            self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
         if !new_text.is_empty() {
             self.marked_range = Some(range.start..range.start + new_text.len());
         } else {
@@ -663,7 +672,14 @@ impl Element for InputElement {
         let lh = px(INPUT_LINE_HEIGHT);
         let mut y = bounds.top();
         for (_, line) in &prepaint.lines {
-            let _ = line.paint(point(bounds.left(), y), lh, TextAlign::Left, None, window, cx);
+            let _ = line.paint(
+                point(bounds.left(), y),
+                lh,
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
             y += line.size(lh).height;
         }
         if focus_handle.is_focused(window) {
@@ -877,7 +893,8 @@ impl Composer {
                                 el.child(div().text_color(theme.accent).child("✓"))
                             })
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.state.update(cx, |s, cx| s.set_model(name_owned.clone(), cx));
+                                this.state
+                                    .update(cx, |s, cx| s.set_model(name_owned.clone(), cx));
                                 this.open_picker = None;
                                 cx.notify();
                             })),
@@ -1004,7 +1021,12 @@ impl Render for Composer {
             .shadow_sm();
 
         if !self.attachments.is_empty() {
-            let mut chips = div().flex().flex_wrap().gap(px(6.0)).px(px(16.0)).pt(px(10.0));
+            let mut chips = div()
+                .flex()
+                .flex_wrap()
+                .gap(px(6.0))
+                .px(px(16.0))
+                .pt(px(10.0));
             for (i, name) in self.attachments.iter().enumerate() {
                 let name_owned = name.clone();
                 chips = chips.child(

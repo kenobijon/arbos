@@ -2,11 +2,14 @@
 //! (S7/S17), subagent chips, diff/file cards, the browser card (S16), and the
 //! error chip (S10). All collapsed by default; details are lazy.
 
-use gpui::{App, ClickEvent, Div, ElementId, FontWeight, SharedString, Stateful, Window, div, prelude::*, px};
+use gpui::{
+    div, prelude::*, px, App, ClickEvent, Div, ElementId, FontWeight, SharedString, Stateful,
+    Window,
+};
 
 use crate::model::{StatusKind, ToolStatus};
 use crate::ui::motion::PulseClock;
-use crate::ui::theme::{PANEL_RADIUS, Theme};
+use crate::ui::theme::{Theme, PANEL_RADIUS};
 use crate::ui::transcript::ToolView;
 
 fn card_shell(theme: &Theme) -> Div {
@@ -35,10 +38,9 @@ pub fn status_icon(status: Option<ToolStatus>, is_error: bool, theme: &Theme, cx
             .text_size(px(11.0))
             .text_color(theme.danger)
             .child("✗"),
-        (Some(ToolStatus::Ok), false) | (None, false) => div()
-            .text_size(px(11.0))
-            .text_color(theme.ok)
-            .child("✓"),
+        (Some(ToolStatus::Ok), false) | (None, false) => {
+            div().text_size(px(11.0)).text_color(theme.ok).child("✓")
+        }
     }
 }
 
@@ -128,6 +130,7 @@ fn fmt_duration(ms: Option<u64>) -> String {
 }
 
 /// S7/S17: "Called N tools ▾" folded; expanded shows one card per call.
+#[allow(clippy::too_many_arguments)]
 pub fn tool_group(
     row_id: &str,
     tools: &[ToolView],
@@ -139,7 +142,9 @@ pub fn tool_group(
     cx: &App,
 ) -> Stateful<Div> {
     let running = tools.iter().any(|t| t.status == Some(ToolStatus::Running));
-    let failed = tools.iter().any(|t| t.is_error || t.status == Some(ToolStatus::Failed));
+    let failed = tools
+        .iter()
+        .any(|t| t.is_error || t.status == Some(ToolStatus::Failed));
     let total_ms: u64 = tools.iter().filter_map(|t| t.duration_ms).sum();
     let summary = if tools.len() == 1 {
         let t = &tools[0];
@@ -164,7 +169,10 @@ pub fn tool_group(
     header = header.child(if running {
         spinner(theme, cx)
     } else if failed {
-        div().text_size(px(11.0)).text_color(theme.danger).child("✗")
+        div()
+            .text_size(px(11.0))
+            .text_color(theme.danger)
+            .child("✗")
     } else {
         div().text_size(px(11.0)).text_color(theme.ok).child("✓")
     });
@@ -214,7 +222,12 @@ pub fn tool_group(
                 .px(px(12.0))
                 .py(px(7.0))
                 .when(i > 0, |el| el.border_t_1().border_color(theme.border))
-                .child(div().w(px(10.0)).flex().justify_center().child(status_icon(tool.status, tool.is_error, theme, cx)))
+                .child(div().w(px(10.0)).flex().justify_center().child(status_icon(
+                    tool.status,
+                    tool.is_error,
+                    theme,
+                    cx,
+                )))
                 .child(
                     div()
                         .text_size(px(12.0))
@@ -272,31 +285,27 @@ pub fn tool_group(
 /// A subagent spawn never folds (S7): its own chip with the name.
 pub fn subagent_chip(tool: &ToolView, theme: &Theme) -> Div {
     let name = tool.subagent_name.clone().unwrap_or_default();
-    div()
-        .w_full()
-        .py(px(4.0))
-        .flex()
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(8.0))
-                .px(px(10.0))
-                .py(px(5.0))
-                .rounded_full()
-                .bg(theme.accent_soft)
-                .border_1()
-                .border_color(Theme::with_alpha(theme.accent, 0.4))
-                .text_size(px(12.0))
-                .text_color(theme.text)
-                .child(div().text_color(theme.accent).child("⇢"))
-                .child(format!("Subagent {name}"))
-                .child(
-                    div()
-                        .text_color(theme.text_faint)
-                        .child(tool.call.input_line()),
-                ),
-        )
+    div().w_full().py(px(4.0)).flex().child(
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .px(px(10.0))
+            .py(px(5.0))
+            .rounded_full()
+            .bg(theme.accent_soft)
+            .border_1()
+            .border_color(Theme::with_alpha(theme.accent, 0.4))
+            .text_size(px(12.0))
+            .text_color(theme.text)
+            .child(div().text_color(theme.accent).child("⇢"))
+            .child(format!("Subagent {name}"))
+            .child(
+                div()
+                    .text_color(theme.text_faint)
+                    .child(tool.call.input_line()),
+            ),
+    )
 }
 
 pub fn diff_card(
@@ -320,7 +329,12 @@ pub fn diff_card(
                 .gap(px(10.0))
                 .px(px(12.0))
                 .py(px(8.0))
-                .child(div().text_size(px(11.0)).text_color(theme.text_faint).child("DIFF"))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme.text_faint)
+                        .child("DIFF"),
+                )
                 .child(
                     div()
                         .flex_1()
@@ -330,9 +344,24 @@ pub fn diff_card(
                         .text_color(theme.text)
                         .child(path.to_string()),
                 )
-                .child(div().text_size(px(12.0)).text_color(theme.ok).child(format!("+{added}")))
-                .child(div().text_size(px(12.0)).text_color(theme.danger).child(format!("−{removed}")))
-                .child(div().text_size(px(11.0)).text_color(theme.text_faint).child("▸")),
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(theme.ok)
+                        .child(format!("+{added}")),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(theme.danger)
+                        .child(format!("−{removed}")),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme.text_faint)
+                        .child("▸"),
+                ),
         )
 }
 
@@ -356,7 +385,12 @@ pub fn file_card(
                 .gap(px(10.0))
                 .px(px(12.0))
                 .py(px(8.0))
-                .child(div().text_size(px(11.0)).text_color(theme.text_faint).child("FILE"))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme.text_faint)
+                        .child("FILE"),
+                )
                 .child(
                     div()
                         .flex_1()
@@ -366,8 +400,18 @@ pub fn file_card(
                         .text_color(theme.text)
                         .child(path.to_string()),
                 )
-                .child(div().text_size(px(11.5)).text_color(theme.text_muted).child(format!("{lines} lines")))
-                .child(div().text_size(px(11.0)).text_color(theme.text_faint).child("▸")),
+                .child(
+                    div()
+                        .text_size(px(11.5))
+                        .text_color(theme.text_muted)
+                        .child(format!("{lines} lines")),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme.text_faint)
+                        .child("▸"),
+                ),
         )
 }
 
@@ -381,7 +425,9 @@ pub fn browser_card(
     theme: &Theme,
     on_watch: impl Fn(&mut App) + 'static,
 ) -> Stateful<Div> {
-    let mut card = card_shell(theme).id(SharedString::from(row_id.to_string())).my(px(4.0));
+    let mut card = card_shell(theme)
+        .id(SharedString::from(row_id.to_string()))
+        .my(px(4.0));
     let header = div()
         .flex()
         .items_center()
@@ -490,7 +536,12 @@ pub fn error_chip(
         .bg(theme.danger_soft)
         .border_1()
         .border_color(Theme::with_alpha(theme.danger, 0.4))
-        .child(div().text_color(theme.danger).text_size(px(12.0)).child("✗"))
+        .child(
+            div()
+                .text_color(theme.danger)
+                .text_size(px(12.0))
+                .child("✗"),
+        )
         .child(
             div()
                 .flex_1()
@@ -498,7 +549,12 @@ pub fn error_chip(
                 .text_color(theme.text)
                 .child(message.to_string()),
         )
-        .child(div().text_size(px(11.0)).text_color(theme.text_faint).child(code.to_string()))
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(theme.text_faint)
+                .child(code.to_string()),
+        )
         .child(
             div()
                 .id(SharedString::from(format!("{row_id}-retry")))

@@ -6,15 +6,15 @@ mod sync;
 mod ui;
 
 use gpui::{
-    App, AppContext as _, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowDecorations,
-    WindowOptions, point, px, size,
+    point, px, size, App, AppContext as _, Bounds, KeyBinding, TitlebarOptions, WindowBounds,
+    WindowDecorations, WindowOptions,
 };
 
 use crate::app::AppState;
 use crate::ui::composer;
 use crate::ui::motion::PulseClock;
 use crate::ui::shell::{self, Shell};
-use crate::ui::theme::{Appearance, Surface, Theme, reapply_window_background};
+use crate::ui::theme::{reapply_window_background, Appearance, Surface, Theme};
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();

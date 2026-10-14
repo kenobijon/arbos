@@ -5,20 +5,20 @@
 use std::time::Duration;
 
 use gpui::{
-    Animation, AnimationExt, App, Context, Div, ElementId, Entity, FocusHandle, Focusable,
-    FontWeight, Render, SharedString, Stateful, Window, actions, div, prelude::*, px,
+    actions, div, prelude::*, px, Animation, AnimationExt, App, Context, Div, ElementId, Entity,
+    FocusHandle, Focusable, FontWeight, Render, SharedString, Stateful, Window,
 };
 
 use crate::app::{AppState, DetailsTarget};
-use crate::model::{BoxState, Chat, Link, Project, now_ms};
+use crate::model::{now_ms, BoxState, Chat, Link, Project};
 use crate::ui::composer::{Composer, ComposerEvent};
-use crate::ui::motion::{COMPOSER_DROP_MS, PulseClock, SHAKE_MS, ease_out_cubic};
+use crate::ui::motion::{ease_out_cubic, PulseClock, COMPOSER_DROP_MS, SHAKE_MS};
 use crate::ui::theme::{
-    Appearance, COMPOSER_WIDTH, DRAWER_WIDTH, PANEL_RADIUS, RAIL_TILE, RAIL_WIDTH,
-    RAIL_WIDTH_COLLAPSED, RIGHT_PANEL_WIDTH, Surface, TAB_BAR_HEIGHT, TAB_MIN_WIDTH, Theme,
-    reapply_window_background,
+    reapply_window_background, Appearance, Surface, Theme, COMPOSER_WIDTH, DRAWER_WIDTH,
+    PANEL_RADIUS, RAIL_TILE, RAIL_WIDTH, RAIL_WIDTH_COLLAPSED, RIGHT_PANEL_WIDTH, TAB_BAR_HEIGHT,
+    TAB_MIN_WIDTH,
 };
-use crate::ui::transcript::{COLUMN_MAX_WIDTH, Transcript};
+use crate::ui::transcript::{Transcript, COLUMN_MAX_WIDTH};
 
 actions!(shell, [CloseTab, NewTab, ToggleRail, TogglePanel, Quit]);
 
@@ -36,14 +36,17 @@ impl Shell {
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
         cx.observe(&state, |_, _, cx| cx.notify()).detach();
-        cx.subscribe(&composer, |this, _, event: &ComposerEvent, cx| match event {
-            ComposerEvent::Send(text, attachments) => {
-                let text = text.clone();
-                let attachments = attachments.clone();
-                this.state.update(cx, |s, cx| s.send(text, attachments, cx));
-            }
-            ComposerEvent::Stop => this.state.update(cx, |s, cx| s.stop(cx)),
-        })
+        cx.subscribe(
+            &composer,
+            |this, _, event: &ComposerEvent, cx| match event {
+                ComposerEvent::Send(text, attachments) => {
+                    let text = text.clone();
+                    let attachments = attachments.clone();
+                    this.state.update(cx, |s, cx| s.send(text, attachments, cx));
+                }
+                ComposerEvent::Stop => this.state.update(cx, |s, cx| s.stop(cx)),
+            },
+        )
         .detach();
         Composer::focus(&composer, window, cx);
         Self {
@@ -103,7 +106,11 @@ impl Shell {
                 )
             })
             .collect();
-        let width = if collapsed { RAIL_WIDTH_COLLAPSED } else { RAIL_WIDTH };
+        let width = if collapsed {
+            RAIL_WIDTH_COLLAPSED
+        } else {
+            RAIL_WIDTH
+        };
 
         let mut tiles = div()
             .id("rail-tiles")
@@ -111,7 +118,11 @@ impl Shell {
             .flex_col()
             .items_center()
             .gap(px(10.0))
-            .pt(px(if cfg!(target_os = "macos") { 44.0 } else { 10.0 }))
+            .pt(px(if cfg!(target_os = "macos") {
+                44.0
+            } else {
+                10.0
+            }))
             .flex_1()
             .overflow_y_scroll();
         for (project, streaming, unread) in projects {
@@ -123,7 +134,10 @@ impl Shell {
             }
             let tile_size = if collapsed { 36.0 } else { RAIL_TILE };
             let mut tile = div()
-                .id(ElementId::Name(SharedString::from(format!("tile-{}", project.id))))
+                .id(ElementId::Name(SharedString::from(format!(
+                    "tile-{}",
+                    project.id
+                ))))
                 .relative()
                 .w(px(tile_size))
                 .h(px(if collapsed { 36.0 } else { RAIL_TILE - 6.0 }))
@@ -134,12 +148,21 @@ impl Shell {
                 .gap(px(4.0))
                 .rounded(px(PANEL_RADIUS))
                 .border_1()
-                .border_color(if is_selected { theme.accent } else { theme.border })
-                .bg(if is_selected { theme.surface_2 } else { theme.surface_1 })
+                .border_color(if is_selected {
+                    theme.accent
+                } else {
+                    theme.border
+                })
+                .bg(if is_selected {
+                    theme.surface_2
+                } else {
+                    theme.surface_1
+                })
                 .cursor_pointer()
                 .hover(|s| s.border_color(theme.border_strong))
                 .on_click(cx.listener(move |this, _, window, cx| {
-                    this.state.update(cx, |s, cx| s.select_project(id.clone(), cx));
+                    this.state
+                        .update(cx, |s, cx| s.select_project(id.clone(), cx));
                     Composer::focus(&this.composer, window, cx);
                 }));
             tile = tile.child(
@@ -308,17 +331,29 @@ impl Shell {
                 PulseClock::request(cx);
             }
             let mut tab = div()
-                .id(ElementId::Name(SharedString::from(format!("tab-{}", chat.id))))
+                .id(ElementId::Name(SharedString::from(format!(
+                    "tab-{}",
+                    chat.id
+                ))))
                 .group("tab")
                 .relative()
                 .flex()
                 .items_center()
                 .gap(px(6.0))
                 .h(px(28.0))
-                .min_w(px(if chat.is_pinned { 0.0 } else { TAB_MIN_WIDTH.min(96.0) }))
+                .flex_shrink_0()
+                .min_w(px(if chat.is_pinned {
+                    0.0
+                } else {
+                    TAB_MIN_WIDTH.min(96.0)
+                }))
                 .px(px(10.0))
                 .rounded(px(7.0))
-                .bg(if active { theme.surface_2 } else { gpui::transparent_black() })
+                .bg(if active {
+                    theme.surface_2
+                } else {
+                    gpui::transparent_black()
+                })
                 .text_size(px(12.5))
                 .text_color(if active { theme.text } else { theme.text_muted })
                 .cursor_pointer()
@@ -329,7 +364,9 @@ impl Shell {
                 }));
             if chat.is_pinned {
                 let shake_offset = shake
-                    .map(|dt| ((dt as f32 / SHAKE_MS as f32) * std::f32::consts::PI * 4.0).sin() * 3.0)
+                    .map(|dt| {
+                        ((dt as f32 / SHAKE_MS as f32) * std::f32::consts::PI * 4.0).sin() * 3.0
+                    })
                     .unwrap_or(0.0);
                 tab = tab.left(px(shake_offset)).child(
                     div()
@@ -348,20 +385,31 @@ impl Shell {
                 );
             }
             let title = if chat.is_pinned {
-                project.as_ref().map(|p| p.name.clone()).unwrap_or(chat.title.clone())
+                project
+                    .as_ref()
+                    .map(|p| p.name.clone())
+                    .unwrap_or(chat.title.clone())
             } else {
                 chat.title.clone()
             };
             tab = tab.child(
                 div()
                     .overflow_hidden()
-                    .when(chat.unread && !active, |el| el.font_weight(FontWeight::SEMIBOLD).text_color(theme.text))
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .max_w(px(180.0))
+                    .when(chat.unread && !active, |el| {
+                        el.font_weight(FontWeight::SEMIBOLD).text_color(theme.text)
+                    })
                     .child(title),
             );
             if !chat.is_pinned {
                 tab = tab.child(
                     div()
-                        .id(ElementId::Name(SharedString::from(format!("close-{}", chat.id))))
+                        .id(ElementId::Name(SharedString::from(format!(
+                            "close-{}",
+                            chat.id
+                        ))))
                         .size(px(16.0))
                         .flex()
                         .items_center()
@@ -410,17 +458,19 @@ impl Shell {
             .border_color(theme.border)
             .window_control_area(gpui::WindowControlArea::Drag)
             .child(
-                icon_button("rail-toggle", "☰", !rail_collapsed, &theme)
-                    .on_click(cx.listener(|this, _, _, cx| {
+                icon_button("rail-toggle", "☰", !rail_collapsed, &theme).on_click(cx.listener(
+                    |this, _, _, cx| {
                         this.state.update(cx, |s, cx| s.toggle_rail(cx));
-                    })),
+                    },
+                )),
             )
             .child(strip)
             .child(
-                icon_button("panel-toggle", "▣", panel_open, &theme)
-                    .on_click(cx.listener(|this, _, _, cx| {
+                icon_button("panel-toggle", "▣", panel_open, &theme).on_click(cx.listener(
+                    |this, _, _, cx| {
                         this.state.update(cx, |s, cx| s.toggle_right_panel(cx));
-                    })),
+                    },
+                )),
             )
             .child(
                 icon_button("new-tab", "+", false, &theme)
@@ -508,7 +558,8 @@ impl Shell {
                             .cursor_pointer()
                             .child("Wake now")
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.state.update(cx, |s, cx| s.wake(project_id.clone(), cx));
+                                this.state
+                                    .update(cx, |s, cx| s.wake(project_id.clone(), cx));
                             })),
                     ),
             ),
@@ -524,7 +575,8 @@ impl Shell {
                             .cursor_pointer()
                             .child("Resume")
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.state.update(cx, |s, cx| s.wake(project_id.clone(), cx));
+                                this.state
+                                    .update(cx, |s, cx| s.wake(project_id.clone(), cx));
                             })),
                     ),
             ),
@@ -542,7 +594,8 @@ impl Shell {
                                 .cursor_pointer()
                                 .child("Retry")
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.state.update(cx, |s, cx| s.wake(project_id.clone(), cx));
+                                    this.state
+                                        .update(cx, |s, cx| s.wake(project_id.clone(), cx));
                                 })),
                         )
                         .child(
@@ -553,7 +606,10 @@ impl Shell {
                                 .child("Details")
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.state.update(cx, |s, cx| {
-                                        s.open_details(DetailsTarget::Project(details_id.clone()), cx)
+                                        s.open_details(
+                                            DetailsTarget::Project(details_id.clone()),
+                                            cx,
+                                        )
                                     });
                                 })),
                         ),
@@ -631,7 +687,13 @@ impl Shell {
                                 "Ask {name} anything. It will plan, delegate, or answer."
                             )),
                     )
-                    .child(div().w(px(COMPOSER_WIDTH)).max_w_full().pt(px(8.0)).child(self.composer.clone())),
+                    .child(
+                        div()
+                            .w(px(COMPOSER_WIDTH))
+                            .max_w_full()
+                            .pt(px(8.0))
+                            .child(self.composer.clone()),
+                    ),
             );
         } else {
             // Transcript above, composer pinned at the bottom. On the first
@@ -736,8 +798,18 @@ impl Shell {
                                     (phase * 60.0) as u32
                                 )),
                         )
-                        .child(div().text_size(px(12.5)).text_color(theme.text).child(title))
-                        .child(div().text_size(px(11.0)).text_color(theme.text_faint).child(url))
+                        .child(
+                            div()
+                                .text_size(px(12.5))
+                                .text_color(theme.text)
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(theme.text_faint)
+                                .child(url),
+                        )
                         .child(
                             div()
                                 .text_size(px(11.5))
@@ -770,7 +842,9 @@ impl Shell {
                                 .text_size(px(11.5))
                                 .text_color(theme.text_faint)
                                 .text_center()
-                                .child("When a subagent opens the browser, its frames stream here."),
+                                .child(
+                                    "When a subagent opens the browser, its frames stream here.",
+                                ),
                         ),
                 );
             }
@@ -788,7 +862,10 @@ impl Shell {
                 if let Some(p) = state.project(id) {
                     rows.push(("Project".into(), p.name.clone()));
                     rows.push(("Box state".into(), format!("{:?}", p.state)));
-                    rows.push(("Model".into(), format!("{} · {}", p.model, p.effort.label())));
+                    rows.push((
+                        "Model".into(),
+                        format!("{} · {}", p.model, p.effort.label()),
+                    ));
                     rows.push((
                         "Spend today".into(),
                         format!("${:.2} of ${:.2}", p.spend_today_usd, p.spend_cap_usd),
@@ -799,8 +876,15 @@ impl Shell {
                 }
                 "Project details".to_string()
             }
-            DetailsTarget::Message { chat_id, message_id } => {
-                if let Some(m) = state.messages_of(chat_id).iter().find(|m| &m.id == message_id) {
+            DetailsTarget::Message {
+                chat_id,
+                message_id,
+            } => {
+                if let Some(m) = state
+                    .messages_of(chat_id)
+                    .iter()
+                    .find(|m| &m.id == message_id)
+                {
                     rows.push(("Message".into(), m.id.clone()));
                     rows.push(("Status".into(), format!("{:?}", m.status)));
                     if let Some(t) = m.turn {
@@ -875,7 +959,12 @@ impl Shell {
                     .flex()
                     .flex_col()
                     .gap(px(2.0))
-                    .child(div().text_size(px(10.5)).text_color(theme.text_faint).child(k))
+                    .child(
+                        div()
+                            .text_size(px(10.5))
+                            .text_color(theme.text_faint)
+                            .child(k),
+                    )
                     .child(div().text_size(px(12.5)).text_color(theme.text).child(v)),
             );
         }
@@ -890,16 +979,30 @@ impl Shell {
         let link = state.link;
         let glass_ok = Theme::glass_available();
 
-        let option = |id: &'static str, label: &'static str, selected: bool, enabled: bool, theme: &Theme| {
+        let option = |id: &'static str,
+                      label: &'static str,
+                      selected: bool,
+                      enabled: bool,
+                      theme: &Theme| {
             div()
                 .id(id)
                 .px(px(10.0))
                 .py(px(5.0))
                 .rounded(px(6.0))
                 .text_size(px(12.5))
-                .bg(if selected { theme.surface_2 } else { gpui::transparent_black() })
-                .text_color(if enabled { theme.text } else { theme.text_faint })
-                .when(enabled, |el| el.cursor_pointer().hover(|s| s.bg(theme.surface_2)))
+                .bg(if selected {
+                    theme.surface_2
+                } else {
+                    gpui::transparent_black()
+                })
+                .text_color(if enabled {
+                    theme.text
+                } else {
+                    theme.text_faint
+                })
+                .when(enabled, |el| {
+                    el.cursor_pointer().hover(|s| s.bg(theme.surface_2))
+                })
                 .child(label)
         };
 
@@ -918,26 +1021,43 @@ impl Shell {
             .border_1()
             .border_color(theme.border_strong)
             .shadow_lg()
-            .child(div().text_size(px(11.0)).text_color(theme.text_faint).child("APPEARANCE · SURFACE"))
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(theme.text_faint)
+                    .child("APPEARANCE · SURFACE"),
+            )
             .child(
                 div()
                     .flex()
                     .gap(px(4.0))
                     .child(
-                        option("surface-matte", "Matte", theme.surface == Surface::Matte, true, &theme)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let a = Theme::of(cx).appearance;
-                                this.set_theme(a, Surface::Matte, cx);
-                            })),
+                        option(
+                            "surface-matte",
+                            "Matte",
+                            theme.surface == Surface::Matte,
+                            true,
+                            &theme,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let a = Theme::of(cx).appearance;
+                            this.set_theme(a, Surface::Matte, cx);
+                        })),
                     )
                     .child(
-                        option("surface-glass", "Glass", theme.surface == Surface::Glass, glass_ok, &theme)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if glass_ok {
-                                    let a = Theme::of(cx).appearance;
-                                    this.set_theme(a, Surface::Glass, cx);
-                                }
-                            })),
+                        option(
+                            "surface-glass",
+                            "Glass",
+                            theme.surface == Surface::Glass,
+                            glass_ok,
+                            &theme,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if glass_ok {
+                                let a = Theme::of(cx).appearance;
+                                this.set_theme(a, Surface::Glass, cx);
+                            }
+                        })),
                     ),
             )
             .when(!glass_ok, |el| {
@@ -948,24 +1068,41 @@ impl Shell {
                         .child("Glass needs macOS vibrancy; this build uses matte."),
                 )
             })
-            .child(div().text_size(px(11.0)).text_color(theme.text_faint).child("APPEARANCE · MODE"))
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(theme.text_faint)
+                    .child("APPEARANCE · MODE"),
+            )
             .child(
                 div()
                     .flex()
                     .gap(px(4.0))
                     .child(
-                        option("mode-dark", "Dark", theme.appearance == Appearance::Dark, true, &theme)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let s = Theme::of(cx).surface;
-                                this.set_theme(Appearance::Dark, s, cx);
-                            })),
+                        option(
+                            "mode-dark",
+                            "Dark",
+                            theme.appearance == Appearance::Dark,
+                            true,
+                            &theme,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let s = Theme::of(cx).surface;
+                            this.set_theme(Appearance::Dark, s, cx);
+                        })),
                     )
                     .child(
-                        option("mode-light", "Light", theme.appearance == Appearance::Light, true, &theme)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let s = Theme::of(cx).surface;
-                                this.set_theme(Appearance::Light, s, cx);
-                            })),
+                        option(
+                            "mode-light",
+                            "Light",
+                            theme.appearance == Appearance::Light,
+                            true,
+                            &theme,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let s = Theme::of(cx).surface;
+                            this.set_theme(Appearance::Light, s, cx);
+                        })),
                     ),
             )
             .child(div().h(px(1.0)).bg(theme.border))

@@ -24,20 +24,18 @@ impl PulseClock {
             started: Instant::now(),
             wanted: false,
         });
-        cx.spawn(async move |cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(1000 / PULSE_FPS))
-                    .await;
-                cx.update(|cx| {
-                    let wanted = std::mem::take(&mut cx.global_mut::<PulseClock>().wanted);
-                    if wanted {
-                        for window in cx.windows() {
-                            let _ = window.update(cx, |_, window, _| window.refresh());
-                        }
+        cx.spawn(async move |cx| loop {
+            cx.background_executor()
+                .timer(Duration::from_millis(1000 / PULSE_FPS))
+                .await;
+            cx.update(|cx| {
+                let wanted = std::mem::take(&mut cx.global_mut::<PulseClock>().wanted);
+                if wanted {
+                    for window in cx.windows() {
+                        let _ = window.update(cx, |_, window, _| window.refresh());
                     }
-                });
-            }
+                }
+            });
         })
         .detach();
     }
@@ -51,7 +49,11 @@ impl PulseClock {
     pub fn phase(cx: &App, period_ms: u64) -> f32 {
         let elapsed = cx.global::<PulseClock>().started.elapsed().as_millis() as u64;
         let t = (elapsed % period_ms) as f32 / period_ms as f32;
-        if t < 0.5 { t * 2.0 } else { 2.0 - t * 2.0 }
+        if t < 0.5 {
+            t * 2.0
+        } else {
+            2.0 - t * 2.0
+        }
     }
 }
 

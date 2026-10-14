@@ -10,7 +10,7 @@ Arbos is a messenger-style Mac app for talking to AI agents. Each Project has on
 | `crates/arbos-relay` | The one service outside the boxes: project registry (SQLite), device pairing, sync rooms (opaque log + checkpoints), blob store, model proxy (OpenAI- and Anthropic-compatible passthrough with per-project metering and a daily spend cap), Daytona module (typed from the live OpenAPI), wake jobs, push queue. |
 | `crates/arbos-agentd` | The box entrypoint: Loro doc host (a peer of the relay room, 120 ms commits, resume by cursor), SQLite+FTS5 history and memory tables, project MCP server on localhost, the pi main-agent driver (`route` tool validated with one retry, act limits 8 calls / 60 s with escalation), the `HarnessAdapter` registry (`PrimeAdapter` default, `PiAdapter`, `ClaudeCodeAdapter`), compaction and the memory write pass off the reply path. |
 | `crates/arbosctl` | Headless client: pair, create project, open chat, send, stream, resume by cursor, stop/start box, usage, timings. |
-| `crates/arbos-mac` | GPUI Mac client (separate branch). |
+| `crates/arbos-mac` | The GPUI desktop client (zeronsh/zui fork): project rail, tabs, Cursor-style chat, composer; `FixtureSource` (local Loro docs, scripted agent) and `RelaySource` (WebSocket to relay rooms). Builds on macOS and Linux. |
 | `harness/arbos-pi-ext` | The pi extension (TypeScript, loaded by pi through jiti): `tool_call` deny+audit hook, act-call counting, `ask_user`, `route`, output offload to handles (> 4,000 chars), `peek`, `remember`/`recall`, working-set section. |
 | `image/` | `Dockerfile` (the full `arbos-agent` image: pi + Prime + Claude Code + agent-browser/Chrome), `Dockerfile.dev-inline` (pi-only dev image built by Daytona's declarative builder), the D64 hook scripts (`arbos-shell`, Claude `PreToolUse`), Prime skills, pi seed config. |
 
@@ -20,6 +20,7 @@ Arbos is a messenger-style Mac app for talking to AI agents. Each Project has on
 - Node 22.19+ (pi needs zstd in `zlib`; 22.14 is too old) and pnpm 9 for `harness/`.
 - `pi` 1.2.0 (`npm i -g @earendil-works/pi-coding-agent@1.2.0`) for a local box; `prime-agent` 0.10.0 plus its kernel venv (see `image/Dockerfile`) for Prime subagents. Without Prime, set `ARBOS_DEFAULT_HARNESS=pi`.
 - Secrets, only on the relay host: `OPENROUTER_API_KEY` (or `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) for the model proxy and `DAYTONA_API_KEY` for real boxes. The box never sees them (D2).
+- For `arbos-mac` on Linux: `libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb-xkb-dev libasound2-dev libssl-dev libgl1-mesa-dev libfontconfig-dev` (and `mesa-vulkan-drivers` to run without a GPU).
 
 ## Build and check
 
@@ -90,6 +91,15 @@ cargo run -p arbosctl -- project create --name demo --provider daytona
 ```
 
 `cargo run -p arbos-relay -- daytona-smoke` runs the D25 lifecycle check (`create → stop → start → archive → start → delete`) against the live API and prints a timing table.
+
+## Run the desktop client
+
+```bash
+cargo run -p arbos-mac                                  # fixture source: seeded chats + scripted agent
+ARBOS_RELAY_URL=ws://127.0.0.1:7700 ARBOS_RELAY_TOKEN=... cargo run -p arbos-mac   # relay rooms
+```
+
+Optional for the relay source: `ARBOS_DEVICE_ID`, and `ARBOS_RELAY_SEED=path.json` (`{projects, chats}`) until the relay's registry endpoint is wired. Matte theme is the default; Glass (vibrancy) is a macOS-only toggle in the rail's settings popover.
 
 ## Image
 

@@ -18,8 +18,8 @@ use tokio::time::sleep;
 use super::doc::ChatDoc;
 use super::{ClientCommand, SyncEvent, SyncSource};
 use crate::model::{
-    Attachment, BoxState, Chat, Effort, Id, Link, Message, MessageStatus, Part, Project, Role,
-    StatusKind, ToolCall, ToolStatus, TurnKind, new_id, now_ms,
+    new_id, now_ms, Attachment, BoxState, Chat, Effort, Id, Link, Message, MessageStatus, Part,
+    Project, Role, StatusKind, ToolCall, ToolStatus, TurnKind,
 };
 
 pub const STREAM_FRAME_MS: u64 = arbos_core::STREAM_COMMIT_MS;
@@ -35,7 +35,12 @@ pub const CHAT_ARBOS_LAUNCH: &str = "01J9CHAT0LAUNCH00000000000";
 pub const CHAT_AFFINE_MAIN: &str = "01J9CHAT0AFFINE00000000000";
 pub const CHAT_COMMS_MAIN: &str = "01J9CHAT0COMMS000000000000";
 
-pub const MODELS: [&str; 4] = ["GPT-6.1-Sol", "Claude Fable 5.1", "Gemini 4 Argon", "Grok 4.7"];
+pub const MODELS: [&str; 4] = [
+    "GPT-6.1-Sol",
+    "Claude Fable 5.1",
+    "Gemini 4 Argon",
+    "Grok 4.7",
+];
 
 type Docs = Arc<Mutex<HashMap<Id, ChatDoc>>>;
 
@@ -120,7 +125,9 @@ impl SyncSource for FixtureSource {
 
 fn forward_doc_change(shared: &Arc<Shared>, changed: DocChanged) {
     let docs = shared.docs.lock().unwrap();
-    let Some(doc) = docs.get(&changed.chat_id) else { return };
+    let Some(doc) = docs.get(&changed.chat_id) else {
+        return;
+    };
     if changed.touched.list_changed {
         let _ = shared.events.send(SyncEvent::ChatSnapshot {
             chat_id: changed.chat_id.clone(),
@@ -528,7 +535,16 @@ fn spawn_turn(
         .insert(chat_id.clone(), stop.clone());
     let shared = shared.clone();
     tokio::spawn(async move {
-        run_turn(&shared, &project_id, &chat_id, &user_message_id, &text, force_reply, stop).await;
+        run_turn(
+            &shared,
+            &project_id,
+            &chat_id,
+            &user_message_id,
+            &text,
+            force_reply,
+            stop,
+        )
+        .await;
         shared.running.lock().unwrap().remove(&chat_id);
     });
 }
@@ -567,10 +583,30 @@ const REPLY_CODE: &[&str] = &[
 ];
 
 const ACT_TOOLS: &[(&str, &str, &str, u64)] = &[
-    ("read_file", "crates/arbos-mac/src/ui/rail.rs", "90 px rail, 72 px tiles, 11 px labels", 420),
-    ("grep", "TILE_W crates/", "3 matches in rail.rs, theme.rs", 180),
-    ("edit_file", "crates/arbos-mac/src/ui/rail.rs", "Set tile gap to 10 px", 640),
-    ("bash", "cargo check -p arbos-mac", "Finished `dev` profile in 4.1 s", 1900),
+    (
+        "read_file",
+        "crates/arbos-mac/src/ui/rail.rs",
+        "90 px rail, 72 px tiles, 11 px labels",
+        420,
+    ),
+    (
+        "grep",
+        "TILE_W crates/",
+        "3 matches in rail.rs, theme.rs",
+        180,
+    ),
+    (
+        "edit_file",
+        "crates/arbos-mac/src/ui/rail.rs",
+        "Set tile gap to 10 px",
+        640,
+    ),
+    (
+        "bash",
+        "cargo check -p arbos-mac",
+        "Finished `dev` profile in 4.1 s",
+        1900,
+    ),
 ];
 
 const ACT_SUMMARY: &[&str] = &[
@@ -850,10 +886,7 @@ async fn run_turn(
                         ix,
                         status_pix,
                         "message",
-                        json!(format!(
-                            "Working in sandbox · {} · 00:{:02}",
-                            action, secs
-                        )),
+                        json!(format!("Working in sandbox · {} · 00:{:02}", action, secs)),
                     );
                     let _ = doc.set_part_field(ix, browser_pix, "lastAction", json!(action));
                     doc.commit();
@@ -1089,8 +1122,20 @@ fn seed_chats() -> Vec<Chat> {
     };
     vec![
         chat(CHAT_ARBOS_MAIN, PROJECT_ARBOS, "Arbos", true, 3),
-        chat(CHAT_ARBOS_RESEARCH, PROJECT_ARBOS, "Interface research", false, 40),
-        chat(CHAT_ARBOS_LAUNCH, PROJECT_ARBOS, "Launch planning", false, 95),
+        chat(
+            CHAT_ARBOS_RESEARCH,
+            PROJECT_ARBOS,
+            "Interface research",
+            false,
+            40,
+        ),
+        chat(
+            CHAT_ARBOS_LAUNCH,
+            PROJECT_ARBOS,
+            "Launch planning",
+            false,
+            95,
+        ),
         chat(CHAT_AFFINE_MAIN, PROJECT_AFFINE, "Affine", true, 60 * 26),
         chat(CHAT_COMMS_MAIN, PROJECT_COMMS, "Comms", true, 60 * 5),
     ]
@@ -1171,7 +1216,10 @@ fn seed_docs(shared: &Arc<Shared>) {
 
     let main = ChatDoc::new(CHAT_ARBOS_MAIN, PROJECT_ARBOS);
     {
-        let mut s = Seeder { doc: &main, t: base };
+        let mut s = Seeder {
+            doc: &main,
+            t: base,
+        };
         s.user("Let's refine the agent workspace.");
         s.assistant(
             TurnKind::Reply,

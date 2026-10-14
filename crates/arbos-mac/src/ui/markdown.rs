@@ -123,11 +123,12 @@ pub fn inline_spans(text: &str) -> Vec<(String, InlineStyle)> {
     let chars: Vec<char> = text.chars().collect();
     let mut i = 0;
 
-    let push = |current: &mut String, style: InlineStyle, spans: &mut Vec<(String, InlineStyle)>| {
-        if !current.is_empty() {
-            spans.push((std::mem::take(current), style));
-        }
-    };
+    let push =
+        |current: &mut String, style: InlineStyle, spans: &mut Vec<(String, InlineStyle)>| {
+            if !current.is_empty() {
+                spans.push((std::mem::take(current), style));
+            }
+        };
 
     while i < chars.len() {
         let c = chars[i];

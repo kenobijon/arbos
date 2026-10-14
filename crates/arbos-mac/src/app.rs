@@ -10,8 +10,8 @@ use gpui_tokio::Tokio;
 use tokio::sync::mpsc;
 
 use crate::model::{
-    BoxState, Chat, Effort, Id, Link, Message, MessageStatus, Part, Project, Role, StatusKind,
-    new_id, now_ms,
+    new_id, now_ms, BoxState, Chat, Effort, Id, Link, Message, MessageStatus, Part, Project, Role,
+    StatusKind,
 };
 use crate::sync::{ClientCommand, SyncEvent, SyncSource};
 
@@ -146,8 +146,7 @@ impl AppState {
                     .unwrap_or(false);
                 if !still_there {
                     if let Some(first) = chats.first() {
-                        self.active_tab
-                            .insert(project_id.clone(), first.id.clone());
+                        self.active_tab.insert(project_id.clone(), first.id.clone());
                     }
                 }
                 self.chats.insert(project_id, chats);
@@ -298,7 +297,9 @@ impl AppState {
     }
 
     pub fn select_tab(&mut self, chat_id: Id, cx: &mut Context<Self>) {
-        let Some(project_id) = self.selected_project.clone() else { return };
+        let Some(project_id) = self.selected_project.clone() else {
+            return;
+        };
         self.active_tab.insert(project_id, chat_id.clone());
         if let Some(chat) = self
             .chats
@@ -316,7 +317,9 @@ impl AppState {
     }
 
     pub fn new_tab(&mut self, cx: &mut Context<Self>) {
-        let Some(project_id) = self.selected_project.clone() else { return };
+        let Some(project_id) = self.selected_project.clone() else {
+            return;
+        };
         let chat_id = new_id();
         self.chats
             .entry(project_id.clone())
@@ -343,9 +346,13 @@ impl AppState {
 
     /// Returns false for the pinned tab (S3.8: it never closes).
     pub fn close_tab(&mut self, chat_id: Id, cx: &mut Context<Self>) -> bool {
-        let Some(project_id) = self.selected_project.clone() else { return false };
+        let Some(project_id) = self.selected_project.clone() else {
+            return false;
+        };
         let tabs = self.chats.entry(project_id.clone()).or_default();
-        let Some(ix) = tabs.iter().position(|c| c.id == chat_id) else { return false };
+        let Some(ix) = tabs.iter().position(|c| c.id == chat_id) else {
+            return false;
+        };
         if tabs[ix].is_pinned {
             return false;
         }
@@ -366,7 +373,9 @@ impl AppState {
     }
 
     pub fn send(&mut self, text: String, attachments: Vec<String>, cx: &mut Context<Self>) {
-        let Some(chat_id) = self.active_chat_id() else { return };
+        let Some(chat_id) = self.active_chat_id() else {
+            return;
+        };
         let message_id = new_id();
         let answer = self.chat_needs_answer(&chat_id);
         {
@@ -449,7 +458,9 @@ impl AppState {
     }
 
     pub fn set_model(&mut self, model: String, cx: &mut Context<Self>) {
-        let Some(project_id) = self.selected_project.clone() else { return };
+        let Some(project_id) = self.selected_project.clone() else {
+            return;
+        };
         let effort = self.selected().map(|p| p.effort).unwrap_or(Effort::High);
         if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
             p.model = model.clone();
@@ -463,11 +474,10 @@ impl AppState {
     }
 
     pub fn set_effort(&mut self, effort: Effort, cx: &mut Context<Self>) {
-        let Some(project_id) = self.selected_project.clone() else { return };
-        let model = self
-            .selected()
-            .map(|p| p.model.clone())
-            .unwrap_or_default();
+        let Some(project_id) = self.selected_project.clone() else {
+            return;
+        };
+        let model = self.selected().map(|p| p.model.clone()).unwrap_or_default();
         if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
             p.effort = effort;
         }

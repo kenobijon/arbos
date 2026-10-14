@@ -153,7 +153,11 @@ pub struct Attachment {
 /// One row of `messages[].parts` (`crdt-sync.md` §6.2). Unknown kinds decode
 /// to [`Part::Unknown`] and render as nothing, per the "additive only" rule.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum Part {
     Text {
         id: Id,
@@ -226,7 +230,6 @@ pub enum Part {
     #[serde(other)]
     Unknown,
 }
-
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

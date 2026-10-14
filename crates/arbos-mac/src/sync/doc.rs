@@ -13,12 +13,10 @@ use std::collections::BTreeSet;
 
 use anyhow::{Context as _, Result};
 use loro::event::DiffEvent;
-use loro::{
-    Container, Index, LoroDoc, LoroList, LoroMap, LoroText, LoroValue, ValueOrContainer,
-};
+use loro::{Container, Index, LoroDoc, LoroList, LoroMap, LoroText, LoroValue, ValueOrContainer};
 use serde_json::Value;
 
-use crate::model::{Id, Message, MessageStatus, Part, now_ms};
+use crate::model::{now_ms, Id, Message, MessageStatus, Part};
 
 pub const SCHEMA_VERSION: i64 = 1;
 
@@ -94,7 +92,9 @@ impl ChatDoc {
     }
 
     pub fn read_all(&self) -> Vec<Message> {
-        (0..self.len()).filter_map(|ix| self.read_message(ix)).collect()
+        (0..self.len())
+            .filter_map(|ix| self.read_message(ix))
+            .collect()
     }
 
     /// Append a message as nested containers. Does not commit.
