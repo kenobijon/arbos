@@ -174,6 +174,8 @@ pub struct Agent {
     pub turn: Arc<Mutex<Option<TurnState>>>,
     adapters: HashMap<Harness, Arc<dyn HarnessAdapter>>,
     pub turn_running: AtomicBool,
+    /// Subagent turns in flight (keep-alive must cover them too, design §4.6).
+    pub subagent_turns: std::sync::atomic::AtomicU32,
     pub pi_ready: AtomicBool,
     pub ext_loaded: AtomicBool,
     turn_lock: Mutex<()>,
@@ -208,6 +210,7 @@ impl Agent {
             turn: Arc::new(Mutex::new(None)),
             adapters,
             turn_running: AtomicBool::new(false),
+            subagent_turns: std::sync::atomic::AtomicU32::new(0),
             pi_ready: AtomicBool::new(false),
             ext_loaded: AtomicBool::new(false),
             turn_lock: Mutex::new(()),
@@ -1302,6 +1305,7 @@ impl Agent {
         };
         adapter.prompt(&subagent_id, &first_prompt).await?;
 
+        self.subagent_turns.fetch_add(1, Ordering::SeqCst);
         let keepalive = self.spawn_keepalive();
         let mut text = String::new();
         let mut part_id = text_part;
@@ -1433,6 +1437,7 @@ impl Agent {
             }
         }
         keepalive.abort();
+        self.subagent_turns.fetch_sub(1, Ordering::SeqCst);
         let total_ms = t0.elapsed().as_millis() as i64;
         let contract = extract_return_contract(&text);
         let status = contract
@@ -1654,6 +1659,11 @@ impl Agent {
         if let Some(pi) = self.pi.lock().await.take() {
             pi.shutdown().await;
         }
+    }
+
+    /// True while the main agent or any subagent is mid-turn.
+    pub fn any_turn_running(&self) -> bool {
+        self.turn_running.load(Ordering::SeqCst) || self.subagent_turns.load(Ordering::SeqCst) > 0
     }
 
     pub fn is_healthy(&self) -> bool {

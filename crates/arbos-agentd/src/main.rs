@@ -362,12 +362,8 @@ async fn boot() -> Result<()> {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(60)).await;
-                if !agent2
-                    .turn_running
-                    .load(std::sync::atomic::Ordering::SeqCst)
-                {
-                    let _ = agent2.keepalive(false).await;
-                }
+                // Running turns: refresh activity with auto-stop off; idle: let the relay restore auto-stop.
+                let _ = agent2.keepalive(agent2.any_turn_running()).await;
             }
         });
     }
