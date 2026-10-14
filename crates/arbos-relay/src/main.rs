@@ -6,6 +6,7 @@ mod daytona;
 mod db;
 mod proxy;
 mod rooms;
+mod smoke;
 mod state;
 
 use std::collections::HashMap;
@@ -74,6 +75,15 @@ enum Cmd {
     Serve,
     /// Print a one-time pairing code (writes to the same SQLite file).
     PairCode,
+    /// D25 lifecycle check against the live Daytona API with timings (create → stop → start → archive → start → delete).
+    DaytonaSmoke {
+        /// Snapshot name; when absent, an inline Dockerfile (node:24 + pi) is built by Daytona.
+        #[arg(long)]
+        snapshot: Option<String>,
+        /// Keep the sandbox instead of deleting it.
+        #[arg(long)]
+        keep: bool,
+    },
 }
 
 #[tokio::main]

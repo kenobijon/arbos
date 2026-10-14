@@ -467,6 +467,7 @@ async fn mcp(State(a): State<S>, headers: HeaderMap, Json(req): Json<Value>) -> 
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or("");
     if tok != a.cfg.mcp_token {
+        tracing::warn!(got = %tok.chars().take(8).collect::<String>(), "mcp: bad token");
         return (StatusCode::UNAUTHORIZED, "bad token").into_response();
     }
     let id = req.get("id").cloned().unwrap_or(Value::Null);

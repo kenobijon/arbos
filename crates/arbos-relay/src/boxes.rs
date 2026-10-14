@@ -216,6 +216,22 @@ async fn start_process(
         + (u64::from_str_radix(&project.id[project.id.len() - 4..], 32).unwrap_or(0) % 2000) as u16;
     let env = box_env(state, project, box_token, mcp_token, &state.cfg.public_url);
     let mut cmd = tokio::process::Command::new(&state.cfg.agentd_bin);
+    // D2 also holds for a local box: start from an empty environment and pass an allow-list, so the
+    // relay's provider and Daytona keys never reach agentd or its children.
+    cmd.env_clear();
+    for (k, v) in std::env::vars() {
+        let pass = matches!(
+            k.as_str(),
+            "PATH" | "HOME" | "LANG" | "LC_ALL" | "TERM" | "TMPDIR" | "RUST_LOG" | "RUST_BACKTRACE"
+        ) || ((k.starts_with("ARBOS_")
+            || k.starts_with("PRIME_AGENT_")
+            || k.starts_with("PI_"))
+            && !k.contains("KEY")
+            && !k.contains("TOKEN"));
+        if pass {
+            cmd.env(k, v);
+        }
+    }
     cmd.arg("boot")
         .envs(env)
         .env("ARBOS_STATE_DIR", work.join(".arbos"))

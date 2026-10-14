@@ -128,8 +128,8 @@ fn seed_state(cfg: &Config) -> Result<()> {
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or(json!({}));
-    prime_settings["mcpServers"] =
-        json!({ "arbos": { "url": cfg.mcp_url(), "bearerTokenEnvVar": "ARBOS_MCP_TOKEN" } });
+    // Same shape `prime-agent mcp add arbos --url … --bearer-token-env-var ARBOS_MCP_TOKEN` writes.
+    prime_settings["mcpServers"] = json!({ "arbos": { "type": "http", "url": cfg.mcp_url(), "bearer_token_env_var": "ARBOS_MCP_TOKEN", "bearerTokenEnvVar": "ARBOS_MCP_TOKEN" } });
     std::fs::write(
         &prime_settings_path,
         serde_json::to_string_pretty(&prime_settings)?,
