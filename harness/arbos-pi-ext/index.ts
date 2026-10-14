@@ -270,8 +270,8 @@ export default function arbosPiExt(pi: ExtensionAPI) {
     promptSnippet: "peek: read a slice of a big tool output by handle",
     parameters: Type.Object({
       handle: Type.String(),
-      lines: Type.Optional(Type.Tuple([Type.Integer(), Type.Integer()], { description: "1-based inclusive [from, to]" })),
-      chars: Type.Optional(Type.Tuple([Type.Integer(), Type.Integer()])),
+      lines: Type.Optional(Type.Array(Type.Integer(), { minItems: 2, maxItems: 2, description: "1-based inclusive [from, to]" })),
+      chars: Type.Optional(Type.Array(Type.Integer(), { minItems: 2, maxItems: 2, description: "[from, to] character offsets" })),
       grep: Type.Optional(Type.String({ description: "regex; returns matching lines with numbers" })),
       max: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })),
     }),
