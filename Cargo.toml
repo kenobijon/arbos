@@ -5,8 +5,8 @@ members = [
     "crates/arbos-relay",
     "crates/arbos-agentd",
     "crates/arbosctl",
+    "crates/arbos-mac",
 ]
-# crates/arbos-mac (GPUI client) is added by its own worker.
 
 [workspace.package]
 version = "0.1.0"
@@ -52,3 +52,10 @@ nix = { version = "0.29", features = ["signal", "process"] }
 lto = "thin"
 codegen-units = 1
 strip = true
+
+[profile.dev]
+opt-level = 0
+
+# GPUI is unusably slow unoptimised; optimise dependencies only.
+[profile.dev.package."*"]
+opt-level = 2
