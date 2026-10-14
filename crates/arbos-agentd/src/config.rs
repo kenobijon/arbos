@@ -89,6 +89,11 @@ impl Config {
         })
     }
 
+    /// pi provider name: `openrouter` (built-in behaviours over our proxy) unless overridden.
+    pub fn pi_provider(&self) -> String {
+        env_or("ARBOS_PI_PROVIDER", "openrouter")
+    }
+
     pub fn proxy_base(&self) -> String {
         format!("http://127.0.0.1:{}", self.proxy_port)
     }

@@ -84,8 +84,11 @@ fn seed_state(cfg: &Config) -> Result<()> {
         copy_dir(seed, &cfg.pi_dir())?;
     }
     // models.json: the relay proxy as provider `arbos-relay` through the loopback stub (D2).
+    // The built-in `openrouter` provider pointed at the loopback stub keeps pi's OpenRouter behaviour
+    // (cache_control breakpoints for Anthropic models, usage accounting) while the key stays on the relay.
     let models = json!({
         "providers": {
+            "openrouter": { "baseUrl": format!("{}/v1", cfg.proxy_base()), "apiKey": cfg.box_token },
             "arbos-relay": {
                 "baseUrl": format!("{}/v1", cfg.proxy_base()),
                 "api": "openai-completions",
@@ -106,7 +109,7 @@ fn seed_state(cfg: &Config) -> Result<()> {
         serde_json::to_string_pretty(&models)?,
     )?;
     let settings = json!({
-        "defaultProvider": "arbos-relay", "defaultModel": cfg.talking_model, "defaultThinkingLevel": "off",
+        "defaultProvider": cfg.pi_provider(), "defaultModel": cfg.talking_model, "defaultThinkingLevel": "off",
         "defaultTools": ["read", "bash", "edit", "write", "grep", "find", "ls", "+codemode"],
         "compaction": { "enabled": true, "reserveTokens": 16384, "keepRecentTokens": 20000 },
         "hideThinkingBlock": true

@@ -543,7 +543,7 @@ impl PiAdapter {
             "--session-dir".into(),
             session_dir.display().to_string(),
             "--provider".into(),
-            "arbos-relay".into(),
+            cfg.pi_provider(),
             "--model".into(),
             model.to_owned(),
             "--thinking".into(),

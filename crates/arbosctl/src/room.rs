@@ -213,8 +213,6 @@ async fn run(
     let mut sent_msg_id: Option<String> = None;
     let mut rows_seen = 0usize;
     let mut box_state = String::from("?");
-    let t_send = Instant::now();
-    let mut first_delta_logged = false;
 
     loop {
         let msg = tokio::select! {
@@ -285,19 +283,6 @@ async fn run(
                 rows_seen += 1;
                 s.persist()?;
                 if caught_up || matches!(mode, Mode::Stream { .. }) {
-                    if !first_delta_logged
-                        && matches!(mode, Mode::Send { .. })
-                        && s.doc
-                            .messages()
-                            .iter()
-                            .any(|m| m.role == "assistant" && !m.text().is_empty())
-                    {
-                        first_delta_logged = true;
-                        eprintln!(
-                            "\n[first assistant text after {:.2}s]",
-                            t_send.elapsed().as_secs_f64()
-                        );
-                    }
                     let done = s.print_new();
                     if done {
                         s.persist()?;

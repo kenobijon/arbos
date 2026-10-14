@@ -132,8 +132,10 @@ async fn stub_forward(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let path = uri.path();
+    // SDKs append their own `/v1/...` to a base URL that already ends in `/v1`; collapse it.
+    let path = uri.path().replacen("/v1/v1/", "/v1/", 1);
     let query = uri.query().map(|q| format!("?{q}")).unwrap_or_default();
+    tracing::debug!(%path, "model stub forward");
     let target = if path.starts_with("/v1/messages") || path.starts_with("/anthropic/") {
         format!(
             "{}/proxy/anthropic{}{}",
