@@ -291,10 +291,17 @@ async fn run(
                         s.persist()?;
                         let finished = matches!(mode, Mode::Send { .. })
                             || matches!(mode, Mode::Stream { until_done: true });
+                        let reference = sent_msg_id.clone().or_else(|| {
+                            s.doc
+                                .messages()
+                                .iter()
+                                .rev()
+                                .find(|m| m.role == "user")
+                                .map(|m| m.id.clone())
+                        });
                         if finished
-                            && sent_msg_id
-                                .as_ref()
-                                .map(|id| reply_done_for(&s.doc, id))
+                            && reference
+                                .map(|id| reply_done_for(&s.doc, &id))
                                 .unwrap_or(true)
                         {
                             break;
