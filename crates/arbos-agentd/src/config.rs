@@ -29,12 +29,16 @@ pub struct Config {
 }
 
 fn env_or(k: &str, d: &str) -> String {
-    std::env::var(k).ok().filter(|s| !s.is_empty()).unwrap_or_else(|| d.to_owned())
+    std::env::var(k)
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| d.to_owned())
 }
 
 impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
-        let project_id = std::env::var("ARBOS_PROJECT_ID").map_err(|_| anyhow::anyhow!("ARBOS_PROJECT_ID is required"))?;
+        let project_id = std::env::var("ARBOS_PROJECT_ID")
+            .map_err(|_| anyhow::anyhow!("ARBOS_PROJECT_ID is required"))?;
         let state_dir = PathBuf::from(env_or("ARBOS_STATE_DIR", "/work/.arbos"));
         let work_dir = PathBuf::from(env_or("ARBOS_WORK_DIR", "/work"));
         let base_port: u16 = env_or("ARBOS_PORT", "7788").parse().unwrap_or(7788);
@@ -46,10 +50,18 @@ impl Config {
         };
         let pi_ext_path = std::env::var("ARBOS_PI_EXT")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| state_dir.join("pi").join("extensions").join("arbos-pi-ext").join("index.ts"));
+            .unwrap_or_else(|_| {
+                state_dir
+                    .join("pi")
+                    .join("extensions")
+                    .join("arbos-pi-ext")
+                    .join("index.ts")
+            });
         Ok(Self {
             project_name: env_or("ARBOS_PROJECT_NAME", &project_id),
-            relay_url: env_or("ARBOS_RELAY_URL", "http://127.0.0.1:7700").trim_end_matches('/').to_owned(),
+            relay_url: env_or("ARBOS_RELAY_URL", "http://127.0.0.1:7700")
+                .trim_end_matches('/')
+                .to_owned(),
             box_token: env_or("ARBOS_BOX_TOKEN", ""),
             mcp_token: env_or("ARBOS_MCP_TOKEN", ""),
             bind: env_or("ARBOS_BIND", "0.0.0.0"),
@@ -60,7 +72,10 @@ impl Config {
             proxy_port: if local_box { base_port + 3 } else { 7791 },
             talking_model: env_or("ARBOS_TALKING_MODEL", "anthropic/claude-haiku-5.5"),
             subagent_model: env_or("ARBOS_SUBAGENT_MODEL", "anthropic/claude-sonnet-5.5"),
-            decision_model: env_or("ARBOS_DECISION_MODEL", &env_or("ARBOS_TALKING_MODEL", "anthropic/claude-haiku-5.5")),
+            decision_model: env_or(
+                "ARBOS_DECISION_MODEL",
+                &env_or("ARBOS_TALKING_MODEL", "anthropic/claude-haiku-5.5"),
+            ),
             instructions: env_or("ARBOS_INSTRUCTIONS", ""),
             pi_bin: env_or("ARBOS_PI_BIN", "pi"),
             prime_bin: env_or("ARBOS_PRIME_BIN", "prime-agent"),

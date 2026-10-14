@@ -1,0 +1,422 @@
+//! Doc host: one Loro doc per room, synced with the relay as a peer
+//! (`device = box:{sandboxId}`). Streaming commits every 120 ms, one in-flight
+//! PUSH per room, resume by cursor (crdt-sync §7, §8).
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::{anyhow, Result};
+use bytes::Bytes;
+use futures::{SinkExt, StreamExt};
+use loro::VersionVector;
+use serde_json::json;
+use tokio::sync::{mpsc, Mutex};
+use tokio_tungstenite::tungstenite::Message;
+
+use arbos_core::doc::{decode_vv, encode_vv, ChatDoc, CommandView};
+use arbos_core::ids::{now_ms, ulid};
+use arbos_core::wire::{self, Frame, FrameType, PROJECT_DOC_CHAT_ID};
+use arbos_core::STREAM_COMMIT_MS;
+
+use crate::config::Config;
+use crate::store::Store;
+
+/// Something the agent loop must act on.
+#[derive(Debug, Clone)]
+pub enum Incoming {
+    /// A pending command appeared in a chat doc (from a client row or a resumed doc).
+    Command { chat_id: String, cmd: CommandView },
+    /// A room finished its catch-up.
+    CaughtUp { chat_id: String, head_seq: i64 },
+    /// The relay reported a box status change (informational).
+    Status {
+        chat_id: String,
+        state: wire::BoxState,
+    },
+}
+
+pub struct DocHost {
+    pub chat_id: String,
+    pub room: String,
+    pub doc: ChatDoc,
+    pub cursor: i64,
+    acked_vv: VersionVector,
+    inflight: Option<(String, VersionVector)>,
+    pub caught_up: bool,
+    seen_commands: std::collections::HashSet<String>,
+}
+
+impl DocHost {
+    pub fn mark_dirty(&mut self) {
+        self.doc.doc.commit();
+    }
+
+    fn has_unsent(&self) -> bool {
+        !self.doc.oplog_vv().includes_vv(&self.acked_vv) || self.doc.oplog_vv() != self.acked_vv
+    }
+
+    /// Export the next frame if anything changed and nothing is in flight.
+    fn next_push(&mut self) -> Option<(String, Vec<u8>)> {
+        if self.inflight.is_some() {
+            return None;
+        }
+        let vv = self.doc.oplog_vv();
+        if vv == self.acked_vv {
+            return None;
+        }
+        let bytes = self.doc.export_updates_since(&self.acked_vv);
+        if bytes.is_empty() {
+            self.acked_vv = vv;
+            return None;
+        }
+        let batch = ulid();
+        self.inflight = Some((batch.clone(), vv));
+        Some((batch, bytes))
+    }
+
+    fn on_ack(&mut self, batch_id: &str) {
+        if let Some((b, vv)) = &self.inflight {
+            if b == batch_id {
+                self.acked_vv = vv.clone();
+                self.inflight = None;
+            }
+        }
+    }
+
+    fn clear_inflight(&mut self) {
+        self.inflight = None;
+    }
+
+    /// New pending commands not yet handed to the agent loop.
+    fn new_pending(&mut self) -> Vec<CommandView> {
+        let mut out = Vec::new();
+        for c in self.doc.pending_commands() {
+            if self.seen_commands.insert(c.id.clone()) {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    pub fn forget_command(&mut self, id: &str) {
+        self.seen_commands.remove(id);
+    }
+}
+
+pub type SharedHost = Arc<Mutex<DocHost>>;
+
+#[derive(Clone)]
+pub struct SyncHub {
+    pub cfg: Arc<Config>,
+    pub store: Store,
+    pub hosts: Arc<Mutex<HashMap<String, SharedHost>>>,
+    pub incoming: mpsc::Sender<Incoming>,
+    pub peer_id: u64,
+}
+
+fn peer_id_for(device: &str) -> u64 {
+    use sha2::Digest;
+    let h = sha2::Sha256::digest(device.as_bytes());
+    u64::from_le_bytes(h[..8].try_into().expect("8 bytes")) | 1
+}
+
+impl SyncHub {
+    pub fn new(cfg: Arc<Config>, store: Store, incoming: mpsc::Sender<Incoming>) -> Self {
+        let peer_id = peer_id_for(&cfg.device_id);
+        Self {
+            cfg,
+            store,
+            hosts: Arc::new(Mutex::new(HashMap::new())),
+            incoming,
+            peer_id,
+        }
+    }
+
+    /// Open (or re-open) a room: load the local snapshot + cursor, start the client task.
+    pub async fn open_room(&self, chat_id: &str) -> Result<SharedHost> {
+        if let Some(h) = self.hosts.lock().await.get(chat_id) {
+            return Ok(h.clone());
+        }
+        let room = wire::room_name(&self.cfg.project_id, chat_id);
+        let (cursor, snapshot, acked) = self.store.room_doc(&room)?.unwrap_or((0, None, None));
+        let doc = match &snapshot {
+            Some(s) if !s.is_empty() => ChatDoc::from_snapshot(self.peer_id, true, s)?,
+            _ => {
+                let d = ChatDoc::new(self.peer_id, true);
+                if chat_id != PROJECT_DOC_CHAT_ID {
+                    d.init_meta(chat_id, &self.cfg.project_id, 1);
+                }
+                d
+            }
+        };
+        let acked_vv = acked.as_deref().and_then(decode_vv).unwrap_or_default();
+        let host = Arc::new(Mutex::new(DocHost {
+            chat_id: chat_id.to_owned(),
+            room: room.clone(),
+            doc,
+            cursor,
+            acked_vv,
+            inflight: None,
+            caught_up: false,
+            seen_commands: Default::default(),
+        }));
+        self.hosts
+            .lock()
+            .await
+            .insert(chat_id.to_owned(), host.clone());
+        let hub = self.clone();
+        let h2 = host.clone();
+        tokio::spawn(async move { hub.run_room(h2).await });
+        Ok(host)
+    }
+
+    pub async fn host(&self, chat_id: &str) -> Option<SharedHost> {
+        self.hosts.lock().await.get(chat_id).cloned()
+    }
+
+    /// Persist cursor + snapshot + acked vv together.
+    pub async fn persist(&self, host: &SharedHost) -> Result<()> {
+        let h = host.lock().await;
+        let snap = h.doc.snapshot();
+        let acked = encode_vv(&h.acked_vv);
+        self.store.save_room_doc(&h.room, h.cursor, &snap, &acked)
+    }
+
+    pub async fn persist_all(&self) {
+        let hosts: Vec<SharedHost> = self.hosts.lock().await.values().cloned().collect();
+        for h in hosts {
+            let _ = self.persist(&h).await;
+        }
+    }
+
+    /// Post a full checkpoint for a room (box is the only compactor, D20).
+    pub async fn post_checkpoint(&self, host: &SharedHost, seq_covered: i64) -> Result<()> {
+        let (room, snap, vv) = {
+            let h = host.lock().await;
+            (
+                h.room.clone(),
+                h.doc.snapshot(),
+                encode_vv(&h.doc.oplog_vv()),
+            )
+        };
+        let url = format!(
+            "{}/room/{}/checkpoint?seqCovered={}",
+            self.cfg.relay_url, room, seq_covered
+        );
+        let resp = reqwest::Client::new()
+            .post(url)
+            .bearer_auth(&self.cfg.box_token)
+            .header("x-arbos-frontier", hex::encode(vv))
+            .body(snap)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            return Err(anyhow!("checkpoint: HTTP {}", resp.status()));
+        }
+        Ok(())
+    }
+
+    async fn run_room(&self, host: SharedHost) {
+        let mut backoff = Duration::from_millis(250);
+        loop {
+            let started = std::time::Instant::now();
+            let room_name = host.lock().await.room.clone();
+            match self.room_session(&host).await {
+                Ok(()) => tracing::info!(room = %room_name, "room session closed"),
+                Err(e) => tracing::warn!(room = %room_name, error = %e, "room session error"),
+            }
+            {
+                let mut h = host.lock().await;
+                h.clear_inflight();
+                h.caught_up = false;
+            }
+            if started.elapsed() > Duration::from_secs(30) {
+                backoff = Duration::from_millis(250);
+            }
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(Duration::from_secs(16));
+        }
+    }
+
+    async fn room_session(&self, host: &SharedHost) -> Result<()> {
+        let (room, cursor) = {
+            let h = host.lock().await;
+            (h.room.clone(), h.cursor)
+        };
+        let ws_url = format!(
+            "{}/room/{}?token={}",
+            self.cfg.relay_url.replacen("http", "ws", 1),
+            room,
+            self.cfg.box_token
+        );
+        let (ws, _) = tokio::time::timeout(
+            Duration::from_secs(15),
+            tokio_tungstenite::connect_async(&ws_url),
+        )
+        .await
+        .map_err(|_| anyhow!("dial timeout"))??;
+        let (mut sink, mut stream) = ws.split();
+        let hello = Frame::new(
+            FrameType::Hello,
+            serde_json::to_value(wire::Hello {
+                cursor,
+                device: self.cfg.device_id.clone(),
+                room: room.clone(),
+                proto: arbos_core::PROTO_VERSION,
+            })?,
+            Bytes::new(),
+        );
+        sink.send(Message::Binary(hello.encode())).await?;
+        let chat_id = host.lock().await.chat_id.clone();
+
+        let mut tick = tokio::time::interval(Duration::from_millis(STREAM_COMMIT_MS));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut persist_tick = tokio::time::interval(Duration::from_secs(2));
+        let mut probe_tick = tokio::time::interval(Duration::from_secs(15 * 60));
+        probe_tick.tick().await;
+        let mut dirty_since_persist = false;
+        let mut head_seq_for_checkpoint: Option<(i64, i64, i64)> = None;
+
+        loop {
+            tokio::select! {
+                msg = stream.next() => {
+                    let Some(msg) = msg else { return Ok(()) };
+                    let data = match msg? {
+                        Message::Binary(b) => b,
+                        Message::Close(_) => return Ok(()),
+                        Message::Ping(p) => { sink.send(Message::Pong(p)).await?; continue; }
+                        _ => continue,
+                    };
+                    let Some(f) = Frame::decode(data)? else { continue };
+                    match f.ty {
+                        FrameType::State => {
+                            let st: wire::State = serde_json::from_value(f.header)?;
+                            head_seq_for_checkpoint = Some((st.head_seq, st.row_count, st.row_bytes));
+                            let mut after = cursor;
+                            let contained = match decode_vv(&f.payload) {
+                                Some(vv) => host.lock().await.doc.contains_vv(&vv),
+                                None => true,
+                            };
+                            if st.checkpoint_seq > 0 && (!contained || cursor < st.checkpoint_seq) && !f.payload.is_empty() {
+                                if let Ok(bytes) = self.fetch_checkpoint(&room).await {
+                                    let mut h = host.lock().await;
+                                    let _ = h.doc.import(&bytes);
+                                    h.cursor = h.cursor.max(st.checkpoint_seq);
+                                    after = h.cursor;
+                                }
+                            }
+                            after = after.max(st.checkpoint_seq.min(cursor));
+                            let req = Frame::new(FrameType::RowsReq, serde_json::to_value(wire::RowsReq { after, exclude_own: true })?, Bytes::new());
+                            sink.send(Message::Binary(req.encode())).await?;
+                        }
+                        FrameType::Row => {
+                            let rh: wire::RowHeader = serde_json::from_value(f.header)?;
+                            let cmds = {
+                                let mut h = host.lock().await;
+                                if rh.device != self.cfg.device_id {
+                                    let _ = h.doc.import(&f.payload);
+                                }
+                                h.cursor = h.cursor.max(rh.seq);
+                                dirty_since_persist = true;
+                                if h.caught_up { h.new_pending() } else { Vec::new() }
+                            };
+                            for cmd in cmds {
+                                let _ = self.incoming.send(Incoming::Command { chat_id: chat_id.clone(), cmd }).await;
+                            }
+                        }
+                        FrameType::RowsDone => {
+                            let head = f.header.get("headSeq").and_then(|v| v.as_i64()).unwrap_or(0);
+                            let cmds = {
+                                let mut h = host.lock().await;
+                                h.caught_up = true;
+                                h.cursor = h.cursor.max(head);
+                                h.new_pending()
+                            };
+                            let _ = self.persist(host).await;
+                            let _ = self.incoming.send(Incoming::CaughtUp { chat_id: chat_id.clone(), head_seq: head }).await;
+                            for cmd in cmds {
+                                let _ = self.incoming.send(Incoming::Command { chat_id: chat_id.clone(), cmd }).await;
+                            }
+                            if let Some((head, rows, bytes)) = head_seq_for_checkpoint.take() {
+                                if rows > 200 || bytes > 512 * 1024 {
+                                    if let Err(e) = self.post_checkpoint(host, head).await {
+                                        tracing::warn!(error = %e, "checkpoint post failed");
+                                    }
+                                }
+                            }
+                        }
+                        FrameType::Ack => {
+                            let ack: wire::Ack = serde_json::from_value(f.header)?;
+                            let mut h = host.lock().await;
+                            h.on_ack(&ack.batch_id);
+                            h.cursor = h.cursor.max(ack.seq);
+                            dirty_since_persist = true;
+                        }
+                        FrameType::Status => {
+                            if let Ok(s) = serde_json::from_value::<wire::StatusHeader>(f.header) {
+                                let _ = self.incoming.send(Incoming::Status { chat_id: chat_id.clone(), state: s.box_state }).await;
+                            }
+                        }
+                        FrameType::Error => {
+                            let code = f.header.get("code").and_then(|v| v.as_str()).unwrap_or("");
+                            if code == "lagging" {
+                                let after = host.lock().await.cursor;
+                                let req = Frame::new(FrameType::RowsReq, serde_json::to_value(wire::RowsReq { after, exclude_own: true })?, Bytes::new());
+                                sink.send(Message::Binary(req.encode())).await?;
+                            } else {
+                                tracing::warn!(room = %room, header = %f.header, "relay error frame");
+                            }
+                        }
+                        FrameType::ProbeOk | FrameType::Presence | FrameType::Hello | FrameType::RowsReq | FrameType::Push | FrameType::Probe | FrameType::Wake => {}
+                    }
+                }
+                _ = tick.tick() => {
+                    let push = { host.lock().await.next_push() };
+                    if let Some((batch, bytes)) = push {
+                        let f = Frame::new(FrameType::Push, json!({ "batchId": batch }), Bytes::from(bytes));
+                        sink.send(Message::Binary(f.encode())).await?;
+                        dirty_since_persist = true;
+                    }
+                }
+                _ = persist_tick.tick() => {
+                    if dirty_since_persist {
+                        dirty_since_persist = false;
+                        let _ = self.persist(host).await;
+                    }
+                }
+                _ = probe_tick.tick() => {
+                    sink.send(Message::Binary(Frame::new(FrameType::Probe, json!({}), Bytes::new()).encode())).await?;
+                }
+            }
+        }
+    }
+
+    async fn fetch_checkpoint(&self, room: &str) -> Result<Vec<u8>> {
+        let url = format!("{}/room/{}/checkpoint", self.cfg.relay_url, room);
+        let resp = reqwest::Client::new()
+            .get(url)
+            .bearer_auth(&self.cfg.box_token)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            return Err(anyhow!("checkpoint fetch: HTTP {}", resp.status()));
+        }
+        Ok(resp.bytes().await?.to_vec())
+    }
+
+    /// Write the box status into the project doc (`status` map).
+    pub async fn write_status(&self, fields: &[(&str, serde_json::Value)]) {
+        if let Some(h) = self.host(PROJECT_DOC_CHAT_ID).await {
+            let h = h.lock().await;
+            let status = h.doc.doc.get_map("status");
+            for (k, v) in fields {
+                let lv: loro::LoroValue =
+                    serde_json::from_value(v.clone()).unwrap_or(loro::LoroValue::Null);
+                status.insert(k, lv).ok();
+            }
+            status.insert("since", now_ms()).ok();
+            h.doc.doc.commit();
+        }
+    }
+}

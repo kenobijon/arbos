@@ -1,0 +1,493 @@
+//! Room client: a local Loro replica per chat, cursor + snapshot committed together,
+//! HELLO{cursor} → STATE → ROWS_REQ → live rows; PUSH with batch ids (crdt-sync §7, §11).
+
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
+use anyhow::{anyhow, Result};
+use bytes::Bytes;
+use futures::{SinkExt, StreamExt};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use tokio_tungstenite::tungstenite::Message;
+
+use arbos_core::doc::{decode_vv, encode_vv, ChatDoc};
+use arbos_core::ids::ulid;
+use arbos_core::wire::{self, Frame, FrameType};
+
+use crate::client::Config;
+
+#[derive(Serialize, Deserialize, Default)]
+struct Replica {
+    cursor: i64,
+    #[serde(with = "b64")]
+    snapshot: Vec<u8>,
+    #[serde(with = "b64")]
+    acked_vv: Vec<u8>,
+    /// message id → chars already printed (for incremental printing across restarts).
+    #[serde(default)]
+    printed: HashMap<String, usize>,
+}
+
+mod b64 {
+    use base64::Engine;
+    use serde::{Deserialize, Deserializer, Serializer};
+    pub fn serialize<S: Serializer>(v: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&base64::engine::general_purpose::STANDARD.encode(v))
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let s = String::deserialize(d)?;
+        base64::engine::general_purpose::STANDARD
+            .decode(s)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+fn replica_path(cfg: &Config, project: &str, chat: &str) -> std::path::PathBuf {
+    cfg.rooms_dir().join(format!("{project}__{chat}.json"))
+}
+
+fn peer_id(cfg: &Config) -> u64 {
+    use sha2::Digest;
+    let h = sha2::Sha256::digest(cfg.device_name().as_bytes());
+    u64::from_le_bytes(h[..8].try_into().unwrap()) | 1
+}
+
+struct Session {
+    doc: ChatDoc,
+    cursor: i64,
+    acked_vv: loro::VersionVector,
+    printed: HashMap<String, usize>,
+    path: std::path::PathBuf,
+    device: String,
+    room: String,
+}
+
+impl Session {
+    fn load(cfg: &Config, project: &str, chat: &str) -> Result<Self> {
+        let path = replica_path(cfg, project, chat);
+        let rep: Replica = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        let doc = if rep.snapshot.is_empty() {
+            ChatDoc::new(peer_id(cfg), false)
+        } else {
+            ChatDoc::from_snapshot(peer_id(cfg), false, &rep.snapshot)?
+        };
+        let acked_vv = decode_vv(&rep.acked_vv).unwrap_or_default();
+        Ok(Self {
+            doc,
+            cursor: rep.cursor,
+            acked_vv,
+            printed: rep.printed,
+            path,
+            device: cfg.device_name(),
+            room: wire::room_name(project, chat),
+        })
+    }
+
+    /// Cursor and snapshot in one atomic file write.
+    fn persist(&self) -> Result<()> {
+        let rep = Replica {
+            cursor: self.cursor,
+            snapshot: self.doc.snapshot(),
+            acked_vv: encode_vv(&self.acked_vv),
+            printed: self.printed.clone(),
+        };
+        if let Some(p) = self.path.parent() {
+            std::fs::create_dir_all(p)?;
+        }
+        let tmp = self.path.with_extension("tmp");
+        std::fs::write(&tmp, serde_json::to_string(&rep)?)?;
+        std::fs::rename(&tmp, &self.path)?;
+        Ok(())
+    }
+
+    /// Print new text of assistant messages and status/tool parts since the last print.
+    fn print_new(&mut self) -> bool {
+        let mut any_done_new = false;
+        for m in self.doc.messages() {
+            if m.role != "assistant" {
+                continue;
+            }
+            let full = m.text();
+            let shown = self.printed.get(&m.id).copied().unwrap_or(0);
+            let total_chars = full.chars().count();
+            if total_chars > shown {
+                let new: String = full.chars().skip(shown).collect();
+                if shown == 0 {
+                    print!("\n[assistant {}] ", &m.id[m.id.len() - 6..]);
+                }
+                print!("{new}");
+                use std::io::Write;
+                std::io::stdout().flush().ok();
+                self.printed.insert(m.id.clone(), total_chars);
+            }
+            let status_key = format!("{}#status", m.id);
+            let st = m.status.clone();
+            let prev = self.printed.get(&status_key).copied().unwrap_or(0);
+            let code = match st.as_str() {
+                "streaming" => 1,
+                "done" => 2,
+                "error" => 3,
+                _ => 0,
+            };
+            if code != prev {
+                if code >= 2 {
+                    let decision = m
+                        .rest
+                        .get("decision")
+                        .and_then(|d| d.as_str())
+                        .unwrap_or("");
+                    let tools = m
+                        .parts
+                        .iter()
+                        .filter(|p| p.get("kind").and_then(|k| k.as_str()) == Some("tool"))
+                        .count();
+                    println!(
+                        "\n[{} {} route={} tools={}]",
+                        &m.id[m.id.len() - 6..],
+                        st,
+                        decision,
+                        tools
+                    );
+                    any_done_new = true;
+                }
+                self.printed.insert(status_key, code);
+            }
+        }
+        any_done_new
+    }
+}
+
+async fn connect(
+    cfg: &Config,
+    room: &str,
+) -> Result<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+> {
+    if cfg.device_token.is_empty() {
+        return Err(anyhow!("not paired"));
+    }
+    let url = format!(
+        "{}/room/{}?token={}",
+        cfg.relay_url.replacen("http", "ws", 1),
+        room,
+        cfg.device_token
+    );
+    let (ws, _) = tokio::time::timeout(
+        Duration::from_secs(15),
+        tokio_tungstenite::connect_async(&url),
+    )
+    .await
+    .map_err(|_| anyhow!("dial timeout"))??;
+    Ok(ws)
+}
+
+enum Mode {
+    Dump,
+    Stream { until_done: bool },
+    Send { text: String, stream: bool },
+}
+
+async fn run(
+    cfg: &mut Config,
+    project: &str,
+    chat: &str,
+    mode: Mode,
+    timeout: Duration,
+) -> Result<()> {
+    let mut s = Session::load(cfg, project, chat)?;
+    let ws = connect(cfg, &s.room).await?;
+    let (mut sink, mut stream) = ws.split();
+    let hello = Frame::new(
+        FrameType::Hello,
+        json!({ "cursor": s.cursor, "device": s.device, "room": s.room, "proto": arbos_core::PROTO_VERSION }),
+        Bytes::new(),
+    );
+    sink.send(Message::Binary(hello.encode())).await?;
+    let started = Instant::now();
+    let mut caught_up = false;
+    let mut pending_push: Option<(String, loro::VersionVector)> = None;
+    let mut sent_msg_id: Option<String> = None;
+    let mut rows_seen = 0usize;
+    let mut box_state = String::from("?");
+    let t_send = Instant::now();
+    let mut first_delta_logged = false;
+
+    loop {
+        let msg = tokio::select! {
+            m = stream.next() => m,
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                if started.elapsed() > timeout { eprintln!("\n[timeout after {:?}]", timeout); break; }
+                continue;
+            }
+        };
+        let Some(msg) = msg else { break };
+        let data = match msg? {
+            Message::Binary(b) => b,
+            Message::Close(_) => break,
+            Message::Ping(p) => {
+                sink.send(Message::Pong(p)).await?;
+                continue;
+            }
+            _ => continue,
+        };
+        let Some(f) = Frame::decode(data)? else {
+            continue;
+        };
+        match f.ty {
+            FrameType::State => {
+                let st: wire::State = serde_json::from_value(f.header)?;
+                box_state = format!("{:?}", st.box_state).to_ascii_lowercase();
+                let mut after = s.cursor;
+                let contained = decode_vv(&f.payload)
+                    .map(|vv| s.doc.contains_vv(&vv))
+                    .unwrap_or(true);
+                if st.checkpoint_seq > 0 && (!contained || s.cursor < st.checkpoint_seq) {
+                    let url = format!("{}/room/{}/checkpoint", cfg.relay_url, s.room);
+                    if let Ok(r) = reqwest::Client::new()
+                        .get(url)
+                        .bearer_auth(&cfg.device_token)
+                        .send()
+                        .await
+                    {
+                        if r.status().is_success() {
+                            let b = r.bytes().await?;
+                            s.doc.import(&b)?;
+                            s.cursor = s.cursor.max(st.checkpoint_seq);
+                            after = s.cursor;
+                        }
+                    }
+                }
+                eprintln!(
+                    "[room {} head={} cursor={} box={}]",
+                    s.room, st.head_seq, s.cursor, box_state
+                );
+                let req = Frame::new(
+                    FrameType::RowsReq,
+                    json!({ "after": after, "excludeOwn": true }),
+                    Bytes::new(),
+                );
+                sink.send(Message::Binary(req.encode())).await?;
+            }
+            FrameType::Row => {
+                let rh: wire::RowHeader = serde_json::from_value(f.header)?;
+                if rh.seq <= s.cursor {
+                    eprintln!("[dup row seq={} ignored]", rh.seq);
+                    continue;
+                }
+                if rh.device != s.device {
+                    s.doc.import(&f.payload)?;
+                }
+                s.cursor = rh.seq;
+                rows_seen += 1;
+                s.persist()?;
+                if caught_up || matches!(mode, Mode::Stream { .. }) {
+                    if !first_delta_logged
+                        && matches!(mode, Mode::Send { .. })
+                        && s.doc
+                            .messages()
+                            .iter()
+                            .any(|m| m.role == "assistant" && !m.text().is_empty())
+                    {
+                        first_delta_logged = true;
+                        eprintln!(
+                            "\n[first assistant text after {:.2}s]",
+                            t_send.elapsed().as_secs_f64()
+                        );
+                    }
+                    let done = s.print_new();
+                    if done {
+                        s.persist()?;
+                        let finished = matches!(mode, Mode::Send { .. })
+                            || matches!(mode, Mode::Stream { until_done: true });
+                        if finished
+                            && sent_msg_id
+                                .as_ref()
+                                .map(|id| reply_done_for(&s.doc, id))
+                                .unwrap_or(true)
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+            FrameType::RowsDone => {
+                caught_up = true;
+                let head = f
+                    .header
+                    .get("headSeq")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                s.cursor = s.cursor.max(head);
+                s.persist()?;
+                eprintln!("[caught up: {} new rows, head={}]", rows_seen, head);
+                match &mode {
+                    Mode::Dump => {
+                        println!("{}", serde_json::to_string_pretty(&s.doc.to_json())?);
+                        break;
+                    }
+                    Mode::Stream { until_done } => {
+                        let done = s.print_new();
+                        if *until_done && done {
+                            break;
+                        }
+                    }
+                    Mode::Send { text, stream: _ } => {
+                        s.print_new();
+                        let msg_id = ulid();
+                        let base = s.doc.oplog_vv();
+                        let _ = &base;
+                        s.doc.append_user_message(&msg_id, text, &s.device);
+                        let bytes = s.doc.export_updates_since(&s.acked_vv);
+                        let batch = ulid();
+                        pending_push = Some((batch.clone(), s.doc.oplog_vv()));
+                        sent_msg_id = Some(msg_id.clone());
+                        sink.send(Message::Binary(
+                            Frame::new(
+                                FrameType::Push,
+                                json!({ "batchId": batch }),
+                                Bytes::from(bytes),
+                            )
+                            .encode(),
+                        ))
+                        .await?;
+                        if box_state != "awake" {
+                            sink.send(Message::Binary(
+                                Frame::new(
+                                    FrameType::Wake,
+                                    json!({ "reason": "send" }),
+                                    Bytes::new(),
+                                )
+                                .encode(),
+                            ))
+                            .await?;
+                        }
+                        eprintln!("[sent message {msg_id} (box={box_state})]");
+                    }
+                }
+            }
+            FrameType::Ack => {
+                let ack: wire::Ack = serde_json::from_value(f.header)?;
+                if let Some((b, vv)) = &pending_push {
+                    if *b == ack.batch_id {
+                        s.acked_vv = vv.clone();
+                        s.cursor = s.cursor.max(ack.seq);
+                        pending_push = None;
+                        s.persist()?;
+                        eprintln!("[ack seq={} dup={}]", ack.seq, ack.dup);
+                        if let Mode::Send { stream: false, .. } = mode {
+                            break;
+                        }
+                    }
+                }
+            }
+            FrameType::Status => {
+                if let Ok(st) = serde_json::from_value::<wire::StatusHeader>(f.header) {
+                    box_state = format!("{:?}", st.box_state).to_ascii_lowercase();
+                    eprintln!(
+                        "[box {}{}]",
+                        box_state,
+                        st.detail.map(|d| format!(" · {d}")).unwrap_or_default()
+                    );
+                }
+            }
+            FrameType::Error => eprintln!("[relay error {}]", f.header),
+            FrameType::ProbeOk
+            | FrameType::Presence
+            | FrameType::Hello
+            | FrameType::RowsReq
+            | FrameType::Push
+            | FrameType::Probe
+            | FrameType::Wake => {}
+        }
+    }
+    s.persist()?;
+    println!();
+    Ok(())
+}
+
+/// The reply to `user_msg_id` is finished when an assistant message `inReplyTo` it is done
+/// and no later subagent message is still streaming.
+fn reply_done_for(doc: &ChatDoc, user_msg_id: &str) -> bool {
+    let msgs = doc.messages();
+    let replies: Vec<_> = msgs
+        .iter()
+        .filter(|m| {
+            m.role == "assistant"
+                && m.rest.get("inReplyTo").and_then(|v| v.as_str()) == Some(user_msg_id)
+        })
+        .collect();
+    if replies.is_empty() {
+        return false;
+    }
+    let any_streaming = replies.iter().any(|m| m.status == "streaming");
+    let first = &replies[0];
+    let decision = first
+        .rest
+        .get("decision")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let expects_followup = decision == "new"
+        || decision == "wake"
+        || first
+            .parts
+            .iter()
+            .any(|p| p.get("code").and_then(|c| c.as_str()) == Some("handed_off"));
+    if expects_followup && replies.len() < 2 {
+        return false;
+    }
+    !any_streaming
+}
+
+pub async fn send(
+    cfg: &mut Config,
+    project: &str,
+    chat: &str,
+    text: &str,
+    stream: bool,
+    timeout_s: u64,
+) -> Result<()> {
+    run(
+        cfg,
+        project,
+        chat,
+        Mode::Send {
+            text: text.to_owned(),
+            stream,
+        },
+        Duration::from_secs(timeout_s),
+    )
+    .await
+}
+
+pub async fn stream(
+    cfg: &mut Config,
+    project: &str,
+    chat: &str,
+    until_done: bool,
+    timeout_s: u64,
+) -> Result<()> {
+    run(
+        cfg,
+        project,
+        chat,
+        Mode::Stream { until_done },
+        Duration::from_secs(timeout_s),
+    )
+    .await
+}
+
+pub async fn dump(cfg: &mut Config, project: &str, chat: &str) -> Result<()> {
+    run(cfg, project, chat, Mode::Dump, Duration::from_secs(60)).await
+}
+
+pub fn reset(cfg: &Config, project: &str, chat: &str) -> Result<()> {
+    let p = replica_path(cfg, project, chat);
+    if p.exists() {
+        std::fs::remove_file(p)?;
+    }
+    Ok(())
+}

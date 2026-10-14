@@ -239,7 +239,8 @@ async fn forward(
             let base = state.cfg.anthropic_base.trim_end_matches('/').to_owned();
             if base.contains("openrouter") {
                 let Some(key) = state.cfg.openrouter_key.clone() else {
-                    return (StatusCode::BAD_GATEWAY, "relay has no OpenRouter key").into_response();
+                    return (StatusCode::BAD_GATEWAY, "relay has no OpenRouter key")
+                        .into_response();
                 };
                 if !model.contains('/') && !model.is_empty() {
                     model = format!("anthropic/{model}");

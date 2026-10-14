@@ -112,6 +112,7 @@ dependencies = [
  "arbos-core",
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "clap",
@@ -119,6 +120,7 @@ dependencies = [
  "hex",
  "loro",
  "nix",
+ "regex-lite",
  "reqwest",
  "rusqlite",
  "serde",
@@ -182,13 +184,16 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arbos-core",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "clap",
  "futures",
+ "loro",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tokio-tungstenite 0.26.2",
  "tracing",
@@ -1980,6 +1985,12 @@ dependencies = [
  "memchr",
  "regex-syntax",
 ]
+
+[[package]]
+name = "regex-lite"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cab834c73d247e67f4fae452806d17d3c7501756d98c8808d7c9c7aa7d18f973"
 
 [[package]]
 name = "regex-syntax"
