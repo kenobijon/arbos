@@ -226,6 +226,15 @@ pub async fn get_project(
     Ok(Json(json!({ "project": p, "chats": chats, "box": bs, "box_since": since, "spend_today": today })).into_response())
 }
 
+/// Accept a project id or name in the path and return the id.
+fn resolve_project_id(state: &AppState, id_or_name: &str) -> Result<String, (StatusCode, String)> {
+    match state.db.project(id_or_name) {
+        Ok(Some(p)) => Ok(p.id),
+        Ok(None) => Err((StatusCode::NOT_FOUND, "no such project".into())),
+        Err(e) => Err(internal(e)),
+    }
+}
+
 fn start_of_day() -> i64 {
     let now = now_ms();
     now - now.rem_euclid(86_400_000)
@@ -382,6 +391,7 @@ pub async fn keepalive(
     Path(id): Path<String>,
     Json(b): Json<KeepaliveBody>,
 ) -> ApiResult {
+    let id = resolve_project_id(&state, &id)?;
     if !principal.can_access_project(&id) {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
@@ -479,6 +489,7 @@ pub async fn take_pushes(
     principal: Principal,
     Path(id): Path<String>,
 ) -> ApiResult {
+    let id = resolve_project_id(&state, &id)?;
     if !principal.can_access_project(&id) {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
@@ -497,6 +508,7 @@ pub async fn usage(
     principal: Principal,
     Path(id): Path<String>,
 ) -> ApiResult {
+    let id = resolve_project_id(&state, &id)?;
     if !principal.can_access_project(&id) {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
@@ -523,6 +535,7 @@ pub async fn record_timing(
     Path(id): Path<String>,
     Json(b): Json<TimingBody>,
 ) -> ApiResult {
+    let id = resolve_project_id(&state, &id)?;
     if !principal.can_access_project(&id) {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
