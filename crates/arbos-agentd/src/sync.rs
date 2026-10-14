@@ -46,6 +46,7 @@ pub struct DocHost {
     pub caught_up: bool,
     seen_commands: std::collections::HashSet<String>,
     recovered: bool,
+    ever_caught_up: bool,
 }
 
 impl DocHost {
@@ -153,9 +154,12 @@ pub struct SyncHub {
     pub peer_id: u64,
 }
 
+/// A fresh Loro peer id per process boot. A box killed between a PUSH and its persist would
+/// otherwise mint new ops under ids the relay already holds (same peer, same counters).
 fn peer_id_for(device: &str) -> u64 {
     use sha2::Digest;
-    let h = sha2::Sha256::digest(device.as_bytes());
+    let nonce = ulid();
+    let h = sha2::Sha256::digest(format!("{device}:{nonce}").as_bytes());
     u64::from_le_bytes(h[..8].try_into().expect("8 bytes")) | 1
 }
 
@@ -199,6 +203,7 @@ impl SyncHub {
             caught_up: false,
             seen_commands: Default::default(),
             recovered: false,
+            ever_caught_up: false,
         }));
         self.hosts
             .lock()
@@ -346,14 +351,16 @@ impl SyncHub {
                                 }
                             }
                             after = after.max(st.checkpoint_seq.min(cursor));
-                            let req = Frame::new(FrameType::RowsReq, serde_json::to_value(wire::RowsReq { after, exclude_own: true })?, Bytes::new());
+                            // Own rows are re-imported after a boot: the persisted snapshot may predate the last ack.
+                            let first_after_boot = !host.lock().await.ever_caught_up;
+                            let req = Frame::new(FrameType::RowsReq, serde_json::to_value(wire::RowsReq { after, exclude_own: !first_after_boot })?, Bytes::new());
                             sink.send(Message::Binary(req.encode())).await?;
                         }
                         FrameType::Row => {
                             let rh: wire::RowHeader = serde_json::from_value(f.header)?;
                             let cmds = {
                                 let mut h = host.lock().await;
-                                if rh.device != self.cfg.device_id {
+                                if rh.device != self.cfg.device_id || !h.ever_caught_up {
                                     let _ = h.doc.import(&f.payload);
                                 }
                                 h.cursor = h.cursor.max(rh.seq);
@@ -369,6 +376,11 @@ impl SyncHub {
                             let cmds = {
                                 let mut h = host.lock().await;
                                 h.caught_up = true;
+                                if !h.ever_caught_up {
+                                    // Everything the relay has from us is now in the oplog.
+                                    h.acked_vv = h.doc.oplog_vv();
+                                    h.ever_caught_up = true;
+                                }
                                 h.cursor = h.cursor.max(head);
                                 h.new_pending()
                             };

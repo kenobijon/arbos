@@ -47,9 +47,10 @@ fn replica_path(cfg: &Config, project: &str, chat: &str) -> std::path::PathBuf {
     cfg.rooms_dir().join(format!("{project}__{chat}.json"))
 }
 
+/// Fresh Loro peer id per run: a client killed between PUSH and persist must not reuse op ids.
 fn peer_id(cfg: &Config) -> u64 {
     use sha2::Digest;
-    let h = sha2::Sha256::digest(cfg.device_name().as_bytes());
+    let h = sha2::Sha256::digest(format!("{}:{}", cfg.device_name(), ulid()).as_bytes());
     u64::from_le_bytes(h[..8].try_into().unwrap()) | 1
 }
 
@@ -98,7 +99,7 @@ impl Session {
         if let Some(p) = self.path.parent() {
             std::fs::create_dir_all(p)?;
         }
-        let tmp = self.path.with_extension("tmp");
+        let tmp = self.path.with_extension(format!("tmp{}", std::process::id()));
         std::fs::write(&tmp, serde_json::to_string(&rep)?)?;
         std::fs::rename(&tmp, &self.path)?;
         Ok(())
