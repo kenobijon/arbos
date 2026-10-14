@@ -294,7 +294,6 @@ impl Agent {
                 RpcCommand::GetState {
                     id: "boot-state".into(),
                 },
-                "boot-state",
                 Duration::from_secs(30),
             )
             .await?;
@@ -376,7 +375,6 @@ impl Agent {
                 RpcCommand::GetState {
                     id: "boot-state".into(),
                 },
-                "boot-state",
                 Duration::from_secs(30),
             )
             .await?;
@@ -405,9 +403,7 @@ impl Agent {
             RpcCommand::SwitchSession {
                 id: pi.next_id("sw"),
                 session_path: path.display().to_string(),
-            },
-            "sw-x",
-        )
+            })
         .await?;
         tracing::info!(
             chat_id,
@@ -467,9 +463,7 @@ impl Agent {
                 .call(
                     RpcCommand::Abort {
                         id: pi.next_id("ab"),
-                    },
-                    "ab-x",
-                )
+                    })
                 .await;
         }
         Ok(())
@@ -786,9 +780,7 @@ impl Agent {
                     id: pi.next_id("p"),
                     message: prompt_text.to_owned(),
                     streaming_behavior: None,
-                },
-                "p-main",
-            )
+                })
             .await?;
         if !r.success {
             return Err(anyhow!("prompt rejected: {}", r.error.unwrap_or_default()));
@@ -805,15 +797,15 @@ impl Agent {
                     let is_act = matches!(self.turn.lock().await.as_ref().and_then(|t| t.route.as_ref()), Some(ValidRoute::Act { .. }));
                     if is_act && started.elapsed() > Duration::from_secs(ACT_MAX_WALL_SECS) && !act_steered {
                         act_steered = true;
-                        let _ = pi.call(RpcCommand::Steer { id: pi.next_id("st"), message: "Time limit reached. Stop now and summarize what you did and what is left.".into() }, "st-act").await;
+                        let _ = pi.call(RpcCommand::Steer { id: pi.next_id("st"), message: "Time limit reached. Stop now and summarize what you did and what is left.".into() }).await;
                         if let Some(t) = self.turn.lock().await.as_mut() { t.escalate = true; }
                     }
                     if is_act && started.elapsed() > Duration::from_secs(ACT_MAX_WALL_SECS + 20) && !act_aborted {
                         act_aborted = true;
-                        let _ = pi.call(RpcCommand::Abort { id: pi.next_id("ab") }, "ab-act").await;
+                        let _ = pi.call(RpcCommand::Abort { id: pi.next_id("ab") }).await;
                     }
                     if started.elapsed() > deadline {
-                        let _ = pi.call(RpcCommand::Abort { id: pi.next_id("ab") }, "ab-deadline").await;
+                        let _ = pi.call(RpcCommand::Abort { id: pi.next_id("ab") }).await;
                         return Err(anyhow!("turn exceeded 15 minutes"));
                     }
                     continue;

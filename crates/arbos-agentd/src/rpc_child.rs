@@ -110,16 +110,13 @@ impl RpcChild {
     }
 
     /// Send a command and wait for its response (default 60 s).
-    pub async fn call(&self, cmd: RpcCommand, id: &str) -> Result<Response> {
-        self.call_timeout(cmd, id, Duration::from_secs(60)).await
+    pub async fn call(&self, cmd: RpcCommand) -> Result<Response> {
+        self.call_timeout(cmd, Duration::from_secs(60)).await
     }
 
-    pub async fn call_timeout(
-        &self,
-        cmd: RpcCommand,
-        id: &str,
-        timeout: Duration,
-    ) -> Result<Response> {
+    pub async fn call_timeout(&self, cmd: RpcCommand, timeout: Duration) -> Result<Response> {
+        let id = cmd.id().to_owned();
+        let id = id.as_str();
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id.to_owned(), tx);
         let line = rpc::encode_line(&cmd);
@@ -142,8 +139,8 @@ impl RpcChild {
     }
 
     /// Call and fail on `success: false`.
-    pub async fn call_ok(&self, cmd: RpcCommand, id: &str) -> Result<serde_json::Value> {
-        let r = self.call(cmd, id).await?;
+    pub async fn call_ok(&self, cmd: RpcCommand) -> Result<serde_json::Value> {
+        let r = self.call(cmd).await?;
         if !r.success {
             return Err(anyhow!("{}: {}", r.command, r.error.unwrap_or_default()));
         }

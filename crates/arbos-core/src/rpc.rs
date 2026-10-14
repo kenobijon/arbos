@@ -60,6 +60,26 @@ pub enum Command {
     },
 }
 
+impl Command {
+    /// The correlation id this command carries.
+    pub fn id(&self) -> &str {
+        match self {
+            Command::Prompt { id, .. }
+            | Command::Steer { id, .. }
+            | Command::FollowUp { id, .. }
+            | Command::Abort { id }
+            | Command::GetState { id }
+            | Command::GetEntries { id, .. }
+            | Command::SwitchSession { id, .. }
+            | Command::NewSession { id }
+            | Command::SetModel { id, .. }
+            | Command::SetThinkingLevel { id, .. }
+            | Command::GetLastAssistantText { id }
+            | Command::GetMessages { id } => id,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum StreamingBehavior {

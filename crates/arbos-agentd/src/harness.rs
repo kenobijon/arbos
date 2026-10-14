@@ -377,9 +377,7 @@ impl HarnessAdapter for PrimeAdapter {
             .call_ok(
                 RpcCommand::GetState {
                     id: child.next_id("st"),
-                },
-                "st-0",
-            )
+                })
             .await
             .unwrap_or(Value::Null);
         let path = state
@@ -416,9 +414,7 @@ impl HarnessAdapter for PrimeAdapter {
                 id: c.next_id("p"),
                 message: text.to_owned(),
                 streaming_behavior: None,
-            },
-            "p-x",
-        )
+            })
         .await
         .map(|_| ())
     }
@@ -429,9 +425,7 @@ impl HarnessAdapter for PrimeAdapter {
             RpcCommand::FollowUp {
                 id: c.next_id("f"),
                 message: text.to_owned(),
-            },
-            "f-x",
-        )
+            })
         .await
         .map(|_| ())
     }
@@ -442,16 +436,14 @@ impl HarnessAdapter for PrimeAdapter {
             RpcCommand::Steer {
                 id: c.next_id("s"),
                 message: text.to_owned(),
-            },
-            "s-x",
-        )
+            })
         .await
         .map(|_| ())
     }
 
     async fn cancel(&self, session_id: &str) -> Result<()> {
         let c = self.sessions.child(session_id).await?;
-        c.call_ok(RpcCommand::Abort { id: c.next_id("a") }, "a-x")
+        c.call_ok(RpcCommand::Abort { id: c.next_id("a") })
             .await
             .map(|_| ())
     }
@@ -620,9 +612,7 @@ impl HarnessAdapter for PiAdapter {
             .call_ok(
                 RpcCommand::GetState {
                     id: child.next_id("st"),
-                },
-                "st-0",
-            )
+                })
             .await
             .unwrap_or(Value::Null);
         let path = state
@@ -668,9 +658,7 @@ impl HarnessAdapter for PiAdapter {
                 id: c.next_id("p"),
                 message: text.to_owned(),
                 streaming_behavior: None,
-            },
-            "p-x",
-        )
+            })
         .await
         .map(|_| ())
     }
@@ -681,9 +669,7 @@ impl HarnessAdapter for PiAdapter {
             RpcCommand::FollowUp {
                 id: c.next_id("f"),
                 message: text.to_owned(),
-            },
-            "f-x",
-        )
+            })
         .await
         .map(|_| ())
     }
@@ -694,16 +680,14 @@ impl HarnessAdapter for PiAdapter {
             RpcCommand::Steer {
                 id: c.next_id("s"),
                 message: text.to_owned(),
-            },
-            "s-x",
-        )
+            })
         .await
         .map(|_| ())
     }
 
     async fn cancel(&self, session_id: &str) -> Result<()> {
         let c = self.sessions.child(session_id).await?;
-        c.call_ok(RpcCommand::Abort { id: c.next_id("a") }, "a-x")
+        c.call_ok(RpcCommand::Abort { id: c.next_id("a") })
             .await
             .map(|_| ())
     }
@@ -727,9 +711,7 @@ impl HarnessAdapter for PiAdapter {
                 RpcCommand::GetEntries {
                     id: c.next_id("ge"),
                     since: cursor,
-                },
-                "ge-x",
-            )
+                })
             .await?;
         let entries = data
             .get("entries")
