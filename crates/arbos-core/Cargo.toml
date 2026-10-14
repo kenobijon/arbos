@@ -1,0 +1,21 @@
+[package]
+name = "arbos-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+description = "Shared Arbos types: ids, wire frames, Loro chat-doc schema, route schema, pi RPC codec"
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bytes.workspace = true
+loro.workspace = true
+ulid.workspace = true
+sha2.workspace = true
+hex.workspace = true
+rand.workspace = true
+chrono.workspace = true

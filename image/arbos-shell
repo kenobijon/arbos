@@ -1,0 +1,40 @@
+#!/bin/bash
+# D64 shell wrapper for Prime Agent's bash(): PRIME_AGENT_BASH_SHELL points here.
+# 1. Check the command against the deny-list (same rules as arbos-pi-ext/deny.ts).
+# 2. Append one audit line BEFORE running.
+# 3. exec /bin/bash with the original arguments.
+# Prime calls: $SHELL -c "<command>" (optionally with PRIME_AGENT_BASH_COMMAND_PREFIX prepended).
+
+set -u
+AUDIT="${ARBOS_AUDIT_PATH:-${ARBOS_STATE_DIR:-/work/.arbos}/audit.jsonl}"
+TRACE="${ARBOS_TRACE_ID:-}"
+SESSION="${ARBOS_SESSION_ID:-}"
+
+cmd=""
+if [ "${1:-}" = "-c" ] && [ $# -ge 2 ]; then
+  cmd="$2"
+fi
+
+deny() {
+  printf '{"ts":%s,"kind":"tool_call","tool":"bash","role":"subagent","harness":"prime","session":"%s","trace_id":"%s","cwd":"%s","denied":"%s","input_preview":%s}\n' \
+    "$(date +%s%3N)" "$SESSION" "$TRACE" "$PWD" "$1" "$(printf '%s' "${cmd:0:200}" | jq -Rs .)" >> "$AUDIT" 2>/dev/null
+  echo "arbos: blocked by the deny-list ($1): $2" >&2
+  exit 126
+}
+
+if [ -n "$cmd" ]; then
+  if printf '%s' "$cmd" | grep -Eq 'dtn_[A-Za-z0-9]{20,}|DAYTONA_API_KEY|api\.daytona\.io/api/(api-keys|organizations)'; then
+    deny daytona-api-key "Daytona API keys never exist in a box"
+  fi
+  if printf '%s' "$cmd" | grep -Eq '/(admin|v1/admin|pair/new|devices)(/|\?|[[:space:]]|$)'; then
+    deny relay-admin "relay admin endpoints are not reachable with a box token"
+  fi
+  if printf '%s' "$cmd" | grep -Eq '(^|[[:space:]]|["'"'"'])/work/\.arbos/(agentd|audit\.jsonl)'; then
+    deny arbos-state-tamper "agentd state and the audit log are not writable by the model"
+  fi
+  mkdir -p "$(dirname "$AUDIT")" 2>/dev/null
+  printf '{"ts":%s,"kind":"tool_call","tool":"bash","role":"subagent","harness":"prime","session":"%s","trace_id":"%s","cwd":"%s","denied":null,"input_preview":%s}\n' \
+    "$(date +%s%3N)" "$SESSION" "$TRACE" "$PWD" "$(printf '%s' "${cmd:0:200}" | jq -Rs .)" >> "$AUDIT" 2>/dev/null
+fi
+
+exec /bin/bash "$@"

@@ -1,0 +1,126 @@
+# syntax=docker/dockerfile:1.7
+# The arbos-agent image (sandbox-image.md §3). Build for linux/amd64 only.
+# Pin the base by digest in CI once the tag is chosen (node:24.21.0-bookworm-slim@sha256:...).
+FROM node:24.21.0-bookworm-slim
+
+ARG PI_VERSION=1.2.0
+ARG PRIME_AGENT_VERSION=0.10.0
+ARG CLAUDE_CODE_VERSION=2.1.292
+ARG AGENT_BROWSER_VERSION=v0.39.1
+ARG CHROME_VERSION=155.0.8059.79
+ARG UV_VERSION=0.13.1
+ARG RIPGREP_VERSION=15.2.0
+ARG GH_VERSION=2.102.0
+ARG DOPPLER_VERSION=3.77.0
+# Set to 0 to skip the optional Claude Code layer (~250 MB).
+ARG WITH_CLAUDE_CODE=1
+# Set to 0 to skip Chrome + agent-browser (local smoke builds).
+ARG WITH_BROWSER=1
+
+ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 TZ=UTC
+
+# --- OS packages: build tools, git, Chrome's shared libraries, a fake display, fonts
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl wget gnupg sudo git openssh-client \
+      build-essential pkg-config libssl-dev \
+      jq fd-find unzip zip xz-utils procps less \
+      xvfb fonts-liberation fonts-noto-color-emoji \
+      libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 \
+      libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2 \
+      libpango-1.0-0 libcairo2 libx11-xcb1 libxshmfence1 libnss3-tools \
+ && ln -s /usr/bin/fdfind /usr/local/bin/fd \
+ && rm -rf /var/lib/apt/lists/*
+
+# --- ripgrep, gh, doppler (pinned release artifacts)
+RUN curl -fsSLo /tmp/rg.deb https://github.com/BurntSushi/ripgrep/releases/download/${RIPGREP_VERSION}/ripgrep_${RIPGREP_VERSION}-1_amd64.deb \
+ && dpkg -i /tmp/rg.deb && rm /tmp/rg.deb \
+ && curl -fsSL https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz \
+    | tar -xz -C /usr/local --strip-components=1 gh_${GH_VERSION}_linux_amd64/bin/gh \
+ && curl -fsSL https://github.com/DopplerHQ/cli/releases/download/${DOPPLER_VERSION}/doppler_${DOPPLER_VERSION}_linux_amd64.tar.gz \
+    | tar -xz -C /usr/local/bin doppler
+
+# --- uv (system-wide) and Python 3.11 for Prime Agent's kernel
+ENV UV_PYTHON_INSTALL_DIR=/opt/python
+RUN curl -LsSf https://astral.sh/uv/${UV_VERSION}/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh \
+ && uv python install 3.11 && chmod -R a+rX /opt/python
+
+# --- Main agent: pi (needs the Node 24 in the base image) + the Arbos extension
+RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@${PI_VERSION} \
+ && npm cache clean --force
+COPY image/pi-seed/ /etc/arbos/pi-seed/
+COPY harness/arbos-pi-ext/*.ts harness/arbos-pi-ext/package.json /etc/arbos/pi-seed/extensions/arbos-pi-ext/
+# typebox resolves from pi's own node_modules; link it next to the extension so jiti finds it.
+RUN mkdir -p /etc/arbos/pi-seed/extensions/arbos-pi-ext/node_modules \
+ && ln -s "$(npm root -g)/@earendil-works/pi-coding-agent/node_modules/typebox" /etc/arbos/pi-seed/extensions/arbos-pi-ext/node_modules/typebox \
+ && ln -s "$(npm root -g)/@earendil-works" /etc/arbos/pi-seed/extensions/arbos-pi-ext/node_modules/@earendil-works
+
+# --- Subagent harness 1: Prime Agent + its Python 3.11 IPython kernel venv, baked now, not at first use
+ENV PRIME_AGENT_KERNEL_VENV=/opt/prime-venv PRIME_AGENT_TELEMETRY=0 DO_NOT_TRACK=1
+RUN curl -fsSL https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v${PRIME_AGENT_VERSION}/prime-agent-${PRIME_AGENT_VERSION}-linux-x64.tar.gz \
+    | tar -xz -C /opt \
+ && ln -s /opt/prime-agent-${PRIME_AGENT_VERSION}/prime-agent /usr/local/bin/prime-agent \
+ && uv venv /opt/prime-venv --python 3.11 --seed \
+ && uv pip install --python /opt/prime-venv/bin/python prime-agent-runtime \
+ && (HOME=/tmp/pa-build prime-agent --prime-agent-bootstrap || true) \
+ && chmod -R a+rX /opt/prime-venv /opt/prime-agent-${PRIME_AGENT_VERSION}
+
+# --- Subagent harness 2: Claude Code, native binary (no Node), exact version, updates disabled
+RUN if [ "$WITH_CLAUDE_CODE" = "1" ]; then \
+      curl -fsSL https://claude.ai/install.sh | HOME=/tmp/cc-build bash -s ${CLAUDE_CODE_VERSION} \
+   && install -m 755 /tmp/cc-build/.local/share/claude/versions/${CLAUDE_CODE_VERSION} /usr/local/bin/claude \
+   && rm -rf /tmp/cc-build; \
+    fi
+COPY image/claude-settings.json /etc/arbos/claude-seed/settings.json
+COPY image/claude-mcp.json      /etc/arbos/claude-mcp.json
+
+# --- D64 hooks: deny-list + audit shell wrapper (Prime bash()), Claude Code hook scripts, Prime skills
+COPY image/arbos-shell          /usr/local/lib/arbos/arbos-shell
+COPY image/hooks/               /usr/local/lib/arbos/hooks/
+COPY image/prime-skills/        /etc/arbos/prime-seed/skills/
+RUN chmod 755 /usr/local/lib/arbos/arbos-shell /usr/local/lib/arbos/hooks/claude/*.sh
+
+# --- Browser: Chrome for Testing + agent-browser
+RUN if [ "$WITH_BROWSER" = "1" ]; then \
+      curl -fsSLo /tmp/chrome.zip https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/chrome-linux64.zip \
+   && unzip -q /tmp/chrome.zip -d /opt && mv /opt/chrome-linux64 /opt/chrome && rm /tmp/chrome.zip \
+   && curl -fsSLo /usr/local/bin/agent-browser https://github.com/vercel-labs/agent-browser/releases/download/${AGENT_BROWSER_VERSION}/agent-browser-linux-x64 \
+   && chmod +x /usr/local/bin/agent-browser; \
+    fi
+
+# --- Our binary (built earlier in the same CI job: cargo build --release -p arbos-agentd → dist/)
+COPY dist/arbos-agentd /usr/local/bin/arbos-agentd
+COPY image/AGENTS.md   /etc/arbos/AGENTS.md
+
+# --- User and folders (the node image already owns uid 1000; reuse it for daytona)
+RUN userdel -r node \
+ && useradd -m -u 1000 -s /bin/bash daytona \
+ && echo "daytona ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/91-daytona \
+ && mkdir -p /work /run/arbos /opt/arbos && chown -R daytona:daytona /work /run/arbos /opt/arbos
+
+ENV HOME=/home/daytona \
+    ARBOS_STATE_DIR=/work/.arbos \
+    ARBOS_PORT=7788 \
+    PRIME_AGENT_CODING_AGENT_DIR=/work/.arbos/prime \
+    PRIME_AGENT_SESSION_DIR=/work/.arbos/prime/sessions \
+    PRIME_AGENT_BASH_SHELL=/usr/local/lib/arbos/arbos-shell \
+    PRIME_AGENT_KERNEL_PYTHON=/opt/prime-venv/bin/python \
+    PI_CODING_AGENT_DIR=/work/.arbos/pi \
+    PI_TELEMETRY=0 PI_SKIP_VERSION_CHECK=1 \
+    CLAUDE_CONFIG_DIR=/work/.arbos/claude \
+    DISABLE_AUTOUPDATER=1 DISABLE_UPDATES=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 \
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 DISABLE_FEEDBACK_COMMAND=1 \
+    AGENT_BROWSER_EXECUTABLE_PATH=/opt/chrome/chrome \
+    AGENT_BROWSER_PROFILE=/work/.arbos/browser \
+    AGENT_BROWSER_ARGS="--no-sandbox,--disable-dev-shm-usage" \
+    AGENT_BROWSER_SCREENSHOT_DIR=/work/.arbos/shots \
+    AI_AGENT_SANDBOX=daytona
+
+USER daytona
+# Register the project MCP server once, in the image; the token is read from the env at run time
+RUN HOME=/home/daytona PRIME_AGENT_CODING_AGENT_DIR=/etc/arbos/prime-seed \
+    prime-agent mcp add arbos --url http://127.0.0.1:7789/mcp --bearer-token-env-var ARBOS_MCP_TOKEN || true
+WORKDIR /work
+EXPOSE 7788
+HEALTHCHECK --interval=10s --timeout=3s --start-period=20s \
+  CMD curl -fsS http://127.0.0.1:7788/healthz || exit 1
+ENTRYPOINT ["/usr/local/bin/arbos-agentd", "boot"]

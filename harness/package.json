@@ -1,0 +1,9 @@
+{
+  "name": "arbos-harness",
+  "private": true,
+  "packageManager": "pnpm@9.15.0",
+  "scripts": {
+    "typecheck": "pnpm -r typecheck",
+    "build": "pnpm -r build"
+  }
+}

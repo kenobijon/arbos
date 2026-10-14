@@ -1,0 +1,9 @@
+/target
+/dist
+node_modules/
+harness/**/dist/
+*.db
+*.db-wal
+*.db-shm
+/.arbos-local/
+.env

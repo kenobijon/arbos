@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "arbos": {
+      "type": "http",
+      "url": "http://127.0.0.1:7789/mcp",
+      "headers": { "Authorization": "Bearer ${ARBOS_MCP_TOKEN}" }
+    }
+  }
+}
