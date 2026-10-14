@@ -25,6 +25,10 @@ pub struct Config {
     pub anthropic_base: String,
     pub daytona_snapshot: String,
     pub daytona_target: Option<String>,
+    /// Inline Dockerfile for Daytona's declarative builder when the snapshot is not registered.
+    pub daytona_dockerfile: Option<PathBuf>,
+    /// Directory served at `/bootstrap/{file}` to boxes (arbos-agentd binary, arbos-pi-ext.tar).
+    pub bootstrap_dir: Option<PathBuf>,
     pub agentd_bin: PathBuf,
     pub local_box_image: String,
     pub box_idle_grace_ms: i64,

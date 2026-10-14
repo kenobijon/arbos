@@ -49,6 +49,12 @@ struct Args {
     daytona_snapshot: String,
     #[arg(long, env = "ARBOS_DAYTONA_TARGET")]
     daytona_target: Option<String>,
+    /// Inline Dockerfile (e.g. image/Dockerfile.dev-inline) built by Daytona when the snapshot does not exist.
+    #[arg(long, env = "ARBOS_DAYTONA_DOCKERFILE")]
+    daytona_dockerfile: Option<PathBuf>,
+    /// Directory served to boxes at /bootstrap/{file} (arbos-agentd, arbos-pi-ext.tar).
+    #[arg(long, env = "ARBOS_BOOTSTRAP_DIR")]
+    bootstrap_dir: Option<PathBuf>,
     /// Path to the arbos-agentd binary for `process` boxes.
     #[arg(long, env = "ARBOS_AGENTD_BIN", default_value = "arbos-agentd")]
     agentd_bin: PathBuf,
@@ -145,6 +151,8 @@ async fn main() -> anyhow::Result<()> {
         anthropic_base,
         daytona_snapshot: args.daytona_snapshot.clone(),
         daytona_target: args.daytona_target.clone(),
+        daytona_dockerfile: args.daytona_dockerfile.clone(),
+        bootstrap_dir: args.bootstrap_dir.clone(),
         agentd_bin: args.agentd_bin.clone(),
         local_box_image: args.local_box_image.clone(),
         box_idle_grace_ms: 30_000,
@@ -216,6 +224,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/room/{project}/{chat}/stats", get(rooms::room_stats))
         .route("/blob/{project}/{key}", get(blobs::get).put(blobs::put))
+        .route("/bootstrap/{file}", get(blobs::bootstrap))
         .route("/proxy/v1/models", get(proxy::openai_models))
         .route("/proxy/v1/{*tail}", post(proxy::openai))
         .route("/proxy/anthropic/{*tail}", post(proxy::anthropic))

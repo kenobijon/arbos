@@ -73,6 +73,9 @@ fn box_env(
     env.insert("PI_SKIP_VERSION_CHECK".into(), "1".into());
     env.insert("PRIME_AGENT_TELEMETRY".into(), "0".into());
     env.insert("DO_NOT_TRACK".into(), "1".into());
+    if let Ok(h) = std::env::var("ARBOS_DEFAULT_HARNESS") {
+        env.insert("ARBOS_DEFAULT_HARNESS".into(), h);
+    }
     let _ = state;
     env
 }
@@ -114,6 +117,13 @@ pub async fn create_box(
                 .ok_or_else(|| anyhow!("DAYTONA_API_KEY not configured"))?;
             let relay_url = state.cfg.public_url.clone();
             let env = box_env(state, project, &box_token, &mcp_token, &relay_url);
+            let snapshot_ok = dt.get_snapshot(&state.cfg.daytona_snapshot).await.is_ok();
+            let inline = match (&state.cfg.daytona_dockerfile, snapshot_ok) {
+                (Some(p), false) => Some(
+                    std::fs::read_to_string(p).with_context(|| format!("read {}", p.display()))?,
+                ),
+                _ => None,
+            };
             let mut body = CreateSandbox {
                 name: Some(format!(
                     "arbos-{}",
@@ -122,7 +132,12 @@ pub async fn create_box(
                         .to_ascii_lowercase()
                         .replace(|c: char| !c.is_ascii_alphanumeric(), "-")
                 )),
-                snapshot: Some(state.cfg.daytona_snapshot.clone()),
+                snapshot: if inline.is_none() {
+                    Some(state.cfg.daytona_snapshot.clone())
+                } else {
+                    None
+                },
+                build_info: inline.map(|d| json!({ "dockerfileContent": d })),
                 cpu: Some(2),
                 memory: Some(4),
                 disk: Some(10),

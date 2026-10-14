@@ -72,3 +72,29 @@ pub async fn get(
     let stream = tokio_util::io::ReaderStream::new(f);
     ([("content-type", mime)], Body::from_stream(stream)).into_response()
 }
+
+/// `GET /bootstrap/{file}` — dev-image bootstrap artifacts (box tokens only; see image/Dockerfile.dev-inline).
+pub async fn bootstrap(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(file): Path<String>,
+) -> Response {
+    if !principal.is_box() && !matches!(principal, Principal::Admin) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(dir) = &state.cfg.bootstrap_dir else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if !safe_key(&file) {
+        return (StatusCode::BAD_REQUEST, "bad name").into_response();
+    }
+    let Ok(f) = tokio::fs::File::open(dir.join(&file)).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let stream = tokio_util::io::ReaderStream::new(f);
+    (
+        [("content-type", "application/octet-stream")],
+        Body::from_stream(stream),
+    )
+        .into_response()
+}

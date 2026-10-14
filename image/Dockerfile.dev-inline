@@ -1,0 +1,30 @@
+# Dev image for Daytona's declarative builder (no registry, no local Docker): pi 1.2.0 on Node 24,
+# and an entrypoint that fetches `arbos-agentd` + `arbos-pi-ext` from the relay's /bootstrap endpoint
+# at boot, so a build of this branch can run as a real box before the full `arbos-agent` image
+# (image/Dockerfile) is pushed. No Prime / Claude Code / browser in this image: subagents use the pi
+# fallback adapter (ARBOS_DEFAULT_HARNESS=pi). The relay sends this file as `buildInfo.dockerfileContent`
+# when ARBOS_DAYTONA_DOCKERFILE points at it.
+FROM node:24-bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl git procps python3 sqlite3 sudo ripgrep jq \
+ && rm -rf /var/lib/apt/lists/*
+RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@1.2.0 && npm cache clean --force
+RUN userdel -r node && useradd -m -u 1000 -s /bin/bash daytona \
+ && echo "daytona ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/91-daytona \
+ && mkdir -p /work /opt/arbos && chown -R daytona:daytona /work /opt/arbos
+RUN printf '%s\n' '#!/bin/bash' 'set -e' \
+  'mkdir -p /opt/arbos /work/.arbos' \
+  'H="Authorization: Bearer $ARBOS_BOX_TOKEN"' \
+  'until curl -fsSL -H "$H" "$ARBOS_RELAY_URL/bootstrap/arbos-agentd" -o /opt/arbos/arbos-agentd; do echo "waiting for relay bootstrap"; sleep 2; done' \
+  'chmod +x /opt/arbos/arbos-agentd' \
+  'curl -fsSL -H "$H" "$ARBOS_RELAY_URL/bootstrap/arbos-pi-ext.tar" | tar -x -C /opt/arbos' \
+  'mkdir -p /opt/arbos/arbos-pi-ext/node_modules' \
+  'ln -sfn "$(npm root -g)/@earendil-works/pi-coding-agent/node_modules/typebox" /opt/arbos/arbos-pi-ext/node_modules/typebox' \
+  'ln -sfn "$(npm root -g)/@earendil-works" /opt/arbos/arbos-pi-ext/node_modules/@earendil-works' \
+  'export ARBOS_PI_EXT=/opt/arbos/arbos-pi-ext/index.ts ARBOS_PI_BIN=pi ARBOS_STATE_DIR=/work/.arbos ARBOS_WORK_DIR=/work ARBOS_PORT=7788' \
+  'exec /opt/arbos/arbos-agentd boot' > /usr/local/bin/arbos-boot && chmod 755 /usr/local/bin/arbos-boot
+ENV PI_TELEMETRY=0 PI_SKIP_VERSION_CHECK=1 PI_CODING_AGENT_DIR=/work/.arbos/pi HOME=/home/daytona
+USER daytona
+WORKDIR /work
+EXPOSE 7788
+ENTRYPOINT ["/usr/local/bin/arbos-boot"]
