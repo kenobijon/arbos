@@ -156,6 +156,10 @@ async fn main() -> anyhow::Result<()> {
             std::env::var("DAYTONA_ORG_ID").ok(),
         )
     });
+    if let Some(Cmd::DaytonaSmoke { snapshot, keep }) = args.cmd {
+        let dt = daytona.ok_or_else(|| anyhow::anyhow!("DAYTONA_API_KEY is required"))?;
+        return smoke::run(&dt, snapshot, keep).await;
+    }
     let state = AppState {
         db: db.clone(),
         cfg: Arc::new(cfg),
