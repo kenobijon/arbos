@@ -291,7 +291,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 messages: Vec::new(),
             });
         }
-        ClientCommand::CloseChat { chat_id, .. } => {
+        ClientCommand::CloseChat { chat_id } => {
             shared
                 .chats
                 .lock()

@@ -68,7 +68,6 @@ pub enum ClientCommand {
         chat_id: Id,
     },
     CloseChat {
-        project_id: Id,
         chat_id: Id,
     },
     MarkRead {

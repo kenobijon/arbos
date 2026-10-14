@@ -1,6 +1,90 @@
+//! Arbos desktop client. GPUI on the zui fork; tokio for the sync sources.
+
+mod app;
 mod model;
 mod sync;
+mod ui;
+
+use gpui::{
+    App, AppContext as _, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowDecorations,
+    WindowOptions, point, px, size,
+};
+
+use crate::app::AppState;
+use crate::ui::composer;
+use crate::ui::motion::PulseClock;
+use crate::ui::shell::{self, Shell};
+use crate::ui::theme::{Appearance, Surface, Theme, reapply_window_background};
 
 fn main() {
-    println!("arbos-mac skeleton");
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let handle = runtime.handle().clone();
+
+    gpui_platform::application().run(move |cx: &mut App| {
+        gpui_tokio::init_from_handle(cx, handle);
+        cx.set_global(Theme::with(Appearance::Dark, Surface::Matte));
+        PulseClock::init(cx);
+        bind_keys(cx);
+
+        let source = app::init_source(cx);
+        let state = cx.new(|cx| AppState::new(source, cx));
+
+        let bounds = Bounds::centered(None, size(px(1320.0), px(880.0)), cx);
+        let theme = Theme::of(cx).clone();
+        let window = cx
+            .open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_min_size: Some(size(px(900.0), px(600.0))),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("Arbos".into()),
+                        appears_transparent: cfg!(target_os = "macos"),
+                        traffic_light_position: Some(point(px(14.0), px(14.0))),
+                    }),
+                    app_owns_titlebar_drag: cfg!(target_os = "macos"),
+                    window_background: theme.window_background_appearance(),
+                    window_decorations: Some(WindowDecorations::Server),
+                    app_id: Some("sh.arbos.mac".into()),
+                    ..Default::default()
+                },
+                move |window, cx| cx.new(|cx| Shell::new(state.clone(), window, cx)),
+            )
+            .expect("open main window");
+        reapply_window_background(cx);
+        let _ = window.update(cx, |_, _, cx| cx.activate(true));
+        cx.on_action(|_: &shell::Quit, cx| cx.quit());
+    });
+}
+
+fn bind_keys(cx: &mut App) {
+    let input = Some("ComposerInput");
+    cx.bind_keys([
+        KeyBinding::new("enter", composer::Send, input),
+        KeyBinding::new("shift-enter", composer::Newline, input),
+        KeyBinding::new("backspace", composer::Backspace, input),
+        KeyBinding::new("delete", composer::Delete, input),
+        KeyBinding::new("left", composer::Left, input),
+        KeyBinding::new("right", composer::Right, input),
+        KeyBinding::new("shift-left", composer::SelectLeft, input),
+        KeyBinding::new("shift-right", composer::SelectRight, input),
+        KeyBinding::new("home", composer::Home, input),
+        KeyBinding::new("end", composer::End, input),
+        KeyBinding::new("cmd-a", composer::SelectAll, input),
+        KeyBinding::new("ctrl-a", composer::SelectAll, input),
+        KeyBinding::new("cmd-v", composer::Paste, input),
+        KeyBinding::new("ctrl-v", composer::Paste, input),
+        KeyBinding::new("cmd-c", composer::Copy, input),
+        KeyBinding::new("ctrl-c", composer::Copy, input),
+        KeyBinding::new("cmd-x", composer::Cut, input),
+        KeyBinding::new("ctrl-x", composer::Cut, input),
+        KeyBinding::new("cmd-w", shell::CloseTab, None),
+        KeyBinding::new("ctrl-w", shell::CloseTab, None),
+        KeyBinding::new("cmd-t", shell::NewTab, None),
+        KeyBinding::new("ctrl-t", shell::NewTab, None),
+        KeyBinding::new("cmd-b", shell::ToggleRail, None),
+        KeyBinding::new("ctrl-b", shell::ToggleRail, None),
+        KeyBinding::new("cmd-shift-b", shell::TogglePanel, None),
+        KeyBinding::new("ctrl-shift-b", shell::TogglePanel, None),
+        KeyBinding::new("cmd-q", shell::Quit, None),
+    ]);
 }

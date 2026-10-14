@@ -12,9 +12,9 @@
 use std::collections::BTreeSet;
 
 use anyhow::{Context as _, Result};
+use loro::event::DiffEvent;
 use loro::{
-    Container, ContainerID, ContainerTrait, DiffEvent, Index, LoroDoc, LoroList, LoroMap,
-    LoroText, LoroValue, ValueOrContainer,
+    Container, Index, LoroDoc, LoroList, LoroMap, LoroText, LoroValue, ValueOrContainer,
 };
 use serde_json::Value;
 
@@ -32,7 +32,6 @@ pub struct Touched {
 
 pub struct ChatDoc {
     pub chat_id: Id,
-    pub project_id: Id,
     pub doc: LoroDoc,
 }
 
@@ -47,8 +46,15 @@ impl ChatDoc {
         doc.commit();
         Self {
             chat_id: chat_id.to_string(),
-            project_id: project_id.to_string(),
             doc,
+        }
+    }
+
+    /// A replica with no local `meta`: the box writes it and it arrives by sync.
+    pub fn empty(chat_id: &str) -> Self {
+        Self {
+            chat_id: chat_id.to_string(),
+            doc: LoroDoc::new(),
         }
     }
 
@@ -133,10 +139,6 @@ impl ChatDoc {
             self.set_field(ix, "completedAt", Value::from(now_ms()))?;
         }
         Ok(())
-    }
-
-    pub fn part_count(&self, ix: usize) -> usize {
-        parts_list(&self.messages(), ix).map(|l| l.len()).unwrap_or(0)
     }
 
     /// Append a part. Returns the part index. Does not commit.
@@ -224,10 +226,6 @@ impl ChatDoc {
             }
         }
         out
-    }
-
-    pub fn is_messages_root(&self, id: &ContainerID) -> bool {
-        self.messages().id() == *id
     }
 }
 

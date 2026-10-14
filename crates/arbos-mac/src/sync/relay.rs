@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use arbos_core::wire::{
-    Ack, BoxState as WireBox, ErrorHeader, Frame, FrameType, Hello, RowHeader, RowsDone, RowsReq,
+    Ack, BoxState as WireBox, ErrorHeader, Frame, FrameType, Hello, RowHeader, RowsReq,
     State as WireState, StatusHeader, WakeHeader,
 };
 use arbos_core::{PROTO_VERSION, wire};
@@ -194,7 +194,7 @@ fn emit_snapshot(shared: &Shared, chat_id: &str) {
 }
 
 fn open_room(shared: &Arc<Shared>, project_id: &str, chat_id: &str) {
-    let doc = ChatDoc::empty(chat_id, project_id);
+    let doc = ChatDoc::empty(chat_id);
     let (local_tx, local_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let (change_tx, change_rx) = mpsc::unbounded_channel::<super::doc::Touched>();
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<RoomCmd>();
@@ -399,8 +399,8 @@ async fn run_session(
                         *cursor = (*cursor).max(header.seq);
                     }
                     FrameType::RowsDone => {
-                        let header: RowsDone = serde_json::from_value(frame.header)?;
-                        *cursor = (*cursor).max(header.head_seq);
+                        let head_seq = frame.header.get("headSeq").and_then(|v| v.as_i64()).unwrap_or(*cursor);
+                        *cursor = (*cursor).max(head_seq);
                         let _ = shared.events.send(SyncEvent::Link(Link::Live));
                         emit_snapshot(shared, chat_id);
                     }
@@ -657,7 +657,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 messages: Vec::new(),
             });
         }
-        ClientCommand::CloseChat { chat_id, .. } => {
+        ClientCommand::CloseChat { chat_id } => {
             shared
                 .chats
                 .lock()

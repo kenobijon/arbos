@@ -63,15 +63,6 @@ impl Effort {
             Effort::High => "High",
         }
     }
-
-    /// pi thinking level (`arbos-design.md` §3.6).
-    pub fn pi_level(self) -> &'static str {
-        match self {
-            Effort::Low => "low",
-            Effort::Medium => "medium",
-            Effort::High => "high",
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -114,7 +105,7 @@ pub enum TurnKind {
     Wake,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolStatus {
     Running,
@@ -236,22 +227,6 @@ pub enum Part {
     Unknown,
 }
 
-impl Part {
-    pub fn id(&self) -> &str {
-        match self {
-            Part::Text { id, .. }
-            | Part::Reasoning { id, .. }
-            | Part::Tool { id, .. }
-            | Part::Attachment { id, .. }
-            | Part::Error { id, .. }
-            | Part::Status { id, .. }
-            | Part::Diff { id, .. }
-            | Part::File { id, .. }
-            | Part::Browser { id, .. } => id,
-            Part::Unknown => "",
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
