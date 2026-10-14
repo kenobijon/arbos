@@ -497,8 +497,10 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].kind, "send");
 
+        // The peer exports everything the other side lacks (its acked version vector), so the
+        // `taken` mark and the streamed reply arrive together.
+        let before = client.oplog_vv();
         box_doc.set_command_status(&pending[0].id, CommandStatus::Taken, None);
-        let before = box_doc.oplog_vv();
         let part = box_doc.start_assistant_message("m2", "m1", "box:1");
         box_doc.append_text("m2", &part, "Hi ");
         box_doc.append_text("m2", &part, "there");

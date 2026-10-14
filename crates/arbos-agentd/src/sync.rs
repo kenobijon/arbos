@@ -45,6 +45,7 @@ pub struct DocHost {
     inflight: Option<(String, VersionVector)>,
     pub caught_up: bool,
     seen_commands: std::collections::HashSet<String>,
+    recovered: bool,
 }
 
 impl DocHost {
@@ -88,15 +89,52 @@ impl DocHost {
         self.inflight = None;
     }
 
-    /// New pending commands not yet handed to the agent loop.
+    /// New pending commands not yet handed to the agent loop. On the first catch-up after a
+    /// (re)start, commands this box had marked `taken` but never finished are recovered too.
     fn new_pending(&mut self) -> Vec<CommandView> {
+        let recovering = !self.recovered;
+        self.recovered = true;
         let mut out = Vec::new();
-        for c in self.doc.pending_commands() {
-            if self.seen_commands.insert(c.id.clone()) {
+        for c in self.doc.commands() {
+            let eligible = c.status == "pending" || (recovering && c.status == "taken");
+            if eligible && self.seen_commands.insert(c.id.clone()) {
+                if c.status == "taken" {
+                    self.mark_interrupted(&c);
+                }
                 out.push(c);
             }
         }
         out
+    }
+
+    /// A reply that was streaming when the box died: close it as cancelled so the UI settles.
+    fn mark_interrupted(&mut self, cmd: &CommandView) {
+        let user_msg = cmd
+            .payload
+            .get("messageId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned();
+        let stale: Vec<String> = self
+            .doc
+            .messages()
+            .into_iter()
+            .filter(|m| {
+                m.role == "assistant"
+                    && m.status == "streaming"
+                    && m.rest.get("inReplyTo").and_then(|v| v.as_str()) == Some(user_msg.as_str())
+            })
+            .map(|m| m.id)
+            .collect();
+        for id in stale {
+            self.doc.add_error_part(
+                &id,
+                "interrupted",
+                "The box restarted while this reply was streaming; retrying.",
+            );
+            self.doc
+                .finish_message(&id, arbos_core::doc::MessageStatus::Cancelled);
+        }
     }
 
     pub fn forget_command(&mut self, id: &str) {
@@ -160,6 +198,7 @@ impl SyncHub {
             inflight: None,
             caught_up: false,
             seen_commands: Default::default(),
+            recovered: false,
         }));
         self.hosts
             .lock()

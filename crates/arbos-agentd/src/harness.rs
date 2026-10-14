@@ -362,11 +362,10 @@ impl HarnessAdapter for PrimeAdapter {
     }
 
     async fn start(&self, req: StartRequest) -> Result<()> {
+        // Prime has no --session-id: it mints a UUID; we keep subagent_id → uuid for --resume.
         let extra = vec![
-            "--session-id".into(),
-            req.session_id.clone(),
             "--provider".into(),
-            "openai".into(),
+            self.cfg.pi_provider(),
             "--model".into(),
             req.model.clone(),
             "--append-system-prompt".into(),
@@ -374,16 +373,23 @@ impl HarnessAdapter for PrimeAdapter {
         ];
         let child = self.spawn(&req.session_id, &extra, &req.cwd).await?;
         let state = child
-            .call_ok(
+            .call_timeout(
                 RpcCommand::GetState {
                     id: child.next_id("st"),
-                })
-            .await
+                },
+                std::time::Duration::from_secs(60),
+            )
+            .await?
+            .data
             .unwrap_or(Value::Null);
         let path = state
             .get("sessionFile")
             .and_then(Value::as_str)
             .map(str::to_owned);
+        if let Some(uuid) = state.get("sessionId").and_then(Value::as_str) {
+            self.store
+                .meta_set(&format!("prime_uuid:{}", req.session_id), uuid)?;
+        }
         self.store.upsert_session(
             &req.session_id,
             Some(&req.session_id),
@@ -401,7 +407,18 @@ impl HarnessAdapter for PrimeAdapter {
         if self.is_open(session_id) {
             return Ok(());
         }
-        let extra = vec!["--resume".into(), session_id.to_owned()];
+        let uuid = self
+            .store
+            .meta_get(&format!("prime_uuid:{session_id}"))?
+            .unwrap_or_else(|| session_id.to_owned());
+        let extra = vec![
+            "--resume".into(),
+            uuid,
+            "--provider".into(),
+            self.cfg.pi_provider(),
+            "--model".into(),
+            self.cfg.subagent_model.clone(),
+        ];
         let child = self.spawn(session_id, &extra, &self.cfg.work_dir).await?;
         self.sessions.attach(session_id, child, true).await;
         Ok(())
@@ -409,34 +426,31 @@ impl HarnessAdapter for PrimeAdapter {
 
     async fn prompt(&self, session_id: &str, text: &str) -> Result<()> {
         let c = self.sessions.child(session_id).await?;
-        c.call_ok(
-            RpcCommand::Prompt {
-                id: c.next_id("p"),
-                message: text.to_owned(),
-                streaming_behavior: None,
-            })
+        c.call_ok(RpcCommand::Prompt {
+            id: c.next_id("p"),
+            message: text.to_owned(),
+            streaming_behavior: None,
+        })
         .await
         .map(|_| ())
     }
 
     async fn follow_up(&self, session_id: &str, text: &str) -> Result<()> {
         let c = self.sessions.child(session_id).await?;
-        c.call_ok(
-            RpcCommand::FollowUp {
-                id: c.next_id("f"),
-                message: text.to_owned(),
-            })
+        c.call_ok(RpcCommand::FollowUp {
+            id: c.next_id("f"),
+            message: text.to_owned(),
+        })
         .await
         .map(|_| ())
     }
 
     async fn steer(&self, session_id: &str, text: &str) -> Result<()> {
         let c = self.sessions.child(session_id).await?;
-        c.call_ok(
-            RpcCommand::Steer {
-                id: c.next_id("s"),
-                message: text.to_owned(),
-            })
+        c.call_ok(RpcCommand::Steer {
+            id: c.next_id("s"),
+            message: text.to_owned(),
+        })
         .await
         .map(|_| ())
     }
@@ -609,10 +623,9 @@ impl HarnessAdapter for PiAdapter {
             .spawn(&req.session_id, &extra, &req.cwd, &req.system_prompt)
             .await?;
         let state = child
-            .call_ok(
-                RpcCommand::GetState {
-                    id: child.next_id("st"),
-                })
+            .call_ok(RpcCommand::GetState {
+                id: child.next_id("st"),
+            })
             .await
             .unwrap_or(Value::Null);
         let path = state
@@ -653,34 +666,31 @@ impl HarnessAdapter for PiAdapter {
 
     async fn prompt(&self, session_id: &str, text: &str) -> Result<()> {
         let c = self.sessions.child(session_id).await?;
-        c.call_ok(
-            RpcCommand::Prompt {
-                id: c.next_id("p"),
-                message: text.to_owned(),
-                streaming_behavior: None,
-            })
+        c.call_ok(RpcCommand::Prompt {
+            id: c.next_id("p"),
+            message: text.to_owned(),
+            streaming_behavior: None,
+        })
         .await
         .map(|_| ())
     }
 
     async fn follow_up(&self, session_id: &str, text: &str) -> Result<()> {
         let c = self.sessions.child(session_id).await?;
-        c.call_ok(
-            RpcCommand::FollowUp {
-                id: c.next_id("f"),
-                message: text.to_owned(),
-            })
+        c.call_ok(RpcCommand::FollowUp {
+            id: c.next_id("f"),
+            message: text.to_owned(),
+        })
         .await
         .map(|_| ())
     }
 
     async fn steer(&self, session_id: &str, text: &str) -> Result<()> {
         let c = self.sessions.child(session_id).await?;
-        c.call_ok(
-            RpcCommand::Steer {
-                id: c.next_id("s"),
-                message: text.to_owned(),
-            })
+        c.call_ok(RpcCommand::Steer {
+            id: c.next_id("s"),
+            message: text.to_owned(),
+        })
         .await
         .map(|_| ())
     }
@@ -707,11 +717,10 @@ impl HarnessAdapter for PiAdapter {
     ) -> Result<(Vec<Value>, Option<String>)> {
         let c = self.sessions.child(session_id).await?;
         let data = c
-            .call_ok(
-                RpcCommand::GetEntries {
-                    id: c.next_id("ge"),
-                    since: cursor,
-                })
+            .call_ok(RpcCommand::GetEntries {
+                id: c.next_id("ge"),
+                since: cursor,
+            })
             .await?;
         let entries = data
             .get("entries")

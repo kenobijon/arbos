@@ -399,11 +399,10 @@ impl Agent {
         let path = self.session_file_for(chat_id)?;
         let pi = self.pi().await?;
         let t0 = Instant::now();
-        pi.call_ok(
-            RpcCommand::SwitchSession {
-                id: pi.next_id("sw"),
-                session_path: path.display().to_string(),
-            })
+        pi.call_ok(RpcCommand::SwitchSession {
+            id: pi.next_id("sw"),
+            session_path: path.display().to_string(),
+        })
         .await?;
         tracing::info!(
             chat_id,
@@ -460,10 +459,9 @@ impl Agent {
     async fn handle_stop(&self) -> Result<()> {
         if let Ok(pi) = self.pi().await {
             let _ = pi
-                .call(
-                    RpcCommand::Abort {
-                        id: pi.next_id("ab"),
-                    })
+                .call(RpcCommand::Abort {
+                    id: pi.next_id("ab"),
+                })
                 .await;
         }
         Ok(())
@@ -775,12 +773,11 @@ impl Agent {
         let pi = self.pi().await?;
         let mut events = pi.subscribe();
         let r = pi
-            .call(
-                RpcCommand::Prompt {
-                    id: pi.next_id("p"),
-                    message: prompt_text.to_owned(),
-                    streaming_behavior: None,
-                })
+            .call(RpcCommand::Prompt {
+                id: pi.next_id("p"),
+                message: prompt_text.to_owned(),
+                streaming_behavior: None,
+            })
             .await?;
         if !r.success {
             return Err(anyhow!("prompt rejected: {}", r.error.unwrap_or_default()));

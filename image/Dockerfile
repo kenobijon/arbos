@@ -56,12 +56,16 @@ RUN mkdir -p /etc/arbos/pi-seed/extensions/arbos-pi-ext/node_modules \
 
 # --- Subagent harness 1: Prime Agent + its Python 3.11 IPython kernel venv, baked now, not at first use
 ENV PRIME_AGENT_KERNEL_VENV=/opt/prime-venv PRIME_AGENT_TELEMETRY=0 DO_NOT_TRACK=1
-RUN curl -fsSL https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v${PRIME_AGENT_VERSION}/prime-agent-${PRIME_AGENT_VERSION}-linux-x64.tar.gz \
-    | tar -xz -C /opt \
+# The release tarball is flat (binary, prime-agent-runtime/, skills/, ...); the kernel runtime is bundled, not on PyPI.
+RUN mkdir -p /opt/prime-agent-${PRIME_AGENT_VERSION} \
+ && curl -fsSL https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v${PRIME_AGENT_VERSION}/prime-agent-${PRIME_AGENT_VERSION}-linux-x64.tar.gz \
+    | tar -xz -C /opt/prime-agent-${PRIME_AGENT_VERSION} \
  && ln -s /opt/prime-agent-${PRIME_AGENT_VERSION}/prime-agent /usr/local/bin/prime-agent \
  && uv venv /opt/prime-venv --python 3.11 --seed \
- && uv pip install --python /opt/prime-venv/bin/python prime-agent-runtime \
- && (HOME=/tmp/pa-build prime-agent --prime-agent-bootstrap || true) \
+ && uv pip install --python /opt/prime-venv/bin/python /opt/prime-agent-${PRIME_AGENT_VERSION}/prime-agent-runtime \
+      ipykernel dill httpx requests pyyaml tomli python-dotenv pandas numpy scipy beautifulsoup4 lxml \
+ && HOME=/tmp/pa-build PRIME_AGENT_KERNEL_VENV=/opt/prime-venv PRIME_AGENT_KERNEL_PYTHON=/opt/prime-venv/bin/python \
+      prime-agent --prime-agent-bootstrap \
  && chmod -R a+rX /opt/prime-venv /opt/prime-agent-${PRIME_AGENT_VERSION}
 
 # --- Subagent harness 2: Claude Code, native binary (no Node), exact version, updates disabled
