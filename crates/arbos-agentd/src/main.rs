@@ -374,11 +374,13 @@ async fn boot() -> Result<()> {
 
     // Shutdown: SIGTERM → persist docs + checkpoints, stop children.
     let sync_term = sync.clone();
+    let agent_term = agent.clone();
     tokio::spawn(async move {
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .expect("sigterm");
         term.recv().await;
-        tracing::info!("SIGTERM: persisting docs");
+        tracing::info!("SIGTERM: stopping children and persisting docs");
+        let _ = tokio::time::timeout(Duration::from_secs(20), agent_term.shutdown()).await;
         sync_term.persist_all().await;
         std::process::exit(0);
     });

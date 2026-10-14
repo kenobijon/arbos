@@ -1646,6 +1646,16 @@ impl Agent {
         Ok("subagent started; its result will be posted in this chat".to_owned())
     }
 
+    /// Stop every child in order (subagents, then pi) so session files and kernel snapshots land.
+    pub async fn shutdown(&self) {
+        for a in self.adapters.values() {
+            a.shutdown_all().await;
+        }
+        if let Some(pi) = self.pi.lock().await.take() {
+            pi.shutdown().await;
+        }
+    }
+
     pub fn is_healthy(&self) -> bool {
         self.pi_ready.load(Ordering::SeqCst)
     }

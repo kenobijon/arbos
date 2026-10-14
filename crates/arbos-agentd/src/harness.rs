@@ -78,6 +78,8 @@ pub trait HarnessAdapter: Send + Sync {
         cursor: Option<String>,
     ) -> Result<(Vec<Value>, Option<String>)>;
     async fn stop(&self, session_id: &str) -> Result<()>;
+    /// Orderly shutdown of every open child (close stdin, wait, kill) before the box stops.
+    async fn shutdown_all(&self);
     fn is_open(&self, session_id: &str) -> bool;
 }
 
@@ -491,6 +493,20 @@ impl HarnessAdapter for PrimeAdapter {
         Ok(())
     }
 
+    async fn shutdown_all(&self) {
+        let children: Vec<Arc<RpcChild>> = self
+            .sessions
+            .children
+            .lock()
+            .await
+            .drain()
+            .map(|(_, c)| c)
+            .collect();
+        for c in children {
+            c.shutdown().await;
+        }
+    }
+
     fn is_open(&self, session_id: &str) -> bool {
         self.sessions
             .children
@@ -739,6 +755,20 @@ impl HarnessAdapter for PiAdapter {
             c.shutdown().await;
         }
         Ok(())
+    }
+
+    async fn shutdown_all(&self) {
+        let children: Vec<Arc<RpcChild>> = self
+            .sessions
+            .children
+            .lock()
+            .await
+            .drain()
+            .map(|(_, c)| c)
+            .collect();
+        for c in children {
+            c.shutdown().await;
+        }
     }
 
     fn is_open(&self, session_id: &str) -> bool {
@@ -1053,6 +1083,19 @@ impl HarnessAdapter for ClaudeCodeAdapter {
             let _ = child.lock().await.kill().await;
         }
         Ok(())
+    }
+
+    async fn shutdown_all(&self) {
+        let children: Vec<_> = self
+            .children
+            .lock()
+            .await
+            .drain()
+            .map(|(_, (c, _))| c)
+            .collect();
+        for c in children {
+            let _ = c.lock().await.kill().await;
+        }
     }
 
     fn is_open(&self, session_id: &str) -> bool {

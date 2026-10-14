@@ -99,7 +99,9 @@ impl Session {
         if let Some(p) = self.path.parent() {
             std::fs::create_dir_all(p)?;
         }
-        let tmp = self.path.with_extension(format!("tmp{}", std::process::id()));
+        let tmp = self
+            .path
+            .with_extension(format!("tmp{}", std::process::id()));
         std::fs::write(&tmp, serde_json::to_string(&rep)?)?;
         std::fs::rename(&tmp, &self.path)?;
         Ok(())
