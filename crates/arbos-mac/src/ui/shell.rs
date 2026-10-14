@@ -590,7 +590,7 @@ impl Shell {
 
         let composer_block = div()
             .w_full()
-            .max_w(px(COMPOSER_WIDTH.max(COLUMN_MAX_WIDTH - 120.0)))
+            .max_w(px(COMPOSER_WIDTH.max(COLUMN_MAX_WIDTH - 56.0)))
             .child(self.composer.clone());
 
         let mut column = div()

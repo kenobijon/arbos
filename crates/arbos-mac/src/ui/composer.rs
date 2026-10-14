@@ -3,6 +3,7 @@
 //! send/stop. Enter sends, Shift+Enter inserts a newline.
 
 use std::ops::Range;
+use std::rc::Rc;
 
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId, ElementInputHandler,
@@ -64,7 +65,9 @@ pub struct ComposerInput {
     marked_range: Option<Range<usize>>,
     layout: Option<Layout>,
     is_selecting: bool,
-    pub on_submit: Option<Box<dyn Fn(&mut Window, &mut App)>>,
+    /// Runs deferred, after this entity's update ends, so the owner may read
+    /// and update the input freely.
+    pub on_submit: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
 }
 
 impl ComposerInput {
@@ -112,9 +115,8 @@ impl ComposerInput {
     }
 
     fn send(&mut self, _: &Send, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(cb) = self.on_submit.take() {
-            cb(window, cx);
-            self.on_submit = Some(cb);
+        if let Some(cb) = self.on_submit.clone() {
+            window.defer(cx, move |window, cx| cb(window, cx));
         }
     }
 
@@ -779,7 +781,7 @@ impl Composer {
         let input = cx.new(ComposerInput::new);
         let weak = cx.weak_entity();
         input.update(cx, |input, _| {
-            input.on_submit = Some(Box::new(move |window, cx| {
+            input.on_submit = Some(Rc::new(move |window, cx| {
                 let _ = weak.update(cx, |composer, cx| composer.submit(window, cx));
             }));
         });

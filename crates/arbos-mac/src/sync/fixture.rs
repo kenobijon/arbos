@@ -1002,7 +1002,7 @@ async fn stream_blocks(
     for piece in full.split_inclusive(' ') {
         current.push_str(piece);
         words += 1;
-        if words >= 4 {
+        if words >= 3 {
             chunks.push(std::mem::take(&mut current));
             words = 0;
         }

@@ -102,6 +102,8 @@ pub fn status_row(code: StatusKind, text: &str, live: bool, theme: &Theme, cx: &
                     )
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
                             .text_size(px(13.5))
                             .text_color(theme.text)
                             .child(text.to_string()),

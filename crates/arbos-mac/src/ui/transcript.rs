@@ -22,7 +22,9 @@ use crate::ui::theme::{BUBBLE_RADIUS, Theme};
 use crate::ui::veil::Veil;
 
 const OVERDRAW_PX: f32 = 320.0;
-pub const COLUMN_MAX_WIDTH: f32 = 760.0;
+pub const COLUMN_MAX_WIDTH: f32 = 680.0;
+/// 72 ch at 13.5 px (§3.5).
+pub const ASSISTANT_MAX_WIDTH: f32 = 540.0;
 
 #[derive(Clone, Debug)]
 pub struct ToolView {
@@ -804,7 +806,7 @@ fn apply_veil(runs: Vec<TextRun>, spans: &[(std::ops::Range<usize>, f32)], offse
 
 fn render_block(block: &Block, veil: Option<&Veil>, now: Instant, theme: &Theme) -> AnyElement {
     let base = div()
-        .max_w(px(72.0 * 9.0))
+        .max_w(px(ASSISTANT_MAX_WIDTH))
         .text_color(theme.text)
         .text_size(px(13.5))
         .line_height(px(21.0));

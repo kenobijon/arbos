@@ -17,6 +17,7 @@ use crate::ui::shell::{self, Shell};
 use crate::ui::theme::{Appearance, Surface, Theme, reapply_window_background};
 
 fn main() {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let handle = runtime.handle().clone();
 
@@ -52,6 +53,17 @@ fn main() {
             .expect("open main window");
         reapply_window_background(cx);
         let _ = window.update(cx, |_, _, cx| cx.activate(true));
+        // Some X servers (Xvfb, no compositor) do not present the first frame
+        // until an event arrives; nudge a second frame shortly after launch.
+        cx.spawn(async move |cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(400))
+                .await;
+            cx.update(|cx| {
+                let _ = window.update(cx, |_, window, _| window.refresh());
+            });
+        })
+        .detach();
         cx.on_action(|_: &shell::Quit, cx| cx.quit());
     });
 }
