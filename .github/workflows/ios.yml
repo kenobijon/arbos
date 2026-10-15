@@ -54,11 +54,20 @@ jobs:
           if [[ -n "$newest" ]]; then sudo xcode-select -s "$newest"; fi
           xcodebuild -version
       - name: Archive
+        id: archive
         env:
           BUILD_NUMBER: ${{ steps.build.outputs.number }}
         run: |
           set -euo pipefail
-          test -d "$PROJECT" || { echo "::error title=No iOS project::$PROJECT is not in this tree."; exit 1; }
+          if [[ ! -d "$PROJECT" ]]; then
+            if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+              echo "::error title=No iOS project::$PROJECT is not in this tree."
+              exit 1
+            fi
+            echo "::notice title=No iOS project on this branch::$PROJECT is not here yet; nothing to build."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           xcodebuild -project "$PROJECT" -scheme "$SCHEME" \
             -configuration Release -destination 'generic/platform=iOS' \
             -archivePath "$RUNNER_TEMP/Arbos.xcarchive" \
@@ -70,7 +79,7 @@ jobs:
             CURRENT_PROJECT_VERSION="$BUILD_NUMBER"
           test -x "$RUNNER_TEMP/Arbos.xcarchive/Products/Applications/Arbos.app/Arbos"
       - name: Upload to TestFlight
-        if: github.event_name != 'workflow_dispatch' || inputs.upload
+        if: steps.archive.outputs.skip != 'true' && (github.event_name != 'workflow_dispatch' || inputs.upload)
         env:
           AC_API_KEY_P8: ${{ secrets.AC_API_KEY_P8 }}
           AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}

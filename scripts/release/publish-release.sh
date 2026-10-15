@@ -27,9 +27,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-CHANNEL="" VERSION="" SHA="" DIST="" REPO="" NOTES_FILE="" KEY_FILE="" DRY_RUN=false KEEP_EDGE=20
+CHANNEL="" VERSION="" SHA="" DIST="" REPO="" NOTES_FILE="" KEY_FILE="" DRY_RUN=false PROMOTE=true KEEP_EDGE=20
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --no-promote) PROMOTE=false; export PROMOTE; shift ;;
     --channel) CHANNEL="$2"; shift 2 ;;
     --version) VERSION="$2"; shift 2 ;;
     --sha) SHA="$2"; shift 2 ;;
@@ -142,7 +143,9 @@ BODY="$DIST/.release-notes.md"
 ASSETS=("${mac_tar[@]}" "${mac_dmg[@]}" "${linux_desktop[@]}" "${linux_tools[@]}" "${notary_logs[@]}" appcast.xml latest.txt)
 echo "==> release $TAG with: ${ASSETS[*]}"
 FLAGS=(--repo "$REPO" --target "$SHA" --title "$TITLE" --notes-file "$BODY")
-if [[ "$CHANNEL" == "edge" ]]; then FLAGS+=(--prerelease); else FLAGS+=(--latest); fi
+# A build that is not promoted stays a pre-release on every channel: `latest`
+# (the stable feed) and the `edge` feed are left exactly where they were.
+if [[ "$CHANNEL" == "edge" || "$PROMOTE" == false ]]; then FLAGS+=(--prerelease); else FLAGS+=(--latest); fi
 if ! $DRY_RUN && gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
   echo "    (release exists; replacing assets)"
   gh_run release upload "$TAG" --repo "$REPO" --clobber "${ASSETS[@]}"
@@ -151,7 +154,9 @@ else
   gh_run release create "$TAG" "${FLAGS[@]}" "${ASSETS[@]}"
 fi
 
-if [[ -n "$FEED_TAG" ]]; then
+if [[ "$PROMOTE" == false ]]; then
+  echo "==> --no-promote: the $CHANNEL feed was not moved (dry run)"
+elif [[ -n "$FEED_TAG" ]]; then
   echo "==> feed: $FEED_TAG/appcast.xml"
   if ! $DRY_RUN && ! gh release view "$FEED_TAG" --repo "$REPO" >/dev/null 2>&1; then
     gh_run release create "$FEED_TAG" --repo "$REPO" --target "$SHA" --prerelease \

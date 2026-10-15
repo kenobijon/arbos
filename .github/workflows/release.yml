@@ -63,6 +63,14 @@ on:
         description: "Create the GitHub release (off = build, sign, notarize, upload artifacts only)"
         type: boolean
         default: true
+      promote:
+        description: "Move the channel feed (edge appcast / latest) to this build. Off = a pre-release tag only, for dry runs"
+        type: boolean
+        default: true
+      runner:
+        description: "runs-on label for the Mac job; empty = vars.ARBOS_MAC_RUNNER or macos-15"
+        type: string
+        default: ""
       targets:
         description: "Rust targets for the Mac build (space-separated); empty = universal"
         type: string
@@ -93,6 +101,7 @@ jobs:
     outputs:
       channel: ${{ steps.plan.outputs.channel }}
       publish: ${{ steps.plan.outputs.publish }}
+      promote: ${{ steps.plan.outputs.promote }}
       sha: ${{ steps.plan.outputs.sha }}
       version: ${{ steps.plan.outputs.version }}
       build: ${{ steps.plan.outputs.build }}
@@ -108,10 +117,12 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           IN_CHANNEL: ${{ inputs.channel }}
           IN_PUBLISH: ${{ inputs.publish }}
+          IN_PROMOTE: ${{ inputs.promote }}
         run: |
           set -euo pipefail
           base="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
           build="$(git rev-list --count HEAD)"
+          promote=true
           case "$EVENT" in
             push)
               channel=stable
@@ -126,6 +137,7 @@ jobs:
               channel="${IN_CHANNEL:-edge}"
               if [[ "$channel" == stable ]]; then version="$base"; else version="$base.$build"; fi
               publish="${IN_PUBLISH:-true}"
+              promote="${IN_PROMOTE:-true}"
               ;;
             *)
               channel=edge
@@ -136,6 +148,7 @@ jobs:
           {
             echo "channel=$channel"
             echo "publish=$publish"
+            echo "promote=$promote"
             echo "sha=$(git rev-parse HEAD)"
             echo "version=$version"
             echo "build=$build"
@@ -148,7 +161,7 @@ jobs:
   macos:
     name: Mac app (sign, notarize, dmg)
     needs: plan
-    runs-on: ${{ vars.ARBOS_MAC_RUNNER || 'macos-15' }}
+    runs-on: ${{ inputs.runner || vars.ARBOS_MAC_RUNNER || 'macos-15' }}
     timeout-minutes: 150
     outputs:
       signing: ${{ steps.build.outputs.signing }}
@@ -364,6 +377,7 @@ jobs:
           CHANNEL: ${{ needs.plan.outputs.channel }}
           VERSION: ${{ needs.plan.outputs.version }}
           SHA: ${{ needs.plan.outputs.sha }}
+          PROMOTE: ${{ needs.plan.outputs.promote }}
           NOTES: ${{ needs.plan.outputs.notes }}
         run: |
           set -euo pipefail
@@ -374,8 +388,10 @@ jobs:
           fi
           printf '%s\n' "$NOTES" > dist/notes.md
           ls -la dist
+          extra=()
+          if [[ "$PROMOTE" != "true" ]]; then extra+=(--no-promote); fi
           scripts/release/publish-release.sh --channel "$CHANNEL" --version "$VERSION" --sha "$SHA" \
-            --dist dist --repo "$GITHUB_REPOSITORY" --notes-file dist/notes.md
+            --dist dist --repo "$GITHUB_REPOSITORY" --notes-file dist/notes.md "${extra[@]}"
           {
             echo "### Release"
             echo
