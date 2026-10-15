@@ -119,6 +119,9 @@ enum Cmd {
         /// executable path); defaults to this binary.
         #[arg(long)]
         install_path: Option<PathBuf>,
+        /// Also swap the staged build into `--install-path` (no relaunch).
+        #[arg(long)]
+        apply: bool,
     },
 }
 
@@ -321,6 +324,7 @@ async fn main() -> anyhow::Result<()> {
             dir,
             public_file,
             install_path,
+            apply,
         } => {
             let key = load_public(public_file)?;
             let Some(available) = client::check(&feed, &current, &os).await? else {
@@ -339,6 +343,14 @@ async fn main() -> anyhow::Result<()> {
             };
             let staged = client::stage(&payload, &available.item.version, &dir, &install)?;
             println!("{}", staged.display());
+            if apply {
+                client::apply(&staged, &install)?;
+                println!(
+                    "installed {} into {}",
+                    available.item.version,
+                    install.path().display()
+                );
+            }
         }
     }
     Ok(())

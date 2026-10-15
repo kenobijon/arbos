@@ -360,6 +360,7 @@ jobs:
         run: cargo build --locked -p arbos-update --bin arbos-updatectl
       - uses: actions/download-artifact@v4
         with:
+          pattern: payload-*
           path: dist
           merge-multiple: true
       - name: Updater signing key from 1Password
