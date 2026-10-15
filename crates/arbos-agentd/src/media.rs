@@ -305,6 +305,7 @@ pub async fn generate_image(a: &Arc<Agent>, args: &Value) -> Value {
         .http_client()
         .post(format!("{}/proxy/v1/images/generations", a.cfg.relay_url))
         .bearer_auth(&a.cfg.box_token)
+        .header("x-arbos-project", &a.cfg.project_id)
         .json(&body)
         .send()
         .await

@@ -146,7 +146,7 @@ impl Meter {
 /// Which project a box's model call is for: the box serves every project of its user, so the
 /// per-workspace model stub names the project in `X-Arbos-Project`; without it, usage lands on the
 /// user's most recently active project.
-fn project_of(state: &AppState, p: &Principal, headers: &HeaderMap) -> Option<String> {
+pub(crate) fn project_of(state: &AppState, p: &Principal, headers: &HeaderMap) -> Option<String> {
     let Principal::Box { user_id } = p else {
         return None;
     };

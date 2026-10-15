@@ -7,7 +7,7 @@ use std::io::Cursor;
 use std::time::Instant;
 
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use base64::Engine;
@@ -214,20 +214,17 @@ pub fn mock_png(prompt: &str, size: &str) -> Vec<u8> {
 
 // ---- handler -------------------------------------------------------------------------------
 
-fn project_of(p: &Principal) -> Option<String> {
-    match p {
-        Principal::Box { project_id } => Some(project_id.clone()),
-        Principal::Device { .. } | Principal::Admin => None,
-    }
-}
-
 /// `POST /proxy/v1/images/generations` (OpenAI Images API shape; `b64_json` responses).
 pub async fn generations(
     State(state): State<AppState>,
     principal: Principal,
+    headers: HeaderMap,
     Json(mut body): Json<Value>,
 ) -> Response {
-    let project_id = project_of(&principal).unwrap_or_else(|| "relay-admin".to_owned());
+    // A box serves every project of its user (D70): the caller names the project in
+    // `X-Arbos-Project`, like the per-workspace model stub does.
+    let project_id = crate::proxy::project_of(&state, &principal, &headers)
+        .unwrap_or_else(|| "relay-admin".to_owned());
     let prompt = body
         .get("prompt")
         .and_then(Value::as_str)
