@@ -676,6 +676,11 @@ fn people_space_from(shared: &Shared, v: &Value) -> Option<(Project, Chat)> {
                     .and_then(Value::as_str)
                     .unwrap_or("member")
                     .to_string(),
+                role: m
+                    .get("role")
+                    .and_then(Value::as_str)
+                    .unwrap_or("owner")
+                    .to_string(),
             });
         } else if let Some(pid) = member.strip_prefix("agent:") {
             let project = m.get("project").cloned().unwrap_or(Value::Null);
@@ -965,6 +970,11 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
                                     .unwrap_or("")
                                     .to_string(),
                                 status: "member".into(),
+                                role: m
+                                    .get("role")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("member")
+                                    .to_string(),
                             })
                         })
                         .filter(|p| p.id != shared.me_id())
@@ -1949,7 +1959,16 @@ async fn send_message(
         let Some(doc) = docs.get(&chat_id) else {
             return;
         };
-        let in_people = shared.is_people(&chat_id);
+        // People chats, and projects with more than one human, carry who wrote
+        // (API §3/§7); a solo project keeps the plain `user` the box expects.
+        let in_people = shared.is_people(&chat_id) || {
+            let projects = shared.projects.lock().unwrap();
+            projects
+                .iter()
+                .find(|p| p.id == project_id)
+                .map(|p| p.shared || !p.people.is_empty())
+                .unwrap_or(false)
+        };
         let me = shared.me_user();
         let mentions = if in_people {
             mentions_for(&shared, &chat_id, &text)

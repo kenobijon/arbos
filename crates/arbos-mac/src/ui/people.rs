@@ -273,6 +273,11 @@ pub fn new_chat_sheet(
         .map(|p| (p.clone(), s.avatar(&p.avatar_url)))
         .collect();
     let typed = query.trim().trim_start_matches('@').to_string();
+    let invite_into = s
+        .invite_target
+        .as_ref()
+        .and_then(|id| s.projects.iter().find(|p| &p.id == id))
+        .map(|p| p.name.clone());
 
     let input_row = div()
         .flex()
@@ -378,11 +383,21 @@ pub fn new_chat_sheet(
                 })
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.state
-                        .update(cx, |s, cx| s.start_dm(handle.clone(), cx));
+                        .update(cx, |s, cx| s.pick_person(handle.clone(), cx));
                 })),
         );
     }
 
+    let (title, blurb) = match &invite_into {
+        Some(name) => (
+            format!("Invite to {name}"),
+            "They get the same tabs and workspace output; your agent answers them too.".to_string(),
+        ),
+        None => (
+            "New chat".to_string(),
+            "Anyone with a GitHub account. The chat opens for both of you at once.".to_string(),
+        ),
+    };
     let card = div()
         .w(px(440.0))
         .max_w_full()
@@ -405,7 +420,7 @@ pub fn new_chat_sheet(
                         .text_size(px(15.0))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme.text)
-                        .child("New chat"),
+                        .child(title),
                 )
                 .child(
                     div()
@@ -428,7 +443,7 @@ pub fn new_chat_sheet(
             div()
                 .text_size(px(12.0))
                 .text_color(theme.text_muted)
-                .child("Anyone with a GitHub account. The chat opens for both of you at once."),
+                .child(blurb),
         )
         .child(input_row)
         .child(list);
@@ -946,4 +961,274 @@ pub fn typing_line(handle: &str, theme: &Theme) -> Div {
             .text_color(theme.text_faint)
             .child(format!("@{handle} is typing…")),
     )
+}
+
+/// Stacked avatars for a project with people in it (tile corner / header).
+pub fn avatar_stack(
+    people: &[(Person, Option<Arc<RenderImage>>)],
+    size: f32,
+    max: usize,
+    theme: &Theme,
+) -> Div {
+    let mut row = div().flex().items_center();
+    for (i, (p, image)) in people.iter().take(max).enumerate() {
+        let image = image.clone();
+        row = row.child(
+            div()
+                .when(i > 0, |el| el.ml(px(-size * 0.3)))
+                .rounded_full()
+                .border_1()
+                .border_color(theme.bg)
+                .child(avatar(image, p, size, theme)),
+        );
+    }
+    if people.len() > max {
+        row = row.child(
+            div()
+                .ml(px(2.0))
+                .text_size(px(size * 0.5))
+                .text_color(theme.text_faint)
+                .child(format!("+{}", people.len() - max)),
+        );
+    }
+    row
+}
+
+/// Tab-bar controls for a project: "shared by @owner" when I am a guest, the
+/// member avatars, and "Invite" for the owner.
+pub fn project_controls(
+    project: &Project,
+    state: &Entity<AppState>,
+    members_open: bool,
+    cx: &mut Context<Shell>,
+) -> Div {
+    let theme = Theme::of(cx).clone();
+    let s = state.read(cx);
+    let project_id = project.id.clone();
+    let mut row = div().flex().items_center().gap(px(6.0)).flex_shrink_0();
+    if project.is_guest() {
+        let owner = project.owner().cloned();
+        let label = format!(
+            "shared by @{}",
+            project
+                .owner_handle
+                .clone()
+                .or_else(|| owner.as_ref().map(|o| o.handle.clone()))
+                .unwrap_or_else(|| "owner".into())
+        );
+        row = row.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(5.0))
+                .h(px(24.0))
+                .pl(px(3.0))
+                .pr(px(8.0))
+                .rounded(px(12.0))
+                .bg(theme.surface_1)
+                .border_1()
+                .border_color(theme.border)
+                .when_some(owner, |el, o| {
+                    el.child(avatar(s.avatar(&o.avatar_url), &o, 18.0, &theme))
+                })
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .whitespace_nowrap()
+                        .text_color(theme.text_muted)
+                        .child(label),
+                ),
+        );
+    }
+    let guests: Vec<Person> = project.guests().cloned().collect();
+    if !guests.is_empty() || project.is_guest() {
+        let shown: Vec<Person> = if project.is_guest() {
+            project.people.clone()
+        } else {
+            guests.clone()
+        };
+        row = row.child(
+            div()
+                .id("project-members")
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .h(px(24.0))
+                .px(px(6.0))
+                .rounded(px(12.0))
+                .cursor_pointer()
+                .bg(if members_open {
+                    theme.surface_2
+                } else {
+                    gpui::transparent_black()
+                })
+                .hover(|st| st.bg(theme.surface_2))
+                .child(avatar_stack(
+                    &shown
+                        .iter()
+                        .map(|p| (p.clone(), s.avatar(&p.avatar_url)))
+                        .collect::<Vec<_>>(),
+                    20.0,
+                    3,
+                    &theme,
+                ))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.members_open = !this.members_open;
+                    this.add_agent_open = false;
+                    cx.notify();
+                })),
+        );
+    }
+    if !project.is_guest() {
+        row = row.child(
+            div()
+                .id("project-invite")
+                .flex_shrink_0()
+                .h(px(24.0))
+                .px(px(8.0))
+                .flex()
+                .items_center()
+                .rounded(px(6.0))
+                .text_size(px(11.5))
+                .whitespace_nowrap()
+                .text_color(theme.text_muted)
+                .hover(|st| st.bg(theme.surface_2).text_color(theme.text))
+                .cursor_pointer()
+                .child("Invite")
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.new_menu_open = false;
+                    this.people_input.update(cx, |input, cx| input.clear(cx));
+                    let id = project_id.clone();
+                    this.state.update(cx, |s, cx| s.open_invite(id, cx));
+                    let handle = this.people_input.read(cx).focus_handle(cx);
+                    window.focus(&handle, cx);
+                })),
+        );
+    }
+    row
+}
+
+/// Members of a project: the owner, the invited people (Remove for the owner).
+pub fn project_members_popover(
+    project: &Project,
+    state: &Entity<AppState>,
+    right: f32,
+    cx: &mut Context<Shell>,
+) -> Div {
+    let theme = Theme::of(cx).clone();
+    let s = state.read(cx);
+    let me = s.me_handle();
+    let project_id = project.id.clone();
+    let mut card = div()
+        .w(px(280.0))
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .p(px(6.0))
+        .rounded(px(PANEL_RADIUS))
+        .bg(theme.card())
+        .border_1()
+        .border_color(theme.border_strong)
+        .shadow_lg()
+        .child(
+            div()
+                .px(px(8.0))
+                .py(px(4.0))
+                .text_size(px(11.0))
+                .text_color(theme.text_faint)
+                .child(format!("PEOPLE IN {}", project.name.to_uppercase())),
+        );
+    if !project.is_guest() {
+        card = card.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .px(px(8.0))
+                .py(px(5.0))
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(12.5))
+                        .text_color(theme.text)
+                        .child(format!("@{me} (you)")),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.5))
+                        .text_color(theme.text_faint)
+                        .child("owner"),
+                ),
+        );
+    }
+    for p in &project.people {
+        let image = s.avatar(&p.avatar_url);
+        let user_id = p.id.clone();
+        let pid = project_id.clone();
+        let is_owner = p.role == "owner";
+        card = card.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .px(px(8.0))
+                .py(px(5.0))
+                .child(avatar(image, p, 22.0, &theme))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(12.5))
+                        .text_color(theme.text)
+                        .child(format!("@{}", p.handle)),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.5))
+                        .text_color(theme.text_faint)
+                        .child(if is_owner { "owner" } else { "member" }),
+                )
+                .when(!project.is_guest() && !is_owner, |el| {
+                    el.child(
+                        div()
+                            .id(ElementId::Name(SharedString::from(format!(
+                                "remove-member-{}",
+                                p.id
+                            ))))
+                            .px(px(7.0))
+                            .py(px(2.0))
+                            .rounded(px(5.0))
+                            .text_size(px(11.0))
+                            .text_color(theme.danger)
+                            .cursor_pointer()
+                            .hover(|st| st.bg(theme.surface_2))
+                            .child("Remove")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.members_open = false;
+                                let u = user_id.clone();
+                                let p = pid.clone();
+                                this.state
+                                    .update(cx, |s, cx| s.remove_project_member(p, u, cx));
+                            })),
+                    )
+                }),
+        );
+    }
+    card = card.child(
+        div()
+            .px(px(8.0))
+            .pt(px(4.0))
+            .text_size(px(10.5))
+            .text_color(theme.text_faint)
+            .child(if project.is_guest() {
+                "You can chat and drive the agent here; settings and members stay with the owner."
+            } else {
+                "Members see every tab and the workspace output, and the agent answers them as it answers you."
+            }),
+    );
+    div()
+        .absolute()
+        .top(px(crate::ui::theme::TAB_BAR_HEIGHT + 6.0))
+        .right(px(right))
+        .child(frosted(PANEL_RADIUS, MENU_BLUR, card))
 }

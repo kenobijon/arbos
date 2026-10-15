@@ -2,6 +2,7 @@
 //! right panel (browser live view, S16) · Details drawer. Layout per
 //! `arbos-design.md` §3.2 and the mock.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,7 +14,7 @@ use gpui::{
 
 use crate::app::SignInMode;
 use crate::app::{AppState, DetailsTarget};
-use crate::model::{now_ms, BoxState, Chat, Link, MachineState, Project};
+use crate::model::{now_ms, BoxState, Chat, Id, Link, MachineState, Project};
 use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
 use crate::ui::composer::{Composer, ComposerEvent, ComposerInput};
 use crate::ui::connectors::{ConnectorsEvent, ConnectorsPanel};
@@ -155,7 +156,7 @@ impl Shell {
                                 .or_else(|| (!typed.is_empty()).then_some(typed.clone()))
                         };
                         if let Some(handle) = pick {
-                            this.state.update(cx, |s, cx| s.start_dm(handle, cx));
+                            this.state.update(cx, |s, cx| s.pick_person(handle, cx));
                         }
                     });
                 }));
@@ -330,6 +331,28 @@ impl Shell {
                 )
             })
             .collect();
+        // People in each project (D72 step 3) with their decoded avatars.
+        let project_people: HashMap<Id, Vec<(crate::model::Person, Option<Arc<RenderImage>>)>> =
+            projects
+                .iter()
+                .map(|(p, _, _)| {
+                    let shown: Vec<_> = if p.is_guest() {
+                        p.owner().cloned().into_iter().collect()
+                    } else {
+                        p.guests().cloned().collect()
+                    };
+                    (
+                        p.id.clone(),
+                        shown
+                            .into_iter()
+                            .map(|person| {
+                                let img = state.avatar(&person.avatar_url);
+                                (person, img)
+                            })
+                            .collect(),
+                    )
+                })
+                .collect();
         let width = if collapsed {
             RAIL_WIDTH_COLLAPSED
         } else {
@@ -400,6 +423,16 @@ impl Shell {
                         .text_size(px(11.0))
                         .text_color(theme.text)
                         .child(project.name.clone()),
+                );
+            }
+            // People in this project (D72 step 3): a small avatar cluster.
+            if let Some(shown) = project_people.get(&project.id).filter(|v| !v.is_empty()) {
+                tile = tile.child(
+                    div()
+                        .absolute()
+                        .bottom(px(-4.0))
+                        .right(px(-4.0))
+                        .child(people::avatar_stack(shown, 14.0, 2, &theme)),
                 );
             }
             // Workspace state: a tiny dot only (the machine has its own indicator).
@@ -638,7 +671,8 @@ impl Shell {
         let panel_open = state.right_panel_open;
         let in_call = self.voice.read(cx).in_call();
         let projects = state.projects.clone();
-        let can_group = project.is_some() && projects.len() > 1;
+        let can_group =
+            project.as_ref().map(|p| !p.is_guest()).unwrap_or(false) && projects.len() > 1;
         let picker_open = self.group_picker_open;
 
         let shake = self
@@ -846,6 +880,14 @@ impl Shell {
             )
             .children(pinned_tab)
             .child(strip)
+            .when_some(project.as_ref().filter(|p| !p.is_people()), |el, p| {
+                el.child(people::project_controls(
+                    p,
+                    &self.state,
+                    self.members_open,
+                    cx,
+                ))
+            })
             .when(can_group, |el| {
                 el.child(
                     groups::header_button(picker_open, &theme).on_click(cx.listener(
@@ -2574,6 +2616,7 @@ impl Render for Shell {
         let new_project_open = state.new_project_open;
         let new_chat_open = state.new_chat_open;
         let people_space = state.selected().filter(|p| p.is_people()).cloned();
+        let project_space = state.selected().filter(|p| !p.is_people()).cloned();
 
         let mut root = div()
             .id("shell-root")
@@ -2686,6 +2729,20 @@ impl Render for Shell {
             }
             if self.members_open {
                 root = root.child(people::members_popover(&space, &self.state, right, cx));
+            }
+        } else if let Some(project) = project_space {
+            let right = if panel_open {
+                RIGHT_PANEL_WIDTH + 90.0
+            } else {
+                90.0
+            };
+            if self.members_open {
+                root = root.child(people::project_members_popover(
+                    &project,
+                    &self.state,
+                    right,
+                    cx,
+                ));
             }
         }
         if new_chat_open {

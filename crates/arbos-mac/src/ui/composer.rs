@@ -1319,7 +1319,10 @@ impl Render for Composer {
             .map(|p| (p.model.clone(), p.effort))
             .unwrap_or((MODELS[0].to_string(), Effort::High));
         // A people chat has no model of its own: its agents run on their owners' settings.
-        let in_people = state.selected().map(|p| p.is_people()).unwrap_or(false);
+        let in_people = state
+            .selected()
+            .map(|p| p.is_people() || p.is_guest())
+            .unwrap_or(false);
         let link_full = state.link == crate::model::Link::Reconnecting;
         let voice_mode = state.voice_mode;
         let (recording, transcribing, in_call, voice_notice) = {

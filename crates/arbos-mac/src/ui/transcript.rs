@@ -717,6 +717,7 @@ pub fn build_rows(
                         name: message.sender_name.clone(),
                         avatar_url: message.sender_avatar.clone().unwrap_or_default(),
                         status: "member".into(),
+                        role: String::new(),
                     })
                 } else {
                     None

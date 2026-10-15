@@ -3544,6 +3544,9 @@ pub const ME_ID: &str = "gh_1";
 pub const ME_HANDLE: &str = "jacob";
 const SAM_ID: &str = "gh_456";
 pub const DM_SAM: &str = "01J9DMSAM00000000000000000";
+/// A project @sam shares with me (I am a guest).
+pub const SHARED_STUDIO: &str = "01J9STUDIO0000000000000000";
+const SHARED_STUDIO_CHAT: &str = "01J9STUDIOCHAT000000000000";
 
 fn person(id: &str, handle: &str, name: Option<&str>, status: &str) -> Person {
     Person {
@@ -3552,6 +3555,7 @@ fn person(id: &str, handle: &str, name: Option<&str>, status: &str) -> Person {
         name: name.map(str::to_string),
         avatar_url: format!("fixture://avatar/{handle}"),
         status: status.into(),
+        role: "member".into(),
     }
 }
 
@@ -3597,21 +3601,57 @@ fn people_space(id: &str, other: Person, agents: Vec<AgentMember>) -> Project {
 }
 
 fn seed_people_projects() -> Vec<Project> {
-    vec![people_space(DM_SAM, sam(), Vec::new())]
+    let mut owner = sam();
+    owner.role = "owner".into();
+    vec![
+        people_space(DM_SAM, sam(), Vec::new()),
+        Project {
+            id: SHARED_STUDIO.into(),
+            name: "Studio".into(),
+            icon: "◆".into(),
+            color: "#d6843f".into(),
+            state: BoxState::Awake,
+            state_detail: None,
+            wake_progress: None,
+            model: MODELS[0].into(),
+            effort: Effort::Medium,
+            spend_today_usd: 0.0,
+            spend_cap_usd: 25.0,
+            kind: SpaceKind::Project,
+            people: vec![owner],
+            agents: Vec::new(),
+            pending: false,
+            shared: true,
+            owner_handle: Some("sam".into()),
+        },
+    ]
 }
 
 fn seed_people_chats() -> Vec<Chat> {
-    vec![Chat {
-        id: DM_SAM.into(),
-        project_id: DM_SAM.into(),
-        title: "sam".into(),
-        is_pinned: true,
-        is_system: false,
-        kind: ChatKind::Chat,
-        participants: Vec::new(),
-        unread: true,
-        last_message_at: now_ms().saturating_sub(12 * 60_000),
-    }]
+    vec![
+        Chat {
+            id: DM_SAM.into(),
+            project_id: DM_SAM.into(),
+            title: "sam".into(),
+            is_pinned: true,
+            is_system: false,
+            kind: ChatKind::Chat,
+            participants: Vec::new(),
+            unread: true,
+            last_message_at: now_ms().saturating_sub(12 * 60_000),
+        },
+        Chat {
+            id: SHARED_STUDIO_CHAT.into(),
+            project_id: SHARED_STUDIO.into(),
+            title: "Studio".into(),
+            is_pinned: true,
+            is_system: false,
+            kind: ChatKind::Chat,
+            participants: Vec::new(),
+            unread: false,
+            last_message_at: now_ms().saturating_sub(50 * 60_000),
+        },
+    ]
 }
 
 fn human_message(chat_id: &str, who: &Person, text: &str, at: u64) -> Message {
@@ -3679,6 +3719,30 @@ fn seed_people_docs(shared: &Arc<Shared>) {
     ));
     doc.commit();
     add_doc(shared, doc);
+
+    // Sam's shared project: Sam wrote first, the agent answered with attribution.
+    let studio = ChatDoc::new(SHARED_STUDIO_CHAT, SHARED_STUDIO);
+    let _ = studio.insert_message(&human_message(
+        SHARED_STUDIO_CHAT,
+        &sam(),
+        "@jacob is in now. Studio: let's use this for the launch page work.",
+        base + 200_000,
+    ));
+    let mut reply = human_message(SHARED_STUDIO_CHAT, &sam(), "", base + 230_000);
+    reply.role = Role::Assistant;
+    reply.sender = format!("agent:{SHARED_STUDIO}");
+    reply.sender_name = Some("Studio".into());
+    reply.sender_icon = Some("◆".into());
+    reply.sender_handle = Some("studio".into());
+    reply.sender_avatar = None;
+    reply.asked_by_handle = Some("sam".into());
+    reply.owner_handle = Some("sam".into());
+    reply.parts = vec![text_part(
+        "@sam asked: let's use this for the launch page work.\n\nWelcome @jacob. The launch page draft lives in `site/launch/`; I will keep both of you posted here.",
+    )];
+    let _ = studio.insert_message(&reply);
+    studio.commit();
+    add_doc(shared, studio);
 }
 
 /// `@slug` / `@handle` tokens in the text, resolved to member ids.
@@ -3912,11 +3976,52 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                 let mut projects = shared.projects.lock().unwrap();
                 if let Some(p) = projects.iter_mut().find(|p| p.id == *project_id) {
                     if !p.people.iter().any(|x| x.id == other.id) {
-                        p.people.push(other);
+                        p.people.push(other.clone());
                     }
                 }
             }
             emit_projects(shared);
+            // The invitee shows up in the project's pinned chat and asks the agent.
+            let pinned = shared
+                .chats
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|c| c.project_id == *project_id && c.is_pinned)
+                .map(|c| c.id.clone());
+            if let Some(chat_id) = pinned {
+                let shared = shared.clone();
+                let project_id = project_id.clone();
+                tokio::spawn(async move {
+                    sleep(Duration::from_millis(2200)).await;
+                    let ask = "Thanks for the invite — what is the state of the beta invite copy?";
+                    let msg = human_message(&chat_id, &other, ask, now_ms());
+                    with_doc(&shared, &chat_id, |doc| {
+                        let _ = doc.insert_message(&msg);
+                        doc.commit();
+                    });
+                    mark_unread_if_hidden(&shared, &chat_id);
+                    let agent = {
+                        let projects = shared.projects.lock().unwrap();
+                        projects
+                            .iter()
+                            .find(|p| p.id == project_id)
+                            .map(|p| AgentMember {
+                                project_id: p.id.clone(),
+                                name: p.name.clone(),
+                                icon: p.icon.clone(),
+                                color: p.color.clone(),
+                                handle: Project::mention_slug(&p.name),
+                                owner_id: ME_ID.into(),
+                                owner_handle: ME_HANDLE.into(),
+                                reply_policy: ReplyPolicy::EveryMessage,
+                            })
+                    };
+                    if let Some(agent) = agent {
+                        agent_reply(&shared, &chat_id, &agent, &other, ask).await;
+                    }
+                });
+            }
             true
         }
         ClientCommand::RemoveProjectMember {
