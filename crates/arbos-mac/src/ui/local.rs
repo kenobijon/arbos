@@ -307,6 +307,8 @@ impl LocalPanel {
                     .child(
                         div()
                             .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
                             .p(px(8.0))
                             .rounded(px(7.0))
                             .bg(theme.surface_2)
@@ -412,7 +414,7 @@ impl Render for LocalPanel {
         let card = div()
             .id("local-popover")
             .track_focus(&self.focus_handle)
-            .w(px(380.0))
+            .w(px(400.0))
             .flex()
             .flex_col()
             .gap(px(6.0))
