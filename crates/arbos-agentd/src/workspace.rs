@@ -453,6 +453,7 @@ pub fn seed_state(cfg: &Config) -> Result<()> {
     std::fs::create_dir_all(cfg.state_dir.join("logs"))?;
     std::fs::create_dir_all(cfg.prime_dir())?;
     std::fs::create_dir_all(&cfg.work_dir)?;
+    std::fs::create_dir_all(crate::media::out_dir(cfg))?;
     let seed = std::path::Path::new("/etc/arbos/pi-seed");
     if seed.exists() {
         copy_dir(seed, &cfg.pi_dir())?;

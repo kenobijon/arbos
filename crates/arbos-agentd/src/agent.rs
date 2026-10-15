@@ -377,6 +377,9 @@ pub struct Agent {
     pub skills: SkillsIndex,
     /// Pending approval cards and short-lived grants (feature `approve`).
     pub approvals: crate::approval::Approvals,
+    /// Running subagents → (chat id, progress message id), so a file a subagent delivers lands
+    /// on its own card (F10 `deliver_file`).
+    pub subagent_msgs: Mutex<HashMap<String, (String, String)>>,
 }
 
 impl Agent {
@@ -431,6 +434,7 @@ impl Agent {
             settings: crate::settings::Settings::new(&cfg_for_settings),
             skills: SkillsIndex::new(),
             approvals: crate::approval::Approvals::default(),
+            subagent_msgs: Mutex::new(HashMap::new()),
         })
     }
 
@@ -478,6 +482,8 @@ impl Agent {
             self.cfg.project_name,
             self.cfg.work_dir.display()
         ));
+        s.push('\n');
+        s.push_str(&crate::media::prompt_section(&self.cfg));
         if !self.cfg.instructions.trim().is_empty() {
             s.push_str("\n\n## Project instructions\n\n");
             s.push_str(self.cfg.instructions.trim());
@@ -2033,7 +2039,8 @@ impl Agent {
             s.push_str(&skills_text);
             s.push_str("\n\n");
         }
-        s.push_str("## Tools\n\nMCP server `arbos`: history_search, history_read, read_thread, memory_search, memory_read (you may search and read the entire history of this Project), peek, sub_llm, remember/recall, projects_list/projects_send, ask_user, connectors_list/connector_call (the user's Gmail, Calendar, Slack, GitHub, Harness Comms through the relay; write/send actions need the user's approval), local_devices/local_run/local_read/local_list (the user's own computer through the arbos-local helper; every command and, unless the user allowed reads, every file read needs the user's approval).\n\n");
+        s.push_str("## Tools\n\nMCP server `arbos`: history_search, history_read, read_thread, memory_search, memory_read (you may search and read the entire history of this Project), peek, sub_llm, remember/recall, projects_list/projects_send, ask_user, connectors_list/connector_call (the user's Gmail, Calendar, Slack, GitHub, Harness Comms through the relay; write/send actions need the user's approval), local_devices/local_run/local_read/local_list (the user's own computer through the arbos-local helper; every command and, unless the user allowed reads, every file read needs the user's approval), deliver_file (hand a file you made to the user as a card), generate_image (an image from a prompt, delivered as a card).\n\n");
+        s.push_str(&crate::media::prompt_section(&self.cfg));
         s.push_str("## Return contract\n\nEnd your final reply with one fenced ```json block:\n{ \"status\": \"done\" | \"blocked\" | \"partial\" | \"needs_input\", \"summary\": \"<= 5 lines\", \"artifacts\": [ { \"kind\": \"file\" | \"commit\" | \"url\" | \"command\", \"ref\": \"…\", \"note\": \"…\" } ], \"acceptance\": [ { \"criterion\": \"…\", \"met\": true, \"evidence\": \"…\" } ], \"open_items\": [], \"proposed_memory\": [ { \"kind\": \"decision\", \"scope\": \"project\", \"text\": \"…\" } ], \"questions\": [] }\n");
         s
     }
@@ -2160,6 +2167,10 @@ impl Agent {
             let mut h = host.lock().await;
             h.doc.add_status_part(&msg_id, "working", "Working…");
         }
+        self.subagent_msgs
+            .lock()
+            .await
+            .insert(subagent_id.clone(), (chat_id.to_owned(), msg_id.clone()));
         let _ = self.store.set_subagent_last_status(&subagent_id, "working");
         let t0 = Instant::now();
         let pack = self.build_pack(&sub_name, purpose, brief, data_heavy);
@@ -2469,6 +2480,7 @@ impl Agent {
                 },
             );
         }
+        self.subagent_msgs.lock().await.remove(&subagent_id);
         let _ = self
             .store
             .set_subagent_last_status(&subagent_id, if failed { "failed" } else { "done" });
