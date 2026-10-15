@@ -1,0 +1,69 @@
+# Caddy for arbos.life + relay.arbos.life on Jacob's server. Installed by scripts/deploy/relay-server.sh
+# to @WWW_DIR@/Caddyfile and run by arbos-www.service (the :443 Caddy). Port 80 belongs to the
+# Affine Caddy on this box, so certificates come from the TLS-ALPN challenge only; both hostnames
+# must therefore be DNS-only A records pointing straight at the server (no Cloudflare proxy).
+{
+	admin off
+	auto_https disable_redirects
+	storage file_system {
+		root @WWW_DIR@/caddy-data
+	}
+	log {
+		output file @WWW_DIR@/logs/caddy.log {
+			roll_size 10MiB
+			roll_keep 3
+		}
+	}
+}
+
+(acme_alpn_only) {
+	tls {
+		issuer acme {
+			disable_http_challenge
+		}
+	}
+}
+
+# ---- landing page --------------------------------------------------------------------------------
+arbos.life {
+	import acme_alpn_only
+	root * @WWW_DIR@/site
+	encode zstd gzip
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+		-Server
+	}
+	header /*.png Cache-Control "public, max-age=86400"
+	header /favicon.ico Cache-Control "public, max-age=86400"
+	# same redirect as on the relay, so the button keeps working if the relay is down
+	import /etc/arbos/download.caddy
+	handle_errors {
+		@notfound expression {err.status_code} == 404
+		handle @notfound {
+			rewrite * /index.html
+			file_server
+		}
+	}
+	file_server
+}
+
+# ---- relay ----------------------------------------------------------------------------------------
+relay.arbos.life {
+	import acme_alpn_only
+	encode zstd gzip
+	header -Server
+	# /download/mac → newest edge DMG (rewritten by arbos-refresh-mac-download)
+	import /etc/arbos/download.caddy
+	# everything else, WebSockets included, goes to the relay
+	reverse_proxy @RELAY_LISTEN@ {
+		flush_interval -1
+		transport http {
+			read_timeout 0
+			write_timeout 0
+		}
+	}
+}
