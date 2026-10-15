@@ -72,6 +72,12 @@ struct ChatView: View {
         }
         .onAppear { model.markRead(chatId: chatId) }
         .onChange(of: messages.count) { _, _ in model.markRead(chatId: chatId) }
+        .onChange(of: model.caughtUp.contains(chatId), initial: true) { _, ready in
+            if ready, !sentOnce, let text = DebugHooks.autoSend, DebugHooks.openChat == chatId {
+                draft = text
+                send()
+            }
+        }
     }
 
     // MARK: Transcript
@@ -91,6 +97,11 @@ struct ChatView: View {
                     ForEach(rows) { row in
                         RowView(row: row, chatId: chatId)
                             .id(row.id)
+                    }
+                    if streaming {
+                        WorkingIndicator()
+                            .padding(.vertical, 8)
+                            .transition(.opacity)
                     }
                     Color.clear.frame(height: 1).id("bottom")
                 }
@@ -209,6 +220,30 @@ struct ChatView: View {
 
     private func stop() {
         model.stop(chatId: chatId)
+    }
+}
+
+/// The one working indicator (Jacob's transcript rule): three soft dots that
+/// breathe while any turn in the chat runs. No labels, no step names.
+struct WorkingIndicator: View {
+    @Environment(\.theme) private var theme
+    @State private var phase = 0
+
+    var body: some View {
+        HStack(spacing: 5) {
+            ForEach(0..<3, id: \.self) { i in
+                Circle()
+                    .fill(theme.accent.opacity(phase == i ? 0.95 : 0.3))
+                    .frame(width: 6, height: 6)
+                    .scaleEffect(phase == i ? 1.15 : 0.9)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.leading, 4)
+        .onReceive(Timer.publish(every: 0.3, on: .main, in: .common).autoconnect()) { _ in
+            withAnimation(.easeInOut(duration: 0.28)) { phase = (phase + 1) % 3 }
+        }
+        .accessibilityLabel("Arbos is working")
     }
 }
 

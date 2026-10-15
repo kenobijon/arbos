@@ -9,9 +9,10 @@ struct ProjectsView: View {
     @State private var showSettings = false
     @State private var newProjectName = ""
     @State private var showNewProject = false
+    @State private var path: [Id] = DebugHooks.openProject.map { [$0] } ?? []
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             ZStack {
                 theme.bg.ignoresSafeArea()
                 content

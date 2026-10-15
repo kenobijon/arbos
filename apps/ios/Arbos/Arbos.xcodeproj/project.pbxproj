@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		A1F6426F79178DB9A90C8EA2 /* ArbosApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1FA6D4B127AF19E74875062 /* ArbosApp.swift */; };
+		A15DA44CF0E636E3D9860250 /* DebugHooks.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B0A3D2AD3FE3145729342F /* DebugHooks.swift */; };
 		A1B8B46004801036DC4B4D97 /* Model.swift in Sources */ = {isa = PBXBuildFile; fileRef = A155587775513DEC1F23B656 /* Model.swift */; };
 		A1627BBC9C62B0C159B656E4 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A19CCD11486CB5CFFBAC839C /* Assets.xcassets */; };
 		A1B2553F3B08E424A698DF1E /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A126D30B5C9C2AC07F0C6219 /* AppModel.swift */; };
@@ -28,6 +29,7 @@
 
 /* Begin PBXFileReference section */
 		A1FA6D4B127AF19E74875062 /* ArbosApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArbosApp.swift; sourceTree = "<group>"; };
+		A1B0A3D2AD3FE3145729342F /* DebugHooks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugHooks.swift; sourceTree = "<group>"; };
 		A155587775513DEC1F23B656 /* Model.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Model.swift; sourceTree = "<group>"; };
 		A19CCD11486CB5CFFBAC839C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A126D30B5C9C2AC07F0C6219 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
@@ -91,6 +93,7 @@
 			isa = PBXGroup;
 			children = (
 				A1FA6D4B127AF19E74875062,
+				A1B0A3D2AD3FE3145729342F,
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -220,6 +223,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A1F6426F79178DB9A90C8EA2 /* ArbosApp.swift in Sources */,
+				A15DA44CF0E636E3D9860250 /* DebugHooks.swift in Sources */,
 				A1B8B46004801036DC4B4D97 /* Model.swift in Sources */,
 				A1B2553F3B08E424A698DF1E /* AppModel.swift in Sources */,
 				A11264651E1B169D16B1114D /* ChatDoc.swift in Sources */,

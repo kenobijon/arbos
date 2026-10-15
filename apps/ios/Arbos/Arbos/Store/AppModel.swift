@@ -175,10 +175,8 @@ final class AppModel: ObservableObject {
             for item in items {
                 var p = item.project
                 if let prev = projects.first(where: { $0.id == p.id }) {
-                    p.stateDetail = prev.stateDetail
                     p.modelNote = prev.modelNote
-                    // The live room STATUS wins over a 15 s old registry row.
-                    if rooms[projectDocKey(p.id)] != nil { p.state = prev.state }
+                    if p.state == prev.state { p.stateDetail = prev.stateDetail }
                 }
                 newProjects.append(p)
                 var mine = item.chats
@@ -312,13 +310,11 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// `status.box` and `settings.modelNote` in the project doc (crdt-sync §6.3).
+    /// `settings.modelNote` from the project doc (crdt-sync §6.3). The box
+    /// state comes from the relay (registry + STATUS frames) only: an asleep
+    /// box cannot rewrite its own stale `status.box = awake`.
     private func applyProjectDoc(_ projectId: Id) {
         guard let doc = docs[projectDocKey(projectId)] else { return }
-        let status = doc.mapValue("status")
-        if let b = status["box"] as? String, let state = BoxState.fromWire(b) {
-            setProjectState(projectId, state, detail: nil)
-        }
         let settings = doc.mapValue("settings")
         let note = settings["modelNote"] as? String ?? ""
         if let i = projects.firstIndex(where: { $0.id == projectId }), projects[i].modelNote != note {

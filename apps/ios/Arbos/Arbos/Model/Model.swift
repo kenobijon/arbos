@@ -210,27 +210,6 @@ struct Message: Identifiable, Equatable {
         parts.compactMap(\.textValue).reduce(0) { $0 + $1.utf8.count }
     }
 
-    /// The latest short step label the box emitted for this turn, for the
-    /// working indicator. Text after the last status event means "Writing…".
-    var workingLabel: String? {
-        let lastStatus = parts.lastIndex { $0.isStatus }
-        let lastText = parts.lastIndex { ($0.textValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false }
-        if let t = lastText, lastStatus == nil || t > lastStatus! {
-            return "Writing…"
-        }
-        for part in parts.reversed() {
-            if case .status(_, let code, let message) = part {
-                switch code {
-                case .step, .working, .queued, .deciding, .handoff:
-                    return message
-                case .done, .failed, .stopped, .askUser, .note, .other:
-                    continue
-                }
-            }
-        }
-        return nil
-    }
-
     var askUserText: String? {
         for part in parts {
             if case .status(_, .askUser, let message) = part { return message }

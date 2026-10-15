@@ -61,6 +61,11 @@ struct ChatListView: View {
         .navigationDestination(item: $openChat) { chat in
             ChatView(chatId: chat.id, projectId: projectId)
         }
+        .onChange(of: model.chats(of: projectId).count, initial: true) { _, _ in
+            if openChat == nil, let id = DebugHooks.openChat, let chat = model.chat(id), chat.projectId == projectId {
+                openChat = chat
+            }
+        }
     }
 
     private func preview(of chat: Chat) -> String {
@@ -139,7 +144,7 @@ struct BoxBanner: View {
         case .awake:
             LinkBanner().padding(.horizontal, 12).padding(.top, 6)
         case .waking:
-            banner(icon: nil, text: project.stateDetail ?? "Waking sandbox…", color: theme.accent, progress: true)
+            banner(icon: nil, text: "Waking sandbox…", color: theme.accent, progress: true)
         case .hibernatedLight, .hibernatedDeep:
             banner(icon: "moon.zzz", text: "Sleeping · will wake on your next message", color: theme.textMuted, progress: false)
         case .stoppedByUser:

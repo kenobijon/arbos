@@ -1,7 +1,7 @@
 // The chat body: one row per markdown block, prose only (Grok-bot style).
-// Tool calls, raw JSON, status events and return contracts never render
-// here; a streaming turn shows one minimal working line instead. Port of
-// `crates/arbos-mac/src/ui/transcript.rs::build_rows`.
+// Tool calls, raw JSON, status events, usage footers and return contracts
+// never render here; `ChatView` shows one working indicator while a turn
+// runs. Port of `crates/arbos-mac/src/ui/transcript.rs::build_rows`.
 
 import SwiftUI
 import UIKit
@@ -27,13 +27,7 @@ enum RowKind: Equatable {
     case markdown(block: Block, live: Bool)
     /// S8: the agent asked a question.
     case askUser(text: String)
-    /// Minimal "agent is working" line: pulsing dot + the short step label.
-    case working(label: String)
     case error(code: String, message: String)
-    /// Thin "Stopped by you" / handoff note.
-    case note(text: String)
-    /// Under a finished assistant message: model · decision · tokens.
-    case meta(text: String)
 }
 
 struct Row: Identifiable, Equatable {
@@ -43,6 +37,9 @@ struct Row: Identifiable, Equatable {
 }
 
 enum Transcript {
+    /// Prose and real attachments only. Tool calls, status events, raw JSON,
+    /// usage footers and subagent names never render; `ChatView` shows one
+    /// working indicator while any turn in the chat streams.
     static func rows(_ messages: [Message]) -> [Row] {
         var rows: [Row] = []
         for message in messages {
@@ -69,80 +66,19 @@ enum Transcript {
                         }
                     case .status(let id, .askUser, let text):
                         rows.append(Row(id: "\(message.id)#\(id)", messageId: message.id, kind: .askUser(text: text)))
-                    case .status(let id, .note, let text), .status(let id, .stopped, let text), .status(let id, .failed, let text):
-                        rows.append(Row(id: "\(message.id)#\(id)", messageId: message.id, kind: .note(text: text)))
                     case .error(let id, let code, let text):
                         rows.append(Row(id: "\(message.id)#\(id)", messageId: message.id, kind: .error(code: code, message: text)))
                     case .status, .tool, .subagentResult, .reasoning, .attachment, .unknown:
                         break
                     }
                 }
-                // A finished progress turn (status events only) collapses to
-                // nothing; the prose result arrives as its own message.
-                let isProgress = message.turn?.isProgress ?? false
-                let shownAny = rows.contains { $0.messageId == message.id }
-                if !streaming && message.role == .assistant && !shownAny && !isProgress {
-                    let note: String?
-                    switch message.status {
-                    case .error: note = "The turn failed before it said anything."
-                    case .cancelled: note = "Stopped before it said anything."
-                    case .done, .queued, .streaming: note = nil
-                    }
-                    if let note {
-                        rows.append(Row(id: "\(message.id)#empty", messageId: message.id, kind: .note(text: note)))
-                    }
-                }
                 if message.status == .error && !message.hasErrorPart {
                     rows.append(Row(id: "\(message.id)#failed", messageId: message.id,
                                     kind: .error(code: "turn_failed", message: "The agent could not finish this turn.")))
                 }
-                if streaming {
-                    rows.append(Row(id: "\(message.id)#working", messageId: message.id,
-                                    kind: .working(label: message.workingLabel ?? "Working…")))
-                } else if message.role == .assistant && !isProgress {
-                    let meta = metaLine(message)
-                    if !meta.isEmpty {
-                        rows.append(Row(id: "\(message.id)#meta", messageId: message.id, kind: .meta(text: meta)))
-                    }
-                }
-                if message.status == .cancelled {
-                    let hasNote = message.parts.contains { if case .status(_, .note, _) = $0 { return true } else { return false } }
-                    if !hasNote {
-                        rows.append(Row(id: "\(message.id)#cancelled", messageId: message.id, kind: .note(text: "Stopped by you")))
-                    }
-                }
             }
         }
         return rows
-    }
-
-    /// "claude-haiku-5.5 · reply · 1.2k in / 180 out · $0.0021 · 3.4 s"
-    static func metaLine(_ m: Message) -> String {
-        var parts: [String] = []
-        if let model = m.model { parts.append(Project.shortModel(model)) }
-        if let d = m.decision {
-            parts.append(d)
-        } else if let t = m.turn {
-            parts.append(t.rawValue)
-        }
-        let num = { (k: String) -> Double in m.usage[k] ?? 0 }
-        let input = num("input") + num("input_tokens") + num("prompt_tokens")
-        let output = num("output") + num("output_tokens") + num("completion_tokens")
-        if input > 0 || output > 0 {
-            parts.append("\(tokens(input)) in / \(tokens(output)) out")
-        }
-        let cached = num("cacheRead")
-        if cached > 0 { parts.append("\(tokens(cached)) cached") }
-        let cost = num("cost")
-        if cost > 0 { parts.append(String(format: "$%.4f", cost)) }
-        if let done = m.completedAt, done > m.createdAt, m.createdAt > 0 {
-            parts.append(String(format: "%.1f s", Double(done - m.createdAt) / 1000))
-        }
-        return parts.joined(separator: " · ")
-    }
-
-    private static func tokens(_ n: Double) -> String {
-        n >= 1000 ? String(format: "%.1fk", n / 1000) : "\(Int(n))"
     }
 }
 
@@ -290,17 +226,6 @@ struct RowView: View {
             .padding(.horizontal, 12).padding(.vertical, 10)
             .card()
             .padding(.vertical, 4)
-        case .working(let label):
-            HStack(spacing: 8) {
-                PulseDot(color: theme.accent)
-                Text(label)
-                    .font(.system(size: 13, weight: .regular).italic())
-                    .foregroundStyle(theme.textMuted)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                Spacer(minLength: 0)
-            }
-            .padding(.vertical, 4)
         case .error(let code, let message):
             HStack(spacing: 10) {
                 Text("✗").foregroundStyle(theme.danger).font(.system(size: 12))
@@ -315,18 +240,6 @@ struct RowView: View {
             .background(RoundedRectangle(cornerRadius: Theme.panelRadius).fill(theme.dangerSoft))
             .overlay(RoundedRectangle(cornerRadius: Theme.panelRadius).strokeBorder(theme.danger.opacity(0.4), lineWidth: 1))
             .padding(.vertical, 4)
-        case .note(let text):
-            Text(text)
-                .font(.system(size: 12.5).italic())
-                .foregroundStyle(theme.textFaint)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.vertical, 4)
-        case .meta(let text):
-            Text(text)
-                .font(.system(size: Theme.tiny))
-                .foregroundStyle(theme.textFaint)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.bottom, 6)
         }
     }
 }
