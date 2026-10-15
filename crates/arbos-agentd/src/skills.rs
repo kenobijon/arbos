@@ -83,10 +83,13 @@ impl SkillsIndex {
         http: &reqwest::Client,
         relay_url: &str,
         box_token: &str,
+        project_id: &str,
     ) -> Result<usize> {
+        // One box per user (D70): the relay scopes a box's skills by this header.
         let r = http
             .get(format!("{relay_url}/skills/index"))
             .bearer_auth(box_token)
+            .header("x-arbos-project", project_id)
             .timeout(Duration::from_secs(10))
             .send()
             .await?;
@@ -121,6 +124,7 @@ impl SkillsIndex {
             let r = http
                 .get(format!("{relay_url}/skills/{}", e.id))
                 .bearer_auth(box_token)
+                .header("x-arbos-project", project_id)
                 .timeout(Duration::from_secs(10))
                 .send()
                 .await?;

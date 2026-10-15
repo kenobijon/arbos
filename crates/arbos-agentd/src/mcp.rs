@@ -495,6 +495,7 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
             });
             match reqwest::Client::new()
                 .post(format!("{}/skills", a.cfg.relay_url))
+                .header("x-arbos-project", &a.cfg.project_id)
                 .bearer_auth(&a.cfg.box_token)
                 .json(&payload)
                 .send()

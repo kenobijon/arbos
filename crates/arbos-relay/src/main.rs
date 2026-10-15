@@ -7,6 +7,7 @@ mod channels;
 mod connectors;
 mod daytona;
 mod db;
+mod migrate;
 mod proxy;
 mod rooms;
 mod routines;
@@ -49,7 +50,7 @@ struct Args {
     #[arg(
         long,
         env = "ARBOS_DAYTONA_SNAPSHOT",
-        default_value = "arbos-agent-0.1.5"
+        default_value = "arbos-agent-0.1.7"
     )]
     daytona_snapshot: String,
     /// Inline Dockerfile (e.g. image/Dockerfile.dev-inline) built by Daytona when the snapshot does not exist.
@@ -239,7 +240,19 @@ async fn main() -> anyhow::Result<()> {
         .route("/projects/{id}/start", post(api::start))
         .route("/projects/{id}/stop", post(api::stop))
         .route("/projects/{id}/keepalive", post(api::keepalive))
-        .route("/projects/{id}/box/hello", post(api::box_hello))
+        .route("/projects/{id}/workspace", post(api::set_workspace_state))
+        // One box per user: the box speaks for every project of its user.
+        .route("/machine", get(api::machine))
+        .route("/machine/start", post(api::machine_start))
+        .route("/machine/stop", post(api::machine_stop))
+        .route("/machine/migrate", post(api::machine_migrate))
+        .route(
+            "/admin/users/{id}/box",
+            axum::routing::put(api::admin_set_user_box),
+        )
+        .route("/box/hello", post(api::box_hello))
+        .route("/box/projects", get(api::box_projects))
+        .route("/box/keepalive", post(api::box_keepalive))
         .route("/projects/{id}/push", post(api::push))
         .route("/projects/{id}/pushes", get(api::take_pushes))
         .route("/projects/{id}/usage", get(api::usage))

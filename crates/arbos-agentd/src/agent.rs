@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, Mutex, Semaphore};
 
@@ -367,8 +367,10 @@ pub struct Agent {
     pub pi_ready: AtomicBool,
     pub ext_loaded: AtomicBool,
     turn_lock: Mutex<()>,
-    /// FIFO gate on concurrent subagent runs (`SUBAGENT_MAX_CONCURRENT`).
+    /// FIFO gate on concurrent subagent runs in this workspace (`SUBAGENT_MAX_CONCURRENT`).
     subagent_slots: Arc<Semaphore>,
+    /// Box-wide gate shared by every workspace (`workspace::BOX_MAX_SUBAGENTS`).
+    box_slots: Arc<Semaphore>,
     http: reqwest::Client,
     pub settings: crate::settings::Settings,
     /// Cached skills index (F5): shared + this Project's own, bodies included.
@@ -386,7 +388,12 @@ impl Agent {
         &self.http
     }
 
-    pub fn new(cfg: Arc<Config>, store: Store, sync: SyncHub) -> Arc<Self> {
+    pub fn new(
+        cfg: Arc<Config>,
+        store: Store,
+        sync: SyncHub,
+        box_slots: Arc<Semaphore>,
+    ) -> Arc<Self> {
         let cfg_for_settings = cfg.clone();
         let llm = Arc::new(Llm::new(&cfg));
         let memory = Arc::new(Memory::new(cfg.clone(), store.clone(), llm.clone()));
@@ -419,6 +426,7 @@ impl Agent {
             ext_loaded: AtomicBool::new(false),
             turn_lock: Mutex::new(()),
             subagent_slots: Arc::new(Semaphore::new(SUBAGENT_MAX_CONCURRENT)),
+            box_slots,
             http: reqwest::Client::new(),
             settings: crate::settings::Settings::new(&cfg_for_settings),
             skills: SkillsIndex::new(),
@@ -430,7 +438,12 @@ impl Agent {
     pub async fn refresh_skills(&self) {
         match self
             .skills
-            .refresh(&self.http, &self.cfg.relay_url, &self.cfg.box_token)
+            .refresh(
+                &self.http,
+                &self.cfg.relay_url,
+                &self.cfg.box_token,
+                &self.cfg.project_id,
+            )
             .await
         {
             Ok(n) => {
@@ -459,6 +472,12 @@ impl Agent {
     /// Router prompt (byte-stable, first) + project instructions + T0/T1 (design §6.9 layout).
     pub fn write_system_prompt(&self) -> Result<()> {
         let mut s = String::from(include_str!("../prompts/router.md"));
+        // One box, many workspaces (D70): the project's files live in its own folder, not /work.
+        s.push_str(&format!(
+            "\n\n## This project\n\nProject \"{}\". Its folder is `{}`: every file you create or read for this project goes there (relative paths resolve there; do not use `/work` itself, other folders under `/work` belong to other projects).\n",
+            self.cfg.project_name,
+            self.cfg.work_dir.display()
+        ));
         if !self.cfg.instructions.trim().is_empty() {
             s.push_str("\n\n## Project instructions\n\n");
             s.push_str(self.cfg.instructions.trim());
@@ -1398,10 +1417,7 @@ impl Agent {
 
     pub async fn keepalive(&self, turn_running: bool) -> Result<()> {
         self.http
-            .post(format!(
-                "{}/projects/{}/keepalive",
-                self.cfg.relay_url, self.cfg.project_id
-            ))
+            .post(format!("{}/box/keepalive", self.cfg.relay_url))
             .bearer_auth(&self.cfg.box_token)
             .json(&json!({ "turn_running": turn_running }))
             .send()
@@ -1987,6 +2003,10 @@ impl Agent {
     fn build_pack(&self, name: &str, purpose: &str, brief: &str, data_heavy: bool) -> String {
         let mut s = String::new();
         s.push_str(&format!("# Task: {name}\n\n{purpose}\n\n{brief}\n\n"));
+        s.push_str(&format!(
+            "## Project folder\n\n`{}` (your working directory). Keep every file of this project there; other folders under `/work` belong to other projects.\n\n",
+            self.cfg.work_dir.display()
+        ));
         if !self.cfg.instructions.trim().is_empty() {
             s.push_str(&format!(
                 "## Project instructions\n\n{}\n\n",
@@ -2124,6 +2144,12 @@ impl Agent {
             .acquire_owned()
             .await
             .map_err(|_| anyhow!("subagent slots closed"))?;
+        let _box_slot = self
+            .box_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| anyhow!("box subagent slots closed"))?;
         let queued_ms = queued_at.elapsed().as_millis() as i64;
         if queued_ms > 500 {
             let _ = self
@@ -2157,6 +2183,7 @@ impl Agent {
             Some(&json!({ "chat_id": chat_id, "pack": "pack-v0" })),
         );
 
+        let mut resumed_fresh = false;
         if is_new {
             adapter
                 .start(StartRequest {
@@ -2175,24 +2202,93 @@ impl Agent {
                 )
                 .await;
         } else if !adapter.is_open(&subagent_id) {
-            adapter.resume(&subagent_id).await?;
-            let _ = self
-                .post_timing(
-                    "subagent_resume_ms",
-                    t0.elapsed().as_millis() as i64,
-                    Some(harness.as_str()),
-                )
-                .await;
+            match adapter.resume(&subagent_id).await {
+                Ok(()) => {
+                    let _ = self
+                        .post_timing(
+                            "subagent_resume_ms",
+                            t0.elapsed().as_millis() as i64,
+                            Some(harness.as_str()),
+                        )
+                        .await;
+                }
+                Err(e) => {
+                    // A session that cannot come back (moved box, corrupt store, harness upgrade)
+                    // must not sink the hand-off: start the same subagent fresh with its summary.
+                    tracing::warn!(subagent = %subagent_id, error = %e, "resume failed; starting the subagent fresh");
+                    resumed_fresh = true;
+                    adapter
+                        .start(StartRequest {
+                            session_id: subagent_id.clone(),
+                            cwd: self.cfg.work_dir.clone(),
+                            system_prompt: pack.clone(),
+                            model: subagent_model.clone(),
+                            thinking: "medium".into(),
+                        })
+                        .await
+                        .with_context(|| format!("resume failed ({e}); fresh start failed too"))?;
+                }
+            }
         }
-        let mut stream = adapter
+        let stream = adapter
             .stream(&subagent_id)
             .ok_or_else(|| anyhow!("no stream for {subagent_id}"))?;
         let first_prompt = if is_new {
             brief.to_owned()
+        } else if resumed_fresh {
+            let summary = self
+                .store
+                .subagent(&subagent_id)
+                .ok()
+                .flatten()
+                .map(|r| r.summary)
+                .unwrap_or_default();
+            format!(
+                "Your previous session could not be resumed, so this is a fresh session for the same thread. What you had done before: {}\n\nContinue:\n\n{brief}",
+                if summary.trim().is_empty() { "(no summary recorded)" } else { summary.trim() }
+            )
         } else {
             format!("Context update: continue your thread.\n\n{brief}")
         };
-        adapter.prompt(&subagent_id, &first_prompt).await?;
+        let mut stream = match adapter.prompt(&subagent_id, &first_prompt).await {
+            Ok(()) => stream,
+            Err(e) if !is_new && !resumed_fresh => {
+                // The resumed child died on first contact (broken pipe): same fallback as above.
+                tracing::warn!(subagent = %subagent_id, error = %e, "resumed session failed on prompt; starting fresh");
+                let _ = adapter.stop(&subagent_id).await;
+                adapter
+                    .start(StartRequest {
+                        session_id: subagent_id.clone(),
+                        cwd: self.cfg.work_dir.clone(),
+                        system_prompt: pack.clone(),
+                        model: subagent_model.clone(),
+                        thinking: "medium".into(),
+                    })
+                    .await
+                    .with_context(|| format!("prompt failed ({e}); fresh start failed too"))?;
+                let fresh = adapter
+                    .stream(&subagent_id)
+                    .ok_or_else(|| anyhow!("no stream for {subagent_id}"))?;
+                let summary = self
+                    .store
+                    .subagent(&subagent_id)
+                    .ok()
+                    .flatten()
+                    .map(|r| r.summary)
+                    .unwrap_or_default();
+                adapter
+                    .prompt(
+                        &subagent_id,
+                        &format!(
+                            "Your previous session could not be resumed, so this is a fresh session for the same thread. What you had done before: {}\n\nContinue:\n\n{brief}",
+                            if summary.trim().is_empty() { "(no summary recorded)" } else { summary.trim() }
+                        ),
+                    )
+                    .await?;
+                fresh
+            }
+            Err(e) => return Err(e),
+        };
 
         self.subagent_turns.fetch_add(1, Ordering::SeqCst);
         let keepalive = self.spawn_keepalive();
@@ -2450,6 +2546,7 @@ impl Agent {
                 let _ = me.write_system_prompt();
             });
         }
+        drop(_box_slot);
         drop(_slot);
         // The user hears about it from the main agent, in prose, in this chat.
         let result_text = match &contract {

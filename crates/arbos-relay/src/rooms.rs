@@ -27,7 +27,7 @@ pub async fn ws_room(
     principal: Principal,
     Path((project_id, chat_id)): Path<(String, String)>,
 ) -> Response {
-    if !principal.can_access_project(&project_id) {
+    if !state.allows(&principal, &project_id) {
         return (StatusCode::FORBIDDEN, "not your project").into_response();
     }
     if state.db.project(&project_id).ok().flatten().is_none() {
@@ -68,8 +68,10 @@ async fn run(
     let (mut sink, mut stream) = socket.split();
     let mut device = principal.device_name();
     let is_box = principal.is_box();
+    // Box sockets count per user box (one box serves every project of the user).
+    let box_user = principal.user_id().map(str::to_owned).unwrap_or_default();
     if is_box {
-        boxes::box_connected(&state, &project_id).await;
+        boxes::box_connected(&state, &box_user).await;
     }
     tracing::debug!(%room_name, %device, conn_id, "room join");
 
@@ -112,7 +114,7 @@ async fn run(
     }
     tracing::debug!(%room_name, %device, conn_id, "room leave");
     if is_box {
-        boxes::box_disconnected(&state, &project_id).await;
+        boxes::box_disconnected(&state, &box_user).await;
     }
 }
 
@@ -202,12 +204,14 @@ async fn handle_frame(
                 });
                 if !is_box {
                     // Wake obligation: a client row for a sleeping box (crdt-sync §8.4 step 1–2).
-                    state
-                        .last_client_push
-                        .lock()
-                        .await
-                        .insert(project_id.to_owned(), arbos_core::ids::now_ms());
-                    boxes::ensure_awake(state, project_id, "send").await;
+                    if let Some(u) = state.user_of(project_id) {
+                        state
+                            .last_client_push
+                            .lock()
+                            .await
+                            .insert(u, arbos_core::ids::now_ms());
+                    }
+                    boxes::ensure_awake_project(state, project_id, "send").await;
                 }
             }
         }
@@ -232,8 +236,8 @@ async fn handle_frame(
                 serde_json::from_value(f.header).unwrap_or(wire::WakeHeader {
                     reason: "open".into(),
                 });
-            boxes::ensure_awake(state, project_id, &w.reason).await;
-            let (st, since) = state.box_state(project_id).await;
+            boxes::ensure_awake_project(state, project_id, &w.reason).await;
+            let (st, since) = state.project_box_state(project_id).await;
             sink.send(frame(
                 FrameType::Status,
                 json!({ "box": st, "since": since }),
@@ -261,7 +265,7 @@ async fn send_state(
     sink: &mut futures::stream::SplitSink<WebSocket, Message>,
 ) -> anyhow::Result<()> {
     let st = state.db.room_state(room_name)?;
-    let (box_state, _) = state.box_state(project_id).await;
+    let (box_state, _) = state.project_box_state(project_id).await;
     let header = wire::State {
         head_seq: st.head,
         seq_floor: st.floor,
@@ -286,7 +290,7 @@ pub async fn get_checkpoint(
     principal: Principal,
     Path((project_id, chat_id)): Path<(String, String)>,
 ) -> Response {
-    if !principal.can_access_project(&project_id) {
+    if !state.allows(&principal, &project_id) {
         return StatusCode::FORBIDDEN.into_response();
     }
     let room_name = wire::room_name(&project_id, &chat_id);
@@ -308,7 +312,7 @@ pub async fn post_checkpoint(
     headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !principal.can_access_project(&project_id)
+    if !state.allows(&principal, &project_id)
         || !matches!(principal, Principal::Box { .. } | Principal::Admin)
     {
         return (StatusCode::FORBIDDEN, "box only").into_response();
@@ -339,7 +343,7 @@ pub async fn room_stats(
     principal: Principal,
     Path((project_id, chat_id)): Path<(String, String)>,
 ) -> Response {
-    if !principal.can_access_project(&project_id) {
+    if !state.allows(&principal, &project_id) {
         return StatusCode::FORBIDDEN.into_response();
     }
     let room_name = wire::room_name(&project_id, &chat_id);

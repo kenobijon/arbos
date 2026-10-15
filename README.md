@@ -74,7 +74,7 @@ Relay environment (all optional unless noted):
 | `OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | provider keys for the model proxy (never reach a box) |
 | `ARBOS_OPENAI_BASE`, `ARBOS_ANTHROPIC_BASE` | upstreams, default OpenRouter |
 | `DAYTONA_API_KEY`, `DAYTONA_API_URL`, `DAYTONA_ORG_ID` | Daytona access; without a key new projects get `process` boxes |
-| `ARBOS_DAYTONA_SNAPSHOT` | snapshot for new boxes, default `arbos-agent-0.1.5` |
+| `ARBOS_DAYTONA_SNAPSHOT` | snapshot for new boxes, default `arbos-agent-0.1.7` |
 | `ARBOS_DAYTONA_DOCKERFILE`, `ARBOS_BOOTSTRAP_DIR` | dev-image path (see below) |
 | `ARBOS_AGENTD_BIN`, `ARBOS_PI_BIN`, `ARBOS_PI_EXT`, `ARBOS_PRIME_BIN`, `ARBOS_DEFAULT_HARNESS` | process-box binaries and default subagent harness |
 | `RUST_LOG` | e.g. `info,arbos_relay=debug` |
@@ -95,7 +95,7 @@ The named tunnel is the Cloudflare Zero Trust tunnel `arbos-relay` (remotely man
 
 ## Run on Daytona
 
-With `DAYTONA_API_KEY` set, `project create` (without `--local-box`) creates a real sandbox from the snapshot named by `ARBOS_DAYTONA_SNAPSHOT` (default `arbos-agent-0.1.5`, the current registered build). The relay must be reachable from the box (`ARBOS_RELAY_PUBLIC_URL`). If no production snapshot is registered yet, point the relay at the dev image instead:
+With `DAYTONA_API_KEY` set, `project create` (without `--local-box`) creates a real sandbox from the snapshot named by `ARBOS_DAYTONA_SNAPSHOT` (default `arbos-agent-0.1.7`, the current registered build). The relay must be reachable from the box (`ARBOS_RELAY_PUBLIC_URL`). If no production snapshot is registered yet, point the relay at the dev image instead:
 
 ```bash
 export DAYTONA_API_KEY=… ARBOS_RELAY_PUBLIC_URL=https://<public-url-of-this-relay> \
@@ -185,7 +185,7 @@ cargo run -p arbosctl -- audit demo                                  # approval_
 
 ## Image
 
-`.github/workflows/image.yml` builds `image/Dockerfile` on an image tag (`image-v0.1.5`) or by hand, pushes it to GHCR, smoke-tests it, and registers the Daytona snapshot `arbos-agent-<version>` with `image/register-snapshot.sh` (secrets `DAYTONA_API_KEY`, `GHCR_READ_TOKEN`).
+`.github/workflows/image.yml` builds `image/Dockerfile` on an image tag (`image-v0.1.7`) or by hand, pushes it to GHCR, smoke-tests it, and registers the Daytona snapshot `arbos-agent-<version>` with `image/register-snapshot.sh` (secrets `DAYTONA_API_KEY`, `GHCR_READ_TOKEN`).
 
 Without CI (unpublished repo) the same build runs on any Docker host, including a Daytona Docker-in-Docker sandbox (`FROM docker:27-dind`, start `dockerd-entrypoint.sh`, upload the build context over SSH), then goes to Daytona's transient registry:
 
@@ -193,10 +193,10 @@ Without CI (unpublished repo) the same build runs on any Docker host, including 
 # static agentd for the image
 CC_x86_64_unknown_linux_musl=musl-gcc cargo build --release -p arbos-agentd --target x86_64-unknown-linux-musl
 mkdir -p dist && cp target/x86_64-unknown-linux-musl/release/arbos-agentd dist/
-docker build --platform linux/amd64 -f image/Dockerfile -t arbos-agent:0.1.5 .
-# temporary push credentials: GET $DAYTONA_API_URL/docker-registry/registry-push-access?snapshotName=arbos-agent-0.1.5
-docker tag arbos-agent:0.1.5 cr.app.daytona.io/<project>/arbos-agent:0.1.5 && docker push cr.app.daytona.io/<project>/arbos-agent:0.1.5
-image/register-snapshot.sh arbos-agent-0.1.5 cr.app.daytona.io/<project>/arbos-agent:0.1.5
+docker build --platform linux/amd64 -f image/Dockerfile -t arbos-agent:0.1.7 .
+# temporary push credentials: GET $DAYTONA_API_URL/docker-registry/registry-push-access?snapshotName=arbos-agent-0.1.7
+docker tag arbos-agent:0.1.7 cr.app.daytona.io/<project>/arbos-agent:0.1.7 && docker push cr.app.daytona.io/<project>/arbos-agent:0.1.7
+image/register-snapshot.sh arbos-agent-0.1.7 cr.app.daytona.io/<project>/arbos-agent:0.1.7
 ```
 
 Transient-registry tags are immutable: bump the version for every rebuild. The Arbos layers are last in the Dockerfile, so a code change rebuilds in seconds against the cached toolchain layers.

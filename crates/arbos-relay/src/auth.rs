@@ -1,4 +1,5 @@
-//! Bearer-token principals (D35): paired devices, boxes (one project each), the admin token.
+//! Bearer-token principals (D35): paired devices (each belongs to a user), boxes (one per user,
+//! serving every project of that user), the admin token.
 
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
@@ -10,8 +11,14 @@ use crate::state::AppState;
 
 #[derive(Debug, Clone)]
 pub enum Principal {
-    Device { id: String, token: String },
-    Box { project_id: String },
+    Device {
+        id: String,
+        token: String,
+        user_id: String,
+    },
+    Box {
+        user_id: String,
+    },
     Admin,
 }
 
@@ -19,15 +26,27 @@ impl Principal {
     pub fn device_name(&self) -> String {
         match self {
             Principal::Device { id, .. } => format!("dev:{id}"),
-            Principal::Box { project_id } => format!("box:{project_id}"),
+            Principal::Box { user_id } => format!("box:{user_id}"),
             Principal::Admin => "admin".to_owned(),
         }
     }
 
-    pub fn can_access_project(&self, project_id: &str) -> bool {
+    /// A project is reachable by the admin, by every device of its user, and by its user's box.
+    /// (Devices of other users are refused once more than one user exists on a relay.)
+    pub fn can_access_project(&self, project_user_id: &str) -> bool {
         match self {
-            Principal::Device { .. } | Principal::Admin => true,
-            Principal::Box { project_id: p } => p == project_id,
+            Principal::Admin => true,
+            Principal::Device { user_id, .. } | Principal::Box { user_id } => {
+                user_id == project_user_id
+            }
+        }
+    }
+
+    /// The user this principal acts for (devices and boxes); the admin has none.
+    pub fn user_id(&self) -> Option<&str> {
+        match self {
+            Principal::Device { user_id, .. } | Principal::Box { user_id } => Some(user_id),
+            Principal::Admin => None,
         }
     }
 
@@ -56,14 +75,21 @@ pub fn resolve(state: &AppState, token: &str) -> Option<Principal> {
     }
     let h = hash(token);
     if let Ok(Some(id)) = state.db.device_by_token_hash(&h) {
+        let user_id = state
+            .db
+            .device_user(&id)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "u_default".to_owned());
         return Some(Principal::Device {
             id,
             token: token.to_owned(),
+            user_id,
         });
     }
-    if let Ok(Some(project_id)) = state.db.project_by_box_token_hash(&h) {
-        let _ = state.db.touch_sandbox(&project_id);
-        return Some(Principal::Box { project_id });
+    if let Ok(Some(user_id)) = state.db.user_by_box_token_hash(&h) {
+        let _ = state.db.touch_box(&user_id);
+        return Some(Principal::Box { user_id });
     }
     None
 }

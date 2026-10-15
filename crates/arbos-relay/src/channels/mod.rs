@@ -771,6 +771,8 @@ mod tests {
             last_active_at: 0,
             spend_cap_daily: 25.0,
             color: "#000".into(),
+            user_id: "u_default".into(),
+            workspace_state: "stopped".into(),
         };
         state.db.insert_project(&project).unwrap();
         state

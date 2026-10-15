@@ -28,7 +28,7 @@ pub async fn put(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !principal.can_access_project(&project_id) {
+    if !state.allows(&principal, &project_id) {
         return StatusCode::FORBIDDEN.into_response();
     }
     if !safe_key(&key) || !safe_key(&project_id) {
@@ -56,7 +56,7 @@ pub async fn get(
     principal: Principal,
     Path((project_id, key)): Path<(String, String)>,
 ) -> Response {
-    if !principal.can_access_project(&project_id) {
+    if !state.allows(&principal, &project_id) {
         return StatusCode::FORBIDDEN.into_response();
     }
     if !safe_key(&key) || !safe_key(&project_id) {

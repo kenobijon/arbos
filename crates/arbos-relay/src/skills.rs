@@ -3,7 +3,7 @@
 //! skills it learned (`skills_save`), which land as that Project's own.
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
@@ -21,29 +21,44 @@ fn internal(e: impl std::fmt::Display) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
 }
 
-/// What a principal may see: everything for devices, shared + own for a box.
-fn visible_to(principal: &Principal) -> Option<String> {
+/// The project a box call is for. One box serves every project of its user (D70), so the
+/// per-workspace client names the project in `X-Arbos-Project`; it must belong to the box's user.
+fn box_project(state: &AppState, principal: &Principal, headers: &HeaderMap) -> Option<String> {
+    let Principal::Box { user_id } = principal else {
+        return None;
+    };
+    let id = headers
+        .get("x-arbos-project")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())?;
+    let p = state.db.project(id).ok().flatten()?;
+    (p.user_id == *user_id).then_some(p.id)
+}
+
+/// What a principal may see: everything for devices, shared + own for a box (scoped to the
+/// workspace named in the request; a box without a project header sees shared skills only).
+fn visible_to(state: &AppState, principal: &Principal, headers: &HeaderMap) -> Option<String> {
     match principal {
         Principal::Device { .. } | Principal::Admin => None,
-        Principal::Box { project_id } => Some(project_id.clone()),
-    }
-}
-
-fn can_see(principal: &Principal, s: &Skill) -> bool {
-    match principal {
-        Principal::Device { .. } | Principal::Admin => true,
-        Principal::Box { project_id } => {
-            s.shared || s.origin_project_id.as_deref() == Some(project_id.as_str())
+        Principal::Box { .. } => {
+            Some(box_project(state, principal, headers).unwrap_or_else(|| "-".to_owned()))
         }
     }
 }
 
-fn can_edit(principal: &Principal, s: &Skill) -> bool {
+fn can_see(scope: Option<&str>, principal: &Principal, s: &Skill) -> bool {
     match principal {
         Principal::Device { .. } | Principal::Admin => true,
-        Principal::Box { project_id } => {
-            s.origin_project_id.as_deref() == Some(project_id.as_str())
+        Principal::Box { .. } => {
+            s.shared || (scope.is_some() && s.origin_project_id.as_deref() == scope)
         }
+    }
+}
+
+fn can_edit(scope: Option<&str>, principal: &Principal, s: &Skill) -> bool {
+    match principal {
+        Principal::Device { .. } | Principal::Admin => true,
+        Principal::Box { .. } => scope.is_some() && s.origin_project_id.as_deref() == scope,
     }
 }
 
@@ -158,9 +173,10 @@ fn notify_boxes(state: &AppState, slug: &str) {
 pub async fn list(
     State(state): State<AppState>,
     principal: Principal,
+    headers: HeaderMap,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> ApiResult {
-    let vis = visible_to(&principal);
+    let vis = visible_to(&state, &principal, &headers);
     let rows = match q.get("q").map(|s| s.trim()).filter(|s| !s.is_empty()) {
         Some(query) => state
             .db
@@ -172,8 +188,12 @@ pub async fn list(
 }
 
 /// `GET /skills/index` (box): the lean view the relevance selector caches, plus a change marker.
-pub async fn index(State(state): State<AppState>, principal: Principal) -> ApiResult {
-    let vis = visible_to(&principal);
+pub async fn index(
+    State(state): State<AppState>,
+    principal: Principal,
+    headers: HeaderMap,
+) -> ApiResult {
+    let vis = visible_to(&state, &principal, &headers);
     let rows = state.db.list_skills(vis.as_deref()).map_err(internal)?;
     let rev = state.db.skills_rev(vis.as_deref()).map_err(internal)?;
     Ok(Json(json!({
@@ -186,14 +206,16 @@ pub async fn index(State(state): State<AppState>, principal: Principal) -> ApiRe
 pub async fn get(
     State(state): State<AppState>,
     principal: Principal,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult {
+    let scope = box_project(&state, &principal, &headers);
     let s = state
         .db
         .skill(&id)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "no such skill".to_owned()))?;
-    if !can_see(&principal, &s) {
+    if !can_see(scope.as_deref(), &principal, &s) {
         return Err((StatusCode::FORBIDDEN, "not visible to this box".into()));
     }
     Ok(Json(skill_json(&s)).into_response())
@@ -204,11 +226,13 @@ pub async fn get(
 pub async fn create(
     State(state): State<AppState>,
     principal: Principal,
+    headers: HeaderMap,
     Json(b): Json<SkillBody>,
 ) -> ApiResult {
     let now = now_ms();
+    let scope = box_project(&state, &principal, &headers);
     let origin = match &principal {
-        Principal::Box { project_id } => Some(project_id.clone()),
+        Principal::Box { .. } => scope.clone(),
         Principal::Device { .. } | Principal::Admin => b.origin_project_id.clone(),
     };
     let base = Skill {
@@ -224,7 +248,7 @@ pub async fn create(
         return Err((StatusCode::BAD_REQUEST, "name required".into()));
     }
     if let Some(existing) = state.db.skill(&s.slug).map_err(internal)? {
-        if principal.is_box() && can_edit(&principal, &existing) {
+        if principal.is_box() && can_edit(scope.as_deref(), &principal, &existing) {
             let merged = Skill {
                 id: existing.id.clone(),
                 origin_project_id: existing.origin_project_id.clone(),
@@ -254,15 +278,17 @@ pub async fn create(
 pub async fn update(
     State(state): State<AppState>,
     principal: Principal,
+    headers: HeaderMap,
     Path(id): Path<String>,
     Json(b): Json<SkillBody>,
 ) -> ApiResult {
+    let scope = box_project(&state, &principal, &headers);
     let existing = state
         .db
         .skill(&id)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "no such skill".to_owned()))?;
-    if !can_edit(&principal, &existing) {
+    if !can_edit(scope.as_deref(), &principal, &existing) {
         return Err((StatusCode::FORBIDDEN, "not this box's skill".into()));
     }
     let next = b.apply(existing.clone());

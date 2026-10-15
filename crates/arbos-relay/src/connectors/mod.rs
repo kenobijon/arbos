@@ -866,8 +866,16 @@ mod tests {
             last_active_at: 0,
             spend_cap_daily: 25.0,
             color: "#000".into(),
+            user_id: "u_default".into(),
+            workspace_state: "stopped".into(),
         };
-        let env = crate::boxes::box_env(&state, &project, "abx_box", "amc_mcp", "http://relay");
+        let env = crate::boxes::box_env(
+            &state,
+            &project.user_id,
+            "abx_box",
+            "amc_mcp",
+            "http://relay",
+        );
         for (k, v) in &env {
             assert!(
                 !v.contains(secret) && !v.contains(refresh),

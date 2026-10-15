@@ -15,21 +15,16 @@ mod settings;
 mod skills;
 mod store;
 mod sync;
+mod workspace;
 
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
-use tokio::sync::mpsc;
 
-use arbos_core::wire::PROJECT_DOC_CHAT_ID;
-
-use crate::agent::Agent;
-use crate::config::Config;
-use crate::store::Store;
-use crate::sync::{Incoming, SyncHub};
+use crate::config::BoxConfig;
+use crate::workspace::Supervisor;
 
 #[derive(Parser, Debug)]
 #[command(name = "arbos-agentd", version, about = "Arbos box entrypoint")]
@@ -58,10 +53,10 @@ async fn main() -> Result<()> {
     match args.cmd {
         Cmd::Boot => boot().await,
         Cmd::Config => {
-            let cfg = Config::from_env()?;
+            let cfg = BoxConfig::from_env()?;
             println!(
                 "{}",
-                json!({ "project_id": cfg.project_id, "relay_url": cfg.relay_url, "state_dir": cfg.state_dir, "work_dir": cfg.work_dir, "port": cfg.port, "mcp": cfg.mcp_url(), "hook": cfg.hook_base(), "proxy": cfg.proxy_base(), "box_token": mask(&cfg.box_token), "mcp_token": mask(&cfg.mcp_token), "talking_model": cfg.talking_model, "subagent_model": cfg.subagent_model })
+                json!({ "user_id": cfg.user_id, "relay_url": cfg.relay_url, "work_root": cfg.work_root, "port": cfg.port, "local_box": cfg.local_box, "box_token": mask(&cfg.box_token), "mcp_token": mask(&cfg.mcp_token), "default_talking_model": cfg.default_talking_model, "default_subagent_model": cfg.default_subagent_model, "legacy_project_id": cfg.legacy_project_id })
             );
             Ok(())
         }
@@ -76,117 +71,15 @@ fn mask(s: &str) -> String {
     }
 }
 
-/// First-boot seeding (sandbox-image.md §4 step 5): pi seed → state dir, AGENTS.md, mcp.json.
-fn seed_state(cfg: &Config) -> Result<()> {
-    std::fs::create_dir_all(&cfg.state_dir)?;
-    std::fs::create_dir_all(cfg.pi_dir())?;
-    std::fs::create_dir_all(cfg.pi_sessions_dir())?;
-    std::fs::create_dir_all(cfg.blobs_dir())?;
-    std::fs::create_dir_all(cfg.state_dir.join("logs"))?;
-    std::fs::create_dir_all(cfg.prime_dir())?;
-    std::fs::create_dir_all(&cfg.work_dir)?;
-    let seed = std::path::Path::new("/etc/arbos/pi-seed");
-    if seed.exists() {
-        copy_dir(seed, &cfg.pi_dir())?;
-    }
-    let claude_seed = std::path::Path::new("/etc/arbos/claude-seed/settings.json");
-    let claude_dir = cfg.state_dir.join("claude");
-    if claude_seed.exists() && !claude_dir.join("settings.json").exists() {
-        std::fs::create_dir_all(&claude_dir)?;
-        std::fs::copy(claude_seed, claude_dir.join("settings.json"))?;
-    }
-    // models.json: the relay proxy as provider `arbos-relay` through the loopback stub (D2).
-    // The built-in `openrouter` provider pointed at the loopback stub keeps pi's OpenRouter behaviour
-    // (cache_control breakpoints for Anthropic models, usage accounting) while the key stays on the relay.
-    let models = json!({
-        "providers": {
-            "openrouter": { "baseUrl": format!("{}/v1", cfg.proxy_base()), "apiKey": cfg.box_token },
-            "arbos-relay": {
-                "baseUrl": format!("{}/v1", cfg.proxy_base()),
-                "api": "openai-completions",
-                "apiKey": cfg.box_token,
-                "models": [
-                    { "id": cfg.talking_model, "name": format!("{} (relay)", cfg.talking_model), "reasoning": false, "input": ["text", "image"], "contextWindow": 1000000, "maxTokens": 32000, "cost": { "input": 0.1, "output": 0.5, "cacheRead": 0.01, "cacheWrite": 0.125 } },
-                    { "id": cfg.subagent_model, "name": format!("{} (relay)", cfg.subagent_model), "reasoning": true, "input": ["text", "image"], "contextWindow": 1000000, "maxTokens": 64000, "cost": { "input": 2, "output": 10, "cacheRead": 0.2, "cacheWrite": 2.5 } }
-                ]
-            }
-        }
-    });
-    std::fs::write(
-        cfg.pi_dir().join("models.json"),
-        serde_json::to_string_pretty(&models)?,
-    )?;
-    std::fs::write(
-        cfg.prime_dir().join("models.json"),
-        serde_json::to_string_pretty(&models)?,
-    )?;
-    let settings = json!({
-        "defaultProvider": cfg.pi_provider(), "defaultModel": cfg.talking_model, "defaultThinkingLevel": "off",
-        "defaultTools": ["read", "bash", "edit", "write", "codemode"],
-        "compaction": { "enabled": true, "reserveTokens": 16384, "keepRecentTokens": 20000 },
-        "hideThinkingBlock": true
-    });
-    std::fs::write(
-        cfg.pi_dir().join("settings.json"),
-        serde_json::to_string_pretty(&settings)?,
-    )?;
-    // Project tools reach the main agent through codemode only: 14 direct schemas cost ~4k prefix tokens (D68).
-    // `timeout` (seconds; pi default 60) covers gated tools blocked on an approval card inline.
-    let mcp = json!({ "mcpServers": { "arbos": { "url": cfg.mcp_url(), "headers": { "Authorization": format!("Bearer {}", cfg.mcp_token) }, "exposure": "codemode", "timeout": 900 } } });
-    std::fs::write(
-        cfg.pi_dir().join("mcp.json"),
-        serde_json::to_string_pretty(&mcp)?,
-    )?;
-    let prime_settings_path = cfg.prime_dir().join("settings.json");
-    let mut prime_settings: Value = std::fs::read_to_string(&prime_settings_path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or(json!({}));
-    // Same shape `prime-agent mcp add arbos --url … --bearer-token-env-var ARBOS_MCP_TOKEN` writes.
-    prime_settings["mcpServers"] = json!({ "arbos": { "type": "http", "url": cfg.mcp_url(), "bearer_token_env_var": "ARBOS_MCP_TOKEN", "bearerTokenEnvVar": "ARBOS_MCP_TOKEN" } });
-    std::fs::write(
-        &prime_settings_path,
-        serde_json::to_string_pretty(&prime_settings)?,
-    )?;
-    let agents_md = cfg.work_dir.join("AGENTS.md");
-    if !agents_md.exists() {
-        let src = std::path::Path::new("/etc/arbos/AGENTS.md");
-        if src.exists() {
-            std::fs::copy(src, &agents_md)?;
-        } else {
-            std::fs::write(&agents_md, include_str!("../../../image/AGENTS.md"))?;
-        }
-    }
-    if !cfg.work_dir.join(".git").exists() {
-        let _ = std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(&cfg.work_dir)
-            .status();
-    }
-    Ok(())
-}
-
-fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for e in std::fs::read_dir(src)? {
-        let e = e?;
-        let p = e.path();
-        let target = dst.join(e.file_name());
-        if p.is_dir() {
-            copy_dir(&p, &target)?;
-        } else if !target.exists() {
-            std::fs::copy(&p, &target)?;
-        }
-    }
-    Ok(())
-}
-
 /// The relay URL baked into the sandbox env goes stale when the relay's public URL changes (quick
 /// tunnels change on every restart). The relay writes the current URL to `<state>/relay-url` at
 /// every wake; agentd prefers a reachable file URL over the env, and keeps re-reading the file
 /// until one of the candidates answers `/healthz`. Returns the URL that answered.
 async fn resolve_relay_url() -> String {
-    let state_dir = std::env::var("ARBOS_STATE_DIR").unwrap_or_else(|_| "/work/.arbos".into());
+    let state_dir = format!(
+        "{}/.arbos",
+        std::env::var("ARBOS_WORK_DIR").unwrap_or_else(|_| "/work".into())
+    );
     let file = std::path::Path::new(&state_dir).join("relay-url");
     let env_url = std::env::var("ARBOS_RELAY_URL")
         .ok()
@@ -243,265 +136,102 @@ async fn boot() -> Result<()> {
     let relay_url = resolve_relay_url().await;
     // Config reads the env; the resolved URL wins over whatever the sandbox was created with.
     std::env::set_var("ARBOS_RELAY_URL", &relay_url);
-    let cfg = Arc::new(Config::from_env()?);
-    seed_state(&cfg)?;
-    let store = Store::open(&cfg.state_dir.join("agentd").join("agentd.db"))?;
-    let (tx, mut rx) = mpsc::channel::<Incoming>(1024);
-    let sync = SyncHub::new(cfg.clone(), store.clone(), tx);
-    let agent = Agent::new(cfg.clone(), store.clone(), sync.clone());
+    let cfg = BoxConfig::from_env()?;
+    std::fs::create_dir_all(cfg.box_state_dir().join("logs"))?;
+    let sup = Supervisor::new(cfg.clone());
 
-    // Loopback servers first, so pi's extension can reach the hook API as soon as it loads.
-    let hook_app = hooks::router(agent.clone());
-    let mcp_app = mcp::router(agent.clone());
-    let stub_app = http::stub_router(agent.clone());
-    let main_app = http::router(agent.clone());
-    let hook_l = tokio::net::TcpListener::bind(("127.0.0.1", cfg.hook_port))
-        .await
-        .context("bind hook port")?;
-    let mcp_l = tokio::net::TcpListener::bind(("127.0.0.1", cfg.mcp_port))
-        .await
-        .context("bind mcp port")?;
-    let stub_l = tokio::net::TcpListener::bind(("127.0.0.1", cfg.proxy_port))
-        .await
-        .context("bind proxy stub port")?;
+    // Box HTTP (health, per-workspace history/metrics, browser stream) first: the relay's preview
+    // URL and the stale-box detector look here.
     let main_l = tokio::net::TcpListener::bind(format!("{}:{}", cfg.bind, cfg.port))
         .await
         .context("bind main port")?;
-    tokio::spawn(async move { axum::serve(hook_l, hook_app).await.ok() });
-    tokio::spawn(async move { axum::serve(mcp_l, mcp_app).await.ok() });
-    tokio::spawn(async move { axum::serve(stub_l, stub_app).await.ok() });
+    let main_app = http::box_router(sup.clone());
     tokio::spawn(async move { axum::serve(main_l, main_app).await.ok() });
 
-    // Hello to the relay: settings, chats, queued pushes.
-    let http = reqwest::Client::new();
-    let hello = http
-        .post(format!("{}/projects/{}/box/hello", cfg.relay_url, cfg.project_id))
-        .bearer_auth(&cfg.box_token)
-        .json(&json!({ "url": format!("http://127.0.0.1:{}", cfg.port), "version": env!("CARGO_PKG_VERSION"), "proto": arbos_core::PROTO_VERSION }))
-        .send()
-        .await;
-    let mut chats: Vec<Value> = Vec::new();
-    // Pushes queued while the box slept (routine runs, cross-project messages): dispatched once
-    // the rooms are open and pi is up.
-    let mut boot_pushes: Vec<Value> = Vec::new();
-    match hello {
-        Ok(r) if r.status().is_success() => {
-            let v: Value = r.json().await.unwrap_or_default();
-            chats = v
-                .get("chats")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            boot_pushes = v
-                .get("pushes")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
+    // Hello: one box per user; the answer lists every project as a workspace.
+    let http_client = reqwest::Client::new();
+    let listing = loop {
+        let hello = http_client
+            .post(format!("{}/box/hello", cfg.relay_url))
+            .bearer_auth(&cfg.box_token)
+            .json(&json!({ "url": format!("http://127.0.0.1:{}", cfg.port), "version": env!("CARGO_PKG_VERSION"), "proto": arbos_core::PROTO_VERSION }))
+            .send()
+            .await;
+        match hello {
+            Ok(r) if r.status().is_success() => break r.json::<Value>().await.unwrap_or_default(),
+            Ok(r) if r.status() == reqwest::StatusCode::CONFLICT => {
+                anyhow::bail!(
+                    "relay refused this agentd: {}",
+                    r.text().await.unwrap_or_default()
+                )
+            }
+            Ok(r) => tracing::warn!(status = %r.status(), "box hello refused; retrying"),
+            Err(e) => tracing::warn!(error = %e, "box hello failed; retrying"),
         }
-        Ok(r) => tracing::warn!(status = %r.status(), "box hello refused"),
-        Err(e) => tracing::warn!(error = %e, "box hello failed"),
-    }
-    for c in &chats {
-        if let (Some(id), Some(title)) = (
-            c.get("id").and_then(Value::as_str),
-            c.get("title").and_then(Value::as_str),
-        ) {
-            let _ = store.upsert_chat(
-                id,
-                title,
-                c.get("is_pinned").and_then(Value::as_bool).unwrap_or(false),
-                c.get("created_at").and_then(Value::as_i64).unwrap_or(0),
-            );
-        }
-    }
-    let known: Vec<String> = store.chats()?.into_iter().map(|c| c.id).collect();
-    let initial_chat = known
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "default".to_owned());
-
-    // Rooms: project doc + every chat.
-    sync.open_room(PROJECT_DOC_CHAT_ID).await?;
-    for id in &known {
-        sync.open_room(id).await?;
-    }
-    // Skills index (F5) before the first turn; refreshed every 60 s, when `skills_rev` moves,
-    // and on the `skills_changed` push.
-    agent.refresh_skills().await;
-    // Main agent.
-    agent.start_pi(&initial_chat).await?;
-    sync.write_status(&[
-        ("box", json!("awake")),
-        ("runningTurns", json!(0)),
-        ("spendTodayUsd", json!(0.0)),
-    ])
-    .await;
-    agent.write_threads_index().await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    };
+    let user_id = listing
+        .get("user_id")
+        .and_then(Value::as_str)
+        .unwrap_or("u_default")
+        .to_owned();
+    sup.apply_listing(&listing).await;
+    let n = sup.list().await.len();
     tracing::info!(
+        user = %user_id,
+        workspaces = n,
         ms = t_boot.elapsed().as_millis() as i64,
-        chats = known.len(),
         "arbos-agentd booted"
     );
-    let _ = agent
-        .post_timing("agentd_boot_ms", t_boot.elapsed().as_millis() as i64, None)
-        .await;
-    for p in boot_pushes {
-        tracing::info!(push = %p, "queued push delivered at boot");
-        agent.dispatch_push(p);
+    if let Some(w) = sup.list().await.first() {
+        let _ = w
+            .agent
+            .post_timing("agentd_boot_ms", t_boot.elapsed().as_millis() as i64, None)
+            .await;
     }
-    agent.spawn_push_poller();
 
-    // Registry poll (3 s): new chats get a room; settings changes (SetModel, rename) reach pi and the doc.
+    // Registry poll (3 s): new projects become workspaces, closed ones stop, settings changes
+    // (SetModel, rename, new chats) reach each workspace's pi and doc.
     {
-        let sync2 = sync.clone();
-        let store2 = store.clone();
+        let sup2 = sup.clone();
         let cfg2 = cfg.clone();
-        let agent2 = agent.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(3)).await;
                 let Ok(r) = reqwest::Client::new()
-                    .get(format!("{}/projects/{}", cfg2.relay_url, cfg2.project_id))
+                    .get(format!("{}/box/projects", cfg2.relay_url))
                     .bearer_auth(&cfg2.box_token)
                     .send()
                     .await
                 else {
                     continue;
                 };
+                if !r.status().is_success() {
+                    continue;
+                }
                 let Ok(v) = r.json::<Value>().await else {
                     continue;
                 };
-                let chats = v
-                    .get("chats")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default();
-                for c in &chats {
-                    if let Some(id) = c.get("id").and_then(Value::as_str) {
-                        let _ = store2.upsert_chat(
-                            id,
-                            c.get("title").and_then(Value::as_str).unwrap_or("New chat"),
-                            c.get("is_pinned").and_then(Value::as_bool).unwrap_or(false),
-                            c.get("created_at").and_then(Value::as_i64).unwrap_or(0),
-                        );
-                        if sync2.host(id).await.is_none() {
-                            if let Err(e) = sync2.open_room(id).await {
-                                tracing::warn!(error = %e, id, "open room");
-                            }
-                        }
-                    }
-                }
-                if let Some(p) = v.get("project") {
-                    if let Err(e) = agent2.settings_from_relay(p, &chats).await {
-                        tracing::warn!(error = %e, "settings from relay");
-                    }
-                }
-                let rev_moved = v
-                    .get("skills_rev")
-                    .and_then(Value::as_str)
-                    .is_some_and(|r| r != agent2.skills.rev());
-                if rev_moved || agent2.skills.is_stale() {
-                    agent2.refresh_skills().await;
-                }
-            }
-        });
-    }
-    // Prime ask_user marker directory (D64 skill) → InputRequested.
-    {
-        let agent2 = agent.clone();
-        let ask_dir = cfg.state_dir.join("ask");
-        tokio::spawn(async move {
-            let _ = std::fs::create_dir_all(&ask_dir);
-            loop {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                let Ok(rd) = std::fs::read_dir(&ask_dir) else {
-                    continue;
-                };
-                for e in rd.flatten() {
-                    let p = e.path();
-                    if p.extension().and_then(|x| x.to_str()) != Some("json") {
-                        continue;
-                    }
-                    if let Ok(v) = std::fs::read_to_string(&p)
-                        .ok()
-                        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-                        .ok_or(())
-                    {
-                        let q = v
-                            .get("question")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .to_owned();
-                        let sid = v
-                            .get("session_id")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .to_owned();
-                        let _ = agent2.hook_ask_user(&q, v.get("widget"), &sid).await;
-                    }
-                    let _ = std::fs::rename(&p, p.with_extension("done"));
-                }
+                sup2.apply_listing(&v).await;
             }
         });
     }
     // Idle keep-alive heartbeat (turn_running=false lets the relay restore auto-stop).
     {
-        let agent2 = agent.clone();
+        let sup2 = sup.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(60)).await;
-                // Running turns: refresh activity with auto-stop off; idle: let the relay restore auto-stop.
-                let _ = agent2.keepalive(agent2.any_turn_running()).await;
+                let running = sup2.any_turn_running().await;
+                let _ = sup2.keepalive(running).await;
             }
         });
     }
-    // Approval cards expire 24 h after they were posted (feature `approve`).
-    {
-        let agent2 = agent.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(60)).await;
-                agent2.expire_approvals().await;
-            }
-        });
-    }
-
-    // Shutdown: SIGTERM → persist docs + checkpoints, stop children.
-    let sync_term = sync.clone();
-    let agent_term = agent.clone();
-    tokio::spawn(async move {
-        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("sigterm");
-        term.recv().await;
-        tracing::info!("SIGTERM: stopping children and persisting docs");
-        let _ = tokio::time::timeout(Duration::from_secs(20), agent_term.shutdown()).await;
-        sync_term.persist_all().await;
-        std::process::exit(0);
-    });
-
-    // Command loop. Each command runs on its own task: `send`/`answer` still serialize on the
-    // agent's turn lock (FIFO), while `stop` and settings changes land at once, mid-turn.
-    while let Some(inc) = rx.recv().await {
-        match inc {
-            Incoming::Command { chat_id, cmd } => {
-                let agent = agent.clone();
-                tokio::spawn(async move {
-                    let _ = agent.handle_command(&chat_id, cmd).await;
-                });
-            }
-            Incoming::CaughtUp { chat_id, head_seq } => {
-                tracing::info!(chat_id, head_seq, "room caught up");
-            }
-            Incoming::Status { chat_id, state } => {
-                tracing::debug!(chat_id, ?state, "relay status");
-            }
-            Incoming::ProjectDocChanged => {
-                let agent = agent.clone();
-                tokio::spawn(async move {
-                    agent.settings_from_doc().await;
-                });
-            }
-        }
-    }
-    Ok(())
+    // Shutdown: SIGTERM → every workspace persists docs + checkpoints and stops its children.
+    let mut term =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("sigterm");
+    term.recv().await;
+    tracing::info!("SIGTERM: stopping workspaces and persisting docs");
+    let _ = tokio::time::timeout(Duration::from_secs(45), sup.shutdown()).await;
+    std::process::exit(0);
 }

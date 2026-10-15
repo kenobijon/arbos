@@ -15,7 +15,7 @@ use arbos_core::ids::now_ms;
 use arbos_core::wire::BoxState;
 
 use crate::daytona::{CreateSandbox, SandboxState};
-use crate::db::{Project, Sandbox};
+use crate::db::Sandbox;
 use crate::state::AppState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,32 +43,21 @@ impl Provider {
     }
 }
 
-/// Environment every box gets. No provider key is in it (D2).
+/// Environment every box gets. No provider key is in it (D2). Project-level settings (models,
+/// instructions, chats) are not baked in any more: the box learns them from `/box/hello` and the
+/// `/box/projects` poll, one workspace per project.
 pub(crate) fn box_env(
     state: &AppState,
-    project: &Project,
+    user_id: &str,
     box_token: &str,
     mcp_token: &str,
     relay_url: &str,
 ) -> BTreeMap<String, String> {
-    let models = &project.models;
-    let talking = models
-        .pointer("/talking_model/id")
-        .and_then(Value::as_str)
-        .unwrap_or("anthropic/claude-haiku-5.5");
-    let subagent = models
-        .pointer("/subagent_model/id")
-        .and_then(Value::as_str)
-        .unwrap_or("anthropic/claude-sonnet-5.5");
     let mut env = BTreeMap::new();
-    env.insert("ARBOS_PROJECT_ID".into(), project.id.clone());
-    env.insert("ARBOS_PROJECT_NAME".into(), project.name.clone());
+    env.insert("ARBOS_USER_ID".into(), user_id.to_owned());
     env.insert("ARBOS_RELAY_URL".into(), relay_url.to_owned());
     env.insert("ARBOS_BOX_TOKEN".into(), box_token.to_owned());
     env.insert("ARBOS_MCP_TOKEN".into(), mcp_token.to_owned());
-    env.insert("ARBOS_TALKING_MODEL".into(), talking.to_owned());
-    env.insert("ARBOS_SUBAGENT_MODEL".into(), subagent.to_owned());
-    env.insert("ARBOS_INSTRUCTIONS".into(), project.instructions.clone());
     env.insert("PI_TELEMETRY".into(), "0".into());
     env.insert("PI_SKIP_VERSION_CHECK".into(), "1".into());
     env.insert("PRIME_AGENT_TELEMETRY".into(), "0".into());
@@ -80,16 +69,21 @@ pub(crate) fn box_env(
     env
 }
 
-/// Create the box for a new project (D32: at project creation, not at first message).
+/// Create the user's box (one Daytona computer per user; created with the user's first project,
+/// D32). `snapshot` overrides the relay default (per-user class).
 pub async fn create_box(
     state: &AppState,
-    project: &Project,
+    user_id: &str,
     provider: Provider,
+    snapshot: Option<&str>,
 ) -> Result<Sandbox> {
+    let snapshot_name = snapshot
+        .map(str::to_owned)
+        .unwrap_or_else(|| state.cfg.daytona_snapshot.clone());
     let box_token = mint(TokenKind::Box);
     let mcp_token = mint(TokenKind::Mcp);
     let mut sb = Sandbox {
-        project_id: project.id.clone(),
+        user_id: user_id.to_owned(),
         provider: provider.as_str().to_owned(),
         sandbox_id: None,
         daytona_state: None,
@@ -103,10 +97,11 @@ pub async fn create_box(
         box_url: None,
         preview_token: None,
         local_pid: None,
+        migrated_from: Vec::new(),
     };
-    state.db.upsert_sandbox(&sb)?; // token hash must exist before the box dials in
+    state.db.upsert_box(&sb)?; // token hash must exist before the box dials in
     state
-        .set_box_state(&project.id, BoxState::Waking, Some("creating"))
+        .set_box_state(user_id, BoxState::Waking, Some("creating"))
         .await;
     let t0 = Instant::now();
     match provider {
@@ -116,8 +111,8 @@ pub async fn create_box(
                 .as_ref()
                 .ok_or_else(|| anyhow!("DAYTONA_API_KEY not configured"))?;
             let relay_url = state.cfg.public_url.clone();
-            let env = box_env(state, project, &box_token, &mcp_token, &relay_url);
-            let snapshot_ok = dt.get_snapshot(&state.cfg.daytona_snapshot).await.is_ok();
+            let env = box_env(state, user_id, &box_token, &mcp_token, &relay_url);
+            let snapshot_ok = dt.get_snapshot(&snapshot_name).await.is_ok();
             let inline = match (&state.cfg.daytona_dockerfile, snapshot_ok) {
                 (Some(p), false) => Some(
                     std::fs::read_to_string(p).with_context(|| format!("read {}", p.display()))?,
@@ -127,19 +122,18 @@ pub async fn create_box(
             let mut body = CreateSandbox {
                 name: Some(format!(
                     "arbos-{}",
-                    project
-                        .name
+                    user_id
                         .to_ascii_lowercase()
                         .replace(|c: char| !c.is_ascii_alphanumeric(), "-")
                 )),
                 snapshot: if inline.is_none() {
-                    Some(state.cfg.daytona_snapshot.clone())
+                    Some(snapshot_name.clone())
                 } else {
                     None
                 },
-                cpu: inline.as_ref().map(|_| 2),
-                memory: inline.as_ref().map(|_| 4),
-                disk: inline.as_ref().map(|_| 10),
+                cpu: inline.as_ref().map(|_| 4),
+                memory: inline.as_ref().map(|_| 8),
+                disk: inline.as_ref().map(|_| 40),
                 build_info: inline.map(|d| json!({ "dockerfileContent": d })),
                 auto_stop_interval: Some(30),
                 auto_archive_interval: Some(7 * 24 * 60),
@@ -151,13 +145,13 @@ pub async fn create_box(
                 body.env.insert(k, Value::String(v));
             }
             body.labels
-                .insert("arbos.project".into(), Value::String(project.id.clone()));
+                .insert("arbos.user".into(), Value::String(user_id.to_owned()));
             let created = dt.create(&body).await?;
             sb.sandbox_id = Some(created.id.clone());
             sb.device_id = format!("box:{}", created.id);
-            sb.snapshot = Some(state.cfg.daytona_snapshot.clone());
+            sb.snapshot = Some(snapshot_name.clone());
             sb.daytona_state = Some(format!("{:?}", created.state).to_ascii_lowercase());
-            state.db.upsert_sandbox(&sb)?;
+            state.db.upsert_box(&sb)?;
             let started = dt
                 .wait_for(&created.id, Duration::from_secs(180), |s| {
                     s.state == SandboxState::Started
@@ -169,36 +163,37 @@ pub async fn create_box(
                 sb.box_url = Some(p.url);
                 sb.preview_token = Some(p.token);
             }
-            state.db.upsert_sandbox(&sb)?;
+            state.db.upsert_box(&sb)?;
+            push_relay_url(state, dt, &created.id).await;
             state.db.record_timing(
-                &project.id,
+                &timing_key(user_id),
                 "daytona_create_to_started_ms",
                 t0.elapsed().as_millis() as i64,
                 created.runner_id.as_deref(),
             )?;
         }
         Provider::Process => {
-            sb.sandbox_id = Some(format!("local-{}", project.id));
-            sb.device_id = format!("box:local-{}", project.id);
-            state.db.upsert_sandbox(&sb)?;
-            save_local_tokens(state, &project.id, &box_token, &mcp_token)?;
-            start_process(state, project, &mut sb, &box_token, &mcp_token).await?;
+            sb.sandbox_id = Some(format!("local-{user_id}"));
+            sb.device_id = format!("box:local-{user_id}");
+            state.db.upsert_box(&sb)?;
+            save_local_tokens(state, user_id, &box_token, &mcp_token)?;
+            start_process(state, user_id, &mut sb, &box_token, &mcp_token).await?;
             state.db.record_timing(
-                &project.id,
+                &timing_key(user_id),
                 "local_create_ms",
                 t0.elapsed().as_millis() as i64,
                 None,
             )?;
         }
         Provider::Docker => {
-            let name = format!("arbos-box-{}", project.id.to_ascii_lowercase());
+            let name = format!("arbos-box-{}", user_id.to_ascii_lowercase());
             sb.sandbox_id = Some(name.clone());
             sb.device_id = format!("box:{name}");
-            state.db.upsert_sandbox(&sb)?;
-            save_local_tokens(state, &project.id, &box_token, &mcp_token)?;
-            start_docker(state, project, &mut sb, &box_token, &mcp_token, true).await?;
+            state.db.upsert_box(&sb)?;
+            save_local_tokens(state, user_id, &box_token, &mcp_token)?;
+            start_docker(state, user_id, &mut sb, &box_token, &mcp_token, true).await?;
             state.db.record_timing(
-                &project.id,
+                &timing_key(user_id),
                 "docker_create_ms",
                 t0.elapsed().as_millis() as i64,
                 None,
@@ -209,8 +204,13 @@ pub async fn create_box(
         .wake_started
         .lock()
         .await
-        .insert(project.id.clone(), now_ms());
+        .insert(user_id.to_owned(), now_ms());
     Ok(sb)
+}
+
+/// Box-level timings are recorded under the user key (`GET /projects/{id}/timings` merges them in).
+pub fn timing_key(user_id: &str) -> String {
+    format!("user:{user_id}")
 }
 
 /// Four consecutive free loopback ports for a process box (main, MCP, hook, model stub), chosen
@@ -218,9 +218,8 @@ pub async fn create_box(
 async fn allocate_local_ports(state: &AppState) -> Result<u16> {
     let taken: std::collections::HashSet<u16> = state
         .db
-        .list_projects()?
-        .iter()
-        .filter_map(|p| state.db.sandbox(&p.id).ok().flatten())
+        .list_boxes()?
+        .into_iter()
         .filter_map(|s| {
             s.box_url
                 .and_then(|u| u.rsplit(':').next().and_then(|p| p.parse().ok()))
@@ -241,20 +240,15 @@ async fn allocate_local_ports(state: &AppState) -> Result<u16> {
 
 async fn start_process(
     state: &AppState,
-    project: &Project,
+    user_id: &str,
     sb: &mut Sandbox,
     box_token: &str,
     mcp_token: &str,
 ) -> Result<()> {
-    let work = state
-        .cfg
-        .data_dir
-        .join("boxes")
-        .join(&project.id)
-        .join("work");
+    let work = state.cfg.data_dir.join("boxes").join(user_id).join("work");
     std::fs::create_dir_all(&work)?;
     // A process box that is still alive (relay restart, double wake) must go before a new one binds.
-    if let Some(mut child) = state.local_children.lock().await.remove(&project.id) {
+    if let Some(mut child) = state.local_children.lock().await.remove(user_id) {
         if let Some(pid) = child.id() {
             let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
         }
@@ -264,7 +258,7 @@ async fn start_process(
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
     let port = allocate_local_ports(state).await?;
-    let env = box_env(state, project, box_token, mcp_token, &state.cfg.public_url);
+    let env = box_env(state, user_id, box_token, mcp_token, &state.cfg.public_url);
     let mut cmd = tokio::process::Command::new(&state.cfg.agentd_bin);
     // D2 also holds for a local box: start from an empty environment and pass an allow-list, so the
     // relay's provider and Daytona keys never reach agentd or its children.
@@ -303,18 +297,24 @@ async fn start_process(
     sb.local_pid = child.id().map(i64::from);
     sb.box_url = Some(format!("http://127.0.0.1:{port}"));
     sb.last_started_at = Some(now_ms());
-    state.db.upsert_sandbox(sb)?;
+    state.db.upsert_box(sb)?;
+    // The relay URL file for a local box: same contract as Daytona, written straight to disk.
+    let _ = std::fs::create_dir_all(work.join(".arbos"));
+    let _ = std::fs::write(
+        work.join(".arbos").join("relay-url"),
+        format!("{}\n", state.cfg.public_url.trim_end_matches('/')),
+    );
     state
         .local_children
         .lock()
         .await
-        .insert(project.id.clone(), child);
+        .insert(user_id.to_owned(), child);
     Ok(())
 }
 
 async fn start_docker(
     state: &AppState,
-    project: &Project,
+    user_id: &str,
     sb: &mut Sandbox,
     box_token: &str,
     mcp_token: &str,
@@ -327,7 +327,7 @@ async fn start_docker(
             .public_url
             .replace("127.0.0.1", "host.docker.internal")
             .replace("localhost", "host.docker.internal");
-        let env = box_env(state, project, box_token, mcp_token, &relay_url);
+        let env = box_env(state, user_id, box_token, mcp_token, &relay_url);
         let mut cmd = tokio::process::Command::new("docker");
         cmd.args([
             "run",
@@ -376,33 +376,39 @@ async fn start_docker(
     let port = port_line.rsplit(':').next().unwrap_or("7788").to_owned();
     sb.box_url = Some(format!("http://127.0.0.1:{port}"));
     sb.last_started_at = Some(now_ms());
-    state.db.upsert_sandbox(sb)?;
+    state.db.upsert_box(sb)?;
     Ok(())
 }
 
 /// Start (wake) an existing box. Returns once the start call is accepted; the box's own
 /// room dial marks it awake.
-pub async fn start_box(state: &AppState, project_id: &str) -> Result<()> {
-    let project = state
-        .db
-        .project(project_id)?
-        .ok_or_else(|| anyhow!("no project"))?;
-    let mut sb = state
-        .db
-        .sandbox(project_id)?
-        .ok_or_else(|| anyhow!("no sandbox"))?;
+pub async fn start_box(state: &AppState, user_id: &str) -> Result<()> {
+    let mut sb = match state.db.user_box(user_id)? {
+        Some(sb) => sb,
+        None => {
+            // A user with projects but no box yet (pre-D70 data): create it on first wake.
+            let provider = if state.daytona.is_some() {
+                Provider::Daytona
+            } else {
+                Provider::Process
+            };
+            tracing::info!(%user_id, provider = provider.as_str(), "no box for this user yet; creating one");
+            ensure_user_box(state, user_id, provider).await?;
+            return Ok(());
+        }
+    };
     let provider = Provider::parse(&sb.provider).ok_or_else(|| anyhow!("bad provider"))?;
     state
         .wake_started
         .lock()
         .await
-        .insert(project_id.to_owned(), now_ms());
+        .insert(user_id.to_owned(), now_ms());
     state
-        .set_box_state(project_id, BoxState::Waking, Some("starting"))
+        .set_box_state(user_id, BoxState::Waking, Some("starting"))
         .await;
     // The box token is minted once per box (Daytona env is fixed at create). Local providers re-inject it
     // from tokens.json; the relay DB holds only the hash.
-    let tokens = load_local_tokens(state, project_id)?;
+    let tokens = load_local_tokens(state, user_id)?;
     match provider {
         Provider::Daytona => {
             let dt = state
@@ -419,7 +425,7 @@ pub async fn start_box(state: &AppState, project_id: &str) -> Result<()> {
             if cur.state == SandboxState::Started {
                 // The sandbox runs but agentd is gone (Daytona's daemon does not restart a dead
                 // entrypoint): bounce it so the entrypoint session starts again.
-                tracing::warn!(%project_id, "sandbox is started but the box is silent; restarting it");
+                tracing::warn!(%user_id, "sandbox is started but the box is silent; restarting it");
                 dt.stop(&id, true).await?;
                 dt.wait_for(&id, Duration::from_secs(120), |s| {
                     s.state == SandboxState::Stopped
@@ -438,9 +444,9 @@ pub async fn start_box(state: &AppState, project_id: &str) -> Result<()> {
                 sb.preview_token = Some(p.token);
             }
             sb.last_started_at = Some(now_ms());
-            state.db.upsert_sandbox(&sb)?;
+            state.db.upsert_box(&sb)?;
             state.db.record_timing(
-                project_id,
+                &timing_key(user_id),
                 &format!("daytona_start_from_{:?}_ms", from).to_ascii_lowercase(),
                 t0.elapsed().as_millis() as i64,
                 None,
@@ -449,22 +455,22 @@ pub async fn start_box(state: &AppState, project_id: &str) -> Result<()> {
         }
         Provider::Process => {
             let (box_token, mcp_token) = tokens.ok_or_else(|| anyhow!("local tokens missing"))?;
-            start_process(state, &project, &mut sb, &box_token, &mcp_token).await?;
+            start_process(state, user_id, &mut sb, &box_token, &mcp_token).await?;
         }
         Provider::Docker => {
             let (box_token, mcp_token) = tokens.ok_or_else(|| anyhow!("local tokens missing"))?;
-            start_docker(state, &project, &mut sb, &box_token, &mcp_token, false).await?;
+            start_docker(state, user_id, &mut sb, &box_token, &mcp_token, false).await?;
         }
     }
     Ok(())
 }
 
 /// Stop (hibernate) a box. `force` is the Stop-project path (§4.7).
-pub async fn stop_box(state: &AppState, project_id: &str, force: bool) -> Result<()> {
+pub async fn stop_box(state: &AppState, user_id: &str, force: bool) -> Result<()> {
     let mut sb = state
         .db
-        .sandbox(project_id)?
-        .ok_or_else(|| anyhow!("no sandbox"))?;
+        .user_box(user_id)?
+        .ok_or_else(|| anyhow!("no box for user {user_id}"))?;
     let provider = Provider::parse(&sb.provider).ok_or_else(|| anyhow!("bad provider"))?;
     match provider {
         Provider::Daytona => {
@@ -488,14 +494,14 @@ pub async fn stop_box(state: &AppState, project_id: &str, force: bool) -> Result
                 .await?;
             sb.daytona_state = Some(format!("{:?}", s.state).to_ascii_lowercase());
             state.db.record_timing(
-                project_id,
+                &timing_key(user_id),
                 "daytona_stop_ms",
                 t0.elapsed().as_millis() as i64,
                 None,
             )?;
         }
         Provider::Process => {
-            if let Some(mut child) = state.local_children.lock().await.remove(project_id) {
+            if let Some(mut child) = state.local_children.lock().await.remove(user_id) {
                 if let Some(pid) = child.id() {
                     let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
                 }
@@ -514,17 +520,19 @@ pub async fn stop_box(state: &AppState, project_id: &str, force: bool) -> Result
         }
     }
     sb.last_stopped_at = Some(now_ms());
-    state.db.upsert_sandbox(&sb)?;
-    state.box_conns.lock().await.remove(project_id);
+    state.db.upsert_box(&sb)?;
+    state.box_conns.lock().await.remove(user_id);
     state
         .set_box_state(
-            project_id,
+            user_id,
             BoxState::Asleep,
             Some(if force { "stopped_by_user" } else { "stopped" }),
         )
         .await;
     if force {
-        let _ = state.db.set_project_state(project_id, "stopped_by_user");
+        for p in state.db.projects_of_user(user_id).unwrap_or_default() {
+            let _ = state.db.set_project_state(&p.id, "stopped_by_user");
+        }
     }
     Ok(())
 }
@@ -532,11 +540,11 @@ pub async fn stop_box(state: &AppState, project_id: &str, force: bool) -> Result
 /// Local providers keep the plaintext box/MCP tokens in the relay data dir so a restart can re-inject them.
 pub fn save_local_tokens(
     state: &AppState,
-    project_id: &str,
+    user_id: &str,
     box_token: &str,
     mcp_token: &str,
 ) -> Result<()> {
-    let dir = state.cfg.data_dir.join("boxes").join(project_id);
+    let dir = state.cfg.data_dir.join("boxes").join(user_id);
     std::fs::create_dir_all(&dir)?;
     std::fs::write(
         dir.join("tokens.json"),
@@ -545,12 +553,12 @@ pub fn save_local_tokens(
     Ok(())
 }
 
-pub fn load_local_tokens(state: &AppState, project_id: &str) -> Result<Option<(String, String)>> {
+pub fn load_local_tokens(state: &AppState, user_id: &str) -> Result<Option<(String, String)>> {
     let p = state
         .cfg
         .data_dir
         .join("boxes")
-        .join(project_id)
+        .join(user_id)
         .join("tokens.json");
     if !p.exists() {
         return Ok(None);
@@ -600,8 +608,28 @@ fn explicit_wake(reason: &str) -> bool {
     matches!(reason, "wake" | "start" | "open" | "api")
 }
 
-pub async fn ensure_awake(state: &AppState, project_id: &str, reason: &str) {
-    let (st, since) = state.box_state(project_id).await;
+/// `ensure_awake` for the box that serves a project.
+pub async fn ensure_awake_project(state: &AppState, project_id: &str, reason: &str) {
+    if let Some(u) = state.user_of(project_id) {
+        ensure_awake(state, &u, reason).await;
+    }
+}
+
+/// The user's box, created on first use (D32 moved from project to user).
+pub async fn ensure_user_box(
+    state: &AppState,
+    user_id: &str,
+    provider: Provider,
+) -> Result<Sandbox> {
+    if let Some(sb) = state.db.user_box(user_id)? {
+        return Ok(sb);
+    }
+    let snapshot = state.db.user_snapshot(user_id)?;
+    create_box(state, user_id, provider, snapshot.as_deref()).await
+}
+
+pub async fn ensure_awake(state: &AppState, user_id: &str, reason: &str) {
+    let (st, since) = state.box_state(user_id).await;
     if st == BoxState::Awake {
         return;
     }
@@ -610,24 +638,24 @@ pub async fn ensure_awake(state: &AppState, project_id: &str, reason: &str) {
         if !explicit_wake(reason) {
             return;
         }
-        state.stale_bounces.lock().await.remove(project_id);
+        state.stale_bounces.lock().await.remove(user_id);
     }
     if st == BoxState::Waking {
         // Already waking: either still inside the hello deadline (nothing to do) or stale, in
         // which case `stale_wake_check` has bounced it once or flipped it to error.
-        let _ = stale_wake_check(state, project_id, since).await;
+        let _ = stale_wake_check(state, user_id, since).await;
         return;
     }
-    if let Err(e) = state.db.upsert_wake_job(project_id, reason) {
+    if let Err(e) = state.db.upsert_wake_job(user_id, reason) {
         tracing::warn!(error = %e, "wake job");
     }
     state
         .wake_started
         .lock()
         .await
-        .insert(project_id.to_owned(), now_ms());
+        .insert(user_id.to_owned(), now_ms());
     state
-        .set_box_state(project_id, BoxState::Waking, Some(reason))
+        .set_box_state(user_id, BoxState::Waking, Some(reason))
         .await;
 }
 
@@ -635,12 +663,12 @@ pub async fn ensure_awake(state: &AppState, project_id: &str, reason: &str) {
 /// waking for longer than `HELLO_DEADLINE_MS` without a socket is re-pushed the relay URL and
 /// bounced once; the second time it becomes `error · box cannot reach relay` and the wake job
 /// ends, so the relay stops waking it forever. Returns true when it acted.
-async fn stale_wake_check(state: &AppState, project_id: &str, since: i64) -> bool {
+async fn stale_wake_check(state: &AppState, user_id: &str, since: i64) -> bool {
     let connected = state
         .box_conns
         .lock()
         .await
-        .get(project_id)
+        .get(user_id)
         .map(|c| c.0 > 0)
         .unwrap_or(false);
     if connected || now_ms() - since < HELLO_DEADLINE_MS {
@@ -648,55 +676,55 @@ async fn stale_wake_check(state: &AppState, project_id: &str, since: i64) -> boo
     }
     let bounces = {
         let mut m = state.stale_bounces.lock().await;
-        let n = m.entry(project_id.to_owned()).or_insert(0);
+        let n = m.entry(user_id.to_owned()).or_insert(0);
         *n += 1;
         *n
     };
-    let _ = state.db.finish_wake_job(project_id);
+    let _ = state.db.finish_wake_job(user_id);
     if bounces > 1 {
-        tracing::error!(%project_id, "box started but never reached the relay; giving up");
+        tracing::error!(%user_id, "box started but never reached the relay; giving up");
         state
-            .set_box_state(project_id, BoxState::Error, Some("box cannot reach relay"))
+            .set_box_state(user_id, BoxState::Error, Some("box cannot reach relay"))
             .await;
         return true;
     }
-    tracing::warn!(%project_id, "box has been waking for >60 s without connecting; re-pushing the relay url and bouncing once");
-    if let Err(e) = state.db.upsert_wake_job(project_id, "stale box: bounce") {
+    tracing::warn!(%user_id, "box has been waking for >60 s without connecting; re-pushing the relay url and bouncing once");
+    if let Err(e) = state.db.upsert_wake_job(user_id, "stale box: bounce") {
         tracing::warn!(error = %e, "wake job");
     }
     state
         .wake_started
         .lock()
         .await
-        .insert(project_id.to_owned(), now_ms());
+        .insert(user_id.to_owned(), now_ms());
     // Restart the clock: the next check happens one deadline after the bounce.
     state
         .box_states
         .write()
         .await
-        .insert(project_id.to_owned(), (BoxState::Waking, now_ms()));
+        .insert(user_id.to_owned(), (BoxState::Waking, now_ms()));
     true
 }
 
-pub async fn box_connected(state: &AppState, project_id: &str) {
+pub async fn box_connected(state: &AppState, user_id: &str) {
     {
         let mut c = state.box_conns.lock().await;
-        let e = c.entry(project_id.to_owned()).or_insert((0, 0));
+        let e = c.entry(user_id.to_owned()).or_insert((0, 0));
         e.0 += 1;
     }
-    state.stale_bounces.lock().await.remove(project_id);
-    let _ = state.db.finish_wake_job(project_id);
-    if let Some(t0) = state.wake_started.lock().await.remove(project_id) {
+    state.stale_bounces.lock().await.remove(user_id);
+    let _ = state.db.finish_wake_job(user_id);
+    if let Some(t0) = state.wake_started.lock().await.remove(user_id) {
         let _ = state
             .db
-            .record_timing(project_id, "wake_to_box_connected_ms", now_ms() - t0, None);
+            .record_timing(user_id, "wake_to_box_connected_ms", now_ms() - t0, None);
     }
-    state.set_box_state(project_id, BoxState::Awake, None).await;
+    state.set_box_state(user_id, BoxState::Awake, None).await;
 }
 
-pub async fn box_disconnected(state: &AppState, project_id: &str) {
+pub async fn box_disconnected(state: &AppState, user_id: &str) {
     let mut c = state.box_conns.lock().await;
-    let e = c.entry(project_id.to_owned()).or_insert((0, 0));
+    let e = c.entry(user_id.to_owned()).or_insert((0, 0));
     e.0 = e.0.saturating_sub(1);
     e.1 = now_ms();
 }
@@ -712,8 +740,8 @@ pub async fn sweep_box_liveness(state: &AppState) {
         .filter(|(_, (st, _))| *st == BoxState::Waking)
         .map(|(k, (_, since))| (k.clone(), *since))
         .collect();
-    for (project_id, since) in waking {
-        stale_wake_check(state, &project_id, since).await;
+    for (user_id, since) in waking {
+        stale_wake_check(state, &user_id, since).await;
     }
     let snapshot: Vec<(String, u32, i64)> = state
         .box_conns
@@ -722,12 +750,12 @@ pub async fn sweep_box_liveness(state: &AppState) {
         .iter()
         .map(|(k, (n, t))| (k.clone(), *n, *t))
         .collect();
-    for (project_id, n, last) in snapshot {
+    for (user_id, n, last) in snapshot {
         if n == 0 && last > 0 && now_ms() - last > state.cfg.box_idle_grace_ms {
-            let (st, _) = state.box_state(&project_id).await;
+            let (st, _) = state.box_state(&user_id).await;
             if st == BoxState::Awake {
                 state
-                    .set_box_state(&project_id, BoxState::Asleep, Some("box socket lost"))
+                    .set_box_state(&user_id, BoxState::Asleep, Some("box socket lost"))
                     .await;
                 // A client row that landed while the box was already dying (still "awake" in the
                 // grace window) has no box to take it: wake again so the command is not stranded.
@@ -735,12 +763,12 @@ pub async fn sweep_box_liveness(state: &AppState) {
                     .last_client_push
                     .lock()
                     .await
-                    .get(&project_id)
+                    .get(&user_id)
                     .copied()
                     .unwrap_or(0);
                 if pushed >= last - 5_000 {
-                    tracing::warn!(%project_id, "box died with client rows outstanding; waking it again");
-                    ensure_awake(state, &project_id, "rows pending after box loss").await;
+                    tracing::warn!(%user_id, "box died with client rows outstanding; waking it again");
+                    ensure_awake(state, &user_id, "rows pending after box loss").await;
                 }
             }
         }
@@ -756,29 +784,29 @@ pub async fn spawn_wake_runner(state: AppState) {
                 Ok(j) => j,
                 Err(_) => continue,
             };
-            for (project_id, reason, attempts) in jobs {
-                let (st, _) = state.box_state(&project_id).await;
+            for (user_id, reason, attempts) in jobs {
+                let (st, _) = state.box_state(&user_id).await;
                 if st == BoxState::Awake || st == BoxState::Error {
                     // Awake: the dial finished it. Error: the stale-box detector gave up; only an
                     // explicit wake/start re-arms it.
-                    let _ = state.db.finish_wake_job(&project_id);
+                    let _ = state.db.finish_wake_job(&user_id);
                     continue;
                 }
                 // Mark the job as in flight by pushing its due time out; the box dial finishes it.
-                let _ = state.db.retry_wake_job(&project_id, 120_000, "in flight");
-                tracing::info!(%project_id, %reason, attempts, "waking box");
-                match start_box(&state, &project_id).await {
+                let _ = state.db.retry_wake_job(&user_id, 120_000, "in flight");
+                tracing::info!(%user_id, %reason, attempts, "waking box");
+                match start_box(&state, &user_id).await {
                     Ok(()) => {}
                     Err(e) => {
-                        tracing::warn!(%project_id, error = %e, "wake failed");
+                        tracing::warn!(%user_id, error = %e, "wake failed");
                         let n = state
                             .db
-                            .retry_wake_job(&project_id, 5_000 * (attempts + 1), &e.to_string())
+                            .retry_wake_job(&user_id, 5_000 * (attempts + 1), &e.to_string())
                             .unwrap_or(99);
                         if n >= 3 {
-                            let _ = state.db.finish_wake_job(&project_id);
+                            let _ = state.db.finish_wake_job(&user_id);
                             state
-                                .set_box_state(&project_id, BoxState::Error, Some(&e.to_string()))
+                                .set_box_state(&user_id, BoxState::Error, Some(&e.to_string()))
                                 .await;
                         }
                     }
@@ -789,29 +817,30 @@ pub async fn spawn_wake_runner(state: AppState) {
 }
 
 /// Keep-alive from the box while a turn runs (design §4.6): forward as "update last activity".
-pub async fn keepalive(state: &AppState, project_id: &str, turn_running: bool) -> Result<()> {
+pub async fn keepalive(state: &AppState, user_id: &str, turn_running: bool) -> Result<()> {
     let sb = state
         .db
-        .sandbox(project_id)?
-        .ok_or_else(|| anyhow!("no sandbox"))?;
+        .user_box(user_id)?
+        .ok_or_else(|| anyhow!("no box for user {user_id}"))?;
     if sb.provider == "daytona" {
         if let (Some(dt), Some(id)) = (&state.daytona, &sb.sandbox_id) {
             dt.refresh_activity(id).await?;
             let _ = dt.set_autostop(id, if turn_running { 0 } else { 30 }).await;
         }
     }
-    state.db.touch_sandbox(project_id)?;
+    state.db.touch_box(user_id)?;
     Ok(())
 }
 
-/// Current provider view of the box, for `GET /projects/{id}/status`.
-pub async fn provider_status(state: &AppState, project_id: &str) -> Value {
-    let sb = match state.db.sandbox(project_id) {
+/// Current provider view of the user's box, for `GET /projects/{id}/status`.
+pub async fn provider_status(state: &AppState, user_id: &str) -> Value {
+    let sb = match state.db.user_box(user_id) {
         Ok(Some(s)) => s,
         _ => return json!({ "provider": null }),
     };
     let mut v = json!({
-        "provider": sb.provider, "sandbox_id": sb.sandbox_id, "box_url": sb.box_url,
+        "provider": sb.provider, "sandbox_id": sb.sandbox_id, "box_url": sb.box_url, "user_id": sb.user_id,
+        "migrated_from": sb.migrated_from,
         "last_started_at": sb.last_started_at, "last_stopped_at": sb.last_stopped_at, "last_seen_at": sb.last_seen_at,
     });
     if sb.provider == "daytona" {
