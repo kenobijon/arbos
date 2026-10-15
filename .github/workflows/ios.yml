@@ -14,6 +14,9 @@ name: iOS
 #
 # Build number: UTC YYYYMMDDHHMM. It always rises, and it is above the builds
 # already on TestFlight (202610150502 at the time of writing).
+#
+# The lanes print every xcodebuild line and write build/xcodebuild-<lane>.log;
+# the last step keeps those logs as an artifact, pass or fail.
 
 on:
   push:
@@ -109,3 +112,11 @@ jobs:
           echo "==> fastlane beta (build $BUILD_NUMBER)"
           AC_API_KEY_P8="" AC_API_KEY_PATH="$key_path" fastlane beta
           echo "TestFlight upload finished: build $BUILD_NUMBER (com.unarbos.arbos.ios)." >> "$GITHUB_STEP_SUMMARY"
+      - name: Keep the xcodebuild logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-logs-${{ steps.build.outputs.number }}
+          path: apps/ios/Arbos/build/xcodebuild-*.log
+          if-no-files-found: ignore
+          retention-days: 14

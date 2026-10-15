@@ -18,6 +18,11 @@
 #
 # Build number: BUILD_NUMBER if set, else UTC `YYYYMMDDHHMM` (12 digits, always
 # above the 7 that build 7 used, strictly increasing between runs).
+#
+# Every xcodebuild runs under `set -o pipefail` with its full output on the
+# console and a copy in build/xcodebuild-<lane>.log (ios.yml keeps the logs as
+# an artifact). Nothing is cut with `tail`: a hidden compile error cost a
+# TestFlight build once.
 
 default_platform(:ios)
 
@@ -35,24 +40,35 @@ def out_dir
   dir
 end
 
+# Runs `command` (which starts in the fastlane directory) with the shell's exit
+# status being xcodebuild's, not tee's, and the whole output copied to
+# build/xcodebuild-<name>.log.
+def xcodebuild_logged(name, command)
+  log = "#{out_dir}/xcodebuild-#{name}.log"
+  sh "set -o pipefail && #{command} 2>&1 | tee '#{log}'"
+  log
+end
+
 platform :ios do
   desc "Debug build for the iOS simulator (no signing)"
   lane :sim do
-    sh "cd .. && xcodebuild build -project #{PROJECT} -scheme #{SCHEME} -configuration Debug " \
-       "-destination 'platform=iOS Simulator,name=iPhone 17' -derivedDataPath '#{out_dir}/dd' " \
-       "CODE_SIGNING_ALLOWED=NO | tail -5"
+    xcodebuild_logged("sim",
+      "cd .. && xcodebuild build -project #{PROJECT} -scheme #{SCHEME} -configuration Debug " \
+      "-destination 'platform=iOS Simulator,name=iPhone 17' -derivedDataPath '#{out_dir}/dd' " \
+      "CODE_SIGNING_ALLOWED=NO")
   end
 
   desc "Unsigned Release archive (what CI keeps even when no Apple secret is set)"
   lane :archive do
     number = build_number
     archive_path = "#{out_dir}/Arbos.xcarchive"
-    sh "cd .. && xcodebuild -project #{PROJECT} -scheme #{SCHEME} " \
-       "-configuration Release -destination 'generic/platform=iOS' " \
-       "-archivePath '#{archive_path}' archive " \
-       "CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO " \
-       "CURRENT_PROJECT_VERSION=#{number} | tail -3"
-    UI.user_error!("archive has no binary") unless File.executable?("#{archive_path}/Products/Applications/Arbos.app/Arbos")
+    log = xcodebuild_logged("archive",
+      "cd .. && xcodebuild -project #{PROJECT} -scheme #{SCHEME} " \
+      "-configuration Release -destination 'generic/platform=iOS' " \
+      "-archivePath '#{archive_path}' archive " \
+      "CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO " \
+      "CURRENT_PROJECT_VERSION=#{number}")
+    UI.user_error!("archive has no binary (see #{log})") unless File.executable?("#{archive_path}/Products/Applications/Arbos.app/Arbos")
     UI.success("Archive #{archive_path} build #{number}")
     lane_context[:ARBOS_ARCHIVE] = archive_path
     lane_context[:ARBOS_BUILD_NUMBER] = number
@@ -95,10 +111,11 @@ platform :ios do
         </plist>
       PLIST
       export_path = "#{out_dir}/TestFlightExport"
-      sh "xcodebuild -exportArchive -archivePath '#{archive_path}' -exportPath '#{export_path}' " \
-         "-exportOptionsPlist '#{options}' -allowProvisioningUpdates " \
-         "-authenticationKeyPath '#{key_path}' -authenticationKeyID '#{key_id}' " \
-         "-authenticationKeyIssuerID '#{issuer_id}' | tail -20"
+      xcodebuild_logged("export",
+        "xcodebuild -exportArchive -archivePath '#{archive_path}' -exportPath '#{export_path}' " \
+        "-exportOptionsPlist '#{options}' -allowProvisioningUpdates " \
+        "-authenticationKeyPath '#{key_path}' -authenticationKeyID '#{key_id}' " \
+        "-authenticationKeyIssuerID '#{issuer_id}'")
       UI.success("Uploaded Arbos build #{number} to TestFlight (bundle com.unarbos.arbos.ios)")
     ensure
       FileUtils.rm_rf(tmp)
