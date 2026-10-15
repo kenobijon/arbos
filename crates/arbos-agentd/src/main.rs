@@ -176,8 +176,68 @@ fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// The relay URL baked into the sandbox env goes stale when the relay's public URL changes (quick
+/// tunnels change on every restart). The relay writes the current URL to `<state>/relay-url` at
+/// every wake; agentd prefers a reachable file URL over the env, and keeps re-reading the file
+/// until one of the candidates answers `/healthz`. Returns the URL that answered.
+async fn resolve_relay_url() -> String {
+    let state_dir = std::env::var("ARBOS_STATE_DIR").unwrap_or_else(|_| "/work/.arbos".into());
+    let file = std::path::Path::new(&state_dir).join("relay-url");
+    let env_url = std::env::var("ARBOS_RELAY_URL")
+        .ok()
+        .map(|u| u.trim().trim_end_matches('/').to_owned())
+        .filter(|u| !u.is_empty());
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .expect("client");
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        let file_url = std::fs::read_to_string(&file)
+            .ok()
+            .map(|u| u.trim().trim_end_matches('/').to_owned())
+            .filter(|u| !u.is_empty());
+        let mut candidates: Vec<String> = Vec::new();
+        for u in [file_url.clone(), env_url.clone()].into_iter().flatten() {
+            if !candidates.contains(&u) {
+                candidates.push(u);
+            }
+        }
+        for u in &candidates {
+            let ok = http
+                .get(format!("{u}/healthz"))
+                .send()
+                .await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            if ok {
+                if file_url.as_deref() != Some(u.as_str()) {
+                    let _ = std::fs::create_dir_all(&state_dir);
+                    let _ = std::fs::write(&file, format!("{u}\n"));
+                }
+                if env_url.as_deref() != Some(u.as_str()) {
+                    tracing::warn!(url = %u, env = ?env_url, "relay url from the wake file (env is stale)");
+                }
+                return u.clone();
+            }
+        }
+        if attempt == 1 || attempt % 15 == 0 {
+            tracing::warn!(
+                ?candidates,
+                attempt,
+                "no relay url answers /healthz; waiting for the relay to push one"
+            );
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
 async fn boot() -> Result<()> {
     let t_boot = Instant::now();
+    let relay_url = resolve_relay_url().await;
+    // Config reads the env; the resolved URL wins over whatever the sandbox was created with.
+    std::env::set_var("ARBOS_RELAY_URL", &relay_url);
     let cfg = Arc::new(Config::from_env()?);
     seed_state(&cfg)?;
     let store = Store::open(&cfg.state_dir.join("agentd").join("agentd.db"))?;

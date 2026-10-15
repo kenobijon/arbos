@@ -71,16 +71,28 @@ Relay environment (all optional unless noted):
 | `OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | provider keys for the model proxy (never reach a box) |
 | `ARBOS_OPENAI_BASE`, `ARBOS_ANTHROPIC_BASE` | upstreams, default OpenRouter |
 | `DAYTONA_API_KEY`, `DAYTONA_API_URL`, `DAYTONA_ORG_ID` | Daytona access; without a key new projects get `process` boxes |
-| `ARBOS_DAYTONA_SNAPSHOT` | snapshot for new boxes, default `arbos-agent-0.1.4` |
+| `ARBOS_DAYTONA_SNAPSHOT` | snapshot for new boxes, default `arbos-agent-0.1.5` |
 | `ARBOS_DAYTONA_DOCKERFILE`, `ARBOS_BOOTSTRAP_DIR` | dev-image path (see below) |
 | `ARBOS_AGENTD_BIN`, `ARBOS_PI_BIN`, `ARBOS_PI_EXT`, `ARBOS_PRIME_BIN`, `ARBOS_DEFAULT_HARNESS` | process-box binaries and default subagent harness |
 | `RUST_LOG` | e.g. `info,arbos_relay=debug` |
 
-Example for a public relay on one machine (the Daytona boxes dial `https://…` back): `ARBOS_RELAY_LISTEN=0.0.0.0:7700 ARBOS_RELAY_PUBLIC_URL=https://relay.example.com cargo run --release -p arbos-relay`, with TLS terminated by a reverse proxy or `cloudflared tunnel --url http://127.0.0.1:7700`. The relay itself speaks plain HTTP/WS.
+Example for a public relay on one machine (the Daytona boxes dial `https://…` back): `ARBOS_RELAY_LISTEN=0.0.0.0:7700 ARBOS_RELAY_PUBLIC_URL=https://relay.example.com cargo run --release -p arbos-relay`, with TLS terminated by a reverse proxy or a cloudflared tunnel. The relay itself speaks plain HTTP/WS.
+
+`ARBOS_RELAY_PUBLIC_URL` must be stable for persistent projects. A cloudflared *quick* tunnel (`cloudflared tunnel --url …`, a random `*.trycloudflare.com` name) changes on every restart and is dev-only; use a named tunnel or the machine's own IP/hostname. The relay tolerates a change: at every wake it writes the current URL into the box (`/work/.arbos/relay-url`, Daytona toolbox API) and agentd prefers that file over the URL baked into the sandbox env; a box that still cannot say hello within 60 s is bounced once and then shown as `error · box cannot reach relay` instead of waking forever (an explicit wake/start tries again).
+
+`scripts/relay-start.sh` starts the relay with the tunnel beside it:
+
+```bash
+ARBOS_TUNNEL=named scripts/relay-start.sh   # https://relay.arbos.life, stable; token from ARBOS_TUNNEL_TOKEN or 1Password
+ARBOS_TUNNEL=quick scripts/relay-start.sh   # dev only: a fresh *.trycloudflare.com URL
+ARBOS_TUNNEL=none  ARBOS_RELAY_PUBLIC_URL=https://relay.example scripts/relay-start.sh
+```
+
+The named tunnel is the Cloudflare Zero Trust tunnel `arbos-relay` (remotely managed: ingress `relay.arbos.life → http://127.0.0.1:7700`). Its connector token lives in the Arbos vault ("Cloudflare — relay named tunnel token … env ARBOS_TUNNEL_TOKEN"); `ARBOS_TUNNEL_HOSTNAME` changes the hostname, `ARBOS_TUNNEL_OP_ITEM` the vault item. Creating a tunnel and its DNS record needs a Cloudflare API token with `Account → Cloudflare Tunnel → Edit` and `Zone → DNS → Edit` on the zone.
 
 ## Run on Daytona
 
-With `DAYTONA_API_KEY` set, `project create` (without `--local-box`) creates a real sandbox from the snapshot named by `ARBOS_DAYTONA_SNAPSHOT` (default `arbos-agent-0.1.4`, the current registered build). The relay must be reachable from the box (`ARBOS_RELAY_PUBLIC_URL`). If no production snapshot is registered yet, point the relay at the dev image instead:
+With `DAYTONA_API_KEY` set, `project create` (without `--local-box`) creates a real sandbox from the snapshot named by `ARBOS_DAYTONA_SNAPSHOT` (default `arbos-agent-0.1.5`, the current registered build). The relay must be reachable from the box (`ARBOS_RELAY_PUBLIC_URL`). If no production snapshot is registered yet, point the relay at the dev image instead:
 
 ```bash
 export DAYTONA_API_KEY=… ARBOS_RELAY_PUBLIC_URL=https://<public-url-of-this-relay> \
@@ -113,7 +125,7 @@ The relay brokers Gmail/Calendar, Slack, GitHub and Harness Comms for the boxes 
 
 ## Image
 
-`.github/workflows/image.yml` builds `image/Dockerfile` on an image tag (`image-v0.1.4`) or by hand, pushes it to GHCR, smoke-tests it, and registers the Daytona snapshot `arbos-agent-<version>` with `image/register-snapshot.sh` (secrets `DAYTONA_API_KEY`, `GHCR_READ_TOKEN`).
+`.github/workflows/image.yml` builds `image/Dockerfile` on an image tag (`image-v0.1.5`) or by hand, pushes it to GHCR, smoke-tests it, and registers the Daytona snapshot `arbos-agent-<version>` with `image/register-snapshot.sh` (secrets `DAYTONA_API_KEY`, `GHCR_READ_TOKEN`).
 
 Without CI (unpublished repo) the same build runs on any Docker host, including a Daytona Docker-in-Docker sandbox (`FROM docker:27-dind`, start `dockerd-entrypoint.sh`, upload the build context over SSH), then goes to Daytona's transient registry:
 
@@ -121,10 +133,10 @@ Without CI (unpublished repo) the same build runs on any Docker host, including 
 # static agentd for the image
 CC_x86_64_unknown_linux_musl=musl-gcc cargo build --release -p arbos-agentd --target x86_64-unknown-linux-musl
 mkdir -p dist && cp target/x86_64-unknown-linux-musl/release/arbos-agentd dist/
-docker build --platform linux/amd64 -f image/Dockerfile -t arbos-agent:0.1.4 .
-# temporary push credentials: GET $DAYTONA_API_URL/docker-registry/registry-push-access?snapshotName=arbos-agent-0.1.4
-docker tag arbos-agent:0.1.4 cr.app.daytona.io/<project>/arbos-agent:0.1.4 && docker push cr.app.daytona.io/<project>/arbos-agent:0.1.4
-image/register-snapshot.sh arbos-agent-0.1.4 cr.app.daytona.io/<project>/arbos-agent:0.1.4
+docker build --platform linux/amd64 -f image/Dockerfile -t arbos-agent:0.1.5 .
+# temporary push credentials: GET $DAYTONA_API_URL/docker-registry/registry-push-access?snapshotName=arbos-agent-0.1.5
+docker tag arbos-agent:0.1.5 cr.app.daytona.io/<project>/arbos-agent:0.1.5 && docker push cr.app.daytona.io/<project>/arbos-agent:0.1.5
+image/register-snapshot.sh arbos-agent-0.1.5 cr.app.daytona.io/<project>/arbos-agent:0.1.5
 ```
 
 Transient-registry tags are immutable: bump the version for every rebuild. The Arbos layers are last in the Dockerfile, so a code change rebuilds in seconds against the cached toolchain layers.

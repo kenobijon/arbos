@@ -445,6 +445,7 @@ pub async fn start_box(state: &AppState, project_id: &str) -> Result<()> {
                 t0.elapsed().as_millis() as i64,
                 None,
             )?;
+            push_relay_url(state, dt, &id).await;
         }
         Provider::Process => {
             let (box_token, mcp_token) = tokens.ok_or_else(|| anyhow!("local tokens missing"))?;
@@ -568,26 +569,54 @@ pub fn load_local_tokens(state: &AppState, project_id: &str) -> Result<Option<(S
 }
 
 /// A client needs the box: queue a wake obligation unless it is already awake or waking.
+/// The sandbox env bakes `ARBOS_RELAY_URL` at create time; the relay's public URL can change
+/// (quick tunnels do on every restart). After every start the current URL goes into the box as
+/// `/work/.arbos/relay-url`, which agentd prefers over its env at boot.
+pub const RELAY_URL_FILE: &str = "/work/.arbos/relay-url";
+
+async fn push_relay_url(state: &AppState, dt: &crate::daytona::Daytona, sandbox_id: &str) {
+    let url = state.cfg.public_url.trim_end_matches('/').to_owned();
+    for attempt in 1..=4u32 {
+        match dt
+            .toolbox_upload(sandbox_id, RELAY_URL_FILE, format!("{url}\n").into_bytes())
+            .await
+        {
+            Ok(()) => {
+                tracing::info!(sandbox_id, %url, attempt, "relay url pushed into the box");
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(sandbox_id, attempt, error = %e, "relay url push failed");
+                tokio::time::sleep(Duration::from_millis(1500 * attempt as u64)).await;
+            }
+        }
+    }
+}
+
+/// A started box must say hello within this long, or it is treated as unable to reach the relay.
+pub const HELLO_DEADLINE_MS: i64 = 60_000;
+/// Reasons that count as the user asking again (they reset a `box cannot reach relay` error).
+fn explicit_wake(reason: &str) -> bool {
+    matches!(reason, "wake" | "start" | "open" | "api")
+}
+
 pub async fn ensure_awake(state: &AppState, project_id: &str, reason: &str) {
     let (st, since) = state.box_state(project_id).await;
     if st == BoxState::Awake {
         return;
     }
-    if st == BoxState::Waking {
-        // A wake that never produced a box socket (the process died, the start call failed) is
-        // retried after a grace period instead of being treated as "already in progress".
-        let connected = state
-            .box_conns
-            .lock()
-            .await
-            .get(project_id)
-            .map(|c| c.0 > 0)
-            .unwrap_or(false);
-        if connected || now_ms() - since < 45_000 {
+    if st == BoxState::Error {
+        // Stale-box error: no more automatic retries; an explicit wake/start tries again once.
+        if !explicit_wake(reason) {
             return;
         }
-        tracing::warn!(%project_id, "box has been waking for >45 s without connecting; retrying");
-        let _ = state.db.finish_wake_job(project_id);
+        state.stale_bounces.lock().await.remove(project_id);
+    }
+    if st == BoxState::Waking {
+        // Already waking: either still inside the hello deadline (nothing to do) or stale, in
+        // which case `stale_wake_check` has bounced it once or flipped it to error.
+        let _ = stale_wake_check(state, project_id, since).await;
+        return;
     }
     if let Err(e) = state.db.upsert_wake_job(project_id, reason) {
         tracing::warn!(error = %e, "wake job");
@@ -602,12 +631,60 @@ pub async fn ensure_awake(state: &AppState, project_id: &str, reason: &str) {
         .await;
 }
 
+/// Stale-box detector (runs from the liveness sweep and from `ensure_awake`): a box that has been
+/// waking for longer than `HELLO_DEADLINE_MS` without a socket is re-pushed the relay URL and
+/// bounced once; the second time it becomes `error · box cannot reach relay` and the wake job
+/// ends, so the relay stops waking it forever. Returns true when it acted.
+async fn stale_wake_check(state: &AppState, project_id: &str, since: i64) -> bool {
+    let connected = state
+        .box_conns
+        .lock()
+        .await
+        .get(project_id)
+        .map(|c| c.0 > 0)
+        .unwrap_or(false);
+    if connected || now_ms() - since < HELLO_DEADLINE_MS {
+        return false;
+    }
+    let bounces = {
+        let mut m = state.stale_bounces.lock().await;
+        let n = m.entry(project_id.to_owned()).or_insert(0);
+        *n += 1;
+        *n
+    };
+    let _ = state.db.finish_wake_job(project_id);
+    if bounces > 1 {
+        tracing::error!(%project_id, "box started but never reached the relay; giving up");
+        state
+            .set_box_state(project_id, BoxState::Error, Some("box cannot reach relay"))
+            .await;
+        return true;
+    }
+    tracing::warn!(%project_id, "box has been waking for >60 s without connecting; re-pushing the relay url and bouncing once");
+    if let Err(e) = state.db.upsert_wake_job(project_id, "stale box: bounce") {
+        tracing::warn!(error = %e, "wake job");
+    }
+    state
+        .wake_started
+        .lock()
+        .await
+        .insert(project_id.to_owned(), now_ms());
+    // Restart the clock: the next check happens one deadline after the bounce.
+    state
+        .box_states
+        .write()
+        .await
+        .insert(project_id.to_owned(), (BoxState::Waking, now_ms()));
+    true
+}
+
 pub async fn box_connected(state: &AppState, project_id: &str) {
     {
         let mut c = state.box_conns.lock().await;
         let e = c.entry(project_id.to_owned()).or_insert((0, 0));
         e.0 += 1;
     }
+    state.stale_bounces.lock().await.remove(project_id);
     let _ = state.db.finish_wake_job(project_id);
     if let Some(t0) = state.wake_started.lock().await.remove(project_id) {
         let _ = state
@@ -624,8 +701,20 @@ pub async fn box_disconnected(state: &AppState, project_id: &str) {
     e.1 = now_ms();
 }
 
-/// Called every 5 s: a box with no sockets for `box_idle_grace_ms` is asleep (unless it was never seen).
+/// Called every 5 s: a box with no sockets for `box_idle_grace_ms` is asleep (unless it was never seen),
+/// and a box waking past the hello deadline goes through the stale-box detector.
 pub async fn sweep_box_liveness(state: &AppState) {
+    let waking: Vec<(String, i64)> = state
+        .box_states
+        .read()
+        .await
+        .iter()
+        .filter(|(_, (st, _))| *st == BoxState::Waking)
+        .map(|(k, (_, since))| (k.clone(), *since))
+        .collect();
+    for (project_id, since) in waking {
+        stale_wake_check(state, &project_id, since).await;
+    }
     let snapshot: Vec<(String, u32, i64)> = state
         .box_conns
         .lock()
@@ -669,7 +758,9 @@ pub async fn spawn_wake_runner(state: AppState) {
             };
             for (project_id, reason, attempts) in jobs {
                 let (st, _) = state.box_state(&project_id).await;
-                if st == BoxState::Awake {
+                if st == BoxState::Awake || st == BoxState::Error {
+                    // Awake: the dial finished it. Error: the stale-box detector gave up; only an
+                    // explicit wake/start re-arms it.
                     let _ = state.db.finish_wake_job(&project_id);
                     continue;
                 }

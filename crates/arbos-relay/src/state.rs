@@ -62,6 +62,8 @@ pub struct AppState {
     pub wake_started: Arc<Mutex<HashMap<String, i64>>>,
     /// project_id → ms of the last client row; rows pushed while a box was dying must re-wake it.
     pub last_client_push: Arc<Mutex<HashMap<String, i64>>>,
+    /// project_id → wakes that produced no hello within the deadline (stale-box detector).
+    pub stale_bounces: Arc<Mutex<HashMap<String, u32>>>,
     pub conn_seq: Arc<std::sync::atomic::AtomicU64>,
     /// Encrypts connector tokens at rest (F1).
     pub relay_key: Arc<crate::connectors::crypto::RelayKey>,
