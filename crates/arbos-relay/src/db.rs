@@ -469,6 +469,7 @@ impl Db {
         crate::db_people::migrate_people(&c);
         c.execute_batch(crate::db_people::PEOPLE_SCHEMA)?;
         Self::migrate_mono_avatar_defaults(&c)?;
+        c.execute_batch(crate::db_push::PUSH_SCHEMA)?;
         Ok(Self(Arc::new(Mutex::new(c))))
     }
 

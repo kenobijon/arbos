@@ -137,6 +137,12 @@ pub struct AppState {
     /// `signin::REFRESH_GRACE_MS` the old token gets that same pair again instead of counting
     /// as a replay, so concurrent refreshers from one device converge on one rotation.
     pub refresh_grace: Arc<Mutex<HashMap<String, (i64, serde_json::Value)>>>,
+    /// Message notifications transport (APNs, a capture list in tests, or off).
+    pub push: Arc<crate::apns::Pusher>,
+    /// device_id → the chat its presence says is on screen (suppresses that chat's pushes).
+    pub focus: crate::notify::Focus,
+    /// (chat_id, sender user) → when the row-level fallback last notified for it.
+    pub fallback_sent: Arc<Mutex<HashMap<(String, String), i64>>>,
 }
 
 /// One running box upgrade.
@@ -365,6 +371,9 @@ pub(crate) mod test_support {
             stale_bounces: Arc::new(Mutex::new(HashMap::new())),
             local_conns: Arc::new(Mutex::new(HashMap::new())),
             refresh_grace: Arc::new(Mutex::new(HashMap::new())),
+            push: Arc::new(crate::apns::Pusher::Capture(Mutex::new(Vec::new()))),
+            focus: Arc::new(Mutex::new(HashMap::new())),
+            fallback_sent: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
