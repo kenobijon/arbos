@@ -745,6 +745,10 @@ mod tests {
                 .iter()
                 .map(|s| (*s).to_owned())
                 .collect(),
+            avatar_colors: crate::avatar::DEFAULT_COLORS
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect(),
         };
         AppState {
             db,
@@ -800,6 +804,7 @@ mod tests {
             user_id: "u_default".into(),
             workspace_state: "stopped".into(),
             avatar: None,
+            avatar_color: None,
         };
         state.db.insert_project(&project).unwrap();
         state

@@ -135,6 +135,9 @@ pub struct CreateProjectBody {
     /// Tree avatar slug; default = the deterministic pick for the new id.
     #[serde(default)]
     pub avatar: Option<String>,
+    /// Avatar colour slug; default = the deterministic pick, deduped with the tree.
+    #[serde(default)]
+    pub avatar_color: Option<String>,
 }
 
 fn default_models() -> Value {
@@ -179,25 +182,44 @@ pub async fn create_project(
     };
     let now = now_ms();
     let id = ulid();
+    let owner = principal.user_id().unwrap_or("u_default").to_owned();
+    // Defaults are deduped within the user's (tree, colour) pairs so sibling tiles differ.
+    let taken: Vec<(String, String)> = state
+        .db
+        .projects_of_user(&owner)
+        .unwrap_or_default()
+        .iter()
+        .map(|p| {
+            (
+                p.avatar
+                    .clone()
+                    .unwrap_or_else(|| crate::avatar::default_for(&p.id, &state.cfg.avatar_slugs)),
+                p.avatar_color.clone().unwrap_or_else(|| {
+                    crate::avatar::default_color_for(&p.id, &state.cfg.avatar_colors)
+                }),
+            )
+        })
+        .collect();
+    let (default_tree, default_color) = crate::avatar::default_pair(
+        &id,
+        &state.cfg.avatar_slugs,
+        &state.cfg.avatar_colors,
+        &taken,
+    );
     let avatar = match b.avatar.as_deref().map(str::trim) {
         Some(a) if crate::avatar::valid_slug(a) => a.to_owned(),
         Some(_) => return Err((StatusCode::BAD_REQUEST, "avatar must be a slug".into())),
-        None => {
-            // Deduped within the user's projects so sibling tiles get different trees.
-            let owner = principal.user_id().unwrap_or("u_default");
-            let taken: Vec<String> = state
-                .db
-                .projects_of_user(owner)
-                .unwrap_or_default()
-                .iter()
-                .map(|p| {
-                    p.avatar.clone().unwrap_or_else(|| {
-                        crate::avatar::default_for(&p.id, &state.cfg.avatar_slugs)
-                    })
-                })
-                .collect();
-            crate::avatar::default_unused(&id, &state.cfg.avatar_slugs, &taken)
+        None => default_tree,
+    };
+    let avatar_color = match b.avatar_color.as_deref().map(str::trim) {
+        Some(c) if crate::avatar::valid_slug(c) => c.to_owned(),
+        Some(_) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "avatar_color must be a slug".into(),
+            ))
         }
+        None => default_color,
     };
     let project = Project {
         id,
@@ -210,9 +232,10 @@ pub async fn create_project(
         last_active_at: now,
         spend_cap_daily: 25.0,
         color: b.color.clone().unwrap_or_else(|| "#8b7cf6".into()),
-        user_id: principal.user_id().unwrap_or("u_default").to_owned(),
+        user_id: owner,
         workspace_state: "stopped".into(),
         avatar: Some(avatar),
+        avatar_color: Some(avatar_color),
     };
     if state
         .db
@@ -362,6 +385,9 @@ pub struct PatchProjectBody {
     /// Tree avatar slug; `null` resets to the deterministic default.
     #[serde(default, deserialize_with = "deserialize_double_option")]
     pub avatar: Option<Option<String>>,
+    /// Avatar colour slug; `null` resets to the deterministic default.
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub avatar_color: Option<Option<String>>,
 }
 
 fn deserialize_double_option<'de, D>(d: D) -> Result<Option<Option<String>>, D::Error>
@@ -430,6 +456,23 @@ pub async fn patch_project(
             Some(Some(a.to_owned()))
         }
     };
+    let color_patch: Option<Option<String>> = match &b.avatar_color {
+        None => None,
+        Some(None) => Some(Some(crate::avatar::default_color_for(
+            &p.id,
+            &state.cfg.avatar_colors,
+        ))),
+        Some(Some(c)) => {
+            let c = c.trim();
+            if !crate::avatar::valid_slug(c) {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "avatar_color must be a slug".into(),
+                ));
+            }
+            Some(Some(c.to_owned()))
+        }
+    };
     state
         .db
         .update_project(
@@ -441,6 +484,7 @@ pub async fn patch_project(
             models.as_ref(),
             b.spend_cap_daily,
             avatar_patch.as_ref().map(|a| a.as_deref()),
+            color_patch.as_ref().map(|a| a.as_deref()),
         )
         .map_err(internal)?;
     let p = state
@@ -567,6 +611,7 @@ pub(crate) async fn project_json(state: &AppState, p: &Project) -> Value {
     json!({
         "id": p.id, "name": p.name, "icon": p.icon, "color": p.color, "instructions": p.instructions,
         "avatar": p.avatar.clone().unwrap_or_else(|| crate::avatar::default_for(&p.id, &state.cfg.avatar_slugs)),
+        "avatar_color": p.avatar_color.clone().unwrap_or_else(|| crate::avatar::default_color_for(&p.id, &state.cfg.avatar_colors)),
         "state": p.state, "box": bs, "box_since": since,
         "models": p.models,
         "spend_today_usd": today, "spend_cap_usd": p.spend_cap_daily,

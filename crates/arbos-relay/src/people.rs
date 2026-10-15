@@ -216,8 +216,12 @@ fn member_json(state: &AppState, m: &Membership) -> Value {
                 .avatar
                 .clone()
                 .unwrap_or_else(|| crate::avatar::default_for(&p.id, &state.cfg.avatar_slugs));
+            let avatar_color = p.avatar_color.clone().unwrap_or_else(|| {
+                crate::avatar::default_color_for(&p.id, &state.cfg.avatar_colors)
+            });
             v["avatar"] = json!(avatar);
-            v["project"] = json!({ "id": p.id, "name": p.name, "icon": p.icon, "color": p.color, "avatar": avatar });
+            v["avatar_color"] = json!(avatar_color);
+            v["project"] = json!({ "id": p.id, "name": p.name, "icon": p.icon, "color": p.color, "avatar": avatar, "avatar_color": avatar_color });
             v["owner"] = json!(p.user_id);
             v["owner_handle"] = state
                 .db
@@ -1995,6 +1999,7 @@ pub(crate) mod tests_support {
             user_id: owner.to_owned(),
             workspace_state: "stopped".into(),
             avatar: None,
+            avatar_color: None,
         };
         state.db.insert_project(&project).expect("project");
         state

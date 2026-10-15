@@ -190,6 +190,9 @@ pub struct Project {
     /// read as the deterministic default for the id (`crate::avatar::default_for`).
     #[serde(default)]
     pub avatar: Option<String>,
+    /// Avatar colour slug (manifest `colors[]`); `None` reads as the deterministic default.
+    #[serde(default)]
+    pub avatar_color: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -427,6 +430,7 @@ impl Db {
         let _ = c.execute("ALTER TABLE chats ADD COLUMN closed_at INTEGER", []);
         let _ = c.execute("ALTER TABLE projects ADD COLUMN avatar TEXT", []);
         let _ = c.execute("ALTER TABLE projects ADD COLUMN deleted_at INTEGER", []);
+        let _ = c.execute("ALTER TABLE projects ADD COLUMN avatar_color TEXT", []);
         // One box per user: devices and projects belong to a user; legacy sandboxes record where
         // their /work went.
         let _ = c.execute(
@@ -506,12 +510,13 @@ impl Db {
                    user_id TEXT NOT NULL DEFAULT 'u_default',
                    workspace_state TEXT NOT NULL DEFAULT 'stopped',
                    avatar TEXT,
-                   deleted_at INTEGER
+                   deleted_at INTEGER,
+                   avatar_color TEXT
                  );
                  INSERT INTO projects_new(id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily,
-                                          project_token_hash, color, user_id, workspace_state, avatar, deleted_at)
+                                          project_token_hash, color, user_id, workspace_state, avatar, deleted_at, avatar_color)
                    SELECT id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily,
-                          project_token_hash, color, user_id, workspace_state, avatar, deleted_at FROM projects;
+                          project_token_hash, color, user_id, workspace_state, avatar, deleted_at, avatar_color FROM projects;
                  DROP TABLE projects;
                  ALTER TABLE projects_new RENAME TO projects;
                  COMMIT;",
@@ -616,9 +621,9 @@ impl Db {
     pub fn insert_project(&self, p: &Project) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO projects(id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color, user_id, workspace_state, avatar)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-                params![p.id, p.name, p.icon, p.instructions, p.models.to_string(), p.state, p.created_at, p.last_active_at, p.spend_cap_daily, p.color, p.user_id, p.workspace_state, p.avatar],
+                "INSERT INTO projects(id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color, user_id, workspace_state, avatar, avatar_color)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                params![p.id, p.name, p.icon, p.instructions, p.models.to_string(), p.state, p.created_at, p.last_active_at, p.spend_cap_daily, p.color, p.user_id, p.workspace_state, p.avatar, p.avatar_color],
             )
             .map(|_| ())
         })
@@ -639,11 +644,12 @@ impl Db {
             user_id: r.get(10)?,
             workspace_state: r.get(11)?,
             avatar: r.get(12)?,
+            avatar_color: r.get(13)?,
         })
     }
 
     const PROJECT_COLS: &'static str =
-        "id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color, user_id, workspace_state, avatar";
+        "id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color, user_id, workspace_state, avatar, avatar_color";
 
     /// By id, else by name. Names are unique per user only, so a name lookup prefers the id
     /// match and otherwise returns the most recently active project with that name; callers that
@@ -773,6 +779,7 @@ impl Db {
         models: Option<&serde_json::Value>,
         spend_cap_daily: Option<f64>,
         avatar: Option<Option<&str>>,
+        avatar_color: Option<Option<&str>>,
     ) -> Result<()> {
         self.with(|c| {
             c.execute(
@@ -785,6 +792,12 @@ impl Db {
                 c.execute(
                     "UPDATE projects SET avatar = ?2 WHERE id = ?1",
                     params![id, a],
+                )?;
+            }
+            if let Some(col) = avatar_color {
+                c.execute(
+                    "UPDATE projects SET avatar_color = ?2 WHERE id = ?1",
+                    params![id, col],
                 )?;
             }
             Ok(())

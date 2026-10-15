@@ -15,6 +15,12 @@ pub const DEFAULT_SLUGS: &[&str] = &[
     "olive", "ginkgo",
 ];
 
+/// Avatar colour palette (manifest `colors[]`), in order.
+pub const DEFAULT_COLORS: &[&str] = &[
+    "mono", "red", "orange", "amber", "green", "teal", "cyan", "blue", "indigo", "violet", "pink",
+    "rose", "slate",
+];
+
 /// FNV-1a 64 over the UTF-8 bytes (the same arithmetic is one line in Swift).
 pub fn fnv1a64(s: &str) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -33,23 +39,85 @@ pub fn default_for(project_id: &str, slugs: &[String]) -> String {
     slugs[(fnv1a64(project_id) % slugs.len() as u64) as usize].clone()
 }
 
-/// The default for a new project of a user: start at `default_for(project_id)` and probe forward
-/// (wrapping) to the first slug none of the user's existing projects uses; when every slug is
-/// taken, keep the hash pick. Stored on the row at creation, so apps never have to guess.
-pub fn default_unused(project_id: &str, slugs: &[String], taken: &[String]) -> String {
-    let list: Vec<String> = if slugs.is_empty() {
+/// Default colour for a new project: `colors[fnv1a64(project_id + ":color") % n]`.
+pub fn default_color_for(project_id: &str, colors: &[String]) -> String {
+    let list: Vec<String> = if colors.is_empty() {
+        DEFAULT_COLORS.iter().map(|s| (*s).to_owned()).collect()
+    } else {
+        colors.to_vec()
+    };
+    list[(fnv1a64(&format!("{project_id}:color")) % list.len() as u64) as usize].clone()
+}
+
+/// Default `(tree, color)` for a new project, deduped against the user's existing pairs: start
+/// at the hash picks; probe forward on the colour first (same tree, next colour), then on the
+/// tree, until the pair is unused; when every pair is taken, keep the hash picks. Two agents may
+/// share a tree only when their colours differ.
+pub fn default_pair(
+    project_id: &str,
+    slugs: &[String],
+    colors: &[String],
+    taken: &[(String, String)],
+) -> (String, String) {
+    let trees: Vec<String> = if slugs.is_empty() {
         DEFAULT_SLUGS.iter().map(|s| (*s).to_owned()).collect()
     } else {
         slugs.to_vec()
     };
-    let start = (fnv1a64(project_id) % list.len() as u64) as usize;
-    for i in 0..list.len() {
-        let candidate = &list[(start + i) % list.len()];
-        if !taken.iter().any(|t| t == candidate) {
-            return candidate.clone();
+    let palette: Vec<String> = if colors.is_empty() {
+        DEFAULT_COLORS.iter().map(|s| (*s).to_owned()).collect()
+    } else {
+        colors.to_vec()
+    };
+    let t0 = (fnv1a64(project_id) % trees.len() as u64) as usize;
+    let c0 = (fnv1a64(&format!("{project_id}:color")) % palette.len() as u64) as usize;
+    for ti in 0..trees.len() {
+        let tree = &trees[(t0 + ti) % trees.len()];
+        for ci in 0..palette.len() {
+            let color = &palette[(c0 + ci) % palette.len()];
+            if !taken.iter().any(|(t, c)| t == tree && c == color) {
+                return (tree.clone(), color.clone());
+            }
         }
     }
-    list[start].clone()
+    (trees[t0].clone(), palette[c0].clone())
+}
+
+/// Colour list from the manifest file (`colors[]`), `ARBOS_AVATAR_COLORS`, else the default.
+pub fn colors_from_env() -> Vec<String> {
+    if let Ok(path) = std::env::var("ARBOS_AVATAR_MANIFEST") {
+        if let Ok(text) = std::fs::read_to_string(path.trim()) {
+            if let Ok(v) = serde_json::from_str::<Value>(&text) {
+                let colors: Vec<String> = v
+                    .get("colors")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|e| {
+                                e.as_str().map(str::to_owned).or_else(|| {
+                                    e.get("slug").and_then(Value::as_str).map(str::to_owned)
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !colors.is_empty() {
+                    return colors;
+                }
+            }
+        }
+    }
+    if let Ok(list) = std::env::var("ARBOS_AVATAR_COLORS") {
+        let colors: Vec<String> = list
+            .split(',')
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !colors.is_empty() {
+            return colors;
+        }
+    }
+    DEFAULT_COLORS.iter().map(|s| (*s).to_owned()).collect()
 }
 
 /// Slug list from the env (file or list), else the built-in default.
@@ -107,18 +175,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_unused_probes_forward_and_wraps() {
-        let slugs: Vec<String> = DEFAULT_SLUGS.iter().map(|s| (*s).to_owned()).collect();
-        let first = default_for("P1", &slugs);
-        assert_eq!(default_unused("P1", &slugs, &[]), first);
-        let start = slugs.iter().position(|s| *s == first).unwrap();
-        let next = slugs[(start + 1) % slugs.len()].clone();
-        assert_eq!(
-            default_unused("P1", &slugs, std::slice::from_ref(&first)),
-            next
-        );
-        // Every slug taken: the hash pick stays.
-        assert_eq!(default_unused("P1", &slugs, &slugs), first);
+    fn default_pair_dedupes_on_color_first() {
+        let trees: Vec<String> = DEFAULT_SLUGS.iter().map(|s| (*s).to_owned()).collect();
+        let colors: Vec<String> = DEFAULT_COLORS.iter().map(|s| (*s).to_owned()).collect();
+        let (t, c) = default_pair("P9", &trees, &colors, &[]);
+        assert_eq!(t, default_for("P9", &trees));
+        assert_eq!(c, default_color_for("P9", &colors));
+        // Same tree taken with that colour: the tree stays, the colour moves on.
+        let (t2, c2) = default_pair("P9", &trees, &colors, &[(t.clone(), c.clone())]);
+        assert_eq!(t2, t);
+        let ci = colors.iter().position(|x| *x == c).unwrap();
+        assert_eq!(c2, colors[(ci + 1) % colors.len()]);
+        // Every colour of that tree taken: the next tree.
+        let all: Vec<(String, String)> = colors.iter().map(|c| (t.clone(), c.clone())).collect();
+        let (t3, _) = default_pair("P9", &trees, &colors, &all);
+        let ti = trees.iter().position(|x| *x == t).unwrap();
+        assert_eq!(t3, trees[(ti + 1) % trees.len()]);
     }
 
     #[test]

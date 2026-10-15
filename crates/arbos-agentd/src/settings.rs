@@ -80,6 +80,8 @@ pub struct SettingsState {
     pub color: String,
     /// Tree avatar slug from the registry (`Project.avatar`), mirrored into the doc settings.
     pub avatar: String,
+    /// Avatar colour slug (`Project.avatar_color`).
+    pub avatar_color: String,
     pub instructions: String,
     pub spend_cap_usd: f64,
     /// Visible note when a configured model id was unknown and a default took its place.
@@ -293,6 +295,9 @@ impl Agent {
             if let Some(a) = project.get("avatar").and_then(Value::as_str) {
                 st.avatar = a.to_owned();
             }
+            if let Some(a) = project.get("avatar_color").and_then(Value::as_str) {
+                st.avatar_color = a.to_owned();
+            }
             if let Some(i) = project.get("instructions").and_then(Value::as_str) {
                 st.instructions = i.to_owned();
             }
@@ -340,7 +345,7 @@ impl Agent {
         let m = self.settings.models.read().await.clone();
         let st = self.settings.state.read().await.clone();
         let v = json!({
-            "name": st.name, "icon": st.icon, "color": st.color, "avatar": st.avatar, "instructions": st.instructions,
+            "name": st.name, "icon": st.icon, "color": st.color, "avatar": st.avatar, "avatarColor": st.avatar_color, "instructions": st.instructions,
             "agentModel": m.talking.id, "agentEffort": m.talking.effort,
             "defaultSubagentModel": m.subagent.id, "defaultSubagentEffort": m.subagent.effort,
             "decisionModel": m.decision.id, "spendCapUsd": st.spend_cap_usd,
