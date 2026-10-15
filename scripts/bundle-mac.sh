@@ -172,56 +172,23 @@ ditto "$APP" "$DMG_SRC/$APP_NAME.app"
 ln -s /Applications "$DMG_SRC/Applications"
 cp crates/arbos-mac/macos/dmg-background.png "$DMG_SRC/.background/background.png"
 cp crates/arbos-mac/macos/dmg-background@2x.png "$DMG_SRC/.background/background@2x.png"
-# Two passes: a writable image so Finder can lay the window out (dark
-# background, app left, Applications right), then compress. The layout step
-# is best effort — a runner without a Finder session still ships a plain DMG.
-DMG_RW="$DIST/$APP_NAME-rw.dmg"
-rm -f "$DMG_RW"
-hdiutil create -quiet -volname "$APP_NAME" -srcfolder "$DMG_SRC" -ov -format UDRW -fs HFS+ "$DMG_RW"
+# The window layout (dark background, 128 px icons, app left / Applications
+# right, 660x400) is a prebuilt .DS_Store generated once with the `ds_store`
+# + `mac_alias` Python libraries (see crates/arbos-mac/macos/README-dmg.md),
+# so no Finder session or Apple Events are needed on the build machine. The
+# background alias inside it points at /Volumes/Arbos/.background/background.png,
+# which is why the volume name must stay "Arbos".
+cp crates/arbos-mac/macos/dmg.DS_Store "$DMG_SRC/.DS_Store"
 MOUNT_DIR="/Volumes/$APP_NAME"
-# A leftover from an earlier run detaches cleanly. A busy volume of the same name (someone
-# running the app from a mounted DMG on this machine) does not; refuse rather than force-eject
-# it or lay out the wrong volume.
-hdiutil detach -quiet "$MOUNT_DIR" 2>/dev/null || true
+# Nothing here mounts the image, but a busy volume of the same name (someone running the
+# app from a mounted DMG on this machine) would make any later verification step lay out
+# the wrong volume; refuse rather than guess.
 if mount | grep -q " on $MOUNT_DIR "; then
   echo "error: $MOUNT_DIR is mounted and busy; eject it before building the DMG" >&2
   exit 1
 fi
-hdiutil attach -quiet -readwrite -noverify -noautoopen "$DMG_RW"
-mount | grep -q " on $MOUNT_DIR " || { echo "error: $DMG_RW did not mount at $MOUNT_DIR" >&2; exit 1; }
-if osascript <<EOS >/dev/null 2>&1
-tell application "Finder"
-  tell disk "$APP_NAME"
-    open
-    set current view of container window to icon view
-    set toolbar visible of container window to false
-    set statusbar visible of container window to false
-    set the bounds of container window to {200, 120, 860, 520}
-    set theViewOptions to the icon view options of container window
-    set arrangement of theViewOptions to not arranged
-    set icon size of theViewOptions to 128
-    set background picture of theViewOptions to file ".background:background.png"
-    set position of item "$APP_NAME.app" of container window to {165, 190}
-    set position of item "Applications" of container window to {495, 190}
-    close
-    open
-    update without registering applications
-    delay 2
-    close
-  end tell
-end tell
-EOS
-then
-  echo "==> dmg window laid out"
-else
-  echo "==> dmg layout skipped (no Finder session)"
-fi
-# Hide the background folder from the window either way.
-SetFile -a V "$MOUNT_DIR/.background" 2>/dev/null || chflags hidden "$MOUNT_DIR/.background" 2>/dev/null || true
-sync
-hdiutil detach -quiet "$MOUNT_DIR" || { sleep 2; hdiutil detach -quiet -force "$MOUNT_DIR"; }
-hdiutil convert -quiet "$DMG_RW" -format UDZO -imagekey zlib-level=9 -ov -o "$DMG"
-rm -f "$DMG_RW"
+hdiutil create -quiet -volname "$APP_NAME" -srcfolder "$DMG_SRC" -ov -format UDZO -fs HFS+ \
+  -imagekey zlib-level=9 "$DMG"
 rm -rf "$DMG_SRC"
 if [[ "$SIGNING" != "ad-hoc" ]]; then
   codesign --force --timestamp --sign "$ARBOS_SIGN_IDENTITY" "$DMG"
