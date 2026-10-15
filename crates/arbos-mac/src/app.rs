@@ -11,6 +11,8 @@ use gpui::{App, Context, EventEmitter, RenderImage, Task};
 use gpui_tokio::Tokio;
 use tokio::sync::mpsc;
 
+use crate::auth;
+use crate::model::AccountView;
 use crate::model::{
     new_id, now_ms, AttachmentKind, BoxState, ChannelsView, Chat, ChatKind, ConnectorsView, Effort,
     Id, Link, LocalView, Machine, Message, MessageStatus, Part, Project, ProjectDocView,
@@ -24,10 +26,20 @@ use crate::ui::notify::{Gate, Notifier, NotifyEvent, NotifyKind};
 const NOTIFY_TICK_MS: u64 = 5_000;
 use crate::update::{self, UpdateCommand, UpdateEvent, UpdatePhase, UpdateState};
 
-/// Pairing screen state (crdt-sync §10.1).
+/// How the sign-in screen signs this device in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignInMode {
+    /// "Sign in with GitHub" through the relay's OAuth flow.
+    GitHub,
+    /// The relay runs `ARBOS_AUTH_MODE=paircode`: one-time code from its log.
+    PairCode,
+}
+
+/// Sign-in screen state (first launch, after sign-out, after a revoked token).
 #[derive(Clone, Debug)]
 pub struct Pairing {
     pub relay_url: String,
+    pub mode: SignInMode,
     pub busy: bool,
     pub error: Option<String>,
 }
@@ -99,6 +111,10 @@ pub struct AppState {
     pub source_name: &'static str,
     pub pairing: Option<Pairing>,
     pub device_id: Option<String>,
+    /// Signed-in account (`/auth/token` user, then `/me`).
+    pub account: Option<AccountView>,
+    /// Set by a fresh sign-in: with no projects yet, create "Home" and land in it.
+    first_project_pending: bool,
     pub projects: Vec<Project>,
     /// Picker contents; empty = the fixture's static list.
     pub models: Vec<String>,
@@ -217,6 +233,8 @@ impl AppState {
         Self {
             source_name,
             pairing: None,
+            account: None,
+            first_project_pending: false,
             device_id: None,
             projects: Vec::new(),
             models: Vec::new(),
@@ -362,16 +380,29 @@ impl AppState {
     fn apply(&mut self, event: SyncEvent, cx: &mut Context<Self>) {
         match event {
             SyncEvent::NeedsPairing { relay_url } => {
+                let mode = self
+                    .pairing
+                    .as_ref()
+                    .map(|p| p.mode)
+                    .unwrap_or(SignInMode::GitHub);
                 self.pairing = Some(Pairing {
                     relay_url,
+                    mode,
                     busy: false,
                     error: None,
                 });
+                self.device_id = None;
                 cx.notify();
             }
             SyncEvent::Paired { device_id } => {
                 self.pairing = None;
                 self.device_id = Some(device_id);
+                // Land in a chat: if this account has no project yet, make "Home".
+                self.first_project_pending = true;
+                cx.notify();
+            }
+            SyncEvent::Account(account) => {
+                self.account = account;
                 cx.notify();
             }
             SyncEvent::PairingFailed(err) => {
@@ -480,6 +511,15 @@ impl AppState {
                             NotifyKind::SpendCapReached,
                             format!("${:.2} of ${:.2} today", p.spend_today_usd, p.spend_cap_usd),
                         );
+                    }
+                }
+                if self.first_project_pending {
+                    self.first_project_pending = false;
+                    if projects.is_empty() && !self.awaiting_new_project {
+                        self.awaiting_new_project = true;
+                        self.command(ClientCommand::CreateProject {
+                            name: "Home".into(),
+                        });
                     }
                 }
                 // A project this device just created becomes the selection.
@@ -1598,6 +1638,52 @@ impl AppState {
         cx.notify();
     }
 
+    /// "Sign in with GitHub": run the browser leg, then exchange the grant.
+    pub fn sign_in(&mut self, cx: &mut Context<Self>) {
+        let Some(p) = &mut self.pairing else {
+            return;
+        };
+        if p.busy {
+            return;
+        }
+        p.busy = true;
+        p.error = None;
+        let relay = p.relay_url.clone();
+        cx.notify();
+        let this = cx.entity().downgrade();
+        auth::begin(relay, device_name(), cx, move |outcome, cx| {
+            let _ = this.update(cx, |state, cx| {
+                match outcome {
+                    Ok(auth::SignIn::Grant(grant_code)) => {
+                        state.command(ClientCommand::SignIn { grant_code });
+                    }
+                    Ok(auth::SignIn::PairCodeMode) => {
+                        if let Some(p) = &mut state.pairing {
+                            p.mode = SignInMode::PairCode;
+                            p.busy = false;
+                        }
+                    }
+                    Err(err) => {
+                        if let Some(p) = &mut state.pairing {
+                            p.busy = false;
+                            p.error = Some(format!("{err:#}"));
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        });
+    }
+
+    pub fn sign_out(&mut self, cx: &mut Context<Self>) {
+        self.command(ClientCommand::SignOut);
+        self.account = None;
+        self.projects.clear();
+        self.chats.clear();
+        self.selected_project = None;
+        cx.notify();
+    }
+
     pub fn create_project(&mut self, name: String, cx: &mut Context<Self>) {
         self.new_project_open = false;
         self.awaiting_new_project = true;
@@ -2044,4 +2130,20 @@ fn preview(m: &Message) -> String {
 pub fn init_source(cx: &mut App) -> Box<dyn SyncSource> {
     let _ = cx;
     crate::sync::source_from_env()
+}
+
+/// What the relay lists this device as (`device_name` on sign-in).
+fn device_name() -> String {
+    let host = std::fs::read_to_string("/etc/hostname")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .unwrap_or_else(|| "Mac".into());
+    let host = host.trim_end_matches(".local");
+    if cfg!(target_os = "macos") {
+        format!("{host} (Mac)")
+    } else {
+        host.to_string()
+    }
 }

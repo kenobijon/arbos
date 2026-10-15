@@ -10,6 +10,7 @@ use gpui::{
     FocusHandle, Focusable, FontWeight, Render, SharedString, Stateful, Window,
 };
 
+use crate::app::SignInMode;
 use crate::app::{AppState, DetailsTarget};
 use crate::model::{now_ms, BoxState, Chat, Link, MachineState, Project};
 use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
@@ -55,6 +56,8 @@ pub struct Shell {
     tab_scroll: gpui::ScrollHandle,
     /// Tab index to scroll into view on the next frame (new/selected tab).
     reveal_tab: Option<usize>,
+    /// True while the sign-in screen is up; its clearing focuses the composer.
+    signing_in: bool,
 }
 
 impl Shell {
@@ -191,6 +194,7 @@ impl Shell {
             shake_started_at: None,
             tab_scroll: gpui::ScrollHandle::new(),
             reveal_tab: None,
+            signing_in: false,
         }
     }
 
@@ -1574,6 +1578,7 @@ impl Shell {
         let link = state.link;
         let device = state.device_id.clone();
         let show_details = state.show_details;
+        let account = state.account.clone();
         let notify_on = state.notifier.enabled;
         let skill_count = state.skills.len();
         let update = state.update.clone();
@@ -2031,6 +2036,56 @@ impl Shell {
                     }),
             )
             .child(div().h(px(1.0)).bg(theme.border))
+            .when_some(account.clone(), |el, account| {
+                let who = if account.login.is_empty() {
+                    "Signed in".to_string()
+                } else {
+                    format!("@{}", account.login)
+                };
+                let credits = if account.balance_usd > 0.0 || account.daily_cap_usd.is_some() {
+                    match account.daily_cap_usd {
+                        Some(cap) => format!(
+                            " · ${:.2} left · ${:.2} of ${cap:.0} today",
+                            account.balance_usd, account.spent_today_usd
+                        ),
+                        None => format!(" · ${:.2} left", account.balance_usd),
+                    }
+                } else {
+                    String::new()
+                };
+                el.child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme.text_faint)
+                        .child("ACCOUNT"),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .text_size(px(12.0))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_color(theme.text)
+                                .child(format!("{who}{credits}")),
+                        )
+                        .child(
+                            div()
+                                .id("sign-out")
+                                .text_color(theme.accent)
+                                .cursor_pointer()
+                                .child("Sign out")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.settings_open = false;
+                                    this.state.update(cx, |s, cx| s.sign_out(cx));
+                                })),
+                        ),
+                )
+                .child(div().h(px(1.0)).bg(theme.border))
+            })
             .child(
                 div()
                     .text_size(px(11.5))
@@ -2059,38 +2114,22 @@ impl Shell {
 
     /// First run against a relay: enter the one-time code the relay printed
     /// (`arbos-relay` logs it; `POST /pair/new` mints more).
+    /// First launch: the mark, one sentence, "Sign in with GitHub". The
+    /// pairing-code entry only appears when the relay runs in paircode mode.
     fn render_pairing(&self, pairing: &crate::app::Pairing, cx: &mut Context<Self>) -> Div {
         let theme = Theme::of(cx).clone();
-        let input_row = div()
+        let mark = div()
+            .size(px(64.0))
+            .rounded(px(18.0))
+            .bg(theme.accent)
             .flex()
             .items_center()
-            .gap(px(10.0))
-            .h(px(COMPOSER_HEIGHT))
-            .px(px(16.0))
-            .rounded(px(COMPOSER_HEIGHT / 2.0))
-            .bg(theme.card())
-            .border_1()
-            .border_color(if pairing.error.is_some() {
-                theme.danger
-            } else {
-                theme.border_strong
-            })
-            .child(self.pairing_input.clone())
-            .child(
-                div()
-                    .id("pair-submit")
-                    .px(px(12.0))
-                    .py(px(6.0))
-                    .rounded_full()
-                    .bg(theme.text)
-                    .text_color(theme.bg)
-                    .text_size(px(12.5))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .cursor_pointer()
-                    .child(if pairing.busy { "Pairing…" } else { "Pair" })
-                    .on_click(cx.listener(|this, _, _, cx| this.submit_pairing(cx))),
-            );
-        div()
+            .justify_center()
+            .text_size(px(34.0))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(theme.bg)
+            .child("Ω");
+        let screen = div()
             .flex_1()
             .flex()
             .flex_col()
@@ -2098,22 +2137,117 @@ impl Shell {
             .justify_center()
             .gap(px(14.0))
             .px(px(28.0))
-            .child(div().text_size(px(22.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child("Pair this device"))
+            .child(mark)
+            .child(
+                div()
+                    .pt(px(6.0))
+                    .text_size(px(22.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.text)
+                    .child("Arbos"),
+            )
             .child(
                 div()
                     .text_size(px(13.0))
                     .text_color(theme.text_muted)
                     .text_center()
-                    .child(format!(
-                        "Relay {}. Enter the one-time code from the relay log (or `arbosctl pair-code`). The device token is kept in {}.",
-                        pairing.relay_url,
-                        if cfg!(target_os = "macos") { "your login keychain" } else { "~/.config/arbos (0600)" }
-                    )),
-            )
-            .child(div().w(px(COMPOSER_WIDTH)).max_w_full().pt(px(8.0)).child(frosted(COMPOSER_HEIGHT / 2.0, PANEL_BLUR, input_row)))
-            .when_some(pairing.error.clone(), |el, err| {
-                el.child(div().text_size(px(12.0)).text_color(theme.danger).child(err))
-            })
+                    .child(
+                        "Your agents work from one machine in the cloud; sign in and start a chat.",
+                    ),
+            );
+        match pairing.mode {
+            SignInMode::GitHub => {
+                let busy = pairing.busy;
+                let button = div()
+                    .id("sign-in-github")
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .mt(px(10.0))
+                    .px(px(18.0))
+                    .h(px(40.0))
+                    .rounded_full()
+                    .bg(theme.text)
+                    .text_color(theme.bg)
+                    .text_size(px(13.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .cursor_pointer()
+                    .when(busy, |el| el.opacity(0.7))
+                    .child(if busy {
+                        "Waiting for GitHub…"
+                    } else {
+                        "Sign in with GitHub"
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.state.update(cx, |s, cx| s.sign_in(cx));
+                    }));
+                screen.child(frosted(20.0, PANEL_BLUR, button)).when_some(
+                    pairing.error.clone(),
+                    |el, err| {
+                        el.child(
+                            div()
+                                .max_w(px(420.0))
+                                .text_center()
+                                .text_size(px(12.0))
+                                .text_color(theme.danger)
+                                .child(err),
+                        )
+                    },
+                )
+            }
+            SignInMode::PairCode => {
+                let input_row = div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .h(px(COMPOSER_HEIGHT))
+                    .px(px(16.0))
+                    .rounded(px(COMPOSER_HEIGHT / 2.0))
+                    .bg(theme.card())
+                    .border_1()
+                    .border_color(if pairing.error.is_some() {
+                        theme.danger
+                    } else {
+                        theme.border_strong
+                    })
+                    .child(self.pairing_input.clone())
+                    .child(
+                        div()
+                            .id("pair-submit")
+                            .px(px(12.0))
+                            .py(px(6.0))
+                            .rounded_full()
+                            .bg(theme.text)
+                            .text_color(theme.bg)
+                            .text_size(px(12.5))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .cursor_pointer()
+                            .child(if pairing.busy { "Pairing…" } else { "Pair" })
+                            .on_click(cx.listener(|this, _, _, cx| this.submit_pairing(cx))),
+                    );
+                screen
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(theme.text_faint)
+                            .text_center()
+                            .child(format!(
+                                "{} uses pairing codes. Enter the one-time code from its log (or `arbosctl pair-code`).",
+                                pairing.relay_url
+                            )),
+                    )
+                    .child(
+                        div()
+                            .w(px(COMPOSER_WIDTH))
+                            .max_w_full()
+                            .pt(px(4.0))
+                            .child(frosted(COMPOSER_HEIGHT / 2.0, PANEL_BLUR, input_row)),
+                    )
+                    .when_some(pairing.error.clone(), |el, err| {
+                        el.child(div().text_size(px(12.0)).text_color(theme.danger).child(err))
+                    })
+            }
+        }
     }
 
     fn render_new_project(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2342,9 +2476,15 @@ impl Render for Shell {
             .text_size(px(13.0));
 
         if let Some(pairing) = pairing {
+            self.signing_in = true;
             return root
                 .child(self.render_pairing(&pairing, cx))
                 .into_any_element();
+        }
+        if self.signing_in {
+            // Landed after sign-in: the composer takes the keyboard.
+            self.signing_in = false;
+            Composer::focus(&self.composer, window, cx);
         }
 
         root = root
