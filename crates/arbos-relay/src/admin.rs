@@ -8,7 +8,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
 
-use arbos_core::ids::now_ms;
+use arbos_core::ids::{now_ms, ulid};
 
 use crate::auth::Principal;
 use crate::db_accounts::KillSwitch;
@@ -43,6 +43,7 @@ pub async fn list_users(State(state): State<AppState>, principal: Principal) -> 
         v["id"] = json!(u.id);
         v["login"] = json!(u.login);
         v["github_id"] = json!(u.github_id);
+        v["test"] = json!(u.test);
         v["created_at"] = json!(u.created_at);
         v["last_login_at"] = json!(u.last_login_at);
         v["machine"] = json!({
@@ -108,6 +109,130 @@ pub async fn set_credits(
     let mut v = crate::credits::summary(&state, &id);
     v["id"] = json!(id);
     Json(v).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct TestUserBody {
+    pub handle: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+}
+
+/// `POST /admin/users/test {handle, name?, avatar_url?}`: a user with no GitHub account behind
+/// it (`test_<ulid>`), default credits, and a signed-in device with its token pair — for
+/// recordings and two-account tests in GitHub mode.
+pub async fn create_test_user(
+    State(state): State<AppState>,
+    principal: Principal,
+    Json(b): Json<TestUserBody>,
+) -> Response {
+    if let Err(r) = admin_only(&principal) {
+        return *r;
+    }
+    let handle = b.handle.trim().trim_start_matches('@').to_owned();
+    if handle.is_empty()
+        || handle.len() > 39
+        || !handle
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "bad_handle",
+            "handle must look like a GitHub login",
+        );
+    }
+    if let Ok(Some(_)) = state.db.user_by_handle(&handle) {
+        return api_error(
+            StatusCode::CONFLICT,
+            "handle_taken",
+            "a user with that handle exists",
+        );
+    }
+    let id = format!("test_{}", ulid());
+    if let Err(e) = state.db.insert_test_user(
+        &id,
+        &handle,
+        b.name.as_deref(),
+        b.avatar_url.as_deref(),
+        state.cfg.default_daily_cap_usd,
+    ) {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+    }
+    let _ = state
+        .db
+        .grant_credits(&id, state.cfg.default_grant_usd, "test user grant", "admin");
+    let device_id = ulid();
+    if let Err(e) = state.db.insert_device(
+        &device_id,
+        &format!("{handle} (test device)"),
+        &arbos_core::auth::hash(&format!("jwt:{device_id}:{}", ulid())),
+        &id,
+        "github",
+    ) {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+    }
+    match crate::signin::issue_tokens(&state, &id, &device_id) {
+        Ok(mut tokens) => {
+            tokens["test"] = json!(true);
+            (StatusCode::CREATED, Json(tokens)).into_response()
+        }
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    }
+}
+
+/// `DELETE /admin/users/{id}` — test users only; refused while the user still owns projects or a
+/// box (delete those first so nothing is orphaned).
+pub async fn delete_test_user(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+) -> Response {
+    if let Err(r) = admin_only(&principal) {
+        return *r;
+    }
+    match state.db.user(&id) {
+        Ok(Some(u)) if u.test => {}
+        Ok(Some(_)) => {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "not_test_user",
+                "only test users can be deleted",
+            )
+        }
+        Ok(None) => return api_error(StatusCode::NOT_FOUND, "not_found", "no such user"),
+        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    }
+    if !state
+        .db
+        .projects_of_user(&id)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        return api_error(
+            StatusCode::CONFLICT,
+            "has_projects",
+            "delete the user's projects first",
+        );
+    }
+    if state.db.user_box(&id).ok().flatten().is_some() {
+        return api_error(
+            StatusCode::CONFLICT,
+            "has_box",
+            "stop and delete the user's box first",
+        );
+    }
+    match state.db.delete_test_user(&id) {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => api_error(
+            StatusCode::FORBIDDEN,
+            "not_test_user",
+            "only test users can be deleted",
+        ),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    }
 }
 
 /// `GET /admin/killswitch`.

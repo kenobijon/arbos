@@ -446,6 +446,15 @@ enum AdminCmd {
         #[arg(long)]
         unlimited: bool,
     },
+    /// A test account with no GitHub behind it (recordings, two-account tests): prints the
+    /// user and its token pair.
+    TestUser {
+        handle: String,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Delete a test user (only `test_…` users; their projects and box must be gone first).
+    DeleteTestUser { user: String },
     /// Global kill switch: `on [--reason …]` makes the relay read-only, `off` clears it,
     /// `status` shows it with today's relay-wide spend.
     Killswitch {
@@ -806,6 +815,19 @@ async fn main() -> Result<()> {
                         )
                         .await?;
                     println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                AdminCmd::TestUser { handle, name } => {
+                    let v = admin
+                        .post(
+                            "/admin/users/test",
+                            &serde_json::json!({ "handle": handle, "name": name }),
+                        )
+                        .await?;
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                AdminCmd::DeleteTestUser { user } => {
+                    admin.delete(&format!("/admin/users/{user}")).await?;
+                    println!("deleted {user}");
                 }
                 AdminCmd::Killswitch { action, reason } => {
                     let v = match action.as_str() {

@@ -51,6 +51,7 @@ pub fn migrate_accounts(c: &Connection) {
         "ALTER TABLE users ADD COLUMN cap_unlimited INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE users ADD COLUMN allow_negative INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE devices ADD COLUMN kind TEXT NOT NULL DEFAULT 'paircode'",
+        "ALTER TABLE users ADD COLUMN test INTEGER NOT NULL DEFAULT 0",
     ] {
         let _ = c.execute(stmt, []);
     }
@@ -68,6 +69,8 @@ pub struct User {
     /// Daily debit cap in USD; `None` = unlimited (admin).
     pub daily_cap_usd: Option<f64>,
     pub allow_negative: bool,
+    /// Made by `POST /admin/users/test`; no GitHub account behind it; deletable.
+    pub test: bool,
 }
 
 /// What GitHub tells us about the signed-in account.
@@ -170,10 +173,11 @@ fn user_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<User> {
         last_login_at: r.get(6)?,
         daily_cap_usd: if unlimited != 0 { None } else { Some(cap) },
         allow_negative: r.get::<_, i64>(9)? != 0,
+        test: r.get::<_, i64>(10)? != 0,
     })
 }
 
-const USER_COLS: &str = "id, github_id, login, avatar_url, name, created_at, last_login_at, spend_cap_usd, cap_unlimited, allow_negative";
+const USER_COLS: &str = "id, github_id, login, avatar_url, name, created_at, last_login_at, spend_cap_usd, cap_unlimited, allow_negative, test";
 
 impl Db {
     // ---- users --------------------------------------------------------------------------------
@@ -253,6 +257,61 @@ impl Db {
             ))?;
             let rows = st.query_map([], user_from_row)?;
             rows.collect()
+        })
+    }
+
+    /// A test account (no GitHub behind it): `test_<ulid>`, status member, flagged `test`.
+    pub fn insert_test_user(
+        &self,
+        id: &str,
+        handle: &str,
+        name: Option<&str>,
+        avatar_url: Option<&str>,
+        daily_cap_usd: f64,
+    ) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO users(id, snapshot, spend_cap_usd, created_at, login, avatar_url, name, last_login_at, status, test)
+                 VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6, ?3, 'member', 1)",
+                params![id, daily_cap_usd, now_ms(), handle, avatar_url, name],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// Remove a test user and everything keyed to it (devices, tokens, ledger, memberships,
+    /// pushes). Projects are left for the caller to refuse on. Returns false for a non-test user.
+    pub fn delete_test_user(&self, id: &str) -> Result<bool> {
+        self.with(|c| {
+            let is_test: i64 = c
+                .query_row("SELECT test FROM users WHERE id = ?1", params![id], |r| {
+                    r.get(0)
+                })
+                .optional()?
+                .unwrap_or(0);
+            if is_test == 0 {
+                return Ok(false);
+            }
+            c.execute("DELETE FROM refresh_tokens WHERE user_id = ?1", params![id])?;
+            c.execute("DELETE FROM auth_grants WHERE user_id = ?1", params![id])?;
+            c.execute("DELETE FROM devices WHERE user_id = ?1", params![id])?;
+            c.execute("DELETE FROM credit_ledger WHERE user_id = ?1", params![id])?;
+            c.execute(
+                "DELETE FROM people_members WHERE member = ?1",
+                params![format!("user:{id}")],
+            )?;
+            c.execute(
+                "DELETE FROM project_members WHERE user_id = ?1",
+                params![id],
+            )?;
+            c.execute("DELETE FROM user_pushes WHERE user_id = ?1", params![id])?;
+            c.execute(
+                "DELETE FROM blocks WHERE blocker = ?1 OR blocked = ?1",
+                params![id],
+            )?;
+            c.execute("DELETE FROM machine_meter WHERE user_id = ?1", params![id])?;
+            c.execute("DELETE FROM users WHERE id = ?1", params![id])?;
+            Ok(true)
         })
     }
 

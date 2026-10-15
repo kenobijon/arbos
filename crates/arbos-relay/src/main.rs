@@ -390,6 +390,8 @@ async fn main() -> anyhow::Result<()> {
             axum::routing::put(api::admin_set_user_box),
         )
         .route("/admin/users", get(admin::list_users))
+        .route("/admin/users/test", post(admin::create_test_user))
+        .route("/admin/users/{id}", delete(admin::delete_test_user))
         .route(
             "/admin/users/{id}/credits",
             axum::routing::put(admin::set_credits),
