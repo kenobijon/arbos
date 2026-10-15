@@ -99,7 +99,9 @@ cargo run -p arbos-mac                                  # fixture source: seeded
 ARBOS_RELAY_URL=ws://127.0.0.1:7700 ARBOS_RELAY_TOKEN=... cargo run -p arbos-mac   # relay rooms
 ```
 
-Optional for the relay source: `ARBOS_DEVICE_ID`, and `ARBOS_RELAY_SEED=path.json` (`{projects, chats}`) until the relay's registry endpoint is wired. Matte theme is the default; Glass (vibrancy) is a macOS-only toggle in the rail's settings popover.
+First run against a relay shows the pairing screen: enter the one-time code the relay logged. The device token goes to the login keychain on macOS (`security`), or `~/.config/arbos/` (0600) elsewhere; `ARBOS_RELAY_TOKEN` overrides. Matte is the default theme; Glass = macOS vibrancy + in-window frosted panels (the frost also renders on Linux). `ARBOS_SURFACE=glass` starts in Glass.
+
+macOS packaging: `scripts/bundle-mac.sh` builds a universal `dist/Arbos.app` + DMG and signs/notarizes when `ARBOS_SIGN_IDENTITY` / `ARBOS_NOTARY_PROFILE` are set (skipped otherwise). `scripts/demo-mac.sh` launches the app in Glass, runs a scripted turn and records with `screencapture -v`.
 
 ## Image
 

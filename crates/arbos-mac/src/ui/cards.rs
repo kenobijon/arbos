@@ -264,6 +264,8 @@ pub fn tool_group(
                         .flex_1()
                         .min_w_0()
                         .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
                         .text_size(px(12.0))
                         .text_color(theme.text_muted)
                         .child(tool.input_line.clone()),
