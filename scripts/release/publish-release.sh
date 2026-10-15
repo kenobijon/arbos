@@ -50,6 +50,9 @@ if [[ -z "$KEY_FILE" && -z "${ARBOS_SPARKLE_PRIVATE_KEY:-}" ]]; then
   exit 2
 fi
 DIST="$(cd "$DIST" && pwd)"
+# The script works inside $DIST from here on; relative inputs must survive that.
+if [[ -n "$NOTES_FILE" && "$NOTES_FILE" != /* ]]; then NOTES_FILE="$PWD/$NOTES_FILE"; fi
+if [[ -n "$KEY_FILE" && "$KEY_FILE" != /* ]]; then KEY_FILE="$PWD/$KEY_FILE"; fi
 
 UPDATECTL="${ARBOS_UPDATECTL:-}"
 if [[ -z "$UPDATECTL" ]]; then
