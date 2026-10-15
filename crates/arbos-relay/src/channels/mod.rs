@@ -790,6 +790,8 @@ mod tests {
                 position: 0,
                 created_at: 0,
                 doc_epoch: 1,
+                kind: "chat".into(),
+                participants: Vec::new(),
             })
             .unwrap();
 
