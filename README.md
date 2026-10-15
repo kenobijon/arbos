@@ -123,6 +123,21 @@ The relay brokers Gmail/Calendar, Slack, GitHub and Harness Comms for the boxes 
 - OAuth apps: `ARBOS_GOOGLE_CLIENT_ID/SECRET`, `ARBOS_SLACK_CLIENT_ID/SECRET`, `ARBOS_GITHUB_CLIENT_ID/SECRET`; redirect is `{public_url}/connectors/oauth/callback` (`ARBOS_OAUTH_REDIRECT_URL` overrides). `ARBOS_HARNESS_COMMS_URL` is the default base URL for the Harness Comms connector.
 - `ARBOS_CONNECTORS_MOCK=1`: every action returns canned data, OAuth completes against the relay's own callback, and sends land in `connector_outbox` instead of leaving the machine. The Mac fixture source shows the same panel under Settings → Connectors.
 
+## Routines
+
+A routine is a prompt that runs while you are away: on a cron schedule, when a webhook is called, or on an event (`cross_project_message`, `connector_event`, `box_awake`). The relay scheduler (15 s tick) wakes the box and queues a `routine_run` push; agentd posts the prompt into the routine's chat as a user message with `sender: routine:<id>`, runs a normal turn and reports the run back (`queued → running → done | failed`; runs the box never finishes are failed after 30 min). No new environment variables.
+
+```bash
+arbosctl routines create <project> --name "Stand-up" --prompt "Summarise what changed since yesterday" --cron "0 9 * * 1-5" --tz Europe/Berlin
+arbosctl routines create <project> --name "Deploy finished" --prompt "Check the deploy and report" --webhook   # prints the fire URL
+arbosctl routines list <project>            # trigger, enabled, last/next run
+arbosctl routines run <project> <routine>   # fire now (also works while paused)
+arbosctl routines runs <project> <routine>  # history
+arbosctl routines pause|resume|delete <project> <routine>
+```
+
+Webhook routines fire with `POST <relay>/routines/<id>/fire?secret=<secret>`; a JSON body is appended to the prompt as trigger context. In the desktop client the same lives under Settings → Routines (list, presets, pause/resume, run now, history).
+
 ## Image
 
 `.github/workflows/image.yml` builds `image/Dockerfile` on an image tag (`image-v0.1.5`) or by hand, pushes it to GHCR, smoke-tests it, and registers the Daytona snapshot `arbos-agent-<version>` with `image/register-snapshot.sh` (secrets `DAYTONA_API_KEY`, `GHCR_READ_TOKEN`).

@@ -133,6 +133,19 @@ impl Relay {
         .await
     }
 
+    pub async fn patch(&self, path: &str, body: &Value) -> Result<Value> {
+        self.need_token()?;
+        Self::finish(
+            self.http
+                .patch(format!("{}{}", self.base, path))
+                .bearer_auth(&self.token)
+                .json(body)
+                .send()
+                .await?,
+        )
+        .await
+    }
+
     pub async fn post_unauth(&self, path: &str, body: &Value) -> Result<Value> {
         Self::finish(
             self.http

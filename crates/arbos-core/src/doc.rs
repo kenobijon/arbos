@@ -197,15 +197,32 @@ impl ChatDoc {
 
     /// Client write (crdt-sync §6.2): user message plus a `send` command in one commit.
     pub fn append_user_message(&self, msg_id: &str, text: &str, device_id: &str) -> String {
+        self.append_user_message_from(msg_id, text, device_id, "user", &[])
+    }
+
+    /// A user-role message from another sender (`routine:<id>`, `channel:<platform>:<id>`,
+    /// `project:<id>`) with extra scalar fields (`routineName`, `senderName`, …), plus its `send`
+    /// command, in one commit. Returns the command id.
+    pub fn append_user_message_from(
+        &self,
+        msg_id: &str,
+        text: &str,
+        device_id: &str,
+        sender: &str,
+        extra: &[(&str, Value)],
+    ) -> String {
         let msgs = self.messages_list();
         let m = msgs.push_container(LoroMap::new()).expect("push message");
         let now = now_ms();
         m.insert("id", msg_id).ok();
         m.insert("role", "user").ok();
-        m.insert("sender", "user").ok();
+        m.insert("sender", sender).ok();
         m.insert("createdAt", now).ok();
         m.insert("deviceId", device_id).ok();
         m.insert("status", MessageStatus::Done.as_str()).ok();
+        for (k, v) in extra {
+            m.insert(k, json_to_lv(v)).ok();
+        }
         let parts = m.insert_container("parts", LoroList::new()).expect("parts");
         let part = parts.push_container(LoroMap::new()).expect("part");
         part.insert("id", ulid()).ok();
@@ -221,6 +238,26 @@ impl ChatDoc {
         );
         self.doc.commit();
         cmd_id
+    }
+
+    /// Box write: a one-line `system` message with a `note` status part (the transcript renders
+    /// it as a thin note). Used for "a routine ran while you were away" in the pinned tab.
+    pub fn append_system_note(&self, msg_id: &str, sender: &str, text: &str, device_id: &str) {
+        let msgs = self.messages_list();
+        let m = msgs.push_container(LoroMap::new()).expect("push message");
+        m.insert("id", msg_id).ok();
+        m.insert("role", "system").ok();
+        m.insert("sender", sender).ok();
+        m.insert("createdAt", now_ms()).ok();
+        m.insert("deviceId", device_id).ok();
+        m.insert("status", MessageStatus::Done.as_str()).ok();
+        let parts = m.insert_container("parts", LoroList::new()).expect("parts");
+        let part = parts.push_container(LoroMap::new()).expect("part");
+        part.insert("id", ulid()).ok();
+        part.insert("kind", "status").ok();
+        part.insert("code", "note").ok();
+        part.insert("message", text).ok();
+        self.doc.commit();
     }
 
     pub fn append_command(&self, kind: &str, payload: Value, device_id: &str) -> String {

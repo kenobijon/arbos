@@ -327,6 +327,9 @@ pub struct Message {
     pub subagent_name: Option<String>,
     #[serde(default)]
     pub in_reply_to: Option<String>,
+    /// Set on user messages a routine injected (`sender: routine:<id>`, F3).
+    #[serde(default)]
+    pub routine_name: Option<String>,
     /// Token usage as the box reports it (shape varies by harness).
     #[serde(default)]
     pub usage: Option<serde_json::Value>,
@@ -501,6 +504,119 @@ impl ConnectorsView {
     pub fn connector_for(&self, provider: &str) -> Option<&Connector> {
         self.items.iter().find(|c| c.provider == provider)
     }
+}
+
+/// How a routine fires (relay `routines.trigger`, F3).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RoutineTrigger {
+    Cron {
+        expr: String,
+        #[serde(default = "utc")]
+        tz: String,
+    },
+    Webhook {
+        #[serde(default)]
+        secret: String,
+    },
+    Event {
+        event: String,
+    },
+}
+
+fn utc() -> String {
+    "UTC".into()
+}
+
+impl RoutineTrigger {
+    /// Short human label for the list ("Weekdays 09:00", "Webhook", "On box awake").
+    pub fn label(&self) -> String {
+        match self {
+            RoutineTrigger::Cron { expr, tz } => {
+                let base = match expr.trim() {
+                    "* * * * *" => "Every minute".to_owned(),
+                    "0 * * * *" => "Hourly".to_owned(),
+                    "0 9 * * *" => "Daily 09:00".to_owned(),
+                    "0 9 * * 1-5" => "Weekdays 09:00".to_owned(),
+                    other => format!("cron {other}"),
+                };
+                if tz == "UTC" {
+                    base
+                } else {
+                    format!("{base} {tz}")
+                }
+            }
+            RoutineTrigger::Webhook { .. } => "Webhook".into(),
+            RoutineTrigger::Event { event } => match event.as_str() {
+                "box_awake" => "On box awake".into(),
+                "cross_project_message" => "On project message".into(),
+                "connector_event" => "On connector event".into(),
+                other => format!("On {other}"),
+            },
+        }
+    }
+}
+
+/// A scheduled or event-triggered prompt (relay `routines` row).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Routine {
+    pub id: Id,
+    pub project_id: Id,
+    pub chat_id: Id,
+    pub name: String,
+    pub prompt: String,
+    pub trigger: RoutineTrigger,
+    pub enabled: bool,
+    #[serde(default)]
+    pub created_at: i64,
+    #[serde(default)]
+    pub last_run_at: Option<i64>,
+    #[serde(default)]
+    pub next_run_at: Option<i64>,
+    /// Webhook routines only: the URL that fires them (carries the secret).
+    #[serde(default)]
+    pub fire_url: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutineRunStatus {
+    Queued,
+    Running,
+    Done,
+    Failed,
+    Skipped,
+    #[serde(other)]
+    Other,
+}
+
+impl RoutineRunStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            RoutineRunStatus::Queued => "queued",
+            RoutineRunStatus::Running => "running",
+            RoutineRunStatus::Done => "done",
+            RoutineRunStatus::Failed => "failed",
+            RoutineRunStatus::Skipped => "skipped",
+            RoutineRunStatus::Other => "—",
+        }
+    }
+}
+
+/// One row of a routine's history (relay `routine_runs`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RoutineRun {
+    pub id: Id,
+    pub routine_id: Id,
+    pub started_at: i64,
+    #[serde(default)]
+    pub finished_at: Option<i64>,
+    pub status: RoutineRunStatus,
+    /// The assistant reply; "open" jumps to it.
+    #[serde(default)]
+    pub message_id: Option<Id>,
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 /// Connection to the relay, S14.

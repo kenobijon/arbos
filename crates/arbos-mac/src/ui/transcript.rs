@@ -31,6 +31,8 @@ pub enum RowKind {
         text: String,
         attachments: Vec<Attachment>,
         pending: bool,
+        /// Caption for prompts not typed by the user (a routine, another project).
+        sender_label: Option<String>,
     },
     Markdown {
         block: Block,
@@ -252,6 +254,7 @@ impl Transcript {
                 text,
                 attachments,
                 pending,
+                sender_label,
             } => {
                 let mut bubble = div()
                     .flex()
@@ -285,8 +288,19 @@ impl Transcript {
                 div()
                     .w_full()
                     .flex()
-                    .justify_end()
+                    .flex_col()
+                    .items_end()
+                    .gap(px(3.0))
                     .py(px(6.0))
+                    .when_some(sender_label, |el, label| {
+                        el.child(
+                            div()
+                                .pr(px(6.0))
+                                .text_size(px(10.5))
+                                .text_color(theme.text_faint)
+                                .child(label),
+                        )
+                    })
                     .child(bubble.when(pending, |el| el.opacity(0.6)))
                     .into_any_element()
             }
@@ -445,6 +459,20 @@ fn block_text_len(block: &Block) -> usize {
     }
 }
 
+/// "Routine · Morning stand-up" for a prompt a routine injected; `None` for the
+/// user's own messages (`sender` empty or `user`).
+fn sender_caption(message: &Message) -> Option<String> {
+    let sender = message.sender.as_str();
+    if sender.is_empty() || sender == "user" {
+        return None;
+    }
+    if let Some(id) = sender.strip_prefix("routine:") {
+        let name = message.routine_name.as_deref().unwrap_or(id);
+        return Some(format!("Routine · {name}"));
+    }
+    Some(sender.replace(':', " · "))
+}
+
 /// A text block that is really machine output (a JSON object/array) is not
 /// prose; it belongs in the Details drawer, never in the transcript.
 fn is_json_block(block: &Block) -> bool {
@@ -486,14 +514,19 @@ pub fn build_rows(messages: &[Message], show_details: bool) -> Vec<Row> {
                     })
                     .collect();
                 let id = format!("{}#user", message.id);
+                let sender_label = sender_caption(message);
                 rows.push(Row {
-                    version: hash_version(&(&text, message.pending, attachments.len()), false),
+                    version: hash_version(
+                        &(&text, message.pending, attachments.len(), &sender_label),
+                        false,
+                    ),
                     id,
                     message_id: message.id.clone(),
                     kind: RowKind::User {
                         text,
                         attachments,
                         pending: message.pending,
+                        sender_label,
                     },
                 });
                 if message.status == MessageStatus::Queued {

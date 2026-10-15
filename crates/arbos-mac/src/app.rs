@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 
 use crate::model::{
     new_id, now_ms, BoxState, Chat, ConnectorsView, Effort, Id, Link, Message, MessageStatus, Part,
-    Project, ProjectDocView, Role, StatusKind,
+    Project, ProjectDocView, Role, Routine, RoutineRun, RoutineTrigger, StatusKind,
 };
 use crate::sync::{ClientCommand, SyncEvent, SyncSource};
 
@@ -95,6 +95,10 @@ pub struct AppState {
     pub show_details: bool,
     /// Settings → Connectors (F1).
     pub connectors: ConnectorsView,
+    /// Settings → Routines, per project (F3).
+    pub routines: HashMap<Id, Vec<Routine>>,
+    /// Run history per routine, newest first.
+    pub routine_runs: HashMap<Id, Vec<RoutineRun>>,
     awaiting_new_project: bool,
     commands: mpsc::UnboundedSender<ClientCommand>,
     _pump: Task<()>,
@@ -155,6 +159,8 @@ impl AppState {
             new_project_open: false,
             show_details: false,
             connectors: ConnectorsView::default(),
+            routines: HashMap::new(),
+            routine_runs: HashMap::new(),
             awaiting_new_project: false,
             commands: command_tx,
             _pump: pump,
@@ -318,6 +324,7 @@ impl AppState {
                 cx.notify();
             }
             SyncEvent::MessageUpsert { chat_id, message } => {
+                let message = *message;
                 let list = self.messages.entry(chat_id.clone()).or_default();
                 let mut text_only = false;
                 let mut appended = 0;
@@ -354,6 +361,17 @@ impl AppState {
                 self.push_notice(format!(
                     "Opened the browser to connect {provider}; the relay finishes the sign-in."
                 ));
+                cx.notify();
+            }
+            SyncEvent::Routines {
+                project_id,
+                routines,
+            } => {
+                self.routines.insert(project_id, routines);
+                cx.notify();
+            }
+            SyncEvent::RoutineRuns { routine_id, runs } => {
+                self.routine_runs.insert(routine_id, runs);
                 cx.notify();
             }
         }
@@ -594,6 +612,7 @@ impl AppState {
                 subagent_id: None,
                 subagent_name: None,
                 in_reply_to: None,
+                routine_name: None,
                 usage: None,
                 return_contract: None,
                 waiting_user: false,
@@ -790,6 +809,118 @@ impl AppState {
         self.connectors.items.retain(|c| c.id != id);
         self.command(ClientCommand::ConnectorDisconnect { id });
         cx.notify();
+    }
+
+    // ----- routines (F3) ---------------------------------------------------
+
+    pub fn routines_of(&self, project_id: &str) -> &[Routine] {
+        self.routines
+            .get(project_id)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub fn routine_runs_of(&self, routine_id: &str) -> &[RoutineRun] {
+        self.routine_runs
+            .get(routine_id)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub fn routines_refresh(&mut self, cx: &mut Context<Self>) {
+        if let Some(project_id) = self.selected_project.clone() {
+            self.command(ClientCommand::RoutinesRefresh { project_id });
+        }
+        cx.notify();
+    }
+
+    pub fn routine_create(
+        &mut self,
+        name: String,
+        prompt: String,
+        chat_id: Id,
+        trigger: RoutineTrigger,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project_id) = self.selected_project.clone() else {
+            return;
+        };
+        self.command(ClientCommand::RoutineCreate {
+            project_id,
+            name,
+            prompt,
+            chat_id,
+            trigger,
+        });
+        cx.notify();
+    }
+
+    pub fn routine_set_enabled(&mut self, routine_id: Id, enabled: bool, cx: &mut Context<Self>) {
+        let Some(project_id) = self.selected_project.clone() else {
+            return;
+        };
+        if let Some(r) = self
+            .routines
+            .get_mut(&project_id)
+            .and_then(|v| v.iter_mut().find(|r| r.id == routine_id))
+        {
+            r.enabled = enabled;
+        }
+        self.command(ClientCommand::RoutineSetEnabled {
+            project_id,
+            routine_id,
+            enabled,
+        });
+        cx.notify();
+    }
+
+    pub fn routine_run_now(&mut self, routine_id: Id, cx: &mut Context<Self>) {
+        let Some(project_id) = self.selected_project.clone() else {
+            return;
+        };
+        self.command(ClientCommand::RoutineRunNow {
+            project_id,
+            routine_id,
+        });
+        self.push_notice("Routine queued");
+        cx.notify();
+    }
+
+    pub fn routine_load_runs(&mut self, routine_id: Id, cx: &mut Context<Self>) {
+        let Some(project_id) = self.selected_project.clone() else {
+            return;
+        };
+        self.command(ClientCommand::RoutineRuns {
+            project_id,
+            routine_id,
+        });
+        cx.notify();
+    }
+
+    pub fn routine_delete(&mut self, routine_id: Id, cx: &mut Context<Self>) {
+        let Some(project_id) = self.selected_project.clone() else {
+            return;
+        };
+        if let Some(v) = self.routines.get_mut(&project_id) {
+            v.retain(|r| r.id != routine_id);
+        }
+        self.command(ClientCommand::RoutineDelete {
+            project_id,
+            routine_id,
+        });
+        cx.notify();
+    }
+
+    /// History "open": switch to the chat that holds the reply.
+    pub fn open_chat_of_routine(&mut self, routine_id: &str, cx: &mut Context<Self>) {
+        let chat_id = self
+            .selected_project
+            .as_deref()
+            .and_then(|p| self.routines_of(p).iter().find(|r| r.id == routine_id))
+            .map(|r| r.chat_id.clone());
+        if let Some(chat_id) = chat_id {
+            self.select_tab(chat_id, cx);
+        }
     }
 
     pub fn selected_doc(&self) -> Option<&ProjectDocView> {

@@ -16,6 +16,7 @@ use crate::ui::composer::{Composer, ComposerEvent, ComposerInput};
 use crate::ui::connectors::{ConnectorsEvent, ConnectorsPanel};
 use crate::ui::frost::{edge_faded, frosted, rounded_clip, MENU_BLUR, PANEL_BLUR};
 use crate::ui::motion::{ease_out_cubic, PulseClock, COMPOSER_DROP_MS, SHAKE_MS};
+use crate::ui::routines::{RoutinesEvent, RoutinesPanel};
 use crate::ui::theme::{
     reapply_window_background, Appearance, Surface, Theme, COMPOSER_HEIGHT, COMPOSER_WIDTH,
     DRAWER_WIDTH, PANEL_RADIUS, RAIL_TILE, RAIL_WIDTH, RAIL_WIDTH_COLLAPSED, RIGHT_PANEL_WIDTH,
@@ -34,6 +35,8 @@ pub struct Shell {
     connectors: Entity<ConnectorsPanel>,
     focus_handle: FocusHandle,
     settings_open: bool,
+    routines: Entity<RoutinesPanel>,
+    routines_open: bool,
     shake_started_at: Option<u64>,
     tab_scroll: gpui::ScrollHandle,
     /// Tab index to scroll into view on the next frame (new/selected tab).
@@ -93,6 +96,17 @@ impl Shell {
             },
         )
         .detach();
+        let routines = cx.new(|cx| RoutinesPanel::new(state.clone(), cx));
+        cx.subscribe(
+            &routines,
+            |this, _, event: &RoutinesEvent, cx| match event {
+                RoutinesEvent::Close => {
+                    this.routines_open = false;
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
 
         Self {
             state,
@@ -103,6 +117,8 @@ impl Shell {
             connectors,
             focus_handle: cx.focus_handle(),
             settings_open: false,
+            routines,
+            routines_open: false,
             shake_started_at: None,
             tab_scroll: gpui::ScrollHandle::new(),
             reveal_tab: None,
@@ -1478,6 +1494,27 @@ impl Shell {
                             cx.notify();
                         })),
                 )
+                .child(
+                    div()
+                        .id("settings-routines")
+                        .flex()
+                        .items_center()
+                        .px(px(10.0))
+                        .py(px(6.0))
+                        .rounded(px(6.0))
+                        .text_size(px(12.5))
+                        .text_color(theme.text)
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.surface_2))
+                        .child(div().flex_1().child("Routines"))
+                        .child(div().text_color(theme.text_faint).child("›"))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.settings_open = false;
+                            this.routines_open = true;
+                            this.routines.update(cx, |p, cx| p.open(cx));
+                            cx.notify();
+                        })),
+                )
                 .child(div().h(px(1.0)).bg(theme.border))
                 .child(
                     div()
@@ -1741,6 +1778,9 @@ impl Render for Shell {
                     {
                         return;
                     }
+                    if this.routines_open && this.routines.read(cx).has_focus(window, cx) {
+                        return;
+                    }
                     if this.state.read(cx).pairing.is_none() {
                         Composer::focus(&this.composer, window, cx);
                     }
@@ -1776,6 +1816,9 @@ impl Render for Shell {
         }
         if self.connectors.read(cx).is_open() {
             root = root.child(self.connectors.clone());
+        }
+        if self.routines_open {
+            root = root.child(self.routines.clone());
         }
         if new_project_open {
             root = root.child(self.render_new_project(cx));

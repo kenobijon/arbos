@@ -84,6 +84,12 @@ impl DocHost {
         self.inflight = None;
     }
 
+    /// A command this box wrote itself (routine, channel, cross-project message) and will run
+    /// directly: keep `new_pending` from handing it to the agent loop a second time.
+    pub fn mark_seen(&mut self, cmd_id: &str) {
+        self.seen_commands.insert(cmd_id.to_owned());
+    }
+
     /// New pending commands not yet handed to the agent loop. On the first catch-up after a
     /// (re)start, commands this box had marked `taken` but never finished are recovered too.
     fn new_pending(&mut self) -> Vec<CommandView> {

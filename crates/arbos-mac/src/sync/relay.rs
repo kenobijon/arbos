@@ -30,7 +30,8 @@ use super::doc::ChatDoc;
 use super::{ClientCommand, SyncEvent, SyncSource};
 use crate::model::{
     new_id, now_ms, Attachment, BoxState, Chat, Connector, ConnectorProvider, ConnectorsView,
-    Effort, Id, Link, Message, MessageStatus, Part, Project, ProjectDocView, Role, ThreadInfo,
+    Effort, Id, Link, Message, MessageStatus, Part, Project, ProjectDocView, Role, Routine,
+    RoutineRun, ThreadInfo,
 };
 
 const HELLO_DEADLINE: Duration = Duration::from_secs(15);
@@ -571,7 +572,7 @@ async fn forward_changes(
                 apply_pending(&shared, &mut message);
                 let _ = shared.events.send(SyncEvent::MessageUpsert {
                     chat_id: key.clone(),
-                    message,
+                    message: Box::new(message),
                 });
             }
         }
@@ -1046,6 +1047,7 @@ async fn send_message(
             subagent_id: None,
             subagent_name: None,
             in_reply_to: None,
+            routine_name: None,
             usage: None,
             return_contract: None,
             waiting_user: false,
@@ -1468,6 +1470,142 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 );
             }
         }
+        ClientCommand::RoutinesRefresh { project_id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move { refresh_routines(&shared, &project_id).await });
+        }
+        ClientCommand::RoutineCreate {
+            project_id,
+            name,
+            prompt,
+            chat_id,
+            trigger,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let body = json!({
+                    "name": name, "prompt": prompt, "chatId": chat_id,
+                    "trigger": serde_json::to_value(&trigger).unwrap_or(Value::Null),
+                });
+                match shared
+                    .post_json(&format!("/projects/{project_id}/routines"), body)
+                    .await
+                {
+                    Ok(_) => refresh_routines(&shared, &project_id).await,
+                    Err(err) => shared.notice(format!("Routine not created: {err:#}")),
+                }
+            });
+        }
+        ClientCommand::RoutineSetEnabled {
+            project_id,
+            routine_id,
+            enabled,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let resp = shared
+                    .http
+                    .patch(format!(
+                        "{}/projects/{}/routines/{}",
+                        shared.http_url, project_id, routine_id
+                    ))
+                    .bearer_auth(shared.token())
+                    .json(&json!({ "enabled": enabled }))
+                    .send()
+                    .await;
+                match resp {
+                    Ok(r) if r.status().is_success() => {}
+                    Ok(r) => shared.notice(format!("Routine not updated: HTTP {}", r.status())),
+                    Err(err) => shared.notice(format!("Routine not updated: {err}")),
+                }
+                refresh_routines(&shared, &project_id).await;
+            });
+        }
+        ClientCommand::RoutineRunNow {
+            project_id,
+            routine_id,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared
+                    .post_json(
+                        &format!("/projects/{project_id}/routines/{routine_id}/run"),
+                        json!({}),
+                    )
+                    .await
+                {
+                    shared.notice(format!("Run now failed: {err:#}"));
+                }
+                refresh_routine_runs(&shared, &project_id, &routine_id).await;
+                refresh_routines(&shared, &project_id).await;
+            });
+        }
+        ClientCommand::RoutineRuns {
+            project_id,
+            routine_id,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                refresh_routine_runs(&shared, &project_id, &routine_id).await;
+            });
+        }
+        ClientCommand::RoutineDelete {
+            project_id,
+            routine_id,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let resp = shared
+                    .http
+                    .delete(format!(
+                        "{}/projects/{}/routines/{}",
+                        shared.http_url, project_id, routine_id
+                    ))
+                    .bearer_auth(shared.token())
+                    .send()
+                    .await;
+                match resp {
+                    Ok(r) if r.status().is_success() => {}
+                    Ok(r) => shared.notice(format!("Routine not deleted: HTTP {}", r.status())),
+                    Err(err) => shared.notice(format!("Routine not deleted: {err}")),
+                }
+                refresh_routines(&shared, &project_id).await;
+            });
+        }
+    }
+}
+
+async fn refresh_routines(shared: &Arc<Shared>, project_id: &str) {
+    match shared
+        .get_json(&format!("/projects/{project_id}/routines"))
+        .await
+    {
+        Ok(v) => {
+            let routines: Vec<Routine> = serde_json::from_value(v).unwrap_or_default();
+            let _ = shared.events.send(SyncEvent::Routines {
+                project_id: project_id.to_string(),
+                routines,
+            });
+        }
+        Err(err) => shared.notice(format!("Routines: {err:#}")),
+    }
+}
+
+async fn refresh_routine_runs(shared: &Arc<Shared>, project_id: &str, routine_id: &str) {
+    match shared
+        .get_json(&format!(
+            "/projects/{project_id}/routines/{routine_id}/runs?limit=20"
+        ))
+        .await
+    {
+        Ok(v) => {
+            let runs: Vec<RoutineRun> = serde_json::from_value(v).unwrap_or_default();
+            let _ = shared.events.send(SyncEvent::RoutineRuns {
+                routine_id: routine_id.to_string(),
+                runs,
+            });
+        }
+        Err(err) => shared.notice(format!("Routine runs: {err:#}")),
     }
 }
 

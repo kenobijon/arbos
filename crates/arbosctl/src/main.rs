@@ -58,6 +58,68 @@ enum Cmd {
         #[command(subcommand)]
         cmd: DeviceCmd,
     },
+    /// Routines: cron / webhook / event-triggered prompts run by the relay scheduler.
+    Routines {
+        #[command(subcommand)]
+        cmd: RoutineCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum RoutineCmd {
+    List {
+        project: String,
+    },
+    /// Create a routine. Exactly one of --cron, --webhook, --event.
+    Create {
+        project: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        prompt: String,
+        /// Chat id the prompt lands in (default: the pinned chat).
+        #[arg(long)]
+        chat: Option<String>,
+        /// Cron expression, e.g. "0 9 * * 1-5".
+        #[arg(long)]
+        cron: Option<String>,
+        /// IANA time zone for --cron (default UTC).
+        #[arg(long, default_value = "UTC")]
+        tz: String,
+        /// Webhook trigger; prints the fire URL.
+        #[arg(long)]
+        webhook: bool,
+        /// Event trigger: cross_project_message | connector_event | box_awake.
+        #[arg(long)]
+        event: Option<String>,
+        /// Create it paused.
+        #[arg(long)]
+        paused: bool,
+    },
+    /// Run a routine now.
+    Run {
+        project: String,
+        routine: String,
+    },
+    /// Last runs of a routine (newest first).
+    Runs {
+        project: String,
+        routine: String,
+        #[arg(long, default_value_t = 20)]
+        limit: i64,
+    },
+    Pause {
+        project: String,
+        routine: String,
+    },
+    Resume {
+        project: String,
+        routine: String,
+    },
+    Delete {
+        project: String,
+        routine: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -358,8 +420,166 @@ async fn main() -> Result<()> {
                 println!("revoked {id}");
             }
         },
+        Cmd::Routines { cmd } => routines(&relay, cmd, args.json).await?,
     }
     Ok(())
+}
+
+async fn routines(relay: &Relay, cmd: RoutineCmd, as_json: bool) -> Result<()> {
+    match cmd {
+        RoutineCmd::List { project } => {
+            let v = relay.get(&format!("/projects/{project}/routines")).await?;
+            if as_json {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+            } else if let Some(a) = v.as_array() {
+                if a.is_empty() {
+                    println!("no routines");
+                }
+                for r in a {
+                    println!(
+                        "{}  {:<24} {:<10} {:<28} next={} last={}",
+                        r["id"].as_str().unwrap_or(""),
+                        r["name"].as_str().unwrap_or(""),
+                        if r["enabled"].as_bool().unwrap_or(false) {
+                            "enabled"
+                        } else {
+                            "paused"
+                        },
+                        trigger_label(&r["trigger"]),
+                        fmt_ms(r["next_run_at"].as_i64()),
+                        fmt_ms(r["last_run_at"].as_i64()),
+                    );
+                }
+            }
+        }
+        RoutineCmd::Create {
+            project,
+            name,
+            prompt,
+            chat,
+            cron,
+            tz,
+            webhook,
+            event,
+            paused,
+        } => {
+            let trigger = match (cron, webhook, event) {
+                (Some(expr), false, None) => json!({ "kind": "cron", "expr": expr, "tz": tz }),
+                (None, true, None) => json!({ "kind": "webhook" }),
+                (None, false, Some(ev)) => json!({ "kind": "event", "event": ev }),
+                _ => return Err(anyhow!("give exactly one of --cron, --webhook, --event")),
+            };
+            let v = relay
+                .post(
+                    &format!("/projects/{project}/routines"),
+                    &json!({ "name": name, "prompt": prompt, "chatId": chat, "trigger": trigger, "enabled": !paused }),
+                )
+                .await?;
+            if as_json {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+            } else {
+                println!(
+                    "routine {} ({}) next run {}",
+                    v["id"].as_str().unwrap_or("?"),
+                    trigger_label(&v["trigger"]),
+                    fmt_ms(v["next_run_at"].as_i64())
+                );
+                if let Some(u) = v["fire_url"].as_str() {
+                    println!("fire with: curl -X POST '{u}'");
+                }
+            }
+        }
+        RoutineCmd::Run { project, routine } => {
+            let v = relay
+                .post(
+                    &format!("/projects/{project}/routines/{routine}/run"),
+                    &json!({}),
+                )
+                .await?;
+            println!("run {} queued", v["id"].as_str().unwrap_or("?"));
+        }
+        RoutineCmd::Runs {
+            project,
+            routine,
+            limit,
+        } => {
+            let v = relay
+                .get(&format!(
+                    "/projects/{project}/routines/{routine}/runs?limit={limit}"
+                ))
+                .await?;
+            if as_json {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+            } else if let Some(a) = v.as_array() {
+                if a.is_empty() {
+                    println!("no runs yet");
+                }
+                for r in a {
+                    let dur = match (r["started_at"].as_i64(), r["finished_at"].as_i64()) {
+                        (Some(s), Some(f)) => format!("{:>5.1}s", (f - s) as f64 / 1000.0),
+                        _ => "     —".to_owned(),
+                    };
+                    println!(
+                        "{}  {:<8} {} {}  msg={} {}",
+                        fmt_ms(r["started_at"].as_i64()),
+                        r["status"].as_str().unwrap_or(""),
+                        dur,
+                        r["id"].as_str().unwrap_or(""),
+                        r["message_id"].as_str().unwrap_or("—"),
+                        r["note"].as_str().unwrap_or("")
+                    );
+                }
+            }
+        }
+        RoutineCmd::Pause { project, routine } => {
+            set_enabled(relay, &project, &routine, false).await?;
+            println!("paused {routine}");
+        }
+        RoutineCmd::Resume { project, routine } => {
+            let v = set_enabled(relay, &project, &routine, true).await?;
+            println!(
+                "resumed {routine}; next run {}",
+                fmt_ms(v["next_run_at"].as_i64())
+            );
+        }
+        RoutineCmd::Delete { project, routine } => {
+            relay
+                .delete(&format!("/projects/{project}/routines/{routine}"))
+                .await?;
+            println!("deleted {routine}");
+        }
+    }
+    Ok(())
+}
+
+async fn set_enabled(relay: &Relay, project: &str, routine: &str, enabled: bool) -> Result<Value> {
+    relay
+        .patch(
+            &format!("/projects/{project}/routines/{routine}"),
+            &json!({ "enabled": enabled }),
+        )
+        .await
+}
+
+fn trigger_label(t: &Value) -> String {
+    match t["kind"].as_str() {
+        Some("cron") => format!(
+            "cron {} ({})",
+            t["expr"].as_str().unwrap_or("?"),
+            t["tz"].as_str().unwrap_or("UTC")
+        ),
+        Some("webhook") => "webhook".to_owned(),
+        Some("event") => format!("event {}", t["event"].as_str().unwrap_or("?")),
+        Some(other) => other.to_owned(),
+        None => "—".to_owned(),
+    }
+}
+
+fn fmt_ms(ms: Option<i64>) -> String {
+    match ms.and_then(chrono::DateTime::from_timestamp_millis) {
+        Some(t) => t.format("%Y-%m-%d %H:%M:%SZ").to_string(),
+        None => "—".to_owned(),
+    }
 }
 
 async fn resolve_project(relay: &Relay, id_or_name: &str) -> Result<String> {

@@ -7,6 +7,7 @@ mod http;
 mod llm;
 mod mcp;
 mod memory;
+mod routines;
 mod rpc_child;
 mod settings;
 mod store;
@@ -276,6 +277,9 @@ async fn boot() -> Result<()> {
         .send()
         .await;
     let mut chats: Vec<Value> = Vec::new();
+    // Pushes queued while the box slept (routine runs, cross-project messages): dispatched once
+    // the rooms are open and pi is up.
+    let mut boot_pushes: Vec<Value> = Vec::new();
     match hello {
         Ok(r) if r.status().is_success() => {
             let v: Value = r.json().await.unwrap_or_default();
@@ -284,23 +288,11 @@ async fn boot() -> Result<()> {
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
-            for p in v
+            boot_pushes = v
                 .get("pushes")
                 .and_then(Value::as_array)
                 .cloned()
-                .unwrap_or_default()
-            {
-                tracing::info!(push = %p, "queued push delivered at boot");
-                let _ = store.t3_append(
-                    "projects",
-                    None,
-                    None,
-                    "push",
-                    Some("system"),
-                    &p.to_string(),
-                    None,
-                );
-            }
+                .unwrap_or_default();
         }
         Ok(r) => tracing::warn!(status = %r.status(), "box hello refused"),
         Err(e) => tracing::warn!(error = %e, "box hello failed"),
@@ -346,6 +338,11 @@ async fn boot() -> Result<()> {
     let _ = agent
         .post_timing("agentd_boot_ms", t_boot.elapsed().as_millis() as i64, None)
         .await;
+    for p in boot_pushes {
+        tracing::info!(push = %p, "queued push delivered at boot");
+        agent.dispatch_push(p);
+    }
+    agent.spawn_push_poller();
 
     // Registry poll (3 s): new chats get a room; settings changes (SetModel, rename) reach pi and the doc.
     {
@@ -465,7 +462,7 @@ async fn boot() -> Result<()> {
             Incoming::Command { chat_id, cmd } => {
                 let agent = agent.clone();
                 tokio::spawn(async move {
-                    agent.handle_command(&chat_id, cmd).await;
+                    let _ = agent.handle_command(&chat_id, cmd).await;
                 });
             }
             Incoming::CaughtUp { chat_id, head_seq } => {

@@ -711,6 +711,7 @@ pub async fn push(
         .map_err(internal)?;
     if b.kind == "message" {
         boxes::ensure_awake(&state, &p.id, "cross-project").await;
+        crate::routines::fire_event(&state, &p.id, "cross_project_message", b.payload).await;
     }
     Ok(StatusCode::ACCEPTED.into_response())
 }
