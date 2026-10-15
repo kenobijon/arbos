@@ -22,7 +22,8 @@ use super::{ClientCommand, SyncEvent, SyncSource};
 use crate::model::{
     new_id, now_ms, Attachment, BoxState, Chat, Connector, ConnectorAction, ConnectorProvider,
     ConnectorStatus, ConnectorsView, Effort, Id, Link, Message, MessageStatus, Part, Project, Role,
-    StatusKind, ToolCall, ToolStatus, TurnKind,
+    Routine, RoutineRun, RoutineRunStatus, RoutineTrigger, StatusKind, ToolCall, ToolStatus,
+    TurnKind,
 };
 
 pub const STREAM_FRAME_MS: u64 = arbos_core::STREAM_COMMIT_MS;
@@ -62,6 +63,8 @@ struct Shared {
     doc_tx: mpsc::UnboundedSender<DocChanged>,
     subscriptions: Mutex<Vec<loro::Subscription>>,
     connectors: Mutex<ConnectorsView>,
+    routines: Mutex<Vec<Routine>>,
+    routine_runs: Mutex<HashMap<Id, Vec<RoutineRun>>>,
 }
 
 pub struct FixtureSource;
@@ -94,6 +97,8 @@ impl SyncSource for FixtureSource {
                 doc_tx,
                 subscriptions: Mutex::new(Vec::new()),
                 connectors: Mutex::new(seed_connectors()),
+                routines: Mutex::new(seed_routines()),
+                routine_runs: Mutex::new(seed_routine_runs()),
             });
             seed_docs(&shared);
 
@@ -146,7 +151,7 @@ fn forward_doc_change(shared: &Arc<Shared>, changed: DocChanged) {
         if let Some(message) = doc.read_message(ix) {
             let _ = shared.events.send(SyncEvent::MessageUpsert {
                 chat_id: changed.chat_id.clone(),
-                message,
+                message: Box::new(message),
             });
         }
     }
@@ -203,6 +208,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         subagent_id: None,
                         subagent_name: None,
                         in_reply_to: None,
+                        routine_name: None,
                         usage: None,
                         return_contract: None,
                         waiting_user: false,
@@ -246,6 +252,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         subagent_id: None,
                         subagent_name: None,
                         in_reply_to: None,
+                        routine_name: None,
                         usage: None,
                         return_contract: None,
                         waiting_user: false,
@@ -471,6 +478,75 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 .retain(|c| c.id != id);
             emit_connectors(shared);
         }
+        ClientCommand::RoutinesRefresh { project_id } => emit_routines(shared, &project_id),
+        ClientCommand::RoutineCreate {
+            project_id,
+            name,
+            prompt,
+            chat_id,
+            trigger,
+        } => {
+            let next_run_at = match &trigger {
+                RoutineTrigger::Cron { .. } => Some(now_ms() as i64 + 3_600_000),
+                RoutineTrigger::Webhook { .. } | RoutineTrigger::Event { .. } => None,
+            };
+            let fire_url = match &trigger {
+                RoutineTrigger::Webhook { .. } => {
+                    Some("http://127.0.0.1:7700/routines/<id>/fire?secret=…".into())
+                }
+                RoutineTrigger::Cron { .. } | RoutineTrigger::Event { .. } => None,
+            };
+            shared.routines.lock().unwrap().push(Routine {
+                id: new_id(),
+                project_id: project_id.clone(),
+                chat_id,
+                name,
+                prompt,
+                trigger,
+                enabled: true,
+                created_at: now_ms() as i64,
+                last_run_at: None,
+                next_run_at,
+                fire_url,
+            });
+            emit_routines(shared, &project_id);
+        }
+        ClientCommand::RoutineSetEnabled {
+            project_id,
+            routine_id,
+            enabled,
+        } => {
+            {
+                let mut routines = shared.routines.lock().unwrap();
+                if let Some(r) = routines.iter_mut().find(|r| r.id == routine_id) {
+                    r.enabled = enabled;
+                    r.next_run_at = match (&r.trigger, enabled) {
+                        (RoutineTrigger::Cron { .. }, true) => Some(now_ms() as i64 + 3_600_000),
+                        (RoutineTrigger::Cron { .. }, false)
+                        | (RoutineTrigger::Webhook { .. }, _)
+                        | (RoutineTrigger::Event { .. }, _) => None,
+                    };
+                }
+            }
+            emit_routines(shared, &project_id);
+        }
+        ClientCommand::RoutineRunNow {
+            project_id,
+            routine_id,
+        } => run_routine_now(shared, &project_id, &routine_id),
+        ClientCommand::RoutineRuns { routine_id, .. } => emit_routine_runs(shared, &routine_id),
+        ClientCommand::RoutineDelete {
+            project_id,
+            routine_id,
+        } => {
+            shared
+                .routines
+                .lock()
+                .unwrap()
+                .retain(|r| r.id != routine_id);
+            shared.routine_runs.lock().unwrap().remove(&routine_id);
+            emit_routines(shared, &project_id);
+        }
     }
 }
 
@@ -584,6 +660,152 @@ fn seed_connectors() -> ConnectorsView {
         items,
         loaded: true,
     }
+}
+
+fn emit_routines(shared: &Shared, project_id: &str) {
+    let routines: Vec<Routine> = shared
+        .routines
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| r.project_id == project_id)
+        .cloned()
+        .collect();
+    let _ = shared.events.send(SyncEvent::Routines {
+        project_id: project_id.to_string(),
+        routines,
+    });
+}
+
+fn emit_routine_runs(shared: &Shared, routine_id: &str) {
+    let runs = shared
+        .routine_runs
+        .lock()
+        .unwrap()
+        .get(routine_id)
+        .cloned()
+        .unwrap_or_default();
+    let _ = shared.events.send(SyncEvent::RoutineRuns {
+        routine_id: routine_id.to_string(),
+        runs,
+    });
+}
+
+/// What the box does on a `routine_run` push, scripted: the prompt lands in the chat as a user
+/// message from `routine:<id>`, a reply streams, and the run row flips to `done`.
+fn run_routine_now(shared: &Arc<Shared>, project_id: &str, routine_id: &str) {
+    let Some(routine) = shared
+        .routines
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|r| r.id == routine_id)
+        .cloned()
+    else {
+        return;
+    };
+    let run_id = new_id();
+    let started = now_ms() as i64;
+    {
+        let mut runs = shared.routine_runs.lock().unwrap();
+        runs.entry(routine_id.to_string()).or_default().insert(
+            0,
+            RoutineRun {
+                id: run_id.clone(),
+                routine_id: routine_id.to_string(),
+                started_at: started,
+                finished_at: None,
+                status: RoutineRunStatus::Running,
+                message_id: None,
+                note: Some("cause: manual".into()),
+            },
+        );
+        let mut routines = shared.routines.lock().unwrap();
+        if let Some(r) = routines.iter_mut().find(|r| r.id == routine_id) {
+            r.last_run_at = Some(started);
+        }
+    }
+    emit_routine_runs(shared, routine_id);
+    emit_routines(shared, project_id);
+
+    let message_id = new_id();
+    let chat_id = routine.chat_id.clone();
+    if !shared.docs.lock().unwrap().contains_key(&chat_id) {
+        return;
+    }
+    {
+        let docs = shared.docs.lock().unwrap();
+        if let Some(doc) = docs.get(&chat_id) {
+            let _ = doc.insert_message(&Message {
+                id: message_id.clone(),
+                chat_id: chat_id.clone(),
+                role: Role::User,
+                sender: format!("routine:{routine_id}"),
+                status: MessageStatus::Done,
+                turn: None,
+                decision: None,
+                subagent_id: None,
+                subagent_name: None,
+                in_reply_to: None,
+                routine_name: Some(routine.name.clone()),
+                usage: None,
+                return_contract: None,
+                waiting_user: false,
+                model: None,
+                effort: None,
+                created_at: now_ms(),
+                completed_at: None,
+                pending: false,
+                parts: vec![Part::Text {
+                    id: new_id(),
+                    text: routine.prompt.clone(),
+                }],
+                hidden_parts: Vec::new(),
+            });
+            doc.commit();
+        }
+    }
+    spawn_turn(
+        shared,
+        project_id.to_string(),
+        chat_id.clone(),
+        message_id.clone(),
+        routine.prompt.clone(),
+        true,
+    );
+    let shared = shared.clone();
+    let routine_id = routine_id.to_string();
+    tokio::spawn(async move {
+        // Wait for the scripted reply to settle, then close the run with its message id.
+        for _ in 0..40 {
+            sleep(Duration::from_millis(250)).await;
+            let settled = shared.running.lock().unwrap().get(&chat_id).is_none();
+            if settled {
+                break;
+            }
+        }
+        let reply_id = with_doc(&shared, &chat_id, |doc| {
+            doc.read_all()
+                .into_iter()
+                .rev()
+                .find(|m| m.role == Role::Assistant)
+                .map(|m| m.id)
+        })
+        .flatten();
+        {
+            let mut runs = shared.routine_runs.lock().unwrap();
+            if let Some(run) = runs
+                .get_mut(&routine_id)
+                .and_then(|v| v.iter_mut().find(|r| r.id == run_id))
+            {
+                run.status = RoutineRunStatus::Done;
+                run.finished_at = Some(now_ms() as i64);
+                run.message_id = reply_id;
+                run.note = Some("Here is how I would approach it.".into());
+            }
+        }
+        emit_routine_runs(&shared, &routine_id);
+    });
 }
 
 fn add_doc(shared: &Arc<Shared>, doc: ChatDoc) {
@@ -984,6 +1206,7 @@ async fn run_turn(
             subagent_id: None,
             subagent_name: None,
             in_reply_to: None,
+            routine_name: None,
             usage: None,
             return_contract: None,
             waiting_user: false,
@@ -1435,6 +1658,123 @@ fn seed_chats() -> Vec<Chat> {
     ]
 }
 
+pub const ROUTINE_STANDUP: &str = "01J9ROUTINE0STANDUP0000000";
+pub const ROUTINE_PRS: &str = "01J9ROUTINE0PRS00000000000";
+pub const ROUTINE_DEPLOY: &str = "01J9ROUTINE0DEPLOY00000000";
+
+fn seed_routines() -> Vec<Routine> {
+    let t = now_ms() as i64;
+    let hour = 3_600_000;
+    vec![
+        Routine {
+            id: ROUTINE_STANDUP.into(),
+            project_id: PROJECT_ARBOS.into(),
+            chat_id: CHAT_ARBOS_LAUNCH.into(),
+            name: "Morning stand-up".into(),
+            prompt: "Summarise what changed in the launch plan since yesterday and list today's three most important items.".into(),
+            trigger: RoutineTrigger::Cron {
+                expr: "0 9 * * 1-5".into(),
+                tz: "Europe/Berlin".into(),
+            },
+            enabled: true,
+            created_at: t - 9 * 24 * hour,
+            last_run_at: Some(t - 5 * hour),
+            next_run_at: Some(t + 19 * hour),
+            fire_url: None,
+        },
+        Routine {
+            id: ROUTINE_PRS.into(),
+            project_id: PROJECT_ARBOS.into(),
+            chat_id: CHAT_ARBOS_RESEARCH.into(),
+            name: "Open PR digest".into(),
+            prompt: "Check the open pull requests and tell me which ones are waiting on me.".into(),
+            trigger: RoutineTrigger::Cron {
+                expr: "0 * * * *".into(),
+                tz: "UTC".into(),
+            },
+            enabled: false,
+            created_at: t - 3 * 24 * hour,
+            last_run_at: Some(t - 26 * hour),
+            next_run_at: None,
+            fire_url: None,
+        },
+        Routine {
+            id: ROUTINE_DEPLOY.into(),
+            project_id: PROJECT_ARBOS.into(),
+            chat_id: CHAT_ARBOS_MAIN.into(),
+            name: "Deploy finished".into(),
+            prompt: "A deploy webhook fired. Read the trigger context and tell me whether anything needs attention.".into(),
+            trigger: RoutineTrigger::Webhook {
+                secret: "fixture".into(),
+            },
+            enabled: true,
+            created_at: t - 24 * hour,
+            last_run_at: Some(t - 40 * 60_000),
+            next_run_at: None,
+            fire_url: Some(format!(
+                "http://127.0.0.1:7700/routines/{ROUTINE_DEPLOY}/fire?secret=…"
+            )),
+        },
+    ]
+}
+
+fn seed_routine_runs() -> HashMap<Id, Vec<RoutineRun>> {
+    let t = now_ms() as i64;
+    let hour = 3_600_000;
+    let run = |routine: &str, ago_ms: i64, dur_ms: i64, status: RoutineRunStatus, note: &str| {
+        RoutineRun {
+            id: new_id(),
+            routine_id: routine.into(),
+            started_at: t - ago_ms,
+            finished_at: matches!(status, RoutineRunStatus::Done | RoutineRunStatus::Failed)
+                .then_some(t - ago_ms + dur_ms),
+            status,
+            message_id: Some(new_id()),
+            note: Some(note.into()),
+        }
+    };
+    let mut out = HashMap::new();
+    out.insert(
+        ROUTINE_STANDUP.to_string(),
+        vec![
+            run(ROUTINE_STANDUP, 5 * hour, 41_000, RoutineRunStatus::Done, "Two items moved: the beta invite copy is done, the pricing page slipped to Thursday."),
+            run(ROUTINE_STANDUP, 29 * hour, 38_000, RoutineRunStatus::Done, "No changes since yesterday; today: invite copy, pricing page, press list."),
+            run(ROUTINE_STANDUP, 53 * hour, 7_000, RoutineRunStatus::Failed, "the box did not finish this run within 30 min"),
+            run(ROUTINE_STANDUP, 77 * hour, 44_000, RoutineRunStatus::Done, "Launch date confirmed for 1 December; three items listed."),
+        ],
+    );
+    out.insert(
+        ROUTINE_PRS.to_string(),
+        vec![run(
+            ROUTINE_PRS,
+            26 * hour,
+            52_000,
+            RoutineRunStatus::Done,
+            "Three PRs open; #412 and #415 wait on your review.",
+        )],
+    );
+    out.insert(
+        ROUTINE_DEPLOY.to_string(),
+        vec![
+            run(
+                ROUTINE_DEPLOY,
+                40 * 60_000,
+                12_000,
+                RoutineRunStatus::Done,
+                "api 1.4.2 deployed cleanly; error rate unchanged.",
+            ),
+            run(
+                ROUTINE_DEPLOY,
+                6 * hour,
+                15_000,
+                RoutineRunStatus::Done,
+                "web 2.0.9 deployed; one new warning in the logs, not urgent.",
+            ),
+        ],
+    );
+    out
+}
+
 struct Seeder<'a> {
     doc: &'a ChatDoc,
     t: u64,
@@ -1454,6 +1794,7 @@ impl Seeder<'_> {
             subagent_id: None,
             subagent_name: None,
             in_reply_to: None,
+            routine_name: None,
             usage: None,
             return_contract: None,
             waiting_user: false,
@@ -1483,6 +1824,7 @@ impl Seeder<'_> {
             subagent_id: None,
             subagent_name: None,
             in_reply_to: None,
+            routine_name: None,
             usage: None,
             return_contract: None,
             waiting_user: false,

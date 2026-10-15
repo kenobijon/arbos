@@ -19,7 +19,8 @@ use futures::future::BoxFuture;
 use tokio::sync::mpsc;
 
 use crate::model::{
-    BoxState, Chat, ConnectorsView, Effort, Id, Link, Message, Project, ProjectDocView,
+    BoxState, Chat, ConnectorsView, Effort, Id, Link, Message, Project, ProjectDocView, Routine,
+    RoutineRun, RoutineTrigger,
 };
 
 /// Something the source learned; the UI applies it to its mirror.
@@ -69,7 +70,7 @@ pub enum SyncEvent {
     /// One message changed (streaming text, status, a new part).
     MessageUpsert {
         chat_id: Id,
-        message: Message,
+        message: Box<Message>,
     },
     /// A blob the user asked for (file card, tool output).
     Blob {
@@ -94,6 +95,16 @@ pub enum SyncEvent {
     ConnectorAuth {
         provider: String,
         auth_url: String,
+    },
+    /// Routines of one project (Settings → Routines).
+    Routines {
+        project_id: Id,
+        routines: Vec<Routine>,
+    },
+    /// Run history of one routine, newest first.
+    RoutineRuns {
+        routine_id: Id,
+        runs: Vec<RoutineRun>,
     },
 }
 
@@ -165,6 +176,35 @@ pub enum ClientCommand {
     },
     ConnectorDisconnect {
         id: Id,
+    },
+    /// Settings → Routines opened or needs a refresh.
+    RoutinesRefresh {
+        project_id: Id,
+    },
+    RoutineCreate {
+        project_id: Id,
+        name: String,
+        prompt: String,
+        chat_id: Id,
+        trigger: RoutineTrigger,
+    },
+    /// Pause (`false`) or resume (`true`).
+    RoutineSetEnabled {
+        project_id: Id,
+        routine_id: Id,
+        enabled: bool,
+    },
+    RoutineRunNow {
+        project_id: Id,
+        routine_id: Id,
+    },
+    RoutineRuns {
+        project_id: Id,
+        routine_id: Id,
+    },
+    RoutineDelete {
+        project_id: Id,
+        routine_id: Id,
     },
 }
 
