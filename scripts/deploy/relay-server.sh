@@ -62,7 +62,7 @@ if [[ -n "$FROM_SOURCE" ]]; then
     [[ -d repo/.git ]] || git clone -q https://github.com/unarbos/arbos.git repo
     # GitHub only serves fetch-by-SHA for full 40-char ids, so fetch everything and resolve locally
     # (works for branch names, tags, full and abbreviated commit ids).
-    git -C repo fetch -q --tags origin "+refs/heads/*:refs/remotes/origin/*"
+    git -C repo fetch -q --tags --force origin "+refs/heads/*:refs/remotes/origin/*"
     REF="'"$FROM_SOURCE"'"
     COMMIT=$(git -C repo rev-parse -q --verify "origin/$REF^{commit}" 2>/dev/null \
           || git -C repo rev-parse -q --verify "$REF^{commit}" 2>/dev/null) \
