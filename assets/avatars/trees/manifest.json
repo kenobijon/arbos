@@ -7,7 +7,8 @@
     "Lottie: 60 fps, shapes only, no expressions, no raster, no masks; `idle` and `working` loop seamlessly, `reply` plays once.",
     "Frame strips: horizontal row of square frames sampled from the Lottie at 30 fps; `1x` = 28 px, `2x` = 56 px, `rail` = 72 px, `rail@2x` = 144 px; transparent outside the disc.",
     "Tree strips (`frames[state].tree`): same frames, only the tree on transparent, drawn in grey LEVELS (tree 255, tree_light 220, tree_dark 170, face 0) so the app can map level -> hue at draw time; it draws the black disc + ring itself.",
-    "Colors: the tree carries the color on a neutral black disc. `tree` = canopy, `tree_dark` = trunk/shade, `tree_light` = highlight, `face` = near-black eyes/mouth. `mono` (white tree) is the default. Order of `colors` is a contract with the relay (hashed like `characters`); append only."
+    "Colors: the tree carries the color on a neutral black disc. `tree` = canopy, `tree_dark` = trunk/shade, `tree_light` = highlight, `face` = near-black eyes/mouth. `mono` (white tree) stays selectable but is never a default. Order of `colors` is a contract with the relay (hashed like `characters`); append only.",
+    "D74 (2026-10-15, Jacob): everywhere in the apps, the website, ads, README and docs an agent is shown as a COLORED tree. A new agent defaults to a colored variant, never `mono`: color = colored[fnv1a64(project_id + ':color') % colored.length] over `colors` without `mono` (the relay then dedupes (tree, color) pairs per user). The black-and-white tree is only the Arbos brand logo."
   ],
   "style": {
     "background": "#000000",
@@ -167,7 +168,8 @@
       "face": "#0a0a0a"
     }
   ],
-  "default_color": "mono",
+  "default_color": null,
+  "default_color_rule": "colored[fnv1a64(project_id + ':color') % colored.length] where colored = colors without mono (D74)",
   "recolor": {
     "roles": [
       "bg",
@@ -209,8 +211,8 @@
     "reply": "Play once when a reply lands, then return to idle. It starts and ends on the idle pose.",
     "frame_strips": "Frame k of a strip is the square at x = k * size. Advance at `fps`; loop idle/working, play reply once. The widest strip (rail@2x, 90 frames) is 12960 px wide.",
     "tree_strips": "`frames[state].tree` = grey-level strips at 56 (`2x`) and 72 (`rail`) px of the tree alone on transparent. Draw the black disc + ring, then map levels to the color's hues. See `recolor.levels`.",
-    "color": "Per-agent color = one entry of `colors`; default `mono`. Apply the same entry to the still, the Lotties and the strips.",
-    "pick": "Default avatar for a project = characters[fnv1a64(project_id) % characters.length]."
+    "color": "Per-agent color = one entry of `colors`; the default is a colored entry (see `default_color_rule`), never `mono`. Apply the same entry to the still, the Lotties and the strips.",
+    "pick": "Default avatar for a project = characters[fnv1a64(project_id) % characters.length]; default color = `default_color_rule`."
   },
   "png_sizes": [
     56,

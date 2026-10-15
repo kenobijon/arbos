@@ -15,11 +15,34 @@ pub const DEFAULT_SLUGS: &[&str] = &[
     "olive", "ginkgo",
 ];
 
-/// Avatar colour palette (manifest `colors[]`), in order.
+/// Avatar colour palette (manifest `colors[]`), in order. `mono` stays selectable but is
+/// never a default: coloured trees are the agent look, the white tree is the brand mark (D74).
 pub const DEFAULT_COLORS: &[&str] = &[
     "mono", "red", "orange", "amber", "green", "teal", "cyan", "blue", "indigo", "violet", "pink",
     "rose", "slate",
 ];
+
+/// The colour slug that is never picked by default.
+pub const MONO: &str = "mono";
+
+/// The palette minus `mono`, for default picks; `mono` is kept only if it is all there is.
+fn default_palette(colors: &[String]) -> Vec<String> {
+    let all: Vec<String> = if colors.is_empty() {
+        DEFAULT_COLORS.iter().map(|s| (*s).to_owned()).collect()
+    } else {
+        colors.to_vec()
+    };
+    let coloured: Vec<String> = all
+        .iter()
+        .filter(|c| !c.eq_ignore_ascii_case(MONO))
+        .cloned()
+        .collect();
+    if coloured.is_empty() {
+        all
+    } else {
+        coloured
+    }
+}
 
 /// FNV-1a 64 over the UTF-8 bytes (the same arithmetic is one line in Swift).
 pub fn fnv1a64(s: &str) -> u64 {
@@ -39,13 +62,10 @@ pub fn default_for(project_id: &str, slugs: &[String]) -> String {
     slugs[(fnv1a64(project_id) % slugs.len() as u64) as usize].clone()
 }
 
-/// Default colour for a new project: `colors[fnv1a64(project_id + ":color") % n]`.
+/// Default colour for a new project: `coloured[fnv1a64(project_id + ":color") % n]` over the
+/// palette without `mono` (D74: a new agent is always a coloured tree).
 pub fn default_color_for(project_id: &str, colors: &[String]) -> String {
-    let list: Vec<String> = if colors.is_empty() {
-        DEFAULT_COLORS.iter().map(|s| (*s).to_owned()).collect()
-    } else {
-        colors.to_vec()
-    };
+    let list = default_palette(colors);
     list[(fnv1a64(&format!("{project_id}:color")) % list.len() as u64) as usize].clone()
 }
 
@@ -64,11 +84,7 @@ pub fn default_pair(
     } else {
         slugs.to_vec()
     };
-    let palette: Vec<String> = if colors.is_empty() {
-        DEFAULT_COLORS.iter().map(|s| (*s).to_owned()).collect()
-    } else {
-        colors.to_vec()
-    };
+    let palette = default_palette(colors);
     let t0 = (fnv1a64(project_id) % trees.len() as u64) as usize;
     let c0 = (fnv1a64(&format!("{project_id}:color")) % palette.len() as u64) as usize;
     for ti in 0..trees.len() {
@@ -184,13 +200,34 @@ mod tests {
         // Same tree taken with that colour: the tree stays, the colour moves on.
         let (t2, c2) = default_pair("P9", &trees, &colors, &[(t.clone(), c.clone())]);
         assert_eq!(t2, t);
-        let ci = colors.iter().position(|x| *x == c).unwrap();
-        assert_eq!(c2, colors[(ci + 1) % colors.len()]);
+        let coloured = default_palette(&colors);
+        let ci = coloured.iter().position(|x| *x == c).unwrap();
+        assert_eq!(c2, coloured[(ci + 1) % coloured.len()]);
         // Every colour of that tree taken: the next tree.
-        let all: Vec<(String, String)> = colors.iter().map(|c| (t.clone(), c.clone())).collect();
+        let all: Vec<(String, String)> = coloured.iter().map(|c| (t.clone(), c.clone())).collect();
         let (t3, _) = default_pair("P9", &trees, &colors, &all);
         let ti = trees.iter().position(|x| *x == t).unwrap();
         assert_eq!(t3, trees[(ti + 1) % trees.len()]);
+    }
+
+    #[test]
+    fn defaults_are_never_mono() {
+        let trees: Vec<String> = DEFAULT_SLUGS.iter().map(|s| (*s).to_owned()).collect();
+        let colors: Vec<String> = DEFAULT_COLORS.iter().map(|s| (*s).to_owned()).collect();
+        for i in 0..500 {
+            let id = format!("01HPROJECT{i:04}");
+            assert_ne!(default_color_for(&id, &colors), MONO);
+            assert_ne!(default_color_for(&id, &[]), MONO);
+            let (_, c) = default_pair(&id, &trees, &colors, &[]);
+            assert_ne!(c, MONO);
+        }
+        // A palette that is only mono still yields something.
+        assert_eq!(default_color_for("x", &[MONO.to_owned()]), MONO);
+        // Case-insensitive exclusion.
+        assert_eq!(
+            default_color_for("x", &["Mono".to_owned(), "red".to_owned()]),
+            "red"
+        );
     }
 
     #[test]
