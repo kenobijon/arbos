@@ -10,6 +10,7 @@ mod memory;
 mod routines;
 mod rpc_child;
 mod settings;
+mod skills;
 mod store;
 mod sync;
 
@@ -321,6 +322,9 @@ async fn boot() -> Result<()> {
     for id in &known {
         sync.open_room(id).await?;
     }
+    // Skills index (F5) before the first turn; refreshed every 60 s, when `skills_rev` moves,
+    // and on the `skills_changed` push.
+    agent.refresh_skills().await;
     // Main agent.
     agent.start_pi(&initial_chat).await?;
     sync.write_status(&[
@@ -388,6 +392,13 @@ async fn boot() -> Result<()> {
                     if let Err(e) = agent2.settings_from_relay(p, &chats).await {
                         tracing::warn!(error = %e, "settings from relay");
                     }
+                }
+                let rev_moved = v
+                    .get("skills_rev")
+                    .and_then(Value::as_str)
+                    .is_some_and(|r| r != agent2.skills.rev());
+                if rev_moved || agent2.skills.is_stale() {
+                    agent2.refresh_skills().await;
                 }
             }
         });

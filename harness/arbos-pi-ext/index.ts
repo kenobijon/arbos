@@ -129,6 +129,10 @@ export default function arbosPiExt(pi: ExtensionAPI) {
       event.systemPromptOptions.sections["arbos-working-set"] =
         `Named handles and notes of this chat. Use peek(handle) for slices; never ask to re-run them.\n${capped.join("\n")}`;
     }
+    // Relevant skills (F5): a per-turn section after the byte-stable prefix, ≤ 600 tokens, chosen by agentd.
+    if (remote?.ok && typeof remote.skills === "string" && remote.skills.trim()) {
+      event.systemPromptOptions.sections["arbos-skills"] = remote.skills.trim();
+    }
   });
 
   // ---- 1. deny-list veto + audit before execution + act counting --------------------------

@@ -47,7 +47,12 @@ fn tools() -> Value {
           "inputSchema": { "type": "object", "properties": { "question": { "type": "string" }, "widget": widget_schema() }, "required": ["question"] } },
         { "name": "spawn_subagent", "description": "Hand a task to a new subagent (Prime by default). Use mid-act when the task is bigger than 8 tool calls.",
           "inputSchema": { "type": "object", "properties": { "name": { "type": "string" }, "purpose": { "type": "string" }, "brief": { "type": "string" }, "isolate": { "type": "boolean" } }, "required": ["name","purpose","brief"] } },
-        { "name": "wake_subagent", "description": "Continue an existing subagent with a new brief.", "inputSchema": { "type": "object", "properties": { "id": { "type": "string" }, "brief": { "type": "string" } }, "required": ["id","brief"] } }
+        { "name": "wake_subagent", "description": "Continue an existing subagent with a new brief.", "inputSchema": { "type": "object", "properties": { "id": { "type": "string" }, "brief": { "type": "string" } }, "required": ["id","brief"] } },
+        { "name": "skills_list", "description": "List the skills library (reusable how-tos shared across Projects): slug, name, description, when to use. Optional q filters by keyword.",
+          "inputSchema": { "type": "object", "properties": { "q": { "type": "string" } } } },
+        { "name": "skills_read", "description": "Read one skill's full Markdown by slug.", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" } }, "required": ["slug"] } },
+        { "name": "skills_save", "description": "Save a how-to you learned as a skill (upsert by slug; this Project owns it). shared=true makes it visible to every Project.",
+          "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" }, "name": { "type": "string" }, "description": { "type": "string" }, "tags": { "type": "array", "items": { "type": "string" } }, "when_to_use": { "type": "string" }, "body": { "type": "string" }, "shared": { "type": "boolean" } }, "required": ["name","body"] } }
     ]);
     if let Some(a) = list.as_array_mut() {
         a.extend(crate::connectors::tool_specs());
@@ -430,7 +435,100 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
         },
         "connectors_list" => crate::connectors::connectors_list(a).await,
         "connector_call" => crate::connectors::connector_call(a, args, &chat_for_scratch).await,
+        "skills_list" => {
+            if a.skills.is_stale() {
+                a.refresh_skills().await;
+            }
+            let q = s("q").unwrap_or_default();
+            let all = a.skills.snapshot();
+            let items: Vec<Value> = all
+                .iter()
+                .filter(|sk| {
+                    q.trim().is_empty() || {
+                        let hay = sk.match_text().to_lowercase();
+                        q.to_lowercase()
+                            .split_whitespace()
+                            .any(|w| hay.contains(w))
+                    }
+                })
+                .map(|sk| json!({ "slug": sk.slug, "name": sk.name, "description": sk.description, "tags": sk.tags, "when_to_use": sk.when_to_use, "shared": sk.shared, "version": sk.version }))
+                .collect();
+            text_result(json!({ "skills": items }).to_string())
+        }
+        "skills_read" => {
+            let slug = s("slug").unwrap_or_default();
+            if a.skills.find(&slug).is_none() {
+                a.refresh_skills().await;
+            }
+            match a.skills.find(&slug) {
+                Some(sk) => text_result(sk.to_markdown()),
+                None => err_result(format!("no skill {slug}")),
+            }
+        }
+        "skills_save" => {
+            let name = s("name").unwrap_or_default();
+            let body = s("body").unwrap_or_default();
+            if name.trim().is_empty() || body.trim().is_empty() {
+                return err_result("name and body are required");
+            }
+            let slug = s("slug")
+                .map(|x| arbos_core::skill::slugify(&x))
+                .unwrap_or_else(|| arbos_core::skill::slugify(&name));
+            let payload = json!({
+                "slug": slug, "name": name, "description": s("description").unwrap_or_default(),
+                "tags": args.get("tags").cloned().unwrap_or(json!([])),
+                "when_to_use": s("when_to_use").unwrap_or_default(), "body": body,
+                "shared": args.get("shared").and_then(Value::as_bool).unwrap_or(false),
+            });
+            match reqwest::Client::new()
+                .post(format!("{}/skills", a.cfg.relay_url))
+                .bearer_auth(&a.cfg.box_token)
+                .json(&payload)
+                .send()
+                .await
+            {
+                Ok(r) if r.status().is_success() => {
+                    let v: Value = r.json().await.unwrap_or_default();
+                    let version = v.get("version").and_then(Value::as_i64).unwrap_or(1);
+                    audit_line(
+                        a,
+                        json!({ "kind": "skills_save", "slug": slug, "version": version, "chat_id": chat_for_scratch, "at": arbos_core::ids::now_ms() }),
+                    );
+                    let _ = a.store.t3_append(
+                        &chat_for_scratch,
+                        None,
+                        Some(&chat_for_scratch),
+                        "skills",
+                        Some("assistant"),
+                        &format!("skills_save {slug} v{version}: {name}"),
+                        None,
+                    );
+                    a.refresh_skills().await;
+                    text_result(
+                        json!({ "slug": slug, "version": version, "status": "saved" }).to_string(),
+                    )
+                }
+                Ok(r) => err_result(format!(
+                    "relay refused: HTTP {} {}",
+                    r.status(),
+                    r.text().await.unwrap_or_default()
+                )),
+                Err(e) => err_result(e),
+            }
+        }
         _ => err_result(format!("unknown tool {name}")),
+    }
+}
+
+/// One line in `/work/.arbos/audit.jsonl`, the same file the pi extension writes.
+fn audit_line(a: &Arc<Agent>, entry: Value) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(a.cfg.audit_path())
+    {
+        let _ = writeln!(f, "{entry}");
     }
 }
 
