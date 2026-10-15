@@ -397,12 +397,15 @@ async fn boot() -> Result<()> {
         std::process::exit(0);
     });
 
-    // Command loop: one turn at a time, in arrival order.
+    // Command loop. Each command runs on its own task: `send`/`answer` still serialize on the
+    // agent's turn lock (FIFO), while `stop` and settings changes land at once, mid-turn.
     while let Some(inc) = rx.recv().await {
         match inc {
             Incoming::Command { chat_id, cmd } => {
                 let agent = agent.clone();
-                agent.handle_command(&chat_id, cmd).await;
+                tokio::spawn(async move {
+                    agent.handle_command(&chat_id, cmd).await;
+                });
             }
             Incoming::CaughtUp { chat_id, head_seq } => {
                 tracing::info!(chat_id, head_seq, "room caught up");
@@ -411,7 +414,10 @@ async fn boot() -> Result<()> {
                 tracing::debug!(chat_id, ?state, "relay status");
             }
             Incoming::ProjectDocChanged => {
-                agent.settings_from_doc().await;
+                let agent = agent.clone();
+                tokio::spawn(async move {
+                    agent.settings_from_doc().await;
+                });
             }
         }
     }

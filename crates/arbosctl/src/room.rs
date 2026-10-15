@@ -213,8 +213,15 @@ async fn connect(
 
 enum Mode {
     Dump,
-    Stream { until_done: bool },
-    Send { text: String, stream: bool },
+    Stream {
+        until_done: bool,
+    },
+    Send {
+        text: String,
+        stream: bool,
+    },
+    /// Append a `stop` command (out-of-band abort of the running turn) and exit on its ack.
+    Stop,
 }
 
 async fn run(
@@ -353,6 +360,22 @@ async fn run(
                             break;
                         }
                     }
+                    Mode::Stop => {
+                        s.doc.append_command("stop", json!({}), &s.device);
+                        let bytes = s.doc.export_updates_since(&s.acked_vv);
+                        let batch = ulid();
+                        pending_push = Some((batch.clone(), s.doc.oplog_vv()));
+                        sink.send(Message::Binary(
+                            Frame::new(
+                                FrameType::Push,
+                                json!({ "batchId": batch }),
+                                Bytes::from(bytes),
+                            )
+                            .encode(),
+                        ))
+                        .await?;
+                        eprintln!("[sent stop]");
+                    }
                     Mode::Send { text, stream: _ } => {
                         s.print_new();
                         let msg_id = ulid();
@@ -396,7 +419,7 @@ async fn run(
                         pending_push = None;
                         s.persist()?;
                         eprintln!("[ack seq={} dup={}]", ack.seq, ack.dup);
-                        if let Mode::Send { stream: false, .. } = mode {
+                        if matches!(mode, Mode::Send { stream: false, .. } | Mode::Stop) {
                             break;
                         }
                     }
@@ -502,6 +525,10 @@ pub async fn stream(
         Duration::from_secs(timeout_s),
     )
     .await
+}
+
+pub async fn stop(cfg: &mut Config, project: &str, chat: &str) -> Result<()> {
+    run(cfg, project, chat, Mode::Stop, Duration::from_secs(30)).await
 }
 
 pub async fn dump(cfg: &mut Config, project: &str, chat: &str) -> Result<()> {

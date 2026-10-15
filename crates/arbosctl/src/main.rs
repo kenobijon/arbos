@@ -117,6 +117,11 @@ enum ChatCmd {
         project: String,
         chat: String,
     },
+    /// Stop the running turn in a chat now (aborts the main agent's pi turn / act loop).
+    Stop {
+        project: String,
+        chat: String,
+    },
     /// Forget the local replica and cursor for a chat.
     Reset {
         project: String,
@@ -283,6 +288,10 @@ async fn main() -> Result<()> {
             ChatCmd::Dump { project, chat } => {
                 let project = resolve_project(&relay, &project).await?;
                 room::dump(&mut cfg, &project, &chat).await?;
+            }
+            ChatCmd::Stop { project, chat } => {
+                let project = resolve_project(&relay, &project).await?;
+                room::stop(&mut cfg, &project, &chat).await?;
             }
             ChatCmd::Reset { project, chat } => {
                 let project = resolve_project(&relay, &project).await?;

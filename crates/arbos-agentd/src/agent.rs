@@ -185,6 +185,8 @@ pub struct TurnState {
     pub reply_extractor: ReplyExtractor,
     pub route_call_id: Option<String>,
     pub text_part_dirty: bool,
+    /// Set by an out-of-band `stop`: the turn ends as it is and no hand-off follows.
+    pub stopped: bool,
 }
 
 pub struct Agent {
@@ -316,10 +318,11 @@ impl Agent {
     pub async fn start_pi(self: &Arc<Self>, initial_chat: &str) -> Result<()> {
         self.write_system_prompt()?;
         let session = self.session_file_for(initial_chat)?;
+        let (talking_model, _) = self.live_models().await;
         let mut args = PiAdapter::common_args(
             &self.cfg,
             &self.cfg.pi_sessions_dir(),
-            &self.cfg.talking_model,
+            &talking_model,
             &self.system_prompt_path(),
         );
         args.extend(["--session".into(), session.display().to_string()]);
@@ -356,7 +359,7 @@ impl Agent {
             None,
             Some(&session.display().to_string()),
             &self.cfg.work_dir.display().to_string(),
-            &self.cfg.talking_model,
+            &talking_model,
             "pi",
             "main",
         )?;
@@ -400,10 +403,11 @@ impl Agent {
             old.shutdown().await;
         }
         let session = self.session_file_for(chat_id)?;
+        let (talking_model, _) = self.live_models().await;
         let mut args = PiAdapter::common_args(
             &self.cfg,
             &self.cfg.pi_sessions_dir(),
-            &self.cfg.talking_model,
+            &talking_model,
             &self.system_prompt_path(),
         );
         args.extend(["--session".into(), session.display().to_string()]);
@@ -457,12 +461,13 @@ impl Agent {
             "switched pi session"
         );
         *self.current_chat.lock().await = Some(chat_id.to_owned());
+        let (talking_model, _) = self.live_models().await;
         self.store.upsert_session(
             chat_id,
             None,
             Some(&path.display().to_string()),
             &self.cfg.work_dir.display().to_string(),
-            &self.cfg.talking_model,
+            &talking_model,
             "pi",
             "main",
         )?;
@@ -483,7 +488,7 @@ impl Agent {
         }
         let res = match cmd.kind.as_str() {
             "send" => self.handle_send(chat_id, &host, &cmd).await,
-            "stop" => self.handle_stop().await,
+            "stop" => self.handle_stop(chat_id).await,
             "answer" => self.handle_send(chat_id, &host, &cmd).await,
             "retitle" => {
                 let title = cmd
@@ -512,14 +517,40 @@ impl Agent {
         }
     }
 
-    async fn handle_stop(&self) -> Result<()> {
+    /// `stop` runs out of band (its own task, no turn lock): abort the pi turn now, mark the turn
+    /// stopped so no hand-off follows, and tell the chat.
+    async fn handle_stop(&self, chat_id: &str) -> Result<()> {
+        let target = {
+            let mut tl = self.turn.lock().await;
+            match tl.as_mut() {
+                Some(t) if t.chat_id == chat_id => {
+                    t.stopped = true;
+                    t.escalate = false;
+                    Some(t.assistant_msg_id.clone())
+                }
+                _ => None,
+            }
+        };
+        let Some(msg_id) = target else {
+            tracing::info!(chat_id, "stop: no turn running for this chat");
+            return Ok(());
+        };
         if let Ok(pi) = self.pi().await {
             let _ = pi
-                .call(RpcCommand::Abort {
-                    id: pi.next_id("ab"),
-                })
+                .call_timeout(
+                    RpcCommand::Abort {
+                        id: pi.next_id("ab"),
+                    },
+                    Duration::from_secs(5),
+                )
                 .await;
         }
+        if let Some(host) = self.sync.host(chat_id).await {
+            let mut h = host.lock().await;
+            h.doc
+                .add_status_part(&msg_id, "stopped", "Stopped by the user");
+        }
+        tracing::info!(chat_id, "stop: pi turn aborted");
         Ok(())
     }
 
@@ -609,6 +640,9 @@ impl Agent {
         self.spawn_memory_pass(chat_id, &assistant_msg_id, &user_text, &turn.streamed_text);
 
         // Hand-offs after the main turn: new / wake / escalation. Never on the chat's critical path.
+        if turn.stopped {
+            return result;
+        }
         let followup = match (&turn.route, turn.escalate) {
             (
                 Some(ValidRoute::New {
@@ -793,6 +827,7 @@ impl Agent {
             reply_extractor: ReplyExtractor::default(),
             route_call_id: None,
             text_part_dirty: false,
+            stopped: false,
         });
         self.turn_running.store(true, Ordering::SeqCst);
         let keepalive = self.spawn_keepalive();

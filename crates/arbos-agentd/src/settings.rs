@@ -3,7 +3,9 @@
 //! live pi session (`set_model` / `set_thinking_level`). The box is the only writer of the doc's
 //! `chats` index and `status`; clients may write `settings.agentModel` / `agentEffort` (SetModel).
 
+use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -78,14 +80,34 @@ pub struct SettingsState {
     pub color: String,
     pub instructions: String,
     pub spend_cap_usd: f64,
+    /// Visible note when a configured model id was unknown and a default took its place.
+    pub model_note: String,
+    /// Last `models` JSON seen from the registry poll (validated once per distinct value).
+    pub last_registry_models: Option<Models>,
     /// Last `settings` JSON the box wrote into the project doc; used to tell client writes from echoes.
     pub last_doc_write: Option<Value>,
     pub last_chats_write: Option<Value>,
 }
 
+/// Model ids the proxy serves (`GET /proxy/v1/models`), refreshed every `CATALOG_TTL`.
+pub struct ModelCatalog {
+    pub ids: HashSet<String>,
+    pub fetched_at: Instant,
+}
+
+const CATALOG_TTL: Duration = Duration::from_secs(10 * 60);
+
+/// Safe slots when a configured id is not in the catalog (the same defaults `Config` uses).
+pub const DEFAULT_TALKING_MODEL: &str = "anthropic/claude-haiku-5.5";
+pub const DEFAULT_SUBAGENT_MODEL: &str = "anthropic/claude-sonnet-5.5";
+pub const DEFAULT_DECISION_MODEL: &str = "anthropic/claude-haiku-5.5";
+
 pub struct Settings {
     pub models: RwLock<Models>,
     pub state: RwLock<SettingsState>,
+    pub catalog: RwLock<Option<ModelCatalog>>,
+    /// Boot-time slots: the fallback when a client or the registry names an unknown model.
+    pub defaults: Models,
 }
 
 impl Settings {
@@ -105,18 +127,132 @@ impl Settings {
             },
         };
         Self {
-            models: RwLock::new(models),
+            models: RwLock::new(models.clone()),
             state: RwLock::new(SettingsState {
                 name: cfg.project_name.clone(),
                 instructions: cfg.instructions.clone(),
                 spend_cap_usd: 25.0,
                 ..Default::default()
             }),
+            catalog: RwLock::new(None),
+            defaults: models,
         }
     }
 }
 
+/// A model id the proxy can serve has the `vendor/name` shape and no spaces; picker labels such
+/// as "Claude Fable 5.1" never do.
+pub fn plausible_model_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 120
+        && id.contains('/')
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '.' | '_' | ':'))
+}
+
 impl Agent {
+    /// Known model ids from the proxy, cached for `CATALOG_TTL`. `None` when the proxy cannot be
+    /// asked right now (validation then falls back to the shape check only).
+    async fn known_model_ids(self: &Arc<Self>) -> Option<HashSet<String>> {
+        if let Some(c) = self.settings.catalog.read().await.as_ref() {
+            if c.fetched_at.elapsed() < CATALOG_TTL {
+                return Some(c.ids.clone());
+            }
+        }
+        let r = self
+            .http_client()
+            .get(format!("{}/proxy/v1/models", self.cfg.relay_url))
+            .bearer_auth(&self.cfg.box_token)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .ok()?;
+        if !r.status().is_success() {
+            return None;
+        }
+        let v: Value = r.json().await.ok()?;
+        let ids: HashSet<String> = v
+            .get("data")
+            .and_then(Value::as_array)?
+            .iter()
+            .filter_map(|m| m.get("id").and_then(Value::as_str))
+            .map(str::to_owned)
+            .collect();
+        if ids.is_empty() {
+            return None;
+        }
+        *self.settings.catalog.write().await = Some(ModelCatalog {
+            ids: ids.clone(),
+            fetched_at: Instant::now(),
+        });
+        Some(ids)
+    }
+
+    /// Replace unknown model ids with the defaults. Returns the cleaned slots and one note per
+    /// replaced slot (shown to the user through `settings.modelNote`).
+    async fn sanitize_models(self: &Arc<Self>, wanted: &Models) -> (Models, Vec<String>) {
+        let known = self.known_model_ids().await;
+        let valid = |id: &str| -> bool {
+            plausible_model_id(id) && known.as_ref().is_none_or(|k| k.contains(id))
+        };
+        let mut out = wanted.clone();
+        let mut notes = Vec::new();
+        let mut fix = |label: &str, slot: &mut Slot, default: &str| {
+            if !valid(&slot.id) {
+                notes.push(format!(
+                    "Unknown model \"{}\" for {label}; using {default}.",
+                    slot.id
+                ));
+                slot.id = default.to_owned();
+            }
+        };
+        let d = &self.settings.defaults;
+        let pick = |boot: &str, hard: &str| -> String {
+            if valid(boot) {
+                boot.to_owned()
+            } else {
+                hard.to_owned()
+            }
+        };
+        let talking_default = pick(&d.talking.id, DEFAULT_TALKING_MODEL);
+        let subagent_default = pick(&d.subagent.id, DEFAULT_SUBAGENT_MODEL);
+        let decision_default = pick(&d.decision.id, DEFAULT_DECISION_MODEL);
+        fix("the talking model", &mut out.talking, &talking_default);
+        fix("the subagent model", &mut out.subagent, &subagent_default);
+        fix("the decision model", &mut out.decision, &decision_default);
+        (out, notes)
+    }
+
+    /// Validate, apply live, and converge the registry + doc on the cleaned slots.
+    async fn adopt_models(self: &Arc<Self>, wanted: &Models, source: &str) -> Result<()> {
+        let (clean, notes) = self.sanitize_models(wanted).await;
+        if !notes.is_empty() {
+            tracing::warn!(source, ?notes, "model ids rejected");
+        }
+        {
+            let mut st = self.settings.state.write().await;
+            st.model_note = notes.join(" ");
+        }
+        let current = self.settings.models.read().await.clone();
+        if clean != current {
+            self.apply_models(&clean).await?;
+        }
+        if clean != *wanted || source == "doc" {
+            // The bad value must leave the registry too, or the next poll brings it back.
+            let _ = self
+                .http_client()
+                .patch(format!(
+                    "{}/projects/{}",
+                    self.cfg.relay_url, self.cfg.project_id
+                ))
+                .bearer_auth(&self.cfg.box_token)
+                .json(&json!({ "models": clean.to_json() }))
+                .send()
+                .await;
+        }
+        Ok(())
+    }
     /// The relay registry view arrived (boot hello or the 3 s poll): apply models and mirror into the doc.
     pub async fn settings_from_relay(
         self: &Arc<Self>,
@@ -128,8 +264,18 @@ impl Agent {
             .get("models")
             .map(|m| Models::from_json(m, &current))
             .unwrap_or_else(|| current.clone());
-        if incoming != current {
-            self.apply_models(&incoming).await?;
+        let last_seen = self
+            .settings
+            .state
+            .read()
+            .await
+            .last_registry_models
+            .clone();
+        if incoming != current && last_seen.as_ref() != Some(&incoming) {
+            // Validate once per distinct registry value: a rejected id is PATCHed away, and until
+            // that lands the poll must not re-apply (or re-reject) the same stale JSON.
+            self.settings.state.write().await.last_registry_models = Some(incoming.clone());
+            self.adopt_models(&incoming, "registry").await?;
         }
         {
             let mut st = self.settings.state.write().await;
@@ -193,6 +339,7 @@ impl Agent {
             "agentModel": m.talking.id, "agentEffort": m.talking.effort,
             "defaultSubagentModel": m.subagent.id, "defaultSubagentEffort": m.subagent.effort,
             "decisionModel": m.decision.id, "spendCapUsd": st.spend_cap_usd,
+            "modelNote": st.model_note,
         });
         if self.settings.state.read().await.last_doc_write.as_ref() == Some(&v) {
             return;
@@ -286,19 +433,12 @@ impl Agent {
             return;
         }
         tracing::info!(?wanted, "settings change from a client in the project doc");
-        if let Err(e) = self.apply_models(&wanted).await {
+        // `decision` stays as it is: a chat picker only ever selects the talking/subagent slots.
+        if let Err(e) = self.adopt_models(&wanted, "doc").await {
             tracing::warn!(error = %e, "apply models from doc");
         }
-        let _ = self
-            .http_client()
-            .patch(format!(
-                "{}/projects/{}",
-                self.cfg.relay_url, self.cfg.project_id
-            ))
-            .bearer_auth(&self.cfg.box_token)
-            .json(&json!({ "models": wanted.to_json() }))
-            .send()
-            .await;
+        // Overwrite the client's write with the validated value (an echo of a bad id would loop).
+        self.settings.state.write().await.last_doc_write = None;
         self.write_settings_doc().await;
     }
 }

@@ -234,6 +234,17 @@ pub async fn get_project(
     Ok(Json(json!({ "project": project_json(&state, &p).await, "chats": chats, "box": bs, "box_since": since, "spend_today": today })).into_response())
 }
 
+/// A model id the proxy can serve: `vendor/name`, no spaces. Picker labels ("Claude Fable 5.1")
+/// are refused here so they never reach a slot.
+fn plausible_model_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 120
+        && id.contains('/')
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '.' | '_' | ':'))
+}
+
 #[derive(Deserialize)]
 pub struct PatchProjectBody {
     #[serde(default)]
@@ -266,6 +277,26 @@ pub async fn patch_project(
         .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
     if !principal.can_access_project(&p.id) {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
+    }
+    if let Some(o) = b.models.as_ref().and_then(Value::as_object) {
+        for (slot, v) in o {
+            if !matches!(
+                slot.as_str(),
+                "talking_model" | "subagent_model" | "decision_model"
+            ) {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!("unknown model slot {slot}"),
+                ));
+            }
+            let id = v.get("id").and_then(Value::as_str).unwrap_or("");
+            if !plausible_model_id(id) {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!("{slot}.id must be a provider model id like vendor/name, got {id:?}"),
+                ));
+            }
+        }
     }
     let models = b.models.map(|patch| {
         let mut merged = p.models.clone();

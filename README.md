@@ -50,6 +50,7 @@ cargo run -p arbosctl -- project create --name demo --local-box
 cargo run -p arbosctl -- chat open demo                        # prints a chat id
 cargo run -p arbosctl -- chat send demo <chat> "hello" --stream
 cargo run -p arbosctl -- chat stream demo <chat> --until-done  # resumes by cursor after a kill
+cargo run -p arbosctl -- chat stop demo <chat>                 # aborts the running turn at once
 cargo run -p arbosctl -- box stop demo && cargo run -p arbosctl -- box start demo
 cargo run -p arbosctl -- timings demo                          # boot, wake, TTFT, subagent timings
 ```
