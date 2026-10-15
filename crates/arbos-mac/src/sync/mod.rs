@@ -124,10 +124,14 @@ pub enum ClientCommand {
         attachments: Vec<PathBuf>,
     },
     /// Reply to an `ask_user` question (S8). Same shape as `Send`, different outbox kind.
+    /// A typed widget answer carries `question_id` and the structured `value`; `text` is
+    /// the rendered form shown in the user's bubble.
     Answer {
         chat_id: Id,
         message_id: Id,
         text: String,
+        question_id: Option<String>,
+        value: Option<serde_json::Value>,
     },
     Stop {
         chat_id: Id,

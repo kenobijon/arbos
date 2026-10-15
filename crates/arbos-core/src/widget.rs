@@ -4,6 +4,7 @@
 //! model reads. Shared by agentd (render), arbosctl (answer from the CLI) and
 //! the Mac app (cards).
 
+use chrono::{Datelike, Local, NaiveDate};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -71,7 +72,7 @@ pub enum Widget {
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QuestionState {
     Open,
@@ -220,20 +221,40 @@ fn scalar_text(value: &Value) -> String {
 /// `yyyy-mm-dd` → `(year, month, day)` with a calendar check; no time zones.
 pub fn parse_date(s: &str) -> Option<(i32, u32, u32)> {
     let s = s.trim();
-    let mut it = s.splitn(3, '-');
-    let y: i32 = it.next()?.parse().ok()?;
-    let m: u32 = it.next()?.parse().ok()?;
-    let d: u32 = it.next()?.parse().ok()?;
-    if !(1..=12).contains(&m) || d == 0 || s.len() != 10 {
+    if s.len() != 10 {
         return None;
     }
-    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
-    let days = match m {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if leap => 29,
-        2 => 28,
-        _ => return None,
-    };
-    (d <= days).then_some((y, m, d))
+    let d = NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()?;
+    Some((d.year(), d.month(), d.day()))
+}
+
+/// Today's local date as `yyyy-mm-dd` (date widget quick picks).
+pub fn today_iso() -> String {
+    Local::now().date_naive().format("%Y-%m-%d").to_string()
+}
+
+/// `iso + days`, or `None` when `iso` is not a date.
+pub fn add_days(iso: &str, days: i64) -> Option<String> {
+    let d = NaiveDate::parse_from_str(iso.trim(), "%Y-%m-%d").ok()?;
+    d.checked_add_signed(chrono::Duration::days(days))
+        .map(|d| d.format("%Y-%m-%d").to_string())
+}
+
+/// Validate a date answer against the widget bounds (ISO strings compare lexically).
+pub fn check_date(iso: &str, min: Option<&str>, max: Option<&str>) -> Result<String, String> {
+    let iso = iso.trim();
+    if parse_date(iso).is_none() {
+        return Err("Use yyyy-mm-dd".into());
+    }
+    if let Some(min) = min {
+        if iso < min {
+            return Err(format!("Not before {min}"));
+        }
+    }
+    if let Some(max) = max {
+        if iso > max {
+            return Err(format!("Not after {max}"));
+        }
+    }
+    Ok(iso.to_owned())
 }

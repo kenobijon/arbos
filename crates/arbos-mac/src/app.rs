@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 
 use crate::model::{
     new_id, now_ms, BoxState, Chat, ConnectorsView, Effort, Id, Link, Message, MessageStatus, Part,
-    Project, ProjectDocView, Role, Routine, RoutineRun, RoutineTrigger, StatusKind,
+    Project, ProjectDocView, QuestionState, Role, Routine, RoutineRun, RoutineTrigger, StatusKind,
 };
 use crate::sync::{ClientCommand, SyncEvent, SyncSource};
 
@@ -428,20 +428,41 @@ impl AppState {
     }
 
     /// S8: the last assistant message ended with an `ask_user` question and
-    /// nothing has been sent since.
+    /// nothing has been sent since. A typed widget question is answered from
+    /// its card, so it does not switch the composer.
     pub fn chat_needs_answer(&self, chat_id: &str) -> bool {
         match self.messages_of(chat_id).last() {
-            Some(m) if m.role == Role::Assistant && !m.is_streaming() => m.parts.iter().any(|p| {
-                matches!(
-                    p,
-                    Part::Status {
-                        code: StatusKind::AskUser,
-                        ..
-                    }
-                )
-            }),
+            Some(m) if m.role == Role::Assistant && !m.is_streaming() => {
+                if m.has_question_part() {
+                    m.open_questions()
+                        .any(|p| matches!(p, Part::Question { widget: None, .. }))
+                } else {
+                    m.parts.iter().any(|p| {
+                        matches!(
+                            p,
+                            Part::Status {
+                                code: StatusKind::AskUser,
+                                ..
+                            }
+                        )
+                    })
+                }
+            }
             Some(_) | None => false,
         }
+    }
+
+    /// The newest open plain question's id in the last assistant message (S8 composer answer).
+    fn open_plain_question_id(&self, chat_id: &str) -> Option<String> {
+        let m = self.messages_of(chat_id).last()?;
+        m.open_questions().rev().find_map(|p| match p {
+            Part::Question {
+                question_id,
+                widget: None,
+                ..
+            } => Some(question_id.clone()),
+            _ => None,
+        })
     }
 
     pub fn composer_mode(&self, chat_id: &str) -> ComposerMode {
@@ -625,10 +646,19 @@ impl AppState {
                 hidden_parts: Vec::new(),
             });
         if answer {
+            let question_id = self.open_plain_question_id(&chat_id);
+            let value = question_id
+                .as_ref()
+                .map(|_| serde_json::Value::String(text.clone()));
+            if let Some(qid) = &question_id {
+                self.mark_question_answered(&chat_id, qid, value.clone());
+            }
             self.command(ClientCommand::Answer {
                 chat_id: chat_id.clone(),
                 message_id,
                 text,
+                question_id,
+                value,
             });
         } else {
             self.command(ClientCommand::Send {
@@ -640,6 +670,114 @@ impl AppState {
         }
         cx.emit(AppEvent::TranscriptChanged { chat_id });
         cx.notify();
+    }
+
+    /// Answer a typed widget card: the rendered text becomes the user's bubble at once
+    /// (optimistic), the card flips to answered, and the structured value goes to the box.
+    pub fn answer_question(
+        &mut self,
+        chat_id: Id,
+        question_id: String,
+        value: serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
+        let widget = self.messages_of(&chat_id).iter().find_map(|m| {
+            m.parts.iter().find_map(|p| match p {
+                Part::Question {
+                    question_id: qid,
+                    widget,
+                    ..
+                } if *qid == question_id => Some(widget.clone()),
+                _ => None,
+            })
+        });
+        let text = match widget.flatten() {
+            Some(w) => w.answer_text(&value),
+            None => format!(
+                "Answer: {}",
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| value.to_string())
+            ),
+        };
+        let message_id = new_id();
+        {
+            let ui = self.chat_ui.entry(chat_id.clone()).or_default();
+            if !ui.composer_dropped {
+                ui.composer_dropped = true;
+                ui.drop_started_at = Some(now_ms());
+            }
+        }
+        self.mark_question_answered(&chat_id, &question_id, Some(value.clone()));
+        self.messages
+            .entry(chat_id.clone())
+            .or_default()
+            .push(Message {
+                id: message_id.clone(),
+                chat_id: chat_id.clone(),
+                role: Role::User,
+                sender: "user".into(),
+                status: MessageStatus::Queued,
+                turn: None,
+                decision: None,
+                subagent_id: None,
+                subagent_name: None,
+                in_reply_to: None,
+                usage: None,
+                return_contract: None,
+                waiting_user: false,
+                model: None,
+                effort: None,
+                routine_name: None,
+                created_at: now_ms(),
+                completed_at: None,
+                pending: true,
+                parts: vec![Part::Text {
+                    id: new_id(),
+                    text: text.clone(),
+                }],
+                hidden_parts: Vec::new(),
+            });
+        self.command(ClientCommand::Answer {
+            chat_id: chat_id.clone(),
+            message_id,
+            text,
+            question_id: Some(question_id),
+            value: Some(value),
+        });
+        cx.emit(AppEvent::TranscriptChanged { chat_id });
+        cx.notify();
+    }
+
+    fn mark_question_answered(
+        &mut self,
+        chat_id: &str,
+        question_id: &str,
+        value: Option<serde_json::Value>,
+    ) {
+        let Some(list) = self.messages.get_mut(chat_id) else {
+            return;
+        };
+        for m in list.iter_mut() {
+            for p in m.parts.iter_mut() {
+                if let Part::Question {
+                    question_id: qid,
+                    answer,
+                    state,
+                    answered_at,
+                    ..
+                } = p
+                {
+                    if qid == question_id {
+                        *answer = value.clone();
+                        *state = QuestionState::Answered;
+                        *answered_at = Some(now_ms());
+                        m.waiting_user = false;
+                    }
+                }
+            }
+        }
     }
 
     pub fn stop(&mut self, cx: &mut Context<Self>) {

@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub use arbos_core::widget::{ChoiceOption, FieldKind, FormField, QuestionState, Widget};
+
 pub type Id = String;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -275,8 +277,35 @@ pub enum Part {
         last_action: String,
         live: bool,
     },
+    /// `ask_user` with an optional typed widget (design §10). `widget == None`
+    /// is a plain question answered from the composer (S8).
+    Question {
+        id: Id,
+        question_id: String,
+        #[serde(default)]
+        question: String,
+        #[serde(default, deserialize_with = "de_widget")]
+        widget: Option<Widget>,
+        #[serde(default)]
+        answer: Option<serde_json::Value>,
+        #[serde(default = "open_state")]
+        state: QuestionState,
+        #[serde(default)]
+        answered_at: Option<u64>,
+    },
     #[serde(other)]
     Unknown,
+}
+
+fn open_state() -> QuestionState {
+    QuestionState::Open
+}
+
+/// A widget this client cannot draw (newer type, malformed) degrades to a
+/// plain question rather than failing the whole message.
+fn de_widget<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Widget>, D::Error> {
+    let v = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(v.and_then(|v| serde_json::from_value::<Widget>(v).ok()))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -366,6 +395,27 @@ impl Message {
 
     pub fn is_streaming(&self) -> bool {
         self.status == MessageStatus::Streaming
+    }
+
+    /// Open `question` parts of this message, newest last.
+    pub fn open_questions(&self) -> impl DoubleEndedIterator<Item = &Part> {
+        self.parts.iter().filter(|p| {
+            matches!(
+                p,
+                Part::Question {
+                    state: QuestionState::Open,
+                    ..
+                }
+            )
+        })
+    }
+
+    /// True when this message carries any `question` part (typed or plain), so the legacy
+    /// `waiting_user` status row is redundant.
+    pub fn has_question_part(&self) -> bool {
+        self.parts
+            .iter()
+            .any(|p| matches!(p, Part::Question { .. }))
     }
 
     pub fn plain_text(&self) -> String {
