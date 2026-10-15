@@ -43,6 +43,8 @@ pub struct Config {
     /// OpenAI-compatible base for audio (STT/TTS); api.openai.com by default
     /// because OpenRouter carries no audio endpoints.
     pub openai_audio_base: String,
+    /// `ARBOS_VAULT_MOCK=1`: two demo vault items and a local echo target (F8).
+    pub vault_mock: bool,
 }
 
 /// One frame to fan out to the other sockets in a room.
@@ -76,7 +78,7 @@ pub struct AppState {
     /// user_id → wakes that produced no hello within the deadline (stale-box detector).
     pub stale_bounces: Arc<Mutex<HashMap<String, u32>>>,
     pub conn_seq: Arc<std::sync::atomic::AtomicU64>,
-    /// Encrypts connector tokens at rest (F1).
+    /// Encrypts connector tokens and vault items at rest (F1, F8).
     pub relay_key: Arc<crate::connectors::crypto::RelayKey>,
     /// device_id → live `arbos-local` helper socket (F9).
     pub local_conns: crate::local::LocalConns,

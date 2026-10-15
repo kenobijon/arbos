@@ -17,6 +17,7 @@ mod routines;
 mod skills;
 mod smoke;
 mod state;
+mod vault;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -177,6 +178,7 @@ async fn main() -> anyhow::Result<()> {
             .ok()
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| "https://api.openai.com/v1".to_owned()),
+        vault_mock: std::env::var("ARBOS_VAULT_MOCK").is_ok_and(|v| v == "1"),
     };
     let relay_key = Arc::new(connectors::crypto::RelayKey::load(&db)?);
     let daytona = daytona_key.map(|k| {
@@ -225,6 +227,7 @@ async fn main() -> anyhow::Result<()> {
     } else if state.cfg.openai_key.is_none() {
         tracing::info!("no OPENAI_API_KEY: image generation is unavailable (set ARBOS_IMAGE_MOCK=1 for placeholders)");
     }
+    vault::seed_mock(&state)?;
 
     if db.device_count()? == 0 {
         let code = arbos_core::auth::pairing_code();
@@ -376,6 +379,21 @@ async fn main() -> anyhow::Result<()> {
             get(channels::whatsapp::verify).post(channels::whatsapp::webhook),
         )
         .route("/projects/{id}/channels/reply", post(channels::reply))
+        .route(
+            "/vault/items",
+            get(vault::list_items).post(vault::create_item),
+        )
+        .route(
+            "/vault/items/{id}",
+            axum::routing::put(vault::update_item).delete(vault::delete_item),
+        )
+        .route("/vault/requests", get(vault::list_requests))
+        .route("/vault/requests/{id}", get(vault::request_status))
+        .route("/vault/requests/{id}/decide", post(vault::decide_request))
+        .route("/vault/requests/{id}/values", post(vault::request_values))
+        .route("/vault/request", post(vault::create_request))
+        .route("/vault/mock/echo", axum::routing::any(vault::mock_echo))
+        .route("/egress", post(vault::egress))
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(state);
