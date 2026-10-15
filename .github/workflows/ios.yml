@@ -1,9 +1,9 @@
 name: iOS
 
-# The phone app (apps/ios/Arbos) to TestFlight. Pushes to `main` and
-# `arbos-v2` that touch it upload; pushes to `cursor/**` only archive (a
-# TestFlight build per feature-branch push would be noise); workflow_dispatch
-# chooses. The work is the fastlane lanes in apps/ios/Arbos/fastlane
+# The phone app (apps/ios/Arbos) to TestFlight. Only pushes to `main` that
+# touch it upload; pushes to `arbos-v2` and `cursor/**` archive without
+# uploading (a branch push must never produce a duplicate TestFlight build);
+# workflow_dispatch chooses. The work is the fastlane lanes in apps/ios/Arbos/fastlane
 # (`archive`, `beta`): archive with signing off, then exportArchive with
 # App Store Connect automatic signing and the API key.
 #
@@ -47,7 +47,7 @@ jobs:
       APP_DIR: apps/ios/Arbos
       UPLOAD: >-
         ${{ (github.event_name == 'workflow_dispatch' && inputs.upload) ||
-            (github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'arbos-v2')) }}
+            (github.event_name == 'push' && github.ref_name == 'main') }}
     steps:
       - uses: actions/checkout@v4
       - name: Build number
