@@ -179,8 +179,16 @@ DMG_RW="$DIST/$APP_NAME-rw.dmg"
 rm -f "$DMG_RW"
 hdiutil create -quiet -volname "$APP_NAME" -srcfolder "$DMG_SRC" -ov -format UDRW -fs HFS+ "$DMG_RW"
 MOUNT_DIR="/Volumes/$APP_NAME"
+# A leftover from an earlier run detaches cleanly. A busy volume of the same name (someone
+# running the app from a mounted DMG on this machine) does not; refuse rather than force-eject
+# it or lay out the wrong volume.
 hdiutil detach -quiet "$MOUNT_DIR" 2>/dev/null || true
+if mount | grep -q " on $MOUNT_DIR "; then
+  echo "error: $MOUNT_DIR is mounted and busy; eject it before building the DMG" >&2
+  exit 1
+fi
 hdiutil attach -quiet -readwrite -noverify -noautoopen "$DMG_RW"
+mount | grep -q " on $MOUNT_DIR " || { echo "error: $DMG_RW did not mount at $MOUNT_DIR" >&2; exit 1; }
 if osascript <<EOS >/dev/null 2>&1
 tell application "Finder"
   tell disk "$APP_NAME"
