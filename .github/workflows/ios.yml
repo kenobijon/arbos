@@ -15,6 +15,12 @@ name: iOS
 # Build number: UTC YYYYMMDDHHMM. It always rises, and it is above the builds
 # already on TestFlight (202610150502 at the time of writing).
 #
+# After the upload, `fastlane distribute` waits for Apple to process the build,
+# adds it to the external group(s) in the TESTFLIGHT_GROUPS repository variable
+# (default "Arbos public", public link https://testflight.apple.com/join/ec5fWCuJ)
+# and submits it for Beta App Review; the internal group sees every build on
+# its own. The step runs only when the build was uploaded (main / dispatch).
+#
 # The lanes print every xcodebuild line and write build/xcodebuild-<lane>.log;
 # the last step keeps those logs as an artifact, pass or fail.
 
@@ -124,6 +130,32 @@ jobs:
           echo "==> fastlane beta (build $BUILD_NUMBER)"
           AC_API_KEY_P8="" AC_API_KEY_PATH="$key_path" fastlane beta
           echo "TestFlight upload finished: build $BUILD_NUMBER (com.unarbos.arbos.ios)." >> "$GITHUB_STEP_SUMMARY"
+      - name: Wait for processing, add the build to the external group, submit for Beta App Review
+        if: >-
+          ${{ (github.event_name == 'workflow_dispatch' && inputs.upload) ||
+              (github.event_name == 'push' && github.ref_name == 'main') }}
+        env:
+          AC_API_KEY_P8: ${{ secrets.AC_API_KEY_P8 }}
+          AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
+          AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
+          BUILD_NUMBER: ${{ steps.build.outputs.number }}
+          TESTFLIGHT_GROUPS: ${{ vars.TESTFLIGHT_GROUPS || 'Arbos public' }}
+          CHANGELOG: ${{ github.event.head_commit.message }}
+        run: |
+          set -euo pipefail
+          set +x
+          cd "$APP_DIR"
+          umask 077
+          key_path="$RUNNER_TEMP/AuthKey_$AC_API_KEY_ID.p8"
+          if printf '%s' "$AC_API_KEY_P8" | grep -q -- '-----BEGIN'; then
+            printf '%s\n' "$AC_API_KEY_P8" > "$key_path"
+          else
+            printf '%s' "$AC_API_KEY_P8" | base64 --decode > "$key_path"
+          fi
+          trap 'rm -f "$key_path"' EXIT
+          # What to test = the first line of the commit message.
+          CHANGELOG="$(printf '%s' "$CHANGELOG" | head -1)" AC_API_KEY_P8="" AC_API_KEY_PATH="$key_path" fastlane distribute
+          echo "Build $BUILD_NUMBER added to TestFlight group(s) $TESTFLIGHT_GROUPS and submitted for Beta App Review." >> "$GITHUB_STEP_SUMMARY"
       - name: Keep the xcodebuild logs
         if: always()
         uses: actions/upload-artifact@v4
