@@ -120,6 +120,16 @@ else
   echo "keeping $(sudo -u "$SVC_USER" env FEEDBACK_STATE_DIR="$STATE_DIR" python3 "$INSTALL_DIR/feedback_poller.py" status | head -1)"
 fi
 
+say "cli wrapper"
+cat > /usr/local/bin/arbos-feedback <<'EOF2'
+#!/usr/bin/env bash
+# arbos-feedback status | inject <image> "<comment>" [ios|mac] | set-cursor <ISO> | run  — as root.
+set -euo pipefail
+set -a; . /etc/arbos/feedback.env; set +a
+exec sudo -E -u arbos-feedback /usr/bin/python3 /opt/arbos-feedback/feedback_poller.py "$@"
+EOF2
+chmod 0755 /usr/local/bin/arbos-feedback
+
 say "systemd"
 systemctl daemon-reload
 systemctl enable --now arbos-feedback-poller.timer >/dev/null
@@ -128,5 +138,5 @@ sleep 1
 journalctl -u arbos-feedback-poller.service -n 15 --no-pager -o cat || true
 systemctl list-timers arbos-feedback-poller.timer --no-pager | head -3
 echo
-echo "installed. status: sudo systemctl status arbos-feedback-poller.timer; items: sudo -u $SVC_USER env \$(sudo cat $ENV_FILE | xargs) python3 $INSTALL_DIR/feedback_poller.py status"
+echo "installed. timer: sudo systemctl status arbos-feedback-poller.timer; items: sudo arbos-feedback status"
 echo "stop the loop: sudo touch /etc/arbos/feedback.disabled    resume: sudo rm /etc/arbos/feedback.disabled"
