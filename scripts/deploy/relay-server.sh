@@ -5,6 +5,8 @@
 #   sudo -E scripts/deploy/relay-server.sh                 # install/upgrade everything
 #   sudo -E scripts/deploy/relay-server.sh --import-data /path/to/relay-data   # also import a relay data dir
 #   RELAY_VERSION=0.3.0.189 sudo -E scripts/deploy/relay-server.sh             # pin a release instead of the newest edge
+#   sudo -E scripts/deploy/relay-server.sh --from-source main   # build arbos-relay + arbosctl from a git ref on this box
+#                                                               # (any ref of github.com/unarbos/arbos; needs ~2 min on 128 cores)
 #
 # Secrets never live in the repo. They are written to /etc/arbos/relay.env (root:root 0600) from
 # the environment at deploy time; the usual way is:
@@ -32,10 +34,14 @@ ENV_FILE=/etc/arbos/relay.env
 WWW_USER="${WWW_USER:-const}"
 WWW_DIR="${WWW_DIR:-/home/$WWW_USER/arbos-www}"
 IMPORT_DATA=""
+FROM_SOURCE=""
+BUILD_USER="${BUILD_USER:-${SUDO_USER:-const}}"
+BUILD_DIR="${BUILD_DIR:-/home/$BUILD_USER/arbos-build}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --import-data) IMPORT_DATA="$2"; shift 2;;
+    --from-source) FROM_SOURCE="$2"; shift 2;;
     *) echo "unknown arg $1" >&2; exit 2;;
   esac
 done
@@ -43,8 +49,25 @@ done
 
 say() { printf '\n==> %s\n' "$*"; }
 
-# ---- 1. relay binary from the newest edge release ------------------------------------------------
+# ---- 1. relay binary: built from a git ref on this box, or from the newest edge release ----------
 say "relay binary"
+if [[ -n "$FROM_SOURCE" ]]; then
+  # Build as $BUILD_USER (never root): rustup + the toolchain pinned by rust-toolchain.toml.
+  id "$BUILD_USER" >/dev/null 2>&1 || { echo "build user $BUILD_USER does not exist" >&2; exit 1; }
+  install -d -o "$BUILD_USER" -g "$BUILD_USER" "$BUILD_DIR"
+  sudo -u "$BUILD_USER" -H bash -euo pipefail -c '
+    export PATH="$HOME/.cargo/bin:$PATH"
+    command -v rustup >/dev/null 2>&1 || curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable >/dev/null
+    cd "'"$BUILD_DIR"'"
+    if [[ -d repo/.git ]]; then git -C repo fetch -q origin "'"$FROM_SOURCE"'"; else git clone -q https://github.com/unarbos/arbos.git repo && git -C repo fetch -q origin "'"$FROM_SOURCE"'"; fi
+    git -C repo checkout -q --detach FETCH_HEAD
+    echo "building $(git -C repo log --oneline -1)"
+    cd repo && cargo build --release -p arbos-relay -p arbosctl 2>&1 | tail -3
+  '
+  install -m 0755 "$BUILD_DIR/repo/target/release/arbos-relay" /usr/local/bin/arbos-relay
+  install -m 0755 "$BUILD_DIR/repo/target/release/arbosctl" /usr/local/bin/arbosctl
+  echo "installed arbos-relay $(/usr/local/bin/arbos-relay --version | awk '{print $2}') from $FROM_SOURCE @ $(git -C "$BUILD_DIR/repo" rev-parse --short HEAD)"
+else
 if [[ -z "$RELAY_VERSION" ]]; then
   RELAY_VERSION=$(curl -fsSL "https://api.github.com/repos/unarbos/arbos/releases?per_page=20" \
     | python3 -c 'import sys,json; r=[x for x in json.load(sys.stdin) if x["tag_name"].startswith("edge-")]; print(r[0]["tag_name"][5:] if r else "")')
@@ -73,6 +96,7 @@ if ! /usr/local/bin/arbosctl --version 2>/dev/null | grep -q "$RELAY_VERSION"; t
   fi
   rm -rf "$TMP"
 fi
+fi  # FROM_SOURCE
 
 # ---- 2. system user + data dir ---------------------------------------------------------------------
 say "user + data dir"
