@@ -33,6 +33,25 @@ pub fn default_for(project_id: &str, slugs: &[String]) -> String {
     slugs[(fnv1a64(project_id) % slugs.len() as u64) as usize].clone()
 }
 
+/// The default for a new project of a user: start at `default_for(project_id)` and probe forward
+/// (wrapping) to the first slug none of the user's existing projects uses; when every slug is
+/// taken, keep the hash pick. Stored on the row at creation, so apps never have to guess.
+pub fn default_unused(project_id: &str, slugs: &[String], taken: &[String]) -> String {
+    let list: Vec<String> = if slugs.is_empty() {
+        DEFAULT_SLUGS.iter().map(|s| (*s).to_owned()).collect()
+    } else {
+        slugs.to_vec()
+    };
+    let start = (fnv1a64(project_id) % list.len() as u64) as usize;
+    for i in 0..list.len() {
+        let candidate = &list[(start + i) % list.len()];
+        if !taken.iter().any(|t| t == candidate) {
+            return candidate.clone();
+        }
+    }
+    list[start].clone()
+}
+
 /// Slug list from the env (file or list), else the built-in default.
 pub fn slugs_from_env() -> Vec<String> {
     if let Ok(path) = std::env::var("ARBOS_AVATAR_MANIFEST") {
@@ -86,6 +105,18 @@ pub fn valid_slug(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_unused_probes_forward_and_wraps() {
+        let slugs: Vec<String> = DEFAULT_SLUGS.iter().map(|s| (*s).to_owned()).collect();
+        let first = default_for("P1", &slugs);
+        assert_eq!(default_unused("P1", &slugs, &[]), first);
+        let start = slugs.iter().position(|s| *s == first).unwrap();
+        let next = slugs[(start + 1) % slugs.len()].clone();
+        assert_eq!(default_unused("P1", &slugs, &[first.clone()]), next);
+        // Every slug taken: the hash pick stays.
+        assert_eq!(default_unused("P1", &slugs, &slugs), first);
+    }
 
     #[test]
     fn default_is_deterministic_and_in_range() {

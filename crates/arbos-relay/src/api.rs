@@ -182,7 +182,22 @@ pub async fn create_project(
     let avatar = match b.avatar.as_deref().map(str::trim) {
         Some(a) if crate::avatar::valid_slug(a) => a.to_owned(),
         Some(_) => return Err((StatusCode::BAD_REQUEST, "avatar must be a slug".into())),
-        None => crate::avatar::default_for(&id, &state.cfg.avatar_slugs),
+        None => {
+            // Deduped within the user's projects so sibling tiles get different trees.
+            let owner = principal.user_id().unwrap_or("u_default");
+            let taken: Vec<String> = state
+                .db
+                .projects_of_user(owner)
+                .unwrap_or_default()
+                .iter()
+                .map(|p| {
+                    p.avatar.clone().unwrap_or_else(|| {
+                        crate::avatar::default_for(&p.id, &state.cfg.avatar_slugs)
+                    })
+                })
+                .collect();
+            crate::avatar::default_unused(&id, &state.cfg.avatar_slugs, &taken)
+        }
     };
     let project = Project {
         id,
