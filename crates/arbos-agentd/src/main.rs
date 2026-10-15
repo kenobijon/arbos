@@ -84,6 +84,12 @@ fn seed_state(cfg: &Config) -> Result<()> {
     if seed.exists() {
         copy_dir(seed, &cfg.pi_dir())?;
     }
+    let claude_seed = std::path::Path::new("/etc/arbos/claude-seed/settings.json");
+    let claude_dir = cfg.state_dir.join("claude");
+    if claude_seed.exists() && !claude_dir.join("settings.json").exists() {
+        std::fs::create_dir_all(&claude_dir)?;
+        std::fs::copy(claude_seed, claude_dir.join("settings.json"))?;
+    }
     // models.json: the relay proxy as provider `arbos-relay` through the loopback stub (D2).
     // The built-in `openrouter` provider pointed at the loopback stub keeps pi's OpenRouter behaviour
     // (cache_control breakpoints for Anthropic models, usage accounting) while the key stays on the relay.

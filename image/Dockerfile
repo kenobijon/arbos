@@ -47,13 +47,6 @@ RUN curl -LsSf https://astral.sh/uv/${UV_VERSION}/install.sh | env UV_INSTALL_DI
 # --- Main agent: pi (needs the Node 24 in the base image) + the Arbos extension
 RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@${PI_VERSION} \
  && npm cache clean --force
-COPY image/pi-seed/ /etc/arbos/pi-seed/
-COPY harness/arbos-pi-ext/*.ts harness/arbos-pi-ext/package.json /etc/arbos/pi-seed/extensions/arbos-pi-ext/
-# typebox resolves from pi's own node_modules; link it next to the extension so jiti finds it.
-RUN mkdir -p /etc/arbos/pi-seed/extensions/arbos-pi-ext/node_modules \
- && TB="$(dirname "$(find "$(npm root -g)/@earendil-works" -path '*/node_modules/typebox/package.json' | head -1)")" \
- && ln -s "$TB" /etc/arbos/pi-seed/extensions/arbos-pi-ext/node_modules/typebox \
- && ln -s "$(npm root -g)/@earendil-works" /etc/arbos/pi-seed/extensions/arbos-pi-ext/node_modules/@earendil-works
 
 # --- Subagent harness 1: Prime Agent + its Python 3.11 IPython kernel venv, baked now, not at first use
 ENV PRIME_AGENT_KERNEL_VENV=/opt/prime-venv PRIME_AGENT_TELEMETRY=0 DO_NOT_TRACK=1
@@ -75,14 +68,7 @@ RUN if [ "$WITH_CLAUDE_CODE" = "1" ]; then \
    && install -m 755 /tmp/cc-build/.local/share/claude/versions/${CLAUDE_CODE_VERSION} /usr/local/bin/claude \
    && rm -rf /tmp/cc-build; \
     fi
-COPY image/claude-settings.json /etc/arbos/claude-seed/settings.json
-COPY image/claude-mcp.json      /etc/arbos/claude-mcp.json
 
-# --- D64 hooks: deny-list + audit shell wrapper (Prime bash()), Claude Code hook scripts, Prime skills
-COPY image/arbos-shell          /usr/local/lib/arbos/arbos-shell
-COPY image/hooks/               /usr/local/lib/arbos/hooks/
-COPY image/prime-skills/        /etc/arbos/prime-seed/skills/
-RUN chmod 755 /usr/local/lib/arbos/arbos-shell /usr/local/lib/arbos/hooks/claude/*.sh
 
 # --- Browser: Chrome for Testing + agent-browser
 RUN if [ "$WITH_BROWSER" = "1" ]; then \
@@ -92,6 +78,21 @@ RUN if [ "$WITH_BROWSER" = "1" ]; then \
    && chmod +x /usr/local/bin/agent-browser; \
     fi
 
+# --- Arbos files last, so a code change rebuilds only these thin layers (heavy downloads stay cached)
+COPY image/pi-seed/ /etc/arbos/pi-seed/
+COPY harness/arbos-pi-ext/*.ts harness/arbos-pi-ext/package.json /etc/arbos/pi-seed/extensions/arbos-pi-ext/
+# typebox resolves from pi's own node_modules; link it next to the extension so jiti finds it.
+RUN mkdir -p /etc/arbos/pi-seed/extensions/arbos-pi-ext/node_modules \
+ && TB="$(dirname "$(find "$(npm root -g)/@earendil-works" -path '*/node_modules/typebox/package.json' | head -1)")" \
+ && ln -s "$TB" /etc/arbos/pi-seed/extensions/arbos-pi-ext/node_modules/typebox \
+ && ln -s "$(npm root -g)/@earendil-works" /etc/arbos/pi-seed/extensions/arbos-pi-ext/node_modules/@earendil-works
+COPY image/claude-settings.json /etc/arbos/claude-seed/settings.json
+COPY image/claude-mcp.json      /etc/arbos/claude-mcp.json
+# --- D64 hooks: deny-list + audit shell wrapper (Prime bash()), Claude Code hook scripts, Prime skills
+COPY image/arbos-shell          /usr/local/lib/arbos/arbos-shell
+COPY image/hooks/               /usr/local/lib/arbos/hooks/
+COPY image/prime-skills/        /etc/arbos/prime-seed/skills/
+RUN chmod 755 /usr/local/lib/arbos/arbos-shell /usr/local/lib/arbos/hooks/claude/*.sh
 # --- Our binary (built earlier in the same CI job: cargo build --release -p arbos-agentd → dist/)
 COPY dist/arbos-agentd /usr/local/bin/arbos-agentd
 COPY image/AGENTS.md   /etc/arbos/AGENTS.md

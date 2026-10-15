@@ -820,9 +820,9 @@ impl ClaudeCodeAdapter {
     ) -> Result<()> {
         use std::process::Stdio;
         use tokio::io::{AsyncBufReadExt, BufReader};
+        // No `--bare`: the seed settings (PreToolUse deny/audit hook, bypassPermissions) must load.
         let mut args: Vec<String> = vec![
             "-p".into(),
-            "--bare".into(),
             "--permission-mode".into(),
             "bypassPermissions".into(),
             "--output-format".into(),
@@ -856,6 +856,10 @@ impl ClaudeCodeAdapter {
             .env("CLAUDE_CONFIG_DIR", self.cfg.state_dir.join("claude"))
             .env("ANTHROPIC_BASE_URL", self.cfg.proxy_base())
             .env("ANTHROPIC_AUTH_TOKEN", &self.cfg.box_token)
+            // The relay's Anthropic passthrough may sit on OpenRouter, whose ids are `anthropic/<model>`.
+            .env("ANTHROPIC_MODEL", &self.cfg.subagent_model)
+            .env("ANTHROPIC_DEFAULT_SONNET_MODEL", &self.cfg.subagent_model)
+            .env("ANTHROPIC_DEFAULT_HAIKU_MODEL", &self.cfg.talking_model)
             .env("ARBOS_MCP_TOKEN", &self.cfg.mcp_token)
             .env("ARBOS_AUDIT_PATH", self.cfg.audit_path())
             .env("DISABLE_AUTOUPDATER", "1")
