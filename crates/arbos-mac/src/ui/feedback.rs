@@ -103,7 +103,16 @@ impl FeedbackSheet {
         self.error = None;
         self.sent = None;
         self.busy = false;
-        match capture_window(window) {
+        // Debug builds: ARBOS_FEEDBACK_IMAGE=<file> stands in for the capture (demos, Linux).
+        let preset = if cfg!(debug_assertions) {
+            std::env::var("ARBOS_FEEDBACK_IMAGE")
+                .ok()
+                .map(PathBuf::from)
+                .and_then(|p| load_file(&p).ok())
+        } else {
+            None
+        };
+        match preset.map(Ok).unwrap_or_else(|| capture_window(window)) {
             Ok(shot) => self.shot = Some(shot),
             Err(e) => {
                 self.shot = None;
