@@ -395,6 +395,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/machine/start", post(api::machine_start))
         .route("/machine/stop", post(api::machine_stop))
         .route("/machine/migrate", post(api::machine_migrate))
+        .route("/machine/restart", post(api::machine_restart))
         .route("/machine/upgrade", post(upgrade::machine_upgrade))
         .route(
             "/admin/users/{id}/box/upgrade",

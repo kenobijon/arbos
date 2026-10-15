@@ -677,6 +677,41 @@ pub async fn machine_stop(
     Ok(Json(json!({ "state": bs, "since": since, "held": true })).into_response())
 }
 
+/// `POST /machine/restart`: stop and start the caller's box in one call (no `held`; the
+/// always-on sweep would re-wake it anyway). 202 with the state right after the start was kicked.
+pub async fn machine_restart(State(state): State<AppState>, principal: Principal) -> ApiResult {
+    let user_id = principal
+        .user_id()
+        .ok_or((StatusCode::FORBIDDEN, "device token required".to_owned()))?
+        .to_owned();
+    if principal.is_box() {
+        return Err((StatusCode::FORBIDDEN, "devices only".into()));
+    }
+    if let Err(r) = crate::credits::check_read_only(&state) {
+        return Ok(crate::credits::refused_response(&r));
+    }
+    let _ = state.db.set_box_held(&user_id, false);
+    if state.db.user_box(&user_id).map_err(internal)?.is_some() {
+        boxes::stop_box(&state, &user_id, true)
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+    }
+    state
+        .set_box_state(
+            &user_id,
+            arbos_core::wire::BoxState::Asleep,
+            Some("restarting"),
+        )
+        .await;
+    boxes::ensure_awake(&state, &user_id, "start").await;
+    let (bs, since) = state.box_state(&user_id).await;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({ "state": bs, "since": since, "held": false })),
+    )
+        .into_response())
+}
+
 /// `POST /machine/migrate`: copy every legacy per-project sandbox of the caller's user into the
 /// user box (D70). Idempotent; old sandboxes are stopped and marked, never deleted.
 pub async fn machine_migrate(
