@@ -725,6 +725,8 @@ mod tests {
             channels_mock: true,
             openai_images_base: String::new(),
             image_mock: false,
+            voice_mock: true,
+            openai_audio_base: String::new(),
         };
         AppState {
             db,

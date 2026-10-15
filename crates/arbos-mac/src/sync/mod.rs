@@ -121,6 +121,21 @@ pub enum SyncEvent {
     Channels(ChannelsView),
     /// Settings → This Mac: paired `arbos-local` helpers with online state (F9).
     LocalDevices(LocalView),
+    /// Speech-to-text result for `ClientCommand::Transcribe` (F11).
+    Transcript {
+        request_id: u64,
+        text: String,
+        error: Option<String>,
+        mock: bool,
+    },
+    /// Text-to-speech result for `ClientCommand::Speak` (F11): encoded audio (WAV by default).
+    Speech {
+        request_id: u64,
+        bytes: Arc<Vec<u8>>,
+        mime: String,
+        error: Option<String>,
+        mock: bool,
+    },
 }
 
 /// Something the user did; the source writes it into the doc / outbox.
@@ -275,6 +290,26 @@ pub enum ClientCommand {
     /// Forget a helper (and revoke its device token).
     LocalForget {
         device_id: Id,
+    },
+    /// F11: a spoken message. `wav` (16 kHz mono PCM) is uploaded to the blob
+    /// store and kept on the row as an `attachment` part `{ kind: "audio" }`.
+    SendVoice {
+        chat_id: Id,
+        message_id: Id,
+        text: String,
+        wav: Arc<Vec<u8>>,
+    },
+    /// F11: speech-to-text through the relay proxy; answered by `SyncEvent::Transcript`.
+    Transcribe {
+        project_id: Id,
+        request_id: u64,
+        wav: Arc<Vec<u8>>,
+    },
+    /// F11: text-to-speech through the relay proxy; answered by `SyncEvent::Speech`.
+    Speak {
+        project_id: Id,
+        request_id: u64,
+        text: String,
     },
 }
 

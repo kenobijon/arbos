@@ -1,6 +1,7 @@
 //! Arbos desktop client. GPUI on the zui fork; tokio for the sync sources.
 
 mod app;
+mod audio;
 mod model;
 mod sync;
 mod ui;

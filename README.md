@@ -133,6 +133,12 @@ Every green push to `main` becomes an installable build, with no human picking a
 - By hand, from a Mac with `op` access: `scripts/release/local-release.sh [--dry-run] [--channel stable]` does the whole release (`scripts/release/publish-release.sh` is the shared publish step).
 - iOS: `.github/workflows/ios.yml` archives `apps/ios/Arbos` and uploads to TestFlight on pushes to `main` that touch `apps/ios/`.
 
+## Voice
+
+Speech goes through the relay's model proxy so the OpenAI key never reaches a device: `POST /proxy/v1/audio/transcriptions` (multipart, Whisper-compatible; `gpt-4o-mini-transcribe`) and `POST /proxy/v1/audio/speech` (`gpt-4o-mini-tts`, WAV) forward to `ARBOS_OPENAI_AUDIO_BASE` (default `https://api.openai.com/v1`) with `OPENAI_API_KEY`, and meter per project under `api = openai-audio` (STT by the minute, TTS by the character). `ARBOS_VOICE_MOCK=1` answers without a key: a `[mock transcript] N s of audio …` text and a 1 s sine WAV, flagged with `x-arbos-voice-mock: 1`.
+
+In the desktop client the composer has a mic button (hold to talk, or click to toggle; 16 kHz mono WAV kept in memory). The transcript lands in the composer (Enter sends); with `♪ Voice` on it is sent directly and the reply is read aloud when it finishes (`▶ Replay` under the message). The sent message carries the clip as an `attachment` part `{ "kind": "audio", "mime": "audio/wav", "ref": "voice-<ulid>.wav" }` uploaded to the project's blob store. `☎` in the tab bar opens a call strip (timer, level meter, mute, hang up) that loops listening → thinking → speaking with an energy VAD. Without an input device the app records the bundled `crates/arbos-mac/assets/test-voice.wav` and says so; without an output device replies are decoded but not played. Audio is not streamed to the box: a turn is one uploaded clip and one spoken reply.
+
 ## Connectors
 
 The relay brokers Gmail/Calendar, Slack, GitHub and Harness Comms for the boxes (D2/D28/D40): provider tokens are stored AES-256-GCM-encrypted in the relay DB (key from `ARBOS_RELAY_KEY`, else generated once into the `meta` table) and never enter a box. The agent calls `connectors_list` / `connector_call` over MCP; agentd forwards to `POST /connectors/call`, which attaches the bearer upstream and redacts `access_token` / `refresh_token` / `Authorization` from every reply. Write and send actions go through an approval card first (one card per call; see Approvals).

@@ -15,4 +15,5 @@ pub mod skills;
 pub mod theme;
 pub mod transcript;
 pub mod veil;
+pub mod voice;
 pub mod widgets;

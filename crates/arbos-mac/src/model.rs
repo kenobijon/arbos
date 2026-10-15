@@ -274,6 +274,11 @@ impl Attachment {
             Some(b) => format!("{:.2} GB", b as f64 / (1024.0 * 1024.0 * 1024.0)),
         }
     }
+
+    /// A voice memo (`kind: "audio"`, F11).
+    pub fn is_audio(&self) -> bool {
+        self.kind() == AttachmentKind::Audio || self.mime.starts_with("audio/")
+    }
 }
 
 /// One row of `messages[].parts` (`crdt-sync.md` §6.2). Unknown kinds decode

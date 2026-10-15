@@ -435,6 +435,362 @@ pub async fn anthropic(
     .await
 }
 
+// ---------------------------------------------------------------------------
+// Audio (F11): speech-to-text and text-to-speech passthrough with metering.
+// Kept apart from `forward` because the request bodies are multipart / the
+// responses are binary, and the upstream is api.openai.com even when models
+// go through OpenRouter.
+// ---------------------------------------------------------------------------
+
+/// USD per minute of audio for the transcription models.
+fn stt_price_per_minute(model: &str) -> f64 {
+    let m = model.to_ascii_lowercase();
+    if m.contains("mini") {
+        0.003
+    } else {
+        0.006
+    }
+}
+
+/// USD per million input characters for the speech models.
+fn tts_price_per_million_chars(model: &str) -> f64 {
+    let m = model.to_ascii_lowercase();
+    if m.contains("hd") {
+        30.0
+    } else if m.contains("mini") {
+        12.0
+    } else {
+        15.0
+    }
+}
+
+/// Duration of a RIFF/WAVE blob (anywhere in `bytes`, so a multipart body works) in seconds.
+fn wav_duration_secs(bytes: &[u8]) -> Option<f64> {
+    let riff = bytes.windows(4).position(|w| w == b"RIFF")?;
+    let mut pos = riff + 12;
+    let mut byte_rate: Option<u32> = None;
+    while pos + 8 <= bytes.len() {
+        let id = &bytes[pos..pos + 4];
+        let size = u32::from_le_bytes(bytes[pos + 4..pos + 8].try_into().ok()?) as usize;
+        if id == b"fmt " && pos + 16 <= bytes.len() {
+            byte_rate = Some(u32::from_le_bytes(
+                bytes[pos + 16..pos + 20].try_into().ok()?,
+            ));
+        }
+        if id == b"data" {
+            let rate = byte_rate?;
+            if rate == 0 {
+                return None;
+            }
+            let data_len = size.min(bytes.len().saturating_sub(pos + 8));
+            return Some(data_len as f64 / rate as f64);
+        }
+        pos += 8 + size + (size & 1);
+    }
+    None
+}
+
+/// Value of a text field of a multipart body (`name="model"`), no multipart crate needed.
+fn multipart_field(body: &[u8], name: &str) -> Option<String> {
+    let needle = format!("name=\"{name}\"");
+    let at = body
+        .windows(needle.len())
+        .position(|w| w == needle.as_bytes())?;
+    let rest = &body[at + needle.len()..];
+    let blank = rest.windows(4).position(|w| w == b"\r\n\r\n")? + 4;
+    let value = &rest[blank..];
+    let end = value
+        .windows(2)
+        .position(|w| w == b"\r\n")
+        .unwrap_or(value.len());
+    Some(String::from_utf8_lossy(&value[..end]).trim().to_owned())
+}
+
+/// 16 kHz mono 16-bit PCM WAV of a sine tone.
+pub fn sine_wav(seconds: f64, hz: f64) -> Vec<u8> {
+    const RATE: u32 = 16_000;
+    let n = (seconds * RATE as f64) as usize;
+    let data_len = (n * 2) as u32;
+    let mut out = Vec::with_capacity(44 + n * 2);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data_len).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&RATE.to_le_bytes());
+    out.extend_from_slice(&(RATE * 2).to_le_bytes());
+    out.extend_from_slice(&2u16.to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_len.to_le_bytes());
+    for i in 0..n {
+        let t = i as f64 / RATE as f64;
+        // Short fade in/out so the mock does not click.
+        let env = (t * 20.0).min(1.0).min((seconds - t) * 20.0).max(0.0);
+        let s = (2.0 * std::f64::consts::PI * hz * t).sin() * 0.4 * env;
+        out.extend_from_slice(&((s * i16::MAX as f64) as i16).to_le_bytes());
+    }
+    out
+}
+
+fn audio_project(state: &AppState, principal: &Principal, headers: &HeaderMap) -> String {
+    project_of(state, principal, headers)
+        .or_else(|| {
+            headers
+                .get("x-arbos-project")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| "relay-admin".to_owned())
+}
+
+/// `Some(response)` when the project's daily cap is already spent.
+fn audio_spend_cap(state: &AppState, project_id: &str) -> Option<Response> {
+    let p = state.db.project(project_id).ok().flatten()?;
+    let today = state
+        .db
+        .usage_since(project_id, start_of_utc_day_ms())
+        .map(|u| u.usd)
+        .unwrap_or(0.0);
+    (today >= p.spend_cap_daily).then(|| {
+        (
+            StatusCode::PAYMENT_REQUIRED,
+            json!({ "error": { "type": "spend_cap", "message": format!("daily spend cap ${:.2} reached", p.spend_cap_daily) } }).to_string(),
+        )
+            .into_response()
+    })
+}
+
+fn audio_key(state: &AppState) -> Option<String> {
+    state.cfg.openai_key.clone()
+}
+
+/// `POST /proxy/v1/audio/transcriptions`: multipart (`file`, `model`, …) → `{ "text": … }`.
+/// Metered by audio minutes; `ARBOS_VOICE_MOCK=1` answers without an upstream.
+pub async fn audio_transcriptions(
+    State(state): State<AppState>,
+    principal: Principal,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let project_id = audio_project(&state, &principal, &headers);
+    if let Some(r) = audio_spend_cap(&state, &project_id) {
+        return r;
+    }
+    let model = multipart_field(&body, "model").unwrap_or_else(|| "whisper-1".to_owned());
+    let secs = wav_duration_secs(&body).unwrap_or(0.0);
+    let usd = secs / 60.0 * stt_price_per_minute(&model);
+    let t0 = Instant::now();
+
+    if state.cfg.voice_mock {
+        let _ = state.db.record_usage(
+            &project_id,
+            "openai-audio",
+            &format!("{model} (mock)"),
+            0,
+            0,
+            0,
+            0,
+            0.0,
+            0,
+            None,
+        );
+        let text = format!(
+            "[mock transcript] {:.1} s of audio received by the relay.",
+            secs
+        );
+        return (
+            StatusCode::OK,
+            [
+                ("content-type", "application/json"),
+                ("x-arbos-voice-mock", "1"),
+            ],
+            json!({ "text": text, "duration": secs }).to_string(),
+        )
+            .into_response();
+    }
+
+    let Some(key) = audio_key(&state) else {
+        return (
+            StatusCode::BAD_GATEWAY,
+            "relay has no OpenAI key (OPENAI_API_KEY); set ARBOS_VOICE_MOCK=1 for a mock",
+        )
+            .into_response();
+    };
+    let Some(content_type) = headers.get("content-type").cloned() else {
+        return (StatusCode::BAD_REQUEST, "multipart/form-data body required").into_response();
+    };
+    let url = format!(
+        "{}/audio/transcriptions",
+        state.cfg.openai_audio_base.trim_end_matches('/')
+    );
+    let upstream = state
+        .http
+        .post(url)
+        .bearer_auth(key)
+        .header("content-type", content_type)
+        .body(body)
+        .send()
+        .await;
+    let upstream = match upstream {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::BAD_GATEWAY, format!("upstream: {e}")).into_response(),
+    };
+    let status =
+        StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let bytes = upstream.bytes().await.unwrap_or_default();
+    if status.is_success() {
+        let _ = state.db.record_usage(
+            &project_id,
+            "openai-audio",
+            &model,
+            0,
+            0,
+            0,
+            0,
+            usd,
+            t0.elapsed().as_millis() as i64,
+            None,
+        );
+    }
+    (
+        status,
+        [
+            ("content-type", "application/json"),
+            ("x-arbos-proxied", "1"),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
+/// `POST /proxy/v1/audio/speech`: `{ model, input, voice, response_format }` → audio bytes.
+/// Metered by input characters; `ARBOS_VOICE_MOCK=1` returns a 1 s sine WAV.
+pub async fn audio_speech(
+    State(state): State<AppState>,
+    principal: Principal,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let project_id = audio_project(&state, &principal, &headers);
+    if let Some(r) = audio_spend_cap(&state, &project_id) {
+        return r;
+    }
+    let req: Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_REQUEST, format!("bad JSON: {e}")).into_response(),
+    };
+    let model = req
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("tts-1")
+        .to_owned();
+    let chars = req
+        .get("input")
+        .and_then(Value::as_str)
+        .map(|s| s.chars().count())
+        .unwrap_or(0);
+    if chars == 0 {
+        return (StatusCode::BAD_REQUEST, "`input` is required").into_response();
+    }
+    if chars > 4096 {
+        return (
+            StatusCode::BAD_REQUEST,
+            "`input` is longer than 4096 characters",
+        )
+            .into_response();
+    }
+    let usd = chars as f64 / 1_000_000.0 * tts_price_per_million_chars(&model);
+    let format = req
+        .get("response_format")
+        .and_then(Value::as_str)
+        .unwrap_or("mp3")
+        .to_owned();
+    let t0 = Instant::now();
+
+    if state.cfg.voice_mock {
+        let _ = state.db.record_usage(
+            &project_id,
+            "openai-audio",
+            &format!("{model} (mock)"),
+            chars as i64,
+            0,
+            0,
+            0,
+            0.0,
+            0,
+            None,
+        );
+        return (
+            StatusCode::OK,
+            [("content-type", "audio/wav"), ("x-arbos-voice-mock", "1")],
+            sine_wav(1.0, 440.0),
+        )
+            .into_response();
+    }
+
+    let Some(key) = audio_key(&state) else {
+        return (
+            StatusCode::BAD_GATEWAY,
+            "relay has no OpenAI key (OPENAI_API_KEY); set ARBOS_VOICE_MOCK=1 for a mock",
+        )
+            .into_response();
+    };
+    let url = format!(
+        "{}/audio/speech",
+        state.cfg.openai_audio_base.trim_end_matches('/')
+    );
+    let upstream = state
+        .http
+        .post(url)
+        .bearer_auth(key)
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await;
+    let upstream = match upstream {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::BAD_GATEWAY, format!("upstream: {e}")).into_response(),
+    };
+    let status =
+        StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let content_type = upstream
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+        .unwrap_or_else(|| match format.as_str() {
+            "wav" => "audio/wav".to_owned(),
+            "opus" => "audio/ogg".to_owned(),
+            "aac" => "audio/aac".to_owned(),
+            "flac" => "audio/flac".to_owned(),
+            "pcm" => "audio/pcm".to_owned(),
+            _ => "audio/mpeg".to_owned(),
+        });
+    let bytes = upstream.bytes().await.unwrap_or_default();
+    if status.is_success() {
+        let _ = state.db.record_usage(
+            &project_id,
+            "openai-audio",
+            &model,
+            chars as i64,
+            0,
+            0,
+            0,
+            usd,
+            t0.elapsed().as_millis() as i64,
+            None,
+        );
+    }
+    let mut resp_headers = HeaderMap::new();
+    if let Ok(v) = HeaderValue::from_str(&content_type) {
+        resp_headers.insert("content-type", v);
+    }
+    resp_headers.insert("x-arbos-proxied", HeaderValue::from_static("1"));
+    (status, resp_headers, bytes).into_response()
+}
+
 /// `GET /proxy/v1/models` passthrough (pi's model discovery).
 pub async fn openai_models(State(state): State<AppState>, _principal: Principal) -> Response {
     let base = state.cfg.openai_base.trim_end_matches('/');

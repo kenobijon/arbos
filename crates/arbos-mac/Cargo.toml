@@ -33,3 +33,8 @@ gpui_tokio = { git = "https://github.com/zeronsh/zui", rev = "361ff20b919fdfb801
 unicode-segmentation = "1"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 env_logger = "0.11"
+
+# Voice (F11): capture, playback, WAV in memory.
+cpal = "0.15"
+rodio = { version = "0.20", default-features = false, features = ["wav"] }
+hound = "3.5"

@@ -789,6 +789,8 @@ mod tests {
             connectors_mock: mock,
             channels_mock: true,
             image_mock: false,
+            voice_mock: true,
+            openai_audio_base: String::new(),
         };
         AppState {
             db,

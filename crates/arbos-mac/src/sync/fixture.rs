@@ -41,6 +41,7 @@ pub const CHAT_ARBOS_LAUNCH: &str = "01J9CHAT0LAUNCH00000000000";
 pub const CHAT_ARBOS_WIDGETS: &str = "01J9CHAT0WIDGETS0000000000";
 pub const CHAT_ARBOS_DRAFTS: &str = "01J9CHAT0DRAFTS00000000000";
 pub const CHAT_ARBOS_MEDIA: &str = "01J9CHAT0MEDIA000000000000";
+pub const CHAT_ARBOS_VOICE: &str = "01J9CHAT0VOICE000000000000";
 pub const CHAT_AFFINE_MAIN: &str = "01J9CHAT0AFFINE00000000000";
 pub const CHAT_COMMS_MAIN: &str = "01J9CHAT0COMMS000000000000";
 
@@ -73,7 +74,13 @@ struct Shared {
     routines: Mutex<Vec<Routine>>,
     routine_runs: Mutex<HashMap<Id, Vec<RoutineRun>>>,
     local: Mutex<LocalView>,
+    /// Voice memos sent in this session, by blob key (F11; no blob store offline).
+    voice_blobs: Mutex<HashMap<String, Arc<Vec<u8>>>>,
 }
+
+/// What the offline STT "hears" (the bundled test clip says this).
+const FIXTURE_TRANSCRIPT: &str = "Hello Arbos. What is on my plate today?";
+const VOICE_SEED_BLOB: &str = "blob/seed/voice-memo";
 
 pub struct FixtureSource;
 
@@ -110,6 +117,7 @@ impl SyncSource for FixtureSource {
                 routines: Mutex::new(seed_routines()),
                 routine_runs: Mutex::new(seed_routine_runs()),
                 local: Mutex::new(seed_local()),
+                voice_blobs: Mutex::new(HashMap::new()),
             });
             seed_docs(&shared);
 
@@ -183,72 +191,79 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             text,
             attachments,
         } => {
-            let project_id = project_of(shared, &chat_id);
-            {
-                let docs = shared.docs.lock().unwrap();
-                if let Some(doc) = docs.get(&chat_id) {
-                    let asleep = project_state(shared, &project_id).is_asleep();
-                    let mut parts: Vec<Part> = attachments
-                        .iter()
-                        .map(|path| Part::Attachment {
-                            id: new_id(),
-                            attachment: Attachment {
-                                name: path
-                                    .file_name()
-                                    .and_then(|n| n.to_str())
-                                    .unwrap_or("attachment")
-                                    .to_string(),
-                                mime: "application/octet-stream".into(),
-                                blob_ref: None,
-                                bytes: None,
-                                kind: None,
-                                title: None,
-                            },
-                        })
-                        .collect();
-                    parts.push(Part::Text {
-                        id: new_id(),
-                        text: text.clone(),
-                    });
-                    let msg = Message {
-                        id: message_id.clone(),
-                        chat_id: chat_id.clone(),
-                        role: Role::User,
-                        sender: "user".into(),
-                        status: if asleep {
-                            MessageStatus::Queued
-                        } else {
-                            MessageStatus::Done
-                        },
-                        turn: None,
-                        decision: None,
-                        subagent_id: None,
-                        subagent_name: None,
-                        in_reply_to: None,
-                        routine_name: None,
-                        usage: None,
-                        return_contract: None,
-                        waiting_user: false,
-                        waiting_approval: false,
-                        model: None,
-                        effort: None,
-                        created_at: now_ms(),
-                        completed_at: None,
-                        pending: true,
-                        parts,
-                        hidden_parts: Vec::new(),
-                    };
-                    let _ = doc.insert_message(&msg);
-                    let _ = doc.push_command(
-                        "send",
-                        json!({ "messageId": message_id, "text": text }),
-                        DEVICE,
-                    );
-                    doc.commit();
-                }
-            }
-            maybe_retitle(shared, &chat_id, &text);
-            spawn_turn(shared, project_id, chat_id, message_id, text, false);
+            let parts: Vec<Part> = attachments
+                .iter()
+                .map(|path| Part::Attachment {
+                    id: new_id(),
+                    attachment: Attachment {
+                        name: path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("attachment")
+                            .to_string(),
+                        mime: "application/octet-stream".into(),
+                        blob_ref: None,
+                        bytes: None,
+                        kind: None,
+                        title: None,
+                    },
+                })
+                .collect();
+            send_user(shared, chat_id, message_id, text, parts);
+        }
+        ClientCommand::SendVoice {
+            chat_id,
+            message_id,
+            text,
+            wav,
+        } => {
+            // The fixture has no blob store; the memo stays in memory under a seed key.
+            let key = format!("blob/voice/{}", new_id().to_lowercase());
+            shared.voice_blobs.lock().unwrap().insert(key.clone(), wav);
+            let parts = vec![Part::Attachment {
+                id: new_id(),
+                attachment: Attachment {
+                    name: "voice-memo.wav".into(),
+                    mime: "audio/wav".into(),
+                    blob_ref: Some(key),
+                    bytes: None,
+                    kind: Some(AttachmentKind::Audio),
+                    title: None,
+                },
+            }];
+            send_user(shared, chat_id, message_id, text, parts);
+        }
+        ClientCommand::Transcribe {
+            request_id, wav, ..
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                sleep(Duration::from_millis(600)).await;
+                let secs = crate::audio::decode_wav(&wav)
+                    .map(|p| p.duration_secs())
+                    .unwrap_or(0.0);
+                let _ = shared.events.send(SyncEvent::Transcript {
+                    request_id,
+                    text: format!("{FIXTURE_TRANSCRIPT} ({secs:.1} s clip)"),
+                    error: None,
+                    mock: true,
+                });
+            });
+        }
+        ClientCommand::Speak {
+            request_id, text, ..
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                sleep(Duration::from_millis(400)).await;
+                let _ = shared.events.send(SyncEvent::Speech {
+                    request_id,
+                    bytes: Arc::new(crate::audio::tone_speech(&text)),
+                    mime: "audio/wav".into(),
+                    error: None,
+                    mock: true,
+                });
+            });
         }
         ClientCommand::Answer {
             chat_id,
@@ -448,6 +463,21 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             key,
             save,
         } => {
+            let memo = if key == VOICE_SEED_BLOB {
+                Some(Arc::new(crate::audio::TEST_CLIP_WAV.to_vec()))
+            } else {
+                shared.voice_blobs.lock().unwrap().get(&key).cloned()
+            };
+            if let Some(bytes) = memo {
+                let _ = shared.events.send(SyncEvent::Blob {
+                    project_id,
+                    key,
+                    mime: "audio/wav".into(),
+                    bytes,
+                    saved_to: None,
+                });
+                return;
+            }
             let body = format!(
                 "# {key}\n\nFixture blob for project {project_id}.\n\nThe relay source downloads the real bytes from GET /blob/{{project}}/{{key}}.\n"
             );
@@ -810,6 +840,64 @@ fn seed_local() -> LocalView {
         relay_url: "http://127.0.0.1:7700".into(),
         loaded: true,
     }
+}
+
+/// The user row (`extra_parts` first, then the text), its `send` command, and the scripted turn.
+fn send_user(
+    shared: &Arc<Shared>,
+    chat_id: Id,
+    message_id: Id,
+    text: String,
+    mut parts: Vec<Part>,
+) {
+    let project_id = project_of(shared, &chat_id);
+    {
+        let docs = shared.docs.lock().unwrap();
+        if let Some(doc) = docs.get(&chat_id) {
+            let asleep = project_state(shared, &project_id).is_asleep();
+            parts.push(Part::Text {
+                id: new_id(),
+                text: text.clone(),
+            });
+            let msg = Message {
+                id: message_id.clone(),
+                chat_id: chat_id.clone(),
+                role: Role::User,
+                sender: "user".into(),
+                status: if asleep {
+                    MessageStatus::Queued
+                } else {
+                    MessageStatus::Done
+                },
+                turn: None,
+                decision: None,
+                subagent_id: None,
+                subagent_name: None,
+                in_reply_to: None,
+                routine_name: None,
+                usage: None,
+                return_contract: None,
+                waiting_user: false,
+                waiting_approval: false,
+                model: None,
+                effort: None,
+                created_at: now_ms(),
+                completed_at: None,
+                pending: true,
+                parts,
+                hidden_parts: Vec::new(),
+            };
+            let _ = doc.insert_message(&msg);
+            let _ = doc.push_command(
+                "send",
+                json!({ "messageId": message_id, "text": text }),
+                DEVICE,
+            );
+            doc.commit();
+        }
+    }
+    maybe_retitle(shared, &chat_id, &text);
+    spawn_turn(shared, project_id, chat_id, message_id, text, false);
 }
 
 fn emit_connectors(shared: &Shared) {
@@ -2338,6 +2426,7 @@ fn seed_chats() -> Vec<Chat> {
             12,
         ),
         chat(CHAT_ARBOS_MEDIA, PROJECT_ARBOS, "Deliverables", false, 18),
+        chat(CHAT_ARBOS_VOICE, PROJECT_ARBOS, "Voice memo", false, 6),
         chat(CHAT_AFFINE_MAIN, PROJECT_AFFINE, "Affine", true, 60 * 26),
         chat(CHAT_COMMS_MAIN, PROJECT_COMMS, "Comms", true, 60 * 5),
     ]
@@ -2467,7 +2556,16 @@ struct Seeder<'a> {
 
 impl Seeder<'_> {
     fn user(&mut self, text: &str) {
+        self.user_with_parts(text, Vec::new());
+    }
+
+    /// `extra` parts (attachments) come before the text, as the clients write them.
+    fn user_with_parts(&mut self, text: &str, mut extra: Vec<Part>) {
         self.t += 45_000;
+        extra.push(Part::Text {
+            id: new_id(),
+            text: text.into(),
+        });
         let _ = self.doc.insert_message(&Message {
             id: new_id(),
             chat_id: self.doc.chat_id.clone(),
@@ -2489,10 +2587,7 @@ impl Seeder<'_> {
             created_at: self.t,
             completed_at: Some(self.t),
             pending: false,
-            parts: vec![Part::Text {
-                id: new_id(),
-                text: text.into(),
-            }],
+            parts: extra,
             hidden_parts: Vec::new(),
         });
     }
@@ -2864,6 +2959,38 @@ fn seed_docs(shared: &Arc<Shared>) {
         media.commit();
     }
     add_doc(shared, media);
+
+    // Voice memo (F11): a spoken prompt keeps its audio as an attachment part.
+    let voice = ChatDoc::new(CHAT_ARBOS_VOICE, PROJECT_ARBOS);
+    {
+        let mut s = Seeder {
+            doc: &voice,
+            t: base + 2_700_000,
+        };
+        s.user_with_parts(
+            FIXTURE_TRANSCRIPT,
+            vec![Part::Attachment {
+                id: new_id(),
+                attachment: Attachment {
+                    name: "voice-memo.wav".into(),
+                    mime: "audio/wav".into(),
+                    blob_ref: Some(VOICE_SEED_BLOB.into()),
+                    bytes: None,
+                    kind: Some(AttachmentKind::Audio),
+                    title: None,
+                },
+            }],
+        );
+        s.assistant(
+            TurnKind::Reply,
+            MessageStatus::Done,
+            vec![text(
+                "Three things today: the beta invite copy is due at noon, the pricing page review is at three, and two pull requests wait on you. Want me to start with the invite copy?",
+            )],
+        );
+        voice.commit();
+    }
+    add_doc(shared, voice);
 
     let affine = ChatDoc::new(CHAT_AFFINE_MAIN, PROJECT_AFFINE);
     {

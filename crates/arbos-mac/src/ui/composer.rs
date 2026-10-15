@@ -20,6 +20,7 @@ use crate::model::Effort;
 use crate::sync::fixture::MODELS;
 use crate::ui::frost::{frosted, MENU_BLUR, PANEL_BLUR};
 use crate::ui::theme::{Theme, COMPOSER_HEIGHT, PANEL_RADIUS};
+use crate::ui::voice::{render_recording_row, Voice, VoiceEvent};
 
 actions!(
     composer,
@@ -904,6 +905,8 @@ enum Picker {
 pub struct Composer {
     state: Entity<AppState>,
     pub input: Entity<ComposerInput>,
+    /// F11: mic button, voice mode, spoken replies.
+    voice: Entity<Voice>,
     attachments: Vec<PathBuf>,
     /// Which chat the input text belongs to; drafts are kept per chat.
     draft_chat: Option<crate::model::Id>,
@@ -917,7 +920,7 @@ pub struct Composer {
 impl EventEmitter<ComposerEvent> for Composer {}
 
 impl Composer {
-    pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+    pub fn new(state: Entity<AppState>, voice: Entity<Voice>, cx: &mut Context<Self>) -> Self {
         let input = cx.new(ComposerInput::new);
         let weak = cx.weak_entity();
         input.update(cx, |input, _| {
@@ -927,9 +930,28 @@ impl Composer {
         });
         cx.observe(&state, |_, _, cx| cx.notify()).detach();
         cx.observe(&input, |_, _, cx| cx.notify()).detach();
+        cx.observe(&voice, |_, _, cx| cx.notify()).detach();
+        cx.subscribe(&voice, |this, _, event: &VoiceEvent, cx| match event {
+            VoiceEvent::Transcript(text) => {
+                // The memo's words land in the input; Enter confirms (§F11).
+                let text = text.clone();
+                this.input.update(cx, |input, cx| {
+                    let existing = input.text().trim_end().to_string();
+                    let next = if existing.is_empty() {
+                        text
+                    } else {
+                        format!("{existing} {text}")
+                    };
+                    input.set_text(next, cx);
+                });
+                cx.notify();
+            }
+        })
+        .detach();
         Self {
             state,
             input,
+            voice,
             attachments: Vec::new(),
             draft_chat: None,
             drafts: std::collections::HashMap::new(),
@@ -1120,11 +1142,23 @@ impl Render for Composer {
             .map(|p| (p.model.clone(), p.effort))
             .unwrap_or((MODELS[0].to_string(), Effort::High));
         let link_full = state.link == crate::model::Link::Reconnecting;
+        let voice_mode = state.voice_mode;
+        let (recording, transcribing, in_call, voice_notice) = {
+            let v = self.voice.read(cx);
+            (
+                v.is_recording(),
+                v.is_transcribing(),
+                v.in_call(),
+                v.notice().map(str::to_owned),
+            )
+        };
 
         self.input.update(cx, |input, _| {
             input.set_placeholder(match mode {
                 ComposerMode::Answer => "Answer the agent…",
                 ComposerMode::Approve => "Approve or reject the card above",
+                ComposerMode::Send if transcribing => "Transcribing…",
+                ComposerMode::Send if voice_mode => "Speak or type…",
                 ComposerMode::Send => "Do anything…",
             });
         });
@@ -1246,14 +1280,95 @@ impl Render for Composer {
         }
 
         // Text uses the full width; the controls live in their own bottom
-        // row, so growing text never moves them (Cursor composer).
-        let text_row = div()
-            .w_full()
+        // row, so growing text never moves them (Cursor composer). While a
+        // memo records, the row shows the level meter instead of the input.
+        let text_row = if recording {
+            div()
+                .w_full()
+                .flex()
+                .px(px(14.0))
+                .pt(px(11.0))
+                .pb(px(4.0))
+                .h(px(INPUT_LINE_HEIGHT + 15.0))
+                .child(render_recording_row(self.voice.read(cx), &theme))
+        } else {
+            div()
+                .w_full()
+                .flex()
+                .px(px(14.0))
+                .pt(px(11.0))
+                .pb(px(4.0))
+                .child(self.input.clone())
+        };
+
+        // Mic (F11): press and hold to talk, or click to toggle.
+        let mic_button = div()
+            .id("composer-mic")
+            .size(px(30.0))
+            .rounded_full()
+            .border_1()
+            .border_color(if recording {
+                theme.danger
+            } else {
+                theme.border_strong
+            })
+            .when(recording, |el| el.bg(theme.danger_soft))
             .flex()
-            .px(px(14.0))
-            .pt(px(11.0))
-            .pb(px(4.0))
-            .child(self.input.clone());
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .text_size(px(13.0))
+            .text_color(if recording {
+                theme.danger
+            } else if transcribing {
+                theme.text_faint
+            } else {
+                theme.text_muted
+            })
+            .hover(|s| s.bg(theme.surface_2))
+            .child(if recording { "■" } else { "◉" })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.voice.update(cx, |v, cx| v.mic_pressed(cx));
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.voice.update(cx, |v, cx| v.mic_released(cx));
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.voice.update(cx, |v, cx| v.mic_released(cx));
+                }),
+            );
+
+        // Voice mode: transcripts send at once and replies are spoken.
+        let voice_toggle = div()
+            .id("composer-voice-mode")
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .px(px(8.0))
+            .py(px(4.0))
+            .rounded(px(6.0))
+            .text_size(px(12.5))
+            .text_color(if voice_mode {
+                theme.accent
+            } else {
+                theme.text_muted
+            })
+            .when(voice_mode, |el| el.bg(theme.accent_soft))
+            .hover(|s| s.bg(theme.surface_2))
+            .cursor_pointer()
+            .child("♪")
+            .child(if in_call { "Call" } else { "Voice" })
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.voice.update(cx, |v, cx| v.toggle_voice_mode(cx));
+            }));
 
         let controls = div()
             .w_full()
@@ -1281,6 +1396,7 @@ impl Render for Composer {
                     .child("+")
                     .on_click(cx.listener(|this, _, _, cx| this.attach(cx))),
             )
+            .child(voice_toggle)
             .child(div().flex_1())
             .child(
                 div()
@@ -1327,9 +1443,23 @@ impl Render for Composer {
                     })),
             )
             .children(stop_button)
+            .child(mic_button)
             .child(send_button);
 
         pill = pill.child(text_row).child(controls);
+
+        // One line about the voice path while it is doing something (or when
+        // it had to fall back: no microphone, mock relay).
+        if let Some(notice) = voice_notice.filter(|_| recording || transcribing || voice_mode) {
+            pill = pill.child(
+                div()
+                    .px(px(16.0))
+                    .pb(px(8.0))
+                    .text_size(px(11.0))
+                    .text_color(theme.text_faint)
+                    .child(notice),
+            );
+        }
 
         if link_full {
             pill = pill.child(
