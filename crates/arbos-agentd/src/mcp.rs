@@ -106,8 +106,12 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
         None,
     );
     // Risky actions run only after an approved card (design S18, `arbos_core::approval`).
-    if let Err(refusal) = a.gate_tool(name, args, &chat_for_scratch).await {
-        return err_result(format!("not executed: {refusal}"));
+    // `connector_call` is gated inside `connectors::connector_call`, where the catalog kind is
+    // known, so it is classified exactly once and gets one card.
+    if name != "connector_call" {
+        if let Err(refusal) = a.gate_tool(name, args, &chat_for_scratch).await {
+            return err_result(format!("not executed: {refusal}"));
+        }
     }
     match name {
         "history_search" => {

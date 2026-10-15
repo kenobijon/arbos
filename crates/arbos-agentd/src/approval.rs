@@ -24,6 +24,7 @@ use arbos_core::doc::MessageStatus;
 use arbos_core::ids::{now_ms, ulid};
 
 use crate::agent::{Agent, TurnKind};
+use crate::connectors;
 
 /// A re-run of a gated call is pre-approved for this long after the user approved it late.
 const GRANT_TTL_MS: i64 = 10 * 60 * 1000;
@@ -433,7 +434,10 @@ impl Agent {
         };
         match (kind.as_str(), &outcome) {
             ("draft_message", ApprovalOutcome::Approved) => {
-                match self.dispatch_draft(approval_id, &request.payload).await {
+                match self
+                    .dispatch_draft(chat_id, approval_id, &request.payload)
+                    .await
+                {
                     Ok(note) => prompt.push_str(&format!(" {note}")),
                     Err(e) => prompt.push_str(&format!(" Sending failed: {e}.")),
                 }
@@ -477,9 +481,16 @@ impl Agent {
         }
     }
 
-    /// Deliver an approved draft. Connectors are not on this branch, so the draft lands in the
-    /// box's `outbox` table; the note says so.
-    async fn dispatch_draft(&self, approval_id: &str, payload: &Value) -> Result<String> {
+    /// Deliver an approved draft through the connector that carries its channel
+    /// (`connectors::route_draft`; the broker call is not gated again, the card was the gate).
+    /// Without a matching connector the draft lands in the box's `outbox` table and the note
+    /// says so. The returned note is what the main agent is told to relay to the user.
+    async fn dispatch_draft(
+        self: &Arc<Self>,
+        chat_id: &str,
+        approval_id: &str,
+        payload: &Value,
+    ) -> Result<String> {
         let s = |k: &str| {
             payload
                 .get(k)
@@ -488,6 +499,44 @@ impl Agent {
                 .to_owned()
         };
         let (channel, to, subject, body) = (s("channel"), s("to"), s("subject"), s("body"));
+        let connected = match connectors::connected_providers(self).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "connector list unavailable; draft goes to the outbox");
+                Vec::new()
+            }
+        };
+        let subject_opt = if subject.is_empty() {
+            None
+        } else {
+            Some(subject.as_str())
+        };
+        if let Some((provider, action, args)) =
+            connectors::route_draft(&channel, &to, subject_opt, &body, &connected)
+        {
+            let reply = connectors::send_through_relay(self, chat_id, provider, action, &args)
+                .await
+                .map_err(|e| anyhow!("{e}"))?;
+            let mock = serde_json::from_str::<Value>(&reply)
+                .ok()
+                .and_then(|v| v.get("mock").and_then(Value::as_bool))
+                .unwrap_or(false);
+            self.append_audit(
+                "draft_dispatched",
+                json!({
+                    "approval_id": approval_id, "chat_id": chat_id, "channel": channel,
+                    "provider": provider, "action": action, "to": to, "mock": mock,
+                }),
+            );
+            return Ok(format!(
+                "Arbos sent the {channel} to {to} through the {provider} connector ({provider}.{action}){}. Say exactly that.",
+                if mock {
+                    "; the relay runs connectors in mock mode, so it was recorded in the relay's connector outbox instead of leaving the machine"
+                } else {
+                    ""
+                }
+            ));
+        }
         let id = self.store.outbox_insert(
             approval_id,
             &channel,
@@ -500,7 +549,7 @@ impl Agent {
             &body,
         )?;
         Ok(format!(
-            "Arbos recorded the {channel} to {to} in this box's outbox (entry {id}); no {channel} connector is configured on this box yet, so it was not delivered externally. Say exactly that."
+            "Arbos recorded the {channel} to {to} in this box's outbox (entry {id}); no connected connector carries {channel} (Settings → Connectors), so it was not delivered externally. Say exactly that."
         ))
     }
 
@@ -580,7 +629,8 @@ impl Agent {
         })
     }
 
-    async fn take_grant(&self, tool: &str, args: &Value) -> Option<String> {
+    /// Consume a late-approval grant for an identical re-run (tool + canonical args hash).
+    pub(crate) async fn take_grant(&self, tool: &str, args: &Value) -> Option<String> {
         let now = now_ms();
         let h = args_hash(tool, args);
         let mut grants = self.approvals.grants.lock().await;
