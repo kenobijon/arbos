@@ -121,14 +121,15 @@ chown -R arbos:arbos "$DATA_DIR"; chmod 0750 "$DATA_DIR"
 
 # ---- 3. env file (secrets) -------------------------------------------------------------------------
 say "env file"
+# Items are referenced by id: `op read` rejects titles with parentheses ("invalid character in secret reference").
 opread() { op read "$1" 2>/dev/null || true; }
 if command -v op >/dev/null 2>&1 && [[ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; then
   : "${OPENROUTER_API_KEY:=$(opread 'op://Arbos/xbirrctuljw2m6aieoway2szom/credential')}"
   : "${OPENAI_API_KEY:=$(opread 'op://Arbos/6k3kuhvc3xxwpgao4mblskj45e/notesPlain' | tr -d '[:space:]')}"
   : "${DAYTONA_API_KEY:=$(opread 'op://Arbos/fywmj6vtq5delybw5c7a53l2qa/notesPlain' | tr -d '[:space:]')}"
-  : "${ARBOS_RELAY_ADMIN_TOKEN:=$(opread 'op://Arbos/Arbos relay (relay.arbos.life) — admin token/credential')}"
-  : "${ARBOS_RELAY_KEY:=$(opread 'op://Arbos/Arbos relay (relay.arbos.life) — connector key (ARBOS_RELAY_KEY)/credential')}"
-  : "${ARBOS_JWT_KEY:=$(opread 'op://Arbos/Arbos relay (relay.arbos.life) — JWT key (ARBOS_JWT_KEY)/credential')}"
+  : "${ARBOS_RELAY_ADMIN_TOKEN:=$(opread 'op://Arbos/pjwsl7tjrhcbzbqos2masde2u4/credential')}"
+  : "${ARBOS_RELAY_KEY:=$(opread 'op://Arbos/t5a4ugctkgljhb3t6f732cxbeu/credential')}"
+  : "${ARBOS_JWT_KEY:=$(opread 'op://Arbos/3f4ks7535m2riceop42hyohlaq/credential')}"
   : "${ARBOS_GITHUB_CLIENT_ID:=$(opread 'op://Arbos/Arbos GitHub OAuth app/ARBOS_GITHUB_CLIENT_ID')}"
   : "${ARBOS_GITHUB_CLIENT_SECRET:=$(opread 'op://Arbos/Arbos GitHub OAuth app/ARBOS_GITHUB_CLIENT_SECRET')}"
 fi
