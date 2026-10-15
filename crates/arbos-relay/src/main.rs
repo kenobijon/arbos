@@ -60,7 +60,7 @@ struct Args {
     #[arg(
         long,
         env = "ARBOS_DAYTONA_SNAPSHOT",
-        default_value = "arbos-agent-0.1.9"
+        default_value = "arbos-agent-0.1.10"
     )]
     daytona_snapshot: String,
     /// Inline Dockerfile (e.g. image/Dockerfile.dev-inline) built by Daytona when the snapshot does not exist.
