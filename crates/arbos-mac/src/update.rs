@@ -7,6 +7,9 @@
 //!   ARBOS_UPDATE_CHANNEL         `edge` (default: every green push to main) or `stable` (tags)
 //!   ARBOS_UPDATE_INTERVAL_SECS   poll interval (default 3600; first poll after 5 s)
 //!   ARBOS_UPDATE_DISABLE=1       never poll (dev runs)
+//!
+//! Every check/install step is also appended to `~/Library/Logs/Arbos/update.log` (or
+//! `$XDG_STATE_HOME/arbos/update.log`), because a bundled app has no stderr anyone reads.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -219,6 +222,13 @@ pub async fn run(
                 let _ = events.send(UpdateEvent::Checking);
                 match client::check(&feed, &current, os).await {
                     Ok(Some(available)) => {
+                        if known.as_ref().map(|k| &k.item.version) != Some(&available.item.version)
+                        {
+                            log(format!(
+                                "check {feed}: {} available (running {current})",
+                                available.item.version
+                            ));
+                        }
                         known = Some(available.clone());
                         let _ = events.send(UpdateEvent::Available(Box::new(available)));
                     }
@@ -227,7 +237,7 @@ pub async fn run(
                         let _ = events.send(UpdateEvent::UpToDate);
                     }
                     Err(err) => {
-                        eprintln!("update check failed: {err:#}");
+                        log(format!("check {feed} failed: {err:#}"));
                         // A failed poll is not news; keep whatever we knew.
                         if known.is_none() {
                             let _ = events.send(UpdateEvent::UpToDate);
@@ -246,11 +256,85 @@ pub async fn run(
                         let _ = events.send(UpdateEvent::Installed(installed));
                     }
                     Err(err) => {
+                        log(format!("install failed: {err:#}"));
                         let _ = events.send(UpdateEvent::Failed(format!("{err:#}")));
                     }
                 }
             }
         }
+    }
+}
+
+/// Where a person can always get the newest build by hand (the fallback the failure notice offers).
+pub const DOWNLOAD_URL: &str = "https://arbos.life/download/mac";
+
+fn log_path() -> std::path::PathBuf {
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    if cfg!(target_os = "macos") {
+        home.join("Library/Logs/Arbos/update.log")
+    } else {
+        std::env::var_os("XDG_STATE_HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| home.join(".local/state"))
+            .join("arbos/update.log")
+    }
+}
+
+/// One line to the update log (best effort).
+pub fn log(line: impl AsRef<str>) {
+    let path = log_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        use std::io::Write;
+        let ts = chrono_like_now();
+        let _ = writeln!(f, "{ts} {}", line.as_ref());
+    }
+    eprintln!("[update] {}", line.as_ref());
+}
+
+fn chrono_like_now() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("{secs}")
+}
+
+/// Refuse early, with a sentence a person can act on, when the running copy cannot be swapped:
+/// Gatekeeper's App Translocation (the app was opened from Downloads or the DMG and runs from a
+/// read-only random path), a read-only or system-owned folder, or a bare `cargo run` binary.
+fn check_install_location(install: &Install) -> anyhow::Result<()> {
+    let path = install.path();
+    let shown = path.display();
+    if cfg!(target_os = "macos") && matches!(install, Install::Executable(_)) {
+        anyhow::bail!("not running from Arbos.app; install the app to update it");
+    }
+    if path.to_string_lossy().contains("/AppTranslocation/") {
+        anyhow::bail!(
+            "Arbos is running from a read-only copy (macOS opened it straight from the download). Move Arbos to your Applications folder and open it from there, then update — or download the new version from {DOWNLOAD_URL}."
+        );
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("{shown} has no parent folder"))?;
+    let probe = parent.join(format!(".arbos-update-probe-{}", std::process::id()));
+    match std::fs::write(&probe, b"") {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&probe);
+            Ok(())
+        }
+        Err(e) => anyhow::bail!(
+            "the folder holding Arbos ({}) is not writable ({e}). Move Arbos to your own Applications folder, or download the new version from {DOWNLOAD_URL}.",
+            parent.display()
+        ),
     }
 }
 
@@ -261,9 +345,13 @@ async fn install(
     let key = arbos_update::public_key()
         .ok_or_else(|| anyhow::anyhow!("this build has no update public key"))?;
     let install = Install::detect()?;
-    if cfg!(target_os = "macos") && matches!(install, Install::Executable(_)) {
-        anyhow::bail!("not running from Arbos.app; install the app to update it");
-    }
+    log(format!(
+        "install {} from {} into {}",
+        available.item.version,
+        available.url,
+        install.path().display()
+    ));
+    check_install_location(&install)?;
     let dir = client::updates_dir();
     client::prune(&dir, &available.item.version);
     let progress_tx = events.clone();
@@ -271,11 +359,31 @@ async fn install(
         let _ = progress_tx.send(UpdateEvent::Progress { got, total });
     });
     let payload = client::download(available, &key, &dir, Some(progress)).await?;
+    log(format!("downloaded and verified {}", payload.display()));
     let _ = events.send(UpdateEvent::Installing);
     let staged = client::stage(&payload, &available.item.version, &dir, &install)?;
+    log(format!("staged {}", staged.display()));
     client::apply(&staged, &install)?;
+    log(format!(
+        "installed {} at {}",
+        available.item.version,
+        install.path().display()
+    ));
     let _ = std::fs::remove_file(&payload);
     Ok(install)
+}
+
+/// Open the download page in the browser (the fallback offered when self-update cannot work).
+pub fn open_download_page() {
+    if cfg!(target_os = "macos") {
+        let _ = std::process::Command::new("/usr/bin/open")
+            .arg(DOWNLOAD_URL)
+            .spawn();
+    } else {
+        let _ = std::process::Command::new("xdg-open")
+            .arg(DOWNLOAD_URL)
+            .spawn();
+    }
 }
 
 /// Called by the UI once `Installed` arrives: schedule the relaunch; the

@@ -370,6 +370,10 @@ impl AppState {
                     let _ = this.update(cx, |state, cx| match update::relaunch(&installed) {
                         Ok(()) => cx.quit(),
                         Err(err) => {
+                            update::log(format!("relaunch failed: {err:#}"));
+                            state.push_notice(
+                                "Arbos was updated but could not relaunch itself — quit and open Arbos again.",
+                            );
                             state.update.phase = UpdatePhase::Failed {
                                 message: format!("installed, but could not relaunch: {err:#}"),
                                 available: state.update.available().cloned(),
@@ -381,6 +385,12 @@ impl AppState {
                 .detach();
             }
             UpdateEvent::Failed(message) => {
+                // A quiet "Retry" in the rail is not enough: say what went wrong and offer the
+                // download page.
+                self.push_notice(format!(
+                    "Update failed: {message} — press Retry, or get the newest version from {}.",
+                    update::DOWNLOAD_URL
+                ));
                 self.update.phase = UpdatePhase::Failed {
                     available: self.update.available().cloned(),
                     message,
@@ -395,6 +405,12 @@ impl AppState {
             return;
         }
         let _ = self.update_commands.send(UpdateCommand::Check);
+        cx.notify();
+    }
+
+    /// The failure notice's fallback: open arbos.life/download/mac.
+    pub fn open_download_page(&mut self, cx: &mut Context<Self>) {
+        update::open_download_page();
         cx.notify();
     }
 

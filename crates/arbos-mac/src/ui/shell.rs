@@ -2273,7 +2273,30 @@ impl Shell {
                                     });
                                 })),
                         )
-                    }),
+                    })
+                    // Self-update could not finish here (read-only copy, unwritable folder…):
+                    // the newest build is one click away in the browser.
+                    .when(
+                        matches!(update.phase, crate::update::UpdatePhase::Failed { .. }),
+                        |el| {
+                            el.child(
+                                div()
+                                    .id("settings-update-download")
+                                    .flex_shrink_0()
+                                    .px(px(8.0))
+                                    .py(px(3.0))
+                                    .rounded(px(6.0))
+                                    .text_size(px(11.5))
+                                    .text_color(theme.accent)
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(theme.surface_2))
+                                    .child("Download")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.state.update(cx, |s, cx| s.open_download_page(cx));
+                                    })),
+                            )
+                        },
+                    ),
             )
             .child(div().h(px(1.0)).bg(theme.border))
             .when_some(account.clone(), |el, account| {
