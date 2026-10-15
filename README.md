@@ -70,7 +70,7 @@ Relay environment (all optional unless noted):
 | `OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | provider keys for the model proxy (never reach a box) |
 | `ARBOS_OPENAI_BASE`, `ARBOS_ANTHROPIC_BASE` | upstreams, default OpenRouter |
 | `DAYTONA_API_KEY`, `DAYTONA_API_URL`, `DAYTONA_ORG_ID` | Daytona access; without a key new projects get `process` boxes |
-| `ARBOS_DAYTONA_SNAPSHOT` | snapshot for new boxes, default `arbos-agent-0.1.7` |
+| `ARBOS_DAYTONA_SNAPSHOT` | snapshot for new boxes, default `arbos-agent-0.1.8` |
 | `ARBOS_DAYTONA_DOCKERFILE`, `ARBOS_BOOTSTRAP_DIR` | dev-image path (see below) |
 | `ARBOS_AGENTD_BIN`, `ARBOS_PI_BIN`, `ARBOS_PI_EXT`, `ARBOS_PRIME_BIN`, `ARBOS_DEFAULT_HARNESS` | process-box binaries and default subagent harness |
 | `RUST_LOG` | e.g. `info,arbos_relay=debug` |
@@ -93,15 +93,16 @@ The named tunnel is the Cloudflare Zero Trust tunnel `arbos-relay` (remotely man
 
 Each user has one Daytona computer; every project of that user is a workspace on it: its own folder `/work/<project-id>`, its own pi main session and subagents, its own SQLite memory/history and blob dir, its own loopback MCP/hook/model-stub ports (7800 + 10·n). One `arbos-agentd` per box supervises them (`crates/arbos-agentd/src/workspace.rs`): workspaces start from `POST /box/hello` and the 3 s `GET /box/projects` poll, stop when a project is deleted, and up to 8 subagents run per box (4 per workspace). The box starts on demand and auto-stops when idle, as before.
 
-- Class: the snapshot fixes vCPU/RAM/disk. Default `ARBOS_DAYTONA_SNAPSHOT` = `arbos-agent-0.1.7` registered at **4 vCPU / 8 GiB / 10 GiB** (the Daytona per-sandbox maximum on this org; $0.332 per active hour, $0.013 per stopped day, $0 archived). Per-user override: `PUT /admin/users/{id}/box {"snapshot": "…"}` (admin token) before the box is created.
+- Class: the snapshot fixes vCPU/RAM/disk. Default `ARBOS_DAYTONA_SNAPSHOT` = `arbos-agent-0.1.8` registered at **4 vCPU / 8 GiB / 10 GiB** (the Daytona per-sandbox maximum on this org; $0.332 per active hour, $0.013 per stopped day, $0 archived). Per-user override: `PUT /admin/users/{id}/box {"snapshot": "…"}` (admin token) before the box is created.
 - Machine API (devices): `GET /machine` → `{user_id, state, since, provider, sandbox_id, spec {cpu, mem_gib, disk_gib, class}, spend_today_usd, spend_cap_usd, workspaces: [{project_id, state}], migrated_from}`; `POST /machine/start`, `POST /machine/stop?force=`. `arbosctl machine status|start|stop`.
 - Project docs: `status.box = {state, since}` (the user's machine, mirrored into every project doc) and `status.workspace = {state, since}` with `state ∈ running | stopped`.
 - Box API (box token): `POST /box/hello`, `GET /box/projects`, `POST /box/keepalive`, `POST /projects/{id}/workspace {state}`. The box names the workspace in `X-Arbos-Project` on model calls and skills calls, so usage and skills stay per project.
+- Isolation inside the box: agentd runs as root (it re-execs through the image's passwordless sudo; `ARBOS_ISOLATION=off` keeps the old single-user mode, local `process` boxes never isolate); every workspace gets its own Unix user `ws-<project>` (no sudo), `/work/<project>` at mode 700 under a non-listable `/work` (711), its own HOME/caches, and a cgroup v2 slice (`cpuset.cpus` = the box's CPU quota so `nproc` tells the truth, `memory.max` = half the box, `memory.high` 3/8, `pids.max` 1024, `cpu.weight` 100). Toolchains stay shared read-only under `/usr/local` and `/opt`. At boot the box checks that workspace A cannot read workspace B and reports it in `/healthz` (`isolation.cross_read_blocked`); the same check is the ignored root test `isolation::tests::workspace_a_cannot_read_workspace_b`. Not enforceable in a Sysbox container: a PID namespace (`ps` shows other workspaces' processes) and anything above the box's own quota.
 - Migration from the old one-sandbox-per-project layout: `arbosctl migrate-to-user-box [--project <id>] [--force]` (`POST /machine/migrate`). For each legacy sandbox it stops the old agentd, packs `/work` (repo + `.arbos` state), copies it into the user box as `/work/<project>` while that workspace is held, releases it, stops the old sandbox and marks it `migrated_to` (never deletes). Idempotent.
 
 ## Run on Daytona
 
-With `DAYTONA_API_KEY` set, `project create` (without `--local-box`) creates a real sandbox from the snapshot named by `ARBOS_DAYTONA_SNAPSHOT` (default `arbos-agent-0.1.7`, the current registered build). The relay must be reachable from the box (`ARBOS_RELAY_PUBLIC_URL`). If no production snapshot is registered yet, point the relay at the dev image instead:
+With `DAYTONA_API_KEY` set, `project create` (without `--local-box`) creates a real sandbox from the snapshot named by `ARBOS_DAYTONA_SNAPSHOT` (default `arbos-agent-0.1.8`, the current registered build). The relay must be reachable from the box (`ARBOS_RELAY_PUBLIC_URL`). If no production snapshot is registered yet, point the relay at the dev image instead:
 
 ```bash
 export DAYTONA_API_KEY=… ARBOS_RELAY_PUBLIC_URL=https://<public-url-of-this-relay> \
@@ -115,7 +116,7 @@ cargo run -p arbosctl -- project create --name demo --provider daytona
 
 ## Image
 
-`.github/workflows/image.yml` builds `image/Dockerfile` on an image tag (`image-v0.1.7`) or by hand, pushes it to GHCR, smoke-tests it, and registers the Daytona snapshot `arbos-agent-<version>` with `image/register-snapshot.sh` (secrets `DAYTONA_API_KEY`, `GHCR_READ_TOKEN`).
+`.github/workflows/image.yml` builds `image/Dockerfile` on an image tag (`image-v0.1.8`) or by hand, pushes it to GHCR, smoke-tests it, and registers the Daytona snapshot `arbos-agent-<version>` with `image/register-snapshot.sh` (secrets `DAYTONA_API_KEY`, `GHCR_READ_TOKEN`).
 
 Without CI (unpublished repo) the same build runs on any Docker host, including a Daytona Docker-in-Docker sandbox (`FROM docker:27-dind`, start `dockerd-entrypoint.sh`, upload the build context over SSH), then goes to Daytona's transient registry:
 
@@ -123,10 +124,10 @@ Without CI (unpublished repo) the same build runs on any Docker host, including 
 # static agentd for the image
 CC_x86_64_unknown_linux_musl=musl-gcc cargo build --release -p arbos-agentd --target x86_64-unknown-linux-musl
 mkdir -p dist && cp target/x86_64-unknown-linux-musl/release/arbos-agentd dist/
-docker build --platform linux/amd64 -f image/Dockerfile -t arbos-agent:0.1.7 .
-# temporary push credentials: GET $DAYTONA_API_URL/docker-registry/registry-push-access?snapshotName=arbos-agent-0.1.7
-docker tag arbos-agent:0.1.7 cr.app.daytona.io/<project>/arbos-agent:0.1.7 && docker push cr.app.daytona.io/<project>/arbos-agent:0.1.7
-image/register-snapshot.sh arbos-agent-0.1.7 cr.app.daytona.io/<project>/arbos-agent:0.1.7
+docker build --platform linux/amd64 -f image/Dockerfile -t arbos-agent:0.1.8 .
+# temporary push credentials: GET $DAYTONA_API_URL/docker-registry/registry-push-access?snapshotName=arbos-agent-0.1.8
+docker tag arbos-agent:0.1.8 cr.app.daytona.io/<project>/arbos-agent:0.1.8 && docker push cr.app.daytona.io/<project>/arbos-agent:0.1.8
+image/register-snapshot.sh arbos-agent-0.1.8 cr.app.daytona.io/<project>/arbos-agent:0.1.8
 ```
 
 Transient-registry tags are immutable: bump the version for every rebuild. The Arbos layers are last in the Dockerfile, so a code change rebuilds in seconds against the cached toolchain layers.

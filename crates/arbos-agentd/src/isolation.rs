@@ -182,6 +182,13 @@ impl Isolation {
         let _ = Command::new("chmod")
             .args(["700", &work_dir.display().to_string()])
             .status();
+        // The work root is traversable but not listable: a workspace reaches its own folder and
+        // cannot enumerate the other projects' ids.
+        if let Some(root) = work_dir.parent() {
+            let _ = Command::new("chmod")
+                .args(["711", &root.display().to_string()])
+                .status();
+        }
         let cgroup = match &self.cgroup_root {
             Some(parent) => {
                 let dir = parent.join(&user);
@@ -337,8 +344,12 @@ mod tests {
             std::fs::create_dir_all(d.join(".arbos")).unwrap();
             std::fs::write(d.join("AGENTS.md"), "secret").unwrap();
         }
-        let a = iso.prepare("01TESTA", &a_dir, &a_dir.join(".arbos")).unwrap();
-        let _b = iso.prepare("01TESTB", &b_dir, &b_dir.join(".arbos")).unwrap();
+        let a = iso
+            .prepare("01TESTA", &a_dir, &a_dir.join(".arbos"))
+            .unwrap();
+        let _b = iso
+            .prepare("01TESTB", &b_dir, &b_dir.join(".arbos"))
+            .unwrap();
         assert!(Isolation::cross_read_blocked(&a, &b_dir).unwrap());
         let _ = std::fs::remove_dir_all(&root);
     }
