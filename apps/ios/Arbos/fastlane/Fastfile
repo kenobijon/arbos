@@ -10,6 +10,9 @@
 # Secrets come from the environment under the same names as the repo secrets:
 #   AC_API_KEY_P8 (key contents) or AC_API_KEY_PATH (file), AC_API_KEY_ID,
 #   AC_API_ISSUER_ID, ARBOS_APPLE_TEAM_ID (defaults to the project's team).
+# The API key must have "cloud-managed distribution certificate" access
+# (App Store Connect → Users and Access → Integrations); a key without it
+# fails the export with "Cloud signing permission error".
 # Nothing is written into the repo; the key file lives in a temp dir and is
 # removed when the lane ends.
 #
