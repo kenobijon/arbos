@@ -977,6 +977,12 @@ impl Shell {
                 }
                 sections.push(("Project".into(), rows));
                 if let Some(doc) = state.project_docs.get(id) {
+                    if !doc.model_note.is_empty() {
+                        sections.push((
+                            "Model note".into(),
+                            vec![("Note".into(), doc.model_note.clone())],
+                        ));
+                    }
                     sections.push(("Box status (project doc)".into(), json_rows(&doc.status)));
                     sections.push(("Settings (project doc)".into(), json_rows(&doc.settings)));
                     sections.push((
@@ -1281,6 +1287,7 @@ impl Shell {
         let source = state.source_name;
         let link = state.link;
         let device = state.device_id.clone();
+        let show_details = state.show_details;
         let glass_ok = Theme::glass_available();
 
         let option = |id: &'static str,
@@ -1310,112 +1317,141 @@ impl Shell {
                 .child(label)
         };
 
-        let card = div()
-            .id("settings-popover")
-            .w(px(272.0))
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .p(px(10.0))
-            .rounded(px(PANEL_RADIUS))
-            .bg(theme.card())
-            .border_1()
-            .border_color(theme.border_strong)
-            .shadow_lg()
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(theme.text_faint)
-                    .child("APPEARANCE · SURFACE"),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap(px(4.0))
-                    .child(
-                        option(
-                            "surface-matte",
-                            "Matte",
-                            theme.surface == Surface::Matte,
-                            true,
-                            &theme,
+        let card =
+            div()
+                .id("settings-popover")
+                .w(px(272.0))
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .p(px(10.0))
+                .rounded(px(PANEL_RADIUS))
+                .bg(theme.card())
+                .border_1()
+                .border_color(theme.border_strong)
+                .shadow_lg()
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme.text_faint)
+                        .child("APPEARANCE · SURFACE"),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(4.0))
+                        .child(
+                            option(
+                                "surface-matte",
+                                "Matte",
+                                theme.surface == Surface::Matte,
+                                true,
+                                &theme,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let a = Theme::of(cx).appearance;
+                                this.set_theme(a, Surface::Matte, cx);
+                            })),
                         )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            let a = Theme::of(cx).appearance;
-                            this.set_theme(a, Surface::Matte, cx);
-                        })),
-                    )
-                    .child(
-                        option(
-                            "surface-glass",
-                            "Glass",
-                            theme.surface == Surface::Glass,
-                            true,
-                            &theme,
+                        .child(
+                            option(
+                                "surface-glass",
+                                "Glass",
+                                theme.surface == Surface::Glass,
+                                true,
+                                &theme,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let a = Theme::of(cx).appearance;
+                                this.set_theme(a, Surface::Glass, cx);
+                            })),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme.text_faint)
+                        .child(if glass_ok {
+                            "Glass: window vibrancy + frosted panels (0.80 shell alpha)."
+                        } else {
+                            "Glass here: frosted panels only; window vibrancy needs macOS."
+                        }),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme.text_faint)
+                        .child("APPEARANCE · MODE"),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(4.0))
+                        .child(
+                            option(
+                                "mode-dark",
+                                "Dark",
+                                theme.appearance == Appearance::Dark,
+                                true,
+                                &theme,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let s = Theme::of(cx).surface;
+                                this.set_theme(Appearance::Dark, s, cx);
+                            })),
                         )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            let a = Theme::of(cx).appearance;
-                            this.set_theme(a, Surface::Glass, cx);
-                        })),
-                    ),
-            )
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(theme.text_faint)
-                    .child(if glass_ok {
-                        "Glass: window vibrancy + frosted panels (0.80 shell alpha)."
-                    } else {
-                        "Glass here: frosted panels only; window vibrancy needs macOS."
-                    }),
-            )
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(theme.text_faint)
-                    .child("APPEARANCE · MODE"),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap(px(4.0))
-                    .child(
-                        option(
-                            "mode-dark",
-                            "Dark",
-                            theme.appearance == Appearance::Dark,
-                            true,
-                            &theme,
+                        .child(
+                            option(
+                                "mode-light",
+                                "Light",
+                                theme.appearance == Appearance::Light,
+                                true,
+                                &theme,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let s = Theme::of(cx).surface;
+                                this.set_theme(Appearance::Light, s, cx);
+                            })),
+                        ),
+                )
+                .child(div().h(px(1.0)).bg(theme.border))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme.text_faint)
+                        .child("DEBUG"),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(4.0))
+                        .child(
+                            option("details-off", "Details off", !show_details, true, &theme)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if this.state.read(cx).show_details {
+                                        this.state.update(cx, |s, cx| s.toggle_show_details(cx));
+                                    }
+                                })),
                         )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            let s = Theme::of(cx).surface;
-                            this.set_theme(Appearance::Dark, s, cx);
-                        })),
-                    )
-                    .child(
-                        option(
-                            "mode-light",
-                            "Light",
-                            theme.appearance == Appearance::Light,
-                            true,
-                            &theme,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            let s = Theme::of(cx).surface;
-                            this.set_theme(Appearance::Light, s, cx);
-                        })),
-                    ),
-            )
-            .child(div().h(px(1.0)).bg(theme.border))
-            .child(
-                div()
-                    .text_size(px(11.5))
-                    .text_color(theme.text_muted)
-                    .child(format!(
-                        "Source: {source} · link: {link:?}{}",
-                        device.map(|d| format!(" · device {d}")).unwrap_or_default()
-                    )),
-            );
+                        .child(
+                            option("details-on", "Show details", show_details, true, &theme)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if !this.state.read(cx).show_details {
+                                        this.state.update(cx, |s, cx| s.toggle_show_details(cx));
+                                    }
+                                })),
+                        ),
+                )
+                .child(div().h(px(1.0)).bg(theme.border))
+                .child(
+                    div()
+                        .text_size(px(11.5))
+                        .text_color(theme.text_muted)
+                        .child(format!(
+                            "Source: {source} · link: {link:?}{}",
+                            device.map(|d| format!(" · device {d}")).unwrap_or_default()
+                        )),
+                );
         div()
             .absolute()
             .left(px(RAIL_WIDTH + 8.0))

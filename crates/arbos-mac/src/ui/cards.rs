@@ -16,24 +16,30 @@ pub fn spinner(theme: &Theme, cx: &App) -> Div {
         .bg(Theme::with_alpha(theme.accent, 0.35 + 0.65 * phase))
 }
 
-/// One subtle line: pulsing dot + the short step label from the box.
-pub fn working_row(label: &str, theme: &Theme, cx: &App) -> Div {
+/// The chat's single working indicator: a pulsing dot that breathes a short
+/// shimmer line beside it. Amber while the message is queued for a sleeping
+/// box. No words.
+pub fn indicator(queued: bool, theme: &Theme, cx: &App) -> Div {
+    let phase = PulseClock::phase(cx, 1100);
+    let base = if queued { theme.warn } else { theme.accent };
     div()
         .w_full()
-        .py(px(4.0))
+        .py(px(6.0))
         .flex()
         .items_center()
         .gap(px(8.0))
-        .child(spinner(theme, cx))
         .child(
             div()
-                .text_size(px(12.5))
-                .text_color(theme.text_muted)
-                .italic()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_ellipsis()
-                .child(label.to_string()),
+                .size(px(8.0))
+                .rounded_full()
+                .bg(Theme::with_alpha(base, 0.35 + 0.65 * phase)),
+        )
+        .child(
+            div()
+                .h(px(2.0))
+                .w(px(28.0 + 36.0 * phase))
+                .rounded_full()
+                .bg(Theme::with_alpha(base, 0.25 + 0.35 * (1.0 - phase))),
         )
 }
 
@@ -83,7 +89,7 @@ pub fn status_row(code: StatusKind, text: &str, live: bool, theme: &Theme, cx: &
         | StatusKind::Note
         | StatusKind::Other => {
             if live {
-                working_row(text, theme, cx)
+                indicator(false, theme, cx)
             } else {
                 div()
                     .w_full()

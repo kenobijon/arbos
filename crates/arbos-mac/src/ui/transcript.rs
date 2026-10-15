@@ -12,7 +12,7 @@ use gpui::{
 };
 
 use crate::app::{AppEvent, AppState, DetailsTarget};
-use crate::model::{Attachment, Id, Message, MessageStatus, Part, Role, StatusKind, TurnKind};
+use crate::model::{Attachment, Id, Message, MessageStatus, Part, Role, StatusKind};
 use crate::ui::cards;
 use crate::ui::frost::edge_faded;
 use crate::ui::markdown::{inline_spans, split_blocks, Block};
@@ -36,27 +36,30 @@ pub enum RowKind {
         block: Block,
         live: bool,
     },
+    /// A file the agent produced for the user.
+    Attachment {
+        attachment: Attachment,
+    },
     /// S8: the agent asked a question.
     AskUser {
         text: String,
     },
-    /// Minimal "agent is working" line: one pulsing dot plus the short step
-    /// label the box emits as status events. Collapses when the turn ends.
-    Working {
-        label: String,
-    },
+    /// Error: one line, red glyph, Retry.
     Error {
         code: String,
         message: String,
     },
-    /// Thin "Stopped by you" / handoff note.
-    Note {
-        text: String,
+    /// Tiny inline glyph (■ stopped, ✗ failed) — no words.
+    Glyph {
+        glyph: &'static str,
     },
-    /// Under a finished assistant message: model · decision · tokens · Details.
-    Meta {
-        text: String,
+    /// The one working indicator for the chat: a pulsing dot under the last
+    /// message while anything runs here. `queued` tints it amber.
+    Indicator {
+        queued: bool,
     },
+    /// Debug-only "Show details" disclosure under a finished reply.
+    Details,
 }
 
 #[derive(Clone, Debug)]
@@ -191,7 +194,8 @@ impl Transcript {
             .unwrap_or_default();
         self.chat_id = chat_id;
 
-        let new_rows = build_rows(&messages);
+        let show_details = state.show_details;
+        let new_rows = build_rows(&messages, show_details);
 
         // Veils: observe text growth of live markdown rows.
         for row in &new_rows {
@@ -304,12 +308,44 @@ impl Transcript {
                     .child(render_block(&row.id, &block, veil.as_ref(), now, &theme))
                     .into_any_element()
             }
+            RowKind::Attachment { attachment } => {
+                let state = self.state.clone();
+                let key = attachment.blob_ref.clone();
+                div()
+                    .id(SharedString::from(row.id.clone()))
+                    .w_full()
+                    .py(px(4.0))
+                    .flex()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .px(px(10.0))
+                            .py(px(6.0))
+                            .rounded(px(8.0))
+                            .bg(theme.card())
+                            .border_1()
+                            .border_color(theme.border)
+                            .text_size(px(12.5))
+                            .text_color(theme.text)
+                            .cursor_pointer()
+                            .hover(|s| s.border_color(theme.border_strong))
+                            .child(div().text_color(theme.text_faint).child("📎"))
+                            .child(attachment.name.clone()),
+                    )
+                    .on_click(move |_, _, cx| {
+                        if let Some(key) = key.clone() {
+                            state.update(cx, |s, cx| {
+                                s.fetch_blob(key.clone(), false, cx);
+                                s.open_details(DetailsTarget::Blob(key), cx);
+                            });
+                        }
+                    })
+                    .into_any_element()
+            }
             RowKind::AskUser { text } => {
                 cards::status_row(StatusKind::AskUser, &text, false, &theme, cx).into_any_element()
-            }
-            RowKind::Working { label } => {
-                PulseClock::request(cx);
-                cards::working_row(&label, &theme, cx).into_any_element()
             }
             RowKind::Error { code, message } => {
                 let state = self.state.clone();
@@ -320,31 +356,30 @@ impl Transcript {
                 })
                 .into_any_element()
             }
-            RowKind::Note { text } => div()
+            RowKind::Glyph { glyph } => div()
                 .w_full()
-                .py(px(4.0))
-                .text_size(px(12.0))
+                .py(px(2.0))
+                .text_size(px(10.0))
                 .text_color(theme.text_faint)
-                .italic()
-                .child(text)
+                .child(glyph)
                 .into_any_element(),
-            RowKind::Meta { text } => {
+            RowKind::Indicator { queued } => {
+                PulseClock::request(cx);
+                cards::indicator(queued, &theme, cx).into_any_element()
+            }
+            RowKind::Details => {
                 let state = self.state.clone();
                 let chat_id = self.chat_id.clone().unwrap_or_default();
                 let message_id = row.message_id.clone();
                 div()
                     .id(SharedString::from(row.id.clone()))
                     .w_full()
-                    .pb(px(6.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
+                    .pb(px(4.0))
                     .text_size(px(11.0))
                     .text_color(theme.text_faint)
                     .cursor_pointer()
                     .hover(|s| s.text_color(theme.text_muted))
-                    .child(text)
-                    .child(div().text_color(theme.accent).child("Details"))
+                    .child("Show details ▸")
                     .on_click(move |_, _, cx| {
                         state.update(cx, |s, cx| {
                             s.open_details(
@@ -392,53 +427,6 @@ impl Render for Transcript {
 // Rows
 // ---------------------------------------------------------------------------
 
-/// "claude-haiku-5.5 · reply · 1.2k in / 180 out · $0.0021 · 3.4 s"
-fn meta_line(message: &Message) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(model) = &message.model {
-        parts.push(model.rsplit('/').next().unwrap_or(model).to_string());
-    }
-    if let Some(d) = &message.decision {
-        parts.push(d.clone());
-    } else if let Some(t) = message.turn {
-        parts.push(format!("{t:?}").to_lowercase());
-    }
-    if let Some(u) = &message.usage {
-        let num = |k: &str| u.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let input = num("input") + num("input_tokens") + num("prompt_tokens");
-        let output = num("output") + num("output_tokens") + num("completion_tokens");
-        if input > 0.0 || output > 0.0 {
-            parts.push(format!(
-                "{} in / {} out",
-                fmt_tokens(input),
-                fmt_tokens(output)
-            ));
-        }
-        let cached = num("cacheRead");
-        if cached > 0.0 {
-            parts.push(format!("{} cached", fmt_tokens(cached)));
-        }
-        let cost = num("cost");
-        if cost > 0.0 {
-            parts.push(format!("${cost:.4}"));
-        }
-    }
-    if let (Some(done), created) = (message.completed_at, message.created_at) {
-        if done > created && created > 0 {
-            parts.push(format!("{:.1} s", (done - created) as f64 / 1000.0));
-        }
-    }
-    parts.join(" · ")
-}
-
-fn fmt_tokens(n: f64) -> String {
-    if n >= 1000.0 {
-        format!("{:.1}k", n / 1000.0)
-    } else {
-        format!("{}", n as u64)
-    }
-}
-
 fn hash_version<T: Hash>(value: &T, live: bool) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     value.hash(&mut h);
@@ -476,11 +464,14 @@ fn is_json_block(block: &Block) -> bool {
         && serde_json::from_str::<serde_json::Value>(t).is_ok()
 }
 
-/// Grok-bot transcript: prose only. Tool calls, raw JSON, status events,
-/// return contracts and cards never render here (the Details drawer has
-/// them); a streaming turn shows one minimal working line instead.
-pub fn build_rows(messages: &[Message]) -> Vec<Row> {
+/// The transcript shows only what the agent said and made: prose, files,
+/// questions, errors. Everything the agent did (tool calls, status events,
+/// JSON, usage) is hidden; the Details drawer has it. One indicator per chat
+/// pulses under the last message while anything runs.
+pub fn build_rows(messages: &[Message], show_details: bool) -> Vec<Row> {
     let mut rows = Vec::new();
+    let mut running = false;
+    let mut queued = false;
     for message in messages {
         let streaming = message.is_streaming();
         match message.role {
@@ -505,12 +496,19 @@ pub fn build_rows(messages: &[Message]) -> Vec<Row> {
                         pending: message.pending,
                     },
                 });
+                if message.status == MessageStatus::Queued {
+                    queued = true;
+                }
             }
             Role::Assistant | Role::System | Role::Project => {
+                if streaming {
+                    running = true;
+                }
                 let last_text_part = message
                     .parts
                     .iter()
                     .rposition(|p| matches!(p, Part::Text { .. }));
+                let mut had_prose = false;
                 for (pix, part) in message.parts.iter().enumerate() {
                     match part {
                         Part::Text { id, text } => {
@@ -521,6 +519,7 @@ pub fn build_rows(messages: &[Message]) -> Vec<Row> {
                             let is_last_text = Some(pix) == last_text_part;
                             let n = blocks.len();
                             for (bix, block) in blocks.into_iter().enumerate() {
+                                had_prose = true;
                                 let live = streaming && is_last_text && bix + 1 == n;
                                 rows.push(Row {
                                     version: hash_version(&block, live),
@@ -530,6 +529,14 @@ pub fn build_rows(messages: &[Message]) -> Vec<Row> {
                                 });
                             }
                         }
+                        Part::Attachment { id, attachment } => rows.push(Row {
+                            version: hash_version(&attachment.name, false),
+                            id: format!("{}#{}", message.id, id),
+                            message_id: message.id.clone(),
+                            kind: RowKind::Attachment {
+                                attachment: attachment.clone(),
+                            },
+                        }),
                         Part::Status {
                             id,
                             code: StatusKind::AskUser,
@@ -540,17 +547,14 @@ pub fn build_rows(messages: &[Message]) -> Vec<Row> {
                             message_id: message.id.clone(),
                             kind: RowKind::AskUser { text: text.clone() },
                         }),
-                        // Thin notes the user should see: stopped, failed, fixture notes.
                         Part::Status {
-                            id,
-                            code: StatusKind::Note | StatusKind::Stopped | StatusKind::Failed,
-                            message: text,
-                        } => rows.push(Row {
-                            version: hash_version(text, false),
-                            id: format!("{}#{}", message.id, id),
-                            message_id: message.id.clone(),
-                            kind: RowKind::Note { text: text.clone() },
-                        }),
+                            code: StatusKind::Queued,
+                            ..
+                        } => {
+                            if streaming {
+                                queued = true;
+                            }
+                        }
                         Part::Error {
                             id,
                             code,
@@ -572,90 +576,52 @@ pub fn build_rows(messages: &[Message]) -> Vec<Row> {
                         | Part::Diff { .. }
                         | Part::File { .. }
                         | Part::Browser { .. }
-                        | Part::Attachment { .. }
                         | Part::Unknown => {}
                     }
                 }
-                // A finished progress turn (status events only) collapses to
-                // nothing; the prose result arrives as its own message.
-                let is_progress = message.turn.map(TurnKind::is_progress).unwrap_or(false);
-                let shown_any = rows.iter().any(|r| r.message_id == message.id);
-                if !streaming && message.role == Role::Assistant && !shown_any && !is_progress {
-                    let note = match message.status {
-                        MessageStatus::Error => Some("The turn failed before it said anything."),
-                        MessageStatus::Cancelled => Some("Stopped before it said anything."),
-                        MessageStatus::Done | MessageStatus::Queued | MessageStatus::Streaming => {
-                            None
-                        }
-                    };
-                    if let Some(text) = note {
-                        rows.push(Row {
-                            version: 1,
-                            id: format!("{}#empty", message.id),
-                            message_id: message.id.clone(),
-                            kind: RowKind::Note { text: text.into() },
-                        });
+                // Stopped / failed turns leave one tiny glyph, no words.
+                let glyph = match message.status {
+                    MessageStatus::Cancelled => Some("■"),
+                    MessageStatus::Error
+                        if !message
+                            .parts
+                            .iter()
+                            .any(|p| matches!(p, Part::Error { .. })) =>
+                    {
+                        Some("✗")
                     }
-                }
-                if message.status == MessageStatus::Error
-                    && !message
-                        .parts
-                        .iter()
-                        .any(|p| matches!(p, Part::Error { .. }))
-                {
+                    MessageStatus::Error
+                    | MessageStatus::Done
+                    | MessageStatus::Queued
+                    | MessageStatus::Streaming => None,
+                };
+                if let Some(glyph) = glyph {
                     rows.push(Row {
                         version: 1,
-                        id: format!("{}#failed", message.id),
+                        id: format!("{}#glyph", message.id),
                         message_id: message.id.clone(),
-                        kind: RowKind::Error {
-                            code: "turn_failed".into(),
-                            message: "The agent could not finish this turn.".into(),
-                        },
+                        kind: RowKind::Glyph { glyph },
                     });
                 }
-                if streaming {
-                    let label = message
-                        .working_label()
-                        .unwrap_or_else(|| "Working…".to_string());
+                if show_details && !streaming && message.role == Role::Assistant && had_prose {
                     rows.push(Row {
-                        version: hash_version(&label, true),
-                        id: format!("{}#working", message.id),
+                        version: 1,
+                        id: format!("{}#details", message.id),
                         message_id: message.id.clone(),
-                        kind: RowKind::Working { label },
-                    });
-                } else if message.role == Role::Assistant && !is_progress {
-                    let meta = meta_line(message);
-                    if !meta.is_empty() {
-                        rows.push(Row {
-                            version: hash_version(&meta, false),
-                            id: format!("{}#meta", message.id),
-                            message_id: message.id.clone(),
-                            kind: RowKind::Meta { text: meta },
-                        });
-                    }
-                }
-                if message.status == MessageStatus::Cancelled
-                    && !message.parts.iter().any(|p| {
-                        matches!(
-                            p,
-                            Part::Status {
-                                code: StatusKind::Note,
-                                ..
-                            }
-                        )
-                    })
-                {
-                    rows.push(Row {
-                        version: 0,
-                        id: format!("{}#cancelled", message.id),
-                        message_id: message.id.clone(),
-                        kind: RowKind::Note {
-                            text: "Stopped by you".into(),
-                        },
+                        kind: RowKind::Details,
                     });
                 }
             }
         }
+    }
+    if running || queued {
+        let last = messages.last().map(|m| m.id.clone()).unwrap_or_default();
+        rows.push(Row {
+            version: hash_version(&queued, true),
+            id: "chat#indicator".into(),
+            message_id: last,
+            kind: RowKind::Indicator { queued },
+        });
     }
     rows
 }

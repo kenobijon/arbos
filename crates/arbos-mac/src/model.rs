@@ -112,13 +112,6 @@ pub enum TurnKind {
     Other,
 }
 
-impl TurnKind {
-    /// Progress messages carry status events only; no prose is expected.
-    pub fn is_progress(self) -> bool {
-        matches!(self, TurnKind::Spawn | TurnKind::Wake)
-    }
-}
-
 /// `turn` is written by the box as `{ "kind": "reply" }` and by older
 /// fixtures as a bare string; accept both.
 fn de_turn<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<TurnKind>, D::Error> {
@@ -360,42 +353,6 @@ pub struct Message {
 }
 
 impl Message {
-    /// The latest short step label the box emitted for this turn
-    /// (`tool_start`, `subagent_working`, `deciding`, …), for the working indicator.
-    pub fn working_label(&self) -> Option<String> {
-        // Text arriving after the last status event means the agent is writing.
-        let last_status = self
-            .parts
-            .iter()
-            .rposition(|p| matches!(p, Part::Status { .. }));
-        let last_text = self
-            .parts
-            .iter()
-            .rposition(|p| matches!(p, Part::Text { text, .. } if !text.trim().is_empty()));
-        if let (Some(t), s) = (last_text, last_status) {
-            if s.is_none_or(|s| t > s) {
-                return Some("Writing…".into());
-            }
-        }
-        self.parts
-            .iter()
-            .chain(self.hidden_parts.iter())
-            .rev()
-            .find_map(|p| match p {
-                Part::Status {
-                    code:
-                        StatusKind::Step
-                        | StatusKind::Working
-                        | StatusKind::Queued
-                        | StatusKind::Deciding
-                        | StatusKind::Handoff,
-                    message,
-                    ..
-                } => Some(message.clone()),
-                _ => None,
-            })
-    }
-
     /// Every tool call of this turn, visible or hidden.
     pub fn tool_parts(&self) -> impl Iterator<Item = &Part> {
         self.parts

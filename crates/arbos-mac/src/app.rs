@@ -60,15 +60,6 @@ pub enum ComposerMode {
     Answer,
 }
 
-/// One running thing shown as a small indicator above the composer.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RunningTask {
-    pub label: String,
-    /// True when it is a turn in this chat (Stop applies); false for a
-    /// project subagent still working elsewhere.
-    pub stoppable: bool,
-}
-
 /// Per-chat UI state kept across tab switches.
 #[derive(Clone, Debug, Default)]
 pub struct ChatUi {
@@ -100,6 +91,8 @@ pub struct AppState {
     pub right_panel_open: bool,
     pub details_open: Option<DetailsTarget>,
     pub new_project_open: bool,
+    /// Debug: per-message "Show details" disclosures in the transcript.
+    pub show_details: bool,
     awaiting_new_project: bool,
     commands: mpsc::UnboundedSender<ClientCommand>,
     _pump: Task<()>,
@@ -158,6 +151,7 @@ impl AppState {
             right_panel_open: false,
             details_open: None,
             new_project_open: false,
+            show_details: false,
             awaiting_new_project: false,
             commands: command_tx,
             _pump: pump,
@@ -426,47 +420,6 @@ impl AppState {
         }
     }
 
-    /// Streaming turns in this chat plus project subagents still running.
-    pub fn running_tasks(&self, chat_id: &str) -> Vec<RunningTask> {
-        let mut out: Vec<RunningTask> = self
-            .messages_of(chat_id)
-            .iter()
-            .filter(|m| m.is_streaming() && m.role == Role::Assistant)
-            .map(|m| {
-                let step = m.working_label().unwrap_or_else(|| "Working…".to_string());
-                RunningTask {
-                    label: match &m.subagent_name {
-                        Some(name) if !step.starts_with(name.as_str()) => {
-                            format!("{name} · {step}")
-                        }
-                        Some(_) | None => step,
-                    },
-                    stoppable: true,
-                }
-            })
-            .collect();
-        if let Some(doc) = self.selected_doc() {
-            for t in doc
-                .threads
-                .iter()
-                .filter(|t| matches!(t.status.as_str(), "running" | "working" | "waiting_user"))
-            {
-                let label = if t.purpose.is_empty() {
-                    t.name.clone()
-                } else {
-                    format!("{} · {}", t.name, t.purpose)
-                };
-                if !out.iter().any(|x| x.label == label) {
-                    out.push(RunningTask {
-                        label,
-                        stoppable: false,
-                    });
-                }
-            }
-        }
-        out
-    }
-
     pub fn chat_ui(&self, chat_id: &str) -> ChatUi {
         self.chat_ui.get(chat_id).cloned().unwrap_or_default()
     }
@@ -710,6 +663,14 @@ impl AppState {
 
     pub fn toggle_rail(&mut self, cx: &mut Context<Self>) {
         self.rail_collapsed = !self.rail_collapsed;
+        cx.notify();
+    }
+
+    pub fn toggle_show_details(&mut self, cx: &mut Context<Self>) {
+        self.show_details = !self.show_details;
+        if let Some(chat_id) = self.active_chat_id() {
+            cx.emit(AppEvent::TranscriptChanged { chat_id });
+        }
         cx.notify();
     }
 

@@ -1136,90 +1136,29 @@ impl Render for Composer {
             .child("↑")
             .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx)));
 
-        // Running tasks: small indicators, never a blocking banner (multitask).
-        let tasks = {
+        // While anything runs in this chat, a small stop icon sits beside send.
+        let running = {
             let state = self.state.read(cx);
             state
                 .active_chat_id()
-                .map(|id| state.running_tasks(&id))
-                .unwrap_or_default()
+                .map(|id| state.chat_is_streaming(&id))
+                .unwrap_or(false)
         };
-        // Turns streaming in this chat already show their working line in the
-        // transcript; the strip lists the other running work (project
-        // subagents) and offers Stop for the chat's own turns.
-        let streaming_here = tasks.iter().filter(|t| t.stoppable).count();
-        let others: Vec<&crate::app::RunningTask> = tasks.iter().filter(|t| !t.stoppable).collect();
-        let tasks_strip = if tasks.is_empty() {
-            None
-        } else {
-            crate::ui::motion::PulseClock::request(cx);
-            let phase = crate::ui::motion::PulseClock::phase(cx, 900);
-            let mut strip = div()
-                .w_full()
+        let stop_button = running.then(|| {
+            div()
+                .id("composer-stop")
+                .size(px(30.0))
+                .rounded_full()
+                .border_1()
+                .border_color(theme.border_strong)
                 .flex()
-                .flex_col()
-                .gap(px(3.0))
-                .px(px(14.0))
-                .pb(px(6.0));
-            for (i, task) in others.iter().enumerate() {
-                strip = strip.child(
-                    div()
-                        .id(ElementId::NamedInteger("running-task".into(), i as u64))
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child(
-                            div()
-                                .size(px(6.0))
-                                .rounded_full()
-                                .bg(Theme::with_alpha(theme.accent, 0.35 + 0.65 * phase)),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .text_size(px(11.5))
-                                .text_color(theme.text_muted)
-                                .child(task.label.clone()),
-                        ),
-                );
-            }
-            if streaming_here > 0 {
-                strip = strip.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_end()
-                        .gap(px(8.0))
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(theme.text_faint)
-                                .child(if streaming_here == 1 {
-                                    "1 turn running".to_string()
-                                } else {
-                                    format!("{streaming_here} turns running")
-                                }),
-                        )
-                        .child(
-                            div()
-                                .id("tasks-stop")
-                                .text_size(px(11.5))
-                                .text_color(theme.text_faint)
-                                .cursor_pointer()
-                                .hover(|s| s.text_color(theme.danger))
-                                .child("■ Stop")
-                                .on_click(cx.listener(|_, _, _, cx| {
-                                    cx.emit(ComposerEvent::Stop);
-                                })),
-                        ),
-                );
-            }
-            Some(strip)
-        };
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|s| s.border_color(theme.danger))
+                .child(div().size(px(9.0)).rounded(px(2.0)).bg(theme.text_muted))
+                .on_click(cx.listener(|_, _, _, cx| cx.emit(ComposerEvent::Stop)))
+        });
 
         let mut pill = div()
             .relative()
@@ -1357,6 +1296,7 @@ impl Render for Composer {
                         cx.notify();
                     })),
             )
+            .children(stop_button)
             .child(send_button);
 
         pill = pill.child(text_row).child(controls);
@@ -1372,31 +1312,11 @@ impl Render for Composer {
             );
         }
 
-        // `settings.modelNote`: the box replaced an unknown model id.
-        let model_note = self
-            .state
-            .read(cx)
-            .selected_doc()
-            .map(|d| d.model_note.clone())
-            .filter(|n| !n.is_empty());
-        let mut root = div()
-            .relative()
-            .w_full()
-            .flex()
-            .flex_col()
-            .when_some(tasks_strip, |el, strip| el.child(strip))
-            .child(frosted(COMPOSER_RADIUS, PANEL_BLUR, pill))
-            .when_some(model_note, |el, note| {
-                el.child(
-                    div()
-                        .w_full()
-                        .px(px(14.0))
-                        .pt(px(6.0))
-                        .text_size(px(11.0))
-                        .text_color(theme.warn)
-                        .child(note),
-                )
-            });
+        let mut root = div().relative().w_full().flex().flex_col().child(frosted(
+            COMPOSER_RADIUS,
+            PANEL_BLUR,
+            pill,
+        ));
         if let Some(picker) = self.open_picker {
             root = root.child(self.render_picker_menu(picker, cx));
         }
