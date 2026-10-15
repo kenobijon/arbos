@@ -256,6 +256,12 @@ impl Agent {
         })
     }
 
+    /// Live model slots (registry/doc writes land here; `cfg` only holds the boot values).
+    async fn live_models(&self) -> (String, String) {
+        let m = self.settings.models.read().await;
+        (m.talking.id.clone(), m.subagent.id.clone())
+    }
+
     pub fn adapter(&self, h: Harness) -> Arc<dyn HarnessAdapter> {
         self.adapters.get(&h).cloned().expect("registered adapter")
     }
@@ -812,6 +818,7 @@ impl Agent {
             Ok(()) => (MessageStatus::Done, None),
             Err(e) => (MessageStatus::Error, Some(e.to_string())),
         };
+        let (talking_model, _) = self.live_models().await;
         {
             let mut h = host.lock().await;
             if let Some(e) = &err_text {
@@ -822,7 +829,7 @@ impl Agent {
                 &[
                     ("decision", json!(route_name)),
                     ("turn", json!({ "kind": turn_kind })),
-                    ("model", json!(self.cfg.talking_model)),
+                    ("model", json!(talking_model)),
                     ("usage", turn.metrics.usage.clone().unwrap_or(Value::Null)),
                 ],
             );
@@ -1502,6 +1509,7 @@ impl Agent {
                 _ => None,
             })
             .unwrap_or(Harness::Prime);
+        let (_, subagent_model) = self.live_models().await;
         let (subagent_id, harness, is_new) = match existing {
             Some(id) => {
                 let row = self
@@ -1520,7 +1528,7 @@ impl Agent {
                     route_harness,
                     data_heavy,
                     brief,
-                    &self.cfg.subagent_model,
+                    &subagent_model,
                     default_harness,
                 );
                 let id = ulid();
@@ -1553,7 +1561,7 @@ impl Agent {
                         json!({ "kind": if is_new { "spawn" } else { "wake" } }),
                     ),
                     ("escalated_from_act", json!(escalated)),
-                    ("model", json!(self.cfg.subagent_model)),
+                    ("model", json!(subagent_model)),
                 ],
             );
         }
@@ -1622,7 +1630,7 @@ impl Agent {
                     session_id: subagent_id.clone(),
                     cwd: self.cfg.work_dir.clone(),
                     system_prompt: pack.clone(),
-                    model: self.cfg.subagent_model.clone(),
+                    model: subagent_model.clone(),
                     thinking: "medium".into(),
                 })
                 .await?;
