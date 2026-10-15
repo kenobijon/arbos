@@ -3,8 +3,11 @@
 //! these tables are created from `Db::open` through `ACCOUNTS_SCHEMA`.
 //!
 //! Money is USD as REAL. A ledger row is positive for a grant and negative for a debit; the
-//! balance is the sum. `debit` refuses to take a user below zero unless the user has
-//! `allow_negative` (the admin override), which is the "ledger never negative" invariant.
+//! balance is the sum over every kind except `machine`. `debit` refuses to take a user below zero
+//! unless the user has `allow_negative` (the admin override), which is the "ledger never
+//! negative" invariant. Machine time (`kind = 'machine'`) is a separate, informational bucket:
+//! machines are always on (Jacob, 2026-10-15), so their cost never gates inference, never
+//! consumes the grant, and never counts toward a user's daily cap.
 
 use anyhow::{anyhow, Result};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -56,6 +59,7 @@ pub fn migrate_accounts(c: &Connection) {
         "ALTER TABLE users ADD COLUMN allow_negative INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE devices ADD COLUMN kind TEXT NOT NULL DEFAULT 'paircode'",
         "ALTER TABLE users ADD COLUMN test INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE boxes ADD COLUMN held_stopped INTEGER NOT NULL DEFAULT 0",
     ] {
         let _ = c.execute(stmt, []);
     }
@@ -112,6 +116,9 @@ pub struct Credits {
     pub spent_today_usd: f64,
     pub daily_cap_usd: Option<f64>,
     pub allow_negative: bool,
+    /// Machine time (always-on box) — informational, outside the balance and caps.
+    pub machine_today_usd: f64,
+    pub machine_total_usd: f64,
 }
 
 /// Why a debit was refused.
@@ -579,7 +586,7 @@ impl Db {
     pub fn debited_since_all(&self, since_ms: i64) -> Result<f64> {
         self.with(|c| {
             c.query_row(
-                "SELECT COALESCE(-SUM(usd), 0.0) FROM credit_ledger WHERE usd < 0 AND at >= ?1",
+                "SELECT COALESCE(-SUM(usd), 0.0) FROM credit_ledger WHERE usd < 0 AND kind != 'machine' AND at >= ?1",
                 params![since_ms],
                 |r| r.get(0),
             )
@@ -610,7 +617,7 @@ impl Db {
                 .optional()?
                 .unwrap_or((0.0, 0, 0));
             let balance: f64 = c.query_row(
-                "SELECT COALESCE(SUM(usd), 0.0) FROM credit_ledger WHERE user_id = ?1",
+                "SELECT COALESCE(SUM(usd), 0.0) FROM credit_ledger WHERE user_id = ?1 AND kind != 'machine'",
                 params![user_id],
                 |r| r.get(0),
             )?;
@@ -622,7 +629,7 @@ impl Db {
             }
             if unlimited == 0 {
                 let today: f64 = c.query_row(
-                    "SELECT COALESCE(-SUM(usd), 0.0) FROM credit_ledger WHERE user_id = ?1 AND usd < 0 AND at >= ?2",
+                    "SELECT COALESCE(-SUM(usd), 0.0) FROM credit_ledger WHERE user_id = ?1 AND usd < 0 AND kind != 'machine' AND at >= ?2",
                     params![user_id, start_of_day_ms],
                     |r| r.get(0),
                 )?;
@@ -649,14 +656,20 @@ impl Db {
             let (granted, spent): (f64, f64) = c.query_row(
                 "SELECT COALESCE(SUM(CASE WHEN usd > 0 THEN usd ELSE 0 END), 0.0),
                         COALESCE(SUM(CASE WHEN usd < 0 THEN -usd ELSE 0 END), 0.0)
-                 FROM credit_ledger WHERE user_id = ?1",
+                 FROM credit_ledger WHERE user_id = ?1 AND kind != 'machine'",
                 params![user_id],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
             let today: f64 = c.query_row(
-                "SELECT COALESCE(-SUM(usd), 0.0) FROM credit_ledger WHERE user_id = ?1 AND usd < 0 AND at >= ?2",
+                "SELECT COALESCE(-SUM(usd), 0.0) FROM credit_ledger WHERE user_id = ?1 AND usd < 0 AND kind != 'machine' AND at >= ?2",
                 params![user_id, start_of_day_ms],
                 |r| r.get(0),
+            )?;
+            let (machine_total, machine_today): (f64, f64) = c.query_row(
+                "SELECT COALESCE(-SUM(usd), 0.0), COALESCE(-SUM(CASE WHEN at >= ?2 THEN usd ELSE 0 END), 0.0)
+                 FROM credit_ledger WHERE user_id = ?1 AND kind = 'machine'",
+                params![user_id, start_of_day_ms],
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
             Ok(Credits {
                 balance_usd: granted - spent,
@@ -665,7 +678,43 @@ impl Db {
                 spent_today_usd: today,
                 daily_cap_usd: user.as_ref().and_then(|u| u.daily_cap_usd),
                 allow_negative: user.as_ref().is_some_and(|u| u.allow_negative),
+                machine_today_usd: machine_today,
+                machine_total_usd: machine_total,
             })
+        })
+    }
+
+    /// Machine time: recorded, never gated, never counted against grant or caps.
+    pub fn record_machine_cost(
+        &self,
+        user_id: &str,
+        usd: f64,
+        reference: Option<&str>,
+    ) -> Result<()> {
+        if !usd.is_finite() || usd <= 0.0 {
+            return Ok(());
+        }
+        self.with(|c| {
+            c.execute(
+                "INSERT OR IGNORE INTO users(id, created_at) VALUES (?1, ?2)",
+                params![user_id, now_ms()],
+            )?;
+            c.execute(
+                "INSERT INTO credit_ledger(user_id, at, kind, usd, ref) VALUES (?1, ?2, 'machine', ?3, ?4)",
+                params![user_id, now_ms(), -usd, reference],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// Relay-wide machine cost since `since_ms` (informational alert threshold).
+    pub fn machine_cost_since_all(&self, since_ms: i64) -> Result<f64> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT COALESCE(-SUM(usd), 0.0) FROM credit_ledger WHERE kind = 'machine' AND at >= ?1",
+                params![since_ms],
+                |r| r.get(0),
+            )
         })
     }
 
@@ -680,6 +729,43 @@ impl Db {
 
     pub fn set_kill_switch(&self, ks: &KillSwitch) -> Result<()> {
         self.meta_set(KILL_SWITCH_KEY, &serde_json::to_string(ks)?)
+    }
+
+    // ---- always-on: a box the user stopped by hand stays stopped until they start it ----------
+
+    pub fn set_box_held(&self, user_id: &str, held: bool) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE boxes SET held_stopped = ?2 WHERE user_id = ?1",
+                params![user_id, held as i64],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn box_held(&self, user_id: &str) -> Result<bool> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT held_stopped FROM boxes WHERE user_id = ?1",
+                params![user_id],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()
+            .map(|o| o.unwrap_or(0) != 0)
+        })
+    }
+
+    /// Users who should have a running machine: everyone with a box row, plus every signed-in
+    /// member without one yet.
+    pub fn always_on_users(&self) -> Result<Vec<String>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT user_id FROM boxes WHERE held_stopped = 0
+                 UNION SELECT id FROM users WHERE status = 'member' AND test = 0 AND id NOT IN (SELECT user_id FROM boxes)",
+            )?;
+            let rows = st.query_map([], |r| r.get(0))?;
+            rows.collect()
+        })
     }
 
     // ---- box history (old sandboxes kept as fallback after an upgrade) -------------------------

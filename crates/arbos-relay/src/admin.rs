@@ -243,10 +243,19 @@ pub async fn get_kill_switch(State(state): State<AppState>, principal: Principal
     if let Err(r) = admin_only(&principal) {
         return *r;
     }
+    let day = crate::proxy::start_of_utc_day_ms();
+    let (boxes, baseline) = crate::credits::machine_baseline_usd_per_day(&state);
     Json(json!({
         "kill_switch": crate::credits::kill_switch(&state),
         "global_daily_cap_usd": state.cfg.global_daily_cap_usd,
-        "spent_today_usd": state.db.debited_since_all(crate::proxy::start_of_utc_day_ms()).unwrap_or(0.0),
+        "spent_today_usd": state.db.debited_since_all(day).unwrap_or(0.0),
+        "machine": {
+            "always_on": state.cfg.always_on,
+            "boxes": boxes,
+            "baseline_usd_per_day": baseline,
+            "today_usd": state.db.machine_cost_since_all(day).unwrap_or(0.0),
+            "alert_cap_usd": state.cfg.global_machine_daily_cap_usd,
+        },
     }))
     .into_response()
 }

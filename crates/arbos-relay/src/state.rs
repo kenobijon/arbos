@@ -55,8 +55,13 @@ pub struct Config {
     pub default_grant_usd: f64,
     /// Soft per-user daily debit cap for new accounts (`ARBOS_DEFAULT_DAILY_CAP_USD`).
     pub default_daily_cap_usd: f64,
-    /// Relay-wide daily debit cap; reaching it trips the kill switch (`ARBOS_GLOBAL_DAILY_CAP_USD`).
+    /// Relay-wide daily inference debit cap; reaching it trips the kill switch (`ARBOS_GLOBAL_DAILY_CAP_USD`).
     pub global_daily_cap_usd: f64,
+    /// Relay-wide daily machine cost that only logs a warning (`ARBOS_GLOBAL_MACHINE_DAILY_CAP_USD`).
+    pub global_machine_daily_cap_usd: f64,
+    /// Machines always on (`ARBOS_ALWAYS_ON`, default on in GitHub mode): no idle auto-stop,
+    /// a box per signed-in user from sign-in on, re-woken after a relay restart.
+    pub always_on: bool,
     /// Our Daytona cost for a running box (`ARBOS_MACHINE_USD_PER_HOUR`).
     pub machine_usd_per_hour: f64,
     /// Our Daytona cost for a stopped box's disk (`ARBOS_MACHINE_STOPPED_USD_PER_DAY`).
@@ -315,6 +320,8 @@ pub(crate) mod test_support {
             default_grant_usd: 100.0,
             default_daily_cap_usd: 20.0,
             global_daily_cap_usd: 500.0,
+            global_machine_daily_cap_usd: 400.0,
+            always_on: false,
             machine_usd_per_hour: 0.332,
             machine_stopped_usd_per_day: 0.013,
             releases_repo: "unarbos/arbos".into(),

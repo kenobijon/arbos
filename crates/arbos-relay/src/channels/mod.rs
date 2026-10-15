@@ -735,6 +735,8 @@ mod tests {
             default_grant_usd: 100.0,
             default_daily_cap_usd: 20.0,
             global_daily_cap_usd: 500.0,
+            global_machine_daily_cap_usd: 400.0,
+            always_on: false,
             machine_usd_per_hour: 0.332,
             machine_stopped_usd_per_day: 0.013,
             releases_repo: "unarbos/arbos".into(),

@@ -617,6 +617,11 @@ pub async fn machine(State(state): State<AppState>, principal: Principal) -> Api
         },
         "image_outdated": sb.as_ref().is_some_and(|s| crate::upgrade::image_outdated(&state, s)),
         "upgrade": crate::upgrade::status_json(&state, &user_id).await,
+        // Always-on: the machine runs all the time (no idle stop, no waking to show); `held`
+        // is a manual Stop that the next Start or message lifts.
+        "always_on": state.cfg.always_on,
+        "held": state.db.box_held(&user_id).unwrap_or(false),
+        "machine_today_usd": state.db.credits(&user_id, start_of_day()).map(|c| c.machine_today_usd).unwrap_or(0.0),
     }))
     .into_response())
 }
@@ -630,9 +635,10 @@ pub async fn machine_start(State(state): State<AppState>, principal: Principal) 
     if principal.is_box() {
         return Err((StatusCode::FORBIDDEN, "devices only".into()));
     }
-    if let Err(r) = crate::credits::check(&state, &user_id) {
+    if let Err(r) = crate::credits::check_read_only(&state) {
         return Ok(crate::credits::refused_response(&r));
     }
+    let _ = state.db.set_box_held(&user_id, false);
     if state.db.user_box(&user_id).map_err(internal)?.is_none() {
         let provider = if state.daytona.is_some() {
             Provider::Daytona
@@ -661,11 +667,14 @@ pub async fn machine_stop(
     if principal.is_box() {
         return Err((StatusCode::FORBIDDEN, "devices only".into()));
     }
+    // A manual Stop holds the box down until the user starts it (or sends a message): the
+    // always-on sweep leaves held boxes alone.
+    let _ = state.db.set_box_held(&user_id, true);
     boxes::stop_box(&state, &user_id, q.force)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
     let (bs, since) = state.box_state(&user_id).await;
-    Ok(Json(json!({ "state": bs, "since": since })).into_response())
+    Ok(Json(json!({ "state": bs, "since": since, "held": true })).into_response())
 }
 
 /// `POST /machine/migrate`: copy every legacy per-project sandbox of the caller's user into the

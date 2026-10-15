@@ -216,6 +216,12 @@ async fn main() -> anyhow::Result<()> {
         default_grant_usd: env_f64("ARBOS_DEFAULT_GRANT_USD", 100.0),
         default_daily_cap_usd: env_f64("ARBOS_DEFAULT_DAILY_CAP_USD", 20.0),
         global_daily_cap_usd: env_f64("ARBOS_GLOBAL_DAILY_CAP_USD", 500.0),
+        global_machine_daily_cap_usd: env_f64("ARBOS_GLOBAL_MACHINE_DAILY_CAP_USD", 400.0),
+        always_on: match env_nonempty("ARBOS_ALWAYS_ON").as_deref() {
+            Some("0") | Some("false") | Some("off") => false,
+            Some(_) => true,
+            None => auth_mode == AuthMode::Github,
+        },
         machine_usd_per_hour: env_f64("ARBOS_MACHINE_USD_PER_HOUR", 0.332),
         machine_stopped_usd_per_day: env_f64("ARBOS_MACHINE_STOPPED_USD_PER_DAY", 0.013),
         releases_repo: env_nonempty("ARBOS_RELEASES_REPO")
@@ -290,6 +296,7 @@ async fn main() -> anyhow::Result<()> {
     routines::spawn_scheduler(state.clone()).await;
     channels::spawn_pollers(state.clone()).await;
     credits::spawn_meter(state.clone()).await;
+    boxes::spawn_always_on(state.clone()).await;
     upgrade::spawn_history_sweeper(state.clone()).await;
 
     let app = Router::new()

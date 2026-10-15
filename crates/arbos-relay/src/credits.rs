@@ -124,12 +124,11 @@ pub fn ensure_account(state: &AppState, user_id: &str) {
     }
 }
 
-/// May this user spend right now? `Ok` or the reason.
-pub fn check(state: &AppState, user_id: &str) -> Result<(), DebitRefused> {
+/// Only the relay-wide kill switch (machines: always on unless the operator switches off).
+pub fn check_read_only(state: &AppState) -> Result<(), DebitRefused> {
     if !metered(state) {
         return Ok(());
     }
-    ensure_account(state, user_id);
     let ks = kill_switch(state);
     if ks.on {
         return Err(DebitRefused::ReadOnly {
@@ -138,6 +137,16 @@ pub fn check(state: &AppState, user_id: &str) -> Result<(), DebitRefused> {
                 .unwrap_or_else(|| "switched off by the operator".to_owned()),
         });
     }
+    Ok(())
+}
+
+/// May this user spend on inference right now? `Ok` or the reason.
+pub fn check(state: &AppState, user_id: &str) -> Result<(), DebitRefused> {
+    if !metered(state) {
+        return Ok(());
+    }
+    ensure_account(state, user_id);
+    check_read_only(state)?;
     // A zero debit runs the balance and cap checks without writing a row.
     match state
         .db
@@ -270,10 +279,17 @@ async fn meter_once(state: &AppState) {
         if usd < MIN_DEBIT_USD {
             continue;
         }
-        charge(state, &sb.user_id, usd, "machine", sb.sandbox_id.as_deref());
+        ensure_account(state, &sb.user_id);
+        if let Err(e) = state
+            .db
+            .record_machine_cost(&sb.user_id, usd, sb.sandbox_id.as_deref())
+        {
+            tracing::warn!(error = %e, user = %sb.user_id, "machine cost");
+        }
+        // Only the kill switch stops a running machine (always-on): machine time never gates.
         if running {
-            if let Err(r) = check(state, &sb.user_id) {
-                tracing::warn!(user = %sb.user_id, %r, "stopping the box: spending blocked");
+            if let Err(r) = check_read_only(state) {
+                tracing::warn!(user = %sb.user_id, %r, "stopping the box: relay is read-only");
                 if let Err(e) = crate::boxes::stop_box(state, &sb.user_id, false).await {
                     tracing::warn!(error = %e, user = %sb.user_id, "meter stop");
                 }
@@ -283,6 +299,45 @@ async fn meter_once(state: &AppState) {
             }
         }
     }
+    machine_alert(state);
+}
+
+/// Relay-wide machine cost today vs `ARBOS_GLOBAL_MACHINE_DAILY_CAP_USD`: a warning once per UTC
+/// day when crossed (log-only; it never gates anything).
+fn machine_alert(state: &AppState) {
+    let day = start_of_utc_day_ms();
+    let today = state.db.machine_cost_since_all(day).unwrap_or(0.0);
+    if today < state.cfg.global_machine_daily_cap_usd {
+        return;
+    }
+    let key = "machine_alert_day";
+    let already = state
+        .db
+        .meta_get(key)
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<i64>().ok())
+        == Some(day);
+    if !already {
+        tracing::warn!(
+            today,
+            cap = state.cfg.global_machine_daily_cap_usd,
+            "machine spend alert: today's always-on machine cost passed the alert threshold"
+        );
+        let _ = state.db.meta_set(key, &day.to_string());
+    }
+}
+
+/// Expected always-on machine cost per day at the current box count.
+pub fn machine_baseline_usd_per_day(state: &AppState) -> (usize, f64) {
+    let boxes = state
+        .db
+        .list_boxes()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|b| b.provider == "daytona")
+        .count();
+    (boxes, boxes as f64 * 24.0 * state.cfg.machine_usd_per_hour)
 }
 
 /// `GET /me`-style credits summary plus the gate result, for `/admin/users`.
@@ -458,8 +513,16 @@ mod tests {
             .set_user_limits(&user, None, Some(true))
             .expect("allow negative");
         assert!(check(&state, &user).is_ok());
-        charge(&state, &user, 2.5, "machine", None);
+        charge(&state, &user, 2.5, "inference", None);
         assert_eq!(state.db.credits(&user, 0).unwrap().balance_usd, -2.5);
+        // Machine time is its own bucket: never part of the balance or the caps.
+        state
+            .db
+            .record_machine_cost(&user, 7.97, Some("sb"))
+            .unwrap();
+        let c = state.db.credits(&user, 0).unwrap();
+        assert_eq!(c.balance_usd, -2.5);
+        assert_eq!(c.machine_today_usd, 7.97);
         // Daily cap: a capped user with money left is still refused once today's debits reach it.
         let (capped, _) = sign_up(&state, 4, "a");
         state
@@ -533,7 +596,7 @@ mod tests {
         let c = state.db.credits("u_mac", 0).unwrap();
         assert_eq!(c.balance_usd, state.cfg.default_grant_usd);
         assert_eq!(c.daily_cap_usd, Some(state.cfg.default_daily_cap_usd));
-        charge(&state, "u_mac", 1.0, "machine", None);
+        charge(&state, "u_mac", 1.0, "inference", None);
         assert_eq!(
             state.db.credits("u_mac", 0).unwrap().balance_usd,
             state.cfg.default_grant_usd - 1.0

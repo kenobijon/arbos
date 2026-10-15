@@ -453,6 +453,10 @@ pub async fn github_callback(
         }
         tracing::info!(user = %user.id, login = %gh.login, "new account");
     }
+    if state.cfg.always_on {
+        // Always-on: the machine starts at sign-in (created now when the user has none).
+        crate::boxes::ensure_awake(&state, &user.id, "signin").await;
+    }
     let device_id = ulid();
     let mut salt = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut salt);
@@ -610,6 +614,8 @@ pub async fn me(State(state): State<AppState>, principal: Principal) -> Response
             "since": since,
             "provider": sb.as_ref().map(|s| s.provider.clone()),
             "sandbox_id": sb.as_ref().and_then(|s| s.sandbox_id.clone()),
+            "always_on": state.cfg.always_on,
+            "held": state.db.box_held(&user_id).unwrap_or(false),
         },
     }))
     .into_response()

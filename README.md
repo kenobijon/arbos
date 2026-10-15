@@ -96,6 +96,11 @@ Relay environment (all optional unless noted):
 | `DAYTONA_API_KEY`, `DAYTONA_API_URL`, `DAYTONA_ORG_ID` | Daytona access; without a key new projects get `process` boxes |
 | `ARBOS_DAYTONA_SNAPSHOT` | snapshot for new boxes, default `arbos-agent-0.1.10` |
 | `ARBOS_DAYTONA_DOCKERFILE`, `ARBOS_BOOTSTRAP_DIR` | dev-image path (see below) |
+| `ARBOS_AUTH_MODE` | `github` (self-serve: Sign in with GitHub, JWT bearers, credits) or `paircode` (self-hosters); default `github` when `ARBOS_GITHUB_CLIENT_ID` is set |
+| `ARBOS_GITHUB_CLIENT_ID`, `ARBOS_GITHUB_CLIENT_SECRET`, `ARBOS_PUBLIC_URL`, `ARBOS_JWT_KEY` | GitHub OAuth app, the public origin of this relay (callback `…/auth/github/callback`), optional JWT signing key (derived from the relay key when unset) |
+| `ARBOS_DEFAULT_GRANT_USD` (100), `ARBOS_DEFAULT_DAILY_CAP_USD` (20), `ARBOS_GLOBAL_DAILY_CAP_USD` (500) | inference credits: welcome grant, per-user daily cap, relay-wide daily cap that trips the kill switch (`PUT /admin/killswitch`) |
+| `ARBOS_ALWAYS_ON` | machines always on (default on in `github` mode): no Daytona auto-stop, a box per signed-in user from sign-in, re-woken after a relay restart; manual Stop and the kill switch are the only things that keep one down |
+| `ARBOS_MACHINE_USD_PER_HOUR` (0.332), `ARBOS_MACHINE_STOPPED_USD_PER_DAY` (0.013), `ARBOS_GLOBAL_MACHINE_DAILY_CAP_USD` (400) | machine time is metered into its own ledger bucket (`machine_today_usd` in `/me`), outside the grant and caps; the global machine cap only logs a warning |
 | `ARBOS_AGENTD_BIN`, `ARBOS_PI_BIN`, `ARBOS_PI_EXT`, `ARBOS_PRIME_BIN`, `ARBOS_DEFAULT_HARNESS` | process-box binaries and default subagent harness |
 | `RUST_LOG` | e.g. `info,arbos_relay=debug` |
 

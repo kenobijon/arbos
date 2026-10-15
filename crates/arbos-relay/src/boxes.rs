@@ -135,7 +135,8 @@ pub async fn create_box(
                 memory: inline.as_ref().map(|_| 8),
                 disk: inline.as_ref().map(|_| 40),
                 build_info: inline.map(|d| json!({ "dockerfileContent": d })),
-                auto_stop_interval: Some(30),
+                // Always-on (default in GitHub mode): Daytona never stops the box by itself.
+                auto_stop_interval: Some(if state.cfg.always_on { 0 } else { 30 }),
                 auto_archive_interval: Some(7 * 24 * 60),
                 auto_delete_interval: Some(-1),
                 ttl_minutes: Some(0),
@@ -445,6 +446,10 @@ pub async fn start_box(state: &AppState, user_id: &str) -> Result<()> {
             }
             sb.last_started_at = Some(now_ms());
             state.db.upsert_box(&sb)?;
+            if state.cfg.always_on {
+                // Boxes created before always-on still carry a 30-minute autostop.
+                let _ = dt.set_autostop(&id, 0).await;
+            }
             state.db.record_timing(
                 &timing_key(user_id),
                 &format!("daytona_start_from_{:?}_ms", from).to_ascii_lowercase(),
@@ -647,14 +652,17 @@ pub async fn ensure_awake(state: &AppState, user_id: &str, reason: &str) {
         state.wake_started.lock().await.remove(user_id);
         return;
     }
-    // Credits gate: a user who may not spend gets no machine time. The apps see the reason in
-    // the status detail; an explicit wake after a top-up clears it.
-    if let Err(r) = crate::credits::check(state, user_id) {
+    // Only the kill switch keeps a machine down: machine time is outside the credit balance and
+    // caps (machines are always on), so an empty inference balance never blocks a wake.
+    if let Err(r) = crate::credits::check_read_only(state) {
         tracing::info!(%user_id, %r, "wake refused");
         state
             .set_box_state(user_id, BoxState::Error, Some(&r.to_string()))
             .await;
         return;
+    }
+    if explicit_wake(reason) {
+        let _ = state.db.set_box_held(user_id, false);
     }
     if st == BoxState::Error {
         // Stale-box error: no more automatic retries; an explicit wake/start tries again once.
@@ -805,6 +813,35 @@ pub async fn sweep_box_liveness(state: &AppState) {
     }
 }
 
+/// Always-on (Jacob, 2026-10-15): every signed-in user's machine runs all the time. At boot and
+/// every minute, any box that is not awake or waking — and that its user did not stop by hand —
+/// is woken; a member without a box yet gets one. Manual Stop (`held_stopped`) and the kill
+/// switch are the only things that keep a machine down.
+pub async fn spawn_always_on(state: AppState) {
+    if !state.cfg.always_on {
+        return;
+    }
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            tick.tick().await;
+            let users = state.db.always_on_users().unwrap_or_default();
+            for user_id in users {
+                let (st, _) = state.box_state(&user_id).await;
+                if matches!(st, BoxState::Awake | BoxState::Waking) {
+                    continue;
+                }
+                if st == BoxState::Error {
+                    // A stale-box error stays until the user asks again (see `explicit_wake`).
+                    continue;
+                }
+                tracing::info!(%user_id, "always-on: waking");
+                ensure_awake(&state, &user_id, "always-on").await;
+            }
+        }
+    });
+}
+
 /// Wake-job runner: 3 attempts with backoff, then S13 error (crdt-sync §8.4 step 5).
 pub async fn spawn_wake_runner(state: AppState) {
     tokio::spawn(async move {
@@ -855,7 +892,12 @@ pub async fn keepalive(state: &AppState, user_id: &str, turn_running: bool) -> R
     if sb.provider == "daytona" {
         if let (Some(dt), Some(id)) = (&state.daytona, &sb.sandbox_id) {
             dt.refresh_activity(id).await?;
-            let _ = dt.set_autostop(id, if turn_running { 0 } else { 30 }).await;
+            let minutes = if state.cfg.always_on || turn_running {
+                0
+            } else {
+                30
+            };
+            let _ = dt.set_autostop(id, minutes).await;
         }
     }
     state.db.touch_box(user_id)?;
