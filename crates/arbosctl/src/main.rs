@@ -68,6 +68,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: SkillsCmd,
     },
+    /// Channels (Slack, Telegram, WhatsApp, Beeper): pairing codes, bindings, mock inbound/outbox.
+    Channels {
+        #[command(subcommand)]
+        cmd: ChannelsCmd,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -163,6 +168,37 @@ enum SkillsCmd {
     },
     /// Delete a skill by id or slug.
     Delete { slug: String },
+}
+
+#[derive(Subcommand, Debug)]
+enum ChannelsCmd {
+    /// Platform states, bound chats, and the active pairing code.
+    List,
+    /// Mint a 6-digit pairing code for a project (its pinned chat unless --chat); send `/pair <code>` from the channel.
+    Pair {
+        project: String,
+        #[arg(long)]
+        chat: Option<String>,
+    },
+    /// Remove a binding by id.
+    Unbind { id: String },
+    /// Mock mode only: inject an inbound message as if the platform delivered it.
+    Inbound {
+        text: String,
+        #[arg(long, default_value = "telegram")]
+        platform: String,
+        #[arg(long, default_value = "mock-chat")]
+        chat: String,
+        #[arg(long, default_value = "mock-user")]
+        user: String,
+        #[arg(long)]
+        sender: Option<String>,
+    },
+    /// What was (or would have been) sent back to the platforms, newest first.
+    Outbox {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -589,6 +625,106 @@ async fn main() -> Result<()> {
             SkillsCmd::Delete { slug } => {
                 relay.delete(&format!("/skills/{slug}")).await?;
                 println!("deleted {slug}");
+            }
+        },
+        Cmd::Channels { cmd } => match cmd {
+            ChannelsCmd::List => {
+                let v = relay.get("/channels").await?;
+                if args.json {
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                } else {
+                    if v["mock"].as_bool() == Some(true) {
+                        println!("mock mode (ARBOS_CHANNELS_MOCK=1)");
+                    }
+                    for p in v["platforms"].as_array().into_iter().flatten() {
+                        println!(
+                            "{:<26} {:<11} {}",
+                            p["label"].as_str().unwrap_or(""),
+                            p["state"].as_str().unwrap_or(""),
+                            p["detail"].as_str().unwrap_or("")
+                        );
+                    }
+                    if let Some(code) = v["pairing"]["code"].as_str() {
+                        let left = (v["pairing"]["expiresAt"].as_i64().unwrap_or(0)
+                            - arbos_core::ids::now_ms())
+                        .max(0)
+                            / 1000;
+                        println!("pairing code {code} ({left} s left) → send `/pair {code}` from the channel");
+                    }
+                    let bindings = v["bindings"].as_array().cloned().unwrap_or_default();
+                    println!("{} bound chat(s)", bindings.len());
+                    for b in bindings {
+                        println!(
+                            "  {} {:<9} {:<40} → project {} chat {}",
+                            b["id"].as_str().unwrap_or(""),
+                            b["platform"].as_str().unwrap_or(""),
+                            b["label"].as_str().unwrap_or(""),
+                            b["projectId"].as_str().unwrap_or(""),
+                            b["chatId"].as_str().unwrap_or("")
+                        );
+                    }
+                }
+            }
+            ChannelsCmd::Pair { project, chat } => {
+                let pid = resolve_project(&relay, &project).await?;
+                let v = relay
+                    .post(
+                        "/channels/pair/new",
+                        &json!({ "projectId": pid, "chatId": chat }),
+                    )
+                    .await?;
+                if args.json {
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                } else {
+                    println!(
+                        "{}  (valid 10 min) → send `/pair {}` from Slack, Telegram, WhatsApp, or a Beeper chat",
+                        v["code"].as_str().unwrap_or(""),
+                        v["code"].as_str().unwrap_or("")
+                    );
+                }
+            }
+            ChannelsCmd::Unbind { id } => {
+                relay.delete(&format!("/channels/bindings/{id}")).await?;
+                println!("unbound {id}");
+            }
+            ChannelsCmd::Inbound {
+                text,
+                platform,
+                chat,
+                user,
+                sender,
+            } => {
+                let v = relay
+                    .post(
+                        "/channels/mock/inbound",
+                        &json!({ "platform": platform, "externalChatId": chat, "externalUserId": user, "text": text, "senderName": sender }),
+                    )
+                    .await?;
+                println!("{}", serde_json::to_string_pretty(&v)?);
+            }
+            ChannelsCmd::Outbox { limit } => {
+                let v = relay.get("/channels/mock/outbox").await?;
+                let items: Vec<Value> = v["items"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .take(limit)
+                    .collect();
+                if args.json {
+                    println!("{}", serde_json::to_string_pretty(&items)?);
+                } else {
+                    for it in items {
+                        println!(
+                            "#{:<4} {:<9} {:<8} → {:<24} {}",
+                            it["id"].as_i64().unwrap_or(0),
+                            it["platform"].as_str().unwrap_or(""),
+                            it["status"].as_str().unwrap_or(""),
+                            it["externalChatId"].as_str().unwrap_or(""),
+                            it["text"].as_str().unwrap_or("").replace('\n', " ⏎ ")
+                        );
+                    }
+                }
             }
         },
     }
