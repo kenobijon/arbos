@@ -53,6 +53,12 @@ enum Cmd {
     Usage { project: String },
     /// Recorded timings (boot, wake, TTFT, cold start).
     Timings { project: String },
+    /// The project's audit trail as mirrored on the relay (approvals, tool calls).
+    Audit {
+        project: String,
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+    },
     /// Devices.
     Devices {
         #[command(subcommand)]
@@ -279,6 +285,20 @@ enum ChatCmd {
         project: String,
         chat: String,
     },
+    /// Approve a pending approval card (its id is printed with the card).
+    Approve {
+        project: String,
+        chat: String,
+        approval_id: String,
+    },
+    /// Reject a pending approval card.
+    Reject {
+        project: String,
+        chat: String,
+        approval_id: String,
+        #[arg(long)]
+        reason: Option<String>,
+    },
     /// Forget the local replica and cursor for a chat.
     Reset {
         project: String,
@@ -472,6 +492,31 @@ async fn main() -> Result<()> {
                 let project = resolve_project(&relay, &project).await?;
                 room::stop(&mut cfg, &project, &chat).await?;
             }
+            ChatCmd::Approve {
+                project,
+                chat,
+                approval_id,
+            } => {
+                let project = resolve_project(&relay, &project).await?;
+                room::decide(&mut cfg, &project, &chat, true, &approval_id, None).await?;
+            }
+            ChatCmd::Reject {
+                project,
+                chat,
+                approval_id,
+                reason,
+            } => {
+                let project = resolve_project(&relay, &project).await?;
+                room::decide(
+                    &mut cfg,
+                    &project,
+                    &chat,
+                    false,
+                    &approval_id,
+                    reason.as_deref(),
+                )
+                .await?;
+            }
             ChatCmd::Reset { project, chat } => {
                 let project = resolve_project(&relay, &project).await?;
                 room::reset(&cfg, &project, &chat)?;
@@ -523,6 +568,31 @@ async fn main() -> Result<()> {
                         x["ms"].as_i64().unwrap_or(0),
                         x["kind"].as_str().unwrap_or(""),
                         x["detail"].as_str().unwrap_or("")
+                    );
+                }
+            }
+        }
+        Cmd::Audit { project, limit } => {
+            let project = resolve_project(&relay, &project).await?;
+            let v = relay
+                .get(&format!("/projects/{project}/audit?limit={limit}"))
+                .await?;
+            let entries = v.get("entries").cloned().unwrap_or(json!([]));
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&entries)?);
+            } else if let Some(a) = entries.as_array() {
+                for x in a {
+                    let mut rest = x.clone();
+                    if let Some(o) = rest.as_object_mut() {
+                        o.remove("ts");
+                        o.remove("kind");
+                        o.remove("source");
+                    }
+                    println!(
+                        "{:>14}  {:<20} {}",
+                        x["ts"].as_i64().unwrap_or(0),
+                        x["kind"].as_str().unwrap_or(""),
+                        rest
                     );
                 }
             }

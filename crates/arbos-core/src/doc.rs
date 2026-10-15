@@ -12,6 +12,7 @@ use loro::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::approval::{ApprovalRequest, ApprovalState};
 use crate::ids::{now_ms, ulid};
 use crate::widget::QuestionState;
 
@@ -498,9 +499,9 @@ impl ChatDoc {
         Some(part_id)
     }
 
-    /// Add a `status` part. Codes: `working`, `done`, `failed`, `stopped`, `waiting_user` — one
-    /// working indicator, nothing that narrates tools. Tool detail lives in `hidden` tool parts
-    /// (Details drawer) and T3.
+    /// Add a `status` part. Codes: `working`, `done`, `failed`, `stopped`, `waiting_user`,
+    /// `waiting_approval` — one working indicator, nothing that narrates tools. Tool detail lives
+    /// in `hidden` tool parts (Details drawer) and T3.
     pub fn add_status_part(&mut self, msg_id: &str, kind: &str, text: &str) -> Option<String> {
         let m = self.find_message(msg_id)?;
         let parts = match m.get("parts")? {
@@ -515,6 +516,120 @@ impl ChatDoc {
         part.insert("message", text).ok();
         self.doc.commit();
         Some(part_id)
+    }
+
+    /// Add an `approval` part (design §10, feature `approve`): the card stays in the transcript
+    /// with its final `state`. `payload` is rendered by the card (draft fields, command).
+    pub fn add_approval_part(
+        &mut self,
+        msg_id: &str,
+        approval_id: &str,
+        req: &ApprovalRequest,
+        expires_at: i64,
+    ) -> Option<String> {
+        let m = self.find_message(msg_id)?;
+        let parts = match m.get("parts")? {
+            ValueOrContainer::Container(Container::List(l)) => l,
+            _ => return None,
+        };
+        let part = parts.push_container(LoroMap::new()).ok()?;
+        let part_id = ulid();
+        part.insert("id", part_id.as_str()).ok();
+        part.insert("kind", "approval").ok();
+        part.insert("approvalId", approval_id).ok();
+        part.insert("title", req.title.as_str()).ok();
+        part.insert("summary", req.summary.as_str()).ok();
+        part.insert("risk", req.risk.as_str()).ok();
+        part.insert("payload", json_to_lv(&req.payload)).ok();
+        part.insert("state", ApprovalState::Pending.as_str()).ok();
+        part.insert("requestedAt", now_ms()).ok();
+        part.insert("expiresAt", expires_at).ok();
+        self.doc.commit();
+        Some(part_id)
+    }
+
+    fn approval_part(&self, approval_id: &str) -> Option<(String, LoroMap)> {
+        let msgs = self.messages_list();
+        for i in 0..msgs.len() {
+            let Some(ValueOrContainer::Container(Container::Map(m))) = msgs.get(i) else {
+                continue;
+            };
+            let Some(ValueOrContainer::Container(Container::List(parts))) = m.get("parts") else {
+                continue;
+            };
+            for j in 0..parts.len() {
+                let Some(ValueOrContainer::Container(Container::Map(p))) = parts.get(j) else {
+                    continue;
+                };
+                let is_match = matches!(
+                    p.get("approvalId"),
+                    Some(ValueOrContainer::Value(LoroValue::String(s))) if s.as_str() == approval_id
+                );
+                if is_match {
+                    let msg_id = match m.get("id") {
+                        Some(ValueOrContainer::Value(LoroValue::String(s))) => s.to_string(),
+                        _ => String::new(),
+                    };
+                    return Some((msg_id, p));
+                }
+            }
+        }
+        None
+    }
+
+    /// Final state of an approval card. Returns the id of the message holding it.
+    pub fn set_approval_state(
+        &mut self,
+        approval_id: &str,
+        state: ApprovalState,
+        decided_by: Option<&str>,
+        reason: Option<&str>,
+    ) -> Option<String> {
+        let (msg_id, p) = self.approval_part(approval_id)?;
+        p.insert("state", state.as_str()).ok();
+        p.insert("decidedAt", now_ms()).ok();
+        if let Some(d) = decided_by {
+            p.insert("decidedBy", d).ok();
+        }
+        if let Some(r) = reason {
+            p.insert("reason", r).ok();
+        }
+        self.doc.commit();
+        Some(msg_id)
+    }
+
+    /// Plain JSON of one approval part, if present.
+    pub fn approval(&self, approval_id: &str) -> Option<Value> {
+        self.approval_part(approval_id)
+            .map(|(_, p)| lv_to_json(&p.get_deep_value()))
+    }
+
+    /// Every approval part across the chat, in document order.
+    pub fn approvals(&self) -> Vec<Value> {
+        self.messages()
+            .into_iter()
+            .flat_map(|m| m.parts.into_iter())
+            .filter(|p| p.get("kind").and_then(Value::as_str) == Some("approval"))
+            .collect()
+    }
+
+    /// Client write: `approve {approvalId}` / `reject {approvalId, reason?}`.
+    pub fn append_approval_command(
+        &self,
+        approve: bool,
+        approval_id: &str,
+        reason: Option<&str>,
+        device_id: &str,
+    ) -> String {
+        let mut payload = serde_json::json!({ "approvalId": approval_id });
+        if let Some(r) = reason {
+            payload["reason"] = Value::from(r);
+        }
+        self.append_command(
+            if approve { "approve" } else { "reject" },
+            payload,
+            device_id,
+        )
     }
 
     /// Add a `question` part (design §10 widgets): `{ kind: "question", questionId, question,

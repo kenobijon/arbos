@@ -13,6 +13,7 @@ use gpui::{
 
 use crate::app::{AppEvent, AppState, DetailsTarget};
 use crate::model::{Attachment, Id, Message, MessageStatus, Part, Role, StatusKind};
+use crate::ui::approve::{approval_card, ApprovalView};
 use crate::ui::cards;
 use crate::ui::frost::edge_faded;
 use crate::ui::markdown::{inline_spans, split_blocks, Block};
@@ -47,6 +48,10 @@ pub enum RowKind {
     /// S8: the agent asked a question.
     AskUser {
         text: String,
+    },
+    /// S18: draft-and-approve card.
+    Approval {
+        view: ApprovalView,
     },
     /// Error: one line, red glyph, Retry.
     /// A typed question widget (design §10): rendered by a [`QuestionCard`] view.
@@ -412,6 +417,26 @@ impl Transcript {
                     .child(card)
                     .into_any_element()
             }
+            RowKind::Approval { view } => {
+                let chat_id = self.chat_id.clone().unwrap_or_default();
+                let approval_id = view.approval_id.clone();
+                let (state_a, chat_a, id_a) =
+                    (self.state.clone(), chat_id.clone(), approval_id.clone());
+                let (state_r, chat_r, id_r) = (self.state.clone(), chat_id, approval_id);
+                approval_card(
+                    &row.id,
+                    &view,
+                    &theme,
+                    move |cx| {
+                        state_a.update(cx, |s, cx| s.approve(chat_a.clone(), id_a.clone(), cx));
+                    },
+                    move |cx| {
+                        state_r
+                            .update(cx, |s, cx| s.reject(chat_r.clone(), id_r.clone(), None, cx));
+                    },
+                )
+                .into_any_element()
+            }
             RowKind::Error { code, message } => {
                 let state = self.state.clone();
                 let chat_id = self.chat_id.clone().unwrap_or_default();
@@ -661,6 +686,39 @@ pub fn build_rows(messages: &[Message], show_details: bool) -> Vec<Row> {
                                 },
                             }),
                         },
+                        // S18: the card renders; its `waiting_approval` status row is implied.
+                        Part::Approval {
+                            id,
+                            approval_id,
+                            title,
+                            summary,
+                            risk,
+                            payload,
+                            state,
+                            decided_by,
+                            reason,
+                            ..
+                        } => {
+                            let view = ApprovalView {
+                                approval_id: approval_id.clone(),
+                                title: title.clone(),
+                                summary: summary.clone(),
+                                risk: *risk,
+                                state: *state,
+                                payload: payload.clone(),
+                                decided_by: decided_by.clone(),
+                                reason: reason.clone(),
+                            };
+                            rows.push(Row {
+                                version: hash_version(
+                                    &(approval_id, title, state.label(), decided_by, reason),
+                                    false,
+                                ),
+                                id: format!("{}#{}", message.id, id),
+                                message_id: message.id.clone(),
+                                kind: RowKind::Approval { view },
+                            });
+                        }
                         Part::Status {
                             code: StatusKind::Queued,
                             ..

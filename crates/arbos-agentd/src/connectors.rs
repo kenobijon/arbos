@@ -1,14 +1,19 @@
 //! Connector tools (F1): `connectors_list` and `connector_call`. The box never holds a
 //! service token; every call goes to the relay broker (`POST /connectors/call`), which signs
 //! the upstream request and returns a redacted reply. Actions of kind `write`/`send` pass
-//! through the approval gate first.
+//! through the approval gate first (`request_approval` below → `Agent::request_approval`):
+//! one card per call, classified once here with the catalog's kind (`mcp.rs` skips
+//! `connector_call` in its generic gate). An approved `draft_message` is delivered through the
+//! matching connector by `route_draft` + `send_through_relay`.
 
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use arbos_core::ids::{now_ms, ulid};
+use arbos_core::approval::{
+    classify_tool, ApprovalOutcome as CoreOutcome, ApprovalRequest as CoreRequest, Risk, RiskMatch,
+};
 
 use crate::agent::Agent;
 use crate::mcp::{err_result, materialize_handle, text_result};
@@ -16,10 +21,12 @@ use crate::mcp::{err_result, materialize_handle, text_result};
 const CATALOG_TTL: Duration = Duration::from_secs(60);
 const INLINE_MAX: usize = 16_000;
 
-// ---- approval stub -------------------------------------------------------------------------
-// TODO(feat-approve): replace with agent::approval (`Agent::request_approval`, same shapes).
+// ---- approval --------------------------------------------------------------------------------
+// String-typed twins of `arbos_core::approval::{ApprovalRequest, ApprovalOutcome}` kept for the
+// callers written against the early stub (vault, local helper); `request_approval` is the real
+// gate.
 
-/// What the user is asked to approve (F2 shape: title, summary, risk, payload).
+/// What the user is asked to approve (title, summary, risk, payload).
 #[derive(Debug, Clone)]
 pub struct ApprovalRequest {
     pub title: String,
@@ -36,85 +43,33 @@ pub enum ApprovalOutcome {
     Expired,
 }
 
-impl ApprovalOutcome {
-    fn state(&self) -> &'static str {
-        match self {
-            ApprovalOutcome::Approved => "approved",
-            ApprovalOutcome::Rejected { .. } => "rejected",
-            ApprovalOutcome::Expired => "expired",
+impl From<CoreOutcome> for ApprovalOutcome {
+    fn from(o: CoreOutcome) -> Self {
+        match o {
+            CoreOutcome::Approved => ApprovalOutcome::Approved,
+            CoreOutcome::Rejected { reason } => ApprovalOutcome::Rejected {
+                reason: reason.unwrap_or_default(),
+            },
+            CoreOutcome::Expired => ApprovalOutcome::Expired,
         }
     }
 }
 
-fn audit(agent: &Agent, kind: &str, fields: Value) {
-    let mut entry = json!({ "kind": kind, "at": now_ms() });
-    if let (Some(e), Some(f)) = (entry.as_object_mut(), fields.as_object()) {
-        for (k, v) in f {
-            e.insert(k.clone(), v.clone());
-        }
-    }
-    let path = agent.cfg.audit_path();
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    {
-        let _ = writeln!(f, "{entry}");
-    }
-}
-
-/// Stub gate until the approve feature lands: approves only when `ARBOS_APPROVAL_STUB=auto`,
-/// otherwise rejects. Writes the audit entries and an `approval` part (hidden) so the
-/// decision is visible in the Details drawer.
+/// Post an approval card in `chat_id` and block until the user decides (or the 24 h /
+/// `ARBOS_APPROVAL_TIMEOUT_SECS` expiry). Audit entries and the card state are written by
+/// `Agent::request_approval`; a card that cannot be posted counts as rejected.
 pub async fn request_approval(
-    agent: &Agent,
+    agent: &Arc<Agent>,
     chat_id: &str,
     req: ApprovalRequest,
 ) -> ApprovalOutcome {
-    let approval_id = ulid();
-    audit(
-        agent,
-        "approval_requested",
-        json!({ "approvalId": approval_id, "chatId": chat_id, "title": req.title, "risk": req.risk, "payload": req.payload }),
-    );
-    let outcome = match std::env::var("ARBOS_APPROVAL_STUB").as_deref() {
-        Ok("auto") => ApprovalOutcome::Approved,
-        Ok("expire") => ApprovalOutcome::Expired,
-        _ => ApprovalOutcome::Rejected {
-            reason: "approval gate not available yet (feature approve not merged); set ARBOS_APPROVAL_STUB=auto to auto-approve in development".into(),
-        },
+    let core = CoreRequest {
+        title: req.title,
+        summary: req.summary,
+        risk: Risk::parse(req.risk),
+        payload: req.payload,
     };
-    audit(
-        agent,
-        "approval_decided",
-        json!({ "approvalId": approval_id, "chatId": chat_id, "state": outcome.state(), "decidedBy": "stub" }),
-    );
-    let msg_id = agent
-        .turn
-        .lock()
-        .await
-        .as_ref()
-        .filter(|t| t.chat_id == chat_id)
-        .map(|t| t.assistant_msg_id.clone());
-    if let Some(msg_id) = msg_id {
-        if let Some(host) = agent.sync.host(chat_id).await {
-            let mut h = host.lock().await;
-            h.doc.add_hidden_part(
-                &msg_id,
-                "approval",
-                &req.summary,
-                &json!({
-                    "approvalId": approval_id, "title": req.title, "summary": req.summary, "risk": req.risk,
-                    "payload": req.payload, "state": outcome.state(), "decidedAt": now_ms(), "decidedBy": "stub",
-                }),
-            );
-        }
-    }
-    outcome
+    agent.request_approval(chat_id, core).await.into()
 }
 
 // ---- tools ---------------------------------------------------------------------------------
@@ -210,7 +165,7 @@ pub async fn connectors_list(agent: &Agent) -> Value {
     )
 }
 
-pub async fn connector_call(agent: &Agent, args: &Value, chat_id: &str) -> Value {
+pub async fn connector_call(agent: &Arc<Agent>, args: &Value, chat_id: &str) -> Value {
     let provider = args["provider"].as_str().unwrap_or("").trim().to_owned();
     let action = args["action"].as_str().unwrap_or("").trim().to_owned();
     let call_args = match args.get("args") {
@@ -232,53 +187,54 @@ pub async fn connector_call(agent: &Agent, args: &Value, chat_id: &str) -> Value
     };
     let kind = spec["kind"].as_str().unwrap_or("read");
     if matches!(kind, "write" | "send") {
-        let outcome = request_approval(
-            agent,
-            chat_id,
-            ApprovalRequest {
-                title: format!("{provider}: {action}"),
-                summary: summarize(&provider, &action, &call_args),
-                risk: "send",
-                payload: json!({ "provider": provider, "action": action, "args": call_args }),
-            },
-        )
-        .await;
-        match outcome {
-            ApprovalOutcome::Approved => {}
-            ApprovalOutcome::Rejected { reason } => {
-                return err_result(format!("{provider}.{action} not approved: {reason}"));
-            }
-            ApprovalOutcome::Expired => {
-                return err_result(format!("{provider}.{action}: approval expired"));
+        // The single classification of this call: the catalog kind is authoritative, so it is
+        // passed explicitly and `classify_tool` runs here and nowhere else for connector_call.
+        let gate_args =
+            json!({ "provider": provider, "action": action, "kind": kind, "args": call_args });
+        let hit = classify_tool("connector_call", &gate_args).unwrap_or(RiskMatch {
+            class: "connector-send",
+            risk: Risk::Send,
+            why: "leaves the box as a message the user did not write",
+        });
+        if let Some(granted) = agent.take_grant("connector_call", &gate_args).await {
+            tracing::info!(
+                provider,
+                action,
+                approval_id = granted,
+                "pre-approved connector call"
+            );
+        } else {
+            let outcome = request_approval(
+                agent,
+                chat_id,
+                ApprovalRequest {
+                    title: format!("{provider}: {action}"),
+                    summary: summarize(&provider, &action, &call_args),
+                    risk: hit.risk.as_str(),
+                    payload: json!({ "kind": "tool_call", "tool": "connector_call", "input": gate_args, "class": hit.class, "why": hit.why }),
+                },
+            )
+            .await;
+            match outcome {
+                ApprovalOutcome::Approved => {}
+                ApprovalOutcome::Rejected { reason } => {
+                    return err_result(format!(
+                        "{provider}.{action} not approved: the user rejected it{}; do not retry it unchanged",
+                        if reason.trim().is_empty() { String::new() } else { format!(" ({reason})") }
+                    ));
+                }
+                ApprovalOutcome::Expired => {
+                    return err_result(format!(
+                        "{provider}.{action}: the approval expired before the user decided"
+                    ));
+                }
             }
         }
     }
-    let _ = agent.store.t3_append(
-        chat_id,
-        None,
-        Some(chat_id),
-        "connector_call",
-        Some("assistant"),
-        &format!("{provider}.{action} {}", clip(&call_args.to_string(), 400)),
-        None,
-    );
-    let r = agent
-        .http_client()
-        .post(format!("{}/connectors/call", agent.cfg.relay_url))
-        .bearer_auth(&agent.cfg.box_token)
-        .json(&json!({ "provider": provider, "action": action, "args": call_args }))
-        .send()
-        .await;
-    let (status, text) = match r {
-        Ok(r) => {
-            let st = r.status();
-            (st, r.text().await.unwrap_or_default())
-        }
-        Err(e) => return err_result(format!("relay unreachable: {e}")),
+    let text = match send_through_relay(agent, chat_id, &provider, &action, &call_args).await {
+        Ok(t) => t,
+        Err(e) => return err_result(e),
     };
-    if !status.is_success() {
-        return err_result(format!("{provider}.{action}: {text}"));
-    }
     if text.len() > INLINE_MAX {
         let handle = materialize_handle(
             agent,
@@ -292,6 +248,97 @@ pub async fn connector_call(agent: &Agent, args: &Value, chat_id: &str) -> Value
         );
     }
     text_result(text)
+}
+
+/// Forward one action to the relay broker and return its reply body. No gate here: callers
+/// hold the approval already (`connector_call` after its card, `dispatch_draft` after the
+/// draft's card).
+pub(crate) async fn send_through_relay(
+    agent: &Agent,
+    chat_id: &str,
+    provider: &str,
+    action: &str,
+    args: &Value,
+) -> Result<String, String> {
+    let _ = agent.store.t3_append(
+        chat_id,
+        None,
+        Some(chat_id),
+        "connector_call",
+        Some("assistant"),
+        &format!("{provider}.{action} {}", clip(&args.to_string(), 400)),
+        None,
+    );
+    let r = agent
+        .http_client()
+        .post(format!("{}/connectors/call", agent.cfg.relay_url))
+        .bearer_auth(&agent.cfg.box_token)
+        .json(&json!({ "provider": provider, "action": action, "args": args }))
+        .send()
+        .await;
+    let (status, text) = match r {
+        Ok(r) => {
+            let st = r.status();
+            (st, r.text().await.unwrap_or_default())
+        }
+        Err(e) => return Err(format!("relay unreachable: {e}")),
+    };
+    if !status.is_success() {
+        return Err(format!("{provider}.{action}: {text}"));
+    }
+    Ok(text)
+}
+
+/// Providers the user has connected (relay `GET /connectors`, `status == "connected"`).
+pub(crate) async fn connected_providers(agent: &Agent) -> Result<Vec<String>, String> {
+    let list = relay_get(agent, "/connectors").await?;
+    Ok(list["items"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter(|c| c["status"] == "connected")
+                .filter_map(|c| c["provider"].as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+/// The connector action that delivers an approved `draft_message`, given what is connected:
+/// email → `google.send`, else `harness_comms.send`; slack → `slack.post_message`;
+/// telegram/whatsapp → `harness_comms.send` (Beeper chat id). `None` when no connected
+/// provider carries the channel (the draft then stays in the box outbox).
+pub(crate) fn route_draft(
+    channel: &str,
+    to: &str,
+    subject: Option<&str>,
+    body: &str,
+    connected: &[String],
+) -> Option<(&'static str, &'static str, Value)> {
+    let has = |p: &str| connected.iter().any(|c| c == p);
+    match channel {
+        "email" if has("google") => Some((
+            "google",
+            "send",
+            json!({ "to": to, "subject": subject.unwrap_or(""), "body": body }),
+        )),
+        "email" if has("harness_comms") => Some((
+            "harness_comms",
+            "send",
+            json!({ "to": to, "subject": subject.unwrap_or(""), "text": body }),
+        )),
+        "slack" if has("slack") => Some((
+            "slack",
+            "post_message",
+            json!({ "channel": to, "text": body }),
+        )),
+        "telegram" | "whatsapp" if has("harness_comms") => Some((
+            "harness_comms",
+            "send",
+            json!({ "chat_id": to, "text": body }),
+        )),
+        _ => None,
+    }
 }
 
 fn summarize(provider: &str, action: &str, args: &Value) -> String {
@@ -339,5 +386,46 @@ fn clip(s: &str, max: usize) -> String {
         s.to_owned()
     } else {
         format!("{}…", s.chars().take(max).collect::<String>())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::route_draft;
+
+    /// Invariant: an approved draft goes to the connected provider for its channel and nowhere
+    /// else; with nothing connected it is not routed at all.
+    #[test]
+    fn draft_routing_follows_connected_providers() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let (p, a, args) = route_draft(
+            "email",
+            "sam@example.com",
+            Some("Hi"),
+            "body",
+            &s(&["google"]),
+        )
+        .unwrap();
+        assert_eq!((p, a), ("google", "send"));
+        assert_eq!(args["to"], "sam@example.com");
+        let (p, a, args) = route_draft(
+            "email",
+            "sam@example.com",
+            None,
+            "body",
+            &s(&["harness_comms"]),
+        )
+        .unwrap();
+        assert_eq!((p, a), ("harness_comms", "send"));
+        assert_eq!(args["text"], "body");
+        let (p, a, _) = route_draft("slack", "#ops", None, "hi", &s(&["slack", "google"])).unwrap();
+        assert_eq!((p, a), ("slack", "post_message"));
+        let (p, a, args) =
+            route_draft("whatsapp", "chat-1", None, "hi", &s(&["harness_comms"])).unwrap();
+        assert_eq!((p, a), ("harness_comms", "send"));
+        assert_eq!(args["chat_id"], "chat-1");
+        assert!(route_draft("email", "x", None, "b", &s(&["slack"])).is_none());
+        assert!(route_draft("sms", "+1", None, "b", &s(&["google", "harness_comms"])).is_none());
+        assert!(route_draft("slack", "#ops", None, "b", &[]).is_none());
     }
 }

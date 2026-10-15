@@ -20,11 +20,12 @@ use crate::model::{ProjectDocView, ThreadInfo};
 use super::doc::ChatDoc;
 use super::{ClientCommand, SyncEvent, SyncSource};
 use crate::model::{
-    new_id, now_ms, Attachment, BoxState, ChannelBinding, ChannelPairing, ChannelPlatform,
-    ChannelPlatformState, ChannelsView, Chat, ChoiceOption, Connector, ConnectorAction,
-    ConnectorProvider, ConnectorStatus, ConnectorsView, Effort, FieldKind, FormField, Id, Link,
-    Message, MessageStatus, Part, Project, QuestionState, Role, Routine, RoutineRun,
-    RoutineRunStatus, RoutineTrigger, Skill, StatusKind, ToolCall, ToolStatus, TurnKind, Widget,
+    new_id, now_ms, ApprovalRisk, ApprovalState, Attachment, BoxState, ChannelBinding,
+    ChannelPairing, ChannelPlatform, ChannelPlatformState, ChannelsView, Chat, ChoiceOption,
+    Connector, ConnectorAction, ConnectorProvider, ConnectorStatus, ConnectorsView, Effort,
+    FieldKind, FormField, Id, Link, Message, MessageStatus, Part, Project, QuestionState, Role,
+    Routine, RoutineRun, RoutineRunStatus, RoutineTrigger, Skill, StatusKind, ToolCall, ToolStatus,
+    TurnKind, Widget,
 };
 
 pub const STREAM_FRAME_MS: u64 = arbos_core::STREAM_COMMIT_MS;
@@ -38,6 +39,7 @@ pub const CHAT_ARBOS_MAIN: &str = "01J9CHAT0ARBOS000000000000";
 pub const CHAT_ARBOS_RESEARCH: &str = "01J9CHAT0RESEARCH000000000";
 pub const CHAT_ARBOS_LAUNCH: &str = "01J9CHAT0LAUNCH00000000000";
 pub const CHAT_ARBOS_WIDGETS: &str = "01J9CHAT0WIDGETS0000000000";
+pub const CHAT_ARBOS_DRAFTS: &str = "01J9CHAT0DRAFTS00000000000";
 pub const CHAT_AFFINE_MAIN: &str = "01J9CHAT0AFFINE00000000000";
 pub const CHAT_COMMS_MAIN: &str = "01J9CHAT0COMMS000000000000";
 
@@ -220,6 +222,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         usage: None,
                         return_contract: None,
                         waiting_user: false,
+                        waiting_approval: false,
                         model: None,
                         effort: None,
                         created_at: now_ms(),
@@ -269,6 +272,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         usage: None,
                         return_contract: None,
                         waiting_user: false,
+                        waiting_approval: false,
                         model: None,
                         effort: None,
                         created_at: now_ms(),
@@ -301,6 +305,21 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 doc.commit();
             }
         }
+        ClientCommand::Approve {
+            chat_id,
+            approval_id,
+        } => decide_approval(shared, chat_id, approval_id, ApprovalState::Approved, None),
+        ClientCommand::Reject {
+            chat_id,
+            approval_id,
+            reason,
+        } => decide_approval(
+            shared,
+            chat_id,
+            approval_id,
+            ApprovalState::Rejected,
+            reason,
+        ),
         ClientCommand::Retry {
             chat_id,
             message_id,
@@ -910,6 +929,7 @@ fn run_routine_now(shared: &Arc<Shared>, project_id: &str, routine_id: &str) {
                 usage: None,
                 return_contract: None,
                 waiting_user: false,
+                waiting_approval: false,
                 model: None,
                 effort: None,
                 created_at: now_ms(),
@@ -1236,6 +1256,14 @@ enum Script {
     /// `ask_user`: lead sentence, question, optional typed widget (design §10).
     Ask(&'static str, &'static str, Option<Widget>),
     Fail(&'static str, &'static str),
+    /// S18: a draft that waits for approval before anything is sent.
+    Draft {
+        lead: &'static str,
+        channel: &'static str,
+        to: &'static str,
+        subject: &'static str,
+        body: &'static str,
+    },
 }
 
 const REPLY_DEFAULT: &[&str] = &[
@@ -1298,11 +1326,24 @@ const ASK_QUESTION: &str =
 
 const REPLY_ANSWERED: &[&str] =
     &["Noted. I will go with that and come back when there is something to look at."];
+const DRAFT_LEAD: &str = "Here is the draft. Nothing goes out until you approve the card below.";
+const DRAFT_TO: &str = "priya@northlight.vc";
+const DRAFT_SUBJECT: &str = "Arbos — October investor update";
+const DRAFT_BODY: &str = "Hi Priya,\n\nQuick October update from Arbos:\n\n- The Mac beta is feature-complete; 14 external testers are on it this week.\n- Box boot is down to 2.1 s warm and 28 s cold.\n- We closed the design partner agreement with Affine.\n\nHappy to walk you through any of it on Thursday.\n\nBest,\nJacob";
 
 fn pick_script(text: &str, force_reply: bool) -> Script {
     let t = text.to_lowercase();
     if force_reply {
         return Script::Reply(REPLY_ANSWERED);
+    }
+    if t.contains("draft") || t.contains("email") || t.contains("send ") {
+        return Script::Draft {
+            lead: DRAFT_LEAD,
+            channel: "email",
+            to: DRAFT_TO,
+            subject: DRAFT_SUBJECT,
+            body: DRAFT_BODY,
+        };
     }
     if t.contains("fail") || t.contains("error") || t.contains("timeout") {
         return Script::Fail("sandbox_timeout", "Sandbox did not answer in 60 s");
@@ -1405,6 +1446,7 @@ async fn run_turn(
             usage: None,
             return_contract: None,
             waiting_user: false,
+            waiting_approval: false,
             model: Some(model.clone()),
             effort: Some(effort),
             created_at: now_ms(),
@@ -1432,7 +1474,7 @@ async fn run_turn(
     let script = pick_script(text, force_reply);
     let turn = match &script {
         Script::Reply(_) | Script::Ask(_, _, _) | Script::Fail(_, _) => TurnKind::Reply,
-        Script::Act { .. } => TurnKind::Act,
+        Script::Act { .. } | Script::Draft { .. } => TurnKind::Act,
         Script::Browse { .. } => TurnKind::Spawn,
     };
     with_doc(shared, chat_id, |doc| {
@@ -1659,6 +1701,47 @@ async fn run_turn(
             }
             done
         }
+        Script::Draft {
+            lead,
+            channel,
+            to,
+            subject,
+            body,
+        } => {
+            with_doc(shared, chat_id, |doc| {
+                let _ = doc.replace_part(ix, 0, &empty_text());
+                doc.commit();
+            });
+            let done = stream_blocks(shared, chat_id, ix, 0, &[lead], &stop).await;
+            if done {
+                let approval_id = new_id();
+                with_doc(shared, chat_id, |doc| {
+                    let _ = doc.push_part(
+                        ix,
+                        &approval_card(
+                            &approval_id,
+                            channel,
+                            to,
+                            subject,
+                            body,
+                            ApprovalState::Pending,
+                            None,
+                        ),
+                    );
+                    let _ = doc.push_part(
+                        ix,
+                        &Part::Status {
+                            id: new_id(),
+                            code: StatusKind::WaitingApproval,
+                            message: format!("Send {channel} to {to}: {subject}"),
+                        },
+                    );
+                    let _ = doc.set_field(ix, "waitingApproval", json!(true));
+                    doc.commit();
+                });
+            }
+            done
+        }
         Script::Fail(code, message) => {
             sleep(Duration::from_millis(900)).await;
             with_doc(shared, chat_id, |doc| {
@@ -1781,6 +1864,170 @@ fn empty_text() -> Part {
         id: new_id(),
         text: String::new(),
     }
+}
+
+/// One `approval` part in the shape `arbos_core::approval` owns.
+fn approval_card(
+    approval_id: &str,
+    channel: &str,
+    to: &str,
+    subject: &str,
+    body: &str,
+    state: ApprovalState,
+    decided_at: Option<u64>,
+) -> Part {
+    let now = now_ms();
+    Part::Approval {
+        id: new_id(),
+        approval_id: approval_id.to_string(),
+        title: format!("Send {channel} to {to}: {subject}"),
+        summary: body
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(160)
+            .collect(),
+        risk: ApprovalRisk::Send,
+        payload: json!({ "kind": "draft_message", "channel": channel, "to": to, "subject": subject, "body": body }),
+        state,
+        expires_at: Some(decided_at.unwrap_or(now) + 24 * 60 * 60_000),
+        decided_at,
+        decided_by: decided_at.map(|_| DEVICE.to_string()),
+        reason: None,
+    }
+}
+
+/// S18 in the fixture: flip the card, mirror the command, then let the "agent" report
+/// the outcome as a follow-up turn (what the box's `[Arbos]` notice turn does).
+fn decide_approval(
+    shared: &Arc<Shared>,
+    chat_id: Id,
+    approval_id: String,
+    state: ApprovalState,
+    reason: Option<String>,
+) {
+    let kind = match state {
+        ApprovalState::Approved => "approve",
+        ApprovalState::Rejected => "reject",
+        ApprovalState::Pending | ApprovalState::Expired => return,
+    };
+    let found = with_doc(shared, &chat_id, |doc| {
+        let mut payload = json!({ "approvalId": approval_id });
+        if let Some(r) = reason.as_deref().filter(|r| !r.trim().is_empty()) {
+            payload["reason"] = json!(r);
+        }
+        let _ = doc.push_command(kind, payload, DEVICE);
+        let hit = (0..doc.len()).rev().find_map(|ix| {
+            let m = doc.read_message(ix)?;
+            let pix = m.parts.iter().position(|p| {
+                matches!(p, Part::Approval { approval_id: a, state: ApprovalState::Pending, .. } if *a == approval_id)
+            })?;
+            let title = match &m.parts[pix] {
+                Part::Approval { title, payload, .. } => (title.clone(), payload.clone()),
+                _ => return None,
+            };
+            Some((ix, pix, title))
+        });
+        if let Some((ix, pix, _)) = &hit {
+            let _ = doc.set_part_field(*ix, *pix, "state", json!(state));
+            let _ = doc.set_part_field(*ix, *pix, "decidedAt", json!(now_ms()));
+            let _ = doc.set_part_field(*ix, *pix, "decidedBy", json!(DEVICE));
+            if let Some(r) = reason.as_deref().filter(|r| !r.trim().is_empty()) {
+                let _ = doc.set_part_field(*ix, *pix, "reason", json!(r));
+            }
+            let _ = doc.set_field(*ix, "waitingApproval", json!(false));
+        }
+        doc.commit();
+        hit
+    })
+    .flatten();
+    let Some((_, _, (title, payload))) = found else {
+        return;
+    };
+    let to = payload
+        .get("to")
+        .and_then(|v| v.as_str())
+        .unwrap_or("them")
+        .to_string();
+    let channel = payload
+        .get("channel")
+        .and_then(|v| v.as_str())
+        .unwrap_or("message")
+        .to_string();
+    let blocks: Vec<String> = match state {
+        ApprovalState::Approved => vec![format!(
+            "Approved. I recorded the {channel} to {to} in this box's outbox; no {channel} connector is configured yet, so it was not delivered externally."
+        )],
+        ApprovalState::Rejected => vec![format!(
+            "Understood, nothing was sent{}. Tell me what to change in \"{title}\" and I will redraft it.",
+            reason
+                .as_deref()
+                .filter(|r| !r.trim().is_empty())
+                .map(|r| format!(" ({r})"))
+                .unwrap_or_default()
+        )],
+        ApprovalState::Pending | ApprovalState::Expired => return,
+    };
+    let project_id = project_of(shared, &chat_id);
+    let shared = shared.clone();
+    tokio::spawn(async move {
+        run_outcome_turn(&shared, &project_id, &chat_id, &approval_id, blocks).await;
+    });
+}
+
+async fn run_outcome_turn(
+    shared: &Arc<Shared>,
+    project_id: &str,
+    chat_id: &str,
+    approval_id: &str,
+    blocks: Vec<String>,
+) {
+    sleep(Duration::from_millis(400)).await;
+    let (model, effort) = project_model(shared, project_id);
+    let ix = with_doc(shared, chat_id, |doc| {
+        let mut msg = Message {
+            id: new_id(),
+            chat_id: chat_id.to_string(),
+            role: Role::Assistant,
+            sender: "agent".into(),
+            status: MessageStatus::Streaming,
+            turn: Some(TurnKind::Reply),
+            decision: Some("reply".into()),
+            subagent_id: None,
+            subagent_name: None,
+            in_reply_to: None,
+            usage: None,
+            return_contract: None,
+            waiting_user: false,
+            waiting_approval: false,
+            routine_name: None,
+            model: Some(model),
+            effort: Some(effort),
+            created_at: now_ms(),
+            completed_at: None,
+            pending: false,
+            parts: vec![empty_text()],
+            hidden_parts: Vec::new(),
+        };
+        msg.parts.push(Part::Status {
+            id: new_id(),
+            code: StatusKind::Working,
+            message: format!("Following up on approval {approval_id}"),
+        });
+        let ix = doc.insert_message(&msg).unwrap_or(0);
+        doc.commit();
+        ix
+    })
+    .unwrap_or(0);
+    let refs: Vec<&str> = blocks.iter().map(String::as_str).collect();
+    let stop = AtomicBool::new(false);
+    stream_blocks(shared, chat_id, ix, 0, &refs, &stop).await;
+    with_doc(shared, chat_id, |doc| {
+        let _ = doc.set_status(ix, MessageStatus::Done);
+        doc.commit();
+    });
+    mark_unread_if_hidden(shared, chat_id);
 }
 
 fn finish_cancelled(shared: &Arc<Shared>, chat_id: &str, ix: usize) {
@@ -1999,6 +2246,13 @@ fn seed_chats() -> Vec<Chat> {
             95,
         ),
         chat(CHAT_ARBOS_WIDGETS, PROJECT_ARBOS, "Beta release", false, 12),
+        chat(
+            CHAT_ARBOS_DRAFTS,
+            PROJECT_ARBOS,
+            "Investor update",
+            false,
+            12,
+        ),
         chat(CHAT_AFFINE_MAIN, PROJECT_AFFINE, "Affine", true, 60 * 26),
         chat(CHAT_COMMS_MAIN, PROJECT_COMMS, "Comms", true, 60 * 5),
     ]
@@ -2144,6 +2398,7 @@ impl Seeder<'_> {
             usage: None,
             return_contract: None,
             waiting_user: false,
+            waiting_approval: false,
             model: None,
             effort: None,
             created_at: self.t,
@@ -2174,6 +2429,7 @@ impl Seeder<'_> {
             usage: None,
             return_contract: None,
             waiting_user: false,
+            waiting_approval: false,
             model: Some(MODELS[0].into()),
             effort: Some(Effort::High),
             created_at: self.t,
@@ -2400,6 +2656,65 @@ fn seed_docs(shared: &Arc<Shared>) {
         widgets.commit();
     }
     add_doc(shared, widgets);
+    // S18: one approved card (already sent) and one pending card waiting on the user.
+    let drafts = ChatDoc::new(CHAT_ARBOS_DRAFTS, PROJECT_ARBOS);
+    {
+        let mut s = Seeder {
+            doc: &drafts,
+            t: base + 2_000_000,
+        };
+        s.user("Email Sam to confirm Tuesday's demo at 10:00.");
+        let sam_body = "Hi Sam,\n\nConfirming the Arbos demo on Tuesday at 10:00 (your office, 45 min). I'll bring the Mac build and a sandbox you can poke at.\n\nSee you then,\nJacob";
+        let decided = s.t + 60_000;
+        s.assistant(
+            TurnKind::Act,
+            MessageStatus::Done,
+            vec![
+                text("Here is the confirmation. Approve the card to send it."),
+                approval_card(
+                    "01J9APPROVAL0SAM0000000000",
+                    "email",
+                    "sam@affine.pro",
+                    "Tuesday demo — confirmed for 10:00",
+                    sam_body,
+                    ApprovalState::Approved,
+                    Some(decided),
+                ),
+            ],
+        );
+        s.assistant(
+            TurnKind::Reply,
+            MessageStatus::Done,
+            vec![text(
+                "Sent. The email to sam@affine.pro went out at 10:14; it is in this box's outbox and the audit trail.",
+            )],
+        );
+        s.user("Now draft the October investor update for Priya.");
+        s.assistant(
+            TurnKind::Act,
+            MessageStatus::Done,
+            vec![
+                text(DRAFT_LEAD),
+                approval_card(
+                    "01J9APPROVAL0PRIYA00000000",
+                    "email",
+                    DRAFT_TO,
+                    DRAFT_SUBJECT,
+                    DRAFT_BODY,
+                    ApprovalState::Pending,
+                    None,
+                ),
+                Part::Status {
+                    id: new_id(),
+                    code: StatusKind::WaitingApproval,
+                    message: format!("Send email to {DRAFT_TO}: {DRAFT_SUBJECT}"),
+                },
+            ],
+        );
+        let _ = drafts.set_field(drafts.len() - 1, "waitingApproval", json!(true));
+        drafts.commit();
+    }
+    add_doc(shared, drafts);
 
     let affine = ChatDoc::new(CHAT_AFFINE_MAIN, PROJECT_AFFINE);
     {

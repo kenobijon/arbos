@@ -32,6 +32,12 @@ const ACT_MAX_CALLS = Number(process.env.ARBOS_ACT_MAX_CALLS ?? 8);
 const HEAD_LINES = 20;
 const TAIL_LINES = 10;
 const ROUTE_PREFIX = "(Arbos: call `route` first.) ";
+// Mirrors `arbos_core::approval::SHELL_TOOLS`; the classification itself happens in agentd.
+const SHELL_TOOLS = new Set(["bash", "shell", "run_command", "execute_command"]);
+const APPROVAL_POLL_MS = Number(process.env.ARBOS_APPROVAL_POLL_MS ?? 1500);
+const APPROVAL_WAIT_MS = Number(process.env.ARBOS_APPROVAL_WAIT_MS ?? 14 * 60 * 1000); // under the 15 min turn deadline
+
+type ApprovalState = "allowed" | "pending" | "approved" | "rejected" | "expired";
 
 type HookResponse = { ok: boolean; error?: string; terminate?: boolean; text?: string; [k: string]: unknown };
 
@@ -163,8 +169,66 @@ export default function arbosPiExt(pi: ExtensionAPI) {
         };
       }
     }
+    // Risky shell commands wait for an approval card (feature `approve`); agentd's
+    // `arbos_core::approval` matcher is the single source of truth for what counts as risky.
+    if (SHELL_TOOLS.has(event.toolName)) {
+      const verdict = await awaitApproval(event.toolName, event.input, event.toolCallId);
+      if (verdict) return verdict;
+    }
     return undefined;
   });
+
+  async function awaitApproval(
+    tool: string,
+    input: unknown,
+    callId: string,
+  ): Promise<{ block: true; reason: string } | undefined> {
+    const first = await hook("/hook/approval", { tool, input, session_id: sessionId, role: SESSION_ROLE });
+    if (!first) return undefined; // no agentd: local pi runs are not gated
+    if (!first.ok) {
+      audit({ kind: "approval_error", session: sessionId, tool, call_id: callId, error: first.error ?? null });
+      return undefined;
+    }
+    let state = String(first.state ?? "allowed") as ApprovalState;
+    if (state === "allowed") return undefined;
+    const approvalId = String(first.approvalId ?? "");
+    audit({ kind: "approval_wait", session: sessionId, tool, call_id: callId, approval_id: approvalId, title: first.title ?? null });
+    const deadline = Date.now() + APPROVAL_WAIT_MS;
+    let reason: string | undefined;
+    while (state === "pending" && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, APPROVAL_POLL_MS));
+      const cur = await hook("/hook/approval-status", { approvalId });
+      if (cur?.ok && typeof cur.state === "string") {
+        state = cur.state as ApprovalState;
+        if (typeof cur.reason === "string") reason = cur.reason;
+      }
+    }
+    if (state === "pending") {
+      // Stopped waiting: agentd turns a late decision into a follow-up turn with a re-run grant.
+      void hook("/hook/approval-abandon", { approvalId });
+    }
+    audit({ kind: "approval_result", session: sessionId, tool, call_id: callId, approval_id: approvalId, state });
+    switch (state) {
+      case "allowed":
+      case "approved":
+        return undefined;
+      case "rejected":
+        return {
+          block: true,
+          reason: `The user rejected this action (approval ${approvalId})${reason ? `: ${reason}` : ""}. Do not retry it unchanged; tell the user.`,
+        };
+      case "expired":
+      case "pending":
+        return {
+          block: true,
+          reason: `The approval for this action (${approvalId}) was not decided in time. Nothing ran; tell the user it needs their approval.`,
+        };
+      default: {
+        const _exhaustive: never = state;
+        return { block: true, reason: `Unknown approval state ${String(_exhaustive)}` };
+      }
+    }
+  }
 
   // ---- 4a. offload hook: big tool results become handles -----------------------------------
   pi.on("tool_result", async (event) => {

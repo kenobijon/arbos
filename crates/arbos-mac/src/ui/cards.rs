@@ -86,6 +86,7 @@ pub fn status_row(code: StatusKind, text: &str, live: bool, theme: &Theme, cx: &
         | StatusKind::Failed
         | StatusKind::Stopped
         | StatusKind::Handoff
+        | StatusKind::WaitingApproval
         | StatusKind::Note
         | StatusKind::Other => {
             if live {

@@ -12,14 +12,17 @@ use axum::routing::post;
 use axum::{Json, Router};
 use serde_json::{json, Value};
 
+use arbos_core::approval::{ApprovalRequest, Risk};
 use arbos_core::widget::WIDGET_SCHEMA_JSON;
 
 use crate::agent::Agent;
+use crate::approval::WaitMode;
 
 type S = Arc<Agent>;
 
 const MAX_HITS: i64 = 20;
 const PAGE_TOKENS_CHARS: usize = 32_000; // ≈ 8k tokens
+const DRAFT_CHANNELS: &[&str] = &["email", "slack", "telegram", "whatsapp", "sms"];
 
 fn tools() -> Value {
     let mut list = json!([
@@ -52,7 +55,9 @@ fn tools() -> Value {
           "inputSchema": { "type": "object", "properties": { "q": { "type": "string" } } } },
         { "name": "skills_read", "description": "Read one skill's full Markdown by slug.", "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" } }, "required": ["slug"] } },
         { "name": "skills_save", "description": "Save a how-to you learned as a skill (upsert by slug; this Project owns it). shared=true makes it visible to every Project.",
-          "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" }, "name": { "type": "string" }, "description": { "type": "string" }, "tags": { "type": "array", "items": { "type": "string" } }, "when_to_use": { "type": "string" }, "body": { "type": "string" }, "shared": { "type": "boolean" } }, "required": ["name","body"] } }
+          "inputSchema": { "type": "object", "properties": { "slug": { "type": "string" }, "name": { "type": "string" }, "description": { "type": "string" }, "tags": { "type": "array", "items": { "type": "string" } }, "when_to_use": { "type": "string" }, "body": { "type": "string" }, "shared": { "type": "boolean" } }, "required": ["name","body"] } },
+        { "name": "draft_message", "description": "Draft an outbound message (email, Slack, Telegram, WhatsApp, SMS) as an approval card. Nothing is sent until the user approves; then stop and end the turn. Call once per draft.",
+          "inputSchema": { "type": "object", "properties": { "channel": { "type": "string", "enum": ["email","slack","telegram","whatsapp","sms"] }, "to": { "type": "string" }, "subject": { "type": "string" }, "body": { "type": "string" } }, "required": ["channel","to","body"] } }
     ]);
     if let Some(a) = list.as_array_mut() {
         a.extend(crate::connectors::tool_specs());
@@ -100,6 +105,14 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
         None,
         None,
     );
+    // Risky actions run only after an approved card (design S18, `arbos_core::approval`).
+    // `connector_call` is gated inside `connectors::connector_call`, where the catalog kind is
+    // known, so it is classified exactly once and gets one card.
+    if name != "connector_call" {
+        if let Err(refusal) = a.gate_tool(name, args, &chat_for_scratch).await {
+            return err_result(format!("not executed: {refusal}"));
+        }
+    }
     match name {
         "history_search" => {
             let q = s("query").unwrap_or_default();
@@ -512,6 +525,42 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
                     "relay refused: HTTP {} {}",
                     r.status(),
                     r.text().await.unwrap_or_default()
+                )),
+                Err(e) => err_result(e),
+            }
+        }
+        "draft_message" => {
+            let channel = s("channel").unwrap_or_default();
+            if !DRAFT_CHANNELS.contains(&channel.as_str()) {
+                return err_result(format!(
+                    "channel must be one of {}",
+                    DRAFT_CHANNELS.join(", ")
+                ));
+            }
+            let to = s("to").unwrap_or_default();
+            let body = s("body").unwrap_or_default();
+            if to.trim().is_empty() || body.trim().is_empty() {
+                return err_result("to and body are required");
+            }
+            let subject = s("subject").filter(|x| !x.trim().is_empty());
+            let title = match &subject {
+                Some(subj) => format!("Send {channel} to {to}: {subj}"),
+                None => format!("Send {channel} to {to}"),
+            };
+            let summary: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
+            let summary = clip(&summary, 160);
+            let req = ApprovalRequest {
+                title,
+                summary,
+                risk: Risk::Send,
+                payload: json!({ "kind": "draft_message", "channel": channel, "to": to, "subject": subject, "body": body }),
+            };
+            match a
+                .begin_approval(&chat_for_scratch, req, WaitMode::Deferred, None)
+                .await
+            {
+                Ok(id) => text_result(format!(
+                    "Draft posted as approval card {id}. Nothing was sent. Stop here: tell the user in one sentence to approve or reject the card above, then end the turn. Arbos will tell you the outcome in a later message."
                 )),
                 Err(e) => err_result(e),
             }

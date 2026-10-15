@@ -122,7 +122,7 @@ macOS packaging: `scripts/bundle-mac.sh` builds a universal `dist/Arbos.app` + D
 
 ## Connectors
 
-The relay brokers Gmail/Calendar, Slack, GitHub and Harness Comms for the boxes (D2/D28/D40): provider tokens are stored AES-256-GCM-encrypted in the relay DB (key from `ARBOS_RELAY_KEY`, else generated once into the `meta` table) and never enter a box. The agent calls `connectors_list` / `connector_call` over MCP; agentd forwards to `POST /connectors/call`, which attaches the bearer upstream and redacts `access_token` / `refresh_token` / `Authorization` from every reply. Write and send actions go through an approval card first (`ARBOS_APPROVAL_STUB=auto|expire|reject` until the approvals feature lands).
+The relay brokers Gmail/Calendar, Slack, GitHub and Harness Comms for the boxes (D2/D28/D40): provider tokens are stored AES-256-GCM-encrypted in the relay DB (key from `ARBOS_RELAY_KEY`, else generated once into the `meta` table) and never enter a box. The agent calls `connectors_list` / `connector_call` over MCP; agentd forwards to `POST /connectors/call`, which attaches the bearer upstream and redacts `access_token` / `refresh_token` / `Authorization` from every reply. Write and send actions go through an approval card first (one card per call; see Approvals).
 
 - Device endpoints: `GET /connectors`, `GET /connectors/catalog`, `POST /connectors/{provider}/connect` (`{"token": ...}` for GitHub PATs / Harness Comms keys, otherwise returns an OAuth `authUrl`), `GET /connectors/oauth/callback`, `DELETE /connectors/{id}`, `GET /connectors/outbox`.
 - OAuth apps: `ARBOS_GOOGLE_CLIENT_ID/SECRET`, `ARBOS_SLACK_CLIENT_ID/SECRET`, `ARBOS_GITHUB_CLIENT_ID/SECRET`; redirect is `{public_url}/connectors/oauth/callback` (`ARBOS_OAUTH_REDIRECT_URL` overrides). `ARBOS_HARNESS_COMMS_URL` is the default base URL for the Harness Comms connector.
@@ -158,6 +158,18 @@ External chats talk to an agent through the relay (§4.5 Flow 4–5, D35): an in
 - WhatsApp Cloud API: `ARBOS_WHATSAPP_TOKEN`, `ARBOS_WHATSAPP_PHONE_ID`, `ARBOS_WHATSAPP_VERIFY_TOKEN` (optional `ARBOS_WHATSAPP_APP_SECRET` for `X-Hub-Signature-256`); webhook `GET/POST {public_url}/channels/whatsapp/webhook`.
 - Beeper: reuses the Harness Comms connector token — the relay polls `POST /v1/messages/poll` (cursor kept in `meta`, `ARBOS_BEEPER_POLL_S`, default 30 s) and sends through `POST /v1/requests` with idempotent request ids. Only messages the user sent themself (`sender.is_self`) can pair or receive the hint, so the relay never writes to someone else's contact.
 - Endpoints: `GET /channels` (platform state + bindings + active code), `POST /channels/pair/new`, `GET/DELETE /channels/bindings[/{id}]`, `GET /channels/mock/outbox`. `ARBOS_CHANNELS_MOCK=1` turns every platform into a mock: `POST /channels/mock/inbound` injects a message and replies land in `channel_outbox` instead of leaving the machine (`arbosctl channels inbound|outbox|list|unbind`).
+
+## Approvals (draft-and-approve)
+
+Risky actions wait for the user. The agent drafts outbound messages with the `draft_message` tool (email, Slack, Telegram, WhatsApp, SMS); sending connectors (`connector_call` send/write), vault requests, local computer use and destructive shell commands (`rm -rf` outside `tmp/`, `git push --force`, `DROP TABLE`, cloud deletes, …; the list is `arbos_core::approval::RISKY_RULES`) are gated the same way. Each one becomes an `approval` card in the chat (`state: pending|approved|rejected|expired`, 24 h expiry); nothing runs until the client writes an `approve` or `reject` command. Both decisions land in `/work/.arbos/audit.jsonl` on the box and are mirrored to the relay (`GET /projects/{id}/audit`). An approved draft is delivered through the connector that carries its channel (email → `google.send`, else `harness_comms.send`; Slack → `slack.post_message`; Telegram/WhatsApp → `harness_comms.send`) without a second card; with no such connector it is recorded in the box's `outbox` table and the agent says so.
+
+```bash
+cargo run -p arbosctl -- chat send demo <chat> "Draft an email to sam@example.com confirming Tuesday" --stream   # prints the card and its id
+cargo run -p arbosctl -- chat approve demo <chat> <approvalId>      # or: chat reject … --reason "too long"
+cargo run -p arbosctl -- audit demo                                  # approval_requested / approval_decided entries
+```
+
+`ARBOS_APPROVAL_TIMEOUT_SECS` (box, default 86400) caps how long an inline-gated tool call waits.
 
 ## Image
 

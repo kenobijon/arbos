@@ -266,6 +266,10 @@ async fn main() -> anyhow::Result<()> {
             "/skills/{id}",
             get(skills::get).put(skills::update).delete(skills::delete),
         )
+        .route(
+            "/projects/{id}/audit",
+            post(api::record_audit).get(api::list_audit),
+        )
         .route("/room/{project}/{chat}", get(rooms::ws_room))
         .route(
             "/room/{project}/{chat}/checkpoint",

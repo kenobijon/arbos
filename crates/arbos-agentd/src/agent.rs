@@ -11,6 +11,7 @@ use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, Mutex, Semaphore};
 
+use arbos_core::approval::ApprovalOutcome;
 use arbos_core::doc::{CommandStatus, CommandView, MessageStatus};
 use arbos_core::ids::ulid;
 use arbos_core::route::{pick_harness, validate, Harness, ValidRoute};
@@ -295,6 +296,9 @@ pub enum TurnKind {
     User,
     /// A finished subagent's result, relayed to the user in prose by the main agent.
     SubagentResult { subagent_id: String, name: String },
+    /// An approval card was decided after its turn ended (feature `approve`): the main agent
+    /// dispatches or acknowledges, in prose.
+    ApprovalOutcome { approval_id: String, title: String },
 }
 
 /// What one main-agent turn produced, for the caller's follow-ups (memory pass, hand-offs).
@@ -369,6 +373,8 @@ pub struct Agent {
     pub settings: crate::settings::Settings,
     /// Cached skills index (F5): shared + this Project's own, bodies included.
     pub skills: SkillsIndex,
+    /// Pending approval cards and short-lived grants (feature `approve`).
+    pub approvals: crate::approval::Approvals,
 }
 
 impl Agent {
@@ -416,6 +422,7 @@ impl Agent {
             http: reqwest::Client::new(),
             settings: crate::settings::Settings::new(&cfg_for_settings),
             skills: SkillsIndex::new(),
+            approvals: crate::approval::Approvals::default(),
         })
     }
 
@@ -678,6 +685,29 @@ impl Agent {
                 self.retitle(chat_id, &title).await
             }
             "retry" => Ok(()),
+            "approve" | "reject" => {
+                let approval_id = cmd
+                    .payload
+                    .get("approvalId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned();
+                let outcome = if cmd.kind == "approve" {
+                    ApprovalOutcome::Approved
+                } else {
+                    ApprovalOutcome::Rejected {
+                        reason: cmd
+                            .payload
+                            .get("reason")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|r| !r.is_empty())
+                            .map(str::to_owned),
+                    }
+                };
+                self.decide_approval(&approval_id, outcome, &cmd.issued_by)
+                    .await
+            }
             other => Err(anyhow!("unknown command kind {other}")),
         };
         let h = host.lock().await;
@@ -1076,6 +1106,17 @@ impl Agent {
                         ],
                     );
                 }
+                TurnKind::ApprovalOutcome { approval_id, title } => {
+                    h.doc.add_status_part(
+                        &assistant_msg_id,
+                        "working",
+                        &format!("Following up on “{title}”…"),
+                    );
+                    h.doc.set_message_fields(
+                        &assistant_msg_id,
+                        &[("approvalId", json!(approval_id))],
+                    );
+                }
             }
             pid
         };
@@ -1103,7 +1144,7 @@ impl Agent {
             stopped: false,
             prompt_text: match &kind {
                 TurnKind::User => prompt_text.to_owned(),
-                TurnKind::SubagentResult { .. } => String::new(),
+                TurnKind::SubagentResult { .. } | TurnKind::ApprovalOutcome { .. } => String::new(),
             },
             skills_used: Vec::new(),
         });
@@ -1140,6 +1181,7 @@ impl Agent {
         let turn_kind = match &kind {
             TurnKind::User => route_name,
             TurnKind::SubagentResult { .. } => "subagent_result",
+            TurnKind::ApprovalOutcome { .. } => "approval_outcome",
         };
         let (final_status, err_text) = match &result {
             Ok(()) => (MessageStatus::Done, None),
@@ -1291,6 +1333,29 @@ impl Agent {
         outcome.result
     }
 
+    /// A `[Arbos]` notice to the main agent as its own turn in `chat_id` (approval outcomes).
+    /// Waits for `turn_lock`, so it lands after whatever the user is doing right now.
+    pub async fn run_notice_turn(
+        self: &Arc<Self>,
+        chat_id: &str,
+        host: &SharedHost,
+        in_reply_to: &str,
+        prompt: &str,
+        kind: TurnKind,
+    ) -> Result<()> {
+        let _guard = self.turn_lock.lock().await;
+        let outcome = self
+            .drive_turn(chat_id, host, in_reply_to, prompt, kind)
+            .await?;
+        self.spawn_memory_pass(
+            chat_id,
+            &outcome.assistant_msg_id,
+            "[approval outcome]",
+            &outcome.turn.streamed_text,
+        );
+        outcome.result
+    }
+
     fn spawn_keepalive(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         let me = self.clone();
         tokio::spawn(async move {
@@ -1404,22 +1469,39 @@ impl Agent {
         let mut act_steered = false;
         let mut act_aborted = false;
         let deadline = Duration::from_secs(15 * 60);
+        // Time the turn spends blocked on an approval card is the user's, not the agent's: it
+        // counts toward neither the act limit nor the turn deadline.
+        let mut approval_paused = Duration::ZERO;
+        let mut approval_pause_started: Option<Instant> = None;
         loop {
             let ev = tokio::select! {
                 e = events.recv() => e,
                 _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                    let waiting = self.approval_pending_for(chat_id).await;
+                    match (waiting, approval_pause_started) {
+                        (true, None) => approval_pause_started = Some(Instant::now()),
+                        (false, Some(t0)) => {
+                            approval_paused += t0.elapsed();
+                            approval_pause_started = None;
+                        }
+                        (true, Some(_)) | (false, None) => {}
+                    }
+                    if waiting {
+                        continue;
+                    }
+                    let elapsed = started.elapsed().saturating_sub(approval_paused);
                     // Act wall-clock limit (D66): steer at 60 s, abort 20 s later.
                     let is_act = matches!(self.turn.lock().await.as_ref().and_then(|t| t.route.as_ref()), Some(ValidRoute::Act { .. }));
-                    if is_act && started.elapsed() > Duration::from_secs(ACT_MAX_WALL_SECS) && !act_steered {
+                    if is_act && elapsed > Duration::from_secs(ACT_MAX_WALL_SECS) && !act_steered {
                         act_steered = true;
                         let _ = pi.call(RpcCommand::Steer { id: pi.next_id("st"), message: "Time limit reached. Stop now and summarize what you did and what is left.".into() }).await;
                         if let Some(t) = self.turn.lock().await.as_mut() { t.escalate = true; }
                     }
-                    if is_act && started.elapsed() > Duration::from_secs(ACT_MAX_WALL_SECS + 20) && !act_aborted {
+                    if is_act && elapsed > Duration::from_secs(ACT_MAX_WALL_SECS + 20) && !act_aborted {
                         act_aborted = true;
                         let _ = pi.call(RpcCommand::Abort { id: pi.next_id("ab") }).await;
                     }
-                    if started.elapsed() > deadline {
+                    if elapsed > deadline {
                         let _ = pi.call(RpcCommand::Abort { id: pi.next_id("ab") }).await;
                         return Err(anyhow!("turn exceeded 15 minutes"));
                     }
@@ -1931,7 +2013,7 @@ impl Agent {
             s.push_str(&skills_text);
             s.push_str("\n\n");
         }
-        s.push_str("## Tools\n\nMCP server `arbos`: history_search, history_read, read_thread, memory_search, memory_read (you may search and read the entire history of this Project), peek, sub_llm, remember/recall, projects_list/projects_send, ask_user (optional `widget`: choice | multi_select | text | date | form, so the user answers with a click instead of typing), connectors_list/connector_call (the user's Gmail, Calendar, Slack, GitHub, Harness Comms through the relay; write/send actions need the user's approval), skills_list/skills_read/skills_save (the skills library).\n\n");
+        s.push_str("## Tools\n\nMCP server `arbos`: history_search, history_read, read_thread, memory_search, memory_read (you may search and read the entire history of this Project), peek, sub_llm, remember/recall, projects_list/projects_send, ask_user (optional `widget`: choice | multi_select | text | date | form, so the user answers with a click instead of typing), connectors_list/connector_call (the user's Gmail, Calendar, Slack, GitHub, Harness Comms through the relay; write/send actions need the user's approval), skills_list/skills_read/skills_save (the skills library), draft_message (outbound email/Slack/Telegram/WhatsApp/SMS as an approval card; nothing is sent until the user approves).\n\n");
         s.push_str("## Return contract\n\nEnd your final reply with one fenced ```json block:\n{ \"status\": \"done\" | \"blocked\" | \"partial\" | \"needs_input\", \"summary\": \"<= 5 lines\", \"artifacts\": [ { \"kind\": \"file\" | \"commit\" | \"url\" | \"command\", \"ref\": \"…\", \"note\": \"…\" } ], \"acceptance\": [ { \"criterion\": \"…\", \"met\": true, \"evidence\": \"…\" } ], \"open_items\": [], \"proposed_memory\": [ { \"kind\": \"decision\", \"scope\": \"project\", \"text\": \"…\" } ], \"questions\": [] }\n");
         s
     }

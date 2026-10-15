@@ -140,6 +140,16 @@ pub enum ClientCommand {
     Stop {
         chat_id: Id,
     },
+    /// S18: decide an approval card (`approve` / `reject` commands, `arbos_core::approval`).
+    Approve {
+        chat_id: Id,
+        approval_id: String,
+    },
+    Reject {
+        chat_id: Id,
+        approval_id: String,
+        reason: Option<String>,
+    },
     Retry {
         chat_id: Id,
         message_id: Id,
