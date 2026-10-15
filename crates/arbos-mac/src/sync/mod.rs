@@ -20,7 +20,7 @@ use tokio::sync::mpsc;
 
 use crate::model::{
     BoxState, Chat, ConnectorsView, Effort, Id, Link, Message, Project, ProjectDocView, Routine,
-    RoutineRun, RoutineTrigger,
+    RoutineRun, RoutineTrigger, Skill,
 };
 
 /// Something the source learned; the UI applies it to its mirror.
@@ -106,6 +106,8 @@ pub enum SyncEvent {
         routine_id: Id,
         runs: Vec<RoutineRun>,
     },
+    /// The skills library (F5), whole, after a fetch or a write.
+    Skills(Vec<Skill>),
 }
 
 /// Something the user did; the source writes it into the doc / outbox.
@@ -209,6 +211,15 @@ pub enum ClientCommand {
     RoutineDelete {
         project_id: Id,
         routine_id: Id,
+    },
+    /// F5: refetch the skills library.
+    SkillsRefresh,
+    /// F5: create (`id` empty) or update a skill; the source answers with `SyncEvent::Skills`.
+    SkillSave {
+        skill: Skill,
+    },
+    SkillDelete {
+        id: Id,
     },
 }
 

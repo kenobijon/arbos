@@ -74,6 +74,9 @@ pub struct ComposerInput {
     /// Runs deferred, after this entity's update ends, so the owner may read
     /// and update the input freely.
     pub on_submit: Option<SubmitHandler>,
+    /// Multi-line editors (skill bodies): Enter inserts a newline instead of
+    /// submitting.
+    pub enter_inserts_newline: bool,
 }
 
 impl ComposerInput {
@@ -89,6 +92,7 @@ impl ComposerInput {
             is_selecting: false,
             scroll_y: 0.0,
             on_submit: None,
+            enter_inserts_newline: false,
         }
     }
 
@@ -108,6 +112,12 @@ impl ComposerInput {
         self.marked_range = None;
         self.scroll_y = 0.0;
         cx.notify();
+    }
+
+    /// Like `set_text`, but shows the text from its first line (form fields).
+    pub fn set_text_from_start(&mut self, text: String, cx: &mut Context<Self>) {
+        self.set_text(text, cx);
+        self.selected_range = 0..0;
     }
 
     pub fn clear(&mut self, cx: &mut Context<Self>) {
@@ -165,6 +175,10 @@ impl ComposerInput {
     }
 
     fn send(&mut self, _: &Send, window: &mut Window, cx: &mut Context<Self>) {
+        if self.enter_inserts_newline {
+            self.replace_text_in_range(None, "\n", window, cx);
+            return;
+        }
         if let Some(cb) = self.on_submit.clone() {
             window.defer(cx, move |window, cx| cb(window, cx));
         }
@@ -787,15 +801,17 @@ impl Element for InputElement {
             .as_ref()
             .map(|l| l.bounds.size.width != bounds.size.width)
             .unwrap_or(true);
-        self.input.update(cx, |input, cx| {
+        self.input.update(cx, |input, _| {
             input.layout = Some(Layout { lines, bounds });
             input.scroll_y = scroll_y;
-            // First layout after a width change or a big insert: re-layout
-            // once more with the measured height.
-            if width_changed || measured.min(MAX_LINES) != laid_out.max(1) {
-                cx.notify();
-            }
         });
+        // First layout after a width change, a big insert, or a programmatic
+        // `set_text`: re-layout once more with the measured height. A notify is
+        // ignored mid-draw; a frame request is not.
+        let grew = width_changed || measured.min(MAX_LINES) != laid_out.max(1);
+        if grew {
+            window.request_animation_frame();
+        }
     }
 }
 

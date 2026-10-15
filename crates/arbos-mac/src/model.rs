@@ -293,6 +293,14 @@ pub enum Part {
         #[serde(default)]
         answered_at: Option<u64>,
     },
+    /// F5: the "Relevant skills" section agentd injected into this turn; always `hidden: true`.
+    Skills {
+        id: Id,
+        #[serde(default)]
+        text: String,
+        #[serde(default)]
+        slugs: Vec<String>,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -307,6 +315,9 @@ fn de_widget<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Widget>, D
     let v = Option::<serde_json::Value>::deserialize(d)?;
     Ok(v.and_then(|v| serde_json::from_value::<Widget>(v).ok()))
 }
+
+/// One skill of the library (F5); the relay's `Skill` shape, reused as the client view.
+pub type Skill = arbos_core::skill::Skill;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

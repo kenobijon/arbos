@@ -7,6 +7,7 @@ pub mod motion;
 pub mod notify;
 pub mod routines;
 pub mod shell;
+pub mod skills;
 pub mod theme;
 pub mod transcript;
 pub mod veil;

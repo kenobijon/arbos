@@ -17,6 +17,7 @@ use crate::ui::connectors::{ConnectorsEvent, ConnectorsPanel};
 use crate::ui::frost::{edge_faded, frosted, rounded_clip, MENU_BLUR, PANEL_BLUR};
 use crate::ui::motion::{ease_out_cubic, PulseClock, COMPOSER_DROP_MS, SHAKE_MS};
 use crate::ui::routines::{RoutinesEvent, RoutinesPanel};
+use crate::ui::skills::SkillsPanel;
 use crate::ui::theme::{
     reapply_window_background, Appearance, Surface, Theme, COMPOSER_HEIGHT, COMPOSER_WIDTH,
     DRAWER_WIDTH, PANEL_RADIUS, RAIL_TILE, RAIL_WIDTH, RAIL_WIDTH_COLLAPSED, RIGHT_PANEL_WIDTH,
@@ -33,6 +34,7 @@ pub struct Shell {
     pairing_input: Entity<ComposerInput>,
     project_input: Entity<ComposerInput>,
     connectors: Entity<ConnectorsPanel>,
+    skills: Entity<SkillsPanel>,
     focus_handle: FocusHandle,
     settings_open: bool,
     routines: Entity<RoutinesPanel>,
@@ -113,6 +115,8 @@ impl Shell {
             },
         )
         .detach();
+        let skills = cx.new(|cx| SkillsPanel::new(state.clone(), cx));
+        cx.observe(&skills, |_, _, cx| cx.notify()).detach();
 
         Self {
             state,
@@ -121,6 +125,7 @@ impl Shell {
             pairing_input,
             project_input,
             connectors,
+            skills,
             focus_handle: cx.focus_handle(),
             settings_open: false,
             routines,
@@ -1118,6 +1123,11 @@ impl Shell {
                     if let Some(c) = &m.return_contract {
                         sections.push(("Return contract".into(), json_rows(c)));
                     }
+                    if let Some((rows, text)) = crate::ui::skills::details_section(&m.hidden_parts)
+                    {
+                        sections.push(("Relevant skills (injected)".into(), rows));
+                        preview = Some(text);
+                    }
                     for p in m.parts.iter().chain(m.hidden_parts.iter()) {
                         if let crate::model::Part::SubagentResult {
                             text,
@@ -1326,6 +1336,7 @@ impl Shell {
         let device = state.device_id.clone();
         let show_details = state.show_details;
         let notify_on = state.notifier.enabled;
+        let skill_count = state.skills.len();
         let glass_ok = Theme::glass_available();
 
         let option = |id: &'static str,
@@ -1519,6 +1530,30 @@ impl Shell {
                             this.settings_open = false;
                             this.routines_open = true;
                             this.routines.update(cx, |p, cx| p.open(cx));
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    div()
+                        .id("settings-skills")
+                        .flex()
+                        .items_center()
+                        .px(px(10.0))
+                        .py(px(6.0))
+                        .rounded(px(6.0))
+                        .text_size(px(12.5))
+                        .text_color(theme.text)
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.surface_2))
+                        .child(div().flex_1().child("Skills"))
+                        .child(
+                            div()
+                                .text_color(theme.text_faint)
+                                .child(format!("{skill_count} in library ›")),
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.settings_open = false;
+                            this.skills.update(cx, |p, cx| p.open(window, cx));
                             cx.notify();
                         })),
                 )
@@ -1814,6 +1849,7 @@ impl Render for Shell {
                     if pairing.is_focused(window)
                         || (shown && project.is_focused(window))
                         || this.connectors.read(cx).input_focused(window, cx)
+                        || this.skills.read(cx).has_focus(window, cx)
                     {
                         return;
                     }
@@ -1858,6 +1894,9 @@ impl Render for Shell {
         }
         if self.routines_open {
             root = root.child(self.routines.clone());
+        }
+        if self.skills.read(cx).open {
+            root = root.child(self.skills.clone());
         }
         if new_project_open {
             root = root.child(self.render_new_project(cx));

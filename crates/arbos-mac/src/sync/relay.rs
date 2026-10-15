@@ -31,7 +31,7 @@ use super::{ClientCommand, SyncEvent, SyncSource};
 use crate::model::{
     new_id, now_ms, Attachment, BoxState, Chat, Connector, ConnectorProvider, ConnectorsView,
     Effort, Id, Link, Message, MessageStatus, Part, Project, ProjectDocView, Role, Routine,
-    RoutineRun, ThreadInfo,
+    RoutineRun, Skill, ThreadInfo,
 };
 
 const HELLO_DEADLINE: Duration = Duration::from_secs(15);
@@ -201,7 +201,27 @@ impl SyncSource for RelaySource {
     }
 }
 
+/// `GET /skills` → `SyncEvent::Skills` (F5).
+async fn refresh_skills(shared: &Arc<Shared>) {
+    match shared.get_json("/skills").await {
+        Ok(v) => {
+            let skills: Vec<Skill> = v
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| serde_json::from_value::<Skill>(s.clone()).ok())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let _ = shared.events.send(SyncEvent::Skills(skills));
+        }
+        Err(err) => shared.notice(format!("Skills: {err:#}")),
+    }
+}
+
 fn start_after_pairing(shared: &Arc<Shared>) {
+    let skills_shared = shared.clone();
+    tokio::spawn(async move { refresh_skills(&skills_shared).await });
     let models_shared = shared.clone();
     tokio::spawn(async move {
         if let Ok(v) = models_shared.get_json("/proxy/v1/models").await {
@@ -1579,6 +1599,62 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     Err(err) => shared.notice(format!("Routine not deleted: {err}")),
                 }
                 refresh_routines(&shared, &project_id).await;
+            });
+        }
+        ClientCommand::SkillsRefresh => {
+            let shared = shared.clone();
+            tokio::spawn(async move { refresh_skills(&shared).await });
+        }
+        ClientCommand::SkillSave { skill } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let body = json!({
+                    "slug": skill.slug, "name": skill.name, "description": skill.description,
+                    "tags": skill.tags, "when_to_use": skill.when_to_use, "body": skill.body,
+                    "shared": skill.shared, "origin_project_id": skill.origin_project_id,
+                });
+                let resp = if skill.id.is_empty() {
+                    shared.post_json("/skills", body).await
+                } else {
+                    let r = shared
+                        .http
+                        .put(format!("{}/skills/{}", shared.http_url, skill.id))
+                        .bearer_auth(shared.token())
+                        .json(&body)
+                        .send()
+                        .await;
+                    match r {
+                        Ok(r) if r.status().is_success() => Ok(Value::Null),
+                        Ok(r) => Err(anyhow!(
+                            "PUT /skills: HTTP {} {}",
+                            r.status(),
+                            r.text().await.unwrap_or_default()
+                        )),
+                        Err(err) => Err(err.into()),
+                    }
+                };
+                match resp {
+                    Ok(_) => shared.notice(format!("Skill \"{}\" saved", skill.name)),
+                    Err(err) => shared.notice(format!("Skill not saved: {err:#}")),
+                }
+                refresh_skills(&shared).await;
+            });
+        }
+        ClientCommand::SkillDelete { id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let r = shared
+                    .http
+                    .delete(format!("{}/skills/{}", shared.http_url, id))
+                    .bearer_auth(shared.token())
+                    .send()
+                    .await;
+                match r {
+                    Ok(r) if r.status().is_success() || r.status().as_u16() == 404 => {}
+                    Ok(r) => shared.notice(format!("Delete skill: HTTP {}", r.status())),
+                    Err(err) => shared.notice(format!("Delete skill: {err}")),
+                }
+                refresh_skills(&shared).await;
             });
         }
     }
