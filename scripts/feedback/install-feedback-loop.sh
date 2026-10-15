@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+# Install (or upgrade) the Arbos feedback loop on the ArbosLife server (Ubuntu, systemd).
+#
+#   sudo -E scripts/feedback/install-feedback-loop.sh                 # install/upgrade, keep the cursor
+#   sudo -E scripts/feedback/install-feedback-loop.sh --since 2026-10-15T19:50:00Z   # (re)start from a date
+#
+# What it does
+#   /opt/arbos-feedback/            feedback_poller.py + agent-prompt.md (copied from this directory)
+#   /etc/arbos/feedback.env         secrets, root:root 0600 — App Store Connect key, Cursor API key,
+#                                   GitHub token. Pulled from the 1Password vault "Arbos" with `op` when
+#                                   OP_SERVICE_ACCOUNT_TOKEN is in the environment (or in /etc/arbos/op.env),
+#                                   else taken from the caller's environment, else kept from the old file.
+#   /etc/arbos/feedback-allowlist.txt  one tester email per line; only these testers trigger a fix
+#   /var/lib/arbos-feedback/        state: cursor.json, launches.json, log.jsonl, <id>/ per item, inbox/
+#   arbos-feedback-poller.{service,timer}   one tick every 2 minutes as user arbos-feedback
+#   /etc/arbos/feedback.disabled    kill file: create it to stop the loop, delete it to resume
+#
+# Environment knobs (written into feedback.env; defaults in brackets):
+#   ASC_KEY_ID [ZV82D3ZWRT]  ASC_ISSUER_ID [4623d589-1653-444a-b497-93116044e272]  ASC_APP_ID [6812503407]
+#   ASC_KEY_P8_B64 (base64 of the .p8; vault: item "Appe Cert Apple Developer", file AuthKey_<id>.p8)
+#   CURSOR_API_KEY (vault: "New New Cursor")   GITHUB_TOKEN (vault: "Arbos GitHub PAT (workflow)")
+#   GITHUB_REPO [unarbos/arbos]  FEEDBACK_ALLOWLIST [jake@bittensor.com]  FEEDBACK_AGENT_MODEL []
+#   FEEDBACK_MIN_INTERVAL_S [600]  FEEDBACK_MAX_PER_DAY [6]
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+INSTALL_DIR=/opt/arbos-feedback
+ENV_FILE=/etc/arbos/feedback.env
+ALLOW_FILE=/etc/arbos/feedback-allowlist.txt
+STATE_DIR=/var/lib/arbos-feedback
+SVC_USER=arbos-feedback
+SINCE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --since) SINCE="$2"; shift 2;;
+    *) echo "unknown arg $1" >&2; exit 2;;
+  esac
+done
+[[ $EUID -eq 0 ]] || { echo "run as root (sudo -E)" >&2; exit 1; }
+
+say() { printf '\n==> %s\n' "$*"; }
+
+say "python"
+python3 -c 'import cryptography' 2>/dev/null || { apt-get update -q && apt-get install -y -q python3-cryptography >/dev/null; }
+
+say "files"
+install -d -m 0755 "$INSTALL_DIR"
+install -m 0755 "$HERE/feedback_poller.py" "$INSTALL_DIR/feedback_poller.py"
+install -m 0644 "$HERE/agent-prompt.md" "$INSTALL_DIR/agent-prompt.md"
+install -m 0644 "$HERE/arbos-feedback-poller.service" /etc/systemd/system/arbos-feedback-poller.service
+install -m 0644 "$HERE/arbos-feedback-poller.timer" /etc/systemd/system/arbos-feedback-poller.timer
+
+say "user + state dir"
+id "$SVC_USER" >/dev/null 2>&1 || useradd --system --home "$STATE_DIR" --shell /usr/sbin/nologin "$SVC_USER"
+install -d -m 0750 -o "$SVC_USER" -g "$SVC_USER" "$STATE_DIR" "$STATE_DIR/inbox"
+mkdir -p /etc/arbos
+
+say "secrets -> $ENV_FILE"
+if [[ -z "${OP_SERVICE_ACCOUNT_TOKEN:-}" && -f /etc/arbos/op.env ]]; then
+  set -a; . /etc/arbos/op.env; set +a
+fi
+export PATH=/usr/local/bin:$PATH
+opread() { op read "$1" 2>/dev/null || true; }
+: "${ASC_KEY_ID:=ZV82D3ZWRT}"
+: "${ASC_ISSUER_ID:=4623d589-1653-444a-b497-93116044e272}"
+: "${ASC_APP_ID:=6812503407}"
+: "${GITHUB_REPO:=unarbos/arbos}"
+if command -v op >/dev/null 2>&1 && [[ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; then
+  if [[ -z "${ASC_KEY_P8_B64:-}" ]]; then
+    p8=$(opread "op://Arbos/phsrnmu3qfpqx6lbumafjo3uom/AuthKey_${ASC_KEY_ID}.p8")
+    [[ -n "$p8" ]] && ASC_KEY_P8_B64=$(printf '%s\n' "$p8" | base64 -w0)
+  fi
+  : "${CURSOR_API_KEY:=$(opread 'op://Arbos/eagoyh7fpynfmzx4xm2agtqaim/notesPlain' | tr -d '[:space:]')}"
+  : "${GITHUB_TOKEN:=$(opread 'op://Arbos/gefompyaklwbv2iuyyb4z5rvbm/credential' | tr -d '[:space:]')}"
+fi
+if [[ -f "$ENV_FILE" ]]; then
+  keep() { local k=$1; [[ -n "${!k:-}" ]] || printf -v "$k" '%s' "$(sed -n "s/^$k=//p" "$ENV_FILE" | head -1)"; }
+  for k in ASC_KEY_P8_B64 CURSOR_API_KEY GITHUB_TOKEN FEEDBACK_ALLOWLIST FEEDBACK_AGENT_MODEL FEEDBACK_MIN_INTERVAL_S FEEDBACK_MAX_PER_DAY; do keep "$k"; done
+fi
+missing=()
+[[ -n "${ASC_KEY_P8_B64:-}" ]] || missing+=(ASC_KEY_P8_B64)
+[[ -n "${CURSOR_API_KEY:-}" ]] || missing+=(CURSOR_API_KEY)
+[[ -n "${GITHUB_TOKEN:-}" ]] || missing+=(GITHUB_TOKEN)
+if [[ ${#missing[@]} -gt 0 ]]; then
+  echo "missing: ${missing[*]} (export them, or give me OP_SERVICE_ACCOUNT_TOKEN for the Arbos vault)" >&2
+  exit 1
+fi
+umask 077
+cat > "$ENV_FILE" <<EOF
+# Arbos feedback loop — written by scripts/feedback/install-feedback-loop.sh on $(date -u +%FT%TZ). root only.
+ASC_KEY_ID=$ASC_KEY_ID
+ASC_ISSUER_ID=$ASC_ISSUER_ID
+ASC_APP_ID=$ASC_APP_ID
+ASC_KEY_P8_B64=$ASC_KEY_P8_B64
+CURSOR_API_KEY=$CURSOR_API_KEY
+FEEDBACK_AGENT_MODEL=${FEEDBACK_AGENT_MODEL:-}
+GITHUB_TOKEN=$GITHUB_TOKEN
+GITHUB_REPO=$GITHUB_REPO
+FEEDBACK_ALLOWLIST=${FEEDBACK_ALLOWLIST:-jake@bittensor.com}
+FEEDBACK_ALLOWLIST_FILE=$ALLOW_FILE
+FEEDBACK_STATE_DIR=$STATE_DIR
+FEEDBACK_KILL_FILE=/etc/arbos/feedback.disabled
+FEEDBACK_MIN_INTERVAL_S=${FEEDBACK_MIN_INTERVAL_S:-600}
+FEEDBACK_MAX_PER_DAY=${FEEDBACK_MAX_PER_DAY:-6}
+EOF
+chmod 0600 "$ENV_FILE"
+umask 022
+if [[ ! -f "$ALLOW_FILE" ]]; then
+  printf '# Testers whose TestFlight screenshot feedback triggers an automatic fix. One email per line.\njake@bittensor.com\n' > "$ALLOW_FILE"
+fi
+chmod 0644 "$ALLOW_FILE"
+
+say "cursor"
+if [[ -n "$SINCE" ]]; then
+  sudo -u "$SVC_USER" env FEEDBACK_STATE_DIR="$STATE_DIR" python3 "$INSTALL_DIR/feedback_poller.py" set-cursor "$SINCE"
+elif [[ ! -f "$STATE_DIR/cursor.json" ]]; then
+  sudo -u "$SVC_USER" env FEEDBACK_STATE_DIR="$STATE_DIR" python3 "$INSTALL_DIR/feedback_poller.py" set-cursor "$(date -u +%FT%TZ)"
+else
+  echo "keeping $(sudo -u "$SVC_USER" env FEEDBACK_STATE_DIR="$STATE_DIR" python3 "$INSTALL_DIR/feedback_poller.py" status | head -1)"
+fi
+
+say "systemd"
+systemctl daemon-reload
+systemctl enable --now arbos-feedback-poller.timer >/dev/null
+systemctl start arbos-feedback-poller.service || true
+sleep 1
+journalctl -u arbos-feedback-poller.service -n 15 --no-pager -o cat || true
+systemctl list-timers arbos-feedback-poller.timer --no-pager | head -3
+echo
+echo "installed. status: sudo systemctl status arbos-feedback-poller.timer; items: sudo -u $SVC_USER env \$(sudo cat $ENV_FILE | xargs) python3 $INSTALL_DIR/feedback_poller.py status"
+echo "stop the loop: sudo touch /etc/arbos/feedback.disabled    resume: sudo rm /etc/arbos/feedback.disabled"

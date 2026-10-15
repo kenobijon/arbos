@@ -1,0 +1,19 @@
+[Unit]
+Description=Arbos feedback loop: TestFlight screenshot feedback -> Cursor agent -> main -> TestFlight (one tick)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=!/etc/arbos/feedback.disabled
+
+[Service]
+Type=oneshot
+User=arbos-feedback
+Group=arbos-feedback
+EnvironmentFile=/etc/arbos/feedback.env
+ExecStart=/usr/bin/python3 /opt/arbos-feedback/feedback_poller.py run
+TimeoutStartSec=15min
+StateDirectory=arbos-feedback
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/arbos-feedback
