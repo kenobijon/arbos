@@ -74,6 +74,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var models: [String] = []
     @Published var machine: Machine = .unknown
     @Published private(set) var machineBusy = false
+    /// `machine.always_on` as last reported by `GET /me` (nil = field absent).
+    private var meAlwaysOn: Bool?
     /// Navigation: home → chat. Shared so menus anywhere can open a chat.
     @Published var path: [Route] = []
     /// True when the Debug fixture replaced the relay (screenshots).
@@ -223,9 +225,16 @@ final class AppModel: ObservableObject {
     func refreshAccount() async {
         guard credentials != nil, !isFixture else { return }
         if tokens?.isExpiringSoon == true { _ = await refreshTokens() }
-        if let (who, cr, _) = try? await api.me() {
+        if let (who, cr, summary) = try? await api.me() {
             user = who
             credits = cr
+            if let on = (summary["always_on"] as? Bool) ?? (summary["always_on"] as? NSNumber)?.boolValue {
+                meAlwaysOn = on
+                if on, !machine.alwaysOn {
+                    machine.alwaysOn = true
+                    machine.state = machine.coerced(machine.state)
+                }
+            }
         }
         if let list = try? await api.approvals() { approvals = list }
     }
@@ -534,8 +543,9 @@ final class AppModel: ObservableObject {
         projects[i].state = state
         projects[i].stateDetail = detail
         // Room STATUS frames report the user's box (D70): the machine moved too.
-        if machine.reported, machine.state != state, state != .error {
-            machine.state = state
+        let shown = machine.coerced(state)
+        if machine.reported, machine.state != shown, state != .error {
+            machine.state = shown
             machine.since = nowMs()
         }
     }
@@ -543,7 +553,12 @@ final class AppModel: ObservableObject {
     /// `GET /machine`: state, since, spec, spend and the workspace states.
     func refreshMachine() async {
         do {
-            let m = try await api.machine()
+            var m = try await api.machine()
+            // `/me` may carry `always_on` on relays whose `/machine` does not.
+            if meAlwaysOn == true, !m.alwaysOn {
+                m.alwaysOn = true
+                m.state = m.coerced(m.state)
+            }
             machineError = nil
             if m != machine { machine = m }
             for i in projects.indices {
@@ -571,7 +586,7 @@ final class AppModel: ObservableObject {
     func startMachine() {
         guard !machineBusy else { return }
         machineBusy = true
-        machine.state = .waking
+        machine.state = machine.coerced(.waking)
         machine.since = nowMs()
         Task {
             defer { machineBusy = false }
@@ -597,6 +612,25 @@ final class AppModel: ObservableObject {
                 machine.since = nowMs()
             } catch {
                 notice = Notice(text: "Stop failed: \(error.localizedDescription)")
+            }
+            await refreshMachine()
+        }
+    }
+
+    /// Always-on boxes (D73): the one control is a restart. The state stays
+    /// awake throughout; `machineBusy` is the only progress signal.
+    func restartMachine() {
+        guard !machineBusy else { return }
+        machineBusy = true
+        Task {
+            defer { machineBusy = false }
+            do {
+                try await api.restartMachine()
+                machine.since = nowMs()
+            } catch {
+                notice = Notice(text: "Restart failed: \(error.localizedDescription)")
+                machine.state = .error
+                machineError = error.localizedDescription
             }
             await refreshMachine()
         }
@@ -989,7 +1023,7 @@ final class AppModel: ObservableObject {
     func wake(projectId: Id, reason: String) {
         rooms[projectDocKey(projectId)]?.wake(reason: reason)
         setProjectState(projectId, .waking, detail: nil)
-        machine.state = .waking
+        machine.state = machine.coerced(.waking)
         machine.since = nowMs()
         Task {
             do {

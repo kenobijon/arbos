@@ -88,10 +88,20 @@ struct Machine: Equatable {
     var spendCapUsd: Double = 0
     /// Workspace state per project id.
     var workspaces: [Id: WorkspaceState] = [:]
+    /// `always_on` (D73): the relay never stops this box, so it is only ever
+    /// awake or in error — no waking/sleeping states, and machine spend is
+    /// informational (not taken from credits). False when the field is absent.
+    var alwaysOn = false
     /// False until the relay has answered `/machine` once.
     var reported = false
 
     static let unknown = Machine(state: .hibernatedLight, since: nil, spec: "")
+
+    /// The state the UI may show: always-on boxes collapse everything but
+    /// error onto awake.
+    func coerced(_ s: BoxState) -> BoxState {
+        alwaysOn && s != .error ? .awake : s
+    }
 
     var label: String {
         switch state {

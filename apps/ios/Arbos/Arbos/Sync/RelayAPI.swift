@@ -227,8 +227,10 @@ final class RelayAPI {
                 workspaces[pid] = WorkspaceState.from(w["state"] as? String)
             }
         }
+        let alwaysOn = (m["always_on"] as? Bool) ?? ((m["always_on"] as? NSNumber)?.boolValue ?? false)
+        let wire = BoxState.fromWire(m["state"] as? String ?? "") ?? .hibernatedLight
         return Machine(
-            state: BoxState.fromWire(m["state"] as? String ?? "") ?? .hibernatedLight,
+            state: alwaysOn && wire != .error ? .awake : wire,
             since: (m["since"] as? NSNumber)?.int64Value,
             spec: Machine.specLine(
                 cpu: (spec["cpu"] as? NSNumber)?.intValue,
@@ -242,6 +244,7 @@ final class RelayAPI {
             spendTodayUsd: (m["spend_today_usd"] as? NSNumber)?.doubleValue ?? 0,
             spendCapUsd: (m["spend_cap_usd"] as? NSNumber)?.doubleValue ?? 0,
             workspaces: workspaces,
+            alwaysOn: alwaysOn,
             reported: true
         )
     }
@@ -252,6 +255,18 @@ final class RelayAPI {
 
     func stopMachine() async throws {
         _ = try await json("POST", "/machine/stop", body: [String: Any]())
+    }
+
+    /// Always-on boxes (D73) are restarted, never stopped. Uses
+    /// `POST /machine/restart` when the relay has it and falls back to
+    /// stop → start on relays that predate the route.
+    func restartMachine() async throws {
+        do {
+            _ = try await json("POST", "/machine/restart", body: [String: Any]())
+        } catch let error as RelayError where error.status == 404 || error.status == 405 {
+            try await stopMachine()
+            try await startMachine()
+        }
     }
 
     /// Model ids the relay proxy can serve, filtered like the Mac client.

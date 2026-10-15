@@ -412,7 +412,7 @@ struct ChatView: View {
     private var machineBannerText: String? {
         switch model.machine.state {
         case .waking: return "Waking your machine…"
-        case .error: return model.machineDetail.map { "Machine: \($0)" } ?? "Could not wake your machine"
+        case .error: return model.machineDetail.map { "Machine: \($0)" } ?? (model.machine.alwaysOn ? "Your machine needs attention" : "Could not wake your machine")
         case .awake, .hibernatedLight, .hibernatedDeep, .stoppedByUser: return model.link == .reconnecting ? "Reconnecting…" : nil
         }
     }

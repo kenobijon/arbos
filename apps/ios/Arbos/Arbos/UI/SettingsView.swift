@@ -51,8 +51,13 @@ struct SettingsView: View {
                         Text("State")
                         Spacer()
                         HStack(spacing: 7) {
-                            Circle().fill(machineDotColor(model.machine.state, theme: theme)).frame(width: 8, height: 8)
-                            Text(model.machine.label).foregroundStyle(theme.muted)
+                            if model.machine.alwaysOn, model.machineBusy {
+                                ProgressView().controlSize(.mini).tint(theme.muted)
+                                Text("Restarting…").foregroundStyle(theme.muted)
+                            } else {
+                                Circle().fill(machineDotColor(model.machine.state, theme: theme)).frame(width: 8, height: 8)
+                                Text(model.machine.label).foregroundStyle(theme.muted)
+                            }
                         }
                     }
                     if let since = model.machine.since, since > 0 {
@@ -63,7 +68,16 @@ struct SettingsView: View {
                             .multilineTextAlignment(.trailing)
                     }
                     if model.machine.reported {
-                        LabeledContent("Spend today", value: String(format: "$%.2f of $%.0f", model.machine.spendTodayUsd, model.machine.spendCapUsd))
+                        if model.machine.alwaysOn {
+                            LabeledContent("Machine spend today") {
+                                VStack(alignment: .trailing, spacing: 2) {
+                                    Text(String(format: "$%.2f", model.machine.spendTodayUsd))
+                                    Text("Not taken from credits").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                                }
+                            }
+                        } else {
+                            LabeledContent("Spend today", value: String(format: "$%.2f of $%.0f", model.machine.spendTodayUsd, model.machine.spendCapUsd))
+                        }
                         LabeledContent("Workspaces", value: "\(model.machine.workspaces.values.filter { $0 == .active }.count) running · \(model.machine.workspaces.count) total")
                         if let id = model.machine.sandboxId, !id.isEmpty {
                             LabeledContent("Sandbox") {
@@ -71,18 +85,25 @@ struct SettingsView: View {
                             }
                         }
                     }
-                    switch model.machine.state {
-                    case .awake, .waking:
-                        Button("Stop machine", role: .destructive) { model.stopMachine() }
+                    if model.machine.alwaysOn {
+                        Button("Restart machine") { model.restartMachine() }
                             .disabled(model.machineBusy)
-                    case .hibernatedLight, .hibernatedDeep, .stoppedByUser, .error:
-                        Button("Start machine") { model.startMachine() }
-                            .disabled(model.machineBusy)
+                    } else {
+                        switch model.machine.state {
+                        case .awake, .waking:
+                            Button("Stop machine", role: .destructive) { model.stopMachine() }
+                                .disabled(model.machineBusy)
+                        case .hibernatedLight, .hibernatedDeep, .stoppedByUser, .error:
+                            Button("Start machine") { model.startMachine() }
+                                .disabled(model.machineBusy)
+                        }
                     }
                 } header: {
                     Text("Machine")
                 } footer: {
-                    Text("Your one cloud computer. Projects are workspaces on it; a message to any project wakes it.")
+                    Text(model.machine.alwaysOn
+                         ? "Your one cloud computer, always on. Projects are workspaces on it. Machine time is billed separately from your credits."
+                         : "Your one cloud computer. Projects are workspaces on it; a message to any project wakes it.")
                 }
                 .listRowBackground(theme.card)
 
