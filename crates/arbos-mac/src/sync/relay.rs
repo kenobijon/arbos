@@ -29,8 +29,8 @@ use super::credentials::{self, DeviceCredentials};
 use super::doc::ChatDoc;
 use super::{ClientCommand, SyncEvent, SyncSource};
 use crate::model::{
-    new_id, now_ms, Attachment, BoxState, Chat, Effort, Id, Link, Message, MessageStatus, Part,
-    Project, ProjectDocView, Role, ThreadInfo,
+    new_id, now_ms, Attachment, BoxState, Chat, Connector, ConnectorProvider, ConnectorsView,
+    Effort, Id, Link, Message, MessageStatus, Part, Project, ProjectDocView, Role, ThreadInfo,
 };
 
 const HELLO_DEADLINE: Duration = Duration::from_secs(15);
@@ -228,6 +228,12 @@ fn start_after_pairing(shared: &Arc<Shared>) {
             }
         }
     });
+    {
+        let shared = shared.clone();
+        tokio::spawn(async move {
+            refresh_connectors(&shared).await;
+        });
+    }
     let shared = shared.clone();
     tokio::spawn(async move {
         let mut poll = interval(REGISTRY_POLL);
@@ -1374,6 +1380,67 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             });
         }
+        ClientCommand::RefreshConnectors => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                refresh_connectors(&shared).await;
+            });
+        }
+        ClientCommand::ConnectorConnect { provider, token } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let body = match token {
+                    Some(t) => json!({ "token": t }),
+                    None => json!({}),
+                };
+                match shared
+                    .post_json(&format!("/connectors/{provider}/connect"), body)
+                    .await
+                {
+                    Ok(v) => {
+                        if let Some(url) = v.get("authUrl").and_then(Value::as_str) {
+                            let _ = shared.events.send(SyncEvent::ConnectorAuth {
+                                provider: provider.clone(),
+                                auth_url: url.to_string(),
+                            });
+                        } else if let Some(c) = v.get("connector") {
+                            let status = c["status"].as_str().unwrap_or("");
+                            if status == "connected" {
+                                shared.notice(format!("{provider} connected."));
+                            } else {
+                                shared.notice(format!(
+                                    "{provider}: {status} {}",
+                                    c["last_error"].as_str().unwrap_or("")
+                                ));
+                            }
+                        }
+                        // The loopback callback lands out of band: poll the list for a while.
+                        for wait in [0u64, 4, 8, 15, 30, 60] {
+                            sleep(Duration::from_secs(wait)).await;
+                            refresh_connectors(&shared).await;
+                        }
+                    }
+                    Err(err) => shared.notice(format!("Connect {provider}: {err:#}")),
+                }
+            });
+        }
+        ClientCommand::ConnectorDisconnect { id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let resp = shared
+                    .http
+                    .delete(format!("{}/connectors/{}", shared.http_url, id))
+                    .bearer_auth(shared.token())
+                    .send()
+                    .await;
+                match resp {
+                    Ok(r) if r.status().is_success() => {}
+                    Ok(r) => shared.notice(format!("Disconnect: HTTP {}", r.status())),
+                    Err(err) => shared.notice(format!("Disconnect: {err}")),
+                }
+                refresh_connectors(&shared).await;
+            });
+        }
         ClientCommand::WatchBrowser { project_id, on } => {
             let mut watches = shared.browser_watch.lock().unwrap();
             if let Some(task) = watches.remove(&project_id) {
@@ -1402,6 +1469,46 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             }
         }
     }
+}
+
+/// Settings → Connectors: `GET /connectors/catalog` + `GET /connectors` → one view (F1).
+async fn refresh_connectors(shared: &Arc<Shared>) {
+    let (catalog, list) = tokio::join!(
+        shared.get_json("/connectors/catalog"),
+        shared.get_json("/connectors")
+    );
+    let (catalog, list) = match (catalog, list) {
+        (Ok(c), Ok(l)) => (c, l),
+        (Err(err), _) | (_, Err(err)) => {
+            // Older relays have no connectors; stay quiet unless it is a real failure.
+            if !format!("{err:#}").contains("HTTP 404") {
+                shared.notice(format!("Connectors: {err:#}"));
+            }
+            return;
+        }
+    };
+    let providers: Vec<ConnectorProvider> = catalog["providers"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|p| serde_json::from_value(p.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    let items: Vec<Connector> = list["items"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|c| serde_json::from_value(c.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    let _ = shared.events.send(SyncEvent::Connectors(ConnectorsView {
+        mock: list["mock"].as_bool().unwrap_or(false),
+        providers,
+        items,
+        loaded: true,
+    }));
 }
 
 /// S16: the box's `/browser/stream` (agentd proxies agent-browser's JPEG

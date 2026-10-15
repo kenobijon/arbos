@@ -1,5 +1,6 @@
 pub mod cards;
 pub mod composer;
+pub mod connectors;
 pub mod frost;
 pub mod markdown;
 pub mod motion;

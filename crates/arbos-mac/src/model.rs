@@ -420,6 +420,89 @@ pub struct ProjectDocView {
     pub model_note: String,
 }
 
+/// `connectors.status` as the relay reports it (F1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectorStatus {
+    Connected,
+    NeedsAuth,
+    Error,
+    #[serde(other)]
+    Other,
+}
+
+impl ConnectorStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            ConnectorStatus::Connected => "Connected",
+            ConnectorStatus::NeedsAuth => "Needs sign-in",
+            ConnectorStatus::Error => "Error",
+            ConnectorStatus::Other => "Unknown",
+        }
+    }
+}
+
+/// One connected account (`GET /connectors` item). Never carries a token.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Connector {
+    pub id: Id,
+    pub provider: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    pub status: ConnectorStatus,
+    #[serde(default)]
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub mock: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ConnectorAction {
+    pub name: String,
+    pub kind: String,
+}
+
+/// One catalog entry (`GET /connectors/catalog`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ConnectorProvider {
+    pub provider: String,
+    pub label: String,
+    /// `oauth | oauth_or_token | token`.
+    #[serde(default)]
+    pub connect: String,
+    #[serde(default)]
+    pub oauth_configured: bool,
+    #[serde(default)]
+    pub actions: Vec<ConnectorAction>,
+}
+
+impl ConnectorProvider {
+    pub fn accepts_token(&self) -> bool {
+        self.connect == "token" || self.connect == "oauth_or_token"
+    }
+
+    pub fn has_oauth(&self) -> bool {
+        self.connect == "oauth" || self.connect == "oauth_or_token"
+    }
+}
+
+/// Settings → Connectors state.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ConnectorsView {
+    pub mock: bool,
+    pub providers: Vec<ConnectorProvider>,
+    pub items: Vec<Connector>,
+    pub loaded: bool,
+}
+
+impl ConnectorsView {
+    pub fn connector_for(&self, provider: &str) -> Option<&Connector> {
+        self.items.iter().find(|c| c.provider == provider)
+    }
+}
+
 /// Connection to the relay, S14.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Link {

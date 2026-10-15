@@ -12,8 +12,8 @@ use gpui_tokio::Tokio;
 use tokio::sync::mpsc;
 
 use crate::model::{
-    new_id, now_ms, BoxState, Chat, Effort, Id, Link, Message, MessageStatus, Part, Project,
-    ProjectDocView, Role, StatusKind,
+    new_id, now_ms, BoxState, Chat, ConnectorsView, Effort, Id, Link, Message, MessageStatus, Part,
+    Project, ProjectDocView, Role, StatusKind,
 };
 use crate::sync::{ClientCommand, SyncEvent, SyncSource};
 
@@ -93,6 +93,8 @@ pub struct AppState {
     pub new_project_open: bool,
     /// Debug: per-message "Show details" disclosures in the transcript.
     pub show_details: bool,
+    /// Settings → Connectors (F1).
+    pub connectors: ConnectorsView,
     awaiting_new_project: bool,
     commands: mpsc::UnboundedSender<ClientCommand>,
     _pump: Task<()>,
@@ -152,6 +154,7 @@ impl AppState {
             details_open: None,
             new_project_open: false,
             show_details: false,
+            connectors: ConnectorsView::default(),
             awaiting_new_project: false,
             commands: command_tx,
             _pump: pump,
@@ -340,6 +343,17 @@ impl AppState {
             }
             SyncEvent::Link(link) => {
                 self.link = link;
+                cx.notify();
+            }
+            SyncEvent::Connectors(view) => {
+                self.connectors = view;
+                cx.notify();
+            }
+            SyncEvent::ConnectorAuth { provider, auth_url } => {
+                cx.open_url(&auth_url);
+                self.push_notice(format!(
+                    "Opened the browser to connect {provider}; the relay finishes the sign-in."
+                ));
                 cx.notify();
             }
         }
@@ -747,6 +761,34 @@ impl AppState {
             self.browser_frame = None;
         }
         self.command(ClientCommand::WatchBrowser { project_id, on });
+        cx.notify();
+    }
+
+    // ----- connectors (F1) -------------------------------------------------
+
+    pub fn refresh_connectors(&mut self, cx: &mut Context<Self>) {
+        self.command(ClientCommand::RefreshConnectors);
+        cx.notify();
+    }
+
+    pub fn connect_connector(
+        &mut self,
+        provider: String,
+        token: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.push_notice(if token.is_some() {
+            format!("Saving the {provider} token on the relay…")
+        } else {
+            format!("Starting {provider} sign-in…")
+        });
+        self.command(ClientCommand::ConnectorConnect { provider, token });
+        cx.notify();
+    }
+
+    pub fn disconnect_connector(&mut self, id: Id, cx: &mut Context<Self>) {
+        self.connectors.items.retain(|c| c.id != id);
+        self.command(ClientCommand::ConnectorDisconnect { id });
         cx.notify();
     }
 

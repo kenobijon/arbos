@@ -18,7 +18,9 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 use tokio::sync::mpsc;
 
-use crate::model::{BoxState, Chat, Effort, Id, Link, Message, Project, ProjectDocView};
+use crate::model::{
+    BoxState, Chat, ConnectorsView, Effort, Id, Link, Message, Project, ProjectDocView,
+};
 
 /// Something the source learned; the UI applies it to its mirror.
 #[derive(Clone, Debug)]
@@ -86,6 +88,13 @@ pub enum SyncEvent {
     Link(Link),
     /// Short user-facing notice (errors from HTTP calls, etc.).
     Notice(String),
+    /// Settings → Connectors: catalog + connected accounts (F1).
+    Connectors(ConnectorsView),
+    /// An OAuth flow started: open this URL in the browser; the relay finishes the callback.
+    ConnectorAuth {
+        provider: String,
+        auth_url: String,
+    },
 }
 
 /// Something the user did; the source writes it into the doc / outbox.
@@ -146,6 +155,16 @@ pub enum ClientCommand {
     WatchBrowser {
         project_id: Id,
         on: bool,
+    },
+    /// Settings → Connectors opened or asked for a refresh.
+    RefreshConnectors,
+    /// Connect a provider: OAuth when `token` is `None`, else store the pasted token.
+    ConnectorConnect {
+        provider: String,
+        token: Option<String>,
+    },
+    ConnectorDisconnect {
+        id: Id,
     },
 }
 
