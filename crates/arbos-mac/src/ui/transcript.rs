@@ -14,6 +14,7 @@ use gpui::{
 use crate::app::{AppEvent, AppState, DetailsTarget};
 use crate::model::{Attachment, Id, Message, MessageStatus, Part, Role, StatusKind};
 use crate::ui::approve::{approval_card, ApprovalView};
+use crate::ui::attachments;
 use crate::ui::cards;
 use crate::ui::frost::edge_faded;
 use crate::ui::markdown::{inline_spans, split_blocks, Block};
@@ -342,39 +343,21 @@ impl Transcript {
                     .into_any_element()
             }
             RowKind::Attachment { attachment } => {
-                let state = self.state.clone();
-                let key = attachment.blob_ref.clone();
+                let thumbnail = attachment
+                    .blob_ref
+                    .as_ref()
+                    .and_then(|k| self.state.read(cx).thumbnails.get(k).cloned());
                 div()
-                    .id(SharedString::from(row.id.clone()))
                     .w_full()
                     .py(px(4.0))
                     .flex()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .px(px(10.0))
-                            .py(px(6.0))
-                            .rounded(px(8.0))
-                            .bg(theme.card())
-                            .border_1()
-                            .border_color(theme.border)
-                            .text_size(px(12.5))
-                            .text_color(theme.text)
-                            .cursor_pointer()
-                            .hover(|s| s.border_color(theme.border_strong))
-                            .child(div().text_color(theme.text_faint).child("📎"))
-                            .child(attachment.name.clone()),
-                    )
-                    .on_click(move |_, _, cx| {
-                        if let Some(key) = key.clone() {
-                            state.update(cx, |s, cx| {
-                                s.fetch_blob(key.clone(), false, cx);
-                                s.open_details(DetailsTarget::Blob(key), cx);
-                            });
-                        }
-                    })
+                    .child(attachments::card(
+                        &row.id,
+                        &attachment,
+                        thumbnail,
+                        self.state.clone(),
+                        &theme,
+                    ))
                     .into_any_element()
             }
             RowKind::AskUser { text } => {
@@ -639,7 +622,10 @@ pub fn build_rows(messages: &[Message], show_details: bool) -> Vec<Row> {
                             }
                         }
                         Part::Attachment { id, attachment } => rows.push(Row {
-                            version: hash_version(&attachment.name, false),
+                            version: hash_version(
+                                &(&attachment.name, &attachment.title, attachment.bytes),
+                                false,
+                            ),
                             id: format!("{}#{}", message.id, id),
                             message_id: message.id.clone(),
                             kind: RowKind::Attachment {

@@ -2,7 +2,7 @@
 //! Tools: history_search, history_read, read_thread, memory_search, memory_read,
 //! peek, sub_llm, remember, recall, projects_list, projects_send, ask_user,
 //! spawn_subagent, wake_subagent, connectors_list, connector_call, local_devices,
-//! local_run, local_read, local_list.
+//! local_run, local_read, local_list, deliver_file, generate_image.
 
 use std::sync::Arc;
 
@@ -63,6 +63,7 @@ fn tools() -> Value {
     if let Some(a) = list.as_array_mut() {
         a.extend(crate::connectors::tool_specs());
         a.extend(crate::local::tool_specs());
+        a.extend(crate::media::tool_specs());
     }
     list
 }
@@ -576,6 +577,8 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
         "local_run" | "local_read" | "local_list" => {
             crate::local::local_call(a, name, args, &chat_for_scratch).await
         }
+        "deliver_file" => crate::media::deliver_file(a, args).await,
+        "generate_image" => crate::media::generate_image(a, args).await,
         _ => err_result(format!("unknown tool {name}")),
     }
 }

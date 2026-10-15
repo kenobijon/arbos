@@ -1,4 +1,5 @@
 pub mod approve;
+pub mod attachments;
 pub mod cards;
 pub mod channels;
 pub mod composer;

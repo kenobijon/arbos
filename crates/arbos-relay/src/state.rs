@@ -21,6 +21,8 @@ pub struct Config {
     pub anthropic_key: Option<String>,
     pub openai_key: Option<String>,
     pub openai_base: String,
+    /// Upstream for `/proxy/v1/images/generations` (OpenAI's own API; OpenRouter has no images endpoint).
+    pub openai_images_base: String,
     pub anthropic_base: String,
     pub daytona_snapshot: String,
     /// Inline Dockerfile for Daytona's declarative builder when the snapshot is not registered.
@@ -34,6 +36,8 @@ pub struct Config {
     pub connectors_mock: bool,
     /// `ARBOS_CHANNELS_MOCK=1`: channel sends land in `channel_outbox`; `/channels/mock/inbound` is open (F7).
     pub channels_mock: bool,
+    /// `ARBOS_IMAGE_MOCK=1`: image generation answers with a labelled placeholder PNG (F10).
+    pub image_mock: bool,
 }
 
 /// One frame to fan out to the other sockets in a room.

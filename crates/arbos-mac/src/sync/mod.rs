@@ -80,6 +80,15 @@ pub enum SyncEvent {
         bytes: Arc<Vec<u8>>,
         saved_to: Option<PathBuf>,
     },
+    /// Bytes of an image attachment for its inline thumbnail (F10); keys are content hashes.
+    Thumbnail {
+        key: String,
+        bytes: Arc<Vec<u8>>,
+    },
+    /// An attachment landed in ~/Downloads (F10); the app reveals it.
+    AttachmentSaved {
+        path: PathBuf,
+    },
     /// One JPEG frame from the box's browser stream (S16).
     BrowserFrame {
         project_id: Id,
@@ -186,6 +195,17 @@ pub enum ClientCommand {
     WatchBrowser {
         project_id: Id,
         on: bool,
+    },
+    /// Fetch an image attachment's bytes for the inline thumbnail (F10).
+    FetchThumbnail {
+        project_id: Id,
+        key: String,
+    },
+    /// Download an attachment to `~/Downloads/<name>` (F10).
+    DownloadAttachment {
+        project_id: Id,
+        key: String,
+        name: String,
     },
     /// Settings → Connectors opened or asked for a refresh.
     RefreshConnectors,

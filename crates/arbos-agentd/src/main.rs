@@ -9,6 +9,7 @@ mod http;
 mod llm;
 mod local;
 mod mcp;
+mod media;
 mod memory;
 mod routines;
 mod rpc_child;

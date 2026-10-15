@@ -314,6 +314,7 @@ impl PrimeAdapter {
                 self.cfg.audit_path().display().to_string(),
             ),
             ("ARBOS_MCP_TOKEN".into(), self.cfg.mcp_token.clone()),
+            ("ARBOS_MCP_URL".into(), self.cfg.mcp_url()),
             ("ARBOS_BOX_TOKEN".into(), self.cfg.box_token.clone()),
             (
                 "ARBOS_MODEL_PROXY_URL".into(),
@@ -577,6 +578,7 @@ impl PiAdapter {
             ),
             ("ARBOS_HOOK_URL".into(), cfg.hook_base()),
             ("ARBOS_MCP_TOKEN".into(), cfg.mcp_token.clone()),
+            ("ARBOS_MCP_URL".into(), cfg.mcp_url()),
             ("ARBOS_BOX_TOKEN".into(), cfg.box_token.clone()),
         ]
     }

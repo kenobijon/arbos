@@ -20,12 +20,12 @@ use crate::model::{ProjectDocView, ThreadInfo};
 use super::doc::ChatDoc;
 use super::{ClientCommand, SyncEvent, SyncSource};
 use crate::model::{
-    new_id, now_ms, ApprovalRisk, ApprovalState, Attachment, BoxState, ChannelBinding,
-    ChannelPairing, ChannelPlatform, ChannelPlatformState, ChannelsView, Chat, ChoiceOption,
-    Connector, ConnectorAction, ConnectorProvider, ConnectorStatus, ConnectorsView, Effort,
-    FieldKind, FormField, Id, Link, LocalDevice, LocalView, Message, MessageStatus, Part, Project,
-    QuestionState, Role, Routine, RoutineRun, RoutineRunStatus, RoutineTrigger, Skill, StatusKind,
-    ToolCall, ToolStatus, TurnKind, Widget,
+    new_id, now_ms, ApprovalRisk, ApprovalState, Attachment, AttachmentKind, BoxState,
+    ChannelBinding, ChannelPairing, ChannelPlatform, ChannelPlatformState, ChannelsView, Chat,
+    ChoiceOption, Connector, ConnectorAction, ConnectorProvider, ConnectorStatus, ConnectorsView,
+    Effort, FieldKind, FormField, Id, Link, LocalDevice, LocalView, Message, MessageStatus, Part,
+    Project, QuestionState, Role, Routine, RoutineRun, RoutineRunStatus, RoutineTrigger, Skill,
+    StatusKind, ToolCall, ToolStatus, TurnKind, Widget,
 };
 
 pub const STREAM_FRAME_MS: u64 = arbos_core::STREAM_COMMIT_MS;
@@ -40,6 +40,7 @@ pub const CHAT_ARBOS_RESEARCH: &str = "01J9CHAT0RESEARCH000000000";
 pub const CHAT_ARBOS_LAUNCH: &str = "01J9CHAT0LAUNCH00000000000";
 pub const CHAT_ARBOS_WIDGETS: &str = "01J9CHAT0WIDGETS0000000000";
 pub const CHAT_ARBOS_DRAFTS: &str = "01J9CHAT0DRAFTS00000000000";
+pub const CHAT_ARBOS_MEDIA: &str = "01J9CHAT0MEDIA000000000000";
 pub const CHAT_AFFINE_MAIN: &str = "01J9CHAT0AFFINE00000000000";
 pub const CHAT_COMMS_MAIN: &str = "01J9CHAT0COMMS000000000000";
 
@@ -199,6 +200,9 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                                     .to_string(),
                                 mime: "application/octet-stream".into(),
                                 blob_ref: None,
+                                bytes: None,
+                                kind: None,
+                                title: None,
                             },
                         })
                         .collect();
@@ -460,6 +464,37 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 bytes: Arc::new(body.into_bytes()),
                 saved_to,
             });
+        }
+        ClientCommand::FetchThumbnail { key, .. } => {
+            let _ = shared.events.send(SyncEvent::Thumbnail {
+                bytes: Arc::new(fixture_png(&key)),
+                key,
+            });
+        }
+        ClientCommand::DownloadAttachment {
+            project_id,
+            key,
+            name,
+        } => {
+            let bytes = if key.ends_with(".png") || name.ends_with(".png") {
+                fixture_png(&key)
+            } else {
+                format!(
+                    "Fixture attachment {name} ({key}) for project {project_id}.\nThe relay source downloads the real bytes from GET /blob/{{project}}/{{key}}.\n"
+                )
+                .into_bytes()
+            };
+            let path = super::relay::unique_download_path(&name.replace('/', "_"));
+            match std::fs::write(&path, &bytes) {
+                Ok(()) => {
+                    let _ = shared.events.send(SyncEvent::AttachmentSaved { path });
+                }
+                Err(err) => {
+                    let _ = shared
+                        .events
+                        .send(SyncEvent::Notice(format!("Could not save {name}: {err}")));
+                }
+            }
         }
         ClientCommand::WatchBrowser { on: true, .. } => {
             let _ = shared.events.send(SyncEvent::Notice(
@@ -2302,6 +2337,7 @@ fn seed_chats() -> Vec<Chat> {
             false,
             12,
         ),
+        chat(CHAT_ARBOS_MEDIA, PROJECT_ARBOS, "Deliverables", false, 18),
         chat(CHAT_AFFINE_MAIN, PROJECT_AFFINE, "Affine", true, 60 * 26),
         chat(CHAT_COMMS_MAIN, PROJECT_COMMS, "Comms", true, 60 * 5),
     ]
@@ -2495,6 +2531,44 @@ fn text(s: &str) -> Part {
         id: new_id(),
         text: s.into(),
     }
+}
+
+fn attachment(name: &str, mime: &str, kind: AttachmentKind, title: &str, bytes: u64) -> Part {
+    Part::Attachment {
+        id: new_id(),
+        attachment: Attachment {
+            name: name.into(),
+            mime: mime.into(),
+            blob_ref: Some(format!("seed-{name}")),
+            bytes: Some(bytes),
+            kind: Some(kind),
+            title: Some(title.into()),
+        },
+    }
+}
+
+/// A 320×200 PNG (diagonal gradient tinted from the key) for fixture thumbnails and downloads.
+fn fixture_png(key: &str) -> Vec<u8> {
+    let seed = key.bytes().fold(0x811c_9dc5u32, |a, b| {
+        (a ^ b as u32).wrapping_mul(0x0100_0193)
+    });
+    let (w, h) = (320u32, 200u32);
+    let img = image::RgbImage::from_fn(w, h, |x, y| {
+        let fx = x as f32 / w as f32;
+        let fy = y as f32 / h as f32;
+        let r = 60.0 + (seed & 0x3F) as f32 + 110.0 * fx;
+        let g = 70.0 + ((seed >> 8) & 0x3F) as f32 + 90.0 * fy;
+        let b = 120.0 + ((seed >> 16) & 0x3F) as f32 + 60.0 * (1.0 - fx);
+        let edge = x < 6 || y < 6 || x + 6 >= w || y + 6 >= h;
+        if edge {
+            image::Rgb([245, 245, 245])
+        } else {
+            image::Rgb([r as u8, g as u8, b as u8])
+        }
+    });
+    let mut out = std::io::Cursor::new(Vec::new());
+    let _ = img.write_to(&mut out, image::ImageFormat::Png);
+    out.into_inner()
 }
 
 fn tool(name: &str, input: &str, out: &str, ms: u64) -> Part {
@@ -2764,6 +2838,32 @@ fn seed_docs(shared: &Arc<Shared>) {
         drafts.commit();
     }
     add_doc(shared, drafts);
+    let media = ChatDoc::new(CHAT_ARBOS_MEDIA, PROJECT_ARBOS);
+    {
+        let mut s = Seeder {
+            doc: &media,
+            t: base + 2_400_000,
+        };
+        s.user("Put together the Q3 review pack: deck, budget sheet, one-pager, PDF export, a cover image, the teaser clip and the voice-over.");
+        s.assistant(
+            TurnKind::Act,
+            MessageStatus::Done,
+            vec![
+                text("Here is the Q3 review pack. Each file is ready to download."),
+                attachment("q3-cover.png", "image/png", AttachmentKind::Image, "Q3 cover image", 418_000),
+                attachment("q3-review.pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation", AttachmentKind::Slides, "Q3 review deck · 12 slides", 2_310_000),
+                attachment("q3-budget.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", AttachmentKind::Sheet, "Q3 budget vs. actuals", 61_000),
+                attachment("q3-one-pager.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", AttachmentKind::Doc, "One-pager for the board", 48_500),
+                attachment("q3-review.pdf", "application/pdf", AttachmentKind::Pdf, "Deck, exported as PDF", 1_540_000),
+                attachment("q3-teaser.mp4", "video/mp4", AttachmentKind::Video, "Teaser clip · 0:24", 9_800_000),
+                attachment("q3-voiceover.mp3", "audio/mpeg", AttachmentKind::Audio, "Voice-over · 1:12", 1_120_000),
+                attachment("q3-sources.zip", "application/zip", AttachmentKind::File, "Source data and scripts", 3_300_000),
+                text("The deck follows last quarter's structure; the budget sheet has a variance column and a chart on the second tab."),
+            ],
+        );
+        media.commit();
+    }
+    add_doc(shared, media);
 
     let affine = ChatDoc::new(CHAT_AFFINE_MAIN, PROJECT_AFFINE);
     {

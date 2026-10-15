@@ -19,11 +19,11 @@ ARG WITH_BROWSER=1
 
 ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 TZ=UTC
 
-# --- OS packages: build tools, git, Chrome's shared libraries, a fake display, fonts
+# --- OS packages: build tools, git, Chrome's shared libraries, a fake display, fonts, ffmpeg (F10 video/audio)
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl wget gnupg sudo git openssh-client \
       build-essential pkg-config libssl-dev \
-      jq fd-find unzip zip xz-utils procps less \
+      jq fd-find unzip zip xz-utils procps less ffmpeg \
       xvfb fonts-liberation fonts-noto-color-emoji \
       libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 \
       libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2 \
@@ -58,6 +58,7 @@ RUN mkdir -p /opt/prime-agent-${PRIME_AGENT_VERSION} \
  && uv venv /opt/prime-venv --python 3.11 --seed \
  && uv pip install --python /opt/prime-venv/bin/python /opt/prime-agent-${PRIME_AGENT_VERSION}/prime-agent-runtime \
       ipykernel dill httpx requests pyyaml tomli python-dotenv pandas numpy scipy beautifulsoup4 lxml \
+      python-pptx python-docx openpyxl Pillow reportlab \
  && HOME=/tmp/pa-build PRIME_AGENT_KERNEL_VENV=/opt/prime-venv PRIME_AGENT_KERNEL_PYTHON=/opt/prime-venv/bin/python \
       prime-agent --prime-agent-bootstrap \
  && chmod -R a+rX /opt/prime-venv /opt/prime-agent-${PRIME_AGENT_VERSION}
@@ -120,6 +121,7 @@ ENV HOME=/home/daytona \
     AGENT_BROWSER_ARGS="--no-sandbox,--disable-dev-shm-usage" \
     AGENT_BROWSER_STREAM_PORT=9223 \
     AGENT_BROWSER_SCREENSHOT_DIR=/work/.arbos/shots \
+    ARBOS_MEDIA_VENV=/opt/prime-venv \
     AI_AGENT_SANDBOX=daytona
 
 USER daytona

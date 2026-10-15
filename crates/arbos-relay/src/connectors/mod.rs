@@ -778,6 +778,7 @@ mod tests {
             anthropic_key: None,
             openai_key: None,
             openai_base: String::new(),
+            openai_images_base: String::new(),
             anthropic_base: String::new(),
             daytona_snapshot: String::new(),
             daytona_dockerfile: None,
@@ -787,6 +788,7 @@ mod tests {
             box_idle_grace_ms: 0,
             connectors_mock: mock,
             channels_mock: true,
+            image_mock: false,
         };
         AppState {
             db,

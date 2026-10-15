@@ -499,6 +499,23 @@ impl ChatDoc {
         Some(part_id)
     }
 
+    /// Add an `attachment` part (F10): a file the agent produced, blob-backed. `attachment` is
+    /// `{ name, mime, ref, bytes, kind, title }`; the bytes live at `GET /blob/{project}/{ref}`.
+    pub fn add_attachment_part(&mut self, msg_id: &str, attachment: &Value) -> Option<String> {
+        let m = self.find_message(msg_id)?;
+        let parts = match m.get("parts")? {
+            ValueOrContainer::Container(Container::List(l)) => l,
+            _ => return None,
+        };
+        let part = parts.push_container(LoroMap::new()).ok()?;
+        let part_id = ulid();
+        part.insert("id", part_id.as_str()).ok();
+        part.insert("kind", "attachment").ok();
+        part.insert("attachment", json_to_lv(attachment)).ok();
+        self.doc.commit();
+        Some(part_id)
+    }
+
     /// Add a `status` part. Codes: `working`, `done`, `failed`, `stopped`, `waiting_user`,
     /// `waiting_approval` — one working indicator, nothing that narrates tools. Tool detail lives
     /// in `hidden` tool parts (Details drawer) and T3.

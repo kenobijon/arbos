@@ -979,6 +979,54 @@ fn mime_for(path: &Path) -> &'static str {
     }
 }
 
+/// `GET /blob/{project}/{key}` → (mime, bytes).
+async fn fetch_blob_bytes(
+    shared: &Shared,
+    project_id: &str,
+    key: &str,
+) -> Result<(String, Vec<u8>)> {
+    let r = shared
+        .http
+        .get(format!("{}/blob/{}/{}", shared.http_url, project_id, key))
+        .bearer_auth(shared.token())
+        .send()
+        .await?;
+    if !r.status().is_success() {
+        anyhow::bail!("HTTP {}", r.status());
+    }
+    let mime = r
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    Ok((mime, r.bytes().await?.to_vec()))
+}
+
+/// `~/Downloads/<name>`, or `<stem> (2).<ext>` when the name is taken.
+pub(crate) fn unique_download_path(name: &str) -> PathBuf {
+    let dir = credentials::downloads_dir();
+    let first = dir.join(name);
+    if !first.exists() {
+        return first;
+    }
+    let p = std::path::Path::new(name);
+    let stem = p
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("file")
+        .to_owned();
+    let ext = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| format!(".{e}"))
+        .unwrap_or_default();
+    (2..1000)
+        .map(|n| dir.join(format!("{stem} ({n}){ext}")))
+        .find(|c| !c.exists())
+        .unwrap_or(first)
+}
+
 fn safe_name(name: &str) -> String {
     name.chars()
         .map(|c| {
@@ -1046,6 +1094,9 @@ async fn send_message(
                 name,
                 mime: mime.into(),
                 blob_ref,
+                bytes: None,
+                kind: None,
+                title: None,
             },
         });
     }
@@ -1439,6 +1490,41 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     }
                     Ok(r) => shared.notice(format!("Blob {key}: HTTP {}", r.status())),
                     Err(err) => shared.notice(format!("Blob {key}: {err}")),
+                }
+            });
+        }
+        ClientCommand::FetchThumbnail { project_id, key } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                match fetch_blob_bytes(&shared, &project_id, &key).await {
+                    Ok((_, bytes)) => {
+                        let _ = shared.events.send(SyncEvent::Thumbnail {
+                            key,
+                            bytes: Arc::new(bytes),
+                        });
+                    }
+                    Err(err) => shared.notice(format!("Thumbnail {key}: {err}")),
+                }
+            });
+        }
+        ClientCommand::DownloadAttachment {
+            project_id,
+            key,
+            name,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                match fetch_blob_bytes(&shared, &project_id, &key).await {
+                    Ok((_, bytes)) => {
+                        let path = unique_download_path(&safe_name(&name));
+                        match tokio::fs::write(&path, &bytes).await {
+                            Ok(()) => {
+                                let _ = shared.events.send(SyncEvent::AttachmentSaved { path });
+                            }
+                            Err(err) => shared.notice(format!("Could not save {name}: {err}")),
+                        }
+                    }
+                    Err(err) => shared.notice(format!("Download {name}: {err}")),
                 }
             });
         }
