@@ -64,7 +64,7 @@ async fn group_json(state: &AppState, chat: &Chat) -> Value {
     let mut details = Vec::new();
     for id in &chat.participants {
         if let Ok(Some(p)) = state.db.project(id) {
-            let (bs, _) = state.box_state(&p.id).await;
+            let (bs, _) = state.box_state(&p.user_id).await;
             details.push(
                 json!({ "id": p.id, "name": p.name, "icon": p.icon, "color": p.color, "box": bs }),
             );
@@ -121,7 +121,7 @@ pub async fn create_group(
     Json(b): Json<CreateGroupBody>,
 ) -> ApiResult {
     let host = resolve_project_id(&state, &id)?;
-    if !principal.can_access_project(&host) {
+    if !state.allows(&principal, &host) {
         return Err(forbidden());
     }
     let others = resolve_participants(&state, &host, &b.participants)?;
@@ -157,9 +157,13 @@ pub async fn get_group(
 ) -> ApiResult {
     let host = resolve_project_id(&state, &id)?;
     let chat = load_group(&state, &host, &chat_id)?;
-    // A participant's box may read the group it belongs to.
-    let allowed = principal.can_access_project(&host)
-        || matches!(&principal, Principal::Box { project_id } if chat.participants.contains(project_id));
+    // A participant's box (D70: the box of a participant's user) may read the group it belongs to.
+    let allowed = state.allows(&principal, &host)
+        || (principal.is_box()
+            && chat
+                .participants
+                .iter()
+                .any(|p| state.allows(&principal, p)));
     if !allowed {
         return Err(forbidden());
     }
@@ -184,7 +188,7 @@ pub async fn patch_group(
     Json(b): Json<PatchGroupBody>,
 ) -> ApiResult {
     let host = resolve_project_id(&state, &id)?;
-    if !principal.can_access_project(&host) {
+    if !state.allows(&principal, &host) {
         return Err(forbidden());
     }
     let chat = load_group(&state, &host, &chat_id)?;
@@ -329,12 +333,13 @@ pub async fn group_send(
     if !chat.participants.contains(&sender_project) {
         return Err(bad("sender is not a participant of this group"));
     }
-    // A box speaks only for itself; the user's messages are fanned out by the host box (or a device).
+    // A box speaks only for its user's projects (D70: one box serves every project of a user);
+    // the user's messages are fanned out by the host box (or a device).
     match (&principal, &sender) {
-        (Principal::Box { project_id }, Sender::User) if project_id != &host_id => {
+        (Principal::Box { .. }, Sender::User) if !state.allows(&principal, &host_id) => {
             return Err(forbidden())
         }
-        (Principal::Box { project_id }, Sender::Project(p)) if project_id != p => {
+        (Principal::Box { .. }, Sender::Project(p)) if !state.allows(&principal, p) => {
             return Err(forbidden())
         }
         (Principal::Box { .. }, _) | (Principal::Device { .. }, _) | (Principal::Admin, _) => {}
@@ -396,7 +401,7 @@ pub async fn group_send(
             .db
             .enqueue_push(&host_id, "group_message", &payload)
             .map_err(internal)?;
-        boxes::ensure_awake(&state, &host_id, "group").await;
+        boxes::ensure_awake_project(&state, &host_id, "group").await;
         delivered.push(host_id.clone());
     }
 
@@ -432,7 +437,7 @@ pub async fn group_send(
                     .db
                     .enqueue_push(&r, "group_message", &payload)
                     .map_err(internal)?;
-                boxes::ensure_awake(&state, &r, "group").await;
+                boxes::ensure_awake_project(&state, &r, "group").await;
                 delivered.push(r);
             }
             Err(reason) => refused.push(json!({ "project": r, "reason": reason })),
@@ -471,10 +476,8 @@ pub async fn group_reply(
         .project(&host_id)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if let Principal::Box { project_id } = &principal {
-        if project_id != &b.from_project_id {
-            return Err(forbidden());
-        }
+    if principal.is_box() && !state.allows(&principal, &b.from_project_id) {
+        return Err(forbidden());
     }
     if !chat.participants.contains(&b.from_project_id) {
         return Err(bad("sender is not a participant of this group"));
@@ -517,7 +520,7 @@ pub async fn group_reply(
         .db
         .enqueue_push(&host_id, "group_message", &payload)
         .map_err(internal)?;
-    boxes::ensure_awake(&state, &host_id, "group").await;
+    boxes::ensure_awake_project(&state, &host_id, "group").await;
     Ok(StatusCode::ACCEPTED.into_response())
 }
 
