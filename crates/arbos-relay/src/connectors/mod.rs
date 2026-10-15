@@ -787,6 +787,8 @@ mod tests {
             box_idle_grace_ms: 0,
             connectors_mock: mock,
             channels_mock: true,
+            voice_mock: true,
+            openai_audio_base: String::new(),
         };
         AppState {
             db,
