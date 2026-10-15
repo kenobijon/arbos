@@ -99,6 +99,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: BlobCmd,
     },
+    /// Group chats: one chat shared by several Projects' agents (F6).
+    Group {
+        #[command(subcommand)]
+        cmd: GroupCmd,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -110,6 +115,48 @@ enum BlobCmd {
         /// Output path.
         #[arg(long, short)]
         out: Option<std::path::PathBuf>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum GroupCmd {
+    /// Create a group hosted by --host with the other --with projects (ids or names).
+    Create {
+        #[arg(long)]
+        host: String,
+        /// Comma-separated project ids or names.
+        #[arg(long, value_delimiter = ',')]
+        with: Vec<String>,
+        #[arg(long)]
+        title: Option<String>,
+    },
+    /// The group entry with participant details.
+    Show { host: String, chat: String },
+    /// Add participants (comma-separated ids or names).
+    Add {
+        host: String,
+        chat: String,
+        #[arg(value_delimiter = ',')]
+        projects: Vec<String>,
+    },
+    /// Remove participants (comma-separated ids or names).
+    Remove {
+        host: String,
+        chat: String,
+        #[arg(value_delimiter = ',')]
+        projects: Vec<String>,
+    },
+    /// Send a user message into the group (host chat); with --stream, print the host's reply
+    /// and the other Projects' answers as they land, until --wait seconds pass.
+    Send {
+        host: String,
+        chat: String,
+        text: String,
+        #[arg(long)]
+        stream: bool,
+        /// Keep listening this long after the host's reply for the other Projects' answers.
+        #[arg(long, default_value_t = 90)]
+        wait: u64,
     },
 }
 
@@ -904,6 +951,95 @@ async fn main() -> Result<()> {
                 }
             }
         },
+        Cmd::Group { cmd } => groups(&mut cfg, &relay, cmd, args.json).await?,
+    }
+    Ok(())
+}
+
+fn print_group(v: &Value, as_json: bool) -> Result<()> {
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(v)?);
+        return Ok(());
+    }
+    println!(
+        "{}  {}  kind={}",
+        v["id"].as_str().unwrap_or(""),
+        v["title"].as_str().unwrap_or(""),
+        v["kind"].as_str().unwrap_or("")
+    );
+    for p in v["participants_detail"].as_array().into_iter().flatten() {
+        println!(
+            "  {} {:<20} {}  box={}",
+            p["icon"].as_str().unwrap_or("·"),
+            p["name"].as_str().unwrap_or(""),
+            p["id"].as_str().unwrap_or(""),
+            p["box"].as_str().unwrap_or("?")
+        );
+    }
+    Ok(())
+}
+
+async fn groups(cfg: &mut Config, relay: &Relay, cmd: GroupCmd, as_json: bool) -> Result<()> {
+    match cmd {
+        GroupCmd::Create { host, with, title } => {
+            let host = resolve_project(relay, &host).await?;
+            let v = relay
+                .post(
+                    &format!("/projects/{host}/groups"),
+                    &json!({ "title": title, "participants": with }),
+                )
+                .await?;
+            print_group(&v, as_json)?;
+        }
+        GroupCmd::Show { host, chat } => {
+            let host = resolve_project(relay, &host).await?;
+            let v = relay
+                .get(&format!("/projects/{host}/groups/{chat}"))
+                .await?;
+            print_group(&v, as_json)?;
+        }
+        GroupCmd::Add {
+            host,
+            chat,
+            projects,
+        } => {
+            let host = resolve_project(relay, &host).await?;
+            let v = relay
+                .patch(
+                    &format!("/projects/{host}/groups/{chat}"),
+                    &json!({ "add": projects }),
+                )
+                .await?;
+            print_group(&v, as_json)?;
+        }
+        GroupCmd::Remove {
+            host,
+            chat,
+            projects,
+        } => {
+            let host = resolve_project(relay, &host).await?;
+            let v = relay
+                .patch(
+                    &format!("/projects/{host}/groups/{chat}"),
+                    &json!({ "remove": projects }),
+                )
+                .await?;
+            print_group(&v, as_json)?;
+        }
+        GroupCmd::Send {
+            host,
+            chat,
+            text,
+            stream,
+            wait,
+        } => {
+            let host = resolve_project(relay, &host).await?;
+            room::send(cfg, &host, &chat, &text, stream, 600).await?;
+            if stream && wait > 0 {
+                // The other Projects answer after the host's own reply; keep the room open.
+                room::stream(cfg, &host, &chat, false, wait).await?;
+            }
+        }
     }
     Ok(())
 }
