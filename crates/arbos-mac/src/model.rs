@@ -123,7 +123,8 @@ pub struct Person {
     pub handle: String,
     #[serde(default)]
     pub name: Option<String>,
-    #[serde(default)]
+    /// Empty when GitHub has none (the relay sends `null`): initials are drawn instead.
+    #[serde(default, deserialize_with = "null_to_empty")]
     pub avatar_url: String,
     /// `member` (has signed in) or `invited` (placeholder).
     #[serde(default)]
@@ -269,6 +270,12 @@ pub enum TurnKind {
 
 /// `turn` is written by the box as `{ "kind": "reply" }` and by older
 /// fixtures as a bare string; accept both.
+/// `null`, a missing key and `""` all read as an empty string (JSON from the
+/// relay carries `"avatar_url": null` for people without a picture).
+pub fn null_to_empty<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    Ok(Option::<String>::deserialize(d)?.unwrap_or_default())
+}
+
 fn de_turn<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<TurnKind>, D::Error> {
     let v = Option::<serde_json::Value>::deserialize(d)?;
     Ok(match v {
@@ -1356,4 +1363,20 @@ pub fn now_ms() -> u64 {
 
 pub fn new_id() -> Id {
     ulid::Ulid::new().to_string()
+}
+
+#[cfg(test)]
+mod null_avatar_tests {
+    use super::*;
+
+    #[test]
+    fn person_with_null_avatar_and_name_parses() {
+        let v = serde_json::json!({
+            "id": "test_1", "handle": "mactest-a", "avatar_url": null, "name": null, "status": "member"
+        });
+        let p: Person = serde_json::from_value(v).expect("null avatar_url is fine");
+        assert_eq!(p.handle, "mactest-a");
+        assert!(p.avatar_url.is_empty());
+        assert_eq!(p.initial(), "M");
+    }
 }
