@@ -19,10 +19,10 @@
 # Build number: BUILD_NUMBER if set, else UTC `YYYYMMDDHHMM` (12 digits, always
 # above the 7 that build 7 used, strictly increasing between runs).
 #
-# Every xcodebuild runs under `set -o pipefail` with its full output on the
-# console and a copy in build/xcodebuild-<lane>.log (ios.yml keeps the logs as
-# an artifact). Nothing is cut with `tail`: a hidden compile error cost a
-# TestFlight build once.
+# Every xcodebuild runs under `set -o pipefail`; its full output is in
+# build/xcodebuild-<lane>.log (ios.yml keeps the logs as an artifact) and the
+# console shows the `error:` lines and the verdict. Nothing is cut with
+# `tail`: a hidden compile error cost a TestFlight build once.
 
 default_platform(:ios)
 
@@ -40,12 +40,21 @@ def out_dir
   dir
 end
 
-# Runs `command` (which starts in the fastlane directory) with the shell's exit
-# status being xcodebuild's, not tee's, and the whole output copied to
-# build/xcodebuild-<name>.log.
+# Runs an xcodebuild `command` (which starts in the fastlane directory). The
+# whole output goes to build/xcodebuild-<name>.log; the console gets the
+# `error:` lines and the verdict. `pipefail` keeps xcodebuild's exit status
+# (not tee's), and a failure stops the lane with the error count.
 def xcodebuild_logged(name, command)
   log = "#{out_dir}/xcodebuild-#{name}.log"
-  sh "set -o pipefail && #{command} 2>&1 | tee '#{log}'"
+  UI.message("xcodebuild #{name}: full output in #{log}")
+  failed = false
+  sh("set -o pipefail && #{command} 2>&1 | tee '#{log}'", log: false, error_callback: ->(_output) { failed = true })
+  lines = File.exist?(log) ? File.readlines(log) : []
+  lines.grep(/error:|\*\* (BUILD|ARCHIVE|EXPORT) (SUCCEEDED|FAILED)/).uniq.each { |line| UI.message(line.chomp) }
+  if failed
+    errors = lines.grep(/error:/).uniq
+    UI.user_error!("xcodebuild #{name} failed (#{errors.size} error lines, see #{log})")
+  end
   log
 end
 
