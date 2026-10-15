@@ -10,6 +10,7 @@ pub mod local;
 pub mod markdown;
 pub mod motion;
 pub mod notify;
+pub mod people;
 pub mod routines;
 pub mod shell;
 pub mod skills;

@@ -15,7 +15,9 @@ use serde_json::json;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 
-use crate::model::{Machine, MachineState, ProjectDocView, ThreadInfo};
+use crate::model::{
+    AgentMember, Machine, MachineState, Person, ProjectDocView, ReplyPolicy, SpaceKind, ThreadInfo,
+};
 
 use super::doc::ChatDoc;
 use super::{ClientCommand, SyncEvent, SyncSource};
@@ -136,9 +138,17 @@ impl SyncSource for FixtureSource {
                 }),
             });
             seed_docs(&shared);
+            seed_people_docs(&shared);
+            shared
+                .projects
+                .lock()
+                .unwrap()
+                .extend(seed_people_projects());
+            shared.chats.lock().unwrap().extend(seed_people_chats());
 
             let _ = events.send(SyncEvent::Link(Link::Connecting));
             emit_projects(&shared);
+            emit_people_seed(&shared);
             emit_machine(&shared);
             emit_chats(&shared);
             {
@@ -198,7 +208,22 @@ fn forward_doc_change(shared: &Arc<Shared>, changed: DocChanged) {
 }
 
 fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
+    if handle_people_command(shared, &cmd) {
+        return;
+    }
     match cmd {
+        // Handled above; listed so a new variant still fails to compile here.
+        ClientCommand::SearchPeople { .. }
+        | ClientCommand::StartDm { .. }
+        | ClientCommand::SetTyping { .. }
+        | ClientCommand::AddAgent { .. }
+        | ClientCommand::RemoveAgent { .. }
+        | ClientCommand::RemoveMember { .. }
+        | ClientCommand::LeaveChat { .. }
+        | ClientCommand::BlockUser { .. }
+        | ClientCommand::InviteToProject { .. }
+        | ClientCommand::RemoveProjectMember { .. }
+        | ClientCommand::FetchAvatar { .. } => {}
         ClientCommand::OpenChat { chat_id } => {
             *shared.open_chat.lock().unwrap() = Some(chat_id.clone());
             mark_read(shared, &chat_id);
@@ -311,6 +336,12 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         routine_name: None,
                         sender_name: None,
                         sender_icon: None,
+                        sender_handle: None,
+                        sender_avatar: None,
+                        mentions: Vec::new(),
+                        reply_to: None,
+                        asked_by_handle: None,
+                        owner_handle: None,
                         usage: None,
                         return_contract: None,
                         waiting_user: false,
@@ -525,6 +556,12 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 effort: Effort::High,
                 spend_today_usd: 0.0,
                 spend_cap_usd: 25.0,
+                kind: SpaceKind::Project,
+                people: Vec::new(),
+                agents: Vec::new(),
+                pending: false,
+                shared: false,
+                owner_handle: None,
             });
             let chat_id = new_id();
             shared.chats.lock().unwrap().push(Chat {
@@ -995,6 +1032,21 @@ fn send_user(
     mut parts: Vec<Part>,
 ) {
     let project_id = project_of(shared, &chat_id);
+    if let Some(space) = people_space_of(shared, &chat_id) {
+        let mentions = mentions_in(&space, &text);
+        let mut msg = human_message(&chat_id, &me(), &text, now_ms());
+        msg.id = message_id.clone();
+        msg.mentions = mentions.clone();
+        msg.parts = parts;
+        msg.parts.push(text_part(&text));
+        with_doc(shared, &chat_id, |doc| {
+            let _ = doc.insert_message(&msg);
+            let _ = doc.push_command("send", json!({ "messageId": message_id }), DEVICE);
+            doc.commit();
+        });
+        people_after_send(shared, space, chat_id, text, mentions);
+        return;
+    }
     {
         let docs = shared.docs.lock().unwrap();
         if let Some(doc) = docs.get(&chat_id) {
@@ -1021,6 +1073,12 @@ fn send_user(
                 routine_name: None,
                 sender_name: None,
                 sender_icon: None,
+                sender_handle: None,
+                sender_avatar: None,
+                mentions: Vec::new(),
+                reply_to: None,
+                asked_by_handle: None,
+                owner_handle: None,
                 usage: None,
                 return_contract: None,
                 waiting_user: false,
@@ -1311,6 +1369,12 @@ fn run_routine_now(shared: &Arc<Shared>, project_id: &str, routine_id: &str) {
                 routine_name: Some(routine.name.clone()),
                 sender_name: None,
                 sender_icon: None,
+                sender_handle: None,
+                sender_avatar: None,
+                mentions: Vec::new(),
+                reply_to: None,
+                asked_by_handle: None,
+                owner_handle: None,
                 usage: None,
                 return_contract: None,
                 waiting_user: false,
@@ -1878,6 +1942,12 @@ async fn run_turn(
             routine_name: None,
             sender_name: None,
             sender_icon: None,
+            sender_handle: None,
+            sender_avatar: None,
+            mentions: Vec::new(),
+            reply_to: None,
+            asked_by_handle: None,
+            owner_handle: None,
             usage: None,
             return_contract: None,
             waiting_user: false,
@@ -2478,6 +2548,12 @@ async fn run_outcome_turn(
             routine_name: None,
             sender_name: None,
             sender_icon: None,
+            sender_handle: None,
+            sender_avatar: None,
+            mentions: Vec::new(),
+            reply_to: None,
+            asked_by_handle: None,
+            owner_handle: None,
             model: Some(model),
             effort: Some(effort),
             created_at: now_ms(),
@@ -2603,6 +2679,12 @@ fn seed_projects() -> Vec<Project> {
             effort: Effort::Medium,
             spend_today_usd: 0.42,
             spend_cap_usd: 25.0,
+            kind: SpaceKind::Project,
+            people: Vec::new(),
+            agents: Vec::new(),
+            pending: false,
+            shared: false,
+            owner_handle: None,
         },
         Project {
             id: PROJECT_COMMS.into(),
@@ -2616,6 +2698,12 @@ fn seed_projects() -> Vec<Project> {
             effort: Effort::Low,
             spend_today_usd: 1.10,
             spend_cap_usd: 25.0,
+            kind: SpaceKind::Project,
+            people: Vec::new(),
+            agents: Vec::new(),
+            pending: false,
+            shared: false,
+            owner_handle: None,
         },
         Project {
             id: PROJECT_ARBOS.into(),
@@ -2629,6 +2717,12 @@ fn seed_projects() -> Vec<Project> {
             effort: Effort::High,
             spend_today_usd: 3.87,
             spend_cap_usd: 25.0,
+            kind: SpaceKind::Project,
+            people: Vec::new(),
+            agents: Vec::new(),
+            pending: false,
+            shared: false,
+            owner_handle: None,
         },
     ]
 }
@@ -2895,6 +2989,12 @@ impl Seeder<'_> {
             routine_name: None,
             sender_name: None,
             sender_icon: None,
+            sender_handle: None,
+            sender_avatar: None,
+            mentions: Vec::new(),
+            reply_to: None,
+            asked_by_handle: None,
+            owner_handle: None,
             usage: None,
             return_contract: None,
             waiting_user: false,
@@ -2925,6 +3025,12 @@ impl Seeder<'_> {
             routine_name: None,
             sender_name: None,
             sender_icon: None,
+            sender_handle: None,
+            sender_avatar: None,
+            mentions: Vec::new(),
+            reply_to: None,
+            asked_by_handle: None,
+            owner_handle: None,
             usage: None,
             return_contract: None,
             waiting_user: false,
@@ -2956,6 +3062,12 @@ fn project_message(chat_id: &str, project: &Project, text: &str, t: u64) -> Mess
         routine_name: None,
         sender_name: Some(project.name.clone()),
         sender_icon: Some(project.icon.clone()),
+        sender_handle: None,
+        sender_avatar: None,
+        mentions: Vec::new(),
+        reply_to: None,
+        asked_by_handle: None,
+        owner_handle: None,
         usage: None,
         return_contract: None,
         waiting_user: false,
@@ -3422,4 +3534,588 @@ fn seed_docs(shared: &Arc<Shared>) {
         comms.commit();
     }
     add_doc(shared, comms);
+}
+
+// ---------------------------------------------------------------------------
+// People chats (D72): two users (me @jacob, @sam) and one shared agent.
+// ---------------------------------------------------------------------------
+
+pub const ME_ID: &str = "gh_1";
+pub const ME_HANDLE: &str = "jacob";
+const SAM_ID: &str = "gh_456";
+pub const DM_SAM: &str = "01J9DMSAM00000000000000000";
+
+fn person(id: &str, handle: &str, name: Option<&str>, status: &str) -> Person {
+    Person {
+        id: id.into(),
+        handle: handle.into(),
+        name: name.map(str::to_string),
+        avatar_url: format!("fixture://avatar/{handle}"),
+        status: status.into(),
+    }
+}
+
+fn me() -> Person {
+    person(ME_ID, ME_HANDLE, Some("Jacob Steeves"), "member")
+}
+
+fn sam() -> Person {
+    person(SAM_ID, "sam", Some("Sam Rivera"), "member")
+}
+
+/// The directory the new-chat sheet searches.
+fn directory() -> Vec<Person> {
+    vec![
+        sam(),
+        person("gh_457", "samir", Some("Samir Haddad"), "member"),
+        person("gh_458", "sara", Some("Sara Lind"), "member"),
+        person("gh_459", "octocat", None, "invited"),
+        person("gh_460", "jules", Some("Jules Park"), "member"),
+    ]
+}
+
+fn people_space(id: &str, other: Person, agents: Vec<AgentMember>) -> Project {
+    Project {
+        id: id.into(),
+        name: other.handle.clone(),
+        icon: other.initial(),
+        color: "#8b7cf6".into(),
+        state: BoxState::Awake,
+        state_detail: None,
+        wake_progress: None,
+        model: MODELS[0].into(),
+        effort: Effort::Low,
+        spend_today_usd: 0.0,
+        spend_cap_usd: 0.0,
+        kind: SpaceKind::Dm,
+        pending: other.status == "invited",
+        people: vec![other],
+        agents,
+        shared: false,
+        owner_handle: None,
+    }
+}
+
+fn seed_people_projects() -> Vec<Project> {
+    vec![people_space(DM_SAM, sam(), Vec::new())]
+}
+
+fn seed_people_chats() -> Vec<Chat> {
+    vec![Chat {
+        id: DM_SAM.into(),
+        project_id: DM_SAM.into(),
+        title: "sam".into(),
+        is_pinned: true,
+        is_system: false,
+        kind: ChatKind::Chat,
+        participants: Vec::new(),
+        unread: true,
+        last_message_at: now_ms().saturating_sub(12 * 60_000),
+    }]
+}
+
+fn human_message(chat_id: &str, who: &Person, text: &str, at: u64) -> Message {
+    Message {
+        id: new_id(),
+        chat_id: chat_id.into(),
+        role: Role::User,
+        sender: format!("user:{}", who.id),
+        status: MessageStatus::Done,
+        turn: None,
+        decision: None,
+        subagent_id: None,
+        subagent_name: None,
+        in_reply_to: None,
+        routine_name: None,
+        sender_name: who.name.clone(),
+        sender_icon: None,
+        sender_handle: Some(who.handle.clone()),
+        sender_avatar: Some(who.avatar_url.clone()),
+        mentions: Vec::new(),
+        reply_to: None,
+        asked_by_handle: None,
+        owner_handle: None,
+        usage: None,
+        return_contract: None,
+        waiting_user: false,
+        waiting_approval: false,
+        model: None,
+        effort: None,
+        created_at: at,
+        completed_at: Some(at),
+        pending: false,
+        parts: vec![text_part(text)],
+        hidden_parts: Vec::new(),
+    }
+}
+
+fn text_part(text: &str) -> Part {
+    Part::Text {
+        id: new_id(),
+        text: text.into(),
+    }
+}
+
+fn seed_people_docs(shared: &Arc<Shared>) {
+    let base = now_ms().saturating_sub(40 * 60_000);
+    let doc = ChatDoc::new(DM_SAM, "people");
+    let _ = doc.insert_message(&human_message(
+        DM_SAM,
+        &sam(),
+        "Hey — are you around? I want to go over the beta invite copy before it ships.",
+        base,
+    ));
+    let _ = doc.insert_message(&human_message(
+        DM_SAM,
+        &me(),
+        "Here now. Paste what you have and I'll read it.",
+        base + 90_000,
+    ));
+    let _ = doc.insert_message(&human_message(
+        DM_SAM,
+        &sam(),
+        "Sending in a sec. Also: can we add your Arbos agent here so it can pull the numbers while we talk?",
+        base + 150_000,
+    ));
+    doc.commit();
+    add_doc(shared, doc);
+}
+
+/// `@slug` / `@handle` tokens in the text, resolved to member ids.
+fn mentions_in(space: &Project, text: &str) -> Vec<String> {
+    let lower = text.to_lowercase();
+    let mut out = Vec::new();
+    for a in &space.agents {
+        if lower.contains(&format!("@{}", a.handle)) {
+            out.push(format!("agent:{}", a.project_id));
+        }
+    }
+    for p in &space.people {
+        if lower.contains(&format!("@{}", p.handle.to_lowercase())) {
+            out.push(format!("user:{}", p.id));
+        }
+    }
+    out
+}
+
+fn people_space_of(shared: &Shared, chat_id: &str) -> Option<Project> {
+    let projects = shared.projects.lock().unwrap();
+    projects
+        .iter()
+        .find(|p| p.is_people() && p.id == chat_id)
+        .cloned()
+}
+
+/// A tiny two-tone PNG avatar so the image path is exercised (`image` crate).
+fn avatar_png(seed: &str) -> Vec<u8> {
+    let hash = seed
+        .bytes()
+        .fold(7u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
+    let (r, g, b) = (
+        120 + (hash % 100) as u8,
+        90 + ((hash >> 8) % 120) as u8,
+        140 + ((hash >> 16) % 100) as u8,
+    );
+    let size = 64u32;
+    let mut img = image::RgbaImage::new(size, size);
+    let c = (size as f32 - 1.0) / 2.0;
+    for (x, y, px) in img.enumerate_pixels_mut() {
+        let dx = x as f32 - c;
+        let dy = y as f32 - c;
+        let d = (dx * dx + dy * dy).sqrt();
+        if d > c {
+            *px = image::Rgba([0, 0, 0, 0]);
+        } else if (dx + dy) > 0.0 {
+            *px = image::Rgba([r, g, b, 255]);
+        } else {
+            *px = image::Rgba([r / 2 + 40, g / 2 + 40, b / 2 + 40, 255]);
+        }
+    }
+    let mut out = std::io::Cursor::new(Vec::new());
+    let _ = img.write_to(&mut out, image::ImageFormat::Png);
+    out.into_inner()
+}
+
+fn emit_avatar(shared: &Shared, url: &str) {
+    let seed = url.rsplit('/').next().unwrap_or(url).to_string();
+    let _ = shared.events.send(SyncEvent::Avatar {
+        url: url.to_string(),
+        bytes: Arc::new(avatar_png(&seed)),
+    });
+}
+
+fn emit_people_seed(shared: &Shared) {
+    for p in directory() {
+        emit_avatar(shared, &p.avatar_url);
+    }
+    emit_avatar(shared, &me().avatar_url);
+}
+
+fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
+    match cmd {
+        ClientCommand::SearchPeople { query } => {
+            let q = query.trim().trim_start_matches('@').to_lowercase();
+            let results: Vec<Person> = if q.is_empty() {
+                Vec::new()
+            } else {
+                directory()
+                    .into_iter()
+                    .filter(|p| {
+                        p.handle.starts_with(&q)
+                            || p.name
+                                .as_deref()
+                                .map(|n| n.to_lowercase().contains(&q))
+                                .unwrap_or(false)
+                    })
+                    .take(10)
+                    .collect()
+            };
+            let shared = shared.clone();
+            let query = query.clone();
+            tokio::spawn(async move {
+                sleep(Duration::from_millis(180)).await;
+                let _ = shared
+                    .events
+                    .send(SyncEvent::PeopleSearch { query, results });
+            });
+            true
+        }
+        ClientCommand::StartDm { handle } => {
+            let handle = handle.trim().trim_start_matches('@').to_lowercase();
+            if handle == ME_HANDLE {
+                let _ = shared
+                    .events
+                    .send(SyncEvent::PeopleError("That is you.".into()));
+                return true;
+            }
+            let existing = shared
+                .projects
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|p| p.is_people() && p.person().map(|x| x.handle == handle).unwrap_or(false))
+                .map(|p| p.id.clone());
+            if existing.is_some() {
+                emit_projects(shared);
+                return true;
+            }
+            let Some(other) = directory().into_iter().find(|p| p.handle == handle) else {
+                let _ = shared.events.send(SyncEvent::PeopleError(format!(
+                    "No GitHub user named @{handle}."
+                )));
+                return true;
+            };
+            let id = new_id();
+            let pending = other.status == "invited";
+            shared
+                .projects
+                .lock()
+                .unwrap()
+                .push(people_space(&id, other.clone(), Vec::new()));
+            shared.chats.lock().unwrap().push(Chat {
+                id: id.clone(),
+                project_id: id.clone(),
+                title: other.handle.clone(),
+                is_pinned: true,
+                is_system: false,
+                kind: ChatKind::Chat,
+                participants: Vec::new(),
+                unread: false,
+                last_message_at: now_ms(),
+            });
+            add_doc(shared, ChatDoc::new(&id, "people"));
+            emit_projects(shared);
+            emit_chats(shared);
+            if pending {
+                let _ = shared.events.send(SyncEvent::Notice(format!(
+                    "@{} has not signed in yet; the chat opens for them when they do.",
+                    other.handle
+                )));
+            }
+            true
+        }
+        ClientCommand::SetTyping { .. } => true,
+        ClientCommand::AddAgent {
+            chat_id,
+            project_id,
+        } => {
+            let agent = {
+                let projects = shared.projects.lock().unwrap();
+                projects
+                    .iter()
+                    .find(|p| p.id == *project_id && !p.is_people())
+                    .map(|p| AgentMember {
+                        project_id: p.id.clone(),
+                        name: p.name.clone(),
+                        icon: p.icon.clone(),
+                        color: p.color.clone(),
+                        handle: Project::mention_slug(&p.name),
+                        owner_id: ME_ID.into(),
+                        owner_handle: ME_HANDLE.into(),
+                        reply_policy: ReplyPolicy::Mention,
+                    })
+            };
+            if let Some(agent) = agent {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(space) = projects.iter_mut().find(|p| p.id == *chat_id) {
+                    if !space
+                        .agents
+                        .iter()
+                        .any(|a| a.project_id == agent.project_id)
+                    {
+                        space.agents.push(agent);
+                    }
+                }
+            }
+            emit_projects(shared);
+            true
+        }
+        ClientCommand::RemoveAgent {
+            chat_id,
+            project_id,
+        } => {
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(space) = projects.iter_mut().find(|p| p.id == *chat_id) {
+                    space.agents.retain(|a| a.project_id != *project_id);
+                }
+            }
+            emit_projects(shared);
+            true
+        }
+        ClientCommand::RemoveMember { chat_id, .. } | ClientCommand::LeaveChat { chat_id } => {
+            shared.projects.lock().unwrap().retain(|p| p.id != *chat_id);
+            shared
+                .chats
+                .lock()
+                .unwrap()
+                .retain(|c| c.project_id != *chat_id);
+            emit_projects(shared);
+            emit_chats(shared);
+            true
+        }
+        ClientCommand::BlockUser { handle } => {
+            let _ = shared
+                .events
+                .send(SyncEvent::Notice(format!("@{handle} blocked.")));
+            true
+        }
+        ClientCommand::InviteToProject { project_id, handle } => {
+            let handle = handle.trim().trim_start_matches('@').to_lowercase();
+            let Some(other) = directory().into_iter().find(|p| p.handle == handle) else {
+                let _ = shared.events.send(SyncEvent::PeopleError(format!(
+                    "No GitHub user named @{handle}."
+                )));
+                return true;
+            };
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == *project_id) {
+                    if !p.people.iter().any(|x| x.id == other.id) {
+                        p.people.push(other);
+                    }
+                }
+            }
+            emit_projects(shared);
+            true
+        }
+        ClientCommand::RemoveProjectMember {
+            project_id,
+            user_id,
+        } => {
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == *project_id) {
+                    p.people.retain(|x| x.id != *user_id);
+                }
+            }
+            emit_projects(shared);
+            true
+        }
+        ClientCommand::FetchAvatar { url } => {
+            emit_avatar(shared, url);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Which shared agent a human message addresses (API §4 routing, client side
+/// of the fixture): explicit mention, `@slug`, reply-to, `@arbos` with one agent.
+fn addressed_agent(space: &Project, text: &str, mentions: &[String]) -> Option<AgentMember> {
+    let lower = text.to_lowercase();
+    space
+        .agents
+        .iter()
+        .find(|a| {
+            mentions
+                .iter()
+                .any(|m| *m == format!("agent:{}", a.project_id))
+                || lower.contains(&format!("@{}", a.handle))
+                || a.reply_policy == ReplyPolicy::EveryMessage
+        })
+        .cloned()
+        .or_else(|| {
+            if space.agents.len() == 1 && lower.contains("@arbos") {
+                space.agents.first().cloned()
+            } else {
+                None
+            }
+        })
+}
+
+/// After I send in a people chat: an addressed agent answers (quoting the
+/// asker), otherwise Sam types for a moment and replies.
+fn people_after_send(
+    shared: &Arc<Shared>,
+    space: Project,
+    chat_id: Id,
+    text: String,
+    mentions: Vec<String>,
+) {
+    let shared = shared.clone();
+    tokio::spawn(async move {
+        sleep(Duration::from_millis(250)).await;
+        if let Some(agent) = addressed_agent(&space, &text, &mentions) {
+            agent_reply(&shared, &chat_id, &agent, &me(), &text).await;
+            return;
+        }
+        let Some(other) = space.person().cloned() else {
+            return;
+        };
+        if other.status == "invited" {
+            return;
+        }
+        let _ = shared.events.send(SyncEvent::Typing {
+            chat_id: chat_id.clone(),
+            handle: other.handle.clone(),
+            active: true,
+        });
+        sleep(Duration::from_millis(1800)).await;
+        let _ = shared.events.send(SyncEvent::Typing {
+            chat_id: chat_id.clone(),
+            handle: other.handle.clone(),
+            active: false,
+        });
+        let reply = sam_reply(&text, &space);
+        let msg = human_message(&chat_id, &other, &reply, now_ms());
+        with_doc(&shared, &chat_id, |doc| {
+            let _ = doc.insert_message(&msg);
+            doc.commit();
+        });
+        mark_unread_if_hidden(&shared, &chat_id);
+        // Sam also asks the shared agent once it is in the chat.
+        if let Some(agent) = space.agents.first().cloned() {
+            if text.to_lowercase().contains("ask") {
+                sleep(Duration::from_millis(900)).await;
+                let ask = format!(
+                    "@{} what did the beta invite copy change last week?",
+                    agent.handle
+                );
+                let msg = human_message(&chat_id, &other, &ask, now_ms());
+                let _ = with_doc(&shared, &chat_id, |doc| {
+                    let _ = doc.insert_message(&msg);
+                    doc.commit();
+                });
+                agent_reply(&shared, &chat_id, &agent, &other, &ask).await;
+            }
+        }
+    });
+}
+
+fn sam_reply(text: &str, space: &Project) -> String {
+    let lower = text.to_lowercase();
+    if lower.contains("?") {
+        "Yes — I think so. Let me check the doc and come back with the exact line.".into()
+    } else if space.agents.is_empty() && lower.contains("agent") {
+        "Please do, I'd rather ask it here than switch windows.".into()
+    } else {
+        "Got it. I'll fold that into the draft and ping you when it's up.".into()
+    }
+}
+
+/// A shared agent's reply: prose with "@handle asked:" attribution, streamed.
+async fn agent_reply(
+    shared: &Arc<Shared>,
+    chat_id: &str,
+    agent: &AgentMember,
+    asker: &Person,
+    ask: &str,
+) {
+    let assistant_id = new_id();
+    let ix = with_doc(shared, chat_id, |doc| {
+        let msg = Message {
+            id: assistant_id.clone(),
+            chat_id: chat_id.to_string(),
+            role: Role::Assistant,
+            sender: format!("agent:{}", agent.project_id),
+            status: MessageStatus::Streaming,
+            turn: None,
+            decision: None,
+            subagent_id: None,
+            subagent_name: None,
+            in_reply_to: None,
+            routine_name: None,
+            sender_name: Some(agent.name.clone()),
+            sender_icon: Some(agent.icon.clone()),
+            sender_handle: Some(agent.handle.clone()),
+            sender_avatar: None,
+            mentions: Vec::new(),
+            reply_to: None,
+            asked_by_handle: Some(asker.handle.clone()),
+            owner_handle: Some(agent.owner_handle.clone()),
+            usage: None,
+            return_contract: None,
+            waiting_user: false,
+            waiting_approval: false,
+            model: None,
+            effort: None,
+            created_at: now_ms(),
+            completed_at: None,
+            pending: false,
+            parts: vec![Part::Status {
+                id: new_id(),
+                code: StatusKind::Deciding,
+                message: format!("{} is reading…", agent.name),
+            }],
+            hidden_parts: Vec::new(),
+        };
+        let ix = doc.insert_message(&msg).unwrap_or(0);
+        doc.commit();
+        ix
+    })
+    .unwrap_or(0);
+    sleep(Duration::from_millis(600)).await;
+    let pix = with_doc(shared, chat_id, |doc| {
+        let _ = doc.set_part_field(ix, 0, "hidden", json!(true));
+        let pix = doc.push_part(ix, &text_part("")).unwrap_or(1);
+        doc.commit();
+        pix
+    })
+    .unwrap_or(1);
+    let short = ask.trim().trim_end_matches('.');
+    let quoted = format!(
+        "@{} asked: {}",
+        asker.handle,
+        if short.chars().count() > 60 {
+            format!("{}…", short.chars().take(60).collect::<String>())
+        } else {
+            short.to_string()
+        }
+    );
+    let body = if ask.to_lowercase().contains("copy") || ask.to_lowercase().contains("invite") {
+        "Last week's change to the beta invite copy was the second paragraph: the old line promised \"instant setup\"; the new one says \"your machine is ready in about a minute\". The CTA text did not change."
+    } else if ask.to_lowercase().contains("number") || ask.to_lowercase().contains("metric") {
+        "Pulled from the workspace: 1,284 invites sent, 412 accepted (32%), median first message 4 m 10 s after sign-in."
+    } else {
+        "On it. I checked the workspace and nothing blocks this on my side; say the word and I will draft it."
+    };
+    let stop = AtomicBool::new(false);
+    stream_blocks(shared, chat_id, ix, pix, &[&quoted, body], &stop).await;
+    with_doc(shared, chat_id, |doc| {
+        let _ = doc.set_status(ix, MessageStatus::Done);
+        let _ = doc.set_field(ix, "completedAt", json!(now_ms()));
+        doc.commit();
+    });
+    mark_unread_if_hidden(shared, chat_id);
 }

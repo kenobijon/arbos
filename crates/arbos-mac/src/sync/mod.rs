@@ -18,7 +18,7 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 use tokio::sync::mpsc;
 
-use crate::model::AccountView;
+use crate::model::{AccountView, Person};
 use crate::model::{
     BoxState, ChannelsView, Chat, ConnectorsView, Effort, Id, Link, LocalView, Machine, Message,
     Project, ProjectDocView, Routine, RoutineRun, RoutineTrigger, Skill, VaultNewItem, VaultView,
@@ -33,6 +33,24 @@ pub enum SyncEvent {
     },
     /// Who is signed in (`/auth/token` or `/me`); `None` after sign-out.
     Account(Option<AccountView>),
+    /// `GET /users/search` results for the new-chat sheet (D72).
+    PeopleSearch {
+        query: String,
+        results: Vec<Person>,
+    },
+    /// Someone in a people chat started/stopped typing (room presence).
+    Typing {
+        chat_id: Id,
+        handle: String,
+        active: bool,
+    },
+    /// Avatar bytes for an `avatar_url` (PNG/JPEG), fetched once.
+    Avatar {
+        url: String,
+        bytes: Arc<Vec<u8>>,
+    },
+    /// Error from a people-chat action (search, DM, members), shown inline.
+    PeopleError(String),
     /// Pairing finished (or failed with a message).
     Paired {
         device_id: String,
@@ -157,6 +175,58 @@ pub enum ClientCommand {
     },
     /// `POST /auth/logout`, forget the tokens, back to the sign-in screen.
     SignOut,
+    /// New-chat sheet: `GET /users/search?q=`.
+    SearchPeople {
+        query: String,
+    },
+    /// `POST /chats/dm {handle}`; the chat lands in the next `Projects` event.
+    StartDm {
+        handle: String,
+    },
+    /// Presence `typing` for a people chat.
+    SetTyping {
+        chat_id: Id,
+        active: bool,
+    },
+    /// `POST /chats/{id}/agents {project_id}` (own project only).
+    AddAgent {
+        chat_id: Id,
+        project_id: Id,
+    },
+    /// `DELETE /chats/{id}/agents/{project_id}` (owner of that project).
+    RemoveAgent {
+        chat_id: Id,
+        project_id: Id,
+    },
+    /// `DELETE /chats/{id}/members/{user_id}` (chat owner).
+    RemoveMember {
+        chat_id: Id,
+        user_id: String,
+    },
+    /// `POST /chats/{id}/leave`.
+    LeaveChat {
+        chat_id: Id,
+    },
+    /// `POST /blocks {handle}`.
+    BlockUser {
+        handle: String,
+    },
+    /// `POST /projects/{id}/members {handle}` (D72 step 3).
+    #[allow(dead_code)]
+    InviteToProject {
+        project_id: Id,
+        handle: String,
+    },
+    /// `DELETE /projects/{id}/members/{user_id}`.
+    #[allow(dead_code)]
+    RemoveProjectMember {
+        project_id: Id,
+        user_id: String,
+    },
+    /// Fetch an avatar once (`SyncEvent::Avatar`).
+    FetchAvatar {
+        url: String,
+    },
     OpenChat {
         chat_id: Id,
     },

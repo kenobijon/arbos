@@ -1153,6 +1153,8 @@ impl Render for Composer {
             .selected()
             .map(|p| (p.model.clone(), p.effort))
             .unwrap_or((MODELS[0].to_string(), Effort::High));
+        // A people chat has no model of its own: its agents run on their owners' settings.
+        let in_people = state.selected().map(|p| p.is_people()).unwrap_or(false);
         let link_full = state.link == crate::model::Link::Reconnecting;
         let voice_mode = state.voice_mode;
         let (recording, transcribing, in_call, voice_notice) = {
@@ -1410,50 +1412,52 @@ impl Render for Composer {
             )
             .child(voice_toggle)
             .child(div().flex_1())
-            .child(
-                div()
-                    .id("composer-model")
-                    .flex()
-                    .items_center()
-                    .gap(px(4.0))
-                    .px(px(8.0))
-                    .py(px(4.0))
-                    .rounded(px(6.0))
-                    .text_size(px(12.5))
-                    .text_color(theme.text)
-                    .hover(|s| s.bg(theme.surface_2))
-                    .cursor_pointer()
-                    .child(model)
-                    .child(div().text_color(theme.text_faint).child("⌄"))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.open_picker = match this.open_picker {
-                            Some(Picker::Model) => None,
-                            Some(Picker::Effort) | None => Some(Picker::Model),
-                        };
-                        cx.notify();
-                    })),
-            )
-            .child(
-                div()
-                    .id("composer-effort")
-                    .flex()
-                    .items_center()
-                    .px(px(8.0))
-                    .py(px(4.0))
-                    .rounded(px(6.0))
-                    .text_size(px(12.5))
-                    .text_color(theme.text_muted)
-                    .hover(|s| s.bg(theme.surface_2))
-                    .cursor_pointer()
-                    .child(effort.label())
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.open_picker = match this.open_picker {
-                            Some(Picker::Effort) => None,
-                            Some(Picker::Model) | None => Some(Picker::Effort),
-                        };
-                        cx.notify();
-                    })),
-            )
+            .when(!in_people, |el| {
+                el.child(
+                    div()
+                        .id("composer-model")
+                        .flex()
+                        .items_center()
+                        .gap(px(4.0))
+                        .px(px(8.0))
+                        .py(px(4.0))
+                        .rounded(px(6.0))
+                        .text_size(px(12.5))
+                        .text_color(theme.text)
+                        .hover(|s| s.bg(theme.surface_2))
+                        .cursor_pointer()
+                        .child(model)
+                        .child(div().text_color(theme.text_faint).child("⌄"))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.open_picker = match this.open_picker {
+                                Some(Picker::Model) => None,
+                                Some(Picker::Effort) | None => Some(Picker::Model),
+                            };
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    div()
+                        .id("composer-effort")
+                        .flex()
+                        .items_center()
+                        .px(px(8.0))
+                        .py(px(4.0))
+                        .rounded(px(6.0))
+                        .text_size(px(12.5))
+                        .text_color(theme.text_muted)
+                        .hover(|s| s.bg(theme.surface_2))
+                        .cursor_pointer()
+                        .child(effort.label())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.open_picker = match this.open_picker {
+                                Some(Picker::Effort) => None,
+                                Some(Picker::Model) | None => Some(Picker::Effort),
+                            };
+                            cx.notify();
+                        })),
+                )
+            })
             .children(stop_button)
             .child(mic_button)
             .child(send_button);
