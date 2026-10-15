@@ -38,6 +38,7 @@ Config comes from the environment (systemd EnvironmentFile=/etc/arbos/feedback.e
   OPENROUTER_API_KEY + FEEDBACK_SCREEN_MODEL (openai/gpt-4o-mini): the malicious-intent screen
   FEEDBACK_STATE_DIR (default /var/lib/arbos-feedback), FEEDBACK_KILL_FILE
   FEEDBACK_MIN_INTERVAL_S (300), FEEDBACK_MAX_PER_DAY (20), FEEDBACK_TESTER_MAX_PER_DAY (3)
+  FEEDBACK_TESTER_MAX_WAIT_MIN (30): after this wait a tester item is ordered with the priority ones
   FEEDBACK_DEDUPE_DAYS (7), FEEDBACK_AGENT_TIMEOUT_MIN (75), FEEDBACK_SHIP_TIMEOUT_MIN (90)
 
 Only the standard library plus `cryptography` (for the ES256 App Store Connect token).
@@ -141,6 +142,7 @@ class Config:
     min_interval_s: int
     max_per_day: int
     tester_max_per_day: int
+    tester_max_wait_min: int
     dedupe_days: int
     agent_timeout_min: int
     ship_timeout_min: int
@@ -186,6 +188,7 @@ class Config:
             min_interval_s=int(env.get("FEEDBACK_MIN_INTERVAL_S", "300")),
             max_per_day=int(env.get("FEEDBACK_MAX_PER_DAY", "20")),
             tester_max_per_day=int(env.get("FEEDBACK_TESTER_MAX_PER_DAY", "3")),
+            tester_max_wait_min=int(env.get("FEEDBACK_TESTER_MAX_WAIT_MIN", "30")),
             dedupe_days=int(env.get("FEEDBACK_DEDUPE_DAYS", "7")),
             agent_timeout_min=int(env.get("FEEDBACK_AGENT_TIMEOUT_MIN", "75")),
             ship_timeout_min=int(env.get("FEEDBACK_SHIP_TIMEOUT_MIN", "90")),
@@ -807,8 +810,19 @@ class Loop:
     # ---- state machine ------------------------------------------------------------------------
 
     def advance_all(self) -> None:
-        order = sorted(self.store.items(),
-                       key=lambda f: (0 if self.store.state(f).get("tier") == "priority" else 1, self.store.state(f).get("created", "")))
+        # Priority testers go first, but a tester item that has waited FEEDBACK_TESTER_MAX_WAIT_MIN
+        # joins the front of the line by age, so a long priority burst cannot starve everyone else.
+        def rank(fid: str) -> tuple[int, str]:
+            st = self.store.state(fid)
+            created = st.get("created", "")
+            try:
+                waited = (utcnow() - parse_iso(created)).total_seconds() / 60 if created else 0
+            except ValueError:
+                waited = 0
+            first = st.get("tier") == "priority" or waited > self.cfg.tester_max_wait_min
+            return (0 if first else 1, created)
+
+        order = sorted(self.store.items(), key=rank)
         for fid in order:
             st = self.store.state(fid)
             if st.get("status") in TERMINAL:
