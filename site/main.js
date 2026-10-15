@@ -100,6 +100,21 @@
       panels.forEach(function (p) { p.hidden = p.getAttribute('data-panel') !== name; });
       var active = tabs.filter(function (b) { return b.classList.contains('is-active'); })[0];
       if (title && active) title.textContent = active.textContent.trim();
+      // The thread card's avatar follows the selected project (the avatar loader remounts new spans).
+      if (active && window.ArbosAvatars) {
+        var slug = active.getAttribute('data-avatar-slug'), color = active.getAttribute('data-avatar-color');
+        doc.querySelectorAll('.thread-avatar .avatar, [data-thread-msg-avatar]').forEach(function (old) {
+          if (old.getAttribute('data-avatar') === slug) return;
+          var fresh = doc.createElement('span');
+          fresh.className = old.className.replace(/\bis-ready\b|\bis-missing\b/g, '').trim();
+          fresh.setAttribute('data-avatar', slug); fresh.setAttribute('data-color', color);
+          fresh.setAttribute('aria-label', active.textContent.trim());
+          if (old.hasAttribute('data-thread-msg-avatar')) fresh.setAttribute('data-thread-msg-avatar', '');
+          if (old.__avatar) old.__avatar.destroy();
+          old.replaceWith(fresh);
+          window.ArbosAvatars.mount(fresh.parentNode);
+        });
+      }
     };
     chips.addEventListener('click', function (e) { var b = e.target.closest('[data-chip]'); if (b) select(b.getAttribute('data-chip')); });
     chips.addEventListener('keydown', function (e) {

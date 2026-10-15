@@ -16,6 +16,7 @@
   <link rel="preload" href="/assets/fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/style.css">
   <script src="/main.js" defer></script>
+  <script src="/assets/js/avatars.js" defer></script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -101,12 +102,12 @@
             <div class="app-traffic" aria-hidden="true"><i></i><i></i><i></i></div>
             <div class="app-rail-title">Projects</div>
             <ul class="app-projects">
-              <li><span class="pj pj-home"></span>Home</li>
-              <li class="is-active"><span class="pj pj-web"></span>Website<span class="pj-state working" title="working"></span></li>
-              <li><span class="pj pj-research"></span>Research<span class="pj-state"></span></li>
-              <li><span class="pj pj-books"></span>Books</li>
-              <li><span class="pj pj-travel"></span>Travel</li>
-              <li><span class="pj pj-hiring"></span>Hiring</li>
+              <li><span class="avatar avatar-sm" data-avatar="oak" data-color="mono" data-static aria-label="Home"></span>Home</li>
+              <li class="is-active"><span class="avatar avatar-sm" data-avatar="pine" data-color="blue" data-state="working" aria-label="Website, working"></span>Website<span class="pj-state working" title="working"></span></li>
+              <li><span class="avatar avatar-sm" data-avatar="fractal" data-color="cyan" aria-label="Research"></span>Research<span class="pj-state"></span></li>
+              <li><span class="avatar avatar-sm" data-avatar="maple" data-color="amber" data-static aria-label="Books"></span>Books</li>
+              <li><span class="avatar avatar-sm" data-avatar="palm" data-color="orange" data-static aria-label="Travel"></span>Travel</li>
+              <li><span class="avatar avatar-sm" data-avatar="cherry" data-color="pink" data-static aria-label="Hiring"></span>Hiring</li>
             </ul>
             <div class="app-rail-foot">
               <span class="machine-dot"></span>Your machine · running
@@ -121,7 +122,7 @@
             </div>
             <div class="app-thread">
               <div class="msg msg-user">Can you get the launch checklist done before I land? Ping Research for the numbers.</div>
-              <div class="msg msg-agent">
+              <div class="msg msg-agent with-avatar"><span class="avatar avatar-sm msg-avatar" data-avatar="pine" data-color="blue" aria-label="Website"></span><div>
                 <p>On it. I asked Research for the latest benchmark numbers and they replied in two minutes. The checklist is in <code>/work/website/launch.md</code>.</p>
                 <p>Three items are done; the last one needs you:</p>
                 <ul>
@@ -129,14 +130,14 @@
                   <li>Lighthouse at 97 on the new hero</li>
                   <li>Release notes drafted</li>
                 </ul>
-              </div>
+              </div></div>
               <div class="card approval">
                 <div class="approval-head"><span class="approval-tag">Approval</span>Send the launch email to the beta list?</div>
                 <div class="approval-body">To 412 people · from you · via Gmail</div>
                 <div class="approval-actions"><span class="chip chip-solid">Approve</span><span class="chip">Edit</span></div>
               </div>
               <div class="msg msg-user">Approve. And book the Tuesday flight through Travel.</div>
-              <div class="msg msg-agent working-line"><span class="working-dots" aria-hidden="true"><i></i><i></i><i></i></span>Working with Travel…</div>
+              <div class="msg msg-agent working-line with-avatar"><span class="avatar avatar-sm msg-avatar" data-avatar="palm" data-color="orange" data-state="working" aria-label="Travel, working"></span><span class="working-dots" aria-hidden="true"><i></i><i></i><i></i></span>Working with Travel…</div>
             </div>
             <div class="app-composer"><span>Message Website…</span><span class="composer-mic" aria-hidden="true"></span></div>
           </div>
@@ -154,7 +155,7 @@
         <h2>Message projects like teammates</h2>
         <p>Give work to a project the way you would to a colleague, from your Mac or your iPhone. The project agent takes it from start to finish, keeps the context on how you work, and comes back when it needs your approval.</p>
       </div>
-      <svg class="statement-mark" viewBox="0 0 64 64" aria-hidden="true"><use href="#arbos-mark"/></svg>
+      <span class="statement-avatar avatar" data-avatar="baobab" data-color="green" aria-label="Baobab, a project agent"></span>
     </div>
   </div>
 </section>
@@ -172,7 +173,7 @@
       <div class="illus illus-machine" aria-hidden="true">
         <div class="mini-panel">
           <div class="mini-row mini-head"><span>Your machine</span><span class="pill-state on">Running</span></div>
-          <div class="mini-row"><span>Projects</span><span class="mini-muted">Website · Research · Books · Travel</span></div>
+          <div class="mini-row"><span>Projects</span><span class="mini-avatars"><span class="avatar avatar-xs" data-avatar="pine" data-color="blue" data-static aria-label="Website"></span><span class="avatar avatar-xs" data-avatar="fractal" data-color="cyan" data-static aria-label="Research"></span><span class="avatar avatar-xs" data-avatar="maple" data-color="amber" data-static aria-label="Books"></span><span class="avatar avatar-xs" data-avatar="palm" data-color="orange" data-static aria-label="Travel"></span></span></div>
           <div class="mini-row"><span>Started</span><span class="mini-muted">12 s ago, on your first message</span></div>
           <div class="mini-row"><span>Sleeps</span><span class="mini-muted">20 min after you go quiet</span></div>
           <div class="mini-bar"><i></i></div>
@@ -191,7 +192,7 @@
         <div class="dev-phone">
           <div class="dev-notch"></div>
           <div class="dev-line w70 dim"></div><div class="dev-line w50 dim"></div>
-          <div class="dev-bubble dev-bubble-agent">Done. Two charts and a one-page summary are in the thread.</div>
+          <div class="dev-bubble dev-bubble-agent"><span class="avatar avatar-xs" data-avatar="mushroom" data-color="rose" aria-label="Agent"></span>Done. Two charts and a one-page summary are in the thread.</div>
           <div class="dev-home"></div>
         </div>
       </div>
@@ -200,11 +201,11 @@
       <h3>Projects stay separate, and still talk</h3>
       <p>Each project has its own directory, memory, and history on your machine. Put a few in one group chat and they hand work between themselves while you watch.</p>
       <div class="illus illus-group" aria-hidden="true">
-        <div class="relay-line"><span class="av av-web"></span>Asking Research…</div>
-        <div class="relay-line"><span class="av av-research"></span>Looping in Books…</div>
-        <div class="relay-line"><span class="av av-books"></span>Sending to Website…</div>
-        <div class="relay-line"><span class="av av-travel"></span>Pinging Travel…</div>
-        <div class="av-stack"><span class="av av-web"></span><span class="av av-research"></span><span class="av av-books"></span><span class="av av-travel"></span></div>
+        <div class="relay-line"><span class="avatar avatar-sm" data-avatar="pine" data-color="blue" aria-label="Website"></span>Asking Research…</div>
+        <div class="relay-line"><span class="avatar avatar-sm" data-avatar="fractal" data-color="cyan" aria-label="Research"></span>Looping in Books…</div>
+        <div class="relay-line"><span class="avatar avatar-sm" data-avatar="maple" data-color="amber" aria-label="Books"></span>Sending to Website…</div>
+        <div class="relay-line"><span class="avatar avatar-sm" data-avatar="palm" data-color="orange" aria-label="Travel"></span>Pinging Travel…</div>
+        <div class="av-stack"><span class="avatar" data-avatar="pine" data-color="blue" data-static aria-label="Website"></span><span class="avatar" data-avatar="fractal" data-color="cyan" data-static aria-label="Research"></span><span class="avatar" data-avatar="maple" data-color="amber" data-static aria-label="Books"></span><span class="avatar" data-avatar="palm" data-color="orange" data-static aria-label="Travel"></span></div>
       </div>
     </article>
     <article class="feature-card" data-reveal>
@@ -212,7 +213,7 @@
       <p>Anything that leaves the machine — an email, a Slack post, a payment — shows up as a draft first. Approve it, edit it, or say no. Logins and keys stay in an encrypted vault the agent never sees.</p>
       <div class="illus illus-approve" aria-hidden="true">
         <div class="card approval approval-lg">
-          <div class="approval-head"><span class="approval-tag">Approval</span>Reply to Dana about the annual plan?</div>
+          <div class="approval-head"><span class="avatar avatar-sm" data-avatar="willow" data-color="teal" aria-label="Inbox"></span><span class="approval-tag">Approval</span>Reply to Dana about the annual plan?</div>
           <div class="approval-quote">“Annual works for us. I’ll send the order form today — same terms as last quarter.”</div>
           <div class="approval-body">Gmail · as you · to dana@acme.com</div>
           <div class="approval-actions"><span class="chip chip-solid">Approve</span><span class="chip">Edit</span><span class="chip chip-ghost">Not now</span></div>
@@ -228,14 +229,14 @@
     <div class="usecases-copy" data-reveal>
       <h2>Give each project a job</h2>
       <div class="chips" role="tablist" aria-label="Example projects" data-chips>
-        <button class="chip-tab is-active" role="tab" aria-selected="true" data-chip="inbox"><span class="av av-xs av-web"></span>Inbox</button>
-        <button class="chip-tab" role="tab" aria-selected="false" data-chip="research">Research</button>
-        <button class="chip-tab" role="tab" aria-selected="false" data-chip="website">Website</button>
-        <button class="chip-tab" role="tab" aria-selected="false" data-chip="books">Books</button>
-        <button class="chip-tab" role="tab" aria-selected="false" data-chip="hiring">Hiring</button>
-        <button class="chip-tab" role="tab" aria-selected="false" data-chip="travel">Travel</button>
-        <button class="chip-tab" role="tab" aria-selected="false" data-chip="oncall">On-call</button>
-        <button class="chip-tab" role="tab" aria-selected="false" data-chip="chief">Chief of staff</button>
+                <button class="chip-tab is-active" role="tab" aria-selected="true" data-chip="inbox" data-avatar-slug="willow" data-avatar-color="teal"><span class="avatar avatar-xs" data-avatar="willow" data-color="teal" data-static aria-hidden="true"></span>Inbox</button>
+        <button class="chip-tab" role="tab" aria-selected="false" data-chip="research" data-avatar-slug="fractal" data-avatar-color="cyan"><span class="avatar avatar-xs" data-avatar="fractal" data-color="cyan" data-static aria-hidden="true"></span>Research</button>
+        <button class="chip-tab" role="tab" aria-selected="false" data-chip="website" data-avatar-slug="pine" data-avatar-color="blue"><span class="avatar avatar-xs" data-avatar="pine" data-color="blue" data-static aria-hidden="true"></span>Website</button>
+        <button class="chip-tab" role="tab" aria-selected="false" data-chip="books" data-avatar-slug="maple" data-avatar-color="amber"><span class="avatar avatar-xs" data-avatar="maple" data-color="amber" data-static aria-hidden="true"></span>Books</button>
+        <button class="chip-tab" role="tab" aria-selected="false" data-chip="hiring" data-avatar-slug="cherry" data-avatar-color="pink"><span class="avatar avatar-xs" data-avatar="cherry" data-color="pink" data-static aria-hidden="true"></span>Hiring</button>
+        <button class="chip-tab" role="tab" aria-selected="false" data-chip="travel" data-avatar-slug="palm" data-avatar-color="orange"><span class="avatar avatar-xs" data-avatar="palm" data-color="orange" data-static aria-hidden="true"></span>Travel</button>
+        <button class="chip-tab" role="tab" aria-selected="false" data-chip="oncall" data-avatar-slug="cactus" data-avatar-color="red"><span class="avatar avatar-xs" data-avatar="cactus" data-color="red" data-static aria-hidden="true"></span>On-call</button>
+        <button class="chip-tab" role="tab" aria-selected="false" data-chip="chief" data-avatar-slug="sequoia" data-avatar-color="violet"><span class="avatar avatar-xs" data-avatar="sequoia" data-color="violet" data-static aria-hidden="true"></span>Chief of staff</button>
       </div>
       <div class="usecase-panels">
         <p class="usecase" data-panel="inbox"><strong>Clear your inbox overnight.</strong> Reads every thread through your Gmail connector, drafts replies in your voice, files what needs no answer, and leaves a short review list for the morning.</p>
@@ -251,17 +252,17 @@
     </div>
     <div class="usecases-visual" data-reveal aria-hidden="true">
       <div class="thread-card">
-        <div class="thread-head"><span class="av av-sm av-web"></span><span class="thread-title" data-thread-title>Inbox</span><span class="thread-meta">routine · every night at 2:00</span></div>
+        <div class="thread-head"><span class="thread-avatar"><span class="avatar" data-avatar="willow" data-color="teal" aria-label="Inbox"></span></span><span class="thread-title" data-thread-title>Inbox</span><span class="thread-meta">routine · every night at 2:00</span></div>
         <div class="thread-body">
           <div class="msg msg-user">Anything I need to see before standup?</div>
-          <div class="msg msg-agent">Two things. Acme accepted the annual terms — I drafted the thank-you and it is waiting for your approval. And the vendor invoice is 40% higher than last month; I asked Books to check it.</div>
+          <div class="msg msg-agent with-avatar"><span class="avatar avatar-sm msg-avatar" data-avatar="willow" data-color="teal" data-thread-msg-avatar aria-label="Inbox"></span><div>Two things. Acme accepted the annual terms — I drafted the thank-you and it is waiting for your approval. And the vendor invoice is 40% higher than last month; I asked Books to check it.</div></div>
           <div class="card approval">
             <div class="approval-head"><span class="approval-tag">Approval</span>Send the thank-you to Acme?</div>
             <div class="approval-body">Gmail · as you · to procurement@acme.com</div>
             <div class="approval-actions"><span class="chip chip-solid">Approve</span><span class="chip">Edit</span></div>
           </div>
           <div class="msg msg-user">Approve. What did Books say?</div>
-          <div class="msg msg-agent working-line"><span class="working-dots"><i></i><i></i><i></i></span>Books is replying…</div>
+          <div class="msg msg-agent working-line with-avatar"><span class="avatar avatar-sm msg-avatar" data-avatar="maple" data-color="amber" data-state="working" aria-label="Books, working"></span><span class="working-dots"><i></i><i></i><i></i></span>Books is replying…</div>
         </div>
         <div class="app-composer"><span>Message Inbox…</span><span class="composer-mic"></span></div>
       </div>
@@ -275,10 +276,11 @@
     <h2 class="center" data-reveal>A day with Arbos</h2>
     <div class="demo-frame media-frame" data-reveal>
       <div class="demo-stage" data-demo>
+        <div class="demo-cast" aria-hidden="true"><span class="avatar avatar-sm" data-avatar="fractal" data-color="cyan" data-static></span><span class="avatar avatar-sm" data-avatar="pine" data-color="blue" data-static></span><span class="avatar avatar-sm" data-avatar="maple" data-color="amber" data-static></span><span class="avatar avatar-sm" data-avatar="palm" data-color="orange" data-static></span><span class="avatar avatar-sm" data-avatar="sequoia" data-color="violet" data-static></span><span class="demo-cast-label">Research · Website · Books · Travel · Chief of staff</span></div>
         <div class="demo-msg demo-user" data-step="1">Morning. What happened overnight?</div>
-        <div class="demo-msg demo-agent" data-step="2">Research finished the competitor memo and Website shipped the pricing fix at 03:12. Books flagged one invoice. Two approvals are waiting for you.</div>
+        <div class="demo-msg demo-agent with-avatar" data-step="2"><span class="avatar demo-avatar" data-avatar="sequoia" data-color="violet" aria-label="Chief of staff"></span><div>Research finished the competitor memo and Website shipped the pricing fix at 03:12. Books flagged one invoice. Two approvals are waiting for you.</div></div>
         <div class="demo-msg demo-user" data-step="3">Approve the first one, hold the second. Then have Travel move my flight to Tuesday.</div>
-        <div class="demo-msg demo-agent" data-step="4"><span class="working-dots" aria-hidden="true"><i></i><i></i><i></i></span>Done. Email sent. Travel found a 9:40 on Tuesday — it is a draft in your thread, waiting for a yes.</div>
+        <div class="demo-msg demo-agent with-avatar" data-step="4"><span class="avatar demo-avatar" data-avatar="sequoia" data-color="violet" data-state="working" aria-label="Chief of staff, working"></span><div><span class="working-dots" aria-hidden="true"><i></i><i></i><i></i></span>Done. Email sent. Travel found a 9:40 on Tuesday — it is a draft in your thread, waiting for a yes.</div></div>
         <div class="demo-caption">Mac at the desk, iPhone on the way — the same thread, the same machine.</div>
       </div>
     </div>
@@ -422,8 +424,16 @@
       </div>
     </div>
   </div>
-  <div class="outline-mark" aria-hidden="true">
-    <svg viewBox="0 0 64 64"><use href="#arbos-mark-outline"/></svg>
+  <div class="lineup" aria-label="Nine project agents">
+    <span class="avatar" data-avatar="cactus" data-color="red" aria-label="On-call"></span>
+    <span class="avatar" data-avatar="cherry" data-color="pink" aria-label="Hiring"></span>
+    <span class="avatar" data-avatar="palm" data-color="orange" aria-label="Travel"></span>
+    <span class="avatar" data-avatar="pine" data-color="blue" aria-label="Website"></span>
+    <span class="avatar" data-avatar="baobab" data-color="green" aria-label="Home"></span>
+    <span class="avatar" data-avatar="fractal" data-color="cyan" aria-label="Research"></span>
+    <span class="avatar" data-avatar="maple" data-color="amber" aria-label="Books"></span>
+    <span class="avatar" data-avatar="willow" data-color="teal" aria-label="Inbox"></span>
+    <span class="avatar" data-avatar="sequoia" data-color="violet" aria-label="Chief of staff"></span>
   </div>
 </section>
 
@@ -481,11 +491,6 @@
     <g id="arbos-mark" mask="url(#arbos-cut)">
       <circle cx="32" cy="26" r="24" fill="currentColor"/>
       <path d="M26 44h12v10a6 6 0 0 1-12 0z" fill="currentColor"/>
-    </g>
-    <g id="arbos-mark-outline" fill="none" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M26 49.24A24 24 0 1 1 38 49.24M26 49.24V54a6 6 0 0 0 12 0V49.24" stroke="currentColor" stroke-width="0.6"/>
-      <path d="M32 50V32M32 34L19 21M32 30L45 17" stroke="currentColor" stroke-width="8.6"/>
-      <path d="M32 50V32M32 34L19 21M32 30L45 17" stroke="var(--bg)" stroke-width="7.4"/>
     </g>
     <path id="apple-logo" d="M13.6 10.6c0-2.4 2-3.6 2.1-3.6-1.1-1.7-2.9-1.9-3.5-1.9-1.5-.2-2.9.9-3.7.9-.8 0-1.9-.9-3.2-.8-1.6 0-3.1 1-4 2.4-1.7 3-.4 7.3 1.2 9.7.8 1.2 1.8 2.5 3 2.4 1.2 0 1.7-.8 3.2-.8 1.5 0 1.9.8 3.2.8 1.3 0 2.2-1.2 3-2.4.9-1.3 1.3-2.6 1.3-2.7 0 0-2.6-1-2.6-4zM11.2 3.4c.7-.8 1.1-1.9 1-3-1 0-2.1.7-2.8 1.5-.6.7-1.2 1.8-1 2.9 1.1.1 2.2-.6 2.8-1.4z" fill="currentColor"/>
   </defs>
