@@ -768,6 +768,7 @@ mod tests {
             upgrading: Arc::new(Mutex::new(HashMap::new())),
             stale_bounces: Arc::new(Mutex::new(HashMap::new())),
             local_conns: Arc::new(Mutex::new(HashMap::new())),
+            refresh_grace: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 

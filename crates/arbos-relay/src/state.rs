@@ -133,6 +133,10 @@ pub struct AppState {
     pub download_cache: Arc<Mutex<Option<(i64, String)>>>,
     /// user_id → box upgrade in progress (`POST /machine/upgrade`).
     pub upgrading: Arc<Mutex<HashMap<String, UpgradeStatus>>>,
+    /// Hash of a just-rotated refresh token → (when, the pair it was rotated into). Within
+    /// `signin::REFRESH_GRACE_MS` the old token gets that same pair again instead of counting
+    /// as a replay, so concurrent refreshers from one device converge on one rotation.
+    pub refresh_grace: Arc<Mutex<HashMap<String, (i64, serde_json::Value)>>>,
 }
 
 /// One running box upgrade.
@@ -360,6 +364,7 @@ pub(crate) mod test_support {
             upgrading: Arc::new(Mutex::new(HashMap::new())),
             stale_bounces: Arc::new(Mutex::new(HashMap::new())),
             local_conns: Arc::new(Mutex::new(HashMap::new())),
+            refresh_grace: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }

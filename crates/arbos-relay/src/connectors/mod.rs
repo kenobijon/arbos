@@ -832,6 +832,7 @@ mod tests {
             download_cache: Arc::new(Mutex::new(None)),
             upgrading: Arc::new(Mutex::new(HashMap::new())),
             local_conns: Arc::new(Mutex::new(HashMap::new())),
+            refresh_grace: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 

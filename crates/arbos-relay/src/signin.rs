@@ -519,10 +519,24 @@ pub struct RefreshBody {
     pub refresh_token: String,
 }
 
-/// `POST /auth/refresh {"refresh_token"}` → new pair; the old refresh token is dead. A token
-/// that was already rotated is a replay: the whole device is revoked.
+/// How long a just-rotated refresh token still answers with the pair it was rotated into.
+/// Several requests of one app can be refused at the same instant and each try to refresh;
+/// inside this window they all get the one new pair. Outside it a reused token is a replay.
+pub const REFRESH_GRACE_MS: i64 = 30_000;
+
+/// `POST /auth/refresh {"refresh_token"}` → new pair; the old refresh token is dead after
+/// `REFRESH_GRACE_MS`. A token that was rotated longer ago is a replay: the whole device is revoked.
 pub async fn refresh(State(state): State<AppState>, Json(b): Json<RefreshBody>) -> Response {
     let h = hash(b.refresh_token.trim());
+    {
+        let mut grace = state.refresh_grace.lock().await;
+        let now = now_ms();
+        grace.retain(|_, (at, _)| now - *at < REFRESH_GRACE_MS);
+        if let Some((_, pair)) = grace.get(&h) {
+            tracing::debug!("refresh token re-presented within the grace window; same pair");
+            return Json(pair.clone()).into_response();
+        }
+    }
     let row = match state.db.refresh_row(&h) {
         Ok(Some(r)) => r,
         Ok(None) => {
@@ -565,7 +579,14 @@ pub async fn refresh(State(state): State<AppState>, Json(b): Json<RefreshBody>) 
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
     }
     match issue_tokens(&state, &row.user_id, &row.device_id) {
-        Ok(v) => Json(v).into_response(),
+        Ok(v) => {
+            state
+                .refresh_grace
+                .lock()
+                .await
+                .insert(h, (now_ms(), v.clone()));
+            Json(v).into_response()
+        }
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
     }
 }

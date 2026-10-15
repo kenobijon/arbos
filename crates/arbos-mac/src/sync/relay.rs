@@ -124,17 +124,34 @@ impl Shared {
     /// `POST /auth/refresh` with the stored refresh token; the relay rotates
     /// it, so this is serialised and never retried with a used token. A 401
     /// here means the device was revoked: back to the sign-in screen.
-    async fn refresh_tokens(self: &Arc<Self>) -> Result<()> {
+    ///
+    /// Single-flight: `stale_access` is the access token the caller was using when it was
+    /// refused. Requests that were refused at the same moment queue on the lock, and every one
+    /// after the first finds the token already replaced and returns at once — one rotation per
+    /// expiry instead of one per in-flight request (the refresh storm at launch).
+    async fn refresh_tokens(self: &Arc<Self>, stale_access: Option<&str>) -> Result<()> {
         let _guard = self.refresh_lock.lock().await;
-        let Some(refresh) = self
-            .creds
-            .read()
-            .unwrap()
-            .as_ref()
-            .and_then(|c| c.refresh_token.clone())
-        else {
+        let (current_access, refresh, due) = {
+            let creds = self.creds.read().unwrap();
+            let Some(c) = creds.as_ref() else {
+                return Err(anyhow!("no refresh token"));
+            };
+            (
+                c.access_token.clone(),
+                c.refresh_token.clone(),
+                c.needs_refresh(),
+            )
+        };
+        let Some(refresh) = refresh else {
             return Err(anyhow!("no refresh token"));
         };
+        match stale_access {
+            // Someone refreshed while we waited for the lock: the new token is already stored.
+            Some(stale) if stale != current_access => return Ok(()),
+            // The periodic refresher: nothing to do when a 401-driven refresh just happened.
+            None if !due => return Ok(()),
+            _ => {}
+        }
         let resp = self
             .http
             .post(format!("{}/auth/refresh", self.http_url))
@@ -292,10 +309,11 @@ impl Shared {
     async fn get_json(self: &Arc<Self>, path: &str) -> Result<Value> {
         let mut refreshed = false;
         loop {
+            let token = self.token();
             let resp = self
                 .http
                 .get(format!("{}{}", self.http_url, path))
-                .bearer_auth(self.token())
+                .bearer_auth(&token)
                 .send()
                 .await
                 .with_context(|| format!("GET {path}"))?;
@@ -303,7 +321,7 @@ impl Shared {
             let body = resp.text().await.unwrap_or_default();
             if Self::is_token_expired(status, &body) && !refreshed {
                 refreshed = true;
-                self.refresh_tokens().await?;
+                self.refresh_tokens(Some(&token)).await?;
                 continue;
             }
             if !status.is_success() {
@@ -316,10 +334,11 @@ impl Shared {
     async fn post_json(self: &Arc<Self>, path: &str, body: Value) -> Result<Value> {
         let mut refreshed = false;
         loop {
+            let token = self.token();
             let resp = self
                 .http
                 .post(format!("{}{}", self.http_url, path))
-                .bearer_auth(self.token())
+                .bearer_auth(&token)
                 .json(&body)
                 .send()
                 .await
@@ -328,7 +347,7 @@ impl Shared {
             let text = resp.text().await.unwrap_or_default();
             if Self::is_token_expired(status, &text) && !refreshed {
                 refreshed = true;
-                self.refresh_tokens().await?;
+                self.refresh_tokens(Some(&token)).await?;
                 continue;
             }
             if !status.is_success() {
@@ -344,10 +363,11 @@ impl Shared {
     async fn patch_json(self: &Arc<Self>, path: &str, body: Value) -> Result<Value> {
         let mut refreshed = false;
         loop {
+            let token = self.token();
             let resp = self
                 .http
                 .patch(format!("{}{}", self.http_url, path))
-                .bearer_auth(self.token())
+                .bearer_auth(&token)
                 .json(&body)
                 .send()
                 .await
@@ -356,7 +376,7 @@ impl Shared {
             let text = resp.text().await.unwrap_or_default();
             if Self::is_token_expired(status, &text) && !refreshed {
                 refreshed = true;
-                self.refresh_tokens().await?;
+                self.refresh_tokens(Some(&token)).await?;
                 continue;
             }
             if !status.is_success() {
@@ -524,7 +544,7 @@ fn start_token_refresher(shared: &Arc<Shared>) {
                 .map(|c| c.needs_refresh())
                 .unwrap_or(false);
             if due {
-                if let Err(err) = shared.refresh_tokens().await {
+                if let Err(err) = shared.refresh_tokens(None).await {
                     shared.notice(format!("Session refresh: {err:#}"));
                 }
             }

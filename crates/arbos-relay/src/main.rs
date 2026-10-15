@@ -268,6 +268,7 @@ async fn main() -> anyhow::Result<()> {
         jwt_key: Arc::new(jwt_key),
         download_cache: Arc::new(Mutex::new(None)),
         upgrading: Arc::new(Mutex::new(HashMap::new())),
+        refresh_grace: Arc::new(Mutex::new(HashMap::new())),
     };
     tracing::info!(auth_mode = auth_mode.as_str(), public_url = %state.cfg.public_url, "sign-in");
     if state.cfg.connectors_mock {
