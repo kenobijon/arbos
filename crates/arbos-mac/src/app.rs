@@ -75,6 +75,8 @@ pub struct AppState {
     pub pairing: Option<Pairing>,
     pub device_id: Option<String>,
     pub projects: Vec<Project>,
+    /// Picker contents; empty = the fixture's static list.
+    pub models: Vec<String>,
     pub project_docs: HashMap<Id, ProjectDocView>,
     pub chats: HashMap<Id, Vec<Chat>>,
     pub messages: HashMap<Id, Vec<Message>>,
@@ -132,6 +134,7 @@ impl AppState {
             pairing: None,
             device_id: None,
             projects: Vec::new(),
+            models: Vec::new(),
             project_docs: HashMap::new(),
             chats: HashMap::new(),
             messages: HashMap::new(),
@@ -240,6 +243,10 @@ impl AppState {
             }
             SyncEvent::Notice(text) => {
                 self.push_notice(text);
+                cx.notify();
+            }
+            SyncEvent::Models(models) => {
+                self.models = models;
                 cx.notify();
             }
             SyncEvent::Projects(projects) => {

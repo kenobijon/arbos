@@ -34,6 +34,8 @@ pub enum SyncEvent {
     PairingFailed(String),
     /// Registry: the full project list, rail order.
     Projects(Vec<Project>),
+    /// Model ids the relay proxy can serve (picker contents).
+    Models(Vec<String>),
     /// Box lifecycle for one project (relay `STATUS` frame or doc `status`).
     ProjectStatus {
         project_id: Id,

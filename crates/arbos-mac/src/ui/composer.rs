@@ -874,9 +874,12 @@ impl Composer {
             .map(|p| (p.model.clone(), p.effort))
             .unwrap_or((MODELS[0].to_string(), Effort::High));
         let mut menu = div()
+            .id("picker-menu")
             .flex()
             .flex_col()
-            .min_w(px(200.0))
+            .min_w(px(220.0))
+            .max_h(px(320.0))
+            .overflow_y_scroll()
             .p(px(4.0))
             .rounded(px(PANEL_RADIUS))
             .bg(theme.card())
@@ -885,7 +888,15 @@ impl Composer {
             .shadow_lg();
         match picker {
             Picker::Model => {
-                for (i, name) in MODELS.iter().enumerate() {
+                let mut names: Vec<String> = if state.models.is_empty() {
+                    MODELS.iter().map(|m| m.to_string()).collect()
+                } else {
+                    state.models.clone()
+                };
+                if !names.contains(&model) {
+                    names.insert(0, model.clone());
+                }
+                for (i, name) in names.iter().enumerate() {
                     let selected = *name == model;
                     let name_owned = name.to_string();
                     menu = menu.child(
@@ -901,7 +912,7 @@ impl Composer {
                             .text_color(theme.text)
                             .hover(|s| s.bg(theme.surface_2))
                             .cursor_pointer()
-                            .child(*name)
+                            .child(name.clone())
                             .when(selected, |el| {
                                 el.child(div().text_color(theme.accent).child("✓"))
                             })

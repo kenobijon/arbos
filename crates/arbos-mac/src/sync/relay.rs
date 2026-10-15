@@ -201,6 +201,33 @@ impl SyncSource for RelaySource {
 }
 
 fn start_after_pairing(shared: &Arc<Shared>) {
+    let models_shared = shared.clone();
+    tokio::spawn(async move {
+        if let Ok(v) = models_shared.get_json("/proxy/v1/models").await {
+            let mut ids: Vec<String> = v
+                .get("data")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|m| m.get("id").and_then(Value::as_str))
+                        .filter(|id| !id.contains(':'))
+                        .filter(|id| {
+                            id.starts_with("anthropic/")
+                                || id.starts_with("openai/")
+                                || id.starts_with("google/")
+                                || id.starts_with("x-ai/")
+                        })
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            ids.sort();
+            ids.dedup();
+            if !ids.is_empty() {
+                let _ = models_shared.events.send(SyncEvent::Models(ids));
+            }
+        }
+    });
     let shared = shared.clone();
     tokio::spawn(async move {
         let mut poll = interval(REGISTRY_POLL);
@@ -1181,14 +1208,44 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             });
         }
         ClientCommand::CloseChat { chat_id } => {
-            // The relay has no delete yet; the tab closes locally and the
-            // room stays subscribed so unread state keeps working.
+            let project_id = project_of(shared, &chat_id);
             shared
                 .chats
                 .lock()
                 .unwrap()
                 .retain(|c| c.id != chat_id || c.is_pinned);
             emit_chats(shared);
+            if let Some(project_id) = project_id {
+                let shared = shared.clone();
+                tokio::spawn(async move {
+                    // Soft close on the relay; 409 = pinned, which the UI never offers.
+                    let resp = shared
+                        .http
+                        .delete(format!(
+                            "{}/projects/{}/chats/{}",
+                            shared.http_url, project_id, chat_id
+                        ))
+                        .bearer_auth(shared.token())
+                        .send()
+                        .await;
+                    match resp {
+                        Ok(r) if r.status().is_success() || r.status().as_u16() == 404 => {
+                            if let Some(room) = shared.rooms.lock().unwrap().remove(&chat_id) {
+                                drop(room);
+                            }
+                            shared.docs.lock().unwrap().remove(&chat_id);
+                        }
+                        Ok(r) if r.status().as_u16() == 409 => {
+                            shared.notice("The pinned chat cannot be closed");
+                            if let Err(err) = refresh_registry(&shared).await {
+                                shared.notice(format!("Relay: {err:#}"));
+                            }
+                        }
+                        Ok(r) => shared.notice(format!("Close chat: HTTP {}", r.status())),
+                        Err(err) => shared.notice(format!("Close chat: {err}")),
+                    }
+                });
+            }
         }
         ClientCommand::SetModel {
             project_id,
@@ -1210,14 +1267,35 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     doc.commit();
                 }
             }
-            let mut projects = shared.projects.lock().unwrap();
-            if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
-                p.model = model;
-                p.effort = effort;
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
+                    p.model = model.clone();
+                    p.effort = effort;
+                }
+                let snapshot = projects.clone();
+                drop(projects);
+                let _ = shared.events.send(SyncEvent::Projects(snapshot));
             }
-            let snapshot = projects.clone();
-            drop(projects);
-            let _ = shared.events.send(SyncEvent::Projects(snapshot));
+            // Canonical path: the registry. Slots merge one by one.
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let body = json!({
+                    "models": { "talking_model": { "id": model, "effort": effort_to(effort) } }
+                });
+                let resp = shared
+                    .http
+                    .patch(format!("{}/projects/{}", shared.http_url, project_id))
+                    .bearer_auth(shared.token())
+                    .json(&body)
+                    .send()
+                    .await;
+                match resp {
+                    Ok(r) if r.status().is_success() => {}
+                    Ok(r) => shared.notice(format!("Model change not saved: HTTP {}", r.status())),
+                    Err(err) => shared.notice(format!("Model change not saved: {err}")),
+                }
+            });
         }
         ClientCommand::CreateProject { name } => {
             let shared = shared.clone();
@@ -1296,8 +1374,17 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 watches.insert(
                     project_id,
                     tokio::spawn(async move {
-                        if let Err(err) = watch_browser(shared2.clone(), pid).await {
-                            shared2.notice(format!("Browser stream: {err:#}"));
+                        // No session yet closes the socket at once; keep trying
+                        // quietly while the panel is open.
+                        let mut first = true;
+                        loop {
+                            if let Err(err) = watch_browser(shared2.clone(), pid.clone()).await {
+                                if first {
+                                    shared2.notice(format!("Browser stream: {err:#} — retrying"));
+                                    first = false;
+                                }
+                            }
+                            sleep(Duration::from_secs(5)).await;
                         }
                     }),
                 );
@@ -1316,17 +1403,24 @@ async fn watch_browser(shared: Arc<Shared>, project_id: Id) -> Result<()> {
             let status = shared
                 .get_json(&format!("/projects/{project_id}/status"))
                 .await?;
-            let box_url = status
-                .get("provider")
-                .and_then(|p| p.get("box_url"))
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("box has no URL yet (asleep?)"))?
-                .trim_end_matches('/')
-                .to_string();
-            let ws = box_url
-                .replacen("https://", "wss://", 1)
-                .replacen("http://", "ws://", 1);
-            format!("{ws}/browser/stream")
+            let provider = status.get("provider").cloned().unwrap_or(Value::Null);
+            // Relay-proxied stream (token in the URL) first; a direct box
+            // URL only as the v2 fallback.
+            match provider.get("browser_stream_url").and_then(Value::as_str) {
+                Some(url) if !url.is_empty() => url.to_string(),
+                Some(_) | None => {
+                    let box_url = provider
+                        .get("box_url")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| anyhow!("box has no URL yet (asleep?)"))?
+                        .trim_end_matches('/')
+                        .to_string();
+                    let ws = box_url
+                        .replacen("https://", "wss://", 1)
+                        .replacen("http://", "ws://", 1);
+                    format!("{ws}/browser/stream")
+                }
+            }
         }
     };
     let (ws, _) = timeout(HELLO_DEADLINE, connect_async(&url))
