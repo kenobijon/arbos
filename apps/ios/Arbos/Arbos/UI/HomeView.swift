@@ -33,6 +33,9 @@ struct HomeView: View {
                         } else {
                             if query.isEmpty {
                                 machineLine
+                                ForEach(model.approvals) { device in
+                                    ApprovalCard(device: device)
+                                }
                                 favorites
                             }
                             ForEach(projects) { project in
@@ -295,6 +298,45 @@ struct HomeView: View {
             return date.formatted(.dateTime.weekday(.wide))
         }
         return date.formatted(.dateTime.month(.abbreviated).day())
+    }
+}
+
+/// "Approve new device" — another device of this account is waiting (RFC 8628 user code).
+struct ApprovalCard: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    let device: PendingDevice
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                GlassCircle(size: 36) {
+                    Image(systemName: "iphone.and.arrow.right.inward").font(.system(size: 15)).foregroundStyle(theme.text)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Approve new device").font(.system(size: Theme.body, weight: .semibold)).foregroundStyle(theme.text)
+                    Text("\(device.name) · code \(device.userCode)").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                }
+                Spacer()
+            }
+            HStack(spacing: 10) {
+                Button { model.deny(device) } label: {
+                    Text("Deny").font(.system(size: Theme.small, weight: .semibold)).foregroundStyle(theme.text)
+                        .frame(maxWidth: .infinity).frame(height: 38)
+                        .background(Capsule().fill(theme.field)).overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                Button { model.approve(device) } label: {
+                    Text("Approve").font(.system(size: Theme.small, weight: .semibold)).foregroundStyle(theme.onPrimary)
+                        .frame(maxWidth: .infinity).frame(height: 38)
+                        .background(Capsule().fill(theme.primary))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(14)
+        .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
+        .padding(.top, 10)
     }
 }
 

@@ -26,7 +26,7 @@ struct RootView: View {
             if model.isPaired {
                 HomeView()
             } else {
-                PairingView()
+                SignInView()
             }
         }
         .environment(\.theme, theme)

@@ -36,7 +36,8 @@ struct Notice: Identifiable, Equatable {
 
 @MainActor
 final class AppModel: ObservableObject {
-    static let defaultRelayUrl = ""
+    /// The hosted relay; self-hosters change it under Advanced.
+    static let defaultRelayUrl = "https://relay.arbos.life"
 
     @Published var appearanceSetting: String = UserDefaults.standard.string(forKey: "appearance") ?? Appearance.system.rawValue {
         didSet { UserDefaults.standard.set(appearanceSetting, forKey: "appearance") }
@@ -46,6 +47,17 @@ final class AppModel: ObservableObject {
     }
 
     @Published private(set) var credentials: DeviceCredentials?
+    /// Self-serve sign-in (GitHub). `tokens` is the JWT pair; `credentials`
+    /// mirrors its access token so every existing call path keeps working.
+    @Published private(set) var tokens: AuthTokens?
+    @Published private(set) var user: AuthUser?
+    @Published private(set) var credits: Credits?
+    @Published private(set) var approvals: [PendingDevice] = []
+    @Published private(set) var authMode: AuthMode = .github
+    @Published private(set) var signingIn = false
+    @Published private(set) var signInError: String?
+    private let webAuth = WebAuth()
+    private var refreshTask: Task<Bool, Never>?
     @Published var projects: [Project] = []
     @Published var chats: [Id: [Chat]] = [:]
     @Published var messages: [Id: [Message]] = [:]
@@ -118,12 +130,115 @@ final class AppModel: ObservableObject {
             UserDefaults.standard.set(endpoint.httpUrl, forKey: "relayUrl")
         }
         api = RelayAPI(endpoint: endpoint) { "" }
+        if creds == nil, let saved = Keychain.loadAuth(relayUrl: endpoint.httpUrl) {
+            tokens = saved
+            creds = DeviceCredentials(relayUrl: saved.relayUrl, deviceId: saved.deviceId, deviceToken: saved.accessToken)
+        }
         if creds == nil { creds = Keychain.load(relayUrl: endpoint.httpUrl) }
         credentials = creds
         api.token = { [weak self] in self?.credentials?.deviceToken ?? "" }
+        api.refresher = { [weak self] in await self?.refreshTokens() ?? false }
         if creds != nil {
             startAfterPairing()
         }
+        Task { await probeAuthMode() }
+    }
+
+    // MARK: Sign in with GitHub (self-serve relay)
+
+    func probeAuthMode() async {
+        authMode = await api.authMode()
+    }
+
+    func signInWithGitHub() {
+        guard !signingIn else { return }
+        signingIn = true
+        signInError = nil
+        Task {
+            defer { signingIn = false }
+            do {
+                guard let start = api.authStartURL(deviceName: UIDevice.current.name) else {
+                    throw AuthError(message: "Bad relay address")
+                }
+                let code = try await webAuth.signIn(startURL: start)
+                let (toks, who) = try await api.exchange(grantCode: code)
+                adopt(tokens: toks, user: who)
+            } catch {
+                signInError = error.localizedDescription
+            }
+        }
+    }
+
+    private func adopt(tokens toks: AuthTokens, user who: AuthUser?) {
+        tokens = toks
+        if let who { user = who }
+        do { try Keychain.storeAuth(toks) } catch {
+            notice = Notice(text: "Session kept in memory only: \(error.localizedDescription)")
+        }
+        let wasPaired = credentials != nil
+        credentials = DeviceCredentials(relayUrl: toks.relayUrl, deviceId: toks.deviceId, deviceToken: toks.accessToken)
+        if !wasPaired { startAfterPairing() }
+    }
+
+    /// Single-flight refresh; false when the relay rejected the refresh token
+    /// (the device is then signed out — a reused rotated token revokes it).
+    func refreshTokens() async -> Bool {
+        if let running = refreshTask { return await running.value }
+        guard let current = tokens, !current.refreshToken.isEmpty else { return false }
+        let task = Task<Bool, Never> { [weak self] in
+            guard let self else { return false }
+            do {
+                let (next, who) = try await api.refresh(current)
+                adopt(tokens: next, user: who)
+                return true
+            } catch {
+                if let e = error as? RelayError, e.status == 401 || e.status == 403 {
+                    signOut(remote: false)
+                    signInError = "Your session ended. Sign in again."
+                }
+                return false
+            }
+        }
+        refreshTask = task
+        let ok = await task.value
+        refreshTask = nil
+        return ok
+    }
+
+    /// `/me` + pending approvals; runs with every registry poll.
+    func refreshAccount() async {
+        guard tokens != nil else { return }
+        if tokens?.isExpiringSoon == true { _ = await refreshTokens() }
+        if let (who, cr, _) = try? await api.me() {
+            user = who
+            credits = cr
+        }
+        if let list = try? await api.approvals() { approvals = list }
+    }
+
+    func approve(_ device: PendingDevice) {
+        approvals.removeAll { $0.id == device.id }
+        Task {
+            do { try await api.approve(userCode: device.userCode) } catch {
+                notice = Notice(text: "Approve failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    func deny(_ device: PendingDevice) {
+        approvals.removeAll { $0.id == device.id }
+        Task { try? await api.deny(userCode: device.userCode) }
+    }
+
+    func signOut(remote: Bool = true) {
+        let had = tokens
+        if remote, had != nil { Task { await api.logout() } }
+        if let had { Keychain.deleteAuth(relayUrl: had.relayUrl) }
+        tokens = nil
+        user = nil
+        credits = nil
+        approvals = []
+        unpair(forget: true)
     }
 
     var deviceId: String { credentials?.deviceId ?? "ios:unpaired" }
@@ -137,10 +252,20 @@ final class AppModel: ObservableObject {
         let previous = credentials
         unpair(forget: false)
         api = RelayAPI(endpoint: endpoint) { [weak self] in self?.credentials?.deviceToken ?? "" }
-        credentials = Keychain.load(relayUrl: endpoint.httpUrl)
+        api.refresher = { [weak self] in await self?.refreshTokens() ?? false }
+        tokens = nil
+        user = nil
+        credits = nil
+        Task { await probeAuthMode() }
+        if let saved = Keychain.loadAuth(relayUrl: endpoint.httpUrl) {
+            tokens = saved
+            credentials = DeviceCredentials(relayUrl: saved.relayUrl, deviceId: saved.deviceId, deviceToken: saved.accessToken)
+        } else {
+            credentials = Keychain.load(relayUrl: endpoint.httpUrl)
+        }
         if credentials != nil {
             startAfterPairing()
-        } else if let previous {
+        } else if let previous, tokens == nil, previous.deviceToken.hasPrefix("adv_") {
             // A quick-tunnel URL changes while the relay (and this device's
             // token) stays the same: try the old token on the new address
             // before asking for a pairing code.
@@ -210,6 +335,7 @@ final class AppModel: ObservableObject {
             while !Task.isCancelled {
                 guard let self else { return }
                 await self.refreshRegistry()
+                await self.refreshAccount()
                 try? await Task.sleep(nanoseconds: 15_000_000_000)
             }
         }

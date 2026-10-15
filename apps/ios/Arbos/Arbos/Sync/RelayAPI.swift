@@ -7,6 +7,8 @@ import Foundation
 struct RelayError: Error, LocalizedError {
     var status: Int
     var message: String
+    /// `error.type` from the self-serve relay (token_expired, credits_exhausted, …).
+    var type: String? = nil
 
     var errorDescription: String? {
         message.isEmpty ? "HTTP \(status)" : "HTTP \(status): \(message)"
@@ -53,6 +55,9 @@ struct RegistryProject {
 final class RelayAPI {
     let endpoint: RelayEndpoint
     var token: () -> String
+    /// Called once on a 401 for an authenticated call; return true after a
+    /// successful token refresh and the call is retried with the new token.
+    var refresher: (() async -> Bool)?
 
     private let session: URLSession
 
@@ -67,7 +72,18 @@ final class RelayAPI {
 
     // MARK: Raw calls
 
-    private func request(_ method: String, _ path: String, body: Any? = nil, auth: Bool = true) async throws -> (Data, HTTPURLResponse) {
+    func request(_ method: String, _ path: String, body: Any? = nil, auth: Bool = true) async throws -> (Data, HTTPURLResponse) {
+        do {
+            return try await requestOnce(method, path, body: body, auth: auth)
+        } catch let error as RelayError where error.isUnauthorized && auth {
+            if let refresher, await refresher() {
+                return try await requestOnce(method, path, body: body, auth: auth)
+            }
+            throw error
+        }
+    }
+
+    private func requestOnce(_ method: String, _ path: String, body: Any?, auth: Bool) async throws -> (Data, HTTPURLResponse) {
         guard let url = URL(string: endpoint.httpUrl + path) else {
             throw RelayError(status: 0, message: "Bad relay URL")
         }
@@ -86,12 +102,17 @@ final class RelayAPI {
         }
         if http.statusCode >= 400 {
             let text = String(data: data, encoding: .utf8) ?? ""
+            // Self-serve relay errors: {"error":{"type","message"}}.
+            if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let err = obj["error"] as? [String: Any] {
+                throw RelayError(status: http.statusCode, message: err["message"] as? String ?? text, type: err["type"] as? String)
+            }
             throw RelayError(status: http.statusCode, message: text.trimmingCharacters(in: .whitespacesAndNewlines))
         }
         return (data, http)
     }
 
-    private func json(_ method: String, _ path: String, body: Any? = nil, auth: Bool = true) async throws -> Any {
+    func json(_ method: String, _ path: String, body: Any? = nil, auth: Bool = true) async throws -> Any {
         let (data, _) = try await request(method, path, body: body, auth: auth)
         if data.isEmpty { return NSNull() }
         return (try? JSONSerialization.jsonObject(with: data)) ?? NSNull()
@@ -119,7 +140,13 @@ final class RelayAPI {
         var out: [RegistryProject] = []
         for item in list {
             guard let item = item as? [String: Any], let id = item["id"] as? String else { continue }
-            let detail = (try await json("GET", "/projects/\(id)")) as? [String: Any] ?? [:]
+            // A project the list shows but this user may not open (403) is skipped, not fatal.
+            let detail: [String: Any]
+            do {
+                detail = (try await json("GET", "/projects/\(id)")) as? [String: Any] ?? [:]
+            } catch let e as RelayError where e.status == 403 || e.status == 404 {
+                continue
+            }
             let p = detail["project"] as? [String: Any] ?? item
             let models = p["models"] as? [String: Any] ?? [:]
             let talking = models["talking_model"] as? [String: Any] ?? [:]

@@ -12,17 +12,37 @@ struct SettingsView: View {
             Form {
                 Section {
                     HStack(spacing: 14) {
-                        GlassCircle(size: 56) {
-                            Image(systemName: "person.fill").font(.system(size: 22)).foregroundStyle(theme.text)
+                        if let url = model.user?.avatarUrl.flatMap(URL.init(string:)) {
+                            AsyncImage(url: url) { img in img.resizable().scaledToFill() } placeholder: { Color(hex: "#2A2A2A")! }
+                                .frame(width: 56, height: 56)
+                                .clipShape(Circle())
+                        } else {
+                            GlassCircle(size: 56) {
+                                Image(systemName: "person.fill").font(.system(size: 22)).foregroundStyle(theme.text)
+                            }
                         }
                         VStack(alignment: .leading, spacing: 3) {
-                            Text("Arbos").font(.system(size: Theme.body, weight: .semibold)).foregroundStyle(theme.text)
-                            Text(model.relayUrl.isEmpty ? "Not paired" : model.relayUrl)
+                            Text(model.user?.name ?? model.user?.login ?? "Arbos")
+                                .font(.system(size: Theme.body, weight: .semibold)).foregroundStyle(theme.text)
+                            Text(model.user.map { "@\($0.login)" } ?? (model.relayUrl.isEmpty ? "Not signed in" : model.relayUrl))
                                 .font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
                                 .lineLimit(1).truncationMode(.middle)
                         }
                     }
                     .padding(.vertical, 4)
+                    if let c = model.credits {
+                        LabeledContent("Credits", value: String(format: "$%.2f left of $%.0f", c.balanceUsd, c.grantedUsd))
+                        if let cap = c.dailyCapUsd {
+                            LabeledContent("Today", value: String(format: "$%.2f of $%.0f cap", c.spentTodayUsd, cap))
+                        } else {
+                            LabeledContent("Today", value: String(format: "$%.2f", c.spentTodayUsd))
+                        }
+                    }
+                    if model.tokens != nil {
+                        Button("Sign out", role: .destructive) { confirmUnpair = true }
+                    }
+                } header: {
+                    Text("Account")
                 }
                 .listRowBackground(theme.card)
 
@@ -94,16 +114,18 @@ struct SettingsView: View {
                     }
                     LabeledContent("Link", value: linkLabel)
                 } header: {
-                    Text("Relay")
+                    Text("Advanced · Relay")
                 } footer: {
-                    Text("The device token is kept in the Keychain. Switching relays signs this device out of the current one.")
+                    Text("Self-hosters point the app at their own relay here. Switching relays signs this device out of the current one; sessions stay in the Keychain.")
                 }
                 .listRowBackground(theme.card)
 
-                Section {
-                    Button("Sign out this device", role: .destructive) { confirmUnpair = true }
+                if model.tokens == nil {
+                    Section {
+                        Button("Sign out this device", role: .destructive) { confirmUnpair = true }
+                    }
+                    .listRowBackground(theme.card)
                 }
-                .listRowBackground(theme.card)
 
                 Section("About") {
                     LabeledContent("Version", value: SettingsView.versionLine)
@@ -121,13 +143,13 @@ struct SettingsView: View {
                     Button("Done") { dismiss() }
                 }
             }
-            .confirmationDialog("Sign out this device?", isPresented: $confirmUnpair, titleVisibility: .visible) {
+            .confirmationDialog("Sign out?", isPresented: $confirmUnpair, titleVisibility: .visible) {
                 Button("Sign out", role: .destructive) {
-                    model.unpair()
+                    if model.tokens != nil { model.signOut() } else { model.unpair() }
                     dismiss()
                 }
             } message: {
-                Text("You will need a new pairing code to connect again.")
+                Text(model.tokens != nil ? "This device is signed out of the relay; sign in with GitHub to come back." : "You will need a new pairing code to connect again.")
             }
             .onAppear { relayUrl = model.relayUrl }
         }
