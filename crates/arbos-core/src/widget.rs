@@ -181,6 +181,9 @@ impl Widget {
                 let obj = value.as_object();
                 for f in fields {
                     let v = obj.and_then(|o| o.get(&f.id)).unwrap_or(&Value::Null);
+                    if v.is_null() && !f.required {
+                        continue;
+                    }
                     let shown = match f.kind {
                         FieldKind::Choice => label_for(&f.options, v),
                         FieldKind::Bool => match v.as_bool() {

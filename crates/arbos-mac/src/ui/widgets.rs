@@ -269,10 +269,14 @@ impl QuestionCard {
                     if t.is_empty() {
                         None
                     } else {
-                        let n: f64 = t
-                            .parse()
-                            .map_err(|_| format!("{}: not a number", f.label))?;
-                        Some(json!(n))
+                        if let Ok(i) = t.parse::<i64>() {
+                            Some(json!(i))
+                        } else {
+                            let n: f64 = t
+                                .parse()
+                                .map_err(|_| format!("{}: not a number", f.label))?;
+                            Some(json!(n))
+                        }
                     }
                 }
                 FieldKind::Date => {
@@ -717,6 +721,10 @@ impl Render for QuestionCard {
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
+                    // The shell's root handler hands focus back to the
+                    // composer on any click; a click inside a card keeps it
+                    // here (the inner input took it already, or the card does).
+                    cx.stop_propagation();
                     if this.text_input.is_none() && this.form_inputs.is_empty() {
                         window.focus(&this.focus_handle, cx);
                         cx.notify();
