@@ -572,9 +572,8 @@ struct ChatView: View {
                     Task {
                         if let data = try? await item.loadTransferable(type: Data.self) {
                             let type = item.supportedContentTypes.first
-                            let ext = type?.preferredFilenameExtension ?? "jpg"
-                            let mime = type?.preferredMIMEType ?? "image/jpeg"
-                            pending.append(.init(name: "Photo \(Date().formatted(date: .abbreviated, time: .shortened)).\(ext)", mime: mime, data: data))
+                            let picked = ChatView.imageForUpload(data, type: type)
+                            pending.append(.init(name: "Photo \(Date().formatted(date: .abbreviated, time: .shortened)).\(picked.ext)", mime: picked.mime, data: picked.data))
                         }
                         photoItem = nil
                     }
@@ -722,6 +721,25 @@ struct ChatView: View {
         if let last = parts.last, last.hasPrefix("@") { parts[parts.count - 1] = "@\(slug)" } else { parts.append("@\(slug)") }
         draft = parts.joined(separator: " ") + " "
         mentionQuery = nil
+    }
+
+    /// Photos leave the phone as JPEG or PNG no wider than 2048 px: the models behind the
+    /// agent read those; a 12 MB HEIC straight from the camera they do not. Videos and
+    /// anything that is not an image pass through unchanged.
+    static func imageForUpload(_ data: Data, type: UTType?) -> (data: Data, mime: String, ext: String) {
+        let original = (data: data, mime: type?.preferredMIMEType ?? "image/jpeg", ext: type?.preferredFilenameExtension ?? "jpg")
+        if let type, type.conforms(to: .movie) || type.conforms(to: .video) { return original }
+        guard let image = UIImage(data: data) else { return original }
+        let longest = max(image.size.width, image.size.height) * image.scale
+        let isWebFormat = type.map { $0.conforms(to: .jpeg) || $0.conforms(to: .png) } ?? false
+        if isWebFormat && longest <= 2048 && data.count <= 4 * 1024 * 1024 { return original }
+        let scale = min(1, 2048 / max(longest, 1))
+        let size = CGSize(width: (image.size.width * scale).rounded(), height: (image.size.height * scale).rounded())
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        let drawn = UIGraphicsImageRenderer(size: size, format: format).image { _ in image.draw(in: CGRect(origin: .zero, size: size)) }
+        guard let jpeg = drawn.jpegData(compressionQuality: 0.85) else { return original }
+        return (jpeg, "image/jpeg", "jpg")
     }
 
     /// A voice memo goes out as its transcript (typed text first, if any) with the
