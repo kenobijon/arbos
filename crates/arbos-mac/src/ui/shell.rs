@@ -36,6 +36,9 @@ use crate::ui::voice::Voice;
 
 actions!(shell, [CloseTab, NewTab, ToggleRail, TogglePanel, Quit]);
 
+/// Members of a space with their decoded avatars (rail tiles, headers).
+type PeopleWithAvatars = Vec<(crate::model::Person, Option<Arc<RenderImage>>)>;
+
 pub struct Shell {
     pub(crate) state: Entity<AppState>,
     transcript: Entity<Transcript>,
@@ -332,27 +335,26 @@ impl Shell {
             })
             .collect();
         // People in each project (D72 step 3) with their decoded avatars.
-        let project_people: HashMap<Id, Vec<(crate::model::Person, Option<Arc<RenderImage>>)>> =
-            projects
-                .iter()
-                .map(|(p, _, _)| {
-                    let shown: Vec<_> = if p.is_guest() {
-                        p.owner().cloned().into_iter().collect()
-                    } else {
-                        p.guests().cloned().collect()
-                    };
-                    (
-                        p.id.clone(),
-                        shown
-                            .into_iter()
-                            .map(|person| {
-                                let img = state.avatar(&person.avatar_url);
-                                (person, img)
-                            })
-                            .collect(),
-                    )
-                })
-                .collect();
+        let project_people: HashMap<Id, PeopleWithAvatars> = projects
+            .iter()
+            .map(|(p, _, _)| {
+                let shown: Vec<_> = if p.is_guest() {
+                    p.owner().cloned().into_iter().collect()
+                } else {
+                    p.guests().cloned().collect()
+                };
+                (
+                    p.id.clone(),
+                    shown
+                        .into_iter()
+                        .map(|person| {
+                            let img = state.avatar(&person.avatar_url);
+                            (person, img)
+                        })
+                        .collect(),
+                )
+            })
+            .collect();
         let width = if collapsed {
             RAIL_WIDTH_COLLAPSED
         } else {
@@ -947,7 +949,7 @@ impl Shell {
             );
         }
 
-        match machine.state {
+        match machine.shown_state() {
             MachineState::Waking => {
                 PulseClock::request(cx);
                 let detail = machine
@@ -1018,18 +1020,19 @@ impl Shell {
         let state = self.state.read(cx);
         let machine = state.machine.clone();
         let hover = state.machine_hover;
-        let color = match machine.state {
+        let shown = machine.shown_state();
+        let color = match shown {
             MachineState::Awake => theme.accent,
             MachineState::Waking => theme.warn,
             MachineState::Asleep | MachineState::Unknown => theme.text_faint,
             MachineState::Stopped => theme.text_muted,
             MachineState::Error => theme.danger,
         };
-        if machine.state == MachineState::Waking {
+        if shown == MachineState::Waking {
             PulseClock::request(cx);
         }
         let phase = PulseClock::phase(cx, 1100);
-        let dot_alpha = if machine.state == MachineState::Waking {
+        let dot_alpha = if shown == MachineState::Waking {
             0.35 + 0.65 * phase
         } else {
             1.0
@@ -1067,13 +1070,13 @@ impl Shell {
                 div()
                     .text_size(px(10.5))
                     .text_color(theme.text_faint)
-                    .child(machine.state.label()),
+                    .child(shown.label()),
             );
         }
         if hover {
             let uptime = machine
                 .since
-                .filter(|_| machine.state == MachineState::Awake)
+                .filter(|_| shown == MachineState::Awake)
                 .map(|since| fmt_uptime(now_ms().saturating_sub(since)))
                 .unwrap_or_else(|| "—".into());
             let card = div()
@@ -1098,7 +1101,7 @@ impl Shell {
                         .items_center()
                         .gap(px(6.0))
                         .child(div().size(px(7.0)).rounded_full().bg(color))
-                        .child(format!("Machine · {}", machine.state.label())),
+                        .child(format!("Machine · {}", shown.label())),
                 )
                 .child(
                     div().text_color(theme.text_muted).child(
@@ -1116,10 +1119,11 @@ impl Shell {
                         .text_color(theme.text_muted)
                         .child(format!("Uptime {uptime}")),
                 )
-                .child(div().text_color(theme.text_muted).child(format!(
-                    "Spend today ${:.2} of ${:.2}",
-                    machine.spend_today_usd, machine.spend_cap_usd
-                )))
+                .child(
+                    div()
+                        .text_color(theme.text_muted)
+                        .child(machine_spend_line(&machine)),
+                )
                 .when_some(machine.detail.clone(), |el, d| {
                     el.child(div().text_color(theme.text_faint).child(d))
                 });
@@ -1912,7 +1916,7 @@ impl Shell {
                     .text_color(theme.text)
                     .child(format!(
                         "State: {}{}",
-                        machine.state.label(),
+                        machine.shown_state().label(),
                         machine
                             .detail
                             .as_deref()
@@ -1928,44 +1932,56 @@ impl Shell {
                                 .map(|c| format!(" · {c}"))
                                 .unwrap_or_default()
                         )))
-                    .child(div().text_color(theme.text_muted).child(format!(
-                        "Spend today ${:.2} of ${:.2}",
-                        machine.spend_today_usd, machine.spend_cap_usd
-                    ))),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap(px(4.0))
                     .child(
-                        option(
-                            "machine-start",
-                            "Start",
-                            false,
-                            machine.state.is_down(),
-                            &theme,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if this.state.read(cx).machine.state.is_down() {
-                                this.state.update(cx, |s, cx| s.machine_start(cx));
-                            }
-                        })),
-                    )
-                    .child(
-                        option(
-                            "machine-stop",
-                            "Stop",
-                            false,
-                            !machine.state.is_down(),
-                            &theme,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if !this.state.read(cx).machine.state.is_down() {
-                                this.state.update(cx, |s, cx| s.machine_stop(cx));
-                            }
-                        })),
+                        div()
+                            .text_color(theme.text_muted)
+                            .child(machine_spend_line(&machine)),
                     ),
             )
+            .when(machine.always_on, |el| {
+                el.child(div().flex().gap(px(4.0)).child(
+                    option("machine-restart", "Restart machine", false, true, &theme).on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.state.update(cx, |s, cx| s.machine_restart(cx));
+                        }),
+                    ),
+                ))
+            })
+            .when(!machine.always_on, |el| {
+                el.child(
+                    div()
+                        .flex()
+                        .gap(px(4.0))
+                        .child(
+                            option(
+                                "machine-start",
+                                "Start",
+                                false,
+                                machine.state.is_down(),
+                                &theme,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if this.state.read(cx).machine.state.is_down() {
+                                    this.state.update(cx, |s, cx| s.machine_start(cx));
+                                }
+                            })),
+                        )
+                        .child(
+                            option(
+                                "machine-stop",
+                                "Stop",
+                                false,
+                                !machine.state.is_down(),
+                                &theme,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if !this.state.read(cx).machine.state.is_down() {
+                                    this.state.update(cx, |s, cx| s.machine_stop(cx));
+                                }
+                            })),
+                        ),
+                )
+            })
             .child(div().h(px(1.0)).bg(theme.border))
             .child(
                 div()
@@ -2580,6 +2596,18 @@ fn json_rows(v: &serde_json::Value) -> Vec<(String, String)> {
         }
         serde_json::Value::Null => Vec::new(),
         other => vec![("value".into(), scalar(other))],
+    }
+}
+
+/// Hosted machines are included; self-hosted ones count against the cap.
+fn machine_spend_line(machine: &crate::model::Machine) -> String {
+    if machine.always_on {
+        format!("Machine today ${:.2} (included)", machine.spend_today_usd)
+    } else {
+        format!(
+            "Spend today ${:.2} of ${:.2}",
+            machine.spend_today_usd, machine.spend_cap_usd
+        )
     }
 }
 

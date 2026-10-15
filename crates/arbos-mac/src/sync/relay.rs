@@ -491,6 +491,14 @@ async fn refresh_me(shared: &Arc<Shared>) {
     };
     let _ = shared.events.send(SyncEvent::Account(Some(view)));
     if let Some(m) = v.get("machine").and_then(Value::as_object) {
+        if let Some(always_on) = m.get("always_on").and_then(Value::as_bool) {
+            let snapshot = {
+                let mut machine = shared.machine.lock().unwrap();
+                machine.always_on = always_on;
+                machine.clone()
+            };
+            let _ = shared.events.send(SyncEvent::Machine(snapshot));
+        }
         if m.get("exists").and_then(Value::as_bool) != Some(false) {
             if let Some(word) = m.get("state").and_then(Value::as_str) {
                 let since = m.get("since").and_then(Value::as_u64).filter(|v| *v > 0);
@@ -1383,6 +1391,9 @@ async fn refresh_machine(shared: &Arc<Shared>) {
         }
         if let Some(v) = value.get("spend_cap_usd").and_then(Value::as_f64) {
             m.spend_cap_usd = v;
+        }
+        if let Some(v) = value.get("always_on").and_then(Value::as_bool) {
+            m.always_on = v;
         }
         m.clone()
     };
@@ -2876,6 +2887,34 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     }
                     Err(err) => shared.notice(format!("New project failed: {err:#}")),
                 }
+            });
+        }
+        ClientCommand::MachineRestart => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                set_machine(
+                    &shared,
+                    MachineState::Waking,
+                    None,
+                    Some("Restarting your machine…".into()),
+                );
+                if let Err(err) = shared.post_json("/machine/stop", json!({})).await {
+                    shared.notice(format!("Machine restart: {err:#}"));
+                }
+                match shared.post_json("/machine/start", json!({})).await {
+                    Ok(v) => {
+                        if let Some(word) = v.get("state").and_then(Value::as_str) {
+                            set_machine(
+                                &shared,
+                                machine_state_from_word(word),
+                                v.get("since").and_then(Value::as_u64).filter(|v| *v > 0),
+                                None,
+                            );
+                        }
+                    }
+                    Err(err) => shared.notice(format!("Machine restart: {err:#}")),
+                }
+                refresh_machine(&shared).await;
             });
         }
         ClientCommand::MachineStart | ClientCommand::MachineStop => {

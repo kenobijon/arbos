@@ -1303,6 +1303,20 @@ pub struct Machine {
     pub detail: Option<String>,
     /// 0..1 while waking.
     pub progress: Option<f32>,
+    /// Hosted machines never sleep (`machine.always_on`): no waking/asleep
+    /// states in the UI, machine time is included rather than billed to credits.
+    pub always_on: bool,
+}
+
+impl Machine {
+    /// What the UI shows: an always-on machine is awake unless unreachable.
+    pub fn shown_state(&self) -> MachineState {
+        if self.always_on && self.state != MachineState::Error {
+            MachineState::Awake
+        } else {
+            self.state
+        }
+    }
 }
 
 /// Settings → Account: who is signed in and what is left (`GET /me`).

@@ -135,6 +135,9 @@ impl SyncSource for FixtureSource {
                     spend_cap_usd: 25.0,
                     detail: None,
                     progress: None,
+                    always_on: std::env::var("ARBOS_FIXTURE_ALWAYS_ON")
+                        .map(|v| v != "0")
+                        .unwrap_or(true),
                 }),
             });
             seed_docs(&shared);
@@ -525,6 +528,13 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         }
         ClientCommand::MachineStop => {
             set_machine(shared, MachineState::Stopped, Some("Stopped by you"), None);
+        }
+        ClientCommand::MachineRestart => {
+            set_machine(shared, MachineState::Stopped, Some("Restarting…"), None);
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                wake_machine(&shared).await;
+            });
         }
         ClientCommand::Pair { .. } | ClientCommand::SignIn { .. } => {
             let _ = shared.events.send(SyncEvent::Paired {
@@ -1520,7 +1530,8 @@ fn emit_machine(shared: &Shared) {
 }
 
 fn machine_down(shared: &Shared) -> bool {
-    shared.machine.lock().unwrap().state.is_down()
+    let m = shared.machine.lock().unwrap();
+    !m.always_on && m.state.is_down()
 }
 
 fn set_machine(shared: &Shared, state: MachineState, detail: Option<&str>, progress: Option<f32>) {

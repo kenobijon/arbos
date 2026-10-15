@@ -294,6 +294,8 @@ pub enum ClientCommand {
     },
     MachineStart,
     MachineStop,
+    /// Always-on machines: stop then start (`POST /machine/stop`, `/machine/start`).
+    MachineRestart,
     FetchBlob {
         project_id: Id,
         key: String,

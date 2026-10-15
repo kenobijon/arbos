@@ -1510,6 +1510,11 @@ impl AppState {
         cx.notify();
     }
 
+    pub fn machine_restart(&mut self, cx: &mut Context<Self>) {
+        self.command(ClientCommand::MachineRestart);
+        cx.notify();
+    }
+
     pub fn toggle_show_details(&mut self, cx: &mut Context<Self>) {
         self.show_details = !self.show_details;
         if let Some(chat_id) = self.active_chat_id() {
