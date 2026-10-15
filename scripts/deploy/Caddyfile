@@ -34,9 +34,10 @@ arbos.life {
 		X-Frame-Options DENY
 		Referrer-Policy strict-origin-when-cross-origin
 		Permissions-Policy "camera=(), microphone=(), geolocation=()"
-		Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+		Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self'; connect-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
 		-Server
 	}
+	header /assets/* Cache-Control "public, max-age=604800, immutable"
 	header /*.png Cache-Control "public, max-age=86400"
 	header /favicon.ico Cache-Control "public, max-age=86400"
 	# same redirect as on the relay, so the button keeps working if the relay is down
