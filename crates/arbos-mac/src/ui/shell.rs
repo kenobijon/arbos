@@ -426,12 +426,15 @@ impl Shell {
             )
             .children(self.render_update_button(collapsed, cx))
             .child(
-                bottom_button("rail-settings", "⚙", 17.0, &theme).on_click(cx.listener(
-                    |this, _, _, cx| {
+                // Toggle on the press itself: one event per press on every
+                // platform, so a click can never open and shut in one go.
+                bottom_button("rail-settings", "⚙", 17.0, &theme).on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
                         this.settings_open = !this.settings_open;
                         cx.notify();
-                    },
-                )),
+                    }),
+                ),
             );
 
         div()
@@ -2037,11 +2040,21 @@ impl Shell {
                         device.map(|d| format!(" · device {d}")).unwrap_or_default()
                     )),
             );
+        // Pinned to the bottom, never taller than the window: the card
+        // scrolls once the sections outgrow the height.
         div()
             .absolute()
             .left(px(RAIL_WIDTH + 8.0))
+            .top(px(TAB_BAR_HEIGHT + 8.0))
             .bottom(px(14.0))
-            .child(frosted(PANEL_RADIUS, MENU_BLUR, card))
+            .flex()
+            .flex_col()
+            .justify_end()
+            .child(frosted(
+                PANEL_RADIUS,
+                MENU_BLUR,
+                card.min_h_0().flex_shrink(1.0).overflow_y_scroll(),
+            ))
     }
 
     /// First run against a relay: enter the one-time code the relay printed
