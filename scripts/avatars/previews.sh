@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Renders MP4 + GIF previews of idle / working / reply for the given slugs.
-#   NODE_PATH=<scratch>/node_modules scripts/avatars/previews.sh <outdir> <px> slug[,slug...]
+#   NODE_PATH=<scratch>/node_modules scripts/avatars/previews.sh <outdir> <px> slug[,slug...] [color]
+# `color` is a slug from manifest.colors (default: the mono look).
 # Frames come from render.js (lottie-web, 60 fps, dark background); ffmpeg
 # encodes H.264 MP4 (yuv420p) and a palette GIF at 30 fps.
 set -euo pipefail
@@ -8,11 +9,12 @@ set -euo pipefail
 out="$1"
 px="$2"
 slugs="$3"
+color="${4:-}"
 here="$(cd "$(dirname "$0")" && pwd)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-node "$here/render.js" frames "$tmp" "$px" "$slugs"
+node "$here/render.js" frames "$tmp" "$px" "$slugs" $color
 mkdir -p "$out"
 for dir in "$tmp"/*/; do
   name="$(basename "$dir")"

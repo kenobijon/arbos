@@ -6,7 +6,8 @@ bezier or hold keyframes. No expressions, masks, mattes, merge paths, trim
 paths, or raster assets.
 
 Layer stack (top to bottom): ring (white 2 px stroke), tree (one shape
-layer), disc (black circle). The ring sits above the tree so a bounce or sway
+layer), bg (black circle). Every fill/stroke is named by role (bg, ring,
+tree, face) so lottie-ios ValueProviders and lottie-web can retint by name. The ring sits above the tree so a bounce or sway
 that reaches the rim slides under it instead of breaking the circle. Inside the tree layer, groups are listed top-first, as Lottie
 draws them:
 
@@ -120,11 +121,11 @@ def layer_ks(anchor, position=None, scale=None, rotation=None):
 
 
 def ring_items():
-    return [group("ring", paint_groups([Circle(32, 32, 31, stroke=("w", 2))]))]
+    return [group("ring", paint_groups([Circle(32, 32, 31, stroke=("w", 2), role="ring")]))]
 
 
 def disc_items():
-    return [group("disc", paint_groups([Circle(32, 32, 32, fill="k")]))]
+    return [group("bg", paint_groups([Circle(32, 32, 32, fill="k", role="bg")]))]
 
 
 # ---------- per-state motion ----------
@@ -265,7 +266,7 @@ def tree_lottie(slug, name, face_kind, tree, state):
         layer_ks(SWAY_PIVOT, position=m["layer_pos"], scale=m["layer_scale"], rotation=m["layer_rot"]),
         n,
     )
-    disc_layer = layer("disc", 3, disc_items(), layer_ks((32, 32)), n)
+    disc_layer = layer("bg", 3, disc_items(), layer_ks((32, 32)), n)
     if LOOPS[state]:
         assert_seamless(tree_layer, f"{slug}/{state}")
     return {
