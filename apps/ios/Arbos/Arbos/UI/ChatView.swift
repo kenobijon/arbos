@@ -262,12 +262,15 @@ struct ChatView: View {
 
     // MARK: Header (floating glass)
 
-    /// Frosted strip the messages scroll under (ref-02 shows blurred text
-    /// behind the header); the mask fades it out so there is no hard edge.
+    /// Strip the messages scroll under (ref-02): frosted on Glass, solid fade on Matte.
     private var headerBlur: some View {
         ZStack {
-            Rectangle().fill(.ultraThinMaterial)
-            theme.bg.opacity(0.78)
+            if theme.isGlass {
+                Rectangle().fill(.ultraThinMaterial)
+                theme.bg.opacity(0.78)
+            } else {
+                theme.bg
+            }
         }
         .frame(height: isPeople ? 156 : 118)
         .mask(LinearGradient(colors: [.black, .black, .clear], startPoint: .top, endPoint: .bottom))

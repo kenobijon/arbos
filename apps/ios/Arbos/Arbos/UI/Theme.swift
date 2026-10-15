@@ -102,6 +102,8 @@ struct Theme {
     /// Primary filled control (send/voice button, main CTA): white on dark, black on light.
     var primary: Color { isDark ? .white : Color(hex: "#111111")! }
     var onPrimary: Color { isDark ? .black : .white }
+    /// Frosted chrome (header blur, glass circles/pills) when Surface is Glass.
+    var isGlass: Bool { surface == .glass }
 
     /// Grok's bot palette; a project's hex colour snaps to the nearest one.
     static let palette: [Color] = [
@@ -158,8 +160,7 @@ extension EnvironmentValues {
     }
 }
 
-/// Glass circle (header controls, composer "+"): material behind a dark tint
-/// and a hairline rim, as in the references.
+/// Header / composer control circle: frosted material on Glass, solid field on Matte.
 struct GlassCircle<Content: View>: View {
     @Environment(\.theme) private var theme
     var size: CGFloat = Theme.control
@@ -167,8 +168,12 @@ struct GlassCircle<Content: View>: View {
 
     var body: some View {
         ZStack {
-            Circle().fill(.ultraThinMaterial)
-            Circle().fill(theme.field.opacity(0.85))
+            if theme.isGlass {
+                Circle().fill(.ultraThinMaterial)
+                Circle().fill(theme.field.opacity(0.85))
+            } else {
+                Circle().fill(theme.field)
+            }
             Circle().strokeBorder(theme.fieldBorder, lineWidth: 1)
             content()
         }
@@ -176,7 +181,7 @@ struct GlassCircle<Content: View>: View {
     }
 }
 
-/// Glass pill (header title).
+/// Header title pill: frosted material on Glass, solid field on Matte.
 struct GlassPill<Content: View>: View {
     @Environment(\.theme) private var theme
     @ViewBuilder var content: () -> Content
@@ -185,8 +190,12 @@ struct GlassPill<Content: View>: View {
         content()
             .background {
                 ZStack {
-                    Capsule().fill(.ultraThinMaterial)
-                    Capsule().fill(theme.field.opacity(0.85))
+                    if theme.isGlass {
+                        Capsule().fill(.ultraThinMaterial)
+                        Capsule().fill(theme.field.opacity(0.85))
+                    } else {
+                        Capsule().fill(theme.field)
+                    }
                     Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1)
                 }
             }
