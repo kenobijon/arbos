@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use gpui::{
     actions, div, prelude::*, px, Animation, AnimationExt, App, Context, Div, ElementId, Entity,
-    FocusHandle, Focusable, FontWeight, Render, SharedString, Stateful, Window,
+    FocusHandle, Focusable, FontWeight, Render, SharedString, Window,
 };
 
 use crate::app::{AppState, DetailsTarget};
@@ -508,6 +508,7 @@ impl Shell {
             .items_center()
             .gap(px(6.0))
             .px(px(8.0))
+            .bg(theme.chrome())
             .border_b_1()
             .border_color(theme.border)
             .window_control_area(gpui::WindowControlArea::Drag)
@@ -709,11 +710,36 @@ impl Shell {
             .flex_1()
             .min_w_0()
             .h_full()
-            .child(self.render_tab_bar(cx));
+            .child(frosted(0.0, PANEL_BLUR, self.render_tab_bar(cx)));
         if let Some(banner) = self.render_banner(cx) {
             column = column.child(banner);
         }
 
+        if project.is_none() {
+            return column.child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(10.0))
+                    .px(px(28.0))
+                    .child(
+                        div()
+                            .text_size(px(22.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.text)
+                            .child("No projects yet"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .text_color(theme.text_muted)
+                            .child("Press + in the rail. The relay registers the project and starts its sandbox."),
+                    ),
+            );
+        }
         if !dropped {
             // S1/S2: empty chat, composer centered with the project name and a hint.
             let name = project.as_ref().map(|p| p.name.clone()).unwrap_or_default();

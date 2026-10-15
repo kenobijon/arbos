@@ -28,7 +28,6 @@ pub struct Pairing {
 /// A downloaded blob shown in the Details drawer.
 #[derive(Clone, Debug)]
 pub struct BlobView {
-    pub key: String,
     pub mime: String,
     pub bytes: Arc<Vec<u8>>,
     pub saved_to: Option<PathBuf>,
@@ -204,19 +203,21 @@ impl AppState {
                 cx.notify();
             }
             SyncEvent::Blob {
+                project_id,
                 key,
                 mime,
                 bytes,
                 saved_to,
-                ..
             } => {
+                if self.selected_project.as_deref() != Some(project_id.as_str()) {
+                    return;
+                }
                 if let Some(path) = &saved_to {
                     self.push_notice(format!("Saved to {}", path.display()));
                 }
                 self.blobs.insert(
                     key.clone(),
                     BlobView {
-                        key: key.clone(),
                         mime,
                         bytes,
                         saved_to,
@@ -225,7 +226,10 @@ impl AppState {
                 self.details_open = Some(DetailsTarget::Blob(key));
                 cx.notify();
             }
-            SyncEvent::BrowserFrame { jpeg, .. } => {
+            SyncEvent::BrowserFrame { project_id, jpeg } => {
+                if self.selected_project.as_deref() != Some(project_id.as_str()) {
+                    return;
+                }
                 if let Some(image) = decode_jpeg(&jpeg) {
                     self.browser_frame = Some(Arc::new(image));
                     self.browser_frames_seen += 1;

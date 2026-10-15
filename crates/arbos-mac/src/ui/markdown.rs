@@ -9,6 +9,8 @@ pub enum Block {
     Bullets(Vec<String>),
     Numbered(Vec<String>),
     Code { lang: String, code: String },
+    /// GitHub-style pipe table: header row, then body rows.
+    Table { header: Vec<String>, rows: Vec<Vec<String>> },
 }
 
 pub fn split_blocks(source: &str) -> Vec<Block> {
@@ -54,6 +56,26 @@ pub fn split_blocks(source: &str) -> Vec<Block> {
                 continue;
             }
         }
+        if is_table_row(trimmed) {
+            if let Some(next) = lines.peek() {
+                if is_table_separator(next.trim_end()) {
+                    flush(&mut paragraph, &mut blocks);
+                    let header = split_table_row(trimmed);
+                    lines.next();
+                    let mut rows = Vec::new();
+                    while let Some(row) = lines.peek() {
+                        let row = row.trim_end();
+                        if !is_table_row(row) {
+                            break;
+                        }
+                        rows.push(split_table_row(row));
+                        lines.next();
+                    }
+                    blocks.push(Block::Table { header, rows });
+                    continue;
+                }
+            }
+        }
         if let Some(item) = bullet_item(trimmed) {
             flush(&mut paragraph, &mut blocks);
             let mut items = vec![item.to_string()];
@@ -90,6 +112,25 @@ pub fn split_blocks(source: &str) -> Vec<Block> {
     blocks
 }
 
+fn is_table_row(line: &str) -> bool {
+    let t = line.trim();
+    t.starts_with('|') && t.ends_with('|') && t.len() > 2
+}
+
+fn is_table_separator(line: &str) -> bool {
+    let t = line.trim();
+    is_table_row(t)
+        && t.chars()
+            .all(|c| c == '|' || c == '-' || c == ':' || c == ' ')
+        && t.contains('-')
+}
+
+fn split_table_row(line: &str) -> Vec<String> {
+    let t = line.trim();
+    let inner = &t[1..t.len() - 1];
+    inner.split('|').map(|c| c.trim().to_string()).collect()
+}
+
 fn bullet_item(line: &str) -> Option<&str> {
     let t = line.trim_start();
     t.strip_prefix("- ")
@@ -112,26 +153,72 @@ pub struct InlineStyle {
     pub code: bool,
     pub bold: bool,
     pub italic: bool,
+    pub link: bool,
 }
 
-/// Split inline markdown into (text, style) spans. Unterminated markers are
-/// shown literally so a half-streamed `**bold` does not flicker.
-pub fn inline_spans(text: &str) -> Vec<(String, InlineStyle)> {
-    let mut spans: Vec<(String, InlineStyle)> = Vec::new();
+/// One inline run: text, style, and the link target when `style.link`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Span {
+    pub text: String,
+    pub style: InlineStyle,
+    pub href: Option<String>,
+}
+
+type Styled = (String, InlineStyle, Option<String>);
+
+/// Split inline markdown into styled spans. Unterminated markers are shown
+/// literally so a half-streamed `**bold` does not flicker. Links:
+/// `[text](url)` and bare `https://…`.
+pub fn inline_spans(text: &str) -> Vec<Span> {
+    inline_styled(text)
+        .into_iter()
+        .map(|(text, style, href)| Span { text, style, href })
+        .collect()
+}
+
+fn inline_styled(text: &str) -> Vec<Styled> {
+    let mut spans: Vec<Styled> = Vec::new();
     let style = InlineStyle::default();
     let mut current = String::new();
     let chars: Vec<char> = text.chars().collect();
     let mut i = 0;
 
-    let push =
-        |current: &mut String, style: InlineStyle, spans: &mut Vec<(String, InlineStyle)>| {
-            if !current.is_empty() {
-                spans.push((std::mem::take(current), style));
-            }
-        };
+    let push = |current: &mut String, style: InlineStyle, spans: &mut Vec<Styled>| {
+        if !current.is_empty() {
+            spans.push((std::mem::take(current), style, None));
+        }
+    };
 
     while i < chars.len() {
         let c = chars[i];
+        if c == '[' {
+            if let Some(close) = find_from(&chars, i + 1, &[']']) {
+                if close + 1 < chars.len() && chars[close + 1] == '(' {
+                    if let Some(end) = find_from(&chars, close + 2, &[')']) {
+                        push(&mut current, style, &mut spans);
+                        let label: String = chars[i + 1..close].iter().collect();
+                        let href: String = chars[close + 2..end].iter().collect();
+                        spans.push((label, InlineStyle { link: true, ..style }, Some(href)));
+                        i = end + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        if c == 'h' && (slice_starts(&chars, i, "https://") || slice_starts(&chars, i, "http://")) {
+            let end = (i..chars.len())
+                .find(|&j| chars[j].is_whitespace() || chars[j] == ')' || chars[j] == '"')
+                .unwrap_or(chars.len());
+            let mut url_end = end;
+            while url_end > i && matches!(chars[url_end - 1], '.' | ',' | ';' | ':') {
+                url_end -= 1;
+            }
+            push(&mut current, style, &mut spans);
+            let url: String = chars[i..url_end].iter().collect();
+            spans.push((url.clone(), InlineStyle { link: true, ..style }, Some(url)));
+            i = url_end;
+            continue;
+        }
         if c == '`' {
             if let Some(end) = find_from(&chars, i + 1, &['`']) {
                 push(&mut current, style, &mut spans);
@@ -142,6 +229,7 @@ pub fn inline_spans(text: &str) -> Vec<(String, InlineStyle)> {
                         code: true,
                         ..style
                     },
+                    None,
                 ));
                 i = end + 1;
                 continue;
@@ -151,13 +239,14 @@ pub fn inline_spans(text: &str) -> Vec<(String, InlineStyle)> {
             if let Some(end) = find_pair(&chars, i + 2) {
                 push(&mut current, style, &mut spans);
                 let inner: String = chars[i + 2..end].iter().collect();
-                for (t, s) in inline_spans(&inner) {
+                for (t, s, href) in inline_styled(&inner) {
                     spans.push((
                         t,
                         InlineStyle {
                             bold: true,
                             ..merge(style, s)
                         },
+                        href,
                     ));
                 }
                 i = end + 2;
@@ -177,6 +266,7 @@ pub fn inline_spans(text: &str) -> Vec<(String, InlineStyle)> {
                                 italic: true,
                                 ..style
                             },
+                            None,
                         ));
                         i = end + 1;
                         continue;
@@ -196,7 +286,13 @@ fn merge(a: InlineStyle, b: InlineStyle) -> InlineStyle {
         code: a.code || b.code,
         bold: a.bold || b.bold,
         italic: a.italic || b.italic,
+        link: a.link || b.link,
     }
+}
+
+fn slice_starts(chars: &[char], at: usize, needle: &str) -> bool {
+    let n: Vec<char> = needle.chars().collect();
+    at + n.len() <= chars.len() && chars[at..at + n.len()] == n[..]
 }
 
 fn find_from(chars: &[char], from: usize, needles: &[char]) -> Option<usize> {

@@ -90,6 +90,10 @@ pub enum RowKind {
     Note {
         text: String,
     },
+    /// Under a finished assistant message: model · decision · tokens · Details.
+    Meta {
+        text: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -331,7 +335,7 @@ impl Transcript {
                     .flex()
                     .justify_start()
                     .py(px(4.0))
-                    .child(render_block(&block, veil.as_ref(), now, &theme))
+                    .child(render_block(&row.id, &block, veil.as_ref(), now, &theme))
                     .into_any_element()
             }
             RowKind::Reasoning { text, live } => {
@@ -493,6 +497,36 @@ impl Transcript {
                 .italic()
                 .child(text)
                 .into_any_element(),
+            RowKind::Meta { text } => {
+                let state = self.state.clone();
+                let chat_id = self.chat_id.clone().unwrap_or_default();
+                let message_id = row.message_id.clone();
+                div()
+                    .id(SharedString::from(row.id.clone()))
+                    .w_full()
+                    .pb(px(6.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .text_size(px(11.0))
+                    .text_color(theme.text_faint)
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(theme.text_muted))
+                    .child(text)
+                    .child(div().text_color(theme.accent).child("Details"))
+                    .on_click(move |_, _, cx| {
+                        state.update(cx, |s, cx| {
+                            s.open_details(
+                                DetailsTarget::Message {
+                                    chat_id: chat_id.clone(),
+                                    message_id: message_id.clone(),
+                                },
+                                cx,
+                            )
+                        });
+                    })
+                    .into_any_element()
+            }
         };
         div()
             .w_full()
@@ -524,6 +558,49 @@ impl Render for Transcript {
 // Rows
 // ---------------------------------------------------------------------------
 
+/// "claude-haiku-5.5 · reply · 1.2k in / 180 out · $0.0021 · 3.4 s"
+fn meta_line(message: &Message) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(model) = &message.model {
+        parts.push(model.rsplit('/').next().unwrap_or(model).to_string());
+    }
+    if let Some(d) = &message.decision {
+        parts.push(d.clone());
+    } else if let Some(t) = message.turn {
+        parts.push(format!("{t:?}").to_lowercase());
+    }
+    if let Some(u) = &message.usage {
+        let num = |k: &str| u.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let input = num("input") + num("input_tokens") + num("prompt_tokens");
+        let output = num("output") + num("output_tokens") + num("completion_tokens");
+        if input > 0.0 || output > 0.0 {
+            parts.push(format!("{} in / {} out", fmt_tokens(input), fmt_tokens(output)));
+        }
+        let cached = num("cacheRead");
+        if cached > 0.0 {
+            parts.push(format!("{} cached", fmt_tokens(cached)));
+        }
+        let cost = num("cost");
+        if cost > 0.0 {
+            parts.push(format!("${cost:.4}"));
+        }
+    }
+    if let (Some(done), created) = (message.completed_at, message.created_at) {
+        if done > created && created > 0 {
+            parts.push(format!("{:.1} s", (done - created) as f64 / 1000.0));
+        }
+    }
+    parts.join(" · ")
+}
+
+fn fmt_tokens(n: f64) -> String {
+    if n >= 1000.0 {
+        format!("{:.1}k", n / 1000.0)
+    } else {
+        format!("{}", n as u64)
+    }
+}
+
 fn hash_version<T: Hash>(value: &T, live: bool) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     value.hash(&mut h);
@@ -535,6 +612,10 @@ fn block_text_len(block: &Block) -> usize {
         Block::Paragraph(t) | Block::Heading { text: t, .. } => t.len(),
         Block::Bullets(items) | Block::Numbered(items) => items.iter().map(|s| s.len() + 1).sum(),
         Block::Code { code, .. } => code.len(),
+        Block::Table { header, rows } => {
+            header.iter().map(|s| s.len() + 1).sum::<usize>()
+                + rows.iter().flatten().map(|s| s.len() + 1).sum::<usize>()
+        }
     }
 }
 
@@ -687,6 +768,12 @@ pub fn build_rows(messages: &[Message], expanded: &HashSet<String>) -> Vec<Row> 
                             code,
                             message: text,
                         } => {
+                            // "Deciding…" lives only until the first real part (S4 → S5/S6/S7).
+                            if *code == StatusKind::Deciding
+                                && (!streaming || pix + 1 < message.parts.len())
+                            {
+                                continue;
+                            }
                             // A `tool_start` card is replaced by the tool part that follows it (S17).
                             if *code == StatusKind::ToolStart
                                 && message.parts[pix + 1..].iter().any(|p| {
@@ -793,6 +880,17 @@ pub fn build_rows(messages: &[Message], expanded: &HashSet<String>) -> Vec<Row> 
                     }
                 }
                 flush_tools(&mut pending_tools, &mut rows, streaming);
+                if !streaming && message.role == Role::Assistant {
+                    let meta = meta_line(message);
+                    if !meta.is_empty() {
+                        rows.push(Row {
+                            version: hash_version(&meta, false),
+                            id: format!("{}#meta", message.id),
+                            message_id: message.id.clone(),
+                            kind: RowKind::Meta { text: meta },
+                        });
+                    }
+                }
                 if message.status == MessageStatus::Cancelled
                     && !message.parts.iter().any(|p| {
                         matches!(
@@ -823,18 +921,20 @@ pub fn build_rows(messages: &[Message], expanded: &HashSet<String>) -> Vec<Row> 
 // Markdown rendering with the veil
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn styled_text(
+    id: &str,
     text: &str,
     base_color: gpui::Hsla,
-    size: f32,
     theme: &Theme,
     veil: Option<&Veil>,
     now: Instant,
     offset: usize,
-) -> StyledText {
+) -> AnyElement {
     let spans = inline_spans(text);
     let mut full = String::new();
     let mut runs: Vec<TextRun> = Vec::new();
+    let mut links: Vec<(std::ops::Range<usize>, String)> = Vec::new();
     let sans = gpui::Font {
         family: theme.font_sans.into(),
         features: Default::default(),
@@ -846,7 +946,8 @@ fn styled_text(
         family: theme.font_mono.into(),
         ..sans.clone()
     };
-    for (span, style) in spans {
+    for span in spans {
+        let style = span.style;
         let mut font = if style.code {
             mono.clone()
         } else {
@@ -858,26 +959,49 @@ fn styled_text(
         if style.italic {
             font.style = gpui::FontStyle::Italic;
         }
+        let start = full.len();
+        if let Some(href) = span.href.clone() {
+            links.push((start..start + span.text.len(), href));
+        }
         runs.push(TextRun {
-            len: span.len(),
+            len: span.text.len(),
             font,
-            color: base_color,
+            color: if style.link { theme.accent } else { base_color },
             background_color: if style.code {
                 Some(theme.code_bg)
             } else {
                 None
             },
-            underline: None,
+            underline: if style.link {
+                Some(gpui::UnderlineStyle {
+                    color: Some(Theme::with_alpha(theme.accent, 0.6)),
+                    thickness: px(1.0),
+                    wavy: false,
+                })
+            } else {
+                None
+            },
             strikethrough: None,
         });
-        full.push_str(&span);
+        full.push_str(&span.text);
     }
     let runs = match veil {
         Some(veil) => apply_veil(runs, &veil.spans(now), offset),
         None => runs,
     };
-    let _ = size;
-    StyledText::new(SharedString::from(full)).with_runs(runs)
+    let styled = StyledText::new(SharedString::from(full)).with_runs(runs);
+    if links.is_empty() {
+        return styled.into_any_element();
+    }
+    let ranges: Vec<std::ops::Range<usize>> = links.iter().map(|(r, _)| r.clone()).collect();
+    let hrefs: Vec<String> = links.into_iter().map(|(_, h)| h).collect();
+    gpui::InteractiveText::new(SharedString::from(id.to_string()), styled)
+        .on_click(ranges, move |ix, _, cx| {
+            if let Some(href) = hrefs.get(ix) {
+                cx.open_url(href);
+            }
+        })
+        .into_any_element()
 }
 
 /// Split runs at chunk boundaries and multiply alpha in (zeron veil.rs).
@@ -931,7 +1055,13 @@ fn apply_veil(
     out
 }
 
-fn render_block(block: &Block, veil: Option<&Veil>, now: Instant, theme: &Theme) -> AnyElement {
+fn render_block(
+    row_id: &str,
+    block: &Block,
+    veil: Option<&Veil>,
+    now: Instant,
+    theme: &Theme,
+) -> AnyElement {
     let base = div()
         .w_full()
         .min_w_0()
@@ -941,7 +1071,7 @@ fn render_block(block: &Block, veil: Option<&Veil>, now: Instant, theme: &Theme)
         .line_height(px(21.0));
     match block {
         Block::Paragraph(text) => base
-            .child(styled_text(text, theme.text, 13.5, theme, veil, now, 0))
+            .child(styled_text(&format!("{row_id}.p"), text, theme.text, theme, veil, now, 0))
             .into_any_element(),
         Block::Heading { level, text } => {
             let size = match level {
@@ -952,7 +1082,7 @@ fn render_block(block: &Block, veil: Option<&Veil>, now: Instant, theme: &Theme)
             base.text_size(px(size))
                 .font_weight(FontWeight::SEMIBOLD)
                 .pt(px(6.0))
-                .child(styled_text(text, theme.text, size, theme, veil, now, 0))
+                .child(styled_text(&format!("{row_id}.h"), text, theme.text, theme, veil, now, 0))
                 .into_any_element()
         }
         Block::Bullets(items) | Block::Numbered(items) => {
@@ -977,12 +1107,58 @@ fn render_block(block: &Block, veil: Option<&Veil>, now: Instant, theme: &Theme)
                                 .child(marker),
                         )
                         .child(div().flex_1().child(styled_text(
-                            item, theme.text, 13.5, theme, veil, now, offset,
+                            &format!("{row_id}.li{i}"),
+                            item,
+                            theme.text,
+                            theme,
+                            veil,
+                            now,
+                            offset,
                         ))),
                 );
                 offset += item.len() + 1;
             }
             col.into_any_element()
+        }
+        Block::Table { header, rows } => {
+            let cols = header.len().max(1);
+            let cell = |text: &str, head: bool, i: usize| {
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .px(px(10.0))
+                    .py(px(6.0))
+                    .when(i > 0, |el| el.border_l_1().border_color(theme.border))
+                    .text_size(px(12.5))
+                    .when(head, |el| el.font_weight(FontWeight::SEMIBOLD))
+                    .text_color(if head { theme.text } else { theme.text_muted })
+                    .child(text.to_string())
+            };
+            let mut table = div()
+                .flex()
+                .flex_col()
+                .w_full()
+                .rounded(px(8.0))
+                .border_1()
+                .border_color(theme.border)
+                .overflow_hidden();
+            let mut head_row = div().flex().bg(theme.code_bg);
+            for (i, h) in header.iter().enumerate() {
+                head_row = head_row.child(cell(h, true, i));
+            }
+            table = table.child(head_row);
+            for (ri, row) in rows.iter().enumerate() {
+                let mut r = div()
+                    .flex()
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .when(ri % 2 == 1, |el| el.bg(Theme::with_alpha(theme.code_bg, 0.4)));
+                for i in 0..cols {
+                    r = r.child(cell(row.get(i).map(String::as_str).unwrap_or(""), false, i));
+                }
+                table = table.child(r);
+            }
+            table.into_any_element()
         }
         Block::Code { lang, code } => {
             let mut card = div()
