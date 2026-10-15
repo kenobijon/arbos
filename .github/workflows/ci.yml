@@ -7,6 +7,9 @@ name: CI
 on:
   push:
     branches: [main, arbos-v2, "cursor/**"]
+    # The phone app has its own workflow (ios.yml); an apps/ios-only push needs
+    # no Rust gate and no Mac release.
+    paths-ignore: ["apps/ios/**"]
   pull_request:
 
 permissions:
@@ -51,7 +54,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get install -y -q shellcheck >/dev/null
-          shellcheck -S warning scripts/*.sh scripts/release/*.sh scripts/runner/*.sh image/*.sh
+          shellcheck -S warning scripts/*.sh scripts/release/*.sh scripts/runner/*.sh scripts/feedback/*.sh image/*.sh
           curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash | bash -s -- latest /tmp >/dev/null
           /tmp/actionlint -color
 
