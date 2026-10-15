@@ -332,6 +332,9 @@ pub struct TurnState {
     pub reply_extractor: ReplyExtractor,
     /// Boilerplate filter on everything the main agent says in this turn.
     pub prose: ProseFilter,
+    /// Act turns: prose is held here and only the text after the last tool call reaches the doc;
+    /// anything the model said between tool calls is narration and goes to T3 only.
+    pub act_buffer: String,
     pub route_call_id: Option<String>,
     pub text_part_dirty: bool,
     /// Set by an out-of-band `stop`: the turn ends as it is and no hand-off follows.
@@ -1004,6 +1007,7 @@ impl Agent {
             tool_inputs: HashMap::new(),
             reply_extractor: ReplyExtractor::default(),
             prose: ProseFilter::default(),
+            act_buffer: String::new(),
             route_call_id: None,
             text_part_dirty: false,
             stopped: false,
@@ -1020,7 +1024,11 @@ impl Agent {
             if let Some(t) = tl.as_mut() {
                 let held = t.prose.flush();
                 if !held.is_empty() {
-                    self.write_text(host, t, &held).await;
+                    self.stage_text(host, t, &held).await;
+                }
+                let final_text = std::mem::take(&mut t.act_buffer);
+                if !final_text.trim().is_empty() {
+                    self.write_text(host, t, final_text.trim_start()).await;
                 }
             }
         }
@@ -1441,12 +1449,24 @@ impl Agent {
                     Some(chat_id),
                     "tool_call",
                     Some("assistant"),
-                    &format!("{tool_name} {}", step_label(tool_name, args)),
+                    &step_label(tool_name, args),
                     Some(&json!({ "call_id": tool_call_id, "input": args })),
                 );
                 let held = t.prose.flush();
                 if !held.is_empty() {
-                    self.write_text(host, t, &held).await;
+                    self.stage_text(host, t, &held).await;
+                }
+                let interim = std::mem::take(&mut t.act_buffer);
+                if !interim.trim().is_empty() {
+                    let _ = self.store.t3_append(
+                        chat_id,
+                        None,
+                        Some(chat_id),
+                        "interim",
+                        Some("assistant"),
+                        interim.trim(),
+                        Some(&json!({ "before_call": tool_call_id })),
+                    );
                 }
                 t.text_part_dirty = true;
             }
@@ -1542,7 +1562,17 @@ impl Agent {
     async fn append_text(&self, host: &SharedHost, t: &mut TurnState, delta: &str) {
         let out = t.prose.feed(delta);
         if !out.is_empty() {
-            self.write_text(host, t, &out).await;
+            self.stage_text(host, t, &out).await;
+        }
+    }
+
+    /// Reply turns stream straight into the doc; act turns hold the text until the turn settles
+    /// (only what follows the last tool call is the answer).
+    async fn stage_text(&self, host: &SharedHost, t: &mut TurnState, text: &str) {
+        if matches!(t.route, Some(ValidRoute::Act { .. })) {
+            t.act_buffer.push_str(text);
+        } else {
+            self.write_text(host, t, text).await;
         }
     }
 
