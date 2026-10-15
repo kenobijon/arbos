@@ -12,6 +12,7 @@ EnvironmentFile=/etc/arbos/feedback.env
 ExecStart=/usr/bin/python3 /opt/arbos-feedback/feedback_poller.py run
 TimeoutStartSec=15min
 StateDirectory=arbos-feedback
+StateDirectoryMode=0750
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
