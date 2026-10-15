@@ -76,7 +76,7 @@ struct MessagePush {
     @MainActor
     func senderImage() async -> INImage? {
         if senderKind == "agent", let slug = avatarSlug,
-           let png = AvatarImage.treePNG(slug: slug, colorName: avatarColor, pixels: 192) {
+           let png = AvatarImage.treePNG(slug: slug, colorName: avatarColor, pixels: 192, projectId: senderId) {
             return INImage(imageData: png)
         }
         if let urlString = avatarUrl, let url = URL(string: urlString) {
@@ -87,7 +87,7 @@ struct MessagePush {
                 return INImage(imageData: round)
             }
         }
-        if let slug = avatarSlug, let png = AvatarImage.treePNG(slug: slug, colorName: avatarColor, pixels: 192) {
+        if let slug = avatarSlug, let png = AvatarImage.treePNG(slug: slug, colorName: avatarColor, pixels: 192, projectId: senderId) {
             return INImage(imageData: png)
         }
         return nil

@@ -20,7 +20,12 @@ struct SignInView: View {
                     HStack(spacing: -10) {
                         let trees = TreeAvatars.shared.characters
                         if trees.count >= 3 {
-                            ForEach(trees.prefix(3)) { c in TreeCharacterView(slug: c.slug, size: 54) }
+                            // Coloured trees (D74); the approved trio when the bundle has them.
+                            let picks = ["green", "blue", "red"]
+                            ForEach(Array(trees.prefix(3).enumerated()), id: \.element.id) { i, c in
+                                TreeCharacterView(slug: c.slug, size: 54,
+                                                  color: TreeAvatars.shared.color(named: picks[i]) ?? TreeAvatars.shared.defaultColor(forProjectId: c.slug))
+                            }
                         } else {
                             BlobAvatar(color: Theme.palette[1], shape: .blob, size: 54)
                             BlobAvatar(color: Theme.palette[0], shape: .drop, size: 54)

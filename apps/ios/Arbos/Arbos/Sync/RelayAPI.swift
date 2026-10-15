@@ -425,7 +425,8 @@ final class RelayAPI {
         if let color { body["color"] = color }
         if let icon { body["icon"] = icon }
         if let avatar { body["avatar"] = avatar }
-        if let avatarColor { body["avatar_color"] = avatarColor == "mono" ? NSNull() : avatarColor }
+        // "mono" travels as a slug: a null would make the relay re-pick its coloured default (D74).
+        if let avatarColor { body["avatar_color"] = avatarColor }
         guard !body.isEmpty else { return }
         _ = try await request("PATCH", "/projects/\(projectId)", body: body)
     }

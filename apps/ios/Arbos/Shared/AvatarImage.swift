@@ -11,29 +11,45 @@ enum AvatarImage {
     static let scale: CGFloat = 3
     private struct ColorSet { let tree, treeDark, treeLight, face: String }
 
-    private static let colors: [String: ColorSet] = {
+    /// Tintable manifest colours by slug, plus their manifest order (the relay's hash contract).
+    private static let palette: (sets: [String: ColorSet], order: [String]) = {
         guard let url = Bundle.main.url(forResource: "manifest", withExtension: "json"),
               let data = try? Data(contentsOf: url),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let list = obj["colors"] as? [[String: Any]] else { return [:] }
+              let list = obj["colors"] as? [[String: Any]] else { return ([:], []) }
         var out: [String: ColorSet] = [:]
+        var order: [String] = []
         for c in list {
             guard let slug = c["slug"] as? String, slug != "mono",
                   let tree = c["tree"] as? String, let dark = c["tree_dark"] as? String, let light = c["tree_light"] as? String else { continue }
             out[slug] = ColorSet(tree: tree, treeDark: dark, treeLight: light, face: (c["face"] as? String) ?? "#000000")
+            order.append(slug)
         }
-        return out
+        return (out, order)
     }()
+    private static var colors: [String: ColorSet] { palette.sets }
+    private static var coloredOrder: [String] { palette.order }
 
+    /// The colour an agent without a chosen one shows (D74: coloured, never
+    /// mono) — the relay's `colored[fnv1a64(id + ":color") % n]`.
+    static func defaultColorName(forProjectId projectId: String) -> String? {
+        guard !coloredOrder.isEmpty else { return nil }
+        var h: UInt64 = 0xcbf29ce484222325
+        for b in (projectId + ":color").utf8 { h = (h ^ UInt64(b)) &* 0x100000001b3 }
+        return coloredOrder[Int(h % UInt64(coloredOrder.count))]
+    }
+
+    /// `colorName` nil → the project's default colour; "mono" → the art as drawn.
     @MainActor
-    static func treePNG(slug: String, colorName: String?, pixels: CGFloat) -> Data? {
+    static func treePNG(slug: String, colorName: String?, pixels: CGFloat, projectId: String? = nil) -> Data? {
         guard let animation = LottieAnimation.named("idle", bundle: .main, subdirectory: "lottie/\(slug)") else { return nil }
         let view = LottieAnimationView(animation: animation, configuration: LottieConfiguration(renderingEngine: .mainThread))
         let side = pixels / AvatarImage.scale
         view.frame = CGRect(x: 0, y: 0, width: side, height: side)
         view.contentMode = .scaleAspectFit
         view.backgroundColor = .clear
-        if let name = colorName, let set = colors[name] {
+        let name = colorName ?? projectId.flatMap(defaultColorName(forProjectId:))
+        if let name, let set = colors[name] {
             let pairs: [(String, String)] = [
                 ("tree.**.tree.Color", set.tree), ("tree.**.tree_dark.Color", set.treeDark),
                 ("tree.**.tree_light.Color", set.treeLight), ("tree.**.face.Color", set.face),

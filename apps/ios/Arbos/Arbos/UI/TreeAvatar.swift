@@ -14,8 +14,9 @@ import Lottie
 /// One colour set from the manifest `colors[]`. The TREE carries the colour
 /// (`tree` plus its `tree_dark`/`tree_light` shading and a dark `face`); the
 /// disc (`bg`) and the thin ring stay neutral and are never tinted. `mono`
-/// is the default. Entries without the v2 shading hexes are not tintable
-/// (the v1 manifest), so the art renders as drawn.
+/// stays selectable but is never a default (D74: agents are always coloured;
+/// the white tree is only the brand mark). Entries without the v2 shading
+/// hexes are not tintable (the v1 manifest), so the art renders as drawn.
 struct TreeColor: Identifiable, Equatable, Hashable {
     let name: String
     let label: String
@@ -185,6 +186,18 @@ final class TreeAvatars {
     func relayDefault(_ projectId: String) -> String? {
         guard !all.isEmpty else { return nil }
         return all[TreeAvatars.hashIndex(projectId, count: all.count)].slug
+    }
+
+    /// Tintable colours in manifest order — the palette a default is drawn from.
+    var coloredPalette: [TreeColor] { colors.filter(\.isTintable) }
+
+    /// The colour an agent shows when nothing was chosen (D74: never mono).
+    /// The relay's `default_color_for`: `colored[fnv1a64(id + ":color") % n]`
+    /// over `colors[]` without `mono`, so both ends land on the same hue.
+    func defaultColor(forProjectId projectId: String) -> TreeColor? {
+        let palette = coloredPalette
+        guard !palette.isEmpty else { return nil }
+        return palette[TreeAvatars.hashIndex(projectId + ":color", count: palette.count)]
     }
 
     /// Slug per project: an explicit `avatar` the bundle can draw wins; the

@@ -22,8 +22,8 @@ extension AppModel {
         let invoices = Project(id: "fx-invoices", name: "Invoice Collector", icon: "Ic", color: "#8E8E93", state: .awake, stateSince: now,
                                stateDetail: nil, model: "anthropic/claude-haiku-5.5", effort: .low, spendTodayUsd: 0, spendCapUsd: 25)
         var list = [comms, affine, hyper, scout, expense, invoices]
-        // A few coloured trees for the avatar-colour screens; the rest stay mono.
-        let tints = ["fx-comms": "blue", "fx-hyper": "orange", "fx-expense": "pink", "fx-invoices": "teal", "fx-scout": "slate"]
+        // Every agent is a coloured tree (D74); the colours differ so screenshots read well.
+        let tints = ["fx-comms": "blue", "fx-affine": "green", "fx-hyper": "orange", "fx-expense": "pink", "fx-invoices": "teal", "fx-scout": "violet"]
         for i in list.indices { list[i].avatarColor = tints[list[i].id] }
         setFixture(projects: list, now: now)
     }

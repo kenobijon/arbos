@@ -397,6 +397,9 @@ struct RowView: View {
                 Text(before)
                 if let target {
                     AgentAvatar(project: target, theme: theme, size: 16, still: true)
+                } else if let slug = TreeAvatars.shared.relayDefault(after), TreeAvatars.shared.has(slug) {
+                    // An agent we do not list yet still shows as a coloured tree (D74).
+                    TreeCharacterView(slug: slug, size: 16, color: TreeAvatars.shared.defaultColor(forProjectId: after), still: true)
                 } else {
                     BlobAvatar(color: theme.muted, shape: BlobShape.pick(for: after), size: 16)
                 }

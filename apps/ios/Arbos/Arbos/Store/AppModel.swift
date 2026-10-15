@@ -837,7 +837,8 @@ final class AppModel: ObservableObject {
             if let color { projects[i].color = color }
             if let icon { projects[i].icon = icon }
             if let avatar { projects[i].avatar = avatar }
-            if let avatarColor { projects[i].avatarColor = avatarColor == "mono" ? nil : avatarColor }
+            // "mono" is kept as an explicit pick; nil would fall back to the coloured default (D74).
+            if let avatarColor { projects[i].avatarColor = avatarColor }
         }
         guard !isFixture else { return }
         Task {
@@ -885,16 +886,19 @@ final class AppModel: ObservableObject {
         set { UserDefaults.standard.set(newValue, forKey: "avatarColorOverrides") }
     }
 
-    /// The colour set a project's tree is tinted with; nil = mono.
+    /// The colour set a project's tree is tinted with; nil = mono. A project
+    /// without a chosen colour shows the relay's hash default (D74: coloured,
+    /// never mono); only an explicit "mono" pick draws the white tree.
     func avatarColor(for project: Project) -> TreeColor? {
         let name = project.avatarColor ?? avatarColorOverrides[project.id]
-        guard let name, name != "mono" else { return nil }
-        return TreeAvatars.shared.color(named: name)
+        guard let name else { return TreeAvatars.shared.defaultColor(forProjectId: project.id) }
+        guard name != "mono" else { return nil }
+        return TreeAvatars.shared.color(named: name) ?? TreeAvatars.shared.defaultColor(forProjectId: project.id)
     }
 
     func pickAvatarColor(_ projectId: Id, name: String) {
         var o = avatarColorOverrides
-        if name == "mono" { o[projectId] = nil } else { o[projectId] = name }
+        o[projectId] = name
         avatarColorOverrides = o
         updateProject(projectId, avatarColor: name)
         objectWillChange.send()

@@ -281,7 +281,10 @@ struct NewAgentView: View {
                     BlobAvatar(color: Theme.palette[NewAgentView.stableIndex(clean, Theme.palette.count)], shape: BlobShape.pick(for: clean), size: 92)
                 } else {
                     let slug = trees[NewAgentView.stableIndex(clean, trees.count)].slug
-                    TreeCharacterView(slug: slug, size: 92).id(slug)
+                    // The preview is coloured like the agent will be (D74); the relay picks the final pair.
+                    let palette = TreeAvatars.shared.coloredPalette
+                    let color = palette.isEmpty ? nil : palette[NewAgentView.stableIndex(clean + ":color", palette.count)]
+                    TreeCharacterView(slug: slug, size: 92, color: color).id("\(slug)|\(color?.name ?? "mono")")
                 }
             }
             .padding(.top, 28)
