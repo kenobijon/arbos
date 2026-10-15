@@ -441,7 +441,7 @@ impl AppState {
                 cx.notify();
             }
             SyncEvent::Skills(mut skills) => {
-                skills.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                skills.sort_by_key(|s| s.name.to_lowercase());
                 self.skills = skills;
                 cx.notify();
             }
