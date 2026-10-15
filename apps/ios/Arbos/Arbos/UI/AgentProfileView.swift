@@ -34,7 +34,7 @@ struct AgentProfileView: View {
                                     Text("Avatar").font(.system(size: Theme.body, weight: .medium)).foregroundStyle(theme.text)
                                     TreePickerGrid(current: model.avatarSlug(for: project)) { slug in
                                         guard !project.shared else { return }
-                                        model.updateProject(projectId, avatar: slug)
+                                        model.pickAvatar(projectId, slug: slug)
                                     }
                                     .disabled(project.shared)
                                 }

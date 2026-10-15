@@ -732,6 +732,13 @@ final class AppModel: ObservableObject {
     /// Recomputed whenever the project list changes.
     @Published private(set) var avatarMap: [Id: String] = [:]
 
+    /// Picks made on this phone, kept until the relay stores `avatar` itself
+    /// (PATCH /projects/{id} ignores unknown fields on relays without it).
+    private var avatarOverrides: [Id: String] {
+        get { (UserDefaults.standard.dictionary(forKey: "avatarOverrides") as? [String: String]) ?? [:] }
+        set { UserDefaults.standard.set(newValue, forKey: "avatarOverrides") }
+    }
+
     func avatarSlug(for project: Project) -> String? {
         if let slug = project.avatar, TreeAvatars.shared.has(slug) { return slug }
         if let slug = avatarMap[project.id] { return slug }
@@ -743,8 +750,22 @@ final class AppModel: ObservableObject {
     }
 
     func recomputeAvatars() {
-        let map = TreeAvatars.shared.assign(projects)
+        let overrides = avatarOverrides
+        let withPicks = projects.map { p -> Project in
+            var q = p
+            if q.avatar == nil, let slug = overrides[p.id] { q.avatar = slug }
+            return q
+        }
+        let map = TreeAvatars.shared.assign(withPicks)
         if map != avatarMap { avatarMap = map }
+    }
+
+    func pickAvatar(_ projectId: Id, slug: String) {
+        var o = avatarOverrides
+        o[projectId] = slug
+        avatarOverrides = o
+        updateProject(projectId, avatar: slug)
+        recomputeAvatars()
     }
 
     /// Open (or create) the DM with a handle and navigate to it.
