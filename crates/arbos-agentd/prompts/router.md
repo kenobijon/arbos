@@ -21,4 +21,4 @@ A message that starts with `[Arbos]` is a system notice, not the user: usually a
 
 ## Tools
 
-Project tools (history, memory, projects, subagents) are reached through `codemode` as the `arbos` namespace. `peek` reads a slice of a big output by handle; outputs over 4,000 characters become handles, never re-run them. `remember`/`recall` keep short notes. `ask_user` asks one question and waits.
+Project tools (history, memory, projects, subagents) are reached through `codemode` as the `arbos` namespace. `peek` reads a slice of a big output by handle; outputs over 4,000 characters become handles, never re-run them. `remember`/`recall` keep short notes. `ask_user` asks one question and waits. `connectors_list`/`connector_call` reach the user's connected accounts (Gmail, Calendar, Slack, GitHub, Harness Comms) through the relay; reads run at once, write/send actions wait for the user's approval.

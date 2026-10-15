@@ -1,7 +1,7 @@
 //! The project MCP server (design §6.7): Streamable-HTTP JSON-RPC on loopback.
 //! Tools: history_search, history_read, read_thread, memory_search, memory_read,
 //! peek, sub_llm, remember, recall, projects_list, projects_send, ask_user,
-//! spawn_subagent, wake_subagent.
+//! spawn_subagent, wake_subagent, connectors_list, connector_call.
 
 use std::sync::Arc;
 
@@ -20,7 +20,7 @@ const MAX_HITS: i64 = 20;
 const PAGE_TOKENS_CHARS: usize = 32_000; // ≈ 8k tokens
 
 fn tools() -> Value {
-    json!([
+    let mut list = json!([
         { "name": "history_search", "description": "Search this Project's whole history (chats, subagent sessions, tool outputs). Ranked hits with snippets; every hit id is readable with history_read.",
           "inputSchema": { "type": "object", "properties": { "query": { "type": "string" }, "thread_id": { "type": "string" }, "kind": { "type": "string", "enum": ["user","assistant","tool_call","tool_output","compaction","memory","session_entry"] }, "limit": { "type": "integer", "maximum": 20 }, "cursor": { "type": "string" } }, "required": ["query"] } },
         { "name": "history_read", "description": "Read one history entry verbatim by id, or a range {thread_id, from_id, to_id}. Big entries return a handle for peek.",
@@ -45,14 +45,18 @@ fn tools() -> Value {
         { "name": "spawn_subagent", "description": "Hand a task to a new subagent (Prime by default). Use mid-act when the task is bigger than 8 tool calls.",
           "inputSchema": { "type": "object", "properties": { "name": { "type": "string" }, "purpose": { "type": "string" }, "brief": { "type": "string" }, "isolate": { "type": "boolean" } }, "required": ["name","purpose","brief"] } },
         { "name": "wake_subagent", "description": "Continue an existing subagent with a new brief.", "inputSchema": { "type": "object", "properties": { "id": { "type": "string" }, "brief": { "type": "string" } }, "required": ["id","brief"] } }
-    ])
+    ]);
+    if let Some(a) = list.as_array_mut() {
+        a.extend(crate::connectors::tool_specs());
+    }
+    list
 }
 
-fn text_result(text: impl Into<String>) -> Value {
+pub(crate) fn text_result(text: impl Into<String>) -> Value {
     json!({ "content": [{ "type": "text", "text": text.into() }] })
 }
 
-fn err_result(msg: impl std::fmt::Display) -> Value {
+pub(crate) fn err_result(msg: impl std::fmt::Display) -> Value {
     json!({ "content": [{ "type": "text", "text": format!("error: {msg}") }], "isError": true })
 }
 
@@ -414,6 +418,8 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
             Ok(t) => text_result(t),
             Err(e) => err_result(e),
         },
+        "connectors_list" => crate::connectors::connectors_list(a).await,
+        "connector_call" => crate::connectors::connector_call(a, args, &chat_for_scratch).await,
         _ => err_result(format!("unknown tool {name}")),
     }
 }
@@ -438,7 +444,7 @@ fn page_rows(rows: &[crate::store::T3Row]) -> String {
     json!({ "turns": out, "next_cursor": next }).to_string()
 }
 
-fn materialize_handle(a: &Arc<Agent>, chat_id: &str, note: &str, text: &str) -> String {
+pub(crate) fn materialize_handle(a: &Agent, chat_id: &str, note: &str, text: &str) -> String {
     use sha2::Digest;
     let sha = hex::encode(sha2::Sha256::digest(text.as_bytes()));
     let id = format!("h_{}", &sha[..8]);
