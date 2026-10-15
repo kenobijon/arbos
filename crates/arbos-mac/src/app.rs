@@ -587,9 +587,10 @@ impl AppState {
                     }
                 }
                 if let Some(handle) = self.awaiting_dm.clone() {
-                    if let Some(space) = projects.iter().find(|p| {
-                        p.is_people() && p.person().map(|x| x.handle == handle).unwrap_or(false)
-                    }) {
+                    if let Some(space) = projects
+                        .iter()
+                        .find(|p| p.is_people() && p.people.iter().any(|x| x.handle == handle))
+                    {
                         self.awaiting_dm = None;
                         self.new_chat_open = false;
                         let id = space.id.clone();
