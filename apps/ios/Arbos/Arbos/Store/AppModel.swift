@@ -81,6 +81,9 @@ final class AppModel: ObservableObject {
         }
         #endif
         let endpoint = RelayEndpoint(saved)
+        if !endpoint.httpUrl.isEmpty {
+            UserDefaults.standard.set(endpoint.httpUrl, forKey: "relayUrl")
+        }
         api = RelayAPI(endpoint: endpoint) { "" }
         if creds == nil { creds = Keychain.load(relayUrl: endpoint.httpUrl) }
         credentials = creds
@@ -96,9 +99,9 @@ final class AppModel: ObservableObject {
 
     func setRelayUrl(_ raw: String) {
         let endpoint = RelayEndpoint(raw)
+        UserDefaults.standard.set(endpoint.httpUrl, forKey: "relayUrl")
         guard endpoint != api.endpoint else { return }
         unpair(forget: false)
-        UserDefaults.standard.set(endpoint.httpUrl, forKey: "relayUrl")
         api = RelayAPI(endpoint: endpoint) { [weak self] in self?.credentials?.deviceToken ?? "" }
         credentials = Keychain.load(relayUrl: endpoint.httpUrl)
         if credentials != nil {
