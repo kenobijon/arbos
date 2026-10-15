@@ -75,6 +75,26 @@ struct ChatView: View {
                 VoiceModeView(project: project).environmentObject(model).environment(\.theme, theme)
             }
         }
+        .task {
+            guard DebugHooks.demo, model.isFixture else { return }
+            try? await Task.sleep(nanoseconds: 1_800_000_000)
+            composerFocused = true
+            try? await Task.sleep(nanoseconds: 900_000_000)
+            for ch in "Also keep your replies short, please." {
+                draft.append(ch)
+                try? await Task.sleep(nanoseconds: 55_000_000)
+            }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            send()
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            composerFocused = false
+            try? await Task.sleep(nanoseconds: 7_500_000_000)
+            showThreads = true
+            try? await Task.sleep(nanoseconds: 2_200_000_000)
+            showThreads = false
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            dismiss()
+        }
         .onAppear {
             model.markRead(chatId: chatId)
             if let show = DebugHooks.show {

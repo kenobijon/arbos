@@ -11,6 +11,8 @@ enum DebugHooks {
     static var fixture: Bool { value("ARBOS_FIXTURE") == "1" }
     /// keyboard | settings | voice | threads | model — opened on the chat screen.
     static var show: String? { value("ARBOS_SHOW") }
+    /// Scripted tour for the screen recording (fixture only).
+    static var demo: Bool { value("ARBOS_DEMO") == "1" }
 
     private static func value(_ key: String) -> String? {
         #if DEBUG

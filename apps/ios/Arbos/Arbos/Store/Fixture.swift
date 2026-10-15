@@ -74,13 +74,41 @@ extension AppModel {
         link = .live
     }
 
-    /// Sends in fixture mode append locally so the composer can be exercised.
+    /// Sends in fixture mode append locally so the composer can be exercised,
+    /// then a scripted reply streams in word by word.
     func fixtureAppend(chatId: Id, text: String, attachments: [Attachment]) {
         var list = messages[chatId] ?? []
+        // Finish the fixture's stuck "working" turn so the demo reads cleanly.
+        if let i = list.lastIndex(where: { $0.isStreaming }) {
+            list[i].status = .done
+            list[i].parts = [.text(id: "\(list[i].id)-t", text: "Got it.")]
+        }
         var m = user(newId(), chatId, text, at: nowMs())
         m.parts = attachments.map { .attachment(id: newId(), attachment: $0) } + (text.isEmpty ? [] : m.parts)
         list.append(m)
         messages[chatId] = list
+        Task { await fixtureReply(chatId: chatId) }
+    }
+
+    private func fixtureReply(chatId: Id) async {
+        try? await Task.sleep(nanoseconds: 1_400_000_000)
+        let id = newId()
+        var m = Message(id: id, chatId: chatId, role: .assistant, sender: "agent", status: .streaming, turn: .reply, decision: nil,
+                        subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: nowMs(),
+                        completedAt: nil, pending: false, parts: [.status(id: "\(id)-s", code: .working, message: "Working")], hiddenCount: 0)
+        messages[chatId, default: []].append(m)
+        try? await Task.sleep(nanoseconds: 1_800_000_000)
+        let words = "Done. Short replies from now on, and I'll keep anything that goes out on Discord to one or two casual lines in your voice.".split(separator: " ")
+        var text = ""
+        for w in words {
+            text += (text.isEmpty ? "" : " ") + w
+            m.parts = [.text(id: "\(id)-t", text: text)]
+            if let i = messages[chatId]?.firstIndex(where: { $0.id == id }) { messages[chatId]?[i] = m }
+            try? await Task.sleep(nanoseconds: 90_000_000)
+        }
+        m.status = .done
+        m.completedAt = nowMs()
+        if let i = messages[chatId]?.firstIndex(where: { $0.id == id }) { messages[chatId]?[i] = m }
     }
 
     private func user(_ id: Id, _ chat: Id, _ text: String, at: Int64) -> Message {

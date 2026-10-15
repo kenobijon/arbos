@@ -76,6 +76,11 @@ struct HomeView: View {
                 Text("The relay registers it as a workspace on your machine.")
             }
         }
+        .task {
+            guard DebugHooks.demo, model.isFixture else { return }
+            try? await Task.sleep(nanoseconds: 2_600_000_000)
+            if let p = model.project("fx-comms") { model.open(project: p) }
+        }
         .onAppear {
             if let id = DebugHooks.openProject, model.path.isEmpty, let p = model.project(id) {
                 if let cid = DebugHooks.openChat, let c = model.chat(cid) { model.open(chat: c) } else { model.open(project: p) }
