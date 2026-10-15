@@ -294,8 +294,9 @@ struct Vad {
 
 impl Vad {
     const START_FRAMES: u32 = 3;
-    /// 1 s of silence closes an utterance (a sentence pause is ~0.8 s).
-    const END_FRAMES: u32 = 50;
+    /// 1.2 s of silence closes an utterance; a sentence pause (~0.8 s plus a
+    /// quiet consonant tail) must not split a turn.
+    const END_FRAMES: u32 = 60;
     /// 300 ms of speech is the minimum worth sending.
     const MIN_SPEECH_FRAMES: u32 = 15;
     const PRE_ROLL: usize = FRAME * 10;
@@ -333,7 +334,9 @@ impl Vad {
             let level = audio::rms(&frame);
             let loud = level > self.threshold();
             if !self.in_speech {
-                self.noise = self.noise * 0.95 + level * 0.05;
+                if !loud {
+                    self.noise = self.noise * 0.95 + level * 0.05;
+                }
                 self.pre_roll.extend_from_slice(&frame);
                 if self.pre_roll.len() > Self::PRE_ROLL {
                     let cut = self.pre_roll.len() - Self::PRE_ROLL;
