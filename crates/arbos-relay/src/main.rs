@@ -198,7 +198,15 @@ async fn main() -> anyhow::Result<()> {
             "/projects",
             get(api::list_projects).post(api::create_project),
         )
-        .route("/projects/{id}", get(api::get_project))
+        .route(
+            "/projects/{id}",
+            get(api::get_project).patch(api::patch_project),
+        )
+        .route(
+            "/projects/{id}/chats/{chat}",
+            axum::routing::patch(api::patch_chat),
+        )
+        .route("/projects/{id}/history/{chat}", get(api::chat_history))
         .route("/projects/{id}/status", get(api::project_status))
         .route(
             "/projects/{id}/chats",

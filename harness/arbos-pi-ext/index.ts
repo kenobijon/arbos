@@ -85,6 +85,8 @@ export default function arbosPiExt(pi: ExtensionAPI) {
   let actCalls = 0;
   let routeAttempts = 0;
   let routed = false;
+  let routeCorrections = 0;
+  let correcting = false;
   let sessionId = "";
   const handles = new Map<string, Handle>();
   const scratch = new Map<string, string>();
@@ -109,6 +111,8 @@ export default function arbosPiExt(pi: ExtensionAPI) {
     actCalls = 0;
     routeAttempts = 0;
     routed = false;
+    routeCorrections = 0;
+    correcting = false;
     const lines: string[] = [];
     for (const h of handles.values()) {
       lines.push(`- ${h.id} (${h.kind}, ${h.chars.toLocaleString()} chars, ${h.lines} lines): ${h.note}`);
@@ -192,9 +196,8 @@ export default function arbosPiExt(pi: ExtensionAPI) {
   pi.registerTool({
     name: "route",
     label: "Route",
-    description:
-      "Required first call of every turn. Decide how to handle the user's message: reply (answer now; put short answers in `reply`), act (do it yourself in <= 8 tool calls / 60 s; give a `plan`), wake (continue an existing subagent by `subagent_id` with a `brief`), or new (start a subagent: `name`, `purpose`, `brief`).",
-    promptSnippet: "route: the required first call of every turn; picks reply | act | wake | new",
+    description: "Required first call of every turn: reply | act | wake | new (see the system prompt).",
+    promptSnippet: "route: the required first call of every turn",
     parameters: ROUTE_PARAMS,
     exposure: "model-only",
     executionMode: "sequential",
@@ -214,6 +217,12 @@ export default function arbosPiExt(pi: ExtensionAPI) {
       }
       routed = true;
       const action = args.action;
+      if (correcting) {
+        // Post-hoc route after a reply that skipped it: record it, do not answer again.
+        correcting = false;
+        void hook("/hook/route-corrected", { session_id: sessionId, action });
+        return { content: [{ type: "text", text: "Route recorded. Do not repeat your answer; end the turn." }], details: { action }, terminate: true };
+      }
       switch (action) {
         case "reply":
           if (args.reply && args.reply.trim()) {
@@ -244,7 +253,7 @@ export default function arbosPiExt(pi: ExtensionAPI) {
   pi.registerTool({
     name: "ask_user",
     label: "Ask user",
-    description: "Pause and ask the user one question. The answer arrives as the next user message. One open question at a time.",
+    description: "Ask the user one question and stop; the answer arrives as the next message.",
     promptSnippet: "ask_user: ask the user one question and wait",
     parameters: Type.Object({ question: Type.String({ description: "The question, one or two sentences" }) }),
     exposure: "model-only",
@@ -266,13 +275,13 @@ export default function arbosPiExt(pi: ExtensionAPI) {
   pi.registerTool({
     name: "peek",
     label: "Peek",
-    description: "Read a slice of an offloaded output by handle: a line range, a char range, or the lines matching a regex (max 200 lines).",
+    description: "Read a slice of an offloaded output by handle: lines [from,to] (1-based), chars [from,to], or grep regex; max 200 lines.",
     promptSnippet: "peek: read a slice of a big tool output by handle",
     parameters: Type.Object({
       handle: Type.String(),
-      lines: Type.Optional(Type.Array(Type.Integer(), { minItems: 2, maxItems: 2, description: "1-based inclusive [from, to]" })),
-      chars: Type.Optional(Type.Array(Type.Integer(), { minItems: 2, maxItems: 2, description: "[from, to] character offsets" })),
-      grep: Type.Optional(Type.String({ description: "regex; returns matching lines with numbers" })),
+      lines: Type.Optional(Type.Array(Type.Integer(), { minItems: 2, maxItems: 2 })),
+      chars: Type.Optional(Type.Array(Type.Integer(), { minItems: 2, maxItems: 2 })),
+      grep: Type.Optional(Type.String()),
       max: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })),
     }),
     async execute(_toolCallId, params) {
@@ -314,7 +323,7 @@ export default function arbosPiExt(pi: ExtensionAPI) {
   pi.registerTool({
     name: "remember",
     label: "Remember",
-    description: "Save a short named note in this chat's working set. Pass value null to forget.",
+    description: "Save a short named note in this chat's working set (null forgets).",
     parameters: Type.Object({ name: Type.String(), value: Type.Union([Type.String(), Type.Null()]) }),
     async execute(_toolCallId, params) {
       if (params.value === null) scratch.delete(params.name);
@@ -335,10 +344,29 @@ export default function arbosPiExt(pi: ExtensionAPI) {
     },
   });
 
-  pi.on("agent_end", async () => {
-    if (SESSION_ROLE === "main" && !routed) {
-      void hook("/hook/turn-without-route", { session_id: sessionId });
+  // Post-resume route guard: a main-agent run that ends without a `route` call gets one corrective
+  // continuation (a hidden custom message) and one more model request; a second miss is logged only.
+  pi.on("agent_before_settle", async (event) => {
+    if (SESSION_ROLE !== "main" || routed) return undefined;
+    if (routeCorrections >= 1 || !event.context.canContinue) {
+      void hook("/hook/turn-without-route", { session_id: sessionId, corrected: false });
+      return undefined;
     }
+    routeCorrections += 1;
+    correcting = true;
+    void hook("/hook/turn-without-route", { session_id: sessionId, corrected: true });
+    return {
+      continue: true,
+      entries: [
+        {
+          type: "custom_message",
+          customType: "arbos-route-reminder",
+          content:
+            "Your previous turn did not start with the required `route` call. Call `route` now with the action that matches what you already did (`reply` if you answered; put nothing in `reply`). Do not repeat your answer.",
+          display: false,
+        },
+      ],
+    };
   });
 
   pi.on("session_compact", async () => {

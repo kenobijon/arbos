@@ -51,7 +51,8 @@ COPY image/pi-seed/ /etc/arbos/pi-seed/
 COPY harness/arbos-pi-ext/*.ts harness/arbos-pi-ext/package.json /etc/arbos/pi-seed/extensions/arbos-pi-ext/
 # typebox resolves from pi's own node_modules; link it next to the extension so jiti finds it.
 RUN mkdir -p /etc/arbos/pi-seed/extensions/arbos-pi-ext/node_modules \
- && ln -s "$(npm root -g)/@earendil-works/pi-coding-agent/node_modules/typebox" /etc/arbos/pi-seed/extensions/arbos-pi-ext/node_modules/typebox \
+ && TB="$(dirname "$(find "$(npm root -g)/@earendil-works" -path '*/node_modules/typebox/package.json' | head -1)")" \
+ && ln -s "$TB" /etc/arbos/pi-seed/extensions/arbos-pi-ext/node_modules/typebox \
  && ln -s "$(npm root -g)/@earendil-works" /etc/arbos/pi-seed/extensions/arbos-pi-ext/node_modules/@earendil-works
 
 # --- Subagent harness 1: Prime Agent + its Python 3.11 IPython kernel venv, baked now, not at first use

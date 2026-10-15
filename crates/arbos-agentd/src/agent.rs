@@ -142,6 +142,8 @@ pub struct TurnMetrics {
     pub route_ms: Option<i64>,
     pub tool_calls: i64,
     pub usage: Option<Value>,
+    pub route_missing: bool,
+    pub route_corrected: bool,
 }
 
 pub struct TurnState {
@@ -180,10 +182,20 @@ pub struct Agent {
     pub ext_loaded: AtomicBool,
     turn_lock: Mutex<()>,
     http: reqwest::Client,
+    pub settings: crate::settings::Settings,
 }
 
 impl Agent {
+    pub async fn pi_child(&self) -> Result<Arc<RpcChild>> {
+        self.pi().await
+    }
+
+    pub fn http_client(&self) -> &reqwest::Client {
+        &self.http
+    }
+
     pub fn new(cfg: Arc<Config>, store: Store, sync: SyncHub) -> Arc<Self> {
+        let cfg_for_settings = cfg.clone();
         let llm = Arc::new(Llm::new(&cfg));
         let memory = Arc::new(Memory::new(cfg.clone(), store.clone(), llm.clone()));
         let mut adapters: HashMap<Harness, Arc<dyn HarnessAdapter>> = HashMap::new();
@@ -215,6 +227,7 @@ impl Agent {
             ext_loaded: AtomicBool::new(false),
             turn_lock: Mutex::new(()),
             http: reqwest::Client::new(),
+            settings: crate::settings::Settings::new(&cfg_for_settings),
         })
     }
 
@@ -585,6 +598,13 @@ impl Agent {
                 Some(&json!({ "message_id": assistant_msg_id, "route": route_name })),
             );
         }
+        let mut usage_rec = turn.metrics.usage.clone().unwrap_or(json!({}));
+        if turn.metrics.route_missing {
+            usage_rec["route_missing"] = json!(true);
+        }
+        if turn.metrics.route_corrected {
+            usage_rec["route_corrected"] = json!(true);
+        }
         let _ = self.store.record_turn(
             chat_id,
             &user_msg_id,
@@ -594,7 +614,7 @@ impl Agent {
             total_ms,
             turn.metrics.tool_calls,
             turn.escalate,
-            turn.metrics.usage.as_ref(),
+            Some(&usage_rec),
         );
         if let Some(ttft) = turn.metrics.ttft_ms {
             let _ = self

@@ -192,6 +192,47 @@ async fn noop(State(a): State<S>, headers: HeaderMap, Json(b): Json<Value>) -> R
     ok()
 }
 
+async fn turn_without_route(
+    State(a): State<S>,
+    headers: HeaderMap,
+    Json(b): Json<Value>,
+) -> Response {
+    if !authed(&a, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let corrected = b.get("corrected").and_then(Value::as_bool).unwrap_or(false);
+    let sid = b
+        .get("session_id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    tracing::warn!(session = %sid, corrected, "turn ended without a route call");
+    let _ = a.store.t3_append(
+        &sid,
+        None,
+        Some(&sid),
+        "route",
+        Some("system"),
+        &format!("turn without route; corrective continuation={corrected}"),
+        None,
+    );
+    if let Some(t) = a.turn.lock().await.as_mut() {
+        t.metrics.route_missing = true;
+    }
+    ok()
+}
+
+async fn route_corrected(State(a): State<S>, headers: HeaderMap, Json(b): Json<Value>) -> Response {
+    if !authed(&a, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    tracing::info!(action = ?b.get("action"), "route recorded by the post-hoc guard");
+    if let Some(t) = a.turn.lock().await.as_mut() {
+        t.metrics.route_corrected = true;
+    }
+    ok()
+}
+
 pub fn router(agent: Arc<Agent>) -> Router {
     Router::new()
         .route("/hook/route", post(route))
@@ -203,6 +244,7 @@ pub fn router(agent: Arc<Agent>) -> Router {
         .route("/hook/working-set", post(working_set))
         .route("/hook/remember", post(remember))
         .route("/hook/compacted", post(noop))
-        .route("/hook/turn-without-route", post(noop))
+        .route("/hook/turn-without-route", post(turn_without_route))
+        .route("/hook/route-corrected", post(route_corrected))
         .with_state(agent)
 }

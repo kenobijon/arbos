@@ -34,6 +34,8 @@ pub enum Incoming {
         chat_id: String,
         state: wire::BoxState,
     },
+    /// A client wrote into the project doc (settings).
+    ProjectDocChanged,
 }
 
 pub struct DocHost {
@@ -357,6 +359,9 @@ impl SyncHub {
                             };
                             for cmd in cmds {
                                 let _ = self.incoming.send(Incoming::Command { chat_id: chat_id.clone(), cmd }).await;
+                            }
+                            if chat_id == PROJECT_DOC_CHAT_ID && rh.device != self.cfg.device_id {
+                                let _ = self.incoming.send(Incoming::ProjectDocChanged).await;
                             }
                         }
                         FrameType::RowsDone => {

@@ -88,6 +88,7 @@ pub struct Project {
     pub created_at: i64,
     pub last_active_at: i64,
     pub spend_cap_daily: f64,
+    pub color: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -158,6 +159,11 @@ impl Db {
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;",
         )?;
         c.execute_batch(SCHEMA)?;
+        // Forward-only, additive migrations (D50).
+        let _ = c.execute(
+            "ALTER TABLE projects ADD COLUMN color TEXT NOT NULL DEFAULT '#8b7cf6'",
+            [],
+        );
         Ok(Self(Arc::new(Mutex::new(c))))
     }
 
@@ -253,9 +259,9 @@ impl Db {
     pub fn insert_project(&self, p: &Project) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO projects(id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![p.id, p.name, p.icon, p.instructions, p.models.to_string(), p.state, p.created_at, p.last_active_at, p.spend_cap_daily],
+                "INSERT INTO projects(id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![p.id, p.name, p.icon, p.instructions, p.models.to_string(), p.state, p.created_at, p.last_active_at, p.spend_cap_daily, p.color],
             )
             .map(|_| ())
         })
@@ -272,11 +278,12 @@ impl Db {
             created_at: r.get(6)?,
             last_active_at: r.get(7)?,
             spend_cap_daily: r.get(8)?,
+            color: r.get(9)?,
         })
     }
 
     const PROJECT_COLS: &'static str =
-        "id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily";
+        "id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color";
 
     pub fn project(&self, id_or_name: &str) -> Result<Option<Project>> {
         self.with(|c| {
@@ -300,6 +307,38 @@ impl Db {
             ))?;
             let rows = st.query_map([], Self::row_to_project)?;
             rows.collect()
+        })
+    }
+
+    /// Partial update of the editable project fields (settings writes from clients or the box).
+    pub fn update_project(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        icon: Option<&str>,
+        color: Option<&str>,
+        instructions: Option<&str>,
+        models: Option<&serde_json::Value>,
+        spend_cap_daily: Option<f64>,
+    ) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE projects SET name = COALESCE(?2, name), icon = COALESCE(?3, icon), color = COALESCE(?4, color),
+                        instructions = COALESCE(?5, instructions), models = COALESCE(?6, models), spend_cap_daily = COALESCE(?7, spend_cap_daily)
+                 WHERE id = ?1",
+                params![id, name, icon, color, instructions, models.map(|m| m.to_string()), spend_cap_daily],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn update_chat_title(&self, project_id: &str, chat_id: &str, title: &str) -> Result<bool> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE chats SET title = ?3 WHERE project_id = ?1 AND id = ?2",
+                params![project_id, chat_id, title],
+            )
+            .map(|n| n > 0)
         })
     }
 

@@ -7,6 +7,7 @@ mod llm;
 mod mcp;
 mod memory;
 mod rpc_child;
+mod settings;
 mod store;
 mod sync;
 
@@ -110,7 +111,7 @@ fn seed_state(cfg: &Config) -> Result<()> {
     )?;
     let settings = json!({
         "defaultProvider": cfg.pi_provider(), "defaultModel": cfg.talking_model, "defaultThinkingLevel": "off",
-        "defaultTools": ["read", "bash", "edit", "write", "grep", "find", "ls", "+codemode"],
+        "defaultTools": ["read", "bash", "edit", "write", "codemode"],
         "compaction": { "enabled": true, "reserveTokens": 16384, "keepRecentTokens": 20000 },
         "hideThinkingBlock": true
     });
@@ -118,7 +119,8 @@ fn seed_state(cfg: &Config) -> Result<()> {
         cfg.pi_dir().join("settings.json"),
         serde_json::to_string_pretty(&settings)?,
     )?;
-    let mcp = json!({ "mcpServers": { "arbos": { "url": cfg.mcp_url(), "headers": { "Authorization": format!("Bearer {}", cfg.mcp_token) }, "exposure": "direct" } } });
+    // Project tools reach the main agent through codemode only: 14 direct schemas cost ~4k prefix tokens (D68).
+    let mcp = json!({ "mcpServers": { "arbos": { "url": cfg.mcp_url(), "headers": { "Authorization": format!("Bearer {}", cfg.mcp_token) }, "exposure": "codemode" } } });
     std::fs::write(
         cfg.pi_dir().join("mcp.json"),
         serde_json::to_string_pretty(&mcp)?,
@@ -278,41 +280,49 @@ async fn boot() -> Result<()> {
         .post_timing("agentd_boot_ms", t_boot.elapsed().as_millis() as i64, None)
         .await;
 
-    // Chat discovery poll: new chats created through the relay REST get a room here.
+    // Registry poll (3 s): new chats get a room; settings changes (SetModel, rename) reach pi and the doc.
     {
         let sync2 = sync.clone();
         let store2 = store.clone();
         let cfg2 = cfg.clone();
+        let agent2 = agent.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(3)).await;
                 let Ok(r) = reqwest::Client::new()
-                    .get(format!(
-                        "{}/projects/{}/chats",
-                        cfg2.relay_url, cfg2.project_id
-                    ))
+                    .get(format!("{}/projects/{}", cfg2.relay_url, cfg2.project_id))
                     .bearer_auth(&cfg2.box_token)
                     .send()
                     .await
                 else {
                     continue;
                 };
-                let Ok(list) = r.json::<Vec<Value>>().await else {
+                let Ok(v) = r.json::<Value>().await else {
                     continue;
                 };
-                for c in list {
+                let chats = v
+                    .get("chats")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                for c in &chats {
                     if let Some(id) = c.get("id").and_then(Value::as_str) {
+                        let _ = store2.upsert_chat(
+                            id,
+                            c.get("title").and_then(Value::as_str).unwrap_or("New chat"),
+                            c.get("is_pinned").and_then(Value::as_bool).unwrap_or(false),
+                            c.get("created_at").and_then(Value::as_i64).unwrap_or(0),
+                        );
                         if sync2.host(id).await.is_none() {
-                            let _ = store2.upsert_chat(
-                                id,
-                                c.get("title").and_then(Value::as_str).unwrap_or("New chat"),
-                                c.get("is_pinned").and_then(Value::as_bool).unwrap_or(false),
-                                c.get("created_at").and_then(Value::as_i64).unwrap_or(0),
-                            );
                             if let Err(e) = sync2.open_room(id).await {
                                 tracing::warn!(error = %e, id, "open room");
                             }
                         }
+                    }
+                }
+                if let Some(p) = v.get("project") {
+                    if let Err(e) = agent2.settings_from_relay(p, &chats).await {
+                        tracing::warn!(error = %e, "settings from relay");
                     }
                 }
             }
@@ -393,6 +403,9 @@ async fn boot() -> Result<()> {
             }
             Incoming::Status { chat_id, state } => {
                 tracing::debug!(chat_id, ?state, "relay status");
+            }
+            Incoming::ProjectDocChanged => {
+                agent.settings_from_doc().await;
             }
         }
     }

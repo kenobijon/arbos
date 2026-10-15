@@ -109,6 +109,8 @@ pub struct CreateProjectBody {
     #[serde(default)]
     pub icon: Option<String>,
     #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
     pub instructions: Option<String>,
     #[serde(default)]
     pub models: Option<Value>,
@@ -168,6 +170,7 @@ pub async fn create_project(
         created_at: now,
         last_active_at: now,
         spend_cap_daily: 25.0,
+        color: b.color.clone().unwrap_or_else(|| "#8b7cf6".into()),
     };
     state
         .db
@@ -187,8 +190,8 @@ pub async fn create_project(
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("box create: {e}")))?;
     Ok(Json(json!({
-        "project": project,
-        "pinned_chat": pinned,
+        "project": project_json(&state, &project).await,
+        "pinned_chat": chat_json(&pinned),
         "sandbox": { "provider": sb.provider, "sandbox_id": sb.sandbox_id, "device_id": sb.device_id, "box_url": sb.box_url },
         "rooms": { "project": format!("/room/{}/{}", project.id, PROJECT_DOC_CHAT_ID), "pinned_chat": format!("/room/{}/{}", project.id, pinned.id) }
     }))
@@ -198,8 +201,7 @@ pub async fn create_project(
 pub async fn list_projects(State(state): State<AppState>, _principal: Principal) -> ApiResult {
     let mut out = Vec::new();
     for p in state.db.list_projects().map_err(internal)? {
-        let (bs, since) = state.box_state(&p.id).await;
-        out.push(json!({ "id": p.id, "name": p.name, "icon": p.icon, "state": p.state, "box": bs, "box_since": since, "last_active_at": p.last_active_at }));
+        out.push(project_json(&state, &p).await);
     }
     Ok(Json(out).into_response())
 }
@@ -217,13 +219,150 @@ pub async fn get_project(
     if !principal.can_access_project(&p.id) {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
-    let chats = state.db.list_chats(&p.id).map_err(internal)?;
+    let chats: Vec<Value> = state
+        .db
+        .list_chats(&p.id)
+        .map_err(internal)?
+        .iter()
+        .map(chat_json)
+        .collect();
     let (bs, since) = state.box_state(&p.id).await;
     let today = state
         .db
         .usage_since(&p.id, start_of_day())
         .map_err(internal)?;
-    Ok(Json(json!({ "project": p, "chats": chats, "box": bs, "box_since": since, "spend_today": today })).into_response())
+    Ok(Json(json!({ "project": project_json(&state, &p).await, "chats": chats, "box": bs, "box_since": since, "spend_today": today })).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct PatchProjectBody {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub instructions: Option<String>,
+    /// Merged slot by slot: `{ "talking_model": { "id": "...", "effort": "low" } }` leaves the other slots alone.
+    #[serde(default)]
+    pub models: Option<Value>,
+    #[serde(default)]
+    pub spend_cap_daily: Option<f64>,
+}
+
+/// `PATCH /projects/{id}`: settings writes (SetModel, rename, icon, instructions, cap). Devices and the
+/// project's own box may call it; the box mirrors the result into the project doc `settings` map.
+pub async fn patch_project(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    Json(b): Json<PatchProjectBody>,
+) -> ApiResult {
+    let p = state
+        .db
+        .project(&id)
+        .map_err(internal)?
+        .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
+    if !principal.can_access_project(&p.id) {
+        return Err((StatusCode::FORBIDDEN, "not your project".into()));
+    }
+    let models = b.models.map(|patch| {
+        let mut merged = p.models.clone();
+        if let (Some(m), Some(o)) = (merged.as_object_mut(), patch.as_object()) {
+            for (k, v) in o {
+                m.insert(k.clone(), v.clone());
+            }
+        }
+        merged
+    });
+    state
+        .db
+        .update_project(
+            &p.id,
+            b.name.as_deref(),
+            b.icon.as_deref(),
+            b.color.as_deref(),
+            b.instructions.as_deref(),
+            models.as_ref(),
+            b.spend_cap_daily,
+        )
+        .map_err(internal)?;
+    let p = state
+        .db
+        .project(&p.id)
+        .map_err(internal)?
+        .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
+    Ok(Json(project_json(&state, &p).await).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct PatchChatBody {
+    pub title: String,
+}
+
+/// `PATCH /projects/{id}/chats/{chat}`: retitle.
+pub async fn patch_chat(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((id, chat)): Path<(String, String)>,
+    Json(b): Json<PatchChatBody>,
+) -> ApiResult {
+    let id = resolve_project_id(&state, &id)?;
+    if !principal.can_access_project(&id) {
+        return Err((StatusCode::FORBIDDEN, "not your project".into()));
+    }
+    let ok = state
+        .db
+        .update_chat_title(&id, &chat, b.title.trim())
+        .map_err(internal)?;
+    Ok(if ok {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::NOT_FOUND
+    }
+    .into_response())
+}
+
+/// `GET /projects/{id}/history/{chat}?before=&limit=`: older T3 turns of a chat, proxied from the box
+/// (`crdt-sync.md` §6.4). Needs the box awake; 409 otherwise.
+pub async fn chat_history(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((id, chat)): Path<(String, String)>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> ApiResult {
+    let id = resolve_project_id(&state, &id)?;
+    if !principal.can_access_project(&id) {
+        return Err((StatusCode::FORBIDDEN, "not your project".into()));
+    }
+    let sb = state
+        .db
+        .sandbox(&id)
+        .map_err(internal)?
+        .ok_or((StatusCode::NOT_FOUND, "no sandbox".to_owned()))?;
+    let Some(url) = sb.box_url else {
+        return Err((StatusCode::CONFLICT, "box has no url yet".into()));
+    };
+    let mut req = state.http.get(format!("{url}/history/{chat}")).query(&q);
+    if let Some(t) = &sb.preview_token {
+        req = req.header("x-daytona-preview-token", t);
+    }
+    match req.send().await {
+        Ok(r) if r.status().is_success() => Ok((
+            [("content-type", "application/json")],
+            r.bytes().await.unwrap_or_default(),
+        )
+            .into_response()),
+        Ok(r) => Err((
+            StatusCode::BAD_GATEWAY,
+            format!("box answered {}", r.status()),
+        )),
+        Err(e) => Err((
+            StatusCode::CONFLICT,
+            format!("box unreachable (asleep?): {e}"),
+        )),
+    }
 }
 
 /// Accept a project id or name in the path and return the id.
@@ -233,6 +372,28 @@ fn resolve_project_id(state: &AppState, id_or_name: &str) -> Result<String, (Sta
         Ok(None) => Err((StatusCode::NOT_FOUND, "no such project".into())),
         Err(e) => Err(internal(e)),
     }
+}
+
+/// The project record as clients see it (additive; `arbos-mac` maps it onto its `Project`).
+async fn project_json(state: &AppState, p: &Project) -> Value {
+    let (bs, since) = state.box_state(&p.id).await;
+    let today = state
+        .db
+        .usage_since(&p.id, start_of_day())
+        .map(|u| u.usd)
+        .unwrap_or(0.0);
+    json!({
+        "id": p.id, "name": p.name, "icon": p.icon, "color": p.color, "instructions": p.instructions,
+        "state": p.state, "box": bs, "box_since": since,
+        "models": p.models,
+        "spend_today_usd": today, "spend_cap_usd": p.spend_cap_daily,
+        "created_at": p.created_at, "last_active_at": p.last_active_at,
+    })
+}
+
+fn chat_json(c: &Chat) -> Value {
+    json!({ "id": c.id, "project_id": c.project_id, "title": c.title, "is_pinned": c.is_pinned, "is_system": false,
+            "position": c.position, "created_at": c.created_at, "doc_epoch": c.doc_epoch, "room": format!("/room/{}/{}", c.project_id, c.id) })
 }
 
 fn start_of_day() -> i64 {
@@ -309,7 +470,16 @@ pub async fn list_chats(
     if !principal.can_access_project(&p.id) {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
-    Ok(Json(state.db.list_chats(&p.id).map_err(internal)?).into_response())
+    Ok(Json(
+        state
+            .db
+            .list_chats(&p.id)
+            .map_err(internal)?
+            .iter()
+            .map(chat_json)
+            .collect::<Vec<_>>(),
+    )
+    .into_response())
 }
 
 // ---- box lifecycle ----------------------------------------------------------------------------
