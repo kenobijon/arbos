@@ -457,6 +457,7 @@ impl Agent {
             return Err(anyhow!("projects tab: HTTP {}", r.status()));
         }
         let v: Value = r.json().await?;
+        let v = v.get("chat").cloned().unwrap_or(v);
         let id = str_field(&v, "id").ok_or_else(|| anyhow!("projects tab: no id"))?;
         let _ = self.store.upsert_chat(
             &id,
