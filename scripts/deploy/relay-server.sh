@@ -97,8 +97,8 @@ if command -v op >/dev/null 2>&1 && [[ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; th
   : "${DAYTONA_API_KEY:=$(opread 'op://Arbos/fywmj6vtq5delybw5c7a53l2qa/notesPlain' | tr -d '[:space:]')}"
   : "${ARBOS_RELAY_ADMIN_TOKEN:=$(opread 'op://Arbos/Arbos relay (relay.arbos.life) — admin token/credential')}"
   : "${ARBOS_RELAY_KEY:=$(opread 'op://Arbos/Arbos relay (relay.arbos.life) — connector key (ARBOS_RELAY_KEY)/credential')}"
-  : "${ARBOS_GITHUB_CLIENT_ID:=$(opread 'op://Arbos/Arbos relay — GitHub OAuth app/username')}"
-  : "${ARBOS_GITHUB_CLIENT_SECRET:=$(opread 'op://Arbos/Arbos relay — GitHub OAuth app/credential')}"
+  : "${ARBOS_GITHUB_CLIENT_ID:=$(opread 'op://Arbos/Arbos GitHub OAuth app/ARBOS_GITHUB_CLIENT_ID')}"
+  : "${ARBOS_GITHUB_CLIENT_SECRET:=$(opread 'op://Arbos/Arbos GitHub OAuth app/ARBOS_GITHUB_CLIENT_SECRET')}"
 fi
 # keep values already in the env file when nothing new was supplied
 if [[ -f "$ENV_FILE" ]]; then
@@ -122,6 +122,8 @@ OPENAI_API_KEY=${OPENAI_API_KEY:-}
 DAYTONA_API_KEY=${DAYTONA_API_KEY:-}
 ARBOS_GITHUB_CLIENT_ID=${ARBOS_GITHUB_CLIENT_ID:-}
 ARBOS_GITHUB_CLIENT_SECRET=${ARBOS_GITHUB_CLIENT_SECRET:-}
+ARBOS_GITHUB_OAUTH_CLIENT_ID=${ARBOS_GITHUB_CLIENT_ID:-}
+ARBOS_GITHUB_OAUTH_CLIENT_SECRET=${ARBOS_GITHUB_CLIENT_SECRET:-}
 ARBOS_OAUTH_REDIRECT_URL=$PUBLIC_URL/auth/github/callback
 RUST_LOG=info,arbos_relay=info
 EOF
@@ -198,6 +200,32 @@ WantedBy=timers.target
 EOF
 systemctl daemon-reload
 systemctl enable --now arbos-refresh-mac-download.timer >/dev/null
+
+# ---- 6. GitHub OAuth secret watcher (vault -> relay.env -> restart) --------------------------------
+say "oauth secret watcher"
+install -m 0755 "$REPO_DIR/scripts/deploy/oauth-secret-watch.sh" /usr/local/bin/arbos-oauth-secret-watch
+if [[ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; then
+  umask 077; printf 'OP_SERVICE_ACCOUNT_TOKEN=%s\n' "$OP_SERVICE_ACCOUNT_TOKEN" > /etc/arbos/op.env; chmod 0600 /etc/arbos/op.env; umask 022
+fi
+cat > /etc/systemd/system/arbos-oauth-secret-watch.service <<'UNIT'
+[Unit]
+Description=Pull the GitHub OAuth client id/secret from the Arbos vault into relay.env
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/arbos-oauth-secret-watch
+UNIT
+cat > /etc/systemd/system/arbos-oauth-secret-watch.timer <<'UNIT'
+[Unit]
+Description=Check the vault for the GitHub OAuth secret every 2 minutes
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=2min
+[Install]
+WantedBy=timers.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now arbos-oauth-secret-watch.timer >/dev/null
+/usr/local/bin/arbos-oauth-secret-watch || true
 
 say "done"
 echo "relay: $PUBLIC_URL (listening on $LISTEN, data $DATA_DIR, env $ENV_FILE)"
