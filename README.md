@@ -89,6 +89,16 @@ ARBOS_TUNNEL=none  ARBOS_RELAY_PUBLIC_URL=https://relay.example scripts/relay-st
 
 The named tunnel is the Cloudflare Zero Trust tunnel `arbos-relay` (remotely managed: ingress `relay.arbos.life → http://127.0.0.1:7700`). Its connector token lives in the Arbos vault ("Cloudflare — relay named tunnel token … env ARBOS_TUNNEL_TOKEN"); `ARBOS_TUNNEL_HOSTNAME` changes the hostname, `ARBOS_TUNNEL_OP_ITEM` the vault item. Creating a tunnel and its DNS record needs a Cloudflare API token with `Account → Cloudflare Tunnel → Edit` and `Zone → DNS → Edit` on the zone.
 
+## One machine per user (D70)
+
+Each user has one Daytona computer; every project of that user is a workspace on it: its own folder `/work/<project-id>`, its own pi main session and subagents, its own SQLite memory/history and blob dir, its own loopback MCP/hook/model-stub ports (7800 + 10·n). One `arbos-agentd` per box supervises them (`crates/arbos-agentd/src/workspace.rs`): workspaces start from `POST /box/hello` and the 3 s `GET /box/projects` poll, stop when a project is deleted, and up to 8 subagents run per box (4 per workspace). The box starts on demand and auto-stops when idle, as before.
+
+- Class: the snapshot fixes vCPU/RAM/disk. Default `ARBOS_DAYTONA_SNAPSHOT` = `arbos-agent-0.1.7` registered at **4 vCPU / 8 GiB / 10 GiB** (the Daytona per-sandbox maximum on this org; $0.332 per active hour, $0.013 per stopped day, $0 archived). Per-user override: `PUT /admin/users/{id}/box {"snapshot": "…"}` (admin token) before the box is created.
+- Machine API (devices): `GET /machine` → `{user_id, state, since, provider, sandbox_id, spec {cpu, mem_gib, disk_gib, class}, spend_today_usd, spend_cap_usd, workspaces: [{project_id, state}], migrated_from}`; `POST /machine/start`, `POST /machine/stop?force=`. `arbosctl machine status|start|stop`.
+- Project docs: `status.box = {state, since}` (the user's machine, mirrored into every project doc) and `status.workspace = {state, since}` with `state ∈ running | stopped`.
+- Box API (box token): `POST /box/hello`, `GET /box/projects`, `POST /box/keepalive`, `POST /projects/{id}/workspace {state}`. The box names the workspace in `X-Arbos-Project` on model calls and skills calls, so usage and skills stay per project.
+- Migration from the old one-sandbox-per-project layout: `arbosctl migrate-to-user-box [--project <id>] [--force]` (`POST /machine/migrate`). For each legacy sandbox it stops the old agentd, packs `/work` (repo + `.arbos` state), copies it into the user box as `/work/<project>` while that workspace is held, releases it, stops the old sandbox and marks it `migrated_to` (never deletes). Idempotent.
+
 ## Run on Daytona
 
 With `DAYTONA_API_KEY` set, `project create` (without `--local-box`) creates a real sandbox from the snapshot named by `ARBOS_DAYTONA_SNAPSHOT` (default `arbos-agent-0.1.7`, the current registered build). The relay must be reachable from the box (`ARBOS_RELAY_PUBLIC_URL`). If no production snapshot is registered yet, point the relay at the dev image instead:
