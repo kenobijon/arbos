@@ -92,6 +92,17 @@ CREATE TABLE IF NOT EXISTS connector_outbox (
   id INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT NOT NULL, action TEXT NOT NULL, args TEXT NOT NULL,
   created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS routines (
+  id TEXT PRIMARY KEY, project_id TEXT NOT NULL, chat_id TEXT NOT NULL, name TEXT NOT NULL,
+  prompt TEXT NOT NULL, trigger TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL, last_run_at INTEGER, next_run_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS routines_due ON routines(enabled, next_run_at);
+CREATE TABLE IF NOT EXISTS routine_runs (
+  id TEXT PRIMARY KEY, routine_id TEXT NOT NULL, started_at INTEGER NOT NULL, finished_at INTEGER,
+  status TEXT NOT NULL, message_id TEXT, note TEXT
+);
+CREATE INDEX IF NOT EXISTS routine_runs_routine ON routine_runs(routine_id, started_at);
 "#;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,6 +146,34 @@ pub struct Sandbox {
     pub box_url: Option<String>,
     pub preview_token: Option<String>,
     pub local_pid: Option<i64>,
+}
+
+/// A scheduled or event-triggered prompt (design §10 "Routines").
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Routine {
+    pub id: String,
+    pub project_id: String,
+    pub chat_id: String,
+    pub name: String,
+    pub prompt: String,
+    /// `{ "kind": "cron", "expr", "tz" } | { "kind": "webhook", "secret" } | { "kind": "event", "event" }`.
+    pub trigger: serde_json::Value,
+    pub enabled: bool,
+    pub created_at: i64,
+    pub last_run_at: Option<i64>,
+    pub next_run_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoutineRun {
+    pub id: String,
+    pub routine_id: String,
+    pub started_at: i64,
+    pub finished_at: Option<i64>,
+    /// `queued | running | done | failed | skipped`.
+    pub status: String,
+    pub message_id: Option<String>,
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1057,6 +1096,219 @@ impl Db {
                     "created_at": r.get::<_, i64>(4)?,
                 }))
             })?;
+            rows.collect()
+        })
+    }
+}
+
+impl Db {
+    // ---- routines -----------------------------------------------------------------------------
+
+    const ROUTINE_COLS: &'static str =
+        "id, project_id, chat_id, name, prompt, trigger, enabled, created_at, last_run_at, next_run_at";
+
+    fn row_to_routine(r: &rusqlite::Row<'_>) -> rusqlite::Result<Routine> {
+        Ok(Routine {
+            id: r.get(0)?,
+            project_id: r.get(1)?,
+            chat_id: r.get(2)?,
+            name: r.get(3)?,
+            prompt: r.get(4)?,
+            trigger: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or_default(),
+            enabled: r.get::<_, i64>(6)? != 0,
+            created_at: r.get(7)?,
+            last_run_at: r.get(8)?,
+            next_run_at: r.get(9)?,
+        })
+    }
+
+    pub fn insert_routine(&self, rt: &Routine) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                &format!(
+                    "INSERT INTO routines({}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                    Self::ROUTINE_COLS
+                ),
+                params![
+                    rt.id,
+                    rt.project_id,
+                    rt.chat_id,
+                    rt.name,
+                    rt.prompt,
+                    rt.trigger.to_string(),
+                    rt.enabled as i64,
+                    rt.created_at,
+                    rt.last_run_at,
+                    rt.next_run_at
+                ],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn routine(&self, id: &str) -> Result<Option<Routine>> {
+        self.with(|c| {
+            c.query_row(
+                &format!("SELECT {} FROM routines WHERE id = ?1", Self::ROUTINE_COLS),
+                params![id],
+                Self::row_to_routine,
+            )
+            .optional()
+        })
+    }
+
+    pub fn list_routines(&self, project_id: &str) -> Result<Vec<Routine>> {
+        self.with(|c| {
+            let mut st = c.prepare(&format!(
+                "SELECT {} FROM routines WHERE project_id = ?1 ORDER BY created_at",
+                Self::ROUTINE_COLS
+            ))?;
+            let rows = st.query_map(params![project_id], Self::row_to_routine)?;
+            rows.collect()
+        })
+    }
+
+    /// Enabled routines whose `next_run_at` has passed (cron only; webhook/event rows have no next run).
+    pub fn due_routines(&self, now: i64) -> Result<Vec<Routine>> {
+        self.with(|c| {
+            let mut st = c.prepare(&format!(
+                "SELECT {} FROM routines WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ?1 ORDER BY next_run_at",
+                Self::ROUTINE_COLS
+            ))?;
+            let rows = st.query_map(params![now], Self::row_to_routine)?;
+            rows.collect()
+        })
+    }
+
+    /// Enabled routines of a project whose trigger is `{ "kind": "event", "event": <event> }`.
+    pub fn event_routines(&self, project_id: &str, event: &str) -> Result<Vec<Routine>> {
+        Ok(self
+            .list_routines(project_id)?
+            .into_iter()
+            .filter(|r| {
+                r.enabled
+                    && r.trigger.get("kind").and_then(serde_json::Value::as_str) == Some("event")
+                    && r.trigger.get("event").and_then(serde_json::Value::as_str) == Some(event)
+            })
+            .collect())
+    }
+
+    /// Partial update (pause/resume/edit). `next_run_at` is always written: the caller recomputes it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_routine(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        prompt: Option<&str>,
+        chat_id: Option<&str>,
+        trigger: Option<&serde_json::Value>,
+        enabled: Option<bool>,
+        next_run_at: Option<i64>,
+    ) -> Result<bool> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE routines SET name = COALESCE(?2, name), prompt = COALESCE(?3, prompt), chat_id = COALESCE(?4, chat_id),
+                        trigger = COALESCE(?5, trigger), enabled = COALESCE(?6, enabled), next_run_at = ?7
+                 WHERE id = ?1",
+                params![id, name, prompt, chat_id, trigger.map(|t| t.to_string()), enabled.map(|e| e as i64), next_run_at],
+            )
+            .map(|n| n > 0)
+        })
+    }
+
+    /// Record a fire: `last_run_at = now`, `next_run_at` to the following occurrence (or NULL).
+    pub fn mark_routine_fired(&self, id: &str, now: i64, next_run_at: Option<i64>) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE routines SET last_run_at = ?2, next_run_at = ?3 WHERE id = ?1",
+                params![id, now, next_run_at],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn delete_routine(&self, id: &str) -> Result<bool> {
+        self.with(|c| {
+            c.execute(
+                "DELETE FROM routine_runs WHERE routine_id = ?1",
+                params![id],
+            )?;
+            c.execute("DELETE FROM routines WHERE id = ?1", params![id])
+                .map(|n| n > 0)
+        })
+    }
+
+    pub fn insert_routine_run(&self, run: &RoutineRun) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO routine_runs(id, routine_id, started_at, finished_at, status, message_id, note) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                params![run.id, run.routine_id, run.started_at, run.finished_at, run.status, run.message_id, run.note],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn routine_run(&self, id: &str) -> Result<Option<RoutineRun>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT id, routine_id, started_at, finished_at, status, message_id, note FROM routine_runs WHERE id = ?1",
+                params![id],
+                Self::row_to_run,
+            )
+            .optional()
+        })
+    }
+
+    fn row_to_run(r: &rusqlite::Row<'_>) -> rusqlite::Result<RoutineRun> {
+        Ok(RoutineRun {
+            id: r.get(0)?,
+            routine_id: r.get(1)?,
+            started_at: r.get(2)?,
+            finished_at: r.get(3)?,
+            status: r.get(4)?,
+            message_id: r.get(5)?,
+            note: r.get(6)?,
+        })
+    }
+
+    /// Terminal statuses set `finished_at`; `running` leaves it NULL.
+    pub fn update_routine_run(
+        &self,
+        id: &str,
+        status: &str,
+        message_id: Option<&str>,
+        note: Option<&str>,
+    ) -> Result<bool> {
+        let finished = matches!(status, "done" | "failed" | "skipped").then(now_ms);
+        self.with(|c| {
+            c.execute(
+                "UPDATE routine_runs SET status = ?2, message_id = COALESCE(?3, message_id), note = COALESCE(?4, note),
+                        finished_at = COALESCE(?5, finished_at) WHERE id = ?1",
+                params![id, status, message_id, note, finished],
+            )
+            .map(|n| n > 0)
+        })
+    }
+
+    pub fn routine_runs(&self, routine_id: &str, limit: i64) -> Result<Vec<RoutineRun>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT id, routine_id, started_at, finished_at, status, message_id, note FROM routine_runs
+                 WHERE routine_id = ?1 ORDER BY started_at DESC LIMIT ?2",
+            )?;
+            let rows = st.query_map(params![routine_id, limit], Self::row_to_run)?;
+            rows.collect()
+        })
+    }
+
+    /// Runs the box never picked up or never finished: `queued`/`running` older than `max_age_ms`.
+    pub fn stale_routine_runs(&self, max_age_ms: i64) -> Result<Vec<RoutineRun>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT id, routine_id, started_at, finished_at, status, message_id, note FROM routine_runs
+                 WHERE status IN ('queued', 'running') AND started_at < ?1",
+            )?;
+            let rows = st.query_map(params![now_ms() - max_age_ms], Self::row_to_run)?;
             rows.collect()
         })
     }

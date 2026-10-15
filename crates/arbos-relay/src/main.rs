@@ -8,6 +8,7 @@ mod daytona;
 mod db;
 mod proxy;
 mod rooms;
+mod routines;
 mod smoke;
 mod state;
 
@@ -196,6 +197,7 @@ async fn main() -> anyhow::Result<()> {
 
     rooms::spawn_sweeper(state.clone()).await;
     boxes::spawn_wake_runner(state.clone()).await;
+    routines::spawn_scheduler(state.clone()).await;
 
     let app = Router::new()
         .route("/healthz", get(api::healthz))
@@ -234,6 +236,21 @@ async fn main() -> anyhow::Result<()> {
         .route("/projects/{id}/pushes", get(api::take_pushes))
         .route("/projects/{id}/usage", get(api::usage))
         .route("/projects/{id}/timings", post(api::record_timing))
+        .route(
+            "/projects/{id}/routines",
+            get(routines::list).post(routines::create),
+        )
+        .route(
+            "/projects/{id}/routines/{rid}",
+            axum::routing::patch(routines::patch).delete(routines::delete),
+        )
+        .route("/projects/{id}/routines/{rid}/run", post(routines::run_now))
+        .route("/projects/{id}/routines/{rid}/runs", get(routines::runs))
+        .route(
+            "/projects/{id}/routines/{rid}/runs/{run}",
+            post(routines::report_run),
+        )
+        .route("/routines/{rid}/fire", post(routines::webhook_fire))
         .route("/room/{project}/{chat}", get(rooms::ws_room))
         .route(
             "/room/{project}/{chat}/checkpoint",
