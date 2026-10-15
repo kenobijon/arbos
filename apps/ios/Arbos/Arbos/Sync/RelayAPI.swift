@@ -167,7 +167,8 @@ final class RelayAPI {
                     ?? (p["spend_cap_daily"] as? NSNumber)?.doubleValue ?? 25,
                 shared: p["shared"] as? Bool ?? false,
                 ownerHandle: p["owner_handle"] as? String,
-                avatar: (p["avatar"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                avatar: (p["avatar"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+                avatarColor: (p["avatar_color"] as? String).flatMap { $0.isEmpty ? nil : $0 }
             )
             let chats = ((detail["chats"] as? [Any]) ?? []).compactMap(RelayAPI.parseChat)
             out.append(RegistryProject(project: project, chats: chats))
@@ -368,12 +369,13 @@ final class RelayAPI {
         return chat
     }
 
-    func patchProject(_ projectId: Id, name: String?, color: String?, icon: String?, avatar: String? = nil) async throws {
+    func patchProject(_ projectId: Id, name: String?, color: String?, icon: String?, avatar: String? = nil, avatarColor: String? = nil) async throws {
         var body: [String: Any] = [:]
         if let name { body["name"] = name }
         if let color { body["color"] = color }
         if let icon { body["icon"] = icon }
         if let avatar { body["avatar"] = avatar }
+        if let avatarColor { body["avatar_color"] = avatarColor == "mono" ? NSNull() : avatarColor }
         guard !body.isEmpty else { return }
         _ = try await request("PATCH", "/projects/\(projectId)", body: body)
     }

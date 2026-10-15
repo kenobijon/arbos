@@ -171,6 +171,8 @@ struct Project: Identifiable, Equatable {
     var ownerHandle: String? = nil
     /// Tree-character slug chosen by the owner (`avatar` on the relay); nil → hashed.
     var avatar: String? = nil
+    /// Colour set name from the manifest (`avatar_color` on the relay); nil → mono.
+    var avatarColor: String? = nil
 
     var shortModel: String { Project.shortModel(model) }
 

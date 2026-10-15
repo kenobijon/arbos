@@ -21,7 +21,11 @@ extension AppModel {
                               stateDetail: nil, model: "anthropic/claude-haiku-5.5", effort: .low, spendTodayUsd: 0, spendCapUsd: 25)
         let invoices = Project(id: "fx-invoices", name: "Invoice Collector", icon: "Ic", color: "#8E8E93", state: .awake, stateSince: now,
                                stateDetail: nil, model: "anthropic/claude-haiku-5.5", effort: .low, spendTodayUsd: 0, spendCapUsd: 25)
-        setFixture(projects: [comms, affine, hyper, scout, expense, invoices], now: now)
+        var list = [comms, affine, hyper, scout, expense, invoices]
+        // A few coloured trees for the avatar-colour screens; the rest stay mono.
+        let tints = ["fx-comms": "blue", "fx-hyper": "orange", "fx-expense": "pink", "fx-invoices": "teal", "fx-scout": "slate"]
+        for i in list.indices { list[i].avatarColor = tints[list[i].id] }
+        setFixture(projects: list, now: now)
     }
 
     private func setFixture(projects list: [Project], now: Int64) {

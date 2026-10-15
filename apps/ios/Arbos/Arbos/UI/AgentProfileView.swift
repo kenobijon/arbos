@@ -31,8 +31,17 @@ struct AgentProfileView: View {
                         if !TreeAvatars.shared.isEmpty {
                             card {
                                 VStack(alignment: .leading, spacing: 12) {
-                                    Text("Avatar").font(.system(size: Theme.body, weight: .medium)).foregroundStyle(theme.text)
-                                    TreePickerGrid(current: model.avatarSlug(for: project)) { slug in
+                                    if let slug = model.avatarSlug(for: project) {
+                                        Text("Colour").font(.system(size: Theme.body, weight: .medium)).foregroundStyle(theme.text)
+                                        TreeColorGrid(slug: slug, current: model.avatarColor(for: project)) { c in
+                                            guard !project.shared else { return }
+                                            model.pickAvatarColor(projectId, name: c.name)
+                                        }
+                                        .disabled(project.shared)
+                                        Rectangle().fill(theme.separator).frame(height: 0.5).padding(.vertical, 4)
+                                    }
+                                    Text("Character").font(.system(size: Theme.body, weight: .medium)).foregroundStyle(theme.text)
+                                    TreePickerGrid(current: model.avatarSlug(for: project), color: model.avatarColor(for: project)) { slug in
                                         guard !project.shared else { return }
                                         model.pickAvatar(projectId, slug: slug)
                                     }
@@ -131,7 +140,7 @@ struct AgentProfileView: View {
         VStack(spacing: 12) {
             AgentAvatar(project: project, theme: theme, size: 116, dot: machineDotColor(model.machine.state, theme: theme), working: model.isStreaming(project: project.id))
                 .padding(.top, 18)
-                .id(model.avatarSlug(for: project) ?? project.color)
+                .id("\(model.avatarSlug(for: project) ?? project.color)|\(model.avatarColor(for: project)?.name ?? "mono")")
                 .animation(.snappy, value: project.color)
             if editingName {
                 TextField("", text: $name, prompt: Text("Agent name").foregroundStyle(theme.placeholder))

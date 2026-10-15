@@ -49,7 +49,8 @@ struct ChatMember: Identifiable, Equatable {
             project = Project(id: pid, name: p["name"] as? String ?? "Agent", icon: p["icon"] as? String ?? "A",
                               color: p["color"] as? String ?? "#8b7cf6", state: .awake, stateSince: nil, stateDetail: nil,
                               model: "", effort: .low, spendTodayUsd: 0, spendCapUsd: 0,
-                              avatar: (p["avatar"] as? String).flatMap { $0.isEmpty ? nil : $0 })
+                              avatar: (p["avatar"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+                              avatarColor: ((p["avatar_color"] as? String) ?? (d["avatar_color"] as? String)).flatMap { $0.isEmpty ? nil : $0 })
         }
         let settings = d["settings"] as? [String: Any]
         return ChatMember(id: id, kind: isAgent ? .agent : .user, member: member, role: d["role"] as? String ?? "member",

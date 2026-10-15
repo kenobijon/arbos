@@ -712,16 +712,17 @@ final class AppModel: ObservableObject {
     }
 
     /// Agent profile: rename / recolour a project (`PATCH /projects/{id}`).
-    func updateProject(_ projectId: Id, name: String? = nil, color: String? = nil, icon: String? = nil, avatar: String? = nil) {
+    func updateProject(_ projectId: Id, name: String? = nil, color: String? = nil, icon: String? = nil, avatar: String? = nil, avatarColor: String? = nil) {
         if let i = projects.firstIndex(where: { $0.id == projectId }) {
             if let name { projects[i].name = name }
             if let color { projects[i].color = color }
             if let icon { projects[i].icon = icon }
             if let avatar { projects[i].avatar = avatar }
+            if let avatarColor { projects[i].avatarColor = avatarColor == "mono" ? nil : avatarColor }
         }
         guard !isFixture else { return }
         Task {
-            do { try await api.patchProject(projectId, name: name, color: color, icon: icon, avatar: avatar) }
+            do { try await api.patchProject(projectId, name: name, color: color, icon: icon, avatar: avatar, avatarColor: avatarColor) }
             catch { notice = Notice(text: "Could not save: \(error.localizedDescription)") }
         }
     }
@@ -757,6 +758,27 @@ final class AppModel: ObservableObject {
         }
         let map = TreeAvatars.shared.assign(withPicks)
         if map != avatarMap { avatarMap = map }
+    }
+
+    /// Colour picks made on this phone (same fallback as `avatarOverrides`).
+    private var avatarColorOverrides: [Id: String] {
+        get { (UserDefaults.standard.dictionary(forKey: "avatarColorOverrides") as? [String: String]) ?? [:] }
+        set { UserDefaults.standard.set(newValue, forKey: "avatarColorOverrides") }
+    }
+
+    /// The colour set a project's tree is tinted with; nil = mono.
+    func avatarColor(for project: Project) -> TreeColor? {
+        let name = project.avatarColor ?? avatarColorOverrides[project.id]
+        guard let name, name != "mono" else { return nil }
+        return TreeAvatars.shared.color(named: name)
+    }
+
+    func pickAvatarColor(_ projectId: Id, name: String) {
+        var o = avatarColorOverrides
+        if name == "mono" { o[projectId] = nil } else { o[projectId] = name }
+        avatarColorOverrides = o
+        updateProject(projectId, avatarColor: name)
+        objectWillChange.send()
     }
 
     func pickAvatar(_ projectId: Id, slug: String) {
