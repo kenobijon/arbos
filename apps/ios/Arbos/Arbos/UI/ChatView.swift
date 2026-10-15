@@ -204,6 +204,7 @@ struct ChatView: View {
                     case "threads": showThreads = true
                     case "model": showModelPicker = true
                     case "profile": showProfile = true
+                    case "feedback": FeedbackCenter.shared.open(screen: "chat", chatId: chatId, projectId: isPeople ? nil : projectId)
                     case "recording": recorder.start()
                     case "pending":
                         pending = [.init(name: "Q3 board deck v5.pdf", mime: "application/pdf", data: Data()),
@@ -348,6 +349,9 @@ struct ChatView: View {
                     }
                 }
                 Divider()
+                Button { FeedbackCenter.shared.open(screen: "chat", chatId: chatId, projectId: isPeople ? nil : projectId) } label: {
+                    Label("Send feedback", systemImage: "exclamationmark.bubble")
+                }
                 Button { showSettings = true } label: { Label("Settings", systemImage: "gearshape") }
             } label: {
                 GlassCircle {

@@ -205,6 +205,33 @@ final class AppModel: ObservableObject {
         openFromNotification(chatId: p.chatId, projectId: p.projectId)
     }
 
+    // MARK: Feedback
+
+    /// JPEG the screenshot (≤15 MB per the contract) and post it with the note.
+    func sendFeedback(note: String, image: UIImage?, projectId: Id?) async throws -> String? {
+        var data: Data? = nil
+        var mime: String? = nil
+        var w = 0, h = 0
+        if let image {
+            var quality: CGFloat = 0.9
+            var jpeg = image.jpegData(compressionQuality: quality)
+            while let d = jpeg, d.count > 14_000_000, quality > 0.3 {
+                quality -= 0.2
+                jpeg = image.jpegData(compressionQuality: quality)
+            }
+            data = jpeg
+            mime = "image/jpeg"
+            w = Int(image.size.width * image.scale)
+            h = Int(image.size.height * image.scale)
+        }
+        if isFixture {
+            try? await Task.sleep(nanoseconds: 900_000_000)
+            return "01FIXTURE0000000000FEEDBK"
+        }
+        return try await api.sendFeedback(note: note, image: data, mime: mime, width: w, height: h,
+                                          appVersion: FeedbackCenter.appVersion, os: "iOS \(UIDevice.current.systemVersion)", projectId: projectId)
+    }
+
     // MARK: Push registration + badge
 
     private func hookPush() {

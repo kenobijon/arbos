@@ -305,6 +305,24 @@ final class RelayAPI {
         return key
     }
 
+    /// `POST /feedback` (JSON, device token): `{note ≤4000, image: base64 PNG/JPEG ≤15 MB,
+    /// mime, app_version, platform: "ios", os, project_id?, width, height}` → 201 `{id, created_at}`.
+    /// Feeds the same automatic fix loop as the Mac sheet.
+    func sendFeedback(note: String, image: Data?, mime: String?, width: Int, height: Int,
+                      appVersion: String, os: String, projectId: Id?) async throws -> String? {
+        var body: [String: Any] = [
+            "note": String(note.prefix(4000)), "app_version": appVersion, "platform": "ios", "os": os,
+            "width": width, "height": height,
+        ]
+        if let image, let mime {
+            body["image"] = image.base64EncodedString()
+            body["mime"] = mime
+        }
+        if let projectId, !projectId.isEmpty { body["project_id"] = projectId }
+        let v = try await json("POST", "/feedback", body: body)
+        return (v as? [String: Any])?["id"] as? String
+    }
+
     /// `POST /proxy/v1/audio/transcriptions` (multipart `file` + `model`) → the memo's text.
     /// The relay meters it on `projectId` (`X-Arbos-Project`).
     func transcribe(projectId: Id?, data: Data, filename: String, mime: String) async throws -> String {

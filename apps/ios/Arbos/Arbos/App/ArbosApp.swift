@@ -17,6 +17,7 @@ struct ArbosApp: App {
 struct RootView: View {
     @EnvironmentObject private var model: AppModel
     @ObservedObject private var push = PushManager.shared
+    @ObservedObject private var feedback = FeedbackCenter.shared
     @Environment(\.colorScheme) private var systemScheme
     @Environment(\.scenePhase) private var scenePhase
     @State private var showPrimer = false
@@ -41,6 +42,15 @@ struct RootView: View {
         }
         .sheet(isPresented: $showPrimer) {
             NotificationsPrimerView().environment(\.theme, theme)
+        }
+        .sheet(isPresented: $feedback.isPresented) {
+            FeedbackSheet().environmentObject(model).environment(\.theme, theme)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: FeedbackCenter.shake)) { _ in
+            guard model.isPaired else { return }
+            feedback.open(screen: model.path.isEmpty ? "home" : "chat",
+                          chatId: model.path.last.map { if case .chat(let c, _) = $0 { return c } else { return "" } },
+                          projectId: model.path.last.map { if case .chat(_, let p) = $0 { return p } else { return "" } })
         }
         .onChange(of: model.isPaired, initial: true) { _, paired in schedulePrimer(paired) }
         .onChange(of: push.status) { _, _ in schedulePrimer(model.isPaired) }

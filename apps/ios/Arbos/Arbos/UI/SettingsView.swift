@@ -112,6 +112,20 @@ struct SettingsView: View {
                 }
                 .listRowBackground(theme.card)
 
+                Section {
+                    Button {
+                        dismiss()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { FeedbackCenter.shared.open(screen: "settings") }
+                    } label: {
+                        Label("Send feedback", systemImage: "exclamationmark.bubble").foregroundStyle(theme.text)
+                    }
+                } header: {
+                    Text("Help")
+                } footer: {
+                    Text("A screenshot of the screen you were on plus a note. You can also shake the phone.")
+                }
+                .listRowBackground(theme.card)
+
                 Section("Appearance") {
                     Picker("Theme", selection: $model.appearanceSetting) {
                         ForEach(Appearance.allCases) { a in Text(a.label).tag(a.rawValue) }
