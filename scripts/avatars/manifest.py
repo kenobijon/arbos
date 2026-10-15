@@ -75,6 +75,14 @@ def build_manifest(ready_slugs):
             "viewbox": [0, 0, 64, 64],
         },
         "default_size": 56,
+        "usage": {
+            "still": "Use `svg` (or the nearest `png`) wherever the avatar is static: lists, headers, notifications.",
+            "idle": "Loop while the agent has nothing running.",
+            "working": "Loop while a run is active; switch back to idle when it ends (both loops share frame 0, so cut on a loop boundary).",
+            "reply": "Play once when a reply lands, then return to idle. It starts and ends on the idle pose.",
+            "frame_strips": "Frame k of a strip is the square at x = k * size. Advance at `fps`; loop idle/working, play reply once. The widest strip (rail@2x, 90 frames) is 12960 px wide.",
+            "pick": "Default avatar for a project = characters[fnv1a64(project_id) % characters.length].",
+        },
         "png_sizes": PNG_SIZES,
         "states": {
             st: {
