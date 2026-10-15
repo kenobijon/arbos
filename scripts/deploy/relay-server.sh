@@ -97,26 +97,31 @@ if command -v op >/dev/null 2>&1 && [[ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; th
   : "${DAYTONA_API_KEY:=$(opread 'op://Arbos/fywmj6vtq5delybw5c7a53l2qa/notesPlain' | tr -d '[:space:]')}"
   : "${ARBOS_RELAY_ADMIN_TOKEN:=$(opread 'op://Arbos/Arbos relay (relay.arbos.life) — admin token/credential')}"
   : "${ARBOS_RELAY_KEY:=$(opread 'op://Arbos/Arbos relay (relay.arbos.life) — connector key (ARBOS_RELAY_KEY)/credential')}"
+  : "${ARBOS_JWT_KEY:=$(opread 'op://Arbos/Arbos relay (relay.arbos.life) — JWT key (ARBOS_JWT_KEY)/credential')}"
   : "${ARBOS_GITHUB_CLIENT_ID:=$(opread 'op://Arbos/Arbos GitHub OAuth app/ARBOS_GITHUB_CLIENT_ID')}"
   : "${ARBOS_GITHUB_CLIENT_SECRET:=$(opread 'op://Arbos/Arbos GitHub OAuth app/ARBOS_GITHUB_CLIENT_SECRET')}"
 fi
 # keep values already in the env file when nothing new was supplied
 if [[ -f "$ENV_FILE" ]]; then
   keep() { local k=$1; [[ -n "${!k:-}" ]] || printf -v "$k" '%s' "$(sed -n "s/^$k=//p" "$ENV_FILE" | head -1)"; }
-  for k in OPENROUTER_API_KEY OPENAI_API_KEY DAYTONA_API_KEY ARBOS_RELAY_ADMIN_TOKEN ARBOS_RELAY_KEY ARBOS_GITHUB_CLIENT_ID ARBOS_GITHUB_CLIENT_SECRET; do keep "$k"; done
+  for k in OPENROUTER_API_KEY OPENAI_API_KEY DAYTONA_API_KEY ARBOS_RELAY_ADMIN_TOKEN ARBOS_RELAY_KEY ARBOS_JWT_KEY ARBOS_GITHUB_CLIENT_ID ARBOS_GITHUB_CLIENT_SECRET; do keep "$k"; done
 fi
 [[ -n "${DAYTONA_API_KEY:-}" ]] || echo "WARNING: DAYTONA_API_KEY is empty — new projects will get process boxes"
 [[ -n "${OPENROUTER_API_KEY:-}${OPENAI_API_KEY:-}" ]] || echo "WARNING: no model provider key"
 : "${ARBOS_RELAY_ADMIN_TOKEN:=adm_$(openssl rand -hex 32)}"
 : "${ARBOS_RELAY_KEY:=$(openssl rand -hex 32)}"
+: "${ARBOS_JWT_KEY:=$(openssl rand -hex 32)}"
 umask 077
 cat > "$ENV_FILE" <<EOF
 # Arbos relay — written by scripts/deploy/relay-server.sh on $(date -u +%FT%TZ). root only.
 ARBOS_RELAY_LISTEN=$LISTEN
 ARBOS_RELAY_PUBLIC_URL=$PUBLIC_URL
+ARBOS_PUBLIC_URL=$PUBLIC_URL
 ARBOS_RELAY_DATA=$DATA_DIR
 ARBOS_RELAY_ADMIN_TOKEN=$ARBOS_RELAY_ADMIN_TOKEN
 ARBOS_RELAY_KEY=$ARBOS_RELAY_KEY
+ARBOS_JWT_KEY=$ARBOS_JWT_KEY
+ARBOS_AUTH_MODE=${ARBOS_AUTH_MODE:-github}
 OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
 OPENAI_API_KEY=${OPENAI_API_KEY:-}
 DAYTONA_API_KEY=${DAYTONA_API_KEY:-}
