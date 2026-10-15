@@ -73,6 +73,8 @@ enum RoomCmd {
     Wake(&'static str),
     /// Presence frame with `typing` (people chats, D53).
     Typing(bool),
+    /// Presence frame now (the focused chat changed, API §7c).
+    Presence,
 }
 
 struct Room {
@@ -105,6 +107,9 @@ struct Shared {
     avatars_done: Mutex<HashSet<String>>,
     /// `/me` user when the stored credentials carry none (env token, legacy adv_).
     me: Mutex<Option<credentials::AccountUser>>,
+    /// The chat on screen in a focused window; presence frames carry it as
+    /// `focused_chat` so the relay does not push this device for it (§7c).
+    focused_chat: Mutex<Option<Id>>,
 }
 
 fn project_doc_key(project_id: &str) -> String {
@@ -112,6 +117,16 @@ fn project_doc_key(project_id: &str) -> String {
 }
 
 impl Shared {
+    /// `{device, at, focused_chat?}` — every presence frame (15 s tick, typing,
+    /// focus change) says which chat this device is looking at, if any.
+    fn presence_header(&self) -> Value {
+        let mut header = json!({ "device": self.device_id(), "at": now_ms() });
+        if let Some(chat) = self.focused_chat.lock().unwrap().as_deref() {
+            header["focused_chat"] = json!(chat);
+        }
+        header
+    }
+
     fn token(&self) -> String {
         self.creds
             .read()
@@ -408,6 +423,7 @@ impl SyncSource for RelaySource {
                 creds: RwLock::new(credentials::load(&self.http_url)),
                 docs: Mutex::new(HashMap::new()),
                 rooms: Mutex::new(HashMap::new()),
+                focused_chat: Mutex::new(None),
                 projects: Mutex::new(Vec::new()),
                 chats: Mutex::new(Vec::new()),
                 unacked: Mutex::new(HashSet::new()),
@@ -1750,9 +1766,16 @@ async fn run_session(
                         ))).await?;
                     }
                     RoomCmd::Typing(active) => {
+                        let mut header = shared.presence_header();
+                        header["typing"] = json!(active);
+                        header["handle"] = json!(shared.me_handle());
+                        header["user"] = json!(shared.me_id());
+                        tx.send(binary(Frame::new(FrameType::Presence, header, Vec::new()))).await?;
+                    }
+                    RoomCmd::Presence => {
                         tx.send(binary(Frame::new(
                             FrameType::Presence,
-                            json!({ "device": shared.device_id(), "at": now_ms(), "typing": active, "handle": shared.me_handle(), "user": shared.me_id() }),
+                            shared.presence_header(),
                             Vec::new(),
                         ))).await?;
                     }
@@ -1761,7 +1784,7 @@ async fn run_session(
             _ = presence.tick() => {
                 tx.send(binary(Frame::new(
                     FrameType::Presence,
-                    json!({ "device": shared.device_id(), "at": now_ms() }),
+                    shared.presence_header(),
                     Vec::new(),
                 ))).await?;
             }
@@ -2466,6 +2489,20 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 let _ = shared.post_json("/auth/logout", json!({})).await;
                 shared.sign_out_locally();
             });
+        }
+        ClientCommand::FocusChat { chat_id } => {
+            let changed = {
+                let mut focused = shared.focused_chat.lock().unwrap();
+                let changed = *focused != chat_id;
+                *focused = chat_id;
+                changed
+            };
+            if changed {
+                // Tell every room at once rather than on the next 15 s tick.
+                for room in shared.rooms.lock().unwrap().values() {
+                    let _ = room.cmds.send(RoomCmd::Presence);
+                }
+            }
         }
         ClientCommand::OpenChat { chat_id } | ClientCommand::MarkRead { chat_id } => {
             {

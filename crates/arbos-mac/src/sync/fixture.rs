@@ -530,6 +530,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         ClientCommand::MachineStop => {
             set_machine(shared, MachineState::Stopped, Some("Stopped by you"), None);
         }
+        ClientCommand::FocusChat { .. } => {}
         ClientCommand::SetAvatar { project_id, slug } => {
             {
                 let mut projects = shared.projects.lock().unwrap();
