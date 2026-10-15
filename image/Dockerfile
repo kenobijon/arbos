@@ -103,7 +103,7 @@ RUN userdel -r node \
  && useradd -m -u 1000 -s /bin/bash daytona \
  && echo "daytona ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/91-daytona \
  && groupadd arbos \
- && mkdir -p /work /run/arbos /opt/arbos/shared && chown -R daytona:daytona /work /opt/arbos \
+ && mkdir -p /work /run/arbos /opt/arbos/shared /home/daytona/.arbos && chown -R daytona:daytona /work /opt/arbos /home/daytona/.arbos \
  && chown root:arbos /opt/arbos/shared && chmod 755 /opt/arbos/shared \
  && chmod 1777 /run/arbos
 

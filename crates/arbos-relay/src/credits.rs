@@ -92,11 +92,44 @@ pub fn kill_switch(state: &AppState) -> KillSwitch {
     ks
 }
 
+/// A user known only from a device token (paired before GitHub sign-in, e.g. `u_default`,
+/// `u_mac`) has no `users` row and so no credits; give them the default account on first
+/// contact instead of blocking their box. Idempotent.
+pub fn ensure_account(state: &AppState, user_id: &str) {
+    if user_id.is_empty() {
+        return;
+    }
+    let known = matches!(state.db.user(user_id), Ok(Some(_)));
+    if known {
+        return;
+    }
+    if let Err(e) =
+        state
+            .db
+            .set_user_limits(user_id, Some(Some(state.cfg.default_daily_cap_usd)), None)
+    {
+        tracing::warn!(error = %e, user = %user_id, "legacy account row");
+        return;
+    }
+    match state.db.grant_credits(
+        user_id,
+        state.cfg.default_grant_usd,
+        "legacy account grant (device-token user)",
+        "relay",
+    ) {
+        Ok(()) => {
+            tracing::info!(user = %user_id, usd = state.cfg.default_grant_usd, "legacy user got the default grant")
+        }
+        Err(e) => tracing::warn!(error = %e, user = %user_id, "legacy grant"),
+    }
+}
+
 /// May this user spend right now? `Ok` or the reason.
 pub fn check(state: &AppState, user_id: &str) -> Result<(), DebitRefused> {
     if !metered(state) {
         return Ok(());
     }
+    ensure_account(state, user_id);
     let ks = kill_switch(state);
     if ks.on {
         return Err(DebitRefused::ReadOnly {
@@ -158,6 +191,7 @@ pub fn charge(state: &AppState, user_id: &str, usd: f64, kind: &str, reference: 
     if !metered(state) || !usd.is_finite() || usd < MIN_DEBIT_USD {
         return;
     }
+    ensure_account(state, user_id);
     let day = start_of_utc_day_ms();
     match state.db.debit(user_id, usd, kind, reference, day) {
         Ok(Ok(_)) => {}
@@ -485,5 +519,30 @@ mod tests {
         // Self-hosters (pair-code mode) are never gated.
         let open = test_state(AuthMode::Paircode);
         assert!(check(&open, "u_default").is_ok());
+    }
+
+    #[test]
+    fn legacy_device_token_user_gets_the_default_account() {
+        let state = test_state(AuthMode::Github);
+        state.db.set_kill_switch(&KillSwitch::default()).unwrap();
+        assert!(state.db.user("u_mac").unwrap().is_none());
+        assert!(
+            check(&state, "u_mac").is_ok(),
+            "not blocked for having no row"
+        );
+        let c = state.db.credits("u_mac", 0).unwrap();
+        assert_eq!(c.balance_usd, state.cfg.default_grant_usd);
+        assert_eq!(c.daily_cap_usd, Some(state.cfg.default_daily_cap_usd));
+        charge(&state, "u_mac", 1.0, "machine", None);
+        assert_eq!(
+            state.db.credits("u_mac", 0).unwrap().balance_usd,
+            state.cfg.default_grant_usd - 1.0
+        );
+        // Idempotent: a second contact grants nothing more.
+        ensure_account(&state, "u_mac");
+        assert_eq!(
+            state.db.credits("u_mac", 0).unwrap().granted_usd,
+            state.cfg.default_grant_usd
+        );
     }
 }

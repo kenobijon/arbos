@@ -203,6 +203,9 @@ impl AppState {
             w.insert(user_id.to_owned(), (st, now));
             prev != Some(st)
         };
+        if st == BoxState::Awake {
+            self.wake_started.lock().await.remove(user_id);
+        }
         let arbos = match st {
             BoxState::Awake => "awake",
             BoxState::Waking => "waking",

@@ -87,11 +87,19 @@ fn mask(s: &str) -> String {
 /// every wake; agentd prefers a reachable file URL over the env, and keeps re-reading the file
 /// until one of the candidates answers `/healthz`. Returns the URL that answered.
 async fn resolve_relay_url() -> String {
-    let state_dir = format!(
-        "{}/.arbos",
-        std::env::var("ARBOS_WORK_DIR").unwrap_or_else(|_| "/work".into())
+    // The relay uploads the file as the sandbox user, which cannot write under the root-owned
+    // `/work` any more (D70 isolation): the file lives in that user's home. The old location is
+    // still read for boxes created before the move.
+    let file = std::path::PathBuf::from(
+        std::env::var("ARBOS_RELAY_URL_FILE")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "/home/daytona/.arbos/relay-url".to_owned()),
     );
-    let file = std::path::Path::new(&state_dir).join("relay-url");
+    let legacy_file = std::path::PathBuf::from(format!(
+        "{}/.arbos/relay-url",
+        std::env::var("ARBOS_WORK_DIR").unwrap_or_else(|_| "/work".into())
+    ));
     let env_url = std::env::var("ARBOS_RELAY_URL")
         .ok()
         .map(|u| u.trim().trim_end_matches('/').to_owned())
@@ -103,12 +111,19 @@ async fn resolve_relay_url() -> String {
     let mut attempt = 0u32;
     loop {
         attempt += 1;
-        let file_url = std::fs::read_to_string(&file)
-            .ok()
-            .map(|u| u.trim().trim_end_matches('/').to_owned())
-            .filter(|u| !u.is_empty());
+        let read = |p: &std::path::Path| {
+            std::fs::read_to_string(p)
+                .ok()
+                .map(|u| u.trim().trim_end_matches('/').to_owned())
+                .filter(|u| !u.is_empty())
+        };
+        let file_url = read(&file);
+        let legacy_url = read(&legacy_file);
         let mut candidates: Vec<String> = Vec::new();
-        for u in [file_url.clone(), env_url.clone()].into_iter().flatten() {
+        for u in [file_url.clone(), legacy_url, env_url.clone()]
+            .into_iter()
+            .flatten()
+        {
             if !candidates.contains(&u) {
                 candidates.push(u);
             }
@@ -122,8 +137,21 @@ async fn resolve_relay_url() -> String {
                 .unwrap_or(false);
             if ok {
                 if file_url.as_deref() != Some(u.as_str()) {
-                    let _ = std::fs::create_dir_all(&state_dir);
-                    let _ = std::fs::write(&file, format!("{u}\n"));
+                    // agentd runs as root; the relay's next push arrives as the sandbox user, so
+                    // the directory and the file must stay writable for it.
+                    use std::os::unix::fs::PermissionsExt;
+                    if let Some(dir) = file.parent() {
+                        if std::fs::create_dir_all(dir).is_ok() {
+                            let _ = std::fs::set_permissions(
+                                dir,
+                                std::fs::Permissions::from_mode(0o1777),
+                            );
+                        }
+                    }
+                    if std::fs::write(&file, format!("{u}\n")).is_ok() {
+                        let _ =
+                            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o666));
+                    }
                 }
                 if env_url.as_deref() != Some(u.as_str()) {
                     tracing::warn!(url = %u, env = ?env_url, "relay url from the wake file (env is stale)");

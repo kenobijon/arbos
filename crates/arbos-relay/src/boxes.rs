@@ -585,8 +585,11 @@ pub fn load_local_tokens(state: &AppState, user_id: &str) -> Result<Option<(Stri
 /// A client needs the box: queue a wake obligation unless it is already awake or waking.
 /// The sandbox env bakes `ARBOS_RELAY_URL` at create time; the relay's public URL can change
 /// (quick tunnels do on every restart). After every start the current URL goes into the box as
-/// `/work/.arbos/relay-url`, which agentd prefers over its env at boot.
-pub const RELAY_URL_FILE: &str = "/work/.arbos/relay-url";
+/// `/home/daytona/.arbos/relay-url`, which agentd prefers over its env at boot. The toolbox
+/// uploads as the `daytona` user, so the file must live where that user can write: `/work` is
+/// root-owned 711 since the D70 isolation (the old `/work/.arbos/relay-url` failed with
+/// "permission denied" on every wake).
+pub const RELAY_URL_FILE: &str = "/home/daytona/.arbos/relay-url";
 
 async fn push_relay_url(state: &AppState, dt: &crate::daytona::Daytona, sandbox_id: &str) {
     let url = state.cfg.public_url.trim_end_matches('/').to_owned();
@@ -609,6 +612,8 @@ async fn push_relay_url(state: &AppState, dt: &crate::daytona::Daytona, sandbox_
 
 /// A started box must say hello within this long, or it is treated as unable to reach the relay.
 pub const HELLO_DEADLINE_MS: i64 = 60_000;
+/// A wake timer older than this is stale and is not recorded as `wake_to_box_connected_ms`.
+const STALE_WAKE_TIMER_MS: i64 = 5 * 60_000;
 /// Reasons that count as the user asking again (they reset a `box cannot reach relay` error).
 fn explicit_wake(reason: &str) -> bool {
     matches!(reason, "wake" | "start" | "open" | "api")
@@ -637,6 +642,9 @@ pub async fn ensure_user_box(
 pub async fn ensure_awake(state: &AppState, user_id: &str, reason: &str) {
     let (st, since) = state.box_state(user_id).await;
     if st == BoxState::Awake {
+        // Nothing to wake; a timer left from an earlier attempt would only mislabel the next
+        // reconnect as a slow wake.
+        state.wake_started.lock().await.remove(user_id);
         return;
     }
     // Credits gate: a user who may not spend gets no machine time. The apps see the reason in
@@ -730,9 +738,16 @@ pub async fn box_connected(state: &AppState, user_id: &str) {
     state.stale_bounces.lock().await.remove(user_id);
     let _ = state.db.finish_wake_job(user_id);
     if let Some(t0) = state.wake_started.lock().await.remove(user_id) {
-        let _ = state
-            .db
-            .record_timing(user_id, "wake_to_box_connected_ms", now_ms() - t0, None);
+        // A timer older than the hello deadline belongs to an abandoned wake (the box was
+        // already awake, or a wake job gave up); it is not a measurement.
+        let elapsed = now_ms() - t0;
+        if elapsed <= STALE_WAKE_TIMER_MS {
+            let _ = state
+                .db
+                .record_timing(user_id, "wake_to_box_connected_ms", elapsed, None);
+        } else {
+            tracing::debug!(%user_id, elapsed, "stale wake timer dropped");
+        }
     }
     state.set_box_state(user_id, BoxState::Awake, None).await;
 }
