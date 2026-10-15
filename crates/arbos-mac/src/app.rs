@@ -12,9 +12,9 @@ use gpui_tokio::Tokio;
 use tokio::sync::mpsc;
 
 use crate::model::{
-    new_id, now_ms, AttachmentKind, BoxState, ChannelsView, Chat, ConnectorsView, Effort, Id, Link,
-    LocalView, Message, MessageStatus, Part, Project, ProjectDocView, QuestionState, Role, Routine,
-    RoutineRun, RoutineTrigger, Skill, StatusKind,
+    new_id, now_ms, AttachmentKind, BoxState, ChannelsView, Chat, ChatKind, ConnectorsView, Effort,
+    Id, Link, LocalView, Message, MessageStatus, Part, Project, ProjectDocView, QuestionState,
+    Role, Routine, RoutineRun, RoutineTrigger, Skill, StatusKind,
 };
 use crate::sync::{ClientCommand, SyncEvent, SyncSource};
 use crate::ui::notify::{Gate, Notifier, NotifyEvent, NotifyKind};
@@ -827,6 +827,8 @@ impl AppState {
                 title: "New chat".into(),
                 is_pinned: false,
                 is_system: false,
+                kind: ChatKind::Chat,
+                participants: Vec::new(),
                 unread: false,
                 last_message_at: now_ms(),
             });
@@ -836,6 +838,65 @@ impl AppState {
         self.command(ClientCommand::NewChat {
             project_id,
             chat_id: chat_id.clone(),
+        });
+        self.command(ClientCommand::OpenChat { chat_id });
+        cx.notify();
+    }
+
+    /// F6: a group chat hosted by the selected project with `participant` (and, when the active
+    /// tab is already a group, the participant is added there instead).
+    pub fn add_project_to_chat(&mut self, participant: Id, cx: &mut Context<Self>) {
+        let Some(project_id) = self.selected_project.clone() else {
+            return;
+        };
+        if let Some(group) = self.active_chat().filter(|c| c.is_group()).cloned() {
+            if group.participants.contains(&participant) {
+                return;
+            }
+            if let Some(slot) = self
+                .chats
+                .get_mut(&project_id)
+                .and_then(|tabs| tabs.iter_mut().find(|c| c.id == group.id))
+            {
+                slot.participants.push(participant.clone());
+            }
+            self.command(ClientCommand::GroupAddParticipant {
+                project_id,
+                chat_id: group.id,
+                participant,
+            });
+            cx.notify();
+            return;
+        }
+        let name = self
+            .projects
+            .iter()
+            .find(|p| p.id == participant)
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| "project".into());
+        let chat_id = new_id();
+        self.chats
+            .entry(project_id.clone())
+            .or_default()
+            .push(Chat {
+                id: chat_id.clone(),
+                project_id: project_id.clone(),
+                title: format!("Group · {name}"),
+                is_pinned: false,
+                is_system: false,
+                kind: ChatKind::Group,
+                participants: vec![project_id.clone(), participant.clone()],
+                unread: false,
+                last_message_at: now_ms(),
+            });
+        self.messages.insert(chat_id.clone(), Vec::new());
+        self.chat_ui.insert(chat_id.clone(), ChatUi::default());
+        self.active_tab.insert(project_id.clone(), chat_id.clone());
+        self.command(ClientCommand::GroupCreate {
+            project_id,
+            chat_id: chat_id.clone(),
+            participants: vec![participant],
+            title: None,
         });
         self.command(ClientCommand::OpenChat { chat_id });
         cx.notify();
@@ -959,6 +1020,8 @@ impl AppState {
                 subagent_name: None,
                 in_reply_to: None,
                 routine_name: None,
+                sender_name: None,
+                sender_icon: None,
                 usage: None,
                 return_contract: None,
                 waiting_user: false,
@@ -1118,6 +1181,8 @@ impl AppState {
                 model: None,
                 effort: None,
                 routine_name: None,
+                sender_name: None,
+                sender_icon: None,
                 created_at: now_ms(),
                 completed_at: None,
                 pending: true,

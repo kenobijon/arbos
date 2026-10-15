@@ -184,6 +184,19 @@ pub enum ClientCommand {
         project_id: Id,
         chat_id: Id,
     },
+    /// F6: a group chat hosted by `project_id` with the other `participants`; `chat_id` is the
+    /// client's placeholder until `ChatCreated` brings the relay's.
+    GroupCreate {
+        project_id: Id,
+        chat_id: Id,
+        participants: Vec<Id>,
+        title: Option<String>,
+    },
+    GroupAddParticipant {
+        project_id: Id,
+        chat_id: Id,
+        participant: Id,
+    },
     CloseChat {
         chat_id: Id,
     },

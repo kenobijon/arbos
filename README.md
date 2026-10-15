@@ -213,6 +213,18 @@ arbosctl blob get <project> <ref> --out deck.pptx  # fetch a delivered file by i
 
 `ARBOS_MEDIA_VENV` points agentd at the python with the document libraries (the image sets `/opt/prime-venv`; without it the system `python3` is used). The Prime skill `arbos_deliver_file` wraps both tools for subagents.
 
+## Group chats
+
+A group is a chat with `kind: group` and a list of `participants` (project ids, host first), hosted by one project's box. Every user message there goes out from the host box through `POST /projects/{host}/groups/{chat}/send` and reaches the other participants as a `group_message` push; their boxes run it as a turn in their own "Projects ⇄" tab (`kind: projects`) and post the prose reply back (`…/reply`), which the host appends as a `role: project` message with `sender: project:<id>`, `senderName`, `senderIcon`. Agents address each other only with the main-session MCP tool `group_send(text, to?)` (subagents are refused — the MCP server tells sessions apart by role-bound bearer tokens). The relay enforces D37: a trace id per thread, depth ≤ 2, no cycles, 20 group messages per project per hour (`429`). Endpoints: `POST /projects/{id}/groups {title?, participants}`, `GET|PATCH /projects/{id}/groups/{chat}` (`{add, remove, title}`).
+
+```bash
+arbosctl group create --host Alpha --with Beta,Gamma --title "Launch sync"   # prints the chat id
+arbosctl group send Alpha <chat> "Beta, what do you need from Alpha?" --stream --wait 120
+arbosctl group show|add|remove Alpha <chat> [projects]
+```
+
+In the desktop client a group tab shows the participants' glyphs stacked in its title, each Project's message carries a sender chip, and "+ project" in the tab header adds a Project to the open group or starts a new group with it.
+
 ## Image
 
 `.github/workflows/image.yml` builds `image/Dockerfile` on an image tag (`image-v0.1.7`) or by hand, pushes it to GHCR, smoke-tests it, and registers the Daytona snapshot `arbos-agent-<version>` with `image/register-snapshot.sh` (secrets `DAYTONA_API_KEY`, `GHCR_READ_TOKEN`).

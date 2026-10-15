@@ -213,13 +213,58 @@ impl ChatDoc {
         sender: &str,
         extra: &[(&str, Value)],
     ) -> String {
+        self.append_done_message("user", msg_id, text, device_id, sender, extra);
+        let cmd_id = self.append_command(
+            "send",
+            serde_json::json!({ "messageId": msg_id }),
+            device_id,
+        );
+        self.doc.commit();
+        cmd_id
+    }
+
+    /// Box write (F6 groups, S15): a finished message from another Project (`role: "project"`,
+    /// `sender: "project:<id>"`, `senderName`, `senderIcon`, `traceId`). When `with_send` is set a
+    /// `send` command follows, so the message also drives a turn (a participant addressed by name).
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_project_message(
+        &self,
+        msg_id: &str,
+        text: &str,
+        device_id: &str,
+        sender: &str,
+        extra: &[(&str, Value)],
+        with_send: bool,
+    ) -> Option<String> {
+        self.append_done_message("project", msg_id, text, device_id, sender, extra);
+        let cmd = with_send.then(|| {
+            self.append_command(
+                "send",
+                serde_json::json!({ "messageId": msg_id }),
+                device_id,
+            )
+        });
+        self.doc.commit();
+        cmd
+    }
+
+    fn append_done_message(
+        &self,
+        role: &str,
+        msg_id: &str,
+        text: &str,
+        device_id: &str,
+        sender: &str,
+        extra: &[(&str, Value)],
+    ) {
         let msgs = self.messages_list();
         let m = msgs.push_container(LoroMap::new()).expect("push message");
         let now = now_ms();
         m.insert("id", msg_id).ok();
-        m.insert("role", "user").ok();
+        m.insert("role", role).ok();
         m.insert("sender", sender).ok();
         m.insert("createdAt", now).ok();
+        m.insert("completedAt", now).ok();
         m.insert("deviceId", device_id).ok();
         m.insert("status", MessageStatus::Done.as_str()).ok();
         for (k, v) in extra {
@@ -233,13 +278,6 @@ impl ChatDoc {
             .insert_container("text", LoroText::new())
             .expect("text");
         t.insert(0, text).ok();
-        let cmd_id = self.append_command(
-            "send",
-            serde_json::json!({ "messageId": msg_id }),
-            device_id,
-        );
-        self.doc.commit();
-        cmd_id
     }
 
     /// Box write: a one-line `system` message with a `note` status part (the transcript renders

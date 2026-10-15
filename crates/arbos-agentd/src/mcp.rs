@@ -2,7 +2,10 @@
 //! Tools: history_search, history_read, read_thread, memory_search, memory_read,
 //! peek, sub_llm, remember, recall, projects_list, projects_send, ask_user,
 //! spawn_subagent, wake_subagent, connectors_list, connector_call, local_devices,
-//! local_run, local_read, local_list, deliver_file, generate_image.
+//! local_run, local_read, local_list, deliver_file, generate_image, group_send.
+//!
+//! Sessions authenticate with a role-bound bearer token (main vs subagent, `Config::
+//! mcp_token_for_role`); tools that speak to other Projects are refused to subagents (D69).
 
 use std::sync::Arc;
 
@@ -47,6 +50,8 @@ fn tools() -> Value {
         { "name": "projects_list", "description": "List the user's other Projects (name, state).", "inputSchema": { "type": "object", "properties": {} } },
         { "name": "projects_send", "description": "Send a message to another Project by name. Async: the reply lands in this Project's 'Projects ⇄' tab.",
           "inputSchema": { "type": "object", "properties": { "to": { "type": "string" }, "text": { "type": "string" }, "wait": { "type": "boolean" } }, "required": ["to","text"] } },
+        { "name": "group_send", "description": "Say something to the other Projects in the current group chat (or to one of them with `to`). Only in a group chat; replies land in the same chat.",
+          "inputSchema": { "type": "object", "properties": { "text": { "type": "string" }, "to": { "type": "string", "description": "Project name or id; default: every other participant" } }, "required": ["text"] } },
         { "name": "ask_user", "description": "Ask the user one question and wait; the answer arrives as the next message. Pass `widget` for a typed answer (choice, multi_select, text, date, form).",
           "inputSchema": { "type": "object", "properties": { "question": { "type": "string" }, "widget": widget_schema() }, "required": ["question"] } },
         { "name": "spawn_subagent", "description": "Hand a task to a new subagent (Prime by default). Use mid-act when the task is bigger than 8 tool calls.",
@@ -70,6 +75,27 @@ fn tools() -> Value {
 
 fn widget_schema() -> Value {
     serde_json::from_str(WIDGET_SCHEMA_JSON).unwrap_or_else(|_| json!({ "type": "object" }))
+}
+
+/// Who is calling the MCP server, derived from the bearer token it presented.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionRole {
+    Main,
+    Subagent,
+}
+
+/// Tools only the main agent may use: anything that talks to another Project (D69 — subagents
+/// never reach the cross-project surface).
+const MAIN_ONLY_TOOLS: &[&str] = &["group_send", "projects_send"];
+
+/// `Some(reason)` when `role` may not call `tool`.
+pub fn refusal_for(role: SessionRole, tool: &str) -> Option<String> {
+    match role {
+        SessionRole::Main => None,
+        SessionRole::Subagent => MAIN_ONLY_TOOLS
+            .contains(&tool)
+            .then(|| format!("{tool} is available to the main agent only; report back and let it speak for the Project")),
+    }
 }
 
 pub(crate) fn text_result(text: impl Into<String>) -> Value {
@@ -419,6 +445,13 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
                 Err(e) => err_result(e),
             }
         }
+        "group_send" => {
+            let text = s("text").unwrap_or_default();
+            match a.group_send_from_turn(&text, s("to").as_deref()).await {
+                Ok(t) => text_result(t),
+                Err(e) => err_result(e),
+            }
+        }
         "ask_user" => {
             let q = s("question").unwrap_or_default();
             match a
@@ -643,10 +676,14 @@ async fn mcp(State(a): State<S>, headers: HeaderMap, Json(req): Json<Value>) -> 
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or("");
-    if tok != a.cfg.mcp_token {
+    let role = if tok == a.cfg.mcp_token {
+        SessionRole::Main
+    } else if tok == a.cfg.subagent_mcp_token() {
+        SessionRole::Subagent
+    } else {
         tracing::warn!(got = %tok.chars().take(8).collect::<String>(), "mcp: bad token");
         return (StatusCode::UNAUTHORIZED, "bad token").into_response();
-    }
+    };
     let id = req.get("id").cloned().unwrap_or(Value::Null);
     let method = req.get("method").and_then(Value::as_str).unwrap_or("");
     let params = req.get("params").cloned().unwrap_or(json!({}));
@@ -658,7 +695,13 @@ async fn mcp(State(a): State<S>, headers: HeaderMap, Json(req): Json<Value>) -> 
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
-            call_tool(&a, name, &args).await
+            match refusal_for(role, name) {
+                Some(reason) => {
+                    tracing::info!(tool = name, ?role, "mcp: refused for role");
+                    err_result(reason)
+                }
+                None => call_tool(&a, name, &args).await,
+            }
         }
         _ => return Json(json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": format!("unknown method {method}") } })).into_response(),
     };
@@ -667,4 +710,19 @@ async fn mcp(State(a): State<S>, headers: HeaderMap, Json(req): Json<Value>) -> 
 
 pub fn router(agent: Arc<Agent>) -> Router {
     Router::new().route("/mcp", post(mcp)).with_state(agent)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// D69: a subagent-role session may not speak for the Project to other Projects.
+    #[test]
+    fn subagent_cannot_reach_other_projects() {
+        assert!(refusal_for(SessionRole::Subagent, "group_send").is_some());
+        assert!(refusal_for(SessionRole::Subagent, "projects_send").is_some());
+        assert!(refusal_for(SessionRole::Subagent, "history_search").is_none());
+        assert!(refusal_for(SessionRole::Main, "group_send").is_none());
+        assert!(refusal_for(SessionRole::Main, "projects_send").is_none());
+    }
 }

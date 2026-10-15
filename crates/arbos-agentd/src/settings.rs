@@ -364,6 +364,7 @@ impl Agent {
 
     /// `chats` index in the project doc (box is the only writer); rewritten only when it changed.
     pub async fn write_chats_index(self: &Arc<Self>, chats: &[Value]) {
+        self.note_chats_index(chats);
         let v = Value::Array(chats.to_vec());
         if self.settings.state.read().await.last_chats_write.as_ref() == Some(&v) {
             return;
@@ -379,7 +380,7 @@ impl Agent {
                 list.delete(0, n).ok();
             }
             for c in chats {
-                let entry = json!({ "id": c.get("id"), "title": c.get("title"), "isPinned": c.get("is_pinned"), "isSystem": c.get("is_system").and_then(Value::as_bool).unwrap_or(false), "lastMessageAt": c.get("last_message_at"), "position": c.get("position") });
+                let entry = json!({ "id": c.get("id"), "title": c.get("title"), "isPinned": c.get("is_pinned"), "isSystem": c.get("is_system").and_then(Value::as_bool).unwrap_or(false), "lastMessageAt": c.get("last_message_at"), "position": c.get("position"), "kind": c.get("kind").and_then(Value::as_str).unwrap_or("chat"), "participants": c.get("participants").cloned().unwrap_or_else(|| json!([])) });
                 let lv: loro::LoroValue =
                     serde_json::from_value(entry).unwrap_or(loro::LoroValue::Null);
                 list.push(lv).ok();

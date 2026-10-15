@@ -3,6 +3,7 @@ mod approval;
 mod channels;
 mod config;
 mod connectors;
+mod groups;
 mod harness;
 mod hooks;
 mod http;

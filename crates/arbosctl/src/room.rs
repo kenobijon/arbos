@@ -108,11 +108,13 @@ impl Session {
         Ok(())
     }
 
-    /// Print new text of assistant messages and status/tool parts since the last print.
+    /// Print new text of assistant messages (and other Projects' messages in a group chat) and
+    /// status/tool parts since the last print.
     fn print_new(&mut self) -> bool {
         let mut any_done_new = false;
         for m in self.doc.messages() {
-            if m.role != "assistant" {
+            let is_project = m.role == "project";
+            if m.role != "assistant" && !is_project {
                 continue;
             }
             let full = m.text();
@@ -121,12 +123,24 @@ impl Session {
             if total_chars > shown {
                 let new: String = full.chars().skip(shown).collect();
                 if shown == 0 {
-                    print!("\n[assistant {}] ", &m.id[m.id.len() - 6..]);
+                    let who = if is_project {
+                        m.rest
+                            .get("senderName")
+                            .and_then(|v| v.as_str())
+                            .map(|n| format!("project {n}"))
+                            .unwrap_or_else(|| "project".to_owned())
+                    } else {
+                        "assistant".to_owned()
+                    };
+                    print!("\n[{who} {}] ", &m.id[m.id.len() - 6..]);
                 }
                 print!("{new}");
                 use std::io::Write;
                 std::io::stdout().flush().ok();
                 self.printed.insert(m.id.clone(), total_chars);
+            }
+            if is_project {
+                continue;
             }
             // Status events (`deciding`, `queued`, `working`, `step`, `done`, `failed`, …) are the only
             // progress the transcript shows; `hidden` parts (tools, raw subagent output) are skipped.

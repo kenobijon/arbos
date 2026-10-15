@@ -154,6 +154,23 @@ impl Shared {
         }
         Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
     }
+
+    async fn patch_json(&self, path: &str, body: Value) -> Result<Value> {
+        let resp = self
+            .http
+            .patch(format!("{}{}", self.http_url, path))
+            .bearer_auth(self.token())
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("PATCH {path}"))?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(anyhow!("PATCH {path}: HTTP {status} {text}"));
+        }
+        Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
+    }
 }
 
 impl SyncSource for RelaySource {
@@ -325,7 +342,21 @@ fn parse_chat(v: &Value) -> Option<Chat> {
             .unwrap_or("New chat")
             .to_string(),
         is_pinned: v.get("is_pinned").and_then(Value::as_bool).unwrap_or(false),
-        is_system: false,
+        is_system: v.get("is_system").and_then(Value::as_bool).unwrap_or(false),
+        kind: v
+            .get("kind")
+            .cloned()
+            .and_then(|k| serde_json::from_value(k).ok())
+            .unwrap_or_default(),
+        participants: v
+            .get("participants")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default(),
         unread: false,
         last_message_at: v.get("created_at").and_then(Value::as_i64).unwrap_or(0) as u64,
     })
@@ -1126,6 +1157,8 @@ async fn send_message(
             subagent_name: None,
             in_reply_to: None,
             routine_name: None,
+            sender_name: None,
+            sender_icon: None,
             usage: None,
             return_contract: None,
             waiting_user: false,
@@ -1543,6 +1576,69 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         });
                     }
                     Err(err) => shared.notice(format!("New chat failed: {err:#}")),
+                }
+            });
+        }
+        ClientCommand::GroupCreate {
+            project_id,
+            chat_id: local_id,
+            participants,
+            title,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                match shared
+                    .post_json(
+                        &format!("/projects/{project_id}/groups"),
+                        json!({ "title": title, "participants": participants }),
+                    )
+                    .await
+                {
+                    Ok(v) => {
+                        let Some(chat) = parse_chat(&v) else {
+                            shared.notice("Relay returned no group");
+                            return;
+                        };
+                        shared.chats.lock().unwrap().push(chat.clone());
+                        ensure_room(&shared, &project_id, &chat.id, &chat.id);
+                        let _ = shared.events.send(SyncEvent::ChatCreated {
+                            project_id: project_id.clone(),
+                            local_id,
+                            chat,
+                        });
+                    }
+                    Err(err) => shared.notice(format!("New group failed: {err:#}")),
+                }
+            });
+        }
+        ClientCommand::GroupAddParticipant {
+            project_id,
+            chat_id,
+            participant,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                match shared
+                    .patch_json(
+                        &format!("/projects/{project_id}/groups/{chat_id}"),
+                        json!({ "add": [participant] }),
+                    )
+                    .await
+                {
+                    Ok(v) => {
+                        if let Some(chat) = parse_chat(&v) {
+                            let mut chats = shared.chats.lock().unwrap();
+                            match chats.iter_mut().find(|c| c.id == chat.id) {
+                                Some(slot) => {
+                                    slot.participants = chat.participants;
+                                    slot.title = chat.title;
+                                }
+                                None => chats.push(chat),
+                            }
+                        }
+                        emit_chats(&shared);
+                    }
+                    Err(err) => shared.notice(format!("Add to group failed: {err:#}")),
                 }
             });
         }

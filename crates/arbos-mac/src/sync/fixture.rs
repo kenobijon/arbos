@@ -22,10 +22,10 @@ use super::{ClientCommand, SyncEvent, SyncSource};
 use crate::model::{
     new_id, now_ms, ApprovalRisk, ApprovalState, Attachment, AttachmentKind, BoxState,
     ChannelBinding, ChannelPairing, ChannelPlatform, ChannelPlatformState, ChannelsView, Chat,
-    ChoiceOption, Connector, ConnectorAction, ConnectorProvider, ConnectorStatus, ConnectorsView,
-    Effort, FieldKind, FormField, Id, Link, LocalDevice, LocalView, Message, MessageStatus, Part,
-    Project, QuestionState, Role, Routine, RoutineRun, RoutineRunStatus, RoutineTrigger, Skill,
-    StatusKind, ToolCall, ToolStatus, TurnKind, Widget,
+    ChatKind, ChoiceOption, Connector, ConnectorAction, ConnectorProvider, ConnectorStatus,
+    ConnectorsView, Effort, FieldKind, FormField, Id, Link, LocalDevice, LocalView, Message,
+    MessageStatus, Part, Project, QuestionState, Role, Routine, RoutineRun, RoutineRunStatus,
+    RoutineTrigger, Skill, StatusKind, ToolCall, ToolStatus, TurnKind, Widget,
 };
 
 pub const STREAM_FRAME_MS: u64 = arbos_core::STREAM_COMMIT_MS;
@@ -44,6 +44,8 @@ pub const CHAT_ARBOS_MEDIA: &str = "01J9CHAT0MEDIA000000000000";
 pub const CHAT_ARBOS_VOICE: &str = "01J9CHAT0VOICE000000000000";
 pub const CHAT_AFFINE_MAIN: &str = "01J9CHAT0AFFINE00000000000";
 pub const CHAT_COMMS_MAIN: &str = "01J9CHAT0COMMS000000000000";
+/// F6 demo: a group hosted by Arbos with Affine and Comms.
+pub const CHAT_ARBOS_GROUP: &str = "01J9CHAT0GROUP000000000000";
 
 pub const MODELS: [&str; 4] = [
     "GPT-6.1-Sol",
@@ -291,6 +293,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         subagent_name: None,
                         in_reply_to: None,
                         routine_name: None,
+                        sender_name: None,
+                        sender_icon: None,
                         usage: None,
                         return_contract: None,
                         waiting_user: false,
@@ -377,6 +381,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 title: "New chat".into(),
                 is_pinned: false,
                 is_system: false,
+                kind: ChatKind::Chat,
+                participants: Vec::new(),
                 unread: false,
                 last_message_at: now_ms(),
             });
@@ -385,6 +391,61 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 chat_id,
                 messages: Vec::new(),
             });
+        }
+        ClientCommand::GroupCreate {
+            project_id,
+            chat_id,
+            participants,
+            title,
+        } => {
+            add_doc(shared, ChatDoc::new(&chat_id, &project_id));
+            let mut all = vec![project_id.clone()];
+            all.extend(participants.into_iter().filter(|p| *p != project_id));
+            let names: Vec<String> = {
+                let projects = shared.projects.lock().unwrap();
+                all.iter()
+                    .skip(1)
+                    .filter_map(|id| projects.iter().find(|p| &p.id == id))
+                    .map(|p| p.name.clone())
+                    .collect()
+            };
+            let chat = Chat {
+                id: chat_id.clone(),
+                project_id: project_id.clone(),
+                title: title.unwrap_or_else(|| format!("Group · {}", names.join(", "))),
+                is_pinned: false,
+                is_system: false,
+                kind: ChatKind::Group,
+                participants: all,
+                unread: false,
+                last_message_at: now_ms(),
+            };
+            shared.chats.lock().unwrap().push(chat.clone());
+            emit_chats(shared);
+            let _ = shared.events.send(SyncEvent::ChatCreated {
+                project_id,
+                local_id: chat_id.clone(),
+                chat,
+            });
+            let _ = shared.events.send(SyncEvent::ChatSnapshot {
+                chat_id,
+                messages: Vec::new(),
+            });
+        }
+        ClientCommand::GroupAddParticipant {
+            chat_id,
+            participant,
+            ..
+        } => {
+            {
+                let mut chats = shared.chats.lock().unwrap();
+                if let Some(c) = chats.iter_mut().find(|c| c.id == chat_id) {
+                    if !c.participants.contains(&participant) {
+                        c.participants.push(participant);
+                    }
+                }
+            }
+            emit_chats(shared);
         }
         ClientCommand::CloseChat { chat_id } => {
             shared
@@ -447,6 +508,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 title: name,
                 is_pinned: true,
                 is_system: false,
+                kind: ChatKind::Chat,
+                participants: Vec::new(),
                 unread: false,
                 last_message_at: now_ms(),
             });
@@ -875,6 +938,8 @@ fn send_user(
                 subagent_name: None,
                 in_reply_to: None,
                 routine_name: None,
+                sender_name: None,
+                sender_icon: None,
                 usage: None,
                 return_contract: None,
                 waiting_user: false,
@@ -1098,6 +1163,8 @@ fn run_routine_now(shared: &Arc<Shared>, project_id: &str, routine_id: &str) {
                 subagent_name: None,
                 in_reply_to: None,
                 routine_name: Some(routine.name.clone()),
+                sender_name: None,
+                sender_icon: None,
                 usage: None,
                 return_contract: None,
                 waiting_user: false,
@@ -1615,6 +1682,8 @@ async fn run_turn(
             subagent_name: None,
             in_reply_to: None,
             routine_name: None,
+            sender_name: None,
+            sender_icon: None,
             usage: None,
             return_contract: None,
             waiting_user: false,
@@ -1940,6 +2009,7 @@ async fn run_turn(
             doc.commit();
         });
         mark_unread_if_hidden(shared, chat_id);
+        group_replies(shared, chat_id, text, &stop).await;
     } else {
         finish_cancelled(shared, chat_id, ix);
     }
@@ -2028,6 +2098,44 @@ fn question_part(
             QuestionState::Open
         },
         answered_at: answered.then(now_ms),
+    }
+}
+
+const GROUP_REPLIES: &[&str] = &[
+    "Heard. On my side that is done by end of day; I will post the link here.",
+    "Agreed — I can take that. One question for the group: do we announce before or after the build is tagged?",
+];
+
+/// F6 demo: in a group chat the other participants answer after the host, one by one, as
+/// `project` messages (what the relay's `group_message` fan-out produces in real use).
+async fn group_replies(shared: &Arc<Shared>, chat_id: &str, _text: &str, stop: &AtomicBool) {
+    let participants: Vec<Id> = {
+        let chats = shared.chats.lock().unwrap();
+        match chats.iter().find(|c| c.id == chat_id) {
+            Some(c) if c.is_group() => c.participants.clone(),
+            _ => return,
+        }
+    };
+    let host = project_of(shared, chat_id);
+    let others: Vec<Project> = {
+        let projects = shared.projects.lock().unwrap();
+        participants
+            .iter()
+            .filter(|id| **id != host)
+            .filter_map(|id| projects.iter().find(|p| &p.id == id).cloned())
+            .collect()
+    };
+    for (i, p) in others.iter().enumerate() {
+        sleep(Duration::from_millis(1400)).await;
+        if stop.load(Ordering::SeqCst) {
+            return;
+        }
+        let line = GROUP_REPLIES[i % GROUP_REPLIES.len()];
+        with_doc(shared, chat_id, |doc| {
+            let _ = doc.insert_message(&project_message(chat_id, p, line, now_ms()));
+            doc.commit();
+        });
+        mark_unread_if_hidden(shared, chat_id);
     }
 }
 
@@ -2174,6 +2282,8 @@ async fn run_outcome_turn(
             waiting_user: false,
             waiting_approval: false,
             routine_name: None,
+            sender_name: None,
+            sender_icon: None,
             model: Some(model),
             effort: Some(effort),
             created_at: now_ms(),
@@ -2291,7 +2401,7 @@ fn seed_projects() -> Vec<Project> {
             id: PROJECT_AFFINE.into(),
             name: "Affine".into(),
             icon: "△".into(),
-            color: "#8b7cf6".into(),
+            color: "#3fa7d6".into(),
             state: BoxState::HibernatedLight,
             state_detail: None,
             wake_progress: None,
@@ -2304,7 +2414,7 @@ fn seed_projects() -> Vec<Project> {
             id: PROJECT_COMMS.into(),
             name: "Comms".into(),
             icon: "Ψ".into(),
-            color: "#8b7cf6".into(),
+            color: "#e0a458".into(),
             state: BoxState::StoppedByUser,
             state_detail: None,
             wake_progress: None,
@@ -2398,6 +2508,8 @@ fn seed_chats() -> Vec<Chat> {
         title: title.into(),
         is_pinned: pinned,
         is_system: false,
+        kind: ChatKind::Chat,
+        participants: Vec::new(),
         unread: false,
         last_message_at: t.saturating_sub(ago_min * 60_000),
     };
@@ -2427,6 +2539,15 @@ fn seed_chats() -> Vec<Chat> {
         ),
         chat(CHAT_ARBOS_MEDIA, PROJECT_ARBOS, "Deliverables", false, 18),
         chat(CHAT_ARBOS_VOICE, PROJECT_ARBOS, "Voice memo", false, 6),
+        Chat {
+            kind: ChatKind::Group,
+            participants: vec![
+                PROJECT_ARBOS.into(),
+                PROJECT_AFFINE.into(),
+                PROJECT_COMMS.into(),
+            ],
+            ..chat(CHAT_ARBOS_GROUP, PROJECT_ARBOS, "Launch sync", false, 12)
+        },
         chat(CHAT_AFFINE_MAIN, PROJECT_AFFINE, "Affine", true, 60 * 26),
         chat(CHAT_COMMS_MAIN, PROJECT_COMMS, "Comms", true, 60 * 5),
     ]
@@ -2578,6 +2699,8 @@ impl Seeder<'_> {
             subagent_name: None,
             in_reply_to: None,
             routine_name: None,
+            sender_name: None,
+            sender_icon: None,
             usage: None,
             return_contract: None,
             waiting_user: false,
@@ -2606,6 +2729,8 @@ impl Seeder<'_> {
             subagent_name: None,
             in_reply_to: None,
             routine_name: None,
+            sender_name: None,
+            sender_icon: None,
             usage: None,
             return_contract: None,
             waiting_user: false,
@@ -2618,6 +2743,48 @@ impl Seeder<'_> {
             parts,
             hidden_parts: Vec::new(),
         });
+    }
+}
+
+/// Another Project's finished message in a group (`role: project`, F6).
+fn project_message(chat_id: &str, project: &Project, text: &str, t: u64) -> Message {
+    Message {
+        id: new_id(),
+        chat_id: chat_id.to_string(),
+        role: Role::Project,
+        sender: format!("project:{}", project.id),
+        status: MessageStatus::Done,
+        turn: None,
+        decision: None,
+        subagent_id: None,
+        subagent_name: None,
+        in_reply_to: None,
+        routine_name: None,
+        sender_name: Some(project.name.clone()),
+        sender_icon: Some(project.icon.clone()),
+        usage: None,
+        return_contract: None,
+        waiting_user: false,
+        waiting_approval: false,
+        model: None,
+        effort: None,
+        created_at: t,
+        completed_at: Some(t),
+        pending: false,
+        parts: vec![Part::Text {
+            id: new_id(),
+            text: text.into(),
+        }],
+        hidden_parts: Vec::new(),
+    }
+}
+
+impl Seeder<'_> {
+    fn project(&mut self, project: &Project, text: &str) {
+        self.t += 12_000;
+        let _ = self
+            .doc
+            .insert_message(&project_message(&self.doc.chat_id, project, text, self.t));
     }
 }
 
@@ -2991,6 +3158,35 @@ fn seed_docs(shared: &Arc<Shared>) {
         voice.commit();
     }
     add_doc(shared, voice);
+
+    let group = ChatDoc::new(CHAT_ARBOS_GROUP, PROJECT_ARBOS);
+    {
+        let projects = seed_projects();
+        let affine = projects.iter().find(|p| p.id == PROJECT_AFFINE).unwrap();
+        let comms = projects.iter().find(|p| p.id == PROJECT_COMMS).unwrap();
+        let mut s = Seeder {
+            doc: &group,
+            t: base + 2_400_000,
+        };
+        s.user("Launch sync: Affine, Comms — where do you each stand for the Mac beta?");
+        s.assistant(
+            TurnKind::Reply,
+            MessageStatus::Done,
+            vec![text(
+                "Arbos is ready on its side: the shell, tabs and the composer are stable and the relay runs. Affine and Comms will answer here.",
+            )],
+        );
+        s.project(
+            affine,
+            "The canvas export is in review and lands tomorrow. Nothing from Arbos is blocking me.",
+        );
+        s.project(
+            comms,
+            "Announcement draft is written. I need the final build number from Arbos before I schedule it.",
+        );
+        group.commit();
+    }
+    add_doc(shared, group);
 
     let affine = ChatDoc::new(CHAT_AFFINE_MAIN, PROJECT_AFFINE);
     {

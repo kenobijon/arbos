@@ -500,7 +500,8 @@ pub fn seed_state(cfg: &Config) -> Result<()> {
         serde_json::to_string_pretty(&settings)?,
     )?;
     // Project tools reach the main agent through codemode only: 14 direct schemas cost ~4k prefix tokens (D68).
-    let mcp = json!({ "mcpServers": { "arbos": { "url": cfg.mcp_url(), "headers": { "Authorization": format!("Bearer {}", cfg.mcp_token) }, "exposure": "codemode" } } });
+    // The bearer is expanded by pi from the per-role env (main vs subagent token, D69).
+    let mcp = json!({ "mcpServers": { "arbos": { "url": cfg.mcp_url(), "headers": { "Authorization": "Bearer ${ARBOS_MCP_TOKEN}" }, "exposure": "codemode" } } });
     std::fs::write(
         cfg.pi_dir().join("mcp.json"),
         serde_json::to_string_pretty(&mcp)?,

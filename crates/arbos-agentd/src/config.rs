@@ -192,6 +192,25 @@ impl Config {
         format!("http://127.0.0.1:{}/mcp", self.mcp_port)
     }
 
+    /// The bearer token subagent sessions present to the MCP server and hooks. Derived from
+    /// the main token so the main session's token never reaches a subagent process; the MCP
+    /// server tells the two apart to refuse main-only tools (D69: subagents never talk
+    /// project-to-project).
+    pub fn subagent_mcp_token(&self) -> String {
+        use sha2::Digest;
+        let digest = sha2::Sha256::digest(format!("subagent:{}", self.mcp_token).as_bytes());
+        format!("sub_{}", hex::encode(&digest[..16]))
+    }
+
+    /// The MCP token a session of `role` (`main` or `subagent`) is given.
+    pub fn mcp_token_for_role(&self, role: &str) -> String {
+        if role == "main" {
+            self.mcp_token.clone()
+        } else {
+            self.subagent_mcp_token()
+        }
+    }
+
     pub fn pi_dir(&self) -> PathBuf {
         self.state_dir.join("pi")
     }

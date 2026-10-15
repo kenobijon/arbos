@@ -20,7 +20,7 @@ fn authed(agent: &Agent, headers: &HeaderMap) -> bool {
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or("");
-    tok == agent.cfg.mcp_token
+    tok == agent.cfg.mcp_token || tok == agent.cfg.subagent_mcp_token()
 }
 
 fn ok() -> Response {

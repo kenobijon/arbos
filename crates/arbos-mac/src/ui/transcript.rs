@@ -17,6 +17,7 @@ use crate::ui::approve::{approval_card, ApprovalView};
 use crate::ui::attachments;
 use crate::ui::cards;
 use crate::ui::frost::edge_faded;
+use crate::ui::groups;
 use crate::ui::markdown::{inline_spans, split_blocks, Block};
 use crate::ui::motion::PulseClock;
 use crate::ui::theme::{Theme, BUBBLE_RADIUS};
@@ -74,6 +75,13 @@ pub enum RowKind {
     },
     /// Debug-only "Show details" disclosure under a finished reply.
     Details,
+    /// F6: who speaks next — another Project's glyph and name above its message.
+    Sender {
+        name: String,
+        icon: Option<String>,
+        /// Stable seed for the chip colour (the sender id).
+        seed: String,
+    },
     /// F11: small speaker under a reply; click speaks it (again).
     Speaker {
         /// The speech is already cached (instant replay) vs. will be synthesised.
@@ -465,6 +473,17 @@ impl Transcript {
                 PulseClock::request(cx);
                 cards::indicator(queued, &theme, cx).into_any_element()
             }
+            RowKind::Sender { name, icon, seed } => {
+                let color = self
+                    .state
+                    .read(cx)
+                    .projects
+                    .iter()
+                    .find(|p| format!("project:{}", p.id) == seed)
+                    .map(|p| groups::project_color(&p.color, theme.accent))
+                    .unwrap_or_else(|| groups::sender_color(&seed, &theme));
+                groups::sender_chip(&name, icon.as_deref(), color, &theme).into_any_element()
+            }
             RowKind::Details => {
                 let state = self.state.clone();
                 let chat_id = self.chat_id.clone().unwrap_or_default();
@@ -644,6 +663,23 @@ pub fn build_rows(messages: &[Message], show_details: bool, speech: SpeechRows<'
             Role::Assistant | Role::System | Role::Project => {
                 if streaming {
                     running = true;
+                }
+                if message.role == Role::Project {
+                    let name = message
+                        .sender_name
+                        .clone()
+                        .or_else(|| message.sender.strip_prefix("project:").map(str::to_owned))
+                        .unwrap_or_else(|| "Project".to_owned());
+                    rows.push(Row {
+                        version: hash_version(&(&name, &message.sender_icon), false),
+                        id: format!("{}#sender", message.id),
+                        message_id: message.id.clone(),
+                        kind: RowKind::Sender {
+                            name,
+                            icon: message.sender_icon.clone(),
+                            seed: message.sender.clone(),
+                        },
+                    });
                 }
                 let last_text_part = message
                     .parts
