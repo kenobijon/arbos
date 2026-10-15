@@ -743,10 +743,9 @@ final class AppModel: ObservableObject {
         if let slug = project.avatar, TreeAvatars.shared.has(slug) { return slug }
         if let slug = avatarMap[project.id] { return slug }
         // Agents from other people's lists (shared agents in a DM) are not in
-        // `projects`; hash them alone so they still get a tree.
-        let all = TreeAvatars.shared.characters
-        guard !all.isEmpty else { return nil }
-        return all[TreeAvatars.hashIndex(project.id, count: all.count)].slug
+        // `projects`; the relay's default for them, when the art is bundled.
+        if let slug = TreeAvatars.shared.relayDefault(project.id), TreeAvatars.shared.has(slug) { return slug }
+        return nil
     }
 
     func recomputeAvatars() {

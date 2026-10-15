@@ -1,10 +1,12 @@
-// Tree-character agent avatars (Lottie). Assets live in the bundle folder
-// `trees/` (a folder reference to assets/avatars/trees): `manifest.json` and
+// Tree-character agent avatars (Lottie). The bundle carries
+// assets/avatars/trees/manifest.json (at its root) and the folder
 // `lottie/<slug>/{idle,working,reply}.json`. A project shows its `avatar`
-// slug from the relay, else one assigned by hash of its id, deduplicated
-// within the user's list. idle loops when quiet, working loops during a
-// turn, reply plays once when the turn ends. Reduced motion shows the first
-// idle frame. Without assets the Grok blob is drawn instead.
+// slug from the relay (the relay defaults it to
+// slugs[fnv1a64(project id) % n] over the manifest), else the same hash
+// locally, deduplicated within the user's list. idle loops when quiet,
+// working loops during a turn, reply plays once when the turn ends. Reduced
+// motion shows the first idle frame. A slug whose art is not in the bundle
+// yet (manifest `ready: false`) falls back to the Grok blob.
 
 import SwiftUI
 import Lottie
@@ -12,8 +14,10 @@ import Lottie
 struct TreeCharacter: Identifiable, Equatable {
     let slug: String
     let name: String
-    /// Accent from the manifest (used for the blob fallback and the machine ring).
+    /// Accent from the manifest, when it has one.
     let color: String?
+    /// Manifest `ready` (art finished); the bundle check decides what shows.
+    let ready: Bool
 
     var id: String { slug }
 }
@@ -22,6 +26,9 @@ struct TreeCharacter: Identifiable, Equatable {
 final class TreeAvatars {
     static let shared = TreeAvatars()
 
+    /// Every manifest entry, in manifest order (the relay's hash contract).
+    let all: [TreeCharacter]
+    /// Entries whose idle animation is in the bundle — what the app can draw.
     let characters: [TreeCharacter]
     private let slugSet: Set<String>
     private var missing: Set<String> = []
@@ -29,17 +36,18 @@ final class TreeAvatars {
 
     private init() {
         var list: [TreeCharacter] = []
-        if let url = Bundle.main.url(forResource: "manifest", withExtension: "json", subdirectory: "trees"),
+        if let url = Bundle.main.url(forResource: "manifest", withExtension: "json"),
            let data = try? Data(contentsOf: url),
            let json = try? JSONSerialization.jsonObject(with: data) {
             list = TreeAvatars.parse(manifest: json)
         }
-        if list.isEmpty, let dir = Bundle.main.url(forResource: "lottie", withExtension: nil, subdirectory: "trees"),
+        if list.isEmpty, let dir = Bundle.main.url(forResource: "lottie", withExtension: nil),
            let names = try? FileManager.default.contentsOfDirectory(atPath: dir.path) {
-            list = names.sorted().filter { !$0.hasPrefix(".") }.map { TreeCharacter(slug: $0, name: TreeAvatars.title($0), color: nil) }
+            list = names.sorted().filter { !$0.hasPrefix(".") }.map { TreeCharacter(slug: $0, name: TreeAvatars.title($0), color: nil, ready: true) }
         }
-        characters = list
-        slugSet = Set(list.map(\.slug))
+        all = list
+        characters = list.filter { Bundle.main.url(forResource: "idle", withExtension: "json", subdirectory: "lottie/\($0.slug)") != nil }
+        slugSet = Set(characters.map(\.slug))
     }
 
     /// Accepts `{characters:[{slug,name,color}]}`, `{avatars:[…]}`, a bare
@@ -54,9 +62,11 @@ final class TreeAvatars {
             }
         }
         return items.compactMap { raw in
-            if let s = raw as? String { return TreeCharacter(slug: s, name: title(s), color: nil) }
+            if let s = raw as? String { return TreeCharacter(slug: s, name: title(s), color: nil, ready: true) }
             guard let d = raw as? [String: Any], let slug = (d["slug"] as? String) ?? (d["id"] as? String) else { return nil }
-            return TreeCharacter(slug: slug, name: (d["name"] as? String) ?? title(slug), color: (d["color"] as? String) ?? (d["accent"] as? String))
+            return TreeCharacter(slug: slug, name: (d["name"] as? String) ?? title(slug),
+                                 color: (d["color"] as? String) ?? (d["accent"] as? String),
+                                 ready: (d["ready"] as? Bool) ?? true)
         }
     }
 
@@ -68,18 +78,26 @@ final class TreeAvatars {
     func has(_ slug: String) -> Bool { slugSet.contains(slug) }
     func character(_ slug: String) -> TreeCharacter? { characters.first { $0.slug == slug } }
 
-    /// FNV-1a 32 over the project id, mod the catalog size — the Mac client
-    /// uses the same rule so an agent is the same tree on every device.
+    /// FNV-1a 64 over the project id, mod the count — the relay's
+    /// `slugs[fnv1a64(id) % n]` (crates/arbos-relay/src/avatar.rs), so the
+    /// local fallback lands on the same tree the relay would send.
     static func hashIndex(_ projectId: String, count: Int) -> Int {
-        var h: UInt32 = 2166136261
-        for b in projectId.utf8 { h = (h ^ UInt32(b)) &* 16777619 }
-        return Int(h % UInt32(max(count, 1)))
+        var h: UInt64 = 0xcbf29ce484222325
+        for b in projectId.utf8 { h = (h ^ UInt64(b)) &* 0x100000001b3 }
+        return Int(h % UInt64(max(count, 1)))
     }
 
-    /// Slug per project: an explicit `avatar` wins; the rest get the hashed
-    /// slug, probing forward to the next free one when it is taken. Projects
-    /// are visited by id (ULIDs sort by creation), so an older agent keeps
-    /// its tree when a newer one collides with it.
+    /// The relay's default for a project: hashed over the whole manifest.
+    func relayDefault(_ projectId: String) -> String? {
+        guard !all.isEmpty else { return nil }
+        return all[TreeAvatars.hashIndex(projectId, count: all.count)].slug
+    }
+
+    /// Slug per project: an explicit `avatar` the bundle can draw wins; the
+    /// rest get the relay's hash over the drawable set, probing forward to
+    /// the next free tree when it is taken. Projects are visited by id
+    /// (ULIDs sort by creation), so an older agent keeps its tree when a
+    /// newer one collides with it.
     func assign(_ projects: [Project]) -> [Id: String] {
         guard !characters.isEmpty else { return [:] }
         var out: [Id: String] = [:]
@@ -104,7 +122,7 @@ final class TreeAvatars {
         let key = "\(slug)/\(phase.rawValue)"
         lock.lock(); let known = missing.contains(key); lock.unlock()
         if known { return nil }
-        if let a = LottieAnimation.named(phase.rawValue, bundle: .main, subdirectory: "trees/lottie/\(slug)") { return a }
+        if let a = LottieAnimation.named(phase.rawValue, bundle: .main, subdirectory: "lottie/\(slug)") { return a }
         lock.lock(); missing.insert(key); lock.unlock()
         return nil
     }

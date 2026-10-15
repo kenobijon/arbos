@@ -36,7 +36,8 @@
 		A1D5B3AEBDCF93FE7CA572E6 /* VoiceModeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1FA131A56ED616D44B1D8E0 /* VoiceModeView.swift */; };
 		A1C2F6278D4FFE2C67A91076 /* Loro in Frameworks */ = {isa = PBXBuildFile; productRef = A1ECE6E6AE5F254159178833 /* Loro */; };
 		A137411B23802AF0A2964C18 /* Lottie in Frameworks */ = {isa = PBXBuildFile; productRef = A13AA99EEF34F72DE1CEE678 /* Lottie */; };
-		A1CE7422DCFF5980F0FB8F6F /* trees in Resources */ = {isa = PBXBuildFile; fileRef = A12555874C90AC4A8B6639F4 /* trees */; };
+		A109E357769E5CD3E053C864 /* lottie in Resources */ = {isa = PBXBuildFile; fileRef = A1E626B934A96ED1554A02FC /* lottie */; };
+		A1A1C17434CA4D0D1369A076 /* manifest.json in Resources */ = {isa = PBXBuildFile; fileRef = A18B2A1ED6AC20D525E86040 /* manifest.json */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -68,7 +69,8 @@
 		A164D22BA633A730FB31BB3D /* TreeAvatar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TreeAvatar.swift; sourceTree = "<group>"; };
 		A1FA131A56ED616D44B1D8E0 /* VoiceModeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceModeView.swift; sourceTree = "<group>"; };
 		A1D1358493A4FD5407CE1D11 /* Arbos.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Arbos.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		A12555874C90AC4A8B6639F4 /* trees */ = {isa = PBXFileReference; lastKnownFileType = folder; name = trees; path = "../../../assets/avatars/trees"; sourceTree = SOURCE_ROOT; };
+		A1E626B934A96ED1554A02FC /* lottie */ = {isa = PBXFileReference; lastKnownFileType = folder; name = lottie; path = "../../../assets/avatars/trees/lottie"; sourceTree = SOURCE_ROOT; };
+		A18B2A1ED6AC20D525E86040 /* manifest.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = manifest.json; path = "../../../assets/avatars/trees/manifest.json"; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -88,7 +90,8 @@
 			isa = PBXGroup;
 			children = (
 				A1564A0EBD33D8D4B92AD461,
-				A12555874C90AC4A8B6639F4,
+				A1E626B934A96ED1554A02FC,
+				A18B2A1ED6AC20D525E86040,
 				A1CA9DEF8434A85687602C88,
 			);
 			sourceTree = "<group>";
@@ -249,7 +252,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				A1627BBC9C62B0C159B656E4 /* Assets.xcassets in Resources */,
-				A1CE7422DCFF5980F0FB8F6F /* trees in Resources */,
+				A109E357769E5CD3E053C864 /* lottie in Resources */,
+				A1A1C17434CA4D0D1369A076 /* manifest.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
