@@ -118,7 +118,19 @@ First run against a relay shows the pairing screen: enter the one-time code the 
 
 Widget cards answer with the mouse or the keyboard (arrows move, space toggles, Enter submits); the fixture's "Beta release" chat under Arbos shows every widget type. System notifications (macOS `osascript`, Linux `notify-send`) fire for turn finished, needs input, approval requested, wake failed, spend cap reached, cross-project message and routine ran — at most one per project per minute (later ones fold into "N updates in <Project>"), never while that project is streaming, and only while the window is unfocused or the chat is not on screen. Settings has an On/Off switch; `ARBOS_NOTIFY_ALWAYS=1` ignores the focus gate (demos), `ARBOS_NOTIFY_DRY_RUN=1` logs instead of delivering.
 
-macOS packaging: `scripts/bundle-mac.sh` builds a universal `dist/Arbos.app` + DMG and signs/notarizes when `ARBOS_SIGN_IDENTITY` / `ARBOS_NOTARY_PROFILE` are set (skipped otherwise). `scripts/demo-mac.sh` launches the app in Glass, runs a scripted turn and records with `screencapture -v`.
+macOS packaging: `scripts/bundle-mac.sh` builds a universal `dist/Arbos.app`, the DMG, and the updater tarball; it signs with the hardened runtime when `ARBOS_SIGN_IDENTITY` is set and notarizes + staples when the notary credentials are too (`NOTARY_KEY_PATH`/`NOTARY_KEY_ID`/`NOTARY_ISSUER_ID`, or `ARBOS_NOTARY_PROFILE`); every step it lacks credentials for is skipped with a line saying so. `scripts/demo-mac.sh` launches the app in Glass, runs a scripted turn and records with `screencapture -v`.
+
+## Releases and in-app updates
+
+Every green push to `main` becomes an installable build, with no human picking a version (`.github/workflows/release.yml`, D42–D44):
+
+- **edge** (push to `main`): version `0.1.0.<commit count>`, release `edge-0.1.0.<n>` (pre-release) with `Arbos-…-macos-universal.dmg`, the updater tarball, static `arbos-relay`/`arbos-agentd`/`arbosctl` for Linux, and `appcast.xml`. The rolling release `edge` holds the feed the app polls: `https://github.com/unarbos/arbos/releases/download/edge/appcast.xml`.
+- **stable** (tag `v0.1.0`): release `v0.1.0` marked latest; feed `https://github.com/unarbos/arbos/releases/latest/download/appcast.xml`.
+- The Mac job runs on the self-hosted EC2 Mac (label `arbos-mac`, repository variable `ARBOS_MAC_RUNNER`; `scripts/runner/install-self-hosted-runner.sh`) or on `macos-15`. It signs with the Developer ID certificate, notarizes with an App Store Connect API key, and staples.
+- Payloads are signed with an Ed25519 key in Sparkle's `sparkle:edSignature` encoding (`crates/arbos-update`, CLI `arbos-updatectl`). The public half is committed in `crates/arbos-update/update-key.pub` and compiled into the app; the private half lives in the 1Password vault "Arbos" and is read in CI with `OP_SERVICE_ACCOUNT_TOKEN`. The publish job verifies the appcast against the compiled-in key before anything is uploaded.
+- The app polls the feed 5 s after launch and then hourly. When a newer build exists an **Update** button appears in the rail above the settings gear; one click downloads, verifies the signature, swaps `Arbos.app` in place, and relaunches. `ARBOS_UPDATE_CHANNEL=stable|edge`, `ARBOS_UPDATE_FEED=<url>`, `ARBOS_UPDATE_INTERVAL_SECS`, and `ARBOS_UPDATE_DISABLE=1` override the defaults.
+- By hand, from a Mac with `op` access: `scripts/release/local-release.sh [--dry-run] [--channel stable]` does the whole release (`scripts/release/publish-release.sh` is the shared publish step).
+- iOS: `.github/workflows/ios.yml` archives `apps/ios/Arbos` and uploads to TestFlight on pushes to `main` that touch `apps/ios/`.
 
 ## Connectors
 
