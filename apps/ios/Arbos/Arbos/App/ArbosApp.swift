@@ -61,9 +61,10 @@ struct RootView: View {
 
     /// Ask once, a beat after the home screen appears (never in the fixture or a live demo).
     private func schedulePrimer(_ paired: Bool) {
-        guard paired, !model.isFixture, !DebugHooks.liveDemo, push.shouldShowPrimer, !showPrimer else { return }
+        guard paired, !model.isFixture, !DebugHooks.liveDemo, DebugHooks.show == nil, push.shouldShowPrimer, !showPrimer else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-            if push.shouldShowPrimer, model.isPaired { showPrimer = true }
+            // Never on top of another sheet (feedback, settings…).
+            if push.shouldShowPrimer, model.isPaired, !feedback.isPresented { showPrimer = true }
         }
     }
 
