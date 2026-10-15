@@ -214,6 +214,17 @@ pub async fn create_project(
         workspace_state: "stopped".into(),
         avatar: Some(avatar),
     };
+    if state
+        .db
+        .project_of_user_by_name(&project.user_id, &project.name)
+        .map_err(internal)?
+        .is_some()
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("you already have a project named \"{}\"", project.name),
+        ));
+    }
     state
         .db
         .insert_project(&project)

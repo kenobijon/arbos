@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS devices (
   created_at INTEGER NOT NULL, revoked_at INTEGER, last_seen_at INTEGER
 );
 CREATE TABLE IF NOT EXISTS projects (
-  id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, icon TEXT NOT NULL DEFAULT '',
+  id TEXT PRIMARY KEY, name TEXT NOT NULL, icon TEXT NOT NULL DEFAULT '',
   instructions TEXT NOT NULL DEFAULT '', models TEXT NOT NULL DEFAULT '{}',
   state TEXT NOT NULL DEFAULT 'waking', created_at INTEGER NOT NULL, last_active_at INTEGER NOT NULL,
   spend_cap_daily REAL NOT NULL DEFAULT 25.0,
@@ -440,6 +440,8 @@ impl Db {
             "ALTER TABLE projects ADD COLUMN workspace_state TEXT NOT NULL DEFAULT 'stopped'",
             [],
         );
+        // Needs user_id and workspace_state above; rebuilds the table once on old databases.
+        Self::migrate_project_names_per_user(&c)?;
         let _ = c.execute("ALTER TABLE sandboxes ADD COLUMN migrated_to TEXT", []);
         let _ = c.execute("ALTER TABLE sandboxes ADD COLUMN migrated_at INTEGER", []);
         let _ = c.execute(
@@ -462,6 +464,62 @@ impl Db {
         crate::db_people::migrate_people(&c);
         c.execute_batch(crate::db_people::PEOPLE_SCHEMA)?;
         Ok(Self(Arc::new(Mutex::new(c))))
+    }
+
+    /// Project names used to be unique across the whole relay (`name TEXT NOT NULL UNIQUE`), so
+    /// two users could not both have "Home". Rebuild the table without that constraint and add a
+    /// unique index on `(user_id, name)` instead. Runs once: it looks for SQLite's automatic
+    /// unique index on `name`.
+    fn migrate_project_names_per_user(c: &Connection) -> Result<()> {
+        let has_global_unique: bool = {
+            let mut st = c.prepare("PRAGMA index_list(projects)")?;
+            let names: Vec<(String, i64)> = st
+                .query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, i64>(2)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            let mut found = false;
+            for (name, unique) in names {
+                if unique == 0 || !name.starts_with("sqlite_autoindex_projects") {
+                    continue;
+                }
+                let mut cols = c.prepare(&format!("PRAGMA index_info({name})"))?;
+                let col_names: Vec<String> = cols
+                    .query_map([], |r| r.get::<_, String>(2))?
+                    .collect::<rusqlite::Result<_>>()?;
+                if col_names == ["name"] {
+                    found = true;
+                }
+            }
+            found
+        };
+        if has_global_unique {
+            tracing::info!("migrating projects: names unique per user instead of relay-wide");
+            c.execute_batch(
+                "BEGIN;
+                 CREATE TABLE projects_new (
+                   id TEXT PRIMARY KEY, name TEXT NOT NULL, icon TEXT NOT NULL DEFAULT '',
+                   instructions TEXT NOT NULL DEFAULT '', models TEXT NOT NULL DEFAULT '{}',
+                   state TEXT NOT NULL DEFAULT 'waking', created_at INTEGER NOT NULL, last_active_at INTEGER NOT NULL,
+                   spend_cap_daily REAL NOT NULL DEFAULT 25.0,
+                   project_token_hash TEXT,
+                   color TEXT NOT NULL DEFAULT '#8b7cf6',
+                   user_id TEXT NOT NULL DEFAULT 'u_default',
+                   workspace_state TEXT NOT NULL DEFAULT 'stopped',
+                   avatar TEXT
+                 );
+                 INSERT INTO projects_new(id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily,
+                                          project_token_hash, color, user_id, workspace_state, avatar)
+                   SELECT id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily,
+                          project_token_hash, color, user_id, workspace_state, avatar FROM projects;
+                 DROP TABLE projects;
+                 ALTER TABLE projects_new RENAME TO projects;
+                 COMMIT;",
+            )?;
+        }
+        c.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS projects_user_name ON projects(user_id, name)",
+            [],
+        )?;
+        Ok(())
     }
 
     pub(crate) fn with<T>(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> Result<T> {
@@ -585,14 +643,31 @@ impl Db {
     const PROJECT_COLS: &'static str =
         "id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color, user_id, workspace_state, avatar";
 
+    /// By id, else by name. Names are unique per user only, so a name lookup prefers the id
+    /// match and otherwise returns the most recently active project with that name; callers that
+    /// know the user should use `project_of_user_by_name`.
     pub fn project(&self, id_or_name: &str) -> Result<Option<Project>> {
         self.with(|c| {
             c.query_row(
                 &format!(
-                    "SELECT {} FROM projects WHERE id = ?1 OR name = ?1",
+                    "SELECT {} FROM projects WHERE id = ?1 OR name = ?1 ORDER BY (id = ?1) DESC, last_active_at DESC LIMIT 1",
                     Self::PROJECT_COLS
                 ),
                 params![id_or_name],
+                Self::row_to_project,
+            )
+            .optional()
+        })
+    }
+
+    pub fn project_of_user_by_name(&self, user_id: &str, name: &str) -> Result<Option<Project>> {
+        self.with(|c| {
+            c.query_row(
+                &format!(
+                    "SELECT {} FROM projects WHERE user_id = ?1 AND name = ?2",
+                    Self::PROJECT_COLS
+                ),
+                params![user_id, name],
                 Self::row_to_project,
             )
             .optional()
