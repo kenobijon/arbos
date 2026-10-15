@@ -215,10 +215,15 @@ struct ChatView: View {
                 }
                 .ignoresSafeArea()
             }
-            .onChange(of: rows.last?.id) { _, _ in
-                if streaming || sentOnce {
+            .onChange(of: rows.last?.id) { old, _ in
+                if old == nil {
+                    proxy.scrollTo("bottom", anchor: .bottom)
+                } else {
                     withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
                 }
+            }
+            .onChange(of: model.caughtUp.contains(chatId)) { _, ready in
+                if ready { DispatchQueue.main.async { proxy.scrollTo("bottom", anchor: .bottom) } }
             }
             .onChange(of: streaming) { _, _ in
                 withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }

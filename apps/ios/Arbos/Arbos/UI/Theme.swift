@@ -113,6 +113,19 @@ struct Theme {
     func projectColor(_ hex: String) -> Color {
         Color(hex: hex) ?? Theme.palette[0]
     }
+
+    /// The relay hands every project the same default colour (#8b7cf6); Grok
+    /// gives each bot its own, so a default-coloured project picks a palette
+    /// colour from a stable hash of its id.
+    func projectColor(_ project: Project) -> Color {
+        let hex = project.color.lowercased()
+        if hex == "#8b7cf6" || hex.isEmpty {
+            var h: UInt32 = 2166136261
+            for b in project.id.utf8 { h = (h ^ UInt32(b)) &* 16777619 }
+            return Theme.palette[Int(h % UInt32(Theme.palette.count))]
+        }
+        return Color(hex: project.color) ?? Theme.palette[0]
+    }
 }
 
 private func hsla(_ h: Double, _ s: Double, _ l: Double, _ a: Double = 1) -> Color {

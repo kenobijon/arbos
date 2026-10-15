@@ -217,22 +217,35 @@ struct HomeView: View {
 
     // MARK: Row data
 
-    private func lastActivity(_ p: Project) -> Int64 {
-        model.chats(of: p.id).map(\.lastMessageAt).max() ?? 0
-    }
-
-    private func preview(_ p: Project) -> String {
+    /// Newest message with prose across the project's chats.
+    private func latest(_ p: Project) -> Message? {
         var best: Message? = nil
         for chat in model.chats(of: p.id) {
             if let m = model.messages(of: chat.id).last(where: { !$0.plainText.isEmpty }) {
                 if best == nil || m.createdAt > best!.createdAt { best = m }
             }
         }
-        guard let m = best else {
+        return best
+    }
+
+    private func lastActivity(_ p: Project) -> Int64 {
+        if let m = latest(p), m.createdAt > 0 { return m.createdAt }
+        return model.chats(of: p.id).map(\.lastMessageAt).max() ?? 0
+    }
+
+    private func preview(_ p: Project) -> String {
+        guard let m = latest(p) else {
             return model.isStreaming(project: p.id) ? "\(p.name) is working" : "No messages yet"
         }
         let line = m.plainText.split(separator: "\n").first.map(String.init) ?? ""
-        return (m.role == .user ? "You: " : "") + line
+        return (m.role == .user ? "You: " : "") + HomeView.plain(line)
+    }
+
+    /// Strip inline markdown markers for one-line previews.
+    static func plain(_ s: String) -> String {
+        var t = s
+        for mark in ["**", "__", "`", "*", "_", "#"] { t = t.replacingOccurrences(of: mark, with: "") }
+        return t.trimmingCharacters(in: .whitespaces)
     }
 
     private func timeLabel(_ p: Project) -> String {

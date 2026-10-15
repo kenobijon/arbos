@@ -25,7 +25,7 @@ struct BlobAvatar: View {
     var ring: Color = Color(hex: "#141414")!
 
     init(project: Project, theme: Theme, size: CGFloat = Theme.avatar, dot: Color? = nil) {
-        self.color = theme.projectColor(project.color)
+        self.color = theme.projectColor(project)
         self.shape = BlobShape.pick(for: project.id)
         self.size = size
         self.dot = dot

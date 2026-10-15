@@ -66,7 +66,7 @@ struct ChatListView: View {
             return msgs.isEmpty ? "" : "…"
         }
         let line = last.plainText.split(separator: "\n").first.map(String.init) ?? ""
-        return (last.role == .user ? "You: " : "") + line
+        return (last.role == .user ? "You: " : "") + HomeView.plain(line)
     }
 }
 
