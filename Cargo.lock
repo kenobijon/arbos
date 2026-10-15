@@ -378,6 +378,7 @@ dependencies = [
  "anyhow",
  "arbos-core",
  "arbos-update",
+ "block2 0.6.2",
  "cpal",
  "env_logger",
  "futures",
@@ -387,6 +388,10 @@ dependencies = [
  "hound",
  "image",
  "loro",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-authentication-services",
+ "objc2-foundation 0.3.2",
  "reqwest",
  "rodio",
  "serde",
@@ -4969,6 +4974,18 @@ dependencies = [
  "bitflags 2.13.2",
  "objc2 0.6.5",
  "objc2-core-foundation",
+ "objc2-foundation 0.3.2",
+]
+
+[[package]]
+name = "objc2-authentication-services"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee6d6f7dab884a28adaec1012eb3889257a49cc145724e35f93ece2d209f8b25"
+dependencies = [
+ "block2 0.6.2",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
 ]
 
