@@ -485,7 +485,7 @@ pub async fn decide_request(
 /// sandbox as `ARBOS_SECRET_<NAME>` (single-field items) or `ARBOS_SECRET_<NAME>_<FIELD>`.
 async fn mirror_to_daytona(state: &AppState, project_id: &str, item_id: &str) -> Option<String> {
     let dt = state.daytona.as_ref()?;
-    let sb = state.db.sandbox(project_id).ok().flatten()?;
+    let sb = state.db.box_for_project(project_id).ok().flatten()?;
     if sb.provider != "daytona" {
         return None;
     }
@@ -548,23 +548,43 @@ pub struct RequestBody {
     pub chat_id: String,
 }
 
-fn box_project(principal: &Principal) -> Result<String, (StatusCode, String)> {
-    match principal {
-        Principal::Box { project_id } => Ok(project_id.clone()),
-        Principal::Device { .. } | Principal::Admin => Err((
+/// The project a box call is for. One box serves every project of its user (D70), so the
+/// per-workspace agentd names the project in `X-Arbos-Project`; it must belong to the box's user.
+fn box_project(
+    state: &AppState,
+    principal: &Principal,
+    headers: &HeaderMap,
+) -> Result<String, (StatusCode, String)> {
+    let Principal::Box { user_id } = principal else {
+        return Err((
             StatusCode::FORBIDDEN,
             "box token required (the agent asks, the user decides)".into(),
-        )),
+        ));
+    };
+    let id = headers
+        .get("x-arbos-project")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| bad("X-Arbos-Project header required"))?;
+    let p = state
+        .db
+        .project(id)
+        .map_err(internal)?
+        .ok_or_else(|| bad("X-Arbos-Project: no such project"))?;
+    if p.user_id != *user_id {
+        return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
+    Ok(p.id)
 }
 
 /// `POST /vault/request` (box): the agent asks to use an item. Returns `{ id, status }`.
 pub async fn create_request(
     State(state): State<AppState>,
     principal: Principal,
+    headers: HeaderMap,
     Json(b): Json<RequestBody>,
 ) -> ApiResult {
-    let project_id = box_project(&principal)?;
+    let project_id = box_project(&state, &principal, &headers)?;
     if !USES.contains(&b.use_kind.as_str()) {
         return Err(bad(format!("use must be one of {}", USES.join(", "))));
     }
@@ -608,7 +628,13 @@ pub async fn request_status(
         .vault_request(&id)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "no such request".to_owned()))?;
-    if !principal.can_access_project(&rq.project_id) {
+    let owner = state
+        .db
+        .project(&rq.project_id)
+        .map_err(internal)?
+        .map(|p| p.user_id)
+        .unwrap_or_default();
+    if !principal.can_access_project(&owner) {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
     Ok(Json(request_json(&rq)).into_response())
@@ -620,9 +646,10 @@ pub async fn request_status(
 pub async fn request_values(
     State(state): State<AppState>,
     principal: Principal,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult {
-    let project_id = box_project(&principal)?;
+    let project_id = box_project(&state, &principal, &headers)?;
     let rq = state
         .db
         .vault_request(&id)
@@ -695,9 +722,10 @@ fn resolve_items(state: &AppState, project_id: &str) -> anyhow::Result<Vec<Resol
 pub async fn egress(
     State(state): State<AppState>,
     principal: Principal,
+    headers: HeaderMap,
     Json(b): Json<EgressBody>,
 ) -> ApiResult {
-    let project_id = box_project(&principal)?;
+    let project_id = box_project(&state, &principal, &headers)?;
     let url = reqwest::Url::parse(b.url.trim()).map_err(|e| bad(format!("url: {e}")))?;
     if !matches!(url.scheme(), "http" | "https") {
         return Err(bad("url must be http(s)"));

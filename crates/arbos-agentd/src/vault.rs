@@ -170,6 +170,7 @@ async fn relay_get(agent: &Agent, path: &str) -> Result<Value, String> {
         .http_client()
         .get(format!("{}{}", agent.cfg.relay_url, path))
         .bearer_auth(&agent.cfg.box_token)
+        .header("x-arbos-project", &agent.cfg.project_id)
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -186,6 +187,7 @@ async fn relay_post(agent: &Agent, path: &str, body: &Value) -> Result<Value, St
         .http_client()
         .post(format!("{}{}", agent.cfg.relay_url, path))
         .bearer_auth(&agent.cfg.box_token)
+        .header("x-arbos-project", &agent.cfg.project_id)
         .json(body)
         .send()
         .await
@@ -556,6 +558,7 @@ pub async fn egress(agent: &Arc<Agent>, args: &Value, chat_id: &str) -> Value {
         .http_client()
         .post(format!("{}/egress", agent.cfg.relay_url))
         .bearer_auth(&agent.cfg.box_token)
+        .header("x-arbos-project", &agent.cfg.project_id)
         .json(&json!({ "url": url, "method": method, "headers": headers, "body": body, "placeholders": placeholders }))
         .send()
         .await;
