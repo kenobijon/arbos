@@ -124,6 +124,153 @@ impl ReplyExtractor {
     }
 }
 
+/// Cheap post-check on main-agent prose as it streams into the doc (demo review v2): drops
+/// leading boilerplate lines ("Called 3 tools", "Running the tests…", "Route accepted: …") and
+/// whole ```json fences. Text is held back only until a line boundary, so streaming stays live.
+#[derive(Default)]
+pub struct ProseFilter {
+    pending: String,
+    in_fence: bool,
+    fence_hidden: bool,
+    started: bool,
+}
+
+impl ProseFilter {
+    /// First-line boilerplate: narration about the mechanics, never an answer.
+    fn is_boilerplate(line: &str) -> bool {
+        let l = line
+            .trim()
+            .trim_start_matches(['*', '_', '#', '>', '-', ' '])
+            .to_ascii_lowercase();
+        if l.is_empty() {
+            return true;
+        }
+        let starts = |p: &[&str]| p.iter().any(|x| l.starts_with(x));
+        let tool_count = {
+            // "called 3 tools", "i ran 2 tool calls.", "(4 tool calls)"
+            let t = l
+                .trim_start_matches(['(', 'i', ' '])
+                .trim_start_matches("i ");
+            let t = t
+                .trim_start_matches("called ")
+                .trim_start_matches("ran ")
+                .trim_start_matches("used ")
+                .trim_start_matches("made ")
+                .trim_start_matches("executed ");
+            let mut it = t.splitn(2, ' ');
+            matches!((it.next().map(|n| n.parse::<u32>().is_ok()), it.next()), (Some(true), Some(rest)) if rest.starts_with("tool"))
+        };
+        let mechanics = starts(&[
+            "tool call",
+            "tool calls",
+            "tools called",
+            "route accepted",
+            "routing:",
+            "route:",
+        ]);
+        // Verb-led narration is short ("Running the tests…"); a real sentence that happens to
+        // start with the same word runs long and stays.
+        let narration = l.chars().count() <= 90
+            && starts(&[
+                "running ",
+                "executing ",
+                "calling ",
+                "invoking ",
+                "let me check",
+                "let me run",
+                "let me look",
+                "i'll check",
+                "i will check",
+                "i'll run",
+                "i will run",
+                "checking ",
+                "reading the file",
+                "first, i",
+                "first i",
+                "now i'll",
+                "now i will",
+            ]);
+        tool_count || mechanics || narration
+    }
+
+    fn take_line(&mut self, line: &str) -> Option<String> {
+        let t = line.trim_start();
+        if self.in_fence {
+            if t.starts_with("```") {
+                self.in_fence = false;
+                let hidden = self.fence_hidden;
+                self.fence_hidden = false;
+                return if hidden { None } else { Some(line.to_owned()) };
+            }
+            return if self.fence_hidden {
+                None
+            } else {
+                Some(line.to_owned())
+            };
+        }
+        if t.starts_with("```") {
+            let lang = t.trim_start_matches('`').trim().to_ascii_lowercase();
+            self.in_fence = true;
+            self.fence_hidden = lang.starts_with("json");
+            return if self.fence_hidden {
+                None
+            } else {
+                Some(line.to_owned())
+            };
+        }
+        if !self.started {
+            if Self::is_boilerplate(line) {
+                return None;
+            }
+            self.started = true;
+        }
+        Some(line.to_owned())
+    }
+
+    /// Feed a delta; returns the text that may enter the doc now.
+    pub fn feed(&mut self, delta: &str) -> String {
+        self.pending.push_str(delta);
+        let mut out = String::new();
+        while let Some(i) = self.pending.find('\n') {
+            let line: String = self.pending.drain(..=i).collect();
+            if let Some(l) = self.take_line(&line) {
+                out.push_str(&l);
+            }
+        }
+        // A partial line streams at once when it cannot be boilerplate or a fence any more.
+        let p = self.pending.trim_start();
+        let could_be_fence = p.is_empty() || "```".starts_with(p) || p.starts_with("```");
+        if self.started && !self.in_fence && !could_be_fence {
+            out.push_str(&std::mem::take(&mut self.pending));
+        } else if !self.started && !self.in_fence && self.pending.len() > 160 {
+            // Long first line: real prose. Judge it once and let it through.
+            if Self::is_boilerplate(&self.pending) {
+                self.pending.clear();
+            } else {
+                self.started = true;
+                out.push_str(&std::mem::take(&mut self.pending));
+            }
+        }
+        out
+    }
+
+    /// End of a text run (tool call or turn end): judge what is still held back.
+    pub fn flush(&mut self) -> String {
+        let rest = std::mem::take(&mut self.pending);
+        if rest.is_empty() {
+            return rest;
+        }
+        if self.in_fence {
+            // An unterminated fence at the end: drop it when hidden, else let it through.
+            self.in_fence = false;
+            let hidden = self.fence_hidden;
+            self.fence_hidden = false;
+            return if hidden { String::new() } else { rest };
+        }
+        self.take_line(&rest).unwrap_or_default()
+    }
+}
+
 fn utf8_len(b: u8) -> usize {
     if b < 0x80 {
         1
@@ -183,6 +330,8 @@ pub struct TurnState {
     /// call id → args from `tool_execution_start`, so the tool part records the real input.
     pub tool_inputs: HashMap<String, Value>,
     pub reply_extractor: ReplyExtractor,
+    /// Boilerplate filter on everything the main agent says in this turn.
+    pub prose: ProseFilter,
     pub route_call_id: Option<String>,
     pub text_part_dirty: bool,
     /// Set by an out-of-band `stop`: the turn ends as it is and no hand-off follows.
@@ -752,8 +901,7 @@ impl Agent {
                     let id = ulid();
                     h.doc
                         .start_assistant_message(&id, &user_msg, &me.cfg.device_id);
-                    h.doc
-                        .add_status_part(&id, "failed", &format!("{label} · failed"));
+                    h.doc.add_status_part(&id, "failed", "Failed");
                     h.doc.add_error_part(&id, "subagent_failed", &e.to_string());
                     h.doc.finish_message(&id, MessageStatus::Error);
                 }
@@ -822,14 +970,11 @@ impl Agent {
             match &kind {
                 TurnKind::User => {
                     h.doc
-                        .add_status_part(&assistant_msg_id, "deciding", "Arbos is deciding…");
+                        .add_status_part(&assistant_msg_id, "working", "Working…");
                 }
                 TurnKind::SubagentResult { subagent_id, name } => {
-                    h.doc.add_status_part(
-                        &assistant_msg_id,
-                        "working",
-                        &format!("Writing up what {name} did…"),
-                    );
+                    h.doc
+                        .add_status_part(&assistant_msg_id, "working", "Working…");
                     h.doc.set_message_fields(
                         &assistant_msg_id,
                         &[
@@ -858,6 +1003,7 @@ impl Agent {
             act_transcript: Vec::new(),
             tool_inputs: HashMap::new(),
             reply_extractor: ReplyExtractor::default(),
+            prose: ProseFilter::default(),
             route_call_id: None,
             text_part_dirty: false,
             stopped: false,
@@ -868,6 +1014,16 @@ impl Agent {
         self.turn_running.store(false, Ordering::SeqCst);
         keepalive.abort();
 
+        // Whatever the filter still holds back at the end of the turn is judged and written.
+        {
+            let mut tl = self.turn.lock().await;
+            if let Some(t) = tl.as_mut() {
+                let held = t.prose.flush();
+                if !held.is_empty() {
+                    self.write_text(host, t, &held).await;
+                }
+            }
+        }
         let turn = self.turn.lock().await.take();
         let Some(turn) = turn else {
             return Err(anyhow!("turn state vanished mid-turn"));
@@ -1007,7 +1163,7 @@ impl Agent {
             prompt.push_str(&format!("\nThe run ended with an error: {e}\n"));
         }
         prompt.push_str(&format!(
-            "\nSubagent output (for you only; the user has not seen it):\n<<<\n{raw_trim}\n>>>\n\nRoute `reply` and tell the user in plain prose what was done, what changed (files, commits, URLs), and what is open or needs their answer. Do not paste the JSON or the output; summarize it."
+            "\nSubagent output (for you only; the user has not seen it):\n<<<\n{raw_trim}\n>>>\n\nRoute `reply` and write the update for the user like a colleague in chat: what got done and the outcome, what changed that they care about, and what is open or needs their answer. Speak as if you did the work; do not mention the subagent, its name, the harness, the model, tool calls, commands, scratch paths, or token counts. No JSON, no quoted output, no list of steps. Two to five sentences."
         ));
         let kind = TurnKind::SubagentResult {
             subagent_id: subagent_id.to_owned(),
@@ -1277,9 +1433,21 @@ impl Agent {
                 t.metrics.tool_calls += 1;
                 let one_line = args.to_string().chars().take(120).collect::<String>();
                 t.act_transcript.push(format!("→ {tool_name} {one_line}"));
-                let mut h = host.lock().await;
-                h.doc
-                    .add_status_part(&t.assistant_msg_id, "step", &step_label(tool_name, args));
+                // No `step` event in the doc (one working indicator only); the hidden tool part
+                // and T3 keep the detail for the drawer.
+                let _ = self.store.t3_append(
+                    chat_id,
+                    None,
+                    Some(chat_id),
+                    "tool_call",
+                    Some("assistant"),
+                    &format!("{tool_name} {}", step_label(tool_name, args)),
+                    Some(&json!({ "call_id": tool_call_id, "input": args })),
+                );
+                let held = t.prose.flush();
+                if !held.is_empty() {
+                    self.write_text(host, t, &held).await;
+                }
                 t.text_part_dirty = true;
             }
             Event::ToolExecutionEnd {
@@ -1370,7 +1538,15 @@ impl Agent {
         Ok(false)
     }
 
+    /// Main-agent prose enters the doc through the boilerplate filter.
     async fn append_text(&self, host: &SharedHost, t: &mut TurnState, delta: &str) {
+        let out = t.prose.feed(delta);
+        if !out.is_empty() {
+            self.write_text(host, t, &out).await;
+        }
+    }
+
+    async fn write_text(&self, host: &SharedHost, t: &mut TurnState, delta: &str) {
         let mut h = host.lock().await;
         if t.text_part_dirty {
             // A tool part landed since the last text: open a new text part so order is kept.
@@ -1409,21 +1585,6 @@ impl Agent {
                     &format!("route {}: {}", route_name(&r), args),
                     None,
                 );
-                if let ValidRoute::Act { plan } = &r {
-                    if let Some(host) = self.sync.host(&t.chat_id).await {
-                        let first = plan.lines().next().unwrap_or("").trim();
-                        let mut h = host.lock().await;
-                        h.doc.add_status_part(
-                            &t.assistant_msg_id,
-                            "working",
-                            if first.is_empty() {
-                                "Working on it…"
-                            } else {
-                                first
-                            },
-                        );
-                    }
-                }
                 t.route = Some(r);
                 Ok(())
             }
@@ -1645,11 +1806,13 @@ impl Agent {
                 .iter()
                 .filter(|s| s.status == "queued")
                 .count();
-            let line = format!("{sub_name} · queued ({} ahead)", waiting);
             let _ = self.store.set_subagent_status(&subagent_id, "queued");
-            let _ = self.store.set_subagent_last_status(&subagent_id, "queued");
+            let _ = self
+                .store
+                .set_subagent_last_status(&subagent_id, &format!("queued ({waiting} ahead)"));
             let mut h = host.lock().await;
-            h.doc.add_status_part(&msg_id, "queued", &line);
+            h.doc
+                .add_status_part(&msg_id, "working", "Waiting for a free slot…");
         }
         self.write_threads_index().await;
         let _slot = self
@@ -1666,11 +1829,7 @@ impl Agent {
         }
         {
             let mut h = host.lock().await;
-            h.doc.add_status_part(
-                &msg_id,
-                "working",
-                &format!("{sub_name} · {}", harness.as_str()),
-            );
+            h.doc.add_status_part(&msg_id, "working", "Working…");
         }
         let _ = self.store.set_subagent_last_status(&subagent_id, "working");
         let t0 = Instant::now();
@@ -1765,10 +1924,6 @@ impl Agent {
                     let _ = self
                         .store
                         .set_subagent_last_status(&subagent_id, &format!("step: {label}"));
-                    {
-                        let mut h = host.lock().await;
-                        h.doc.add_status_part(&msg_id, "step", &label);
-                    }
                     let _ = self.store.t3_append(
                         &subagent_id,
                         Some(&subagent_id),
@@ -1874,7 +2029,6 @@ impl Agent {
             })
             .to_owned();
         let failed = done_err.is_some() || status == "blocked";
-        let final_line = format!("{sub_name} · {status} · {:.1}s", total_ms as f64 / 1000.0);
         {
             let mut h = host.lock().await;
             if let Some(e) = &done_err {
@@ -1892,8 +2046,11 @@ impl Agent {
                     "durationMs": total_ms,
                 }),
             );
-            h.doc
-                .add_status_part(&msg_id, if failed { "failed" } else { "done" }, &final_line);
+            h.doc.add_status_part(
+                &msg_id,
+                if failed { "failed" } else { "done" },
+                if failed { "Failed" } else { "Done" },
+            );
             h.doc.set_message_fields(
                 &msg_id,
                 &[
@@ -2081,11 +2238,8 @@ impl Agent {
         if let Some(t) = self.turn.lock().await.as_mut() {
             t.escalate = false;
             let mut h = host.lock().await;
-            h.doc.add_status_part(
-                &t.assistant_msg_id,
-                "handed_off",
-                &format!("Handed to subagent {name}"),
-            );
+            h.doc
+                .add_status_part(&t.assistant_msg_id, "working", "Working…");
         }
         let me = self.clone();
         let (n, p, b) = (name.to_owned(), purpose.to_owned(), brief.to_owned());

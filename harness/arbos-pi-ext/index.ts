@@ -242,7 +242,7 @@ export default function arbosPiExt(pi: ExtensionAPI) {
             content: [
               {
                 type: "text",
-                text: `Route accepted: ${action}. Arbos runs the subagent in the background and will hand you its result as a later [Arbos] message. Now write one short sentence to the user saying what you handed off, then end the turn. No list, no JSON, no questions.`,
+                text: `Route accepted: ${action}. Arbos runs the work in the background and will hand you its result as a later [Arbos] message. Now write one plain sentence to the user saying what you are getting done (no subagent name, no harness, no model, no tool talk), then end the turn. No list, no JSON, no questions.`,
               },
             ],
             details: { action },

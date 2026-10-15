@@ -424,9 +424,9 @@ impl ChatDoc {
         Some(part_id)
     }
 
-    /// Add a `status` part. Codes: `deciding`, `queued`, `working`, `step` (short label of one tool
-    /// call), `done`, `failed`, `waiting_user`, `handed_off`. These are the only progress the
-    /// transcript renders; tool parts are `hidden`.
+    /// Add a `status` part. Codes: `working`, `done`, `failed`, `stopped`, `waiting_user` — one
+    /// working indicator, nothing that narrates tools. Tool detail lives in `hidden` tool parts
+    /// (Details drawer) and T3.
     pub fn add_status_part(&mut self, msg_id: &str, kind: &str, text: &str) -> Option<String> {
         let m = self.find_message(msg_id)?;
         let parts = match m.get("parts")? {

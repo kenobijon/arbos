@@ -57,7 +57,7 @@ cargo run -p arbosctl -- timings demo                          # boot, wake, TTF
 
 `arbosctl` keeps its device token and per-chat replicas under `~/.config/arbos/` (`ARBOSCTL_CONFIG` overrides). All commands: `cargo run -p arbosctl -- --help`.
 
-What a chat shows: the user only ever sees prose from the main agent. A hand-off (`new`/`wake`) is one sentence from the model, then a progress message with status events only (`queued`, `working`, `step: <label>`, `done`/`failed`), then a prose result turn (`turn.kind = "subagent_result"`) written by the main agent from the subagent's output. Tool calls and raw subagent output are parts with `hidden: true` (Details drawer, not the transcript). Up to 4 subagents run per box at once; more wait in FIFO order, and the chat stays responsive meanwhile.
+What a chat shows: the user only ever sees prose from the main agent, written like a colleague in chat (what got done and the outcome, never how the tools were called; agentd also strips leading "Called N tools"/"Running …" lines and ```json blocks before text enters the doc). A hand-off (`new`/`wake`) is one plain sentence from the model, then a progress message with status events only (`working`, then `done`/`failed`), then a prose result turn (`turn.kind = "subagent_result"`) written by the main agent from the subagent's output. Status codes are `working`, `done`, `failed`, `stopped`, `waiting_user`; tool calls and raw subagent output are parts with `hidden: true` (Details drawer, not the transcript) and in T3. Up to 4 subagents run per box at once; more wait in FIFO order, and the chat stays responsive meanwhile.
 
 Relay environment (all optional unless noted):
 
