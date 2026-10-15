@@ -309,6 +309,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/auth/token", post(signin::token))
         .route("/auth/refresh", post(signin::refresh))
         .route("/auth/logout", post(signin::logout))
+        .route("/auth/devices", get(signin::devices_list))
+        .route("/auth/devices/{id}", delete(signin::device_revoke))
         .route("/me", get(signin::me))
         .route("/me/pushes", get(people::me_pushes))
         .route("/users/search", get(people::users_search))
@@ -319,6 +321,10 @@ async fn main() -> anyhow::Result<()> {
             get(people::chat_get).delete(people::chat_delete),
         )
         .route("/chats/{id}/read", axum::routing::put(people::chat_read))
+        .route(
+            "/chats/{id}/settings",
+            axum::routing::put(people::chat_settings),
+        )
         .route("/chats/{id}/hide", post(people::chat_hide))
         .route("/chats/{id}/leave", post(people::chat_leave))
         .route("/chats/{id}/agents", post(people::agent_add))

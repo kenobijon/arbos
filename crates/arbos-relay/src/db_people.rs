@@ -206,6 +206,16 @@ impl Db {
         })
     }
 
+    pub fn set_member_muted(&self, chat_id: &str, member: &str, muted: bool) -> Result<bool> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE people_members SET muted = ?3 WHERE chat_id = ?1 AND member = ?2 AND left_at IS NULL",
+                params![chat_id, member, muted as i64],
+            )
+            .map(|n| n > 0)
+        })
+    }
+
     pub fn members_of(&self, chat_id: &str) -> Result<Vec<Membership>> {
         self.with(|c| {
             let mut st = c.prepare(&format!(

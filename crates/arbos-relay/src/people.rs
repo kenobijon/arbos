@@ -203,6 +203,11 @@ fn member_json(state: &AppState, m: &Membership) -> Value {
             v["name"] = card["name"].clone();
             v["status"] = card["status"].clone();
         }
+        v["read_receipts"] = json!(m
+            .settings
+            .get("read_receipts")
+            .and_then(Value::as_bool)
+            .unwrap_or(true));
     }
     if let Some(pid) = m.project_id() {
         if let Ok(Some(p)) = state.db.project(pid) {
@@ -277,7 +282,11 @@ pub fn chat_json(state: &AppState, cm: &ChatWithMembers, me: &str, device_id: &s
         "read_seq": read_seq,
         "unread": head_seq > read_seq,
         "lock_state": if has_agent { "visible_to_agents" } else { "people_only" },
-        "me": { "role": mine.map(|m| m.role.clone()), "muted": mine.is_some_and(|m| m.muted) },
+        "me": {
+            "role": mine.map(|m| m.role.clone()),
+            "muted": mine.is_some_and(|m| m.muted),
+            "read_receipts": mine.map(|m| m.settings.get("read_receipts").and_then(Value::as_bool).unwrap_or(true)).unwrap_or(true),
+        },
     })
 }
 
@@ -1160,6 +1169,56 @@ pub async fn project_member_remove(
         None,
     );
     StatusCode::NO_CONTENT.into_response()
+}
+
+// ---- per-member chat settings: read receipts, mute -------------------------------------------
+
+#[derive(Deserialize)]
+pub struct ChatSettingsBody {
+    /// Share "Seen by @me" with the other people in this chat (default true).
+    #[serde(default)]
+    pub read_receipts: Option<bool>,
+    #[serde(default)]
+    pub muted: Option<bool>,
+}
+
+/// `PUT /chats/{id}/settings {"read_receipts"?, "muted"?}` — my own settings for this chat.
+/// Receipts themselves travel in the room (Presence frames `{seen: <message id>}`); clients of
+/// a member with `read_receipts: false` simply do not send them, and others do not show theirs
+/// to that member.
+pub async fn chat_settings(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    Json(b): Json<ChatSettingsBody>,
+) -> Response {
+    let (me, cm) = match member_chat(&state, &principal, &id) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    let member = format!("user:{me}");
+    let mut settings = cm
+        .members
+        .iter()
+        .find(|m| m.member == member)
+        .map(|m| m.settings.clone())
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}));
+    if let Some(r) = b.read_receipts {
+        settings["read_receipts"] = json!(r);
+    }
+    if let Err(e) = state.db.set_member_settings(&id, &member, &settings) {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+    }
+    if let Some(m) = b.muted {
+        if let Err(e) = state.db.set_member_muted(&id, &member, m) {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+        }
+    }
+    match load_chat(&state, &id) {
+        Ok(cm) => Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response(),
+        Err(r) => *r,
+    }
 }
 
 // ---- invite links (people who are not on Arbos yet) -----------------------------------------

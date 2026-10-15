@@ -583,6 +583,53 @@ pub async fn logout(State(state): State<AppState>, principal: Principal) -> Resp
     }
 }
 
+/// `GET /auth/devices` — the caller's devices (this one marked `current`).
+pub async fn devices_list(State(state): State<AppState>, principal: Principal) -> Response {
+    let Principal::Device { id, user_id, .. } = &principal else {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "a signed-in device is required",
+        );
+    };
+    match state.db.devices_of_user(user_id) {
+        Ok(mut list) => {
+            for d in &mut list {
+                let current = d["id"].as_str() == Some(id.as_str());
+                d["current"] = json!(current);
+            }
+            Json(list).into_response()
+        }
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    }
+}
+
+/// `DELETE /auth/devices/{id}` — revoke one of the caller's devices (its access and refresh
+/// tokens die at once); the admin may revoke any device.
+pub async fn device_revoke(
+    State(state): State<AppState>,
+    principal: Principal,
+    axum::extract::Path(target): axum::extract::Path<String>,
+) -> Response {
+    let owner = match state.db.device_status(&target) {
+        Ok(Some((owner, _))) => owner,
+        Ok(None) => return api_error(StatusCode::NOT_FOUND, "not_found", "no such device"),
+        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    };
+    let allowed = match &principal {
+        Principal::Admin => true,
+        Principal::Device { user_id, .. } => *user_id == owner,
+        Principal::Box { .. } => false,
+    };
+    if !allowed {
+        return api_error(StatusCode::FORBIDDEN, "forbidden", "not your device");
+    }
+    match state.db.revoke_device_fully(&target) {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    }
+}
+
 /// `GET /me`: who am I, what can I spend, where is my machine.
 pub async fn me(State(state): State<AppState>, principal: Principal) -> Response {
     let (user_id, device) = match &principal {
