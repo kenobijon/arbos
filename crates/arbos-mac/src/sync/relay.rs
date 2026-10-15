@@ -2021,20 +2021,20 @@ async fn send_message(
         text: text.clone(),
     });
     shared.unacked.lock().unwrap().insert(message_id.clone());
+    // People chats, and projects with more than one human, carry who wrote
+    // (API §3/§7); a solo project keeps the plain `user` the box expects.
+    let in_people = shared.is_people(&chat_id) || {
+        let projects = shared.projects.lock().unwrap();
+        projects
+            .iter()
+            .find(|p| p.id == project_id)
+            .map(|p| p.shared || !p.people.is_empty())
+            .unwrap_or(false)
+    };
     {
         let docs = shared.docs.lock().unwrap();
         let Some(doc) = docs.get(&chat_id) else {
             return;
-        };
-        // People chats, and projects with more than one human, carry who wrote
-        // (API §3/§7); a solo project keeps the plain `user` the box expects.
-        let in_people = shared.is_people(&chat_id) || {
-            let projects = shared.projects.lock().unwrap();
-            projects
-                .iter()
-                .find(|p| p.id == project_id)
-                .map(|p| p.shared || !p.people.is_empty())
-                .unwrap_or(false)
         };
         let me = shared.me_user();
         let mentions = if in_people {
@@ -2123,6 +2123,25 @@ async fn send_message(
         doc.commit();
     }
     mark_activity(&shared, &chat_id);
+    // Other people in the chat get a notification with the text (API §7c); the relay never
+    // reads rows, so the writer announces. Solo projects have nobody else to tell.
+    if in_people {
+        let path = if shared.is_people(&chat_id) {
+            format!("/chats/{chat_id}/notify")
+        } else {
+            format!("/projects/{project_id}/chats/{chat_id}/notify")
+        };
+        let body = json!({
+            "message_id": message_id,
+            "text": text.chars().take(600).collect::<String>(),
+        });
+        let announcer = shared.clone();
+        tokio::spawn(async move {
+            if let Err(err) = announcer.post_json(&path, body).await {
+                eprintln!("announce message: {err:#}");
+            }
+        });
+    }
     if shared.is_people(&chat_id) {
         if let Some(room) = shared.rooms.lock().unwrap().get(&chat_id) {
             let _ = room.cmds.send(RoomCmd::Typing(false));

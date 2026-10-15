@@ -297,3 +297,104 @@ pub async fn set_kill_switch(
     tracing::warn!(on = b.on, reason = ?ks.reason, "kill switch set by admin");
     Json(json!({ "kill_switch": ks })).into_response()
 }
+
+/// `GET /admin/push`: whether APNs is configured, and every registered device token (the token
+/// itself shortened — it is a credential for that one device).
+pub async fn push_status(State(state): State<AppState>, principal: Principal) -> Response {
+    if let Err(r) = admin_only(&principal) {
+        return *r;
+    }
+    let tokens = match state.db.all_push_tokens() {
+        Ok(t) => t,
+        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    };
+    Json(json!({
+        "push": state.push.is_on(),
+        "tokens": tokens.iter().map(|t| json!({
+            "device_id": t.device_id, "user_id": t.user_id, "platform": t.platform,
+            "environment": t.environment, "bundle_id": t.bundle_id, "app_version": t.app_version,
+            "token": format!("{}…", t.token.chars().take(8).collect::<String>()),
+            "updated_at": t.updated_at,
+        })).collect::<Vec<_>>(),
+    }))
+    .into_response()
+}
+
+#[derive(Deserialize)]
+pub struct TestPushBody {
+    #[serde(default)]
+    pub user_id: Option<String>,
+    #[serde(default)]
+    pub device_id: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub body: Option<String>,
+}
+
+/// `POST /admin/push/test {user_id | device_id, title?, body?}`: one plain alert to each of
+/// those devices, with APNs' answer per device — proves the key, topic, and token end to end.
+pub async fn push_test(
+    State(state): State<AppState>,
+    principal: Principal,
+    Json(b): Json<TestPushBody>,
+) -> Response {
+    if let Err(r) = admin_only(&principal) {
+        return *r;
+    }
+    if !state.push.is_on() {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "push_off",
+            "APNS_KEY_P8 / APNS_KEY_ID / APNS_TEAM_ID are not set on this relay",
+        );
+    }
+    let tokens = match (&b.user_id, &b.device_id) {
+        (Some(u), _) => state.db.push_tokens_of_user(u),
+        (None, Some(d)) => state
+            .db
+            .all_push_tokens()
+            .map(|all| all.into_iter().filter(|t| &t.device_id == d).collect()),
+        (None, None) => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                "user_id or device_id is required",
+            )
+        }
+    };
+    let tokens = match tokens {
+        Ok(t) => t,
+        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    };
+    let title = b.title.unwrap_or_else(|| "Arbos".to_owned());
+    let body = b
+        .body
+        .unwrap_or_else(|| format!("Test notification from the relay at {}", now_ms()));
+    let mut results = Vec::with_capacity(tokens.len());
+    for t in tokens {
+        let out = crate::apns::Outgoing {
+            device_token: t.token.clone(),
+            environment: t.environment.clone(),
+            push_type: "alert",
+            collapse_id: Some(format!("test:{}", ulid())),
+            payload: json!({
+                "aps": { "alert": { "title": title, "body": body }, "sound": "default" },
+                "test": true,
+            }),
+        };
+        let delivery = state.push.send(out).await;
+        if delivery == crate::apns::Delivery::TokenGone {
+            let _ = state.db.delete_push_token_value(&t.token);
+        }
+        results.push(json!({
+            "device_id": t.device_id, "environment": t.environment,
+            "result": match delivery {
+                crate::apns::Delivery::Sent => "sent".to_owned(),
+                crate::apns::Delivery::TokenGone => "token gone (forgotten)".to_owned(),
+                crate::apns::Delivery::Failed(e) => format!("failed: {e}"),
+            },
+        }));
+    }
+    Json(json!({ "sent_to": results.len(), "results": results })).into_response()
+}

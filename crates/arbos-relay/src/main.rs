@@ -448,6 +448,8 @@ async fn main() -> anyhow::Result<()> {
             "/admin/users/{id}/box",
             axum::routing::put(api::admin_set_user_box).delete(api::admin_delete_user_box),
         )
+        .route("/admin/push", get(admin::push_status))
+        .route("/admin/push/test", post(admin::push_test))
         .route("/admin/users", get(admin::list_users))
         .route("/admin/users/test", post(admin::create_test_user))
         .route("/admin/users/{id}", delete(admin::delete_test_user))

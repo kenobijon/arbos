@@ -123,6 +123,17 @@ impl Db {
         })
     }
 
+    /// Every registered token (admin view).
+    pub fn all_push_tokens(&self) -> Result<Vec<PushToken>> {
+        self.with(|c| {
+            let mut st = c.prepare(&format!(
+                "SELECT {TOKEN_COLS} FROM push_tokens ORDER BY updated_at DESC"
+            ))?;
+            let rows = st.query_map([], token_from_row)?;
+            rows.collect()
+        })
+    }
+
     // ---- message events and unread --------------------------------------------------------------
 
     /// Record one whole message. Returns its event id, or `None` when `(chat, message_id)` was

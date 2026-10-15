@@ -471,6 +471,18 @@ enum AdminCmd {
     /// Stop and delete a user's sandbox and clear the box row (a signed-in user gets a fresh box
     /// within a minute; a test user stays without one).
     DeleteBox { user: String },
+    /// iOS push: `status` lists whether APNs is configured and every registered device token;
+    /// `test --user <id> | --device <id>` sends one plain alert and prints APNs' answer.
+    Push {
+        #[arg(value_parser = ["status", "test"])]
+        action: String,
+        #[arg(long)]
+        user: Option<String>,
+        #[arg(long)]
+        device: Option<String>,
+        #[arg(long)]
+        body: Option<String>,
+    },
     /// Global kill switch: `on [--reason …]` makes the relay read-only, `off` clears it,
     /// `status` shows it with today's relay-wide spend.
     Killswitch {
@@ -869,6 +881,25 @@ async fn main() -> Result<()> {
                 }
                 AdminCmd::DeleteBox { user } => {
                     let v = admin.delete(&format!("/admin/users/{user}/box")).await?;
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                AdminCmd::Push {
+                    action,
+                    user,
+                    device,
+                    body,
+                } => {
+                    let v = match action.as_str() {
+                        "status" => admin.get("/admin/push").await?,
+                        _ => {
+                            admin
+                                .post(
+                                    "/admin/push/test",
+                                    &serde_json::json!({ "user_id": user, "device_id": device, "body": body }),
+                                )
+                                .await?
+                        }
+                    };
                     println!("{}", serde_json::to_string_pretty(&v)?);
                 }
                 AdminCmd::Killswitch { action, reason } => {
