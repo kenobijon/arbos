@@ -113,7 +113,10 @@ mod tests {
         assert_eq!(default_unused("P1", &slugs, &[]), first);
         let start = slugs.iter().position(|s| *s == first).unwrap();
         let next = slugs[(start + 1) % slugs.len()].clone();
-        assert_eq!(default_unused("P1", &slugs, &[first.clone()]), next);
+        assert_eq!(
+            default_unused("P1", &slugs, std::slice::from_ref(&first)),
+            next
+        );
         // Every slug taken: the hash pick stays.
         assert_eq!(default_unused("P1", &slugs, &slugs), first);
     }
