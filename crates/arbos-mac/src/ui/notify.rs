@@ -40,7 +40,10 @@ impl NotifyKind {
     /// A message from someone (agent reply or a person's line): the banner is
     /// titled with the sender, like a chat app, not with the event.
     fn is_message(self) -> bool {
-        matches!(self, NotifyKind::TurnFinished | NotifyKind::DirectMessage)
+        matches!(
+            self,
+            NotifyKind::TurnFinished | NotifyKind::DirectMessage | NotifyKind::CrossProject
+        )
     }
 
     fn title(self, project: &str) -> String {

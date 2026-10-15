@@ -24,6 +24,8 @@ use crate::ui::notify::{self, Gate, Notifier, NotifyEvent, NotifyKind};
 
 /// How often held notification batches are re-checked.
 const NOTIFY_TICK_MS: u64 = 5_000;
+/// A chat's first snapshot only announces messages younger than this.
+const SNAPSHOT_FRESH_MS: u64 = 30_000;
 use crate::update::{self, UpdateCommand, UpdateEvent, UpdatePhase, UpdateState};
 
 /// How the sign-in screen signs this device in.
@@ -581,6 +583,10 @@ impl AppState {
                 cx.notify();
             }
             SyncEvent::Projects(projects) => {
+                // Signed in and synced (also the path without a sign-in event).
+                if !projects.is_empty() {
+                    self.maybe_prompt_notifications();
+                }
                 for p in &projects {
                     let crossed = p.spend_cap_usd > 0.0 && p.spend_today_usd >= p.spend_cap_usd;
                     let was_below = self
@@ -696,7 +702,28 @@ impl AppState {
                 if dropped {
                     ui.composer_dropped = true;
                 }
+                // Whole messages inserted at once (a person's line, a shared
+                // agent's reply) arrive as a new snapshot, not an upsert: tell
+                // the notifier about the ones we have not seen. A chat's first
+                // snapshot is history, except what was written just now.
+                let seen: HashSet<Id> = self
+                    .messages
+                    .get(&chat_id)
+                    .map(|l| l.iter().map(|m| m.id.clone()).collect())
+                    .unwrap_or_default();
+                let first_load = !self.messages.contains_key(&chat_id);
+                let fresh_after = now_ms().saturating_sub(SNAPSHOT_FRESH_MS);
+                let arrived: Vec<Message> = messages
+                    .iter()
+                    .filter(|m| !seen.contains(&m.id))
+                    .filter(|m| !first_load || m.created_at >= fresh_after)
+                    .filter(|m| !m.is_streaming())
+                    .cloned()
+                    .collect();
                 self.messages.insert(chat_id.clone(), messages);
+                for m in &arrived {
+                    self.notify_for_message(&chat_id, m, false, false, true);
+                }
                 self.request_thumbnails(&chat_id);
                 cx.emit(AppEvent::TranscriptChanged { chat_id });
                 cx.notify();
@@ -1677,11 +1704,25 @@ impl AppState {
     /// else this project's).
     fn agent_identity(&self, project_id: &str, message: &Message) -> (String, Option<PathBuf>) {
         let project = self.projects.iter().find(|p| p.id == project_id);
-        let shared_agent = message.sender.strip_prefix("agent:").and_then(|pid| {
-            project
-                .and_then(|p| p.agents.iter().find(|a| a.project_id == pid))
-                .map(|a| (a.name.clone(), a.avatar.clone(), a.avatar_color.clone()))
-        });
+        // `agent:<pid>` in a people chat → that member; `project:<pid>` in a
+        // group chat → that project of mine.
+        let shared_agent = message
+            .sender
+            .strip_prefix("agent:")
+            .and_then(|pid| {
+                project
+                    .and_then(|p| p.agents.iter().find(|a| a.project_id == pid))
+                    .map(|a| (a.name.clone(), a.avatar.clone(), a.avatar_color.clone()))
+            })
+            .or_else(|| {
+                let pid = message.sender.strip_prefix("project:")?;
+                let other = self.projects.iter().find(|p| p.id == pid)?;
+                Some((
+                    other.name.clone(),
+                    self.avatar_slug(other),
+                    self.avatar_color(other),
+                ))
+            });
         let name = message
             .sender_name
             .clone()
@@ -1810,11 +1851,14 @@ impl AppState {
                 .insert(project_id.clone(), now_ms() + len);
         }
         if message.role == Role::Project || sender.starts_with("project:") {
-            self.notify(
+            let (sender, image) = self.agent_identity(&project_id, message);
+            self.notify_from(
                 project_id,
                 Some(chat_id),
                 NotifyKind::CrossProject,
                 preview(message),
+                Some(sender),
+                image,
             );
             return;
         }
