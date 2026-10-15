@@ -1,12 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Birdie">
 <circle class="bg" cx="32" cy="32" r="32" fill="#000000"/>
-<rect x="30" y="38" width="4" height="16" rx="1.5" class="tree" fill="#ffffff"/>
-<rect x="30" y="42" width="2" height="1.6" class="face" fill="#000000"/>
-<rect x="32" y="46.5" width="2" height="1.6" class="face" fill="#000000"/>
-<rect x="30" y="51" width="2" height="1.6" class="face" fill="#000000"/>
-<path d="M32 7C38.08 7 43 14.16 43 23C43 31.84 38.08 39 32 39C25.92 39 21 31.84 21 23C21 14.16 25.92 7 32 7Z" class="tree" fill="#ffffff"/>
-<circle cx="28.53" cy="22.48" r="1.9" class="face" fill="#000000"/>
-<circle cx="35.47" cy="22.48" r="1.9" class="face" fill="#000000"/>
-<path d="M28.58 26.47C30.86 29.51 33.14 29.51 35.42 26.47" class="face" fill="none" stroke="#000000" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
-<circle class="ring" cx="32" cy="32" r="31" fill="none" stroke="#ffffff" stroke-width="2"/>
+<path d="M27.25 38.99C27.39 37.34 28.84 36 30.5 36L33.5 36C35.16 36 36.61 37.34 36.75 38.99L37.75 51.01C37.89 52.66 36.66 54 35 54L29 54C27.34 54 26.11 52.66 26.25 51.01L27.25 38.99Z" class="tree_light" fill="#ffffff"/>
+<rect x="28" y="41" width="4" height="2" rx="1" class="tree_dark" fill="#ffffff"/>
+<rect x="32" y="46" width="4" height="2" rx="1" class="tree_dark" fill="#ffffff"/>
+<rect x="28" y="51" width="4" height="2" rx="1" class="tree_dark" fill="#ffffff"/>
+<path d="M32 5C39.18 5 45 12.61 45 22C45 31.39 39.18 39 32 39C24.82 39 19 31.39 19 22C19 12.61 24.82 5 32 5Z" class="tree" fill="#ffffff"/>
+<path d="M24.5 8.4C26.41 7.3 28.64 7.57 29.46 9C30.29 10.43 29.41 12.49 27.5 13.6C25.59 14.7 23.36 14.43 22.54 13C21.71 11.57 22.59 9.51 24.5 8.4Z" class="tree_light" fill="#ffffff"/>
+<circle cx="28.16" cy="22.32" r="2.21" class="face" fill="#000000"/>
+<circle cx="35.84" cy="22.32" r="2.21" class="face" fill="#000000"/>
+<path d="M28.22 26.73C30.74 30.09 33.26 30.09 35.78 26.73" class="face" fill="none" stroke="#000000" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/>
+<circle class="ring" cx="32" cy="32" r="31" fill="none" stroke="#ffffff" stroke-opacity="0.25" stroke-width="2"/>
 </svg>

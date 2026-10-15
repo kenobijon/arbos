@@ -31,7 +31,7 @@ struct AgentProfileView: View {
                         if !TreeAvatars.shared.isEmpty {
                             card {
                                 VStack(alignment: .leading, spacing: 12) {
-                                    if let slug = model.avatarSlug(for: project) {
+                                    if TreeAvatars.shared.colorsTintable, let slug = model.avatarSlug(for: project) {
                                         Text("Colour").font(.system(size: Theme.body, weight: .medium)).foregroundStyle(theme.text)
                                         TreeColorGrid(slug: slug, current: model.avatarColor(for: project)) { c in
                                             guard !project.shared else { return }

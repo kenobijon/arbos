@@ -28,30 +28,46 @@ STRIP_SIZES = {"1x": 28, "2x": 56, "rail": 72, "rail@2x": 144}
 # Tree-only mask strips (white tree on transparent, face cut out) for the Mac.
 TREE_STRIP_SIZES = {"2x": 56, "rail": 72}
 
-# Per-agent colors. One scheme everywhere: deep tinted disc (dark-mode
-# friendly), accent ring, white tree, face in the disc color (cut-out look).
+# Per-agent colors. The TREE carries the color on a neutral black disc with a
+# faint neutral ring: canopy = `tree`, trunk/shade = `tree_dark`, highlight =
+# `tree_light`, eyes/mouth = `face` (near-black). Mono = white tree on black.
 # THE ORDER IS A CONTRACT with the relay (it hashes over this list); the
-# slugs are fixed. Append only. slug, name, bg, ring
+# slugs are fixed. Append only.  slug, name, tree, tree_dark, tree_light
 COLORS = [
-    ("mono", "Mono", "#000000", "#ffffff"),
-    ("red", "Red", "#2a1210", "#f87171"),
-    ("orange", "Orange", "#2b1708", "#fb923c"),
-    ("amber", "Amber", "#2a1f08", "#fbbf24"),
-    ("green", "Green", "#0f2a1a", "#4ade80"),
-    ("teal", "Teal", "#0b2826", "#2dd4bf"),
-    ("cyan", "Cyan", "#0b2430", "#22d3ee"),
-    ("blue", "Blue", "#0f1f3a", "#60a5fa"),
-    ("indigo", "Indigo", "#171a3c", "#818cf8"),
-    ("violet", "Violet", "#221540", "#a78bfa"),
-    ("pink", "Pink", "#2a1230", "#f472b6"),
-    ("rose", "Rose", "#2c1020", "#fb7185"),
-    ("slate", "Slate", "#1a1f2a", "#94a3b8"),
+    ("mono", "Mono", "#ffffff", "#ffffff", "#ffffff"),
+    ("red", "Red", "#f87171", "#b91c1c", "#fecaca"),
+    ("orange", "Orange", "#fb923c", "#c2410c", "#fed7aa"),
+    ("amber", "Amber", "#fbbf24", "#b45309", "#fde68a"),
+    ("green", "Green", "#4ade80", "#15803d", "#bbf7d0"),
+    ("teal", "Teal", "#2dd4bf", "#0f766e", "#99f6e4"),
+    ("cyan", "Cyan", "#22d3ee", "#0e7490", "#a5f3fc"),
+    ("blue", "Blue", "#60a5fa", "#1d4ed8", "#bfdbfe"),
+    ("indigo", "Indigo", "#818cf8", "#4338ca", "#c7d2fe"),
+    ("violet", "Violet", "#a78bfa", "#6d28d9", "#ddd6fe"),
+    ("pink", "Pink", "#f472b6", "#be185d", "#fbcfe8"),
+    ("rose", "Rose", "#fb7185", "#be123c", "#fecdd3"),
+    ("slate", "Slate", "#94a3b8", "#475569", "#cbd5e1"),
 ]
-TREE_INK = "#ffffff"
+BG = "#000000"
+RING = "#ffffff"
+RING_OPACITY = 0.25
+FACE = "#0a0a0a"
+# Grey levels used by the `-tree` strips so the Mac can map level -> hue.
+LEVELS = {"tree": 255, "tree_light": 220, "tree_dark": 170, "face": 0}
 
 
-def color_entry(slug, name, bg, ring):
-    return {"slug": slug, "name": name, "bg": bg, "ring": ring, "tree": TREE_INK, "face": bg}
+def color_entry(slug, name, tree, tree_dark, tree_light):
+    return {
+        "slug": slug,
+        "name": name,
+        "bg": BG,
+        "ring": RING,
+        "ring_opacity": RING_OPACITY,
+        "tree": tree,
+        "tree_dark": tree_dark,
+        "tree_light": tree_light,
+        "face": "#000000" if slug == "mono" else FACE,
+    }
 
 
 def state_frames(state: str, fps: int) -> int:
@@ -100,30 +116,35 @@ def build_manifest(ready_slugs):
             "SVG/PNG: 64x64 viewBox, black #000 disc with a 2 px white #fff ring, white tree, black face; transparent outside the disc.",
             "Lottie: 60 fps, shapes only, no expressions, no raster, no masks; `idle` and `working` loop seamlessly, `reply` plays once.",
             "Frame strips: horizontal row of square frames sampled from the Lottie at 30 fps; `1x` = 28 px, `2x` = 56 px, `rail` = 72 px, `rail@2x` = 144 px; transparent outside the disc.",
-            "Tree strips (`frames[state].tree`): same frames, but only the tree as a white mask on transparent with the face cut out; the app draws its own tinted disc + ring behind and may multiply the mask by `tree`.",
-            "Colors: one scheme for every entry in `colors` — deep tinted `bg` disc, accent `ring`, white `tree`, `face` = `bg` (cut-out look). `mono` is the default. Order of `colors` is a contract with the relay (hashed like `characters`); append only.",
+            "Tree strips (`frames[state].tree`): same frames, only the tree on transparent, drawn in grey LEVELS (tree 255, tree_light 220, tree_dark 170, face 0) so the app can map level -> hue at draw time; it draws the black disc + ring itself.",
+            "Colors: the tree carries the color on a neutral black disc. `tree` = canopy, `tree_dark` = trunk/shade, `tree_light` = highlight, `face` = near-black eyes/mouth. `mono` (white tree) is the default. Order of `colors` is a contract with the relay (hashed like `characters`); append only.",
         ],
         "style": {
-            "background": "#000000",
+            "background": BG,
             "foreground": "#ffffff",
+            "ring": RING,
+            "ring_opacity": RING_OPACITY,
             "ring_px": 2,
             "viewbox": [0, 0, 64, 64],
         },
         "colors": [color_entry(*c) for c in COLORS],
         "default_color": "mono",
         "recolor": {
-            "roles": ["bg", "ring", "tree", "face"],
-            "svg": "Elements carry class=\"bg|ring|tree|face\"; set fill (and stroke for ring and stroke-based face/tree parts) per class.",
-            "lottie_layers": {"bg": "disc", "ring": "outline", "tree": "the animated tree"},
+            "roles": ["bg", "ring", "tree", "tree_dark", "tree_light", "face"],
+            "svg": "Elements carry class=\"bg|ring|tree|tree_dark|tree_light|face\"; set fill (and stroke on stroke-based parts) per class. The ring keeps stroke-opacity.",
+            "lottie_layers": {"bg": "black disc", "ring": "faint outline", "tree": "the animated tree; its fills/strokes are named tree, tree_dark, tree_light, face"},
             "lottie_keypaths": {
                 "bg": "bg.**.bg.Color",
                 "ring": "ring.**.ring.Color",
                 "tree": "tree.**.tree.Color",
+                "tree_dark": "tree.**.tree_dark.Color",
+                "tree_light": "tree.**.tree_light.Color",
                 "face": "tree.**.face.Color",
             },
-            "lottie_ios": "animationView.setValueProvider(ColorValueProvider(color.lottieColorValue), keypath: AnimationKeypath(keypath: \"tree.**.face.Color\")) — one call per role; `**` spans the group nesting.",
+            "lottie_ios": "animationView.setValueProvider(ColorValueProvider(color.lottieColorValue), keypath: AnimationKeypath(keypath: \"tree.**.tree_dark.Color\")) — one call per role; `**` spans the group nesting. For mono nothing needs setting.",
             "lottie_web": "Before loadAnimation, walk animationData.layers[*].shapes recursively and set `c.k` (RGBA 0-1) on every `fl`/`st` item whose `nm` is the role.",
-            "frame_strips": "The white-on-black strips are the `mono` look only. For a color, draw a disc in `bg` with a 2 px `ring` stroke, then the `tree` mask strip on top (multiply by `tree` if it is not white).",
+            "frame_strips": "The white-on-black strips are the `mono` look. For a color, draw the black disc + ring, then the `-tree` strip mapped by grey level: 255 -> tree, 220 -> tree_light, 170 -> tree_dark, 0 -> face (use nearest level for antialiased pixels; keep the pixel alpha).",
+            "levels": LEVELS,
         },
         "default_size": 56,
         "usage": {
@@ -132,7 +153,7 @@ def build_manifest(ready_slugs):
             "working": "Loop while a run is active; switch back to idle when it ends (both loops share frame 0, so cut on a loop boundary).",
             "reply": "Play once when a reply lands, then return to idle. It starts and ends on the idle pose.",
             "frame_strips": "Frame k of a strip is the square at x = k * size. Advance at `fps`; loop idle/working, play reply once. The widest strip (rail@2x, 90 frames) is 12960 px wide.",
-            "tree_strips": "`frames[state].tree` = white mask strips at 56 (`2x`) and 72 (`rail`) px with the face cut out. Draw the tinted disc + ring, then the mask. See `recolor`.",
+            "tree_strips": "`frames[state].tree` = grey-level strips at 56 (`2x`) and 72 (`rail`) px of the tree alone on transparent. Draw the black disc + ring, then map levels to the color's hues. See `recolor.levels`.",
             "color": "Per-agent color = one entry of `colors`; default `mono`. Apply the same entry to the still, the Lotties and the strips.",
             "pick": "Default avatar for a project = characters[fnv1a64(project_id) % characters.length].",
         },

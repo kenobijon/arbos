@@ -11,8 +11,11 @@
 import SwiftUI
 import Lottie
 
-/// One colour set from the manifest `colors[]`: hex for the disc (`bg`),
-/// the ring, the tree and the face. `mono` is black/white, the default.
+/// One colour set from the manifest `colors[]`. The TREE carries the colour
+/// (`tree` plus its `tree_dark`/`tree_light` shading and a dark `face`); the
+/// disc (`bg`) and the thin ring stay neutral and are never tinted. `mono`
+/// is the default. Entries without the v2 shading hexes are not tintable
+/// (the v1 manifest), so the art renders as drawn.
 struct TreeColor: Identifiable, Equatable, Hashable {
     let name: String
     let label: String
@@ -20,14 +23,19 @@ struct TreeColor: Identifiable, Equatable, Hashable {
     let ring: String
     let tree: String
     let face: String
+    var treeDark: String? = nil
+    var treeLight: String? = nil
 
     var id: String { name }
     var isMono: Bool { name == "mono" }
+    /// Carries the v2 tree shading hexes, so the tint can be applied.
+    var isTintable: Bool { !isMono && treeDark != nil && treeLight != nil }
 
     static let mono = TreeColor(name: "mono", label: "Mono", bg: "#000000", ring: "#ffffff", tree: "#ffffff", face: "#000000")
 
     /// The relay's palette names in its order (arbos-relay avatar.rs
-    /// DEFAULT_COLORS), with hexes used until the manifest ships `colors[]`.
+    /// DEFAULT_COLORS). Name-only (no shading hexes) so nothing is tinted
+    /// until a manifest `colors[]` with `tree_dark`/`tree_light` is bundled.
     static let builtin: [TreeColor] = [mono] + [
         ("red", "Red", "#FF3B5C"), ("orange", "Orange", "#FF7A00"), ("amber", "Amber", "#FFB000"),
         ("green", "Green", "#10B981"), ("teal", "Teal", "#14B8A6"), ("cyan", "Cyan", "#06B6D4"),
@@ -35,14 +43,29 @@ struct TreeColor: Identifiable, Equatable, Hashable {
         ("pink", "Pink", "#FF2D9B"), ("rose", "Rose", "#F43F5E"), ("slate", "Slate", "#8E8E93"),
     ].map { TreeColor(name: $0.0, label: $0.1, bg: $0.2, ring: "#ffffff", tree: "#ffffff", face: $0.2) }
 
-    /// A bare `#rrggbb` stored as the colour: accent disc, white tree.
+    /// A bare `#rrggbb` stored as the colour: the tree in that hue, shaded
+    /// by hand, on the neutral disc.
     static func fromHex(_ hex: String) -> TreeColor? {
         guard Color(hex: hex) != nil else { return nil }
-        return TreeColor(name: hex.lowercased(), label: hex, bg: hex, ring: "#ffffff", tree: "#ffffff", face: hex)
+        return TreeColor(name: hex.lowercased(), label: hex, bg: "#000000", ring: "#ffffff", tree: hex, face: "#000000",
+                         treeDark: TreeColor.shade(hex, by: -0.25), treeLight: TreeColor.shade(hex, by: 0.25))
     }
 
-    /// Accent for swatches: the ring (the scheme keeps the disc dark).
-    var swatch: Color { Color(hex: ring) ?? .white }
+    /// Accent for swatches: the tree hue.
+    var swatch: Color { Color(hex: tree) ?? .white }
+
+    /// Lighten (+) or darken (−) a hex by a fraction, for hand-made sets.
+    static func shade(_ hex: String, by f: Double) -> String? {
+        var s = hex.trimmingCharacters(in: .whitespaces)
+        if s.hasPrefix("#") { s.removeFirst() }
+        guard s.count == 6, let v = UInt32(s, radix: 16) else { return nil }
+        func ch(_ x: UInt32) -> Int {
+            let d = Double(x)
+            let r = f >= 0 ? d + (255 - d) * f : d * (1 + f)
+            return max(0, min(255, Int(r.rounded())))
+        }
+        return String(format: "#%02x%02x%02x", ch((v >> 16) & 0xff), ch((v >> 8) & 0xff), ch(v & 0xff))
+    }
 }
 
 struct TreeCharacter: Identifiable, Equatable {
@@ -125,11 +148,16 @@ final class TreeAvatars {
                 return TreeColor(name: "mono", label: (d["label"] as? String) ?? "Mono",
                                  bg: hex("bg") ?? "#000000", ring: hex("ring") ?? "#ffffff", tree: hex("tree") ?? "#ffffff", face: hex("face") ?? hex("bg") ?? "#000000")
             }
-            guard let bg = hex("bg") ?? hex("background"), let tree = hex("tree") ?? hex("fg") ?? hex("foreground") else { return nil }
-            return TreeColor(name: name, label: (d["label"] as? String) ?? title(name), bg: bg,
-                             ring: hex("ring") ?? tree, tree: tree, face: hex("face") ?? bg)
+            guard let tree = hex("tree") ?? hex("fg") ?? hex("foreground") else { return nil }
+            return TreeColor(name: name, label: (d["label"] as? String) ?? title(name),
+                             bg: hex("bg") ?? "#000000", ring: hex("ring") ?? "#ffffff", tree: tree,
+                             face: hex("face") ?? "#000000",
+                             treeDark: hex("tree_dark") ?? hex("treeDark"), treeLight: hex("tree_light") ?? hex("treeLight"))
         }
     }
+
+    /// True once the manifest carries the v2 shading hexes (the picker shows then).
+    var colorsTintable: Bool { colors.contains { $0.isTintable } }
 
     func color(named name: String) -> TreeColor? {
         if let c = colors.first(where: { $0.name == name }) { return c }
@@ -236,16 +264,16 @@ struct TreeCharacterView: View {
             .accessibilityHidden(true)
     }
 
-    /// Runtime retint on the manifest's documented keypaths: the fills and
-    /// strokes are named `bg`, `ring`, `tree`, `face` inside the layers of
-    /// the same name (`face` sits under `tree`).
+    /// Runtime retint of the tree only: the `tree` layer's named fills and
+    /// strokes `tree`, `tree_dark`, `tree_light` take the hue with its tonal
+    /// shading and `face` goes dark. `bg` and `ring` are never touched.
     private func tinted(_ view: LottieView<EmptyView>) -> LottieView<EmptyView> {
-        guard let color, !color.isMono else { return view }
+        guard let color, color.isTintable, let dark = color.treeDark, let light = color.treeLight else { return view }
         var v = view
         let pairs: [(String, String)] = [
-            ("bg.**.bg.Color", color.bg),
-            ("ring.**.ring.Color", color.ring),
             ("tree.**.tree.Color", color.tree),
+            ("tree.**.tree_dark.Color", dark),
+            ("tree.**.tree_light.Color", light),
             ("tree.**.face.Color", color.face),
         ]
         for (path, hex) in pairs {
@@ -346,7 +374,7 @@ struct TreeColorGrid: View {
 
     var body: some View {
         LazyVGrid(columns: columns, spacing: 8) {
-            ForEach(TreeAvatars.shared.colors) { c in
+            ForEach(TreeAvatars.shared.colors.filter { $0.isMono || $0.isTintable }) { c in
                 let selected = (current?.name ?? "mono") == c.name
                 Button { onPick(c) } label: {
                     TreeCharacterView(slug: slug, size: 38, color: c.isMono ? nil : c, still: !selected)
