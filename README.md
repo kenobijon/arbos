@@ -58,7 +58,7 @@ cargo run -p arbosctl -- timings demo                          # boot, wake, TTF
 
 ## Run on Daytona
 
-With `DAYTONA_API_KEY` set, `project create` (without `--local-box`) creates a real sandbox from the snapshot named by `ARBOS_DAYTONA_SNAPSHOT` (default `arbos-agent-0.1.0`). Until that snapshot is pushed, point the relay at the dev image instead:
+With `DAYTONA_API_KEY` set, `project create` (without `--local-box`) creates a real sandbox from the snapshot named by `ARBOS_DAYTONA_SNAPSHOT` (default `arbos-agent-0.1.0`; the current registered build is `arbos-agent-0.1.2`). The relay must be reachable from the box (`ARBOS_RELAY_PUBLIC_URL`). If no production snapshot is registered yet, point the relay at the dev image instead:
 
 ```bash
 export DAYTONA_API_KEY=… ARBOS_RELAY_PUBLIC_URL=https://<public-url-of-this-relay> \
@@ -72,10 +72,21 @@ cargo run -p arbosctl -- project create --name demo --provider daytona
 
 ## Image
 
+`.github/workflows/image.yml` builds `image/Dockerfile` on an image tag (`image-v0.1.2`) or by hand, pushes it to GHCR, smoke-tests it, and registers the Daytona snapshot `arbos-agent-<version>` with `image/register-snapshot.sh` (secrets `DAYTONA_API_KEY`, `GHCR_READ_TOKEN`).
+
+Without CI (unpublished repo) the same build runs on any Docker host, including a Daytona Docker-in-Docker sandbox (`FROM docker:27-dind`, start `dockerd-entrypoint.sh`, upload the build context over SSH), then goes to Daytona's transient registry:
+
 ```bash
-cargo build --release -p arbos-agentd && mkdir -p dist && cp target/release/arbos-agentd dist/
-docker buildx build --platform linux/amd64 -f image/Dockerfile -t arbos-agent:dev .
+# static agentd for the image
+CC_x86_64_unknown_linux_musl=musl-gcc cargo build --release -p arbos-agentd --target x86_64-unknown-linux-musl
+mkdir -p dist && cp target/x86_64-unknown-linux-musl/release/arbos-agentd dist/
+docker build --platform linux/amd64 -f image/Dockerfile -t arbos-agent:0.1.2 .
+# temporary push credentials: GET $DAYTONA_API_URL/docker-registry/registry-push-access?snapshotName=arbos-agent-0.1.2
+docker tag arbos-agent:0.1.2 cr.app.daytona.io/<project>/arbos-agent:0.1.2 && docker push cr.app.daytona.io/<project>/arbos-agent:0.1.2
+image/register-snapshot.sh arbos-agent-0.1.2 cr.app.daytona.io/<project>/arbos-agent:0.1.2
 ```
+
+Transient-registry tags are immutable: bump the version for every rebuild. The Arbos layers are last in the Dockerfile, so a code change rebuilds in seconds against the cached toolchain layers.
 
 ## CI
 
