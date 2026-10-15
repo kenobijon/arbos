@@ -1,5 +1,5 @@
 //! Blob mirror (crdt-sync §6.4): `PUT/GET /blob/{projectId}/{key}`. Files on disk,
-//! keys are sha256 hex or ULIDs; path traversal is refused.
+//! keys are sha256 hex or ULIDs; people-chat slots use `people:{chat_id}`. Path traversal is refused.
 
 use axum::body::Body;
 use axum::extract::{Path, State};
@@ -11,10 +11,11 @@ use crate::auth::Principal;
 use crate::state::AppState;
 
 fn safe_key(k: &str) -> bool {
+    // `:` is required for people-chat blob slots (`people:{chat_id}`); still no `/` or `..` path bits.
     !k.is_empty()
         && k.len() <= 128
         && k.chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == ':')
 }
 
 fn blob_path(state: &AppState, project_id: &str, key: &str) -> std::path::PathBuf {
