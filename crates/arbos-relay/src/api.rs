@@ -1062,7 +1062,7 @@ pub async fn record_audit(
     Json(entry): Json<Value>,
 ) -> ApiResult {
     let id = resolve_project_id(&state, &id)?;
-    if !principal.can_access_project(&id) {
+    if !state.allows(&principal, &id) {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
     let kind = entry
@@ -1090,7 +1090,7 @@ pub async fn list_audit(
     Query(q): Query<AuditQuery>,
 ) -> ApiResult {
     let id = resolve_project_id(&state, &id)?;
-    if !principal.can_access_project(&id) {
+    if !state.allows(&principal, &id) {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
     let limit = q.limit.unwrap_or(200).clamp(1, 1000);
