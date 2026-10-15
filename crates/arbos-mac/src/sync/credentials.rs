@@ -22,11 +22,11 @@ const KEYCHAIN_SERVICE: &str = "sh.arbos.mac.relay";
 pub struct AccountUser {
     #[serde(default)]
     pub id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::model::null_to_empty")]
     pub login: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::model::null_to_empty")]
     pub avatar_url: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::model::null_to_empty")]
     pub name: String,
 }
 
