@@ -3,7 +3,7 @@
 //! header with its picker. Everything here is pure rendering over `AppState`; the shell owns
 //! the open/closed state of the picker.
 
-use gpui::{div, prelude::*, px, Context, Div, ElementId, Entity, Hsla, SharedString, Stateful};
+use gpui::{div, prelude::*, px, Context, Div, ElementId, Entity, Hsla, SharedString};
 
 use crate::app::AppState;
 use crate::model::{Chat, ChatKind, Project};
@@ -143,31 +143,6 @@ pub fn sender_chip_with(
         )
 }
 
-/// "+ project" in the tab header. In a group it adds a participant; elsewhere it starts a
-/// group hosted by the selected Project.
-pub fn header_button(open: bool, theme: &Theme) -> Stateful<Div> {
-    div()
-        .id("add-project")
-        .flex_shrink_0()
-        .h(px(24.0))
-        .px(px(8.0))
-        .flex()
-        .items_center()
-        .rounded(px(6.0))
-        .text_size(px(11.5))
-        .whitespace_nowrap()
-        .bg(if open {
-            theme.surface_2
-        } else {
-            gpui::transparent_black()
-        })
-        .text_color(if open { theme.text } else { theme.text_muted })
-        .hover(|s| s.bg(theme.surface_2))
-        .cursor_pointer()
-        .child("+ project")
-}
-
-/// The picker under "+ project": every other Project not yet in the active group.
 pub fn picker(state: &Entity<AppState>, top: f32, right: f32, cx: &mut Context<Shell>) -> Div {
     let theme = Theme::of(cx).clone();
     let s = state.read(cx);

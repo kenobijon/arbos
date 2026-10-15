@@ -3870,7 +3870,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
         ClientCommand::SearchPeople { query } => {
             let q = query.trim().trim_start_matches('@').to_lowercase();
             let results: Vec<Person> = if q.is_empty() {
-                Vec::new()
+                directory()
             } else {
                 directory()
                     .into_iter()

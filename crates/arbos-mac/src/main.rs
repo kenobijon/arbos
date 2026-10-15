@@ -26,63 +26,65 @@ fn main() {
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let handle = runtime.handle().clone();
 
-    gpui_platform::application().run(move |cx: &mut App| {
-        gpui_tokio::init_from_handle(cx, handle);
-        // Matte is the default (D10); `ARBOS_SURFACE=glass` starts in Glass for demos.
-        let surface = match std::env::var("ARBOS_SURFACE").as_deref() {
-            Ok("glass") => Surface::Glass,
-            Ok(_) | Err(_) => Surface::Matte,
-        };
-        let appearance = match std::env::var("ARBOS_APPEARANCE").as_deref() {
-            Ok("light") => Appearance::Light,
-            Ok(_) | Err(_) => Appearance::Dark,
-        };
-        cx.set_global(Theme::with(appearance, surface));
-        PulseClock::init(cx);
-        bind_keys(cx);
-        set_menus(cx);
+    gpui_platform::application()
+        .with_assets(crate::ui::icons::Assets)
+        .run(move |cx: &mut App| {
+            gpui_tokio::init_from_handle(cx, handle);
+            // Matte is the default (D10); `ARBOS_SURFACE=glass` starts in Glass for demos.
+            let surface = match std::env::var("ARBOS_SURFACE").as_deref() {
+                Ok("glass") => Surface::Glass,
+                Ok(_) | Err(_) => Surface::Matte,
+            };
+            let appearance = match std::env::var("ARBOS_APPEARANCE").as_deref() {
+                Ok("light") => Appearance::Light,
+                Ok(_) | Err(_) => Appearance::Dark,
+            };
+            cx.set_global(Theme::with(appearance, surface));
+            PulseClock::init(cx);
+            bind_keys(cx);
+            set_menus(cx);
 
-        let source = app::init_source(cx);
-        let state = cx.new(|cx| AppState::new(source, cx));
+            let source = app::init_source(cx);
+            let state = cx.new(|cx| AppState::new(source, cx));
 
-        let bounds = Bounds::centered(None, size(px(1320.0), px(880.0)), cx);
-        let theme = Theme::of(cx).clone();
-        let window = cx
-            .open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    window_min_size: Some(size(px(900.0), px(600.0))),
-                    titlebar: Some(TitlebarOptions {
-                        title: Some("Arbos".into()),
-                        appears_transparent: cfg!(target_os = "macos"),
-                        traffic_light_position: Some(point(px(14.0), px(14.0))),
-                    }),
-                    app_owns_titlebar_drag: cfg!(target_os = "macos"),
-                    window_background: theme.window_background_appearance(),
-                    window_decorations: Some(WindowDecorations::Server),
-                    app_id: Some("sh.arbos.mac".into()),
-                    ..Default::default()
-                },
-                move |window, cx| cx.new(|cx| Shell::new(state.clone(), window, cx)),
-            )
-            .expect("open main window");
-        reapply_window_background(cx);
-        // Notification clicks and foreground banners (macOS); no-op elsewhere.
-        crate::ui::notify::init();
-        let _ = window.update(cx, |_, _, cx| cx.activate(true));
-        // Some X servers (Xvfb, no compositor) do not present the first frame
-        // until an event arrives; nudge a second frame shortly after launch.
-        cx.spawn(async move |cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(400))
-                .await;
-            cx.update(|cx| {
-                let _ = window.update(cx, |_, window, _| window.refresh());
-            });
-        })
-        .detach();
-        cx.on_action(|_: &shell::Quit, cx| cx.quit());
-    });
+            let bounds = Bounds::centered(None, size(px(1320.0), px(880.0)), cx);
+            let theme = Theme::of(cx).clone();
+            let window = cx
+                .open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(bounds)),
+                        window_min_size: Some(size(px(900.0), px(600.0))),
+                        titlebar: Some(TitlebarOptions {
+                            title: Some("Arbos".into()),
+                            appears_transparent: cfg!(target_os = "macos"),
+                            traffic_light_position: Some(point(px(14.0), px(14.0))),
+                        }),
+                        app_owns_titlebar_drag: cfg!(target_os = "macos"),
+                        window_background: theme.window_background_appearance(),
+                        window_decorations: Some(WindowDecorations::Server),
+                        app_id: Some("sh.arbos.mac".into()),
+                        ..Default::default()
+                    },
+                    move |window, cx| cx.new(|cx| Shell::new(state.clone(), window, cx)),
+                )
+                .expect("open main window");
+            reapply_window_background(cx);
+            // Notification clicks and foreground banners (macOS); no-op elsewhere.
+            crate::ui::notify::init();
+            let _ = window.update(cx, |_, _, cx| cx.activate(true));
+            // Some X servers (Xvfb, no compositor) do not present the first frame
+            // until an event arrives; nudge a second frame shortly after launch.
+            cx.spawn(async move |cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(400))
+                    .await;
+                cx.update(|cx| {
+                    let _ = window.update(cx, |_, window, _| window.refresh());
+                });
+            })
+            .detach();
+            cx.on_action(|_: &shell::Quit, cx| cx.quit());
+        });
 }
 
 /// The menu bar: the app menu and Help → Send Feedback… (⌘⇧F), the Mac twin of
@@ -138,6 +140,7 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-b", shell::ToggleRail, None),
         KeyBinding::new("cmd-shift-b", shell::TogglePanel, None),
         KeyBinding::new("ctrl-shift-b", shell::TogglePanel, None),
+        KeyBinding::new("escape", shell::Escape, None),
         KeyBinding::new("cmd-q", shell::Quit, None),
         KeyBinding::new("cmd-shift-f", feedback::SendFeedback, None),
         KeyBinding::new("ctrl-shift-f", feedback::SendFeedback, None),

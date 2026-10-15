@@ -14,13 +14,8 @@ use gpui::{div, prelude::*, px, Div, Hsla, RenderImage};
 use image::Delay;
 use serde::Deserialize;
 
-use gpui::{Context, ElementId, Entity, SharedString};
-
-use crate::app::AppState;
-use crate::model::{Id, Project};
-use crate::ui::frost::{frosted, MENU_BLUR};
-use crate::ui::shell::Shell;
-use crate::ui::theme::{Theme, PANEL_RADIUS, TAB_BAR_HEIGHT};
+use crate::model::Project;
+use crate::ui::theme::Theme;
 
 mod embedded {
     include!(concat!(env!("OUT_DIR"), "/tree_avatars.rs"));
@@ -167,10 +162,6 @@ impl Palette {
         let mut c = rgb_hsla(self.ring);
         c.a = self.ring_alpha as f32 / 255.0;
         c
-    }
-
-    pub fn tree_hsla(&self) -> Hsla {
-        rgb_hsla(self.tree)
     }
 }
 
@@ -393,11 +384,6 @@ fn title(slug: &str) -> String {
 /// Every character, for the picker.
 pub fn all() -> &'static [Character] {
     characters()
-}
-
-/// Anything to show or pick at all (manifest or strips present).
-pub fn available() -> bool {
-    !characters().is_empty()
 }
 
 /// FNV-1a 64 over the UTF-8 bytes — the relay's `avatar.rs` arithmetic.
@@ -675,200 +661,4 @@ pub fn element(
         .text_size(px(size * 0.55))
         .text_color(theme.text)
         .child(fallback_glyph.to_owned())
-}
-
-/// One colour swatch: the neutral disc and ring with a dot of tree ink.
-fn swatch(p: &Palette, size: f32, selected: bool, theme: &Theme) -> Div {
-    div()
-        .size(px(size))
-        .flex_shrink_0()
-        .rounded_full()
-        .bg(p.bg_hsla())
-        .border(px(if selected { 2.0 } else { 1.0 }))
-        .border_color(if selected {
-            theme.accent
-        } else {
-            p.ring_hsla()
-        })
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(div().size(px(size * 0.5)).rounded_full().bg(p.tree_hsla()))
-}
-
-/// Settings → Avatar: every character in a grid; the current one is ringed.
-pub fn picker(
-    project: &Project,
-    state: &Entity<AppState>,
-    right: f32,
-    cx: &mut Context<Shell>,
-) -> Div {
-    let theme = Theme::of(cx).clone();
-    let s = state.read(cx);
-    let current = s.avatar_slug(project);
-    let current_color = s.avatar_color(project);
-    let palette = palette_for(current_color.as_deref());
-    let project_id: Id = project.id.clone();
-    let mut grid = div()
-        .flex()
-        .flex_wrap()
-        .gap(px(8.0))
-        .max_w(px(5.0 * 80.0 + 4.0 * 8.0));
-    for c in all() {
-        let slug = c.slug.clone();
-        let selected = current.as_deref() == Some(c.slug.as_str());
-        let pid = project_id.clone();
-        grid = grid.child(
-            div()
-                .id(ElementId::Name(SharedString::from(format!(
-                    "avatar-pick-{}",
-                    c.slug
-                ))))
-                .w(px(80.0))
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap(px(4.0))
-                .p(px(6.0))
-                .when(!c.ready, |el| el.opacity(0.6))
-                .rounded(px(10.0))
-                .border_1()
-                .border_color(if selected {
-                    theme.accent
-                } else {
-                    gpui::transparent_black()
-                })
-                .bg(if selected {
-                    theme.surface_2
-                } else {
-                    gpui::transparent_black()
-                })
-                .cursor_pointer()
-                .hover(|st| st.bg(theme.surface_2))
-                .child(element(
-                    Some(&c.slug),
-                    current_color.as_deref(),
-                    AvatarState::Idle,
-                    44.0,
-                    "·",
-                    theme.accent,
-                    &theme,
-                ))
-                .child(
-                    div()
-                        .text_size(px(10.5))
-                        .text_color(if selected {
-                            theme.text
-                        } else if c.ready {
-                            theme.text_muted
-                        } else {
-                            theme.text_faint
-                        })
-                        .max_w(px(68.0))
-                        .truncate()
-                        .child(c.name.clone()),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let p = pid.clone();
-                    let sl = slug.clone();
-                    this.state.update(cx, |st, cx| st.set_avatar(p, sl, cx));
-                })),
-        );
-    }
-    // Live preview (the chosen tree, animated, in the chosen colour) and the
-    // colour row, when the assets ship colours and tree-only strips.
-    let colour_row = colors_available().then(|| {
-        let mut row = div().flex().flex_wrap().items_center().gap(px(6.0));
-        for p in colors() {
-            let selected = p.id == palette.id;
-            let pid = project_id.clone();
-            let id = p.id.clone();
-            row = row.child(
-                div()
-                    .id(ElementId::Name(SharedString::from(format!(
-                        "avatar-color-{}",
-                        p.id
-                    ))))
-                    .p(px(2.0))
-                    .rounded_full()
-                    .cursor_pointer()
-                    .hover(|st| st.bg(theme.surface_2))
-                    .child(swatch(p, 22.0, selected, &theme))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        let p = pid.clone();
-                        let c = id.clone();
-                        this.state
-                            .update(cx, |st, cx| st.set_avatar_color(p, c, cx));
-                    })),
-            );
-        }
-        div()
-            .flex()
-            .items_center()
-            .gap(px(12.0))
-            .pb(px(4.0))
-            .child(element(
-                current.as_deref(),
-                current_color.as_deref(),
-                s.avatar_state(&project.id),
-                56.0,
-                &project.icon,
-                theme.accent,
-                &theme,
-            ))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.0))
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(theme.text_muted)
-                            .child(format!(
-                                "{} · {}",
-                                current
-                                    .as_deref()
-                                    .and_then(|sl| all().iter().find(|c| c.slug == sl))
-                                    .map(|c| c.name.clone())
-                                    .unwrap_or_else(|| "Tree".to_string()),
-                                palette.name
-                            )),
-                    )
-                    .child(row),
-            )
-    });
-    let card = div()
-        .flex()
-        .flex_col()
-        .gap(px(6.0))
-        .p(px(10.0))
-        .rounded(px(PANEL_RADIUS))
-        .bg(theme.card())
-        .border_1()
-        .border_color(theme.border_strong)
-        .shadow_lg()
-        .child(
-            div()
-                .text_size(px(11.0))
-                .text_color(theme.text_faint)
-                .child(format!("AVATAR · {}", project.name.to_uppercase())),
-        )
-        .children(colour_row)
-        .child(grid)
-        .child(
-            div()
-                .text_size(px(10.5))
-                .text_color(theme.text_faint)
-                .child(if colors_available() {
-                    "Picked for you from the project id; choose any tree and colour to make it yours."
-                } else {
-                    "Picked for you from the project id; choose any tree to make it yours."
-                }),
-        );
-    div()
-        .absolute()
-        .top(px(TAB_BAR_HEIGHT + 6.0))
-        .right(px(right))
-        .child(frosted(PANEL_RADIUS, MENU_BLUR, card))
 }

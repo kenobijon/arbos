@@ -167,7 +167,6 @@ pub struct AppState {
     pub show_details: bool,
     /// The user's one machine (projects are workspaces on it).
     pub machine: Machine,
-    pub machine_hover: bool,
     /// Settings → Connectors (F1).
     pub connectors: ConnectorsView,
     /// Settings → Vault (F8).
@@ -300,7 +299,6 @@ impl AppState {
             new_project_open: false,
             show_details: false,
             machine: Machine::default(),
-            machine_hover: false,
             connectors: ConnectorsView::default(),
             vault: VaultView::default(),
             routines: HashMap::new(),
@@ -2172,7 +2170,7 @@ impl AppState {
         self.people_query.clear();
         self.people_results.clear();
         self.people_error = None;
-        cx.notify();
+        self.search_people(String::new(), cx);
     }
 
     /// Project header "Invite": the same sheet, but a pick adds a member.
@@ -2204,14 +2202,9 @@ impl AppState {
     pub fn search_people(&mut self, query: String, cx: &mut Context<Self>) {
         self.people_query = query.clone();
         self.people_error = None;
-        let q = query.trim().trim_start_matches('@');
-        if q.is_empty() {
-            self.people_results.clear();
-            self.people_busy = false;
-        } else {
-            self.people_busy = true;
-            self.command(ClientCommand::SearchPeople { query });
-        }
+        // An empty query lists everyone on Arbos (the sheet's "Arbos users").
+        self.people_busy = true;
+        self.command(ClientCommand::SearchPeople { query });
         cx.notify();
     }
 

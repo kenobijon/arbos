@@ -1,6 +1,9 @@
-//! The composer pill (§3.6): attach, hand-rolled multi-line text input with
-//! IME (`EntityInputHandler`, zeron-study §4.6), model and reasoning pickers,
-//! send/stop. Enter sends, Shift+Enter inserts a newline.
+//! The composer, Grok Bot layout: a "+" circle for attachments, the pill
+//! field ("Ask <name>") with the hold-to-talk mic, and the round white button
+//! that sends text, stops a running turn, or starts a voice call when empty.
+//! Hand-rolled multi-line text input with IME (`EntityInputHandler`,
+//! zeron-study §4.6). Enter sends, Shift+Enter inserts a newline. The model
+//! and reasoning pickers open from the header's "…" menu.
 
 use std::ops::Range;
 use std::path::PathBuf;
@@ -19,7 +22,12 @@ use crate::app::{AppState, ComposerMode};
 use crate::model::Effort;
 use crate::sync::fixture::MODELS;
 use crate::ui::frost::{frosted, MENU_BLUR, PANEL_BLUR};
-use crate::ui::theme::{Theme, COMPOSER_HEIGHT, PANEL_RADIUS};
+use crate::ui::glass;
+use crate::ui::icons::icon;
+use crate::ui::theme::{
+    Theme, COMPOSER_HEIGHT, LINE_HEIGHT, PANEL_RADIUS, PLUS_BUTTON, SEND_BUTTON, TEXT_BODY,
+    TEXT_TINY,
+};
 use crate::ui::voice::{render_recording_row, Voice, VoiceEvent};
 
 actions!(
@@ -45,11 +53,11 @@ actions!(
 );
 
 pub const MAX_LINES: usize = 10;
-pub const COMPOSER_RADIUS: f32 = 18.0;
+pub const COMPOSER_RADIUS: f32 = COMPOSER_HEIGHT / 2.0;
 
 pub type SubmitHandler = Rc<dyn Fn(&mut Window, &mut App)>;
-const INPUT_LINE_HEIGHT: f32 = 20.0;
-const INPUT_FONT_SIZE: f32 = 13.5;
+const INPUT_LINE_HEIGHT: f32 = LINE_HEIGHT;
+const INPUT_FONT_SIZE: f32 = TEXT_BODY;
 
 #[derive(Clone, Debug)]
 pub enum ComposerEvent {
@@ -937,7 +945,7 @@ impl Focusable for ComposerInput {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Picker {
+pub enum Picker {
     Model,
     Effort,
 }
@@ -951,7 +959,8 @@ pub struct Composer {
     /// Which chat the input text belongs to; drafts are kept per chat.
     draft_chat: Option<crate::model::Id>,
     drafts: std::collections::HashMap<crate::model::Id, String>,
-    open_picker: Option<Picker>,
+    /// The model / effort menu, opened from the header's "…" menu.
+    pub open_picker: Option<Picker>,
     /// S8 shake when the user hits Cmd+W on the pinned tab; also reused for
     /// the empty-send nudge.
     pub nudge_at: Option<u64>,
@@ -1149,8 +1158,8 @@ impl Composer {
             .flex()
             .flex_col()
             .min_w(px(260.0))
-            .p(px(4.0))
-            .rounded(px(10.0))
+            .p(px(6.0))
+            .rounded(px(PANEL_RADIUS))
             .bg(theme.card())
             .border_1()
             .border_color(theme.border_strong)
@@ -1205,9 +1214,9 @@ impl Composer {
         );
         div()
             .absolute()
-            .bottom(px(COMPOSER_HEIGHT + 44.0))
-            .left(px(16.0))
-            .child(frosted(10.0, PANEL_BLUR, menu))
+            .bottom(px(COMPOSER_HEIGHT + 12.0))
+            .left(px(8.0))
+            .child(frosted(PANEL_RADIUS, PANEL_BLUR, menu))
     }
 
     fn render_picker_menu(&self, picker: Picker, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1299,11 +1308,11 @@ impl Composer {
                 }
             }
         }
-        // Opens upward from the picker row.
+        // Opens upward, above the field.
         div()
             .absolute()
-            .bottom(px(COMPOSER_HEIGHT + 44.0))
-            .right(px(56.0))
+            .bottom(px(COMPOSER_HEIGHT + 12.0))
+            .right(px(0.0))
             .child(frosted(PANEL_RADIUS, MENU_BLUR, menu))
     }
 }
@@ -1314,17 +1323,26 @@ impl Render for Composer {
         let theme = Theme::of(cx).clone();
         let mode = self.mode(cx);
         let state = self.state.read(cx);
-        let (model, effort) = state
-            .selected()
-            .map(|p| (p.model.clone(), p.effort))
-            .unwrap_or((MODELS[0].to_string(), Effort::High));
+        let space = state.selected().cloned();
         // A people chat has no model of its own: its agents run on their owners' settings.
-        let in_people = state
-            .selected()
-            .map(|p| p.is_people() || p.is_guest())
-            .unwrap_or(false);
         let link_full = state.link == crate::model::Link::Reconnecting;
         let voice_mode = state.voice_mode;
+        let running = state
+            .active_chat_id()
+            .map(|id| state.chat_is_streaming(&id))
+            .unwrap_or(false);
+        let name = space
+            .as_ref()
+            .map(|p| {
+                if p.is_people() {
+                    p.person()
+                        .map(|x| format!("@{}", x.handle))
+                        .unwrap_or_else(|| p.name.clone())
+                } else {
+                    p.name.clone()
+                }
+            })
+            .unwrap_or_else(|| "Arbos".into());
         let (recording, transcribing, in_call, voice_notice) = {
             let v = self.voice.read(cx);
             (
@@ -1334,14 +1352,16 @@ impl Render for Composer {
                 v.notice().map(str::to_owned),
             )
         };
+        let has_text = !self.input.read(cx).text().trim().is_empty();
 
         self.input.update(cx, |input, _| {
             input.set_placeholder(match mode {
-                ComposerMode::Answer => "Answer the agent…",
-                ComposerMode::Approve => "Approve or reject the card above",
-                ComposerMode::Send if transcribing => "Transcribing…",
-                ComposerMode::Send if voice_mode => "Speak or type…",
-                ComposerMode::Send => "Do anything…",
+                ComposerMode::Answer => format!("Answer {name}"),
+                ComposerMode::Approve => "Approve or reject the card above".to_string(),
+                ComposerMode::Send if transcribing => "Transcribing…".to_string(),
+                ComposerMode::Send if voice_mode => "Speak or type…".to_string(),
+                ComposerMode::Send if name.starts_with('@') => format!("Message {name}"),
+                ComposerMode::Send => format!("Ask {name}"),
             });
         });
 
@@ -1354,161 +1374,80 @@ impl Render for Composer {
         }
 
         let border_color = match mode {
-            ComposerMode::Answer | ComposerMode::Approve => theme.warn,
+            ComposerMode::Answer | ComposerMode::Approve => Theme::with_alpha(theme.warn, 0.7),
             ComposerMode::Send => {
                 if nudge {
                     theme.danger
                 } else {
-                    theme.border_strong
+                    theme.field_border
                 }
             }
         };
 
-        let send_button = div()
+        // The round primary button: send text, stop a running turn when the
+        // field is empty, or start / end a voice call when idle and empty.
+        let (glyph, action): (&str, ButtonAction) = if has_text {
+            ("arrow-up", ButtonAction::Send)
+        } else if running {
+            ("stop", ButtonAction::Stop)
+        } else if in_call {
+            ("phone", ButtonAction::Call)
+        } else {
+            ("waveform", ButtonAction::Call)
+        };
+        let primary_button = div()
             .id("composer-send")
-            .size(px(30.0))
+            .size(px(SEND_BUTTON))
+            .flex_shrink_0()
             .rounded_full()
-            .bg(theme.text)
+            .bg(if action == ButtonAction::Call && in_call {
+                theme.danger
+            } else {
+                theme.primary
+            })
             .flex()
             .items_center()
             .justify_center()
             .cursor_pointer()
-            .text_color(theme.bg)
-            .text_size(px(15.0))
-            .font_weight(gpui::FontWeight::BOLD)
-            .child("↑")
-            .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx)));
+            .hover(|s| s.opacity(0.88))
+            .child(icon(
+                glyph,
+                if glyph == "stop" { 14.0 } else { 16.0 },
+                if action == ButtonAction::Call && in_call {
+                    theme.text
+                } else {
+                    theme.on_primary
+                },
+            ))
+            .on_click(cx.listener(move |this, _, window, cx| match action {
+                ButtonAction::Send => this.submit(window, cx),
+                ButtonAction::Stop => cx.emit(ComposerEvent::Stop),
+                ButtonAction::Call => this.voice.update(cx, |v, cx| v.toggle_call(cx)),
+            }));
 
-        // While anything runs in this chat, a small stop icon sits beside send.
-        let running = {
-            let state = self.state.read(cx);
-            state
-                .active_chat_id()
-                .map(|id| state.chat_is_streaming(&id))
-                .unwrap_or(false)
-        };
-        let stop_button = running.then(|| {
-            div()
-                .id("composer-stop")
-                .size(px(30.0))
-                .rounded_full()
-                .border_1()
-                .border_color(theme.border_strong)
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                .hover(|s| s.border_color(theme.danger))
-                .child(div().size(px(9.0)).rounded(px(2.0)).bg(theme.text_muted))
-                .on_click(cx.listener(|_, _, _, cx| cx.emit(ComposerEvent::Stop)))
-        });
-
-        let mut pill = div()
-            .relative()
-            .w_full()
-            .flex()
-            .flex_col()
-            .rounded(px(COMPOSER_RADIUS))
-            .bg(theme.card())
-            .border_1()
-            .border_color(border_color)
-            .when(
-                matches!(mode, ComposerMode::Answer | ComposerMode::Approve),
-                |el| el.border_t_2(),
-            )
-            .shadow_sm();
-
-        if !self.attachments.is_empty() {
-            let mut chips = div()
-                .flex()
-                .flex_wrap()
-                .gap(px(6.0))
-                .px(px(14.0))
-                .pt(px(10.0));
-            for (i, path) in self.attachments.iter().enumerate() {
-                let name_owned = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("attachment")
-                    .to_string();
-                chips = chips.child(
-                    div()
-                        .id(ElementId::NamedInteger("attachment".into(), i as u64))
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .px(px(8.0))
-                        .py(px(3.0))
-                        .rounded(px(6.0))
-                        .bg(theme.surface_2)
-                        .text_size(px(11.5))
-                        .text_color(theme.text_muted)
-                        .child(name_owned)
-                        .child(
-                            div()
-                                .text_color(theme.text_faint)
-                                .child("×")
-                                .cursor_pointer(),
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if i < this.attachments.len() {
-                                this.attachments.remove(i);
-                            }
-                            cx.notify();
-                        })),
-                );
-            }
-            pill = pill.child(chips);
-        }
-
-        // Text uses the full width; the controls live in their own bottom
-        // row, so growing text never moves them (Cursor composer). While a
-        // memo records, the row shows the level meter instead of the input.
-        let text_row = if recording {
-            div()
-                .w_full()
-                .flex()
-                .px(px(14.0))
-                .pt(px(11.0))
-                .pb(px(4.0))
-                .h(px(INPUT_LINE_HEIGHT + 15.0))
-                .child(render_recording_row(self.voice.read(cx), &theme))
-        } else {
-            div()
-                .w_full()
-                .flex()
-                .px(px(14.0))
-                .pt(px(11.0))
-                .pb(px(4.0))
-                .child(self.input.clone())
-        };
-
-        // Mic (F11): press and hold to talk, or click to toggle.
+        // Hold to record a voice memo, or click to toggle recording.
         let mic_button = div()
             .id("composer-mic")
-            .size(px(30.0))
+            .size(px(SEND_BUTTON))
+            .flex_shrink_0()
             .rounded_full()
-            .border_1()
-            .border_color(if recording {
-                theme.danger
-            } else {
-                theme.border_strong
-            })
-            .when(recording, |el| el.bg(theme.danger_soft))
             .flex()
             .items_center()
             .justify_center()
             .cursor_pointer()
-            .text_size(px(13.0))
-            .text_color(if recording {
-                theme.danger
-            } else if transcribing {
-                theme.text_faint
-            } else {
-                theme.text_muted
-            })
+            .when(recording, |el| el.bg(theme.danger_soft))
             .hover(|s| s.bg(theme.surface_2))
-            .child(if recording { "■" } else { "◉" })
+            .child(icon(
+                if recording { "stop" } else { "mic" },
+                16.0,
+                if recording {
+                    theme.danger
+                } else if transcribing {
+                    theme.text_faint
+                } else {
+                    theme.text_muted
+                },
+            ))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
@@ -1528,146 +1467,162 @@ impl Render for Composer {
                 }),
             );
 
-        // Voice mode: transcripts send at once and replies are spoken.
-        let voice_toggle = div()
-            .id("composer-voice-mode")
+        let plus = div()
+            .id("composer-attach")
+            .size(px(PLUS_BUTTON))
+            .flex_shrink_0()
+            .rounded_full()
+            .bg(theme.surface_2)
             .flex()
             .items_center()
-            .gap(px(4.0))
-            .px(px(8.0))
-            .py(px(4.0))
-            .rounded(px(6.0))
-            .text_size(px(12.5))
-            .text_color(if voice_mode {
-                theme.accent
-            } else {
-                theme.text_muted
-            })
-            .when(voice_mode, |el| el.bg(theme.accent_soft))
-            .hover(|s| s.bg(theme.surface_2))
+            .justify_center()
             .cursor_pointer()
-            .child("♪")
-            .child(if in_call { "Call" } else { "Voice" })
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.voice.update(cx, |v, cx| v.toggle_voice_mode(cx));
-            }));
+            .hover(|s| s.bg(theme.bubble))
+            .child(icon("plus", 16.0, theme.text))
+            .on_click(cx.listener(|this, _, _, cx| this.attach(cx)));
 
-        let controls = div()
-            .w_full()
+        let field_body = if recording {
+            div()
+                .flex_1()
+                .min_w_0()
+                .h(px(COMPOSER_HEIGHT - 2.0))
+                .flex()
+                .items_center()
+                .pl(px(10.0))
+                .child(render_recording_row(self.voice.read(cx), &theme))
+        } else {
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .pl(px(10.0))
+                .py(px((COMPOSER_HEIGHT - 2.0 - INPUT_LINE_HEIGHT) / 2.0))
+                .child(self.input.clone())
+        };
+
+        let mut field = div()
+            .flex_1()
+            .min_w_0()
+            .min_h(px(COMPOSER_HEIGHT))
             .flex()
-            .items_center()
-            .gap(px(6.0))
-            .pl(px(9.0))
-            .pr(px(9.0))
-            .pb(px(8.0))
-            .pt(px(2.0))
+            .items_end()
+            .gap(px(4.0))
+            .pl(px((COMPOSER_HEIGHT - 2.0 - PLUS_BUTTON) / 2.0))
+            .pr(px((COMPOSER_HEIGHT - 2.0 - SEND_BUTTON) / 2.0))
+            .rounded(px(COMPOSER_RADIUS))
+            .bg(theme.field)
+            .border_1()
+            .border_color(border_color)
             .child(
                 div()
-                    .id("composer-attach")
-                    .size(px(28.0))
+                    .h(px(COMPOSER_HEIGHT - 2.0))
                     .flex()
                     .items_center()
-                    .justify_center()
-                    .rounded_full()
-                    .border_1()
-                    .border_color(theme.border_strong)
-                    .text_color(theme.text_muted)
-                    .text_size(px(15.0))
-                    .hover(|s| s.bg(theme.surface_2))
-                    .cursor_pointer()
-                    .child("+")
-                    .on_click(cx.listener(|this, _, _, cx| this.attach(cx))),
+                    .flex_shrink_0()
+                    .child(plus),
             )
-            .child(voice_toggle)
-            .child(div().flex_1())
-            .when(!in_people, |el| {
-                el.child(
+            .child(field_body);
+        // Grok Mac: the mic alone while the field is idle; the round button
+        // appears for text (send), a running turn (stop) or a call (hang up).
+        let mut trailing = div()
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .h(px(COMPOSER_HEIGHT - 2.0))
+            .flex_shrink_0();
+        if !has_text && !recording {
+            trailing = trailing.child(mic_button);
+        }
+        if has_text || running || in_call || voice_mode || recording {
+            trailing = trailing.child(primary_button);
+        }
+        field = field.child(trailing);
+
+        let mut column = div().relative().w_full().flex().flex_col().gap(px(8.0));
+
+        if !self.attachments.is_empty() {
+            let mut chips = div().flex().flex_wrap().gap(px(6.0)).pl(px(8.0));
+            for (i, path) in self.attachments.iter().enumerate() {
+                let name_owned = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("attachment")
+                    .to_string();
+                let is_image = matches!(
+                    path.extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| e.to_lowercase())
+                        .as_deref(),
+                    Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "heic")
+                );
+                chips = chips.child(
                     div()
-                        .id("composer-model")
+                        .id(ElementId::NamedInteger("attachment".into(), i as u64))
                         .flex()
                         .items_center()
-                        .gap(px(4.0))
-                        .px(px(8.0))
-                        .py(px(4.0))
-                        .rounded(px(6.0))
-                        .text_size(px(12.5))
+                        .gap(px(6.0))
+                        .px(px(10.0))
+                        .py(px(5.0))
+                        .rounded_full()
+                        .bg(theme.bubble_assistant)
+                        .text_size(px(TEXT_TINY))
                         .text_color(theme.text)
-                        .hover(|s| s.bg(theme.surface_2))
                         .cursor_pointer()
-                        .child(model)
-                        .child(div().text_color(theme.text_faint).child("⌄"))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.open_picker = match this.open_picker {
-                                Some(Picker::Model) => None,
-                                Some(Picker::Effort) | None => Some(Picker::Model),
-                            };
+                        .child(icon(
+                            if is_image { "photo" } else { "doc" },
+                            12.0,
+                            theme.text,
+                        ))
+                        .child(div().max_w(px(220.0)).truncate().child(name_owned))
+                        .child(icon("xmark", 9.0, theme.text_muted))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if i < this.attachments.len() {
+                                this.attachments.remove(i);
+                            }
                             cx.notify();
                         })),
-                )
-                .child(
-                    div()
-                        .id("composer-effort")
-                        .flex()
-                        .items_center()
-                        .px(px(8.0))
-                        .py(px(4.0))
-                        .rounded(px(6.0))
-                        .text_size(px(12.5))
-                        .text_color(theme.text_muted)
-                        .hover(|s| s.bg(theme.surface_2))
-                        .cursor_pointer()
-                        .child(effort.label())
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.open_picker = match this.open_picker {
-                                Some(Picker::Effort) => None,
-                                Some(Picker::Model) | None => Some(Picker::Effort),
-                            };
-                            cx.notify();
-                        })),
-                )
-            })
-            .children(stop_button)
-            .child(mic_button)
-            .child(send_button);
+                );
+            }
+            column = column.child(chips);
+        }
 
-        pill = pill.child(text_row).child(controls);
+        column = column.child(frosted(COMPOSER_RADIUS, PANEL_BLUR, field));
 
-        // One line about the voice path while it is doing something (or when
-        // it had to fall back: no microphone, mock relay).
-        if let Some(notice) = voice_notice.filter(|_| recording || transcribing || voice_mode) {
-            pill = pill.child(
+        // One muted line about the voice path while it is doing something (or
+        // when it had to fall back: no microphone, mock relay), or the link.
+        let note = voice_notice
+            .filter(|_| recording || transcribing || voice_mode)
+            .or_else(|| {
+                link_full.then(|| {
+                    "Reconnecting… messages queue locally and sync when the relay is back."
+                        .to_string()
+                })
+            });
+        if let Some(note) = note {
+            column = column.child(
                 div()
-                    .px(px(16.0))
-                    .pb(px(8.0))
-                    .text_size(px(11.0))
-                    .text_color(theme.text_faint)
-                    .child(notice),
+                    .pl(px(16.0))
+                    .text_size(px(TEXT_TINY))
+                    .text_color(theme.text_muted)
+                    .child(note),
             );
         }
 
-        if link_full {
-            pill = pill.child(
-                div()
-                    .px(px(16.0))
-                    .pb(px(8.0))
-                    .text_size(px(11.0))
-                    .text_color(theme.text_faint)
-                    .child("Reconnecting… messages queue locally and sync when the relay is back."),
-            );
-        }
-
-        let mut root = div().relative().w_full().flex().flex_col().child(frosted(
-            COMPOSER_RADIUS,
-            PANEL_BLUR,
-            pill,
-        ));
         if let Some(picker) = self.open_picker {
-            root = root.child(self.render_picker_menu(picker, cx));
+            column = column.child(glass::popover(self.render_picker_menu(picker, cx)));
         }
         let mentions = self.mention_candidates(cx);
         if !mentions.is_empty() {
-            root = root.child(self.render_mentions(mentions, cx));
+            column = column.child(glass::popover(self.render_mentions(mentions, cx)));
         }
-        root
+        column
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ButtonAction {
+    Send,
+    Stop,
+    Call,
 }

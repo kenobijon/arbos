@@ -2477,13 +2477,18 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             let shared = shared.clone();
             tokio::spawn(async move {
                 let q = query.trim().trim_start_matches('@');
-                match shared
-                    .get_json(&format!("/users/search?q={}", crate::auth::url_encode(q)))
-                    .await
-                {
+                // Empty query: the directory (`GET /users`, `{users: [...]}`);
+                // otherwise the prefix search (a bare array).
+                let path = if q.is_empty() {
+                    "/users?limit=200".to_string()
+                } else {
+                    format!("/users/search?q={}", crate::auth::url_encode(q))
+                };
+                match shared.get_json(&path).await {
                     Ok(v) => {
                         let results: Vec<Person> = v
                             .as_array()
+                            .or_else(|| v.get("users").and_then(|u| u.as_array()))
                             .map(|a| {
                                 a.iter()
                                     .filter_map(|p| {

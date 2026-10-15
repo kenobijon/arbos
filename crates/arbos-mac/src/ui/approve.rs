@@ -7,7 +7,8 @@
 use gpui::{div, prelude::*, px, App, Div, FontWeight, Hsla, SharedString, Stateful};
 
 use crate::model::{ApprovalRisk, ApprovalState};
-use crate::ui::theme::{Appearance, Theme, PANEL_RADIUS};
+use crate::ui::glass;
+use crate::ui::theme::{Appearance, Theme, BUBBLE_RADIUS, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
 /// Everything the card renders, flattened from `Part::Approval`.
 #[derive(Clone, Debug, PartialEq)]
@@ -75,7 +76,7 @@ impl ApprovalView {
 fn state_color(state: ApprovalState, theme: &Theme) -> Hsla {
     match state {
         ApprovalState::Pending => theme.warn,
-        ApprovalState::Approved => theme.accent,
+        ApprovalState::Approved => theme.online,
         ApprovalState::Rejected => theme.danger,
         ApprovalState::Expired => theme.text_faint,
     }
@@ -83,46 +84,25 @@ fn state_color(state: ApprovalState, theme: &Theme) -> Hsla {
 
 fn chip(text: impl Into<SharedString>, color: Hsla, theme: &Theme) -> Div {
     div()
-        .px(px(7.0))
-        .py(px(1.0))
-        .rounded(px(5.0))
+        .px(px(8.0))
+        .py(px(2.0))
+        .rounded_full()
         .bg(Theme::with_alpha(
             color,
             if theme.appearance == Appearance::Dark {
-                0.18
+                0.16
             } else {
                 0.12
             },
         ))
-        .text_size(px(10.5))
-        .font_weight(FontWeight::SEMIBOLD)
+        .text_size(px(TEXT_TINY))
+        .font_weight(FontWeight::MEDIUM)
         .text_color(color)
         .child(text.into())
 }
 
-fn button(
-    id: impl Into<SharedString>,
-    label: &str,
-    fg: Hsla,
-    bg: Hsla,
-    on_click: impl Fn(&mut App) + 'static,
-) -> Stateful<Div> {
-    div()
-        .id(id.into())
-        .px(px(12.0))
-        .py(px(5.0))
-        .rounded(px(7.0))
-        .bg(bg)
-        .text_size(px(12.0))
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(fg)
-        .cursor_pointer()
-        .hover(|s| s.opacity(0.85))
-        .child(label.to_string())
-        .on_click(move |_, _, cx| on_click(cx))
-}
-
-/// The card. `on_approve` / `on_reject` run only while the card is pending.
+/// The card (Grok's inline widget): an assistant-bubble card with the title,
+/// a risk + state chip, the preview, and two capsule buttons while pending.
 pub fn approval_card(
     row_id: &str,
     view: &ApprovalView,
@@ -133,7 +113,7 @@ pub fn approval_card(
     let accent = state_color(view.state, theme);
     let pending = view.state == ApprovalState::Pending;
 
-    let mut header = div()
+    let header = div()
         .flex()
         .items_center()
         .gap(px(8.0))
@@ -141,33 +121,24 @@ pub fn approval_card(
             div()
                 .flex_1()
                 .min_w_0()
-                .text_size(px(13.5))
+                .text_size(px(TEXT_BODY))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme.text)
                 .child(view.title.clone()),
         )
         .child(chip(view.risk.label(), theme.text_muted, theme))
         .child(chip(view.state.label(), accent, theme));
-    if pending {
-        header = header.child(
-            div()
-                .text_size(px(10.5))
-                .text_color(theme.warn)
-                .font_weight(FontWeight::SEMIBOLD)
-                .child("WAITING FOR YOU"),
-        );
-    }
 
-    let mut body = div().flex().flex_col().gap(px(4.0));
+    let mut body = div().flex().flex_col().gap(px(5.0));
     for (label, value) in view.preview() {
         let mono = label.is_empty();
-        let mut line = div().flex().gap(px(8.0)).text_size(px(12.5));
+        let mut line = div().flex().gap(px(8.0)).text_size(px(TEXT_SMALL));
         if !label.is_empty() {
             line = line.child(
                 div()
-                    .w(px(56.0))
+                    .w(px(60.0))
                     .flex_shrink_0()
-                    .text_color(theme.text_faint)
+                    .text_color(theme.text_muted)
                     .child(label),
             );
         }
@@ -178,12 +149,12 @@ pub fn approval_card(
                 .text_color(theme.text)
                 .when(mono, |el| {
                     el.mt(px(4.0))
-                        .px(px(10.0))
-                        .py(px(8.0))
-                        .rounded(px(6.0))
+                        .px(px(12.0))
+                        .py(px(9.0))
+                        .rounded(px(10.0))
                         .bg(theme.code_bg)
-                        .text_size(px(12.0))
-                        .line_height(px(18.0))
+                        .text_size(px(TEXT_SMALL))
+                        .line_height(px(19.0))
                 })
                 .child(value),
         );
@@ -193,27 +164,21 @@ pub fn approval_card(
     let mut footer = div()
         .flex()
         .items_center()
-        .gap(px(8.0))
-        .text_size(px(11.0))
-        .text_color(theme.text_faint);
+        .gap(px(10.0))
+        .text_size(px(TEXT_TINY))
+        .text_color(theme.text_muted);
     if pending {
         footer = footer
-            .child(button(
-                format!("{row_id}-approve"),
-                "Approve",
-                theme.bg,
-                theme.text,
-                on_approve,
-            ))
-            .child(button(
-                format!("{row_id}-reject"),
-                "Reject",
-                theme.text,
-                theme.surface_2,
-                on_reject,
-            ))
-            .child(div().flex_1())
-            .child("Nothing happens until you decide. Expires in 24 h.");
+            .child(
+                glass::quiet_button(format!("{row_id}-reject"), "Reject", theme)
+                    .flex_1()
+                    .on_click(move |_, _, cx| on_reject(cx)),
+            )
+            .child(
+                glass::primary_button(format!("{row_id}-approve"), "Approve", theme)
+                    .flex_1()
+                    .on_click(move |_, _, cx| on_approve(cx)),
+            );
     } else {
         let mut note = format!("{} ", view.state.label());
         if let Some(by) = &view.decided_by {
@@ -225,21 +190,28 @@ pub fn approval_card(
         footer = footer.child(note.trim().to_string());
     }
 
-    div()
+    let mut card = div()
         .id(SharedString::from(row_id.to_string()))
+        .max_w(px(crate::ui::transcript::ASSISTANT_MAX_WIDTH))
         .w_full()
         .my(px(6.0))
         .flex()
         .flex_col()
-        .gap(px(10.0))
-        .px(px(14.0))
-        .py(px(12.0))
-        .rounded(px(PANEL_RADIUS))
-        .bg(theme.card())
-        .border_1()
-        .border_color(Theme::with_alpha(accent, 0.45))
-        .border_l_2()
+        .gap(px(12.0))
+        .px(px(16.0))
+        .py(px(14.0))
+        .rounded(px(BUBBLE_RADIUS))
+        .bg(theme.bubble_assistant)
         .child(header)
         .child(body)
-        .child(footer)
+        .child(footer);
+    if pending {
+        card = card.child(
+            div()
+                .text_size(px(TEXT_TINY))
+                .text_color(theme.text_muted)
+                .child("Nothing happens until you decide. Expires in 24 h."),
+        );
+    }
+    card
 }

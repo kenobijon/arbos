@@ -1,22 +1,43 @@
 //! Colours are paint, numbers drive layout (zeron-study §2.4). One global.
+//!
+//! The palette is the iPhone app's (`apps/ios/.../UI/Theme.swift`), itself
+//! measured from Grok Bot: background #141414, assistant bubble #202020, user
+//! bubble #5C5C5C, field #181818 with a #242424 rim, system text #95959B.
+//! The Mac is that UI scaled up: a chat-list sidebar, one conversation pane.
 //! Matte is the default; Glass is a macOS-only toggle (D10, §3.11).
 
-use gpui::{hsla, App, Global, Hsla, WindowBackgroundAppearance};
+use gpui::{hsla, rgb, rgba, App, Global, Hsla, WindowBackgroundAppearance};
 
-pub const RAIL_WIDTH: f32 = 90.0;
-pub const RAIL_WIDTH_COLLAPSED: f32 = 48.0;
-pub const RAIL_TILE: f32 = 72.0;
-pub const TAB_BAR_HEIGHT: f32 = 38.0;
-pub const TAB_MIN_WIDTH: f32 = 120.0;
-pub const COMPOSER_WIDTH: f32 = 640.0;
-pub const COMPOSER_HEIGHT: f32 = 48.0;
-pub const BUBBLE_RADIUS: f32 = 14.0;
-pub const PANEL_RADIUS: f32 = 10.0;
+/// Chat-list sidebar (the iPhone home list, one column).
+pub const SIDEBAR_WIDTH: f32 = 296.0;
+/// Kept for the settings sub-panels, which open just right of the sidebar.
+pub const RAIL_WIDTH: f32 = SIDEBAR_WIDTH;
+/// The slim conversation header (avatar + name left, icon buttons right).
+pub const HEADER_HEIGHT: f32 = 50.0;
+pub const TAB_BAR_HEIGHT: f32 = HEADER_HEIGHT;
+/// Composer: one pill with the "+" circle inside left and mic / send inside right.
+pub const COMPOSER_WIDTH: f32 = 820.0;
+pub const COMPOSER_HEIGHT: f32 = 46.0;
+pub const PLUS_BUTTON: f32 = 32.0;
+pub const SEND_BUTTON: f32 = 32.0;
+/// Icon buttons in the header and sheet corners.
+pub const CONTROL: f32 = 32.0;
+/// Bubble corners (Grok Mac ≈ 16 pt; the iPhone uses 20).
+pub const BUBBLE_RADIUS: f32 = 16.0;
+pub const PANEL_RADIUS: f32 = 14.0;
 pub const RIGHT_PANEL_WIDTH: f32 = 360.0;
 pub const DRAWER_WIDTH: f32 = 320.0;
-pub const NARROW_WINDOW: f32 = 1100.0;
+pub const NARROW_WINDOW: f32 = 1000.0;
 pub const GLASS_ALPHA: f32 = 0.80;
 pub const FROST_TINT_ALPHA: f32 = 0.50;
+/// Type scale (iPhone 17/15/13 pt, scaled for a desktop viewing distance).
+pub const TEXT_BODY: f32 = 15.0;
+pub const TEXT_SMALL: f32 = 13.0;
+pub const TEXT_TINY: f32 = 11.5;
+pub const LINE_HEIGHT: f32 = 21.0;
+/// Avatar sizes: list row, header, inline sender.
+pub const AVATAR_ROW: f32 = 42.0;
+pub const AVATAR_HEADER: f32 = 26.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Surface {
@@ -35,16 +56,34 @@ pub struct Theme {
     pub surface: Surface,
     pub appearance: Appearance,
     pub bg: Hsla,
+    /// The chat-list column (a shade lighter than the conversation, as on Grok Mac).
+    pub sidebar: Hsla,
+    /// Cards, sheets, rows that lift off the background (iPhone `card`).
     pub surface_1: Hsla,
+    /// Hover / selected fills and chips (the assistant-bubble grey).
     pub surface_2: Hsla,
     pub border: Hsla,
     pub border_strong: Hsla,
     pub text: Hsla,
+    /// System lines, timestamps, previews, "is working" (#95959B).
     pub text_muted: Hsla,
+    /// Placeholders and footnotes.
     pub text_faint: Hsla,
+    /// Grok's blue: unread dots, links, the caret.
     pub accent: Hsla,
     pub accent_soft: Hsla,
+    /// User bubble (right).
     pub bubble: Hsla,
+    /// Assistant bubble (left).
+    pub bubble_assistant: Hsla,
+    /// Composer field / glass circle fill and its hairline rim.
+    pub field: Hsla,
+    pub field_border: Hsla,
+    /// Primary filled control (send / voice button): white on dark.
+    pub primary: Hsla,
+    pub on_primary: Hsla,
+    /// Presence green.
+    pub online: Hsla,
     pub warn: Hsla,
     pub danger: Hsla,
     pub danger_soft: Hsla,
@@ -59,26 +98,41 @@ fn grey(l: f32) -> Hsla {
     hsla(0.0, 0.0, l, 1.0)
 }
 
+fn hex(v: u32) -> Hsla {
+    rgb(v).into()
+}
+
+fn hex_a(v: u32, a: f32) -> Hsla {
+    rgba((v << 8) | ((a * 255.0).round() as u32 & 0xff)).into()
+}
+
 impl Theme {
     pub fn dark(surface: Surface) -> Self {
         Self {
             surface,
             appearance: Appearance::Dark,
-            bg: hsla(0.0, 0.0, 0.17, 1.0),
-            surface_1: hsla(0.0, 0.0, 0.22, 1.0),
-            surface_2: hsla(0.0, 0.0, 0.27, 1.0),
-            border: hsla(0.0, 0.0, 1.0, 0.09),
-            border_strong: hsla(0.0, 0.0, 1.0, 0.18),
-            text: grey(0.92),
-            text_muted: grey(0.64),
-            text_faint: grey(0.46),
-            accent: hsla(0.70, 0.82, 0.74, 1.0),
-            accent_soft: hsla(0.70, 0.82, 0.74, 0.18),
-            bubble: hsla(0.0, 0.0, 0.26, 0.9),
-            warn: hsla(0.12, 0.85, 0.62, 1.0),
-            danger: hsla(0.0, 0.70, 0.62, 1.0),
-            danger_soft: hsla(0.0, 0.70, 0.62, 0.14),
-            code_bg: hsla(0.0, 0.0, 0.0, 0.25),
+            bg: hex(0x141414),
+            sidebar: hex(0x1a1a1a),
+            surface_1: hex(0x1e1e1e),
+            surface_2: hex(0x262626),
+            border: hex_a(0xffffff, 0.08),
+            border_strong: hex_a(0xffffff, 0.16),
+            text: grey(1.0),
+            text_muted: hex(0x95959b),
+            text_faint: hex(0x6a6a6e),
+            accent: hex(0x1084fe),
+            accent_soft: hex_a(0x1084fe, 0.18),
+            bubble: hex(0x5c5c5c),
+            bubble_assistant: hex(0x232323),
+            field: hex(0x181818),
+            field_border: hex(0x242424),
+            primary: grey(1.0),
+            on_primary: grey(0.0),
+            online: hex(0x34c759),
+            warn: hex(0xffb340),
+            danger: hex(0xff453a),
+            danger_soft: hex_a(0xff453a, 0.14),
+            code_bg: hex_a(0x000000, 0.28),
             font_sans: Self::sans_family(),
             font_mono: Self::mono_family(),
         }
@@ -88,21 +142,28 @@ impl Theme {
         Self {
             surface,
             appearance: Appearance::Light,
-            bg: hsla(0.0, 0.0, 0.965, 1.0),
-            surface_1: hsla(0.0, 0.0, 0.93, 1.0),
-            surface_2: hsla(0.0, 0.0, 0.88, 1.0),
-            border: hsla(0.0, 0.0, 0.0, 0.08),
-            border_strong: hsla(0.0, 0.0, 0.0, 0.16),
-            text: grey(0.12),
-            text_muted: grey(0.42),
-            text_faint: grey(0.58),
-            accent: hsla(0.70, 0.70, 0.52, 1.0),
-            accent_soft: hsla(0.70, 0.70, 0.52, 0.16),
-            bubble: hsla(0.0, 0.0, 0.88, 0.9),
-            warn: hsla(0.10, 0.85, 0.48, 1.0),
-            danger: hsla(0.0, 0.65, 0.50, 1.0),
-            danger_soft: hsla(0.0, 0.65, 0.50, 0.12),
-            code_bg: hsla(0.0, 0.0, 0.0, 0.06),
+            bg: hex(0xf7f7f7),
+            sidebar: hex(0xefefef),
+            surface_1: grey(1.0),
+            surface_2: hex(0xececec),
+            border: hex_a(0x000000, 0.08),
+            border_strong: hex_a(0x000000, 0.16),
+            text: hex(0x111111),
+            text_muted: hex(0x8a8a8e),
+            text_faint: hex(0xa0a0a5),
+            accent: hex(0x1084fe),
+            accent_soft: hex_a(0x1084fe, 0.14),
+            bubble: hex(0x111111),
+            bubble_assistant: hex(0xececec),
+            field: grey(1.0),
+            field_border: hex(0xe2e2e2),
+            primary: hex(0x111111),
+            on_primary: grey(1.0),
+            online: hex(0x34c759),
+            warn: hex(0xe59a00),
+            danger: hex(0xd7332a),
+            danger_soft: hex_a(0xd7332a, 0.10),
+            code_bg: hex_a(0x000000, 0.06),
             font_sans: Self::sans_family(),
             font_mono: Self::mono_family(),
         }
@@ -133,6 +194,11 @@ impl Theme {
         } else {
             "JetBrains Mono"
         }
+    }
+
+    /// Text on a user bubble: white on the dark grey, white on black.
+    pub fn bubble_text(&self) -> Hsla {
+        grey(1.0)
     }
 
     /// Glass is only possible where the window can be blurred (D10).
@@ -169,10 +235,18 @@ impl Theme {
         c
     }
 
-    /// Chrome strips (rail, tab bar, side panels) over frost: thinner than cards.
+    /// Chrome strips (sidebar, side panels) over frost: thinner than cards.
     pub fn chrome(&self) -> Hsla {
-        let mut c = self.surface_1;
+        let mut c = self.sidebar;
         c.a = if self.is_frost() { 0.35 } else { 1.0 };
+        c
+    }
+
+    /// The glass circle / pill fill of the iPhone header controls: the field
+    /// colour at 85 % over the (frosted) background.
+    pub fn glass_fill(&self) -> Hsla {
+        let mut c = self.field;
+        c.a = 0.85;
         c
     }
 

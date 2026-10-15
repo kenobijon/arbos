@@ -21,15 +21,17 @@ use crate::ui::groups;
 use crate::ui::markdown::{inline_spans, split_blocks, Block};
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
-use crate::ui::theme::{Theme, BUBBLE_RADIUS};
+use crate::ui::theme::{Theme, BUBBLE_RADIUS, LINE_HEIGHT, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 use crate::ui::veil::Veil;
 use crate::ui::widgets::QuestionCard;
 use serde_json::Value;
 
 const OVERDRAW_PX: f32 = 320.0;
-pub const COLUMN_MAX_WIDTH: f32 = 680.0;
-/// 72 ch at 13.5 px (§3.5).
-pub const ASSISTANT_MAX_WIDTH: f32 = 540.0;
+pub const COLUMN_MAX_WIDTH: f32 = 820.0;
+/// Assistant bubble cap (Grok: the bubble never spans the whole pane).
+pub const ASSISTANT_MAX_WIDTH: f32 = 620.0;
+/// A new time stamp line whenever messages are this far apart.
+const STAMP_GAP_MS: u64 = 60 * 60 * 1000;
 
 #[derive(Clone, Debug)]
 pub enum RowKind {
@@ -46,6 +48,16 @@ pub enum RowKind {
     Markdown {
         block: Block,
         live: bool,
+        /// Where this block sits in its message's bubble (first/last round
+        /// the corners; `fill` makes a multi-block bubble span the cap width
+        /// so every block has the same edge).
+        first: bool,
+        last: bool,
+        fill: bool,
+    },
+    /// Centered muted time line ("Today 9:39 PM").
+    Stamp {
+        label: String,
     },
     /// A file the agent produced for the user.
     Attachment {
@@ -254,7 +266,10 @@ impl Transcript {
 
         // Veils: observe text growth of live markdown rows.
         for row in &new_rows {
-            if let RowKind::Markdown { block, live: true } = &row.kind {
+            if let RowKind::Markdown {
+                block, live: true, ..
+            } = &row.kind
+            {
                 let len = block_text_len(block);
                 let veil = self
                     .veils
@@ -319,14 +334,14 @@ impl Transcript {
                     .flex()
                     .flex_col()
                     .gap(px(6.0))
-                    .max_w(relative_width(0.70))
+                    .max_w(relative_width(0.72))
                     .px(px(14.0))
-                    .py(px(9.0))
+                    .py(px(10.0))
                     .rounded(px(BUBBLE_RADIUS))
                     .bg(theme.bubble)
-                    .text_color(theme.text)
-                    .text_size(px(13.5))
-                    .line_height(px(20.0));
+                    .text_color(theme.bubble_text())
+                    .text_size(px(TEXT_BODY))
+                    .line_height(px(LINE_HEIGHT));
                 if !attachments.is_empty() {
                     let mut chips = div().flex().flex_wrap().gap(px(6.0));
                     for a in attachments {
@@ -338,12 +353,12 @@ impl Transcript {
                         };
                         chips = chips.child(
                             div()
-                                .px(px(8.0))
-                                .py(px(2.0))
-                                .rounded(px(6.0))
-                                .bg(theme.surface_2)
-                                .text_size(px(11.0))
-                                .text_color(theme.text_muted)
+                                .px(px(9.0))
+                                .py(px(3.0))
+                                .rounded_full()
+                                .bg(Theme::with_alpha(theme.bg, 0.35))
+                                .text_size(px(TEXT_TINY))
+                                .text_color(theme.text)
                                 .child(label),
                         );
                     }
@@ -367,17 +382,20 @@ impl Transcript {
                                 .items_center()
                                 .gap(px(6.0))
                                 .pl(px(2.0))
-                                .child(people::avatar(image, &person, 18.0, &theme))
+                                .child(people::avatar(image, &person, 20.0, &theme))
                                 .child(
                                     div()
-                                        .text_size(px(10.5))
+                                        .text_size(px(TEXT_TINY))
                                         .text_color(theme.text_muted)
                                         .child(format!("@{}", person.handle)),
                                 ),
                         )
                         .child(
                             bubble
-                                .bg(Theme::with_alpha(color, 0.14))
+                                .bg(theme.bubble_assistant)
+                                .text_color(theme.text)
+                                .border_l_2()
+                                .border_color(Theme::with_alpha(color, 0.7))
                                 .when(pending, |el| el.opacity(0.6)),
                         )
                         .into_any_element();
@@ -393,15 +411,21 @@ impl Transcript {
                         el.child(
                             div()
                                 .pr(px(6.0))
-                                .text_size(px(10.5))
-                                .text_color(theme.text_faint)
+                                .text_size(px(TEXT_TINY))
+                                .text_color(theme.text_muted)
                                 .child(label),
                         )
                     })
                     .child(bubble.when(pending, |el| el.opacity(0.6)))
                     .into_any_element()
             }
-            RowKind::Markdown { block, live } => {
+            RowKind::Markdown {
+                block,
+                live,
+                first,
+                last,
+                fill,
+            } => {
                 let veil = if live {
                     self.veils.get(&row.id).cloned()
                 } else {
@@ -411,14 +435,38 @@ impl Transcript {
                 if live || fading {
                     PulseClock::request(cx);
                 }
+                // One assistant bubble, drawn block by block: the first block
+                // rounds the top, the last the bottom, the rest run straight.
+                let r = px(BUBBLE_RADIUS);
+                let bubble = div()
+                    .max_w(px(ASSISTANT_MAX_WIDTH))
+                    .when(fill, |el| el.w_full())
+                    .px(px(14.0))
+                    .when(first, |el| el.pt(px(10.0)).rounded_t(r))
+                    .when(!first, |el| el.pt(px(3.0)))
+                    .when(last, |el| el.pb(px(10.0)).rounded_b(r))
+                    .when(!last, |el| el.pb(px(3.0)))
+                    .bg(theme.bubble_assistant)
+                    .child(render_block(&row.id, &block, veil.as_ref(), now, &theme));
                 div()
                     .w_full()
                     .flex()
                     .justify_start()
-                    .py(px(4.0))
-                    .child(render_block(&row.id, &block, veil.as_ref(), now, &theme))
+                    .when(first, |el| el.pt(px(6.0)))
+                    .when(last, |el| el.pb(px(6.0)))
+                    .child(bubble)
                     .into_any_element()
             }
+            RowKind::Stamp { label } => div()
+                .w_full()
+                .flex()
+                .justify_center()
+                .pt(px(14.0))
+                .pb(px(8.0))
+                .text_size(px(TEXT_SMALL))
+                .text_color(theme.text_muted)
+                .child(label)
+                .into_any_element(),
             RowKind::Attachment { attachment } => {
                 let thumbnail = attachment
                     .blob_ref
@@ -510,12 +558,48 @@ impl Transcript {
                 .w_full()
                 .py(px(2.0))
                 .text_size(px(10.0))
-                .text_color(theme.text_faint)
+                .text_color(theme.text_muted)
                 .child(glyph)
                 .into_any_element(),
             RowKind::Indicator { queued } => {
                 PulseClock::request(cx);
-                cards::indicator(queued, &theme, cx).into_any_element()
+                // "<name> is working" with the worker's picture (Grok's one line).
+                let state = self.state.read(cx);
+                let (name, picture): (String, Option<gpui::Div>) = match state.selected() {
+                    Some(space) if space.is_people() => {
+                        let chat_id = self.chat_id.clone().unwrap_or_default();
+                        let agent = state
+                            .messages_of(&chat_id)
+                            .iter()
+                            .rev()
+                            .find(|m| m.role == Role::Assistant && m.is_streaming())
+                            .and_then(|m| m.sender_handle.clone().or_else(|| m.sender_name.clone()))
+                            .unwrap_or_else(|| "Agent".into());
+                        let glyph = space
+                            .agents
+                            .iter()
+                            .find(|a| a.handle == agent || a.name == agent)
+                            .map(|a| people::agent_glyph(a, 20.0, &theme));
+                        (agent, glyph)
+                    }
+                    Some(space) => {
+                        let slug = state.avatar_slug(space);
+                        (
+                            space.name.clone(),
+                            Some(crate::ui::avatars::element(
+                                slug.as_deref(),
+                                space.avatar_color.as_deref(),
+                                state.avatar_state(&space.id),
+                                20.0,
+                                &space.icon,
+                                groups::project_color(&space.color, theme.accent),
+                                &theme,
+                            )),
+                        )
+                    }
+                    None => ("Agent".into(), None),
+                };
+                cards::working_line(&name, picture, queued, &theme, cx).into_any_element()
             }
             RowKind::Sender {
                 name,
@@ -671,7 +755,7 @@ impl Transcript {
             .w_full()
             .flex()
             .justify_center()
-            .px(px(28.0))
+            .px(px(20.0))
             .child(div().w_full().max_w(px(COLUMN_MAX_WIDTH)).child(inner))
             .into_any_element()
     }
@@ -770,8 +854,20 @@ pub fn build_rows(
     let last_reply = messages
         .iter()
         .rposition(|m| m.role == Role::Assistant && !m.is_streaming());
+    let mut last_stamp_at: u64 = 0;
     for (mix, message) in messages.iter().enumerate() {
         let streaming = message.is_streaming();
+        if message.created_at > 0 && message.created_at.saturating_sub(last_stamp_at) > STAMP_GAP_MS
+        {
+            last_stamp_at = message.created_at;
+            let label = crate::ui::sidebar::stamp_label(message.created_at);
+            rows.push(Row {
+                version: hash_version(&label, false),
+                id: format!("{}#stamp", message.id),
+                message_id: message.id.clone(),
+                kind: RowKind::Stamp { label },
+            });
+        }
         match message.role {
             Role::User => {
                 let text = message.plain_text();
@@ -898,6 +994,22 @@ pub fn build_rows(
                     .parts
                     .iter()
                     .rposition(|p| matches!(p, Part::Text { .. }));
+                // Blocks across every text part form one bubble.
+                let total_blocks: usize = message
+                    .parts
+                    .iter()
+                    .filter_map(|p| match p {
+                        Part::Text { text, .. } => Some(
+                            split_blocks(text)
+                                .into_iter()
+                                .filter(|b| !is_json_block(b))
+                                .count(),
+                        ),
+                        _ => None,
+                    })
+                    .sum();
+                let fill = total_blocks > 1;
+                let mut block_ix = 0usize;
                 let mut had_prose = false;
                 for (pix, part) in message.parts.iter().enumerate() {
                     match part {
@@ -911,12 +1023,22 @@ pub fn build_rows(
                             for (bix, block) in blocks.into_iter().enumerate() {
                                 had_prose = true;
                                 let live = streaming && is_last_text && bix + 1 == n;
+                                let first = block_ix == 0;
+                                // While streaming, the newest block is the bottom for now.
+                                let last = block_ix + 1 == total_blocks || (live && streaming);
                                 rows.push(Row {
-                                    version: hash_version(&block, live),
+                                    version: hash_version(&(&block, first, last, fill), live),
                                     id: format!("{}#{}.{}", message.id, id, bix),
                                     message_id: message.id.clone(),
-                                    kind: RowKind::Markdown { block, live },
+                                    kind: RowKind::Markdown {
+                                        block,
+                                        live,
+                                        first,
+                                        last,
+                                        fill,
+                                    },
                                 });
+                                block_ix += 1;
                             }
                         }
                         Part::Attachment { id, attachment } => rows.push(Row {
@@ -1246,10 +1368,9 @@ fn render_block(
     let base = div()
         .w_full()
         .min_w_0()
-        .max_w(px(ASSISTANT_MAX_WIDTH))
         .text_color(theme.text)
-        .text_size(px(13.5))
-        .line_height(px(21.0));
+        .text_size(px(TEXT_BODY))
+        .line_height(px(LINE_HEIGHT));
     match block {
         Block::Paragraph(text) => base
             .child(styled_text(

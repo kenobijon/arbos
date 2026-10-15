@@ -1,0 +1,661 @@
+//! The conversation header, Grok Bot Mac layout: the avatar and name on the
+//! left (click an agent to open its profile), icon buttons on the right
+//! (browser view, "…", and "add people" in a DM). Under it, one optional
+//! chips row: the open chats of an agent when there is more than one, or the
+//! members of a people chat. The "…" menu holds what the iPhone keeps there:
+//! New chat, Model, Members / Share, Avatar, voice, Stop, Settings.
+
+use gpui::{
+    div, prelude::*, px, AnyElement, Context, Div, ElementId, Focusable as _, FontWeight,
+    SharedString,
+};
+
+use crate::model::{Chat, Project};
+use crate::ui::avatars;
+use crate::ui::composer::{Composer, Picker};
+use crate::ui::glass;
+use crate::ui::groups;
+use crate::ui::icons::icon;
+use crate::ui::motion::PulseClock;
+use crate::ui::people;
+use crate::ui::shell::Shell;
+use crate::ui::sidebar::machine_dot;
+use crate::ui::theme::{
+    Theme, AVATAR_HEADER, CONTROL, HEADER_HEIGHT, RIGHT_PANEL_WIDTH, TEXT_BODY, TEXT_SMALL,
+    TEXT_TINY,
+};
+
+pub fn render(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
+    let theme = Theme::of(cx).clone();
+    let state = shell.state.read(cx);
+    let is_people = space.is_people();
+    let in_call = shell.voice.read(cx).in_call();
+    let menu_open = shell.menu_open;
+    let panel_open = state.right_panel_open;
+
+    // ----- left: avatar + name (click an agent to open its profile) -----------
+    let mut title = div()
+        .id("header-title")
+        .flex()
+        .items_center()
+        .gap(px(9.0))
+        .h(px(34.0))
+        .pl(px(4.0))
+        .pr(px(10.0))
+        .rounded(px(9.0))
+        .min_w_0();
+    if let Some(person) = space.person().filter(|_| is_people) {
+        let image = state.avatar(&person.avatar_url);
+        let sub = if space.pending {
+            Some("Invited · opens when they sign in".to_string())
+        } else if !space.agents.is_empty() {
+            Some(format!(
+                "@{} · {} agent{}",
+                person.handle,
+                space.agents.len(),
+                if space.agents.len() == 1 { "" } else { "s" }
+            ))
+        } else {
+            Some(format!("@{}", person.handle))
+        };
+        title = title
+            .child(people::avatar(image, person, AVATAR_HEADER, &theme))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .text_size(px(TEXT_BODY))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.text)
+                            .truncate()
+                            .child(person.display_name()),
+                    )
+                    .when_some(sub, |el, s| {
+                        el.child(
+                            div()
+                                .text_size(px(TEXT_TINY - 1.0))
+                                .text_color(theme.text_muted)
+                                .truncate()
+                                .child(s),
+                        )
+                    }),
+            );
+    } else {
+        let slug = state.avatar_slug(space);
+        let avatar_state = state.avatar_state(&space.id);
+        let streaming = state.project_is_streaming(&space.id);
+        let machine = state.machine.shown_state();
+        let pid = space.id.clone();
+        let sub = if streaming {
+            Some(format!("{} is working", space.name))
+        } else if space.is_guest() {
+            Some(format!(
+                "shared by @{}",
+                space
+                    .owner_handle
+                    .clone()
+                    .or_else(|| space.owner().map(|o| o.handle.clone()))
+                    .unwrap_or_else(|| "owner".into())
+            ))
+        } else {
+            None
+        };
+        title = title
+            .child(
+                div()
+                    .relative()
+                    .size(px(AVATAR_HEADER))
+                    .flex_shrink_0()
+                    .child(avatars::element(
+                        slug.as_deref(),
+                        space.avatar_color.as_deref(),
+                        avatar_state,
+                        AVATAR_HEADER,
+                        &space.icon,
+                        groups::project_color(&space.color, theme.accent),
+                        &theme,
+                    ))
+                    .child(
+                        div()
+                            .absolute()
+                            .right(px(-2.0))
+                            .bottom(px(-2.0))
+                            .size(px(10.0))
+                            .rounded_full()
+                            .bg(theme.bg)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .size(px(6.0))
+                                    .rounded_full()
+                                    .bg(machine_dot(machine, &theme)),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .text_size(px(TEXT_BODY))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.text)
+                            .truncate()
+                            .child(space.name.clone()),
+                    )
+                    .when_some(sub, |el, s| {
+                        el.child(
+                            div()
+                                .text_size(px(TEXT_TINY - 1.0))
+                                .text_color(theme.text_muted)
+                                .truncate()
+                                .child(s),
+                        )
+                    }),
+            );
+        if avatar_state != avatars::AvatarState::Idle {
+            PulseClock::request(cx);
+        }
+        if !space.is_guest() {
+            title = title
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.surface_2))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.menu_open = false;
+                    this.members_open = false;
+                    this.add_agent_open = false;
+                    let p = pid.clone();
+                    this.state.update(cx, |s, cx| s.toggle_avatar_picker(p, cx));
+                }));
+        }
+    }
+
+    // ----- right: icon buttons --------------------------------------------------
+    let button = |id: &'static str, glyph: &str, on: bool, theme: &Theme| {
+        div()
+            .id(id)
+            .size(px(CONTROL))
+            .flex_shrink_0()
+            .rounded(px(8.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .bg(if on {
+                theme.surface_2
+            } else {
+                gpui::transparent_black()
+            })
+            .hover(|s| s.bg(theme.surface_2))
+            .child(icon(
+                glyph,
+                17.0,
+                if on { theme.text } else { theme.text_muted },
+            ))
+    };
+    let mut right = div().flex().items_center().gap(px(2.0));
+    if is_people {
+        right = right.child(
+            button("header-members", "person-plus", shell.members_open, &theme).on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.members_open = !this.members_open;
+                    this.add_agent_open = false;
+                    this.menu_open = false;
+                    cx.notify();
+                }),
+            ),
+        );
+    }
+    if in_call {
+        right = right.child(
+            button("header-call", "phone", true, &theme)
+                .bg(theme.danger_soft)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.voice.update(cx, |v, cx| v.toggle_call(cx));
+                })),
+        );
+    }
+    right = right
+        .child(
+            button("header-panel", "window", panel_open, &theme).on_click(cx.listener(
+                |this, _, _, cx| {
+                    this.state.update(cx, |s, cx| s.toggle_right_panel(cx));
+                },
+            )),
+        )
+        .child(
+            button("header-menu", "ellipsis", menu_open, &theme).on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.menu_open = !this.menu_open;
+                    this.members_open = false;
+                    this.add_agent_open = false;
+                    this.set_group_picker(false, cx);
+                    cx.notify();
+                }),
+            ),
+        );
+
+    div()
+        .h(px(HEADER_HEIGHT))
+        .flex_shrink_0()
+        .w_full()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(10.0))
+        .pl(px(12.0))
+        .pr(px(10.0))
+        .border_b_1()
+        .border_color(theme.border)
+        .window_control_area(gpui::WindowControlArea::Drag)
+        .child(title)
+        .child(right)
+}
+
+/// Chips under the header: open chats (when more than one) for an agent;
+/// agents + "Add agent" for a people chat. `None` when there is nothing to show.
+pub fn chips(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option<AnyElement> {
+    let theme = Theme::of(cx).clone();
+    let state = shell.state.read(cx);
+    if space.is_people() {
+        return Some(
+            people::member_chips(space, shell.add_agent_open, &theme, cx).into_any_element(),
+        );
+    }
+    let tabs: Vec<(Chat, bool, bool)> = state
+        .tabs(&space.id)
+        .iter()
+        .map(|c| {
+            (
+                c.clone(),
+                state.active_tab.get(&space.id) == Some(&c.id),
+                state.chat_is_streaming(&c.id),
+            )
+        })
+        .collect();
+    if tabs.len() < 2 {
+        return None;
+    }
+    let projects = state.projects.clone();
+    let mut row = div()
+        .id("chat-chips")
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .px(px(16.0))
+        .pb(px(8.0))
+        .overflow_x_scroll();
+    for (chat, active, streaming) in tabs {
+        if streaming {
+            PulseClock::request(cx);
+        }
+        let phase = PulseClock::phase(cx, 1200);
+        let id = chat.id.clone();
+        let close_id = chat.id.clone();
+        let title = if chat.is_pinned {
+            "Main".to_string()
+        } else {
+            chat.title.clone()
+        };
+        let mut chipel = div()
+            .id(ElementId::Name(SharedString::from(format!(
+                "chip-{}",
+                chat.id
+            ))))
+            .group("chip")
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .h(px(30.0))
+            .pl(px(12.0))
+            .pr(px(if chat.is_pinned { 12.0 } else { 8.0 }))
+            .rounded_full()
+            .bg(if active {
+                theme.bubble
+            } else {
+                theme.bubble_assistant
+            })
+            .text_size(px(TEXT_SMALL))
+            .text_color(if active { theme.text } else { theme.text_muted })
+            .when(chat.unread && !active, |el| {
+                el.font_weight(FontWeight::SEMIBOLD).text_color(theme.text)
+            })
+            .cursor_pointer()
+            .hover(|s| s.text_color(theme.text))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.state.update(cx, |s, cx| s.select_tab(id.clone(), cx));
+                Composer::focus(&this.composer, window, cx);
+            }));
+        if let Some(glyphs) = groups::tab_glyphs(&chat, &projects, &theme) {
+            chipel = chipel.child(glyphs);
+        }
+        chipel = chipel.child(div().max_w(px(180.0)).truncate().child(title));
+        if streaming {
+            chipel = chipel.child(
+                div()
+                    .size(px(6.0))
+                    .rounded_full()
+                    .bg(Theme::with_alpha(theme.warn, 0.4 + 0.6 * phase)),
+            );
+        }
+        if !chat.is_pinned {
+            chipel = chipel.child(
+                div()
+                    .id(ElementId::Name(SharedString::from(format!(
+                        "chip-close-{}",
+                        chat.id
+                    ))))
+                    .size(px(16.0))
+                    .rounded_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(theme.text_faint)
+                    .hover(|s| s.bg(theme.border_strong).text_color(theme.text))
+                    .child(icon("xmark", 9.0, theme.text_muted))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.state.update(cx, |s, cx| {
+                            s.close_tab(close_id.clone(), cx);
+                        });
+                    })),
+            );
+        }
+        row = row.child(chipel);
+    }
+    row = row.child(
+        div()
+            .id("chip-new")
+            .flex_shrink_0()
+            .size(px(30.0))
+            .rounded_full()
+            .bg(theme.bubble_assistant)
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.surface_2))
+            .child(icon("plus", 13.0, theme.text_muted))
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.state.update(cx, |s, cx| s.new_tab(cx));
+                Composer::focus(&this.composer, window, cx);
+            })),
+    );
+    Some(row.into_any_element())
+}
+
+/// The "…" dropdown under the header's right circle.
+pub fn menu(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
+    let theme = Theme::of(cx).clone();
+    let state = shell.state.read(cx);
+    let is_people = space.is_people();
+    let streaming = state.project_is_streaming(&space.id);
+    let panel_open = state.right_panel_open;
+    let voice_mode = state.voice_mode;
+    let in_call = shell.voice.read(cx).in_call();
+    let projects_count = state.projects.iter().filter(|p| !p.is_people()).count();
+    let name = if is_people {
+        space
+            .person()
+            .map(|p| format!("@{}", p.handle))
+            .unwrap_or_else(|| space.name.clone())
+    } else {
+        space.name.clone()
+    };
+    let right = if panel_open {
+        RIGHT_PANEL_WIDTH + 16.0
+    } else {
+        16.0
+    };
+
+    let mut body = div().flex().flex_col().gap(px(1.0));
+    if is_people {
+        body = body
+            .child(
+                glass::menu_row("menu-members", "people", "Members & agents", false, &theme)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.menu_open = false;
+                        this.members_open = true;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                glass::menu_row(
+                    "menu-add-agent",
+                    "sparkles",
+                    "Add one of your agents",
+                    false,
+                    &theme,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.menu_open = false;
+                    this.add_agent_open = true;
+                    cx.notify();
+                })),
+            );
+        if let Some(person) = space.person() {
+            let handle = person.handle.clone();
+            let chat = space.id.clone();
+            body = body.child(
+                glass::menu_row(
+                    "menu-block",
+                    "xmark",
+                    format!("Block @{}", person.handle),
+                    true,
+                    &theme,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.menu_open = false;
+                    let h = handle.clone();
+                    let c = chat.clone();
+                    this.state.update(cx, |s, cx| {
+                        s.block_user(h, cx);
+                        s.leave_chat(c, cx);
+                    });
+                })),
+            );
+        }
+    } else {
+        let model = space.model.clone();
+        let effort = space.effort.label();
+        body = body.child(
+            glass::menu_row("menu-new-chat", "square-pencil", "New chat", false, &theme)
+                .child(
+                    div()
+                        .text_size(px(TEXT_TINY))
+                        .text_color(theme.text_faint)
+                        .child("⌘T"),
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.menu_open = false;
+                    this.state.update(cx, |s, cx| s.new_tab(cx));
+                    Composer::focus(&this.composer, window, cx);
+                })),
+        );
+        if !space.is_guest() {
+            body = body
+                .child(
+                    glass::menu_row(
+                        "menu-model",
+                        "cpu",
+                        format!("Model · {model}"),
+                        false,
+                        &theme,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.menu_open = false;
+                        this.composer.update(cx, |c, cx| {
+                            c.open_picker = Some(Picker::Model);
+                            cx.notify();
+                        });
+                    })),
+                )
+                .child(
+                    glass::menu_row(
+                        "menu-effort",
+                        "waveform",
+                        format!("Effort · {effort}"),
+                        false,
+                        &theme,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.menu_open = false;
+                        this.composer.update(cx, |c, cx| {
+                            c.open_picker = Some(Picker::Effort);
+                            cx.notify();
+                        });
+                    })),
+                )
+                .child(glass::menu_divider(&theme))
+                .child(
+                    glass::menu_row(
+                        "menu-share",
+                        "person-plus",
+                        if space.guests().next().is_some() {
+                            "Members"
+                        } else {
+                            "Share project…"
+                        },
+                        false,
+                        &theme,
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.menu_open = false;
+                        let has_guests = this
+                            .state
+                            .read(cx)
+                            .selected()
+                            .map(|p| p.guests().next().is_some())
+                            .unwrap_or(false);
+                        if has_guests {
+                            this.members_open = true;
+                            cx.notify();
+                        } else {
+                            let id = this.state.read(cx).selected_project.clone();
+                            if let Some(id) = id {
+                                this.people_input.update(cx, |i, cx| i.clear(cx));
+                                this.state.update(cx, |s, cx| s.open_invite(id, cx));
+                                let handle = this.people_input.read(cx).focus_handle(cx);
+                                window.focus(&handle, cx);
+                            }
+                        }
+                    })),
+                )
+                .child(
+                    glass::menu_row("menu-avatar", "sparkles", "Avatar & colour", false, &theme)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.menu_open = false;
+                            let id = this.state.read(cx).selected_project.clone();
+                            if let Some(id) = id {
+                                this.state
+                                    .update(cx, |s, cx| s.toggle_avatar_picker(id, cx));
+                            }
+                        })),
+                );
+            if projects_count > 1 {
+                body = body.child(
+                    glass::menu_row(
+                        "menu-group",
+                        "people",
+                        "Add a project to this chat",
+                        false,
+                        &theme,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.menu_open = false;
+                        this.set_group_picker(true, cx);
+                    })),
+                );
+            }
+        } else {
+            body = body.child(
+                glass::menu_row("menu-members-guest", "people", "Members", false, &theme).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.menu_open = false;
+                        this.members_open = true;
+                        cx.notify();
+                    }),
+                ),
+            );
+        }
+    }
+    body = body
+        .child(glass::menu_divider(&theme))
+        .child(
+            glass::menu_row(
+                "menu-voice-mode",
+                "waveform",
+                if voice_mode {
+                    "Voice mode · on"
+                } else {
+                    "Voice mode · off"
+                },
+                false,
+                &theme,
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.menu_open = false;
+                this.voice.update(cx, |v, cx| v.toggle_voice_mode(cx));
+            })),
+        )
+        .child(
+            glass::menu_row(
+                "menu-call",
+                "phone",
+                if in_call { "Hang up" } else { "Voice call" },
+                false,
+                &theme,
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.menu_open = false;
+                this.voice.update(cx, |v, cx| v.toggle_call(cx));
+            })),
+        );
+    if streaming {
+        body = body.child(
+            glass::menu_row("menu-stop", "stop", format!("Stop {name}"), true, &theme).on_click(
+                cx.listener(|this, _, _, cx| {
+                    this.menu_open = false;
+                    this.state.update(cx, |s, cx| s.stop(cx));
+                }),
+            ),
+        );
+    }
+    body = body
+        .child(glass::menu_divider(&theme))
+        .child(
+            glass::menu_row(
+                "menu-feedback",
+                "square-pencil",
+                "Send feedback",
+                false,
+                &theme,
+            )
+            .on_click(cx.listener(|this, _, window, cx| this.open_feedback(window, cx))),
+        )
+        .child(
+            glass::menu_row("menu-settings", "gear", "Settings", false, &theme).on_click(
+                cx.listener(|this, _, _, cx| {
+                    this.menu_open = false;
+                    this.settings_open = true;
+                    cx.notify();
+                }),
+            ),
+        );
+    div()
+        .absolute()
+        .top(px(HEADER_HEIGHT - 4.0))
+        .right(px(right))
+        .child(glass::frosted_menu(250.0, &theme, body))
+}

@@ -1,0 +1,110 @@
+//! SF-Symbol-like glyphs, embedded as tiny SVGs and painted through GPUI's
+//! `svg()` element in the current text colour. Hand-drawn strokes on a 24 pt
+//! grid (round caps, 2 pt weight) to match the iPhone app's header controls.
+
+use std::borrow::Cow;
+
+use gpui::{prelude::*, px, svg, AssetSource, Hsla, Result, SharedString, Svg};
+
+pub struct Assets;
+
+macro_rules! icon {
+    ($name:literal, $body:literal) => {
+        (
+            concat!("icons/", $name, ".svg"),
+            concat!(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" ",
+                "stroke=\"#000\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\">",
+                $body,
+                "</svg>"
+            ),
+        )
+    };
+}
+
+const ICONS: &[(&str, &str)] = &[
+    icon!("plus", "<path d=\"M12 5v14M5 12h14\"/>"),
+    icon!("search", "<circle cx=\"11\" cy=\"11\" r=\"6.5\"/><path d=\"M16 16l4.5 4.5\"/>"),
+    icon!(
+        "person",
+        "<circle cx=\"12\" cy=\"8\" r=\"4\" fill=\"#000\"/><path d=\"M4 21c0-4 3.6-7 8-7s8 3 8 7z\" fill=\"#000\"/>"
+    ),
+    icon!(
+        "ellipsis",
+        "<circle cx=\"5\" cy=\"12\" r=\"1.8\" fill=\"#000\" stroke=\"none\"/><circle cx=\"12\" cy=\"12\" r=\"1.8\" fill=\"#000\" stroke=\"none\"/><circle cx=\"19\" cy=\"12\" r=\"1.8\" fill=\"#000\" stroke=\"none\"/>"
+    ),
+    icon!("chevron-left", "<path d=\"M15 5l-7 7 7 7\"/>"),
+    icon!("chevron-right", "<path d=\"M9 5l7 7-7 7\"/>"),
+    icon!("chevron-down", "<path d=\"M5 9l7 7 7-7\"/>"),
+    icon!(
+        "mic",
+        "<rect x=\"9\" y=\"3\" width=\"6\" height=\"11\" rx=\"3\"/><path d=\"M5 11a7 7 0 0 0 14 0M12 18v3\"/>"
+    ),
+    icon!(
+        "waveform",
+        "<path d=\"M4 10v4M8 7v10M12 4v16M16 8v8M20 10v4\" stroke-width=\"2.4\"/>"
+    ),
+    icon!("arrow-up", "<path d=\"M12 19V5M5 12l7-7 7 7\" stroke-width=\"2.6\"/>"),
+    icon!("xmark", "<path d=\"M6 6l12 12M18 6L6 18\"/>"),
+    icon!(
+        "square-pencil",
+        "<path d=\"M12 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6\"/><path d=\"M18 3l3 3-9 9H9v-3z\"/>"
+    ),
+    icon!(
+        "person-plus",
+        "<circle cx=\"10\" cy=\"8\" r=\"4\" fill=\"#000\"/><path d=\"M2 21c0-4 3.6-7 8-7 1.3 0 2.5.3 3.6.7\" fill=\"#000\"/><path d=\"M19 13v6M16 16h6\"/>"
+    ),
+    icon!(
+        "people",
+        "<circle cx=\"9\" cy=\"8\" r=\"3.5\" fill=\"#000\"/><path d=\"M2 20c0-3.5 3.1-6 7-6s7 2.5 7 6z\" fill=\"#000\"/><circle cx=\"17\" cy=\"8.5\" r=\"3\" fill=\"#000\"/><path d=\"M17 14c2.9 0 5 2.2 5 5h-5.5\" fill=\"#000\"/>"
+    ),
+    icon!("stop", "<rect x=\"6\" y=\"6\" width=\"12\" height=\"12\" rx=\"2\" fill=\"#000\"/>"),
+    icon!(
+        "paperclip",
+        "<path d=\"M20 12.5l-7.8 7.8a5 5 0 0 1-7-7L13.5 5a3.3 3.3 0 0 1 4.7 4.7l-8.3 8.3a1.6 1.6 0 0 1-2.3-2.3L15 8.4\"/>"
+    ),
+    icon!(
+        "gear",
+        "<circle cx=\"12\" cy=\"12\" r=\"3\"/><path d=\"M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1\"/>"
+    ),
+    icon!(
+        "sparkles",
+        "<path d=\"M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z\" fill=\"#000\"/><path d=\"M19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z\" fill=\"#000\"/>"
+    ),
+    icon!("bell", "<path d=\"M6 17V11a6 6 0 0 1 12 0v6l1.5 2h-15z\"/><path d=\"M10 21a2 2 0 0 0 4 0\"/>"),
+    icon!("phone", "<path d=\"M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2z\"/>"),
+    icon!("check", "<path d=\"M5 12.5l4.5 4.5L19 7\" stroke-width=\"2.6\"/>"),
+    icon!("globe", "<circle cx=\"12\" cy=\"12\" r=\"9\"/><path d=\"M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18\"/>"),
+    icon!("doc", "<path d=\"M7 3h7l5 5v13H7z\"/><path d=\"M14 3v5h5\"/>"),
+    icon!("photo", "<rect x=\"3\" y=\"5\" width=\"18\" height=\"14\" rx=\"2\"/><circle cx=\"9\" cy=\"10\" r=\"1.5\" fill=\"#000\"/><path d=\"M21 16l-5-5-8 8\"/>"),
+    icon!("arrow-down", "<path d=\"M12 5v14M5 12l7 7 7-7\" stroke-width=\"2.6\"/>"),
+    icon!("cpu", "<rect x=\"6\" y=\"6\" width=\"12\" height=\"12\" rx=\"2\"/><rect x=\"10\" y=\"10\" width=\"4\" height=\"4\" fill=\"#000\" stroke=\"none\"/><path d=\"M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4\"/>"),
+    icon!("window", "<rect x=\"3\" y=\"4\" width=\"18\" height=\"16\" rx=\"2\"/><path d=\"M3 9h18\"/>"),
+    icon!("minus", "<path d=\"M5 12h14\"/>"),
+];
+
+impl AssetSource for Assets {
+    fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        Ok(ICONS
+            .iter()
+            .find(|(p, _)| *p == path)
+            .map(|(_, body)| Cow::Borrowed(body.as_bytes())))
+    }
+
+    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
+        Ok(ICONS
+            .iter()
+            .filter(|(p, _)| p.starts_with(path))
+            .map(|(p, _)| SharedString::from(*p))
+            .collect())
+    }
+}
+
+/// `icon("plus", 16.0, color)` — a square glyph of `size` points.
+pub fn icon(name: &str, size: f32, color: Hsla) -> Svg {
+    svg()
+        .path(SharedString::from(format!("icons/{name}.svg")))
+        .size(px(size))
+        .flex_shrink_0()
+        .text_color(color)
+}

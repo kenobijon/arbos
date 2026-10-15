@@ -1,73 +1,77 @@
-//! Root view: rail · center column (tab bar, banner, transcript, composer) ·
-//! right panel (browser live view, S16) · Details drawer. Layout per
-//! `arbos-design.md` §3.2 and the mock.
+//! Root view, Grok Bot layout: chat-list sidebar (the iPhone home list) ·
+//! one conversation pane (floating glass header, bubbles, the composer) ·
+//! optional browser live view and the debug Details drawer. Sheets (Settings,
+//! New Message, agent profile) float centred over everything.
 
-use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    actions, div, prelude::*, px, Animation, AnimationExt, App, Context, Div, ElementId, Entity,
-    FocusHandle, Focusable, FontWeight, Render, RenderImage, SharedString, Stateful, Window,
+    actions, div, prelude::*, px, Animation, AnimationExt, App, Context, Div, Entity, FocusHandle,
+    Focusable, FontWeight, Render, Stateful, Window,
 };
 
 use crate::app::SignInMode;
 use crate::app::{AppState, DetailsTarget};
-use crate::model::{now_ms, BoxState, Chat, Id, Link, MachineState, Project};
+use crate::model::{now_ms, Link, MachineState};
 use crate::ui::avatars;
 use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
 use crate::ui::composer::{Composer, ComposerEvent, ComposerInput};
 use crate::ui::connectors::{ConnectorsEvent, ConnectorsPanel};
 use crate::ui::feedback::{FeedbackSheet, SendFeedback};
-use crate::ui::frost::{edge_faded, frosted, rounded_clip, MENU_BLUR, PANEL_BLUR};
+use crate::ui::frost::{frosted, rounded_clip, MENU_BLUR, PANEL_BLUR};
+use crate::ui::glass;
 use crate::ui::groups;
+use crate::ui::header;
+use crate::ui::icons::icon;
 use crate::ui::local::{LocalEvent, LocalPanel};
 use crate::ui::motion::{ease_out_cubic, PulseClock, COMPOSER_DROP_MS, SHAKE_MS};
 use crate::ui::people;
+use crate::ui::profile;
 use crate::ui::routines::{RoutinesEvent, RoutinesPanel};
+use crate::ui::sidebar;
 use crate::ui::skills::SkillsPanel;
 use crate::ui::theme::{
-    reapply_window_background, Appearance, Surface, Theme, COMPOSER_HEIGHT, COMPOSER_WIDTH,
-    DRAWER_WIDTH, PANEL_RADIUS, RAIL_TILE, RAIL_WIDTH, RAIL_WIDTH_COLLAPSED, RIGHT_PANEL_WIDTH,
-    TAB_BAR_HEIGHT, TAB_MIN_WIDTH,
+    reapply_window_background, Appearance, Surface, Theme, COMPOSER_WIDTH, DRAWER_WIDTH,
+    HEADER_HEIGHT, PANEL_RADIUS, PLUS_BUTTON, RIGHT_PANEL_WIDTH, TAB_BAR_HEIGHT, TEXT_BODY,
+    TEXT_SMALL, TEXT_TINY,
 };
 use crate::ui::transcript::{Transcript, COLUMN_MAX_WIDTH};
 use crate::ui::vault::{VaultEvent, VaultPanel};
 use crate::ui::voice::Voice;
 
-actions!(shell, [CloseTab, NewTab, ToggleRail, TogglePanel, Quit]);
-
-/// Members of a space with their decoded avatars (rail tiles, headers).
-type PeopleWithAvatars = Vec<(crate::model::Person, Option<Arc<RenderImage>>)>;
+actions!(
+    shell,
+    [CloseTab, NewTab, ToggleRail, TogglePanel, Escape, Quit]
+);
 
 pub struct Shell {
     pub(crate) state: Entity<AppState>,
     transcript: Entity<Transcript>,
     pub(crate) composer: Entity<Composer>,
     /// F11: call strip + mic/TTS owner.
-    voice: Entity<Voice>,
+    pub(crate) voice: Entity<Voice>,
     pairing_input: Entity<ComposerInput>,
     pub(crate) project_input: Entity<ComposerInput>,
+    /// Sidebar search field.
+    pub(crate) search_input: Entity<ComposerInput>,
     connectors: Entity<ConnectorsPanel>,
     skills: Entity<SkillsPanel>,
     local: Entity<LocalPanel>,
     focus_handle: FocusHandle,
-    settings_open: bool,
+    pub(crate) settings_open: bool,
     routines: Entity<RoutinesPanel>,
     routines_open: bool,
     channels: Entity<ChannelsPanel>,
-    /// F6: the "+ project" picker under the tab header.
+    /// F6: the "add a project to this chat" picker (from the "…" menu).
     group_picker_open: bool,
     vault: Entity<VaultPanel>,
     shake_started_at: Option<u64>,
-    tab_scroll: gpui::ScrollHandle,
-    /// Tab index to scroll into view on the next frame (new/selected tab).
-    reveal_tab: Option<usize>,
     /// True while the sign-in screen is up; its clearing focuses the composer.
     signing_in: bool,
-    /// People chats (D72): the `+` menu, the @search field, the header pickers.
-    pub new_menu_open: bool,
+    /// The header's "…" menu.
+    pub(crate) menu_open: bool,
+    /// People chats (D72): the @search field, the header pickers.
     pub people_input: Entity<ComposerInput>,
     pub add_agent_open: bool,
     pub members_open: bool,
@@ -105,6 +109,7 @@ impl Shell {
         }
         cx.observe(&state, |_, _, cx| cx.notify()).detach();
         cx.observe(&voice, |_, _, cx| cx.notify()).detach();
+        cx.observe(&composer, |_, _, cx| cx.notify()).detach();
         cx.observe_window_activation(window, |this, window, cx| {
             let active = window.is_window_active();
             this.state
@@ -139,19 +144,22 @@ impl Shell {
         {
             let weak = cx.weak_entity();
             project_input.update(cx, |input, _| {
-                input.set_placeholder("Project name");
+                input.set_placeholder("Agent name");
                 input.on_submit = Some(Rc::new(move |window, cx| {
                     let _ = weak.update(cx, |this, cx| this.submit_project(window, cx));
                 }));
             });
         }
+        let search_input = cx.new(ComposerInput::new);
+        search_input.update(cx, |input, _| input.set_placeholder("Search"));
         cx.observe(&pairing_input, |_, _, cx| cx.notify()).detach();
         cx.observe(&project_input, |_, _, cx| cx.notify()).detach();
+        cx.observe(&search_input, |_, _, cx| cx.notify()).detach();
         let people_input = cx.new(ComposerInput::new);
         {
             let weak = cx.entity().downgrade();
             people_input.update(cx, |input, _| {
-                input.set_placeholder("username");
+                input.set_placeholder("Search people");
                 input.on_submit = Some(Rc::new(move |_window, cx| {
                     let _ = weak.update(cx, |this, cx| {
                         let typed = this.people_input.read(cx).text().trim().to_string();
@@ -242,6 +250,7 @@ impl Shell {
             voice,
             pairing_input,
             project_input,
+            search_input,
             connectors,
             skills,
             local,
@@ -253,10 +262,8 @@ impl Shell {
             channels,
             vault,
             shake_started_at: None,
-            tab_scroll: gpui::ScrollHandle::new(),
-            reveal_tab: None,
             signing_in: false,
-            new_menu_open: false,
+            menu_open: false,
             people_input,
             add_agent_open: false,
             members_open: false,
@@ -268,6 +275,12 @@ impl Shell {
         self.feedback.update(cx, |sheet, cx| sheet.open(window, cx));
     }
 
+    pub(crate) fn open_feedback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu_open = false;
+        self.settings_open = false;
+        self.feedback.update(cx, |sheet, cx| sheet.open(window, cx));
+    }
+
     fn submit_pairing(&mut self, cx: &mut Context<Self>) {
         let code = self.pairing_input.read(cx).text().trim().to_string();
         if code.is_empty() {
@@ -276,13 +289,17 @@ impl Shell {
         self.state.update(cx, |s, cx| s.pair(code, cx));
     }
 
-    fn submit_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn submit_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let name = self.project_input.read(cx).text().trim().to_string();
         if name.is_empty() {
             return;
         }
         self.project_input.update(cx, |input, cx| input.clear(cx));
-        self.state.update(cx, |s, cx| s.create_project(name, cx));
+        self.state.update(cx, |s, cx| {
+            s.new_project_open = false;
+            s.close_new_chat(cx);
+            s.create_project(name, cx);
+        });
         Composer::focus(&self.composer, window, cx);
     }
 
@@ -310,339 +327,65 @@ impl Shell {
         self.state.update(cx, |s, cx| s.toggle_right_panel(cx));
     }
 
+    /// Escape closes whatever floats: menus, then sheets.
+    fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        let floating =
+            self.menu_open || self.members_open || self.add_agent_open || self.group_picker_open;
+        self.close_popovers(cx);
+        if floating {
+            return;
+        }
+        let mut closed = false;
+        if self.settings_open {
+            self.settings_open = false;
+            closed = true;
+        }
+        self.state.update(cx, |s, cx| {
+            if s.new_chat_open {
+                s.new_project_open = false;
+                s.close_new_chat(cx);
+                closed = true;
+            }
+            if s.avatar_picker.take().is_some() {
+                closed = true;
+                cx.notify();
+            }
+        });
+        if closed {
+            Composer::focus(&self.composer, window, cx);
+            cx.notify();
+        }
+    }
+
     fn set_theme(&mut self, appearance: Appearance, surface: Surface, cx: &mut Context<Self>) {
         cx.set_global(Theme::with(appearance, surface));
         reapply_window_background(cx);
         cx.notify();
     }
 
-    // ----- rail ------------------------------------------------------------
-
-    fn render_rail(&self, collapsed: bool, cx: &mut Context<Self>) -> Div {
-        let theme = Theme::of(cx).clone();
-        let state = self.state.read(cx);
-        let selected = state.selected_project.clone();
-        let people_tiles: Vec<(Project, Option<Arc<RenderImage>>, usize, bool)> = state
-            .people_spaces()
-            .map(|p| {
-                (
-                    p.clone(),
-                    p.person().and_then(|x| state.avatar(&x.avatar_url)),
-                    state.project_unread(&p.id),
-                    state.typing_in(&p.id).is_some(),
-                )
-            })
-            .collect();
-        let projects: Vec<(Project, bool, usize)> = state
-            .projects
-            .iter()
-            .filter(|p| !p.is_people())
-            .map(|p| {
-                (
-                    p.clone(),
-                    state.project_is_streaming(&p.id),
-                    state.project_unread(&p.id),
-                )
-            })
-            .collect();
-        // Tree-character avatars (own choice or hash pick) and what they are doing.
-        let avatar_slugs: HashMap<Id, Option<String>> = projects
-            .iter()
-            .map(|(p, _, _)| (p.id.clone(), state.avatar_slug(p)))
-            .collect();
-        let avatar_states: HashMap<Id, avatars::AvatarState> = projects
-            .iter()
-            .map(|(p, _, _)| (p.id.clone(), state.avatar_state(&p.id)))
-            .collect();
-        // People in each project (D72 step 3) with their decoded avatars.
-        let project_people: HashMap<Id, PeopleWithAvatars> = projects
-            .iter()
-            .map(|(p, _, _)| {
-                let shown: Vec<_> = if p.is_guest() {
-                    p.owner().cloned().into_iter().collect()
-                } else {
-                    p.guests().cloned().collect()
-                };
-                (
-                    p.id.clone(),
-                    shown
-                        .into_iter()
-                        .map(|person| {
-                            let img = state.avatar(&person.avatar_url);
-                            (person, img)
-                        })
-                        .collect(),
-                )
-            })
-            .collect();
-        let width = if collapsed {
-            RAIL_WIDTH_COLLAPSED
-        } else {
-            RAIL_WIDTH
-        };
-
-        let mut tiles = div()
-            .id("rail-tiles")
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap(px(10.0))
-            .pt(px(if cfg!(target_os = "macos") {
-                44.0
-            } else {
-                10.0
-            }))
-            .flex_1()
-            .overflow_y_scroll();
-        for (project, streaming, unread) in projects {
-            let is_selected = selected.as_deref() == Some(project.id.as_str());
-            let id = project.id.clone();
-            if streaming {
-                PulseClock::request(cx);
-            }
-            let tile_size = if collapsed { 36.0 } else { RAIL_TILE };
-            let mut tile = div()
-                .id(ElementId::Name(SharedString::from(format!(
-                    "tile-{}",
-                    project.id
-                ))))
-                .relative()
-                .w(px(tile_size))
-                .h(px(if collapsed { 36.0 } else { RAIL_TILE - 6.0 }))
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(px(4.0))
-                .rounded(px(PANEL_RADIUS))
-                .border_1()
-                .border_color(if is_selected {
-                    theme.accent
-                } else {
-                    theme.border
-                })
-                .bg(if is_selected {
-                    theme.surface_2
-                } else {
-                    theme.surface_1
-                })
-                .cursor_pointer()
-                .hover(|s| s.border_color(theme.border_strong))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.state
-                        .update(cx, |s, cx| s.select_project(id.clone(), cx));
-                    Composer::focus(&this.composer, window, cx);
-                }));
-            match avatar_slugs.get(&project.id).cloned().flatten() {
-                Some(slug) => {
-                    let avatar_state = avatar_states
-                        .get(&project.id)
-                        .copied()
-                        .unwrap_or(avatars::AvatarState::Idle);
-                    if avatar_state != avatars::AvatarState::Idle {
-                        PulseClock::request(cx);
-                    }
-                    tile = tile.child(avatars::element(
-                        Some(&slug),
-                        project.avatar_color.as_deref(),
-                        avatar_state,
-                        if collapsed { 26.0 } else { 40.0 },
-                        &project.icon,
-                        groups::project_color(&project.color, theme.accent),
-                        &theme,
-                    ));
-                }
-                None => {
-                    tile = tile.child(
-                        div()
-                            .text_size(px(if collapsed { 16.0 } else { 20.0 }))
-                            .text_color(theme.text)
-                            .child(project.icon.clone()),
-                    );
-                }
-            }
-            if !collapsed {
-                tile = tile.child(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(theme.text)
-                        .child(project.name.clone()),
-                );
-            }
-            // People in this project (D72 step 3): a small avatar cluster.
-            if let Some(shown) = project_people.get(&project.id).filter(|v| !v.is_empty()) {
-                tile = tile.child(
-                    div()
-                        .absolute()
-                        .bottom(px(-4.0))
-                        .right(px(-4.0))
-                        .child(people::avatar_stack(shown, 14.0, 2, &theme)),
-                );
-            }
-            // Workspace state: a tiny dot only (the machine has its own indicator).
-            let ws_dot = match project.state {
-                BoxState::Awake => None,
-                BoxState::Waking => Some(theme.warn),
-                BoxState::HibernatedLight | BoxState::HibernatedDeep => Some(theme.text_faint),
-                BoxState::StoppedByUser => Some(theme.text_muted),
-                BoxState::Error => Some(theme.danger),
-            };
-            if let (Some(c), false) = (ws_dot, streaming) {
-                tile = tile.child(
-                    div()
-                        .absolute()
-                        .top(px(5.0))
-                        .right(px(6.0))
-                        .size(px(5.0))
-                        .rounded_full()
-                        .bg(c),
-                );
-            }
-            if streaming {
-                let phase = PulseClock::phase(cx, 1200);
-                tile = tile.child(
-                    div()
-                        .absolute()
-                        .top(px(5.0))
-                        .left(px(6.0))
-                        .size(px(6.0))
-                        .rounded_full()
-                        .bg(Theme::with_alpha(theme.accent, 0.4 + 0.6 * phase)),
-                );
-            } else if unread > 0 {
-                tile = tile.child(
-                    div()
-                        .absolute()
-                        .top(px(-4.0))
-                        .right(px(-4.0))
-                        .min_w(px(16.0))
-                        .h(px(16.0))
-                        .px(px(4.0))
-                        .rounded_full()
-                        .bg(theme.accent)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(10.0))
-                        .text_color(theme.bg)
-                        .font_weight(FontWeight::BOLD)
-                        .child(unread.to_string()),
-                );
-            }
-            tiles = tiles.child(tile);
+    /// Everything that floats closes on a click elsewhere.
+    fn close_popovers(&mut self, cx: &mut Context<Self>) {
+        if self.menu_open || self.members_open || self.add_agent_open || self.group_picker_open {
+            self.menu_open = false;
+            self.members_open = false;
+            self.add_agent_open = false;
+            self.group_picker_open = false;
+            cx.notify();
         }
-        if !people_tiles.is_empty() {
-            tiles = tiles.child(
-                div()
-                    .w(px(if collapsed { 24.0 } else { RAIL_TILE - 20.0 }))
-                    .h(px(1.0))
-                    .my(px(2.0))
-                    .bg(theme.border),
-            );
+        if self.composer.read(cx).open_picker.is_some() {
+            self.composer.update(cx, |c, cx| {
+                c.open_picker = None;
+                cx.notify();
+            });
         }
-        for (space, image, unread, typing) in people_tiles {
-            let is_selected = selected.as_deref() == Some(space.id.as_str());
-            if typing {
-                PulseClock::request(cx);
-            }
-            tiles = tiles.child(people::person_tile(
-                &space,
-                image,
-                is_selected,
-                collapsed,
-                unread,
-                typing,
-                &theme,
-                cx,
-            ));
-        }
-
-        // Bottom controls: same footprint and spacing as the tiles, centred on
-        // the same axis (§3.3).
-        let bottom_button = |id: &'static str, glyph: &'static str, size_px: f32, theme: &Theme| {
-            div()
-                .id(id)
-                .w(px(if collapsed { 36.0 } else { RAIL_TILE }))
-                .h(px(32.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(PANEL_RADIUS))
-                .text_size(px(size_px))
-                .text_color(theme.text_muted)
-                .hover(|s| s.bg(theme.surface_2).text_color(theme.text))
-                .cursor_pointer()
-                .child(glyph)
-        };
-        let bottom = div()
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap(px(10.0))
-            .pt(px(6.0))
-            .pb(px(12.0))
-            .child(self.render_machine_indicator(collapsed, cx))
-            .child(
-                bottom_button("rail-new-project", "+", 20.0, &theme).on_click(cx.listener(
-                    |this, _, _, cx| {
-                        let any_open = this.new_menu_open
-                            || this.state.read(cx).new_project_open
-                            || this.state.read(cx).new_chat_open;
-                        if any_open {
-                            this.new_menu_open = false;
-                            this.state.update(cx, |s, cx| {
-                                s.new_project_open = false;
-                                s.close_new_chat(cx);
-                            });
-                        } else {
-                            this.new_menu_open = true;
-                        }
-                        cx.notify();
-                    },
-                )),
-            )
-            .children(self.render_update_button(collapsed, cx))
-            .child(
-                bottom_button("rail-feedback", "✎", 16.0, &theme).on_click(cx.listener(
-                    |this, _, window, cx| {
-                        this.feedback.update(cx, |sheet, cx| sheet.open(window, cx));
-                    },
-                )),
-            )
-            .child(
-                // Toggle on the press itself: one event per press on every
-                // platform, so a click can never open and shut in one go.
-                bottom_button("rail-settings", "⚙", 17.0, &theme).on_mouse_down(
-                    gpui::MouseButton::Left,
-                    cx.listener(|this, _, _, cx| {
-                        this.settings_open = !this.settings_open;
-                        cx.notify();
-                    }),
-                ),
-            );
-
-        div()
-            .relative()
-            .h_full()
-            .w(px(width))
-            .flex_shrink_0()
-            .flex()
-            .flex_col()
-            .bg(theme.chrome())
-            .border_r_1()
-            .border_color(theme.border)
-            .child(edge_faded(18.0, true, true, tiles))
-            .child(bottom)
     }
+
+    // ----- update pill (sidebar bottom) ------------------------------------------
 
     /// The Update button (D42): absent while up to date; appears the moment
     /// the feed has a newer build; one click downloads, verifies, swaps the
-    /// bundle, and relaunches. It sits just above the settings gear.
-    fn render_update_button(
-        &self,
-        collapsed: bool,
-        cx: &mut Context<Self>,
-    ) -> Option<gpui::Stateful<Div>> {
+    /// bundle, and relaunches. It sits at the bottom of the chat list.
+    pub(crate) fn render_update_button(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
         let theme = Theme::of(cx).clone();
         let update = self.state.read(cx).update.clone();
         if !update.button_visible() {
@@ -661,335 +404,35 @@ impl Shell {
         let bg = if failed {
             theme.danger_soft
         } else {
-            Theme::with_alpha(theme.accent, 0.55 + 0.45 * phase)
+            Theme::with_alpha(theme.primary, 0.75 + 0.25 * phase)
         };
-        let fg = if failed { theme.text } else { theme.bg };
+        let fg = if failed { theme.text } else { theme.on_primary };
         let label = update.button_label();
-        let mut button = div()
-            .id("rail-update")
-            .w(px(if collapsed { 36.0 } else { RAIL_TILE }))
-            .h(px(32.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .gap(px(5.0))
-            .rounded(px(PANEL_RADIUS))
-            .bg(bg)
-            .text_color(fg)
-            .text_size(px(12.0))
-            .font_weight(FontWeight::SEMIBOLD)
-            .when(!busy, |el| {
-                el.cursor_pointer()
-                    .hover(|s| s.bg(Theme::with_alpha(theme.accent, 0.85)))
-            })
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.state.update(cx, |s, cx| s.install_update(cx));
-            }));
-        button = button.child(
+        Some(
             div()
-                .text_size(px(14.0))
-                .child(if failed { "!" } else { "↑" }),
-        );
-        if !collapsed {
-            button = button.child(div().child(label));
-        }
-        Some(button)
-    }
-
-    // ----- tab bar -----------------------------------------------------------
-
-    fn render_tab_bar(&self, cx: &mut Context<Self>) -> Div {
-        let theme = Theme::of(cx).clone();
-        let state = self.state.read(cx);
-        let project = state.selected().cloned();
-        let tabs: Vec<(Chat, bool, bool)> = project
-            .as_ref()
-            .map(|p| {
-                state
-                    .tabs(&p.id)
-                    .iter()
-                    .map(|c| {
-                        (
-                            c.clone(),
-                            state.active_tab.get(&p.id) == Some(&c.id),
-                            state.chat_is_streaming(&c.id),
-                        )
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let rail_collapsed = state.rail_collapsed;
-        let panel_open = state.right_panel_open;
-        let in_call = self.voice.read(cx).in_call();
-        let projects = state.projects.clone();
-        let pinned_avatar = project.as_ref().filter(|p| !p.is_people()).and_then(|p| {
-            state
-                .avatar_slug(p)
-                .map(|slug| (slug, state.avatar_state(&p.id)))
-        });
-        let can_group =
-            project.as_ref().map(|p| !p.is_guest()).unwrap_or(false) && projects.len() > 1;
-        let picker_open = self.group_picker_open;
-
-        let shake = self
-            .shake_started_at
-            .map(|t| now_ms().saturating_sub(t))
-            .filter(|dt| *dt < SHAKE_MS);
-        if shake.is_some() {
-            PulseClock::request(cx);
-        }
-
-        let tab_count = tabs.len();
-        // The strip holds only the closable tabs; the pinned tab stays put.
-        let active_ix = tabs
-            .iter()
-            .position(|(_, active, _)| *active)
-            .map(|ix| ix.saturating_sub(1));
-        let mut pinned_tab = None;
-        let mut strip = div()
-            .id("tab-strip")
-            .flex()
-            .flex_1()
-            .min_w_0()
-            .items_center()
-            .gap(px(2.0))
-            .overflow_x_scroll()
-            .track_scroll(&self.tab_scroll);
-        if let Some(ix) = self.reveal_tab.map(|ix| ix.saturating_sub(1)).or(active_ix) {
-            // Items in the strip: closable tabs then "+"; clamp to the last tab.
-            self.tab_scroll
-                .scroll_to_item(ix.min(tab_count.saturating_sub(2)));
-        }
-        for (chat, active, streaming) in tabs {
-            let id = chat.id.clone();
-            let close_id = chat.id.clone();
-            if streaming {
-                PulseClock::request(cx);
-            }
-            let mut tab = div()
-                .id(ElementId::Name(SharedString::from(format!(
-                    "tab-{}",
-                    chat.id
-                ))))
-                .group("tab")
-                .relative()
+                .id("rail-update")
+                .w_full()
+                .h(px(38.0))
                 .flex()
                 .items_center()
+                .justify_center()
                 .gap(px(6.0))
-                .h(px(28.0))
-                .when(!chat.is_pinned, |el| el.w(px(176.0)).flex_shrink(1.0))
-                .when(chat.is_pinned, |el| el.flex_shrink_0())
-                .min_w(px(if chat.is_pinned { 0.0 } else { TAB_MIN_WIDTH }))
-                .px(px(10.0))
-                .rounded(px(7.0))
-                .bg(if active {
-                    theme.surface_2
-                } else {
-                    gpui::transparent_black()
-                })
-                .text_size(px(12.5))
-                .text_color(if active { theme.text } else { theme.text_muted })
-                .cursor_pointer()
-                .hover(|s| s.bg(theme.surface_1))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.state.update(cx, |s, cx| s.select_tab(id.clone(), cx));
-                    Composer::focus(&this.composer, window, cx);
-                }));
-            if chat.is_pinned {
-                let shake_offset = shake
-                    .map(|dt| {
-                        ((dt as f32 / SHAKE_MS as f32) * std::f32::consts::PI * 4.0).sin() * 3.0
-                    })
-                    .unwrap_or(0.0);
-                tab =
-                    tab.left(px(shake_offset))
-                        .child(match (&project, pinned_avatar.clone()) {
-                            (Some(p), Some((slug, st))) => {
-                                if st != avatars::AvatarState::Idle {
-                                    PulseClock::request(cx);
-                                }
-                                avatars::element(
-                                    Some(&slug),
-                                    p.avatar_color.as_deref(),
-                                    st,
-                                    20.0,
-                                    &p.icon,
-                                    groups::project_color(&p.color, theme.accent),
-                                    &theme,
-                                )
-                            }
-                            _ => div().text_size(px(14.0)).text_color(theme.text).child(
-                                project.as_ref().map(|p| p.icon.clone()).unwrap_or_default(),
-                            ),
-                        });
-            }
-            if streaming {
-                let phase = PulseClock::phase(cx, 1200);
-                tab = tab.child(
-                    div()
-                        .size(px(6.0))
-                        .rounded_full()
-                        .bg(Theme::with_alpha(theme.accent, 0.4 + 0.6 * phase)),
-                );
-            }
-            let title = if chat.is_pinned {
-                project
-                    .as_ref()
-                    .map(|p| p.name.clone())
-                    .unwrap_or(chat.title.clone())
-            } else {
-                chat.title.clone()
-            };
-            if let Some(glyphs) = groups::tab_glyphs(&chat, &projects, &theme) {
-                tab = tab.child(glyphs);
-            }
-            tab = tab.child(
-                div()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .max_w(px(180.0))
-                    .when(chat.unread && !active, |el| {
-                        el.font_weight(FontWeight::SEMIBOLD).text_color(theme.text)
-                    })
-                    .child(title),
-            );
-            if !chat.is_pinned {
-                tab = tab.child(
-                    div()
-                        .id(ElementId::Name(SharedString::from(format!(
-                            "close-{}",
-                            chat.id
-                        ))))
-                        .size(px(16.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(4.0))
-                        .text_size(px(12.0))
-                        .text_color(theme.text_faint)
-                        .invisible()
-                        .group_hover("tab", |s| s.visible())
-                        .hover(|s| s.bg(theme.border_strong).text_color(theme.text))
-                        .child("×")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.state.update(cx, |s, cx| {
-                                s.close_tab(close_id.clone(), cx);
-                            });
-                        })),
-                );
-            }
-            if chat.is_pinned {
-                pinned_tab = Some(tab);
-            } else {
-                strip = strip.child(tab);
-            }
-        }
-        // "+" sits right after the last tab (§3.4), inside the scrolling strip.
-        strip = strip.child(
-            div()
-                .id("new-tab")
-                .flex_shrink_0()
-                .size(px(26.0))
-                .ml(px(2.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(6.0))
-                .text_size(px(18.0))
-                .text_color(theme.text_muted)
-                .hover(|s| s.bg(theme.surface_2))
-                .cursor_pointer()
-                .child("+")
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.state.update(cx, |s, cx| s.new_tab(cx));
-                    let n = this
-                        .state
-                        .read(cx)
-                        .selected_project
-                        .as_deref()
-                        .map(|p| this.state.read(cx).tabs(p).len())
-                        .unwrap_or(1);
-                    this.reveal_tab = Some(n.saturating_sub(1));
-                    Composer::focus(&this.composer, window, cx);
+                .rounded_full()
+                .bg(bg)
+                .text_color(fg)
+                .text_size(px(TEXT_SMALL))
+                .font_weight(FontWeight::SEMIBOLD)
+                .when(!busy, |el| el.cursor_pointer().hover(|s| s.opacity(0.88)))
+                .child(icon(if failed { "xmark" } else { "arrow-down" }, 14.0, fg))
+                .child(label)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.state.update(cx, |s, cx| s.install_update(cx));
                 })),
-        );
-
-        let icon_button = |id: &'static str, glyph: &'static str, active: bool, theme: &Theme| {
-            div()
-                .id(id)
-                .size(px(26.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(6.0))
-                .text_size(px(14.0))
-                .text_color(if active { theme.text } else { theme.text_muted })
-                .hover(|s| s.bg(theme.surface_2))
-                .cursor_pointer()
-                .child(glyph)
-        };
-
-        div()
-            .h(px(TAB_BAR_HEIGHT))
-            .flex_shrink_0()
-            .w_full()
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .px(px(8.0))
-            .bg(theme.chrome())
-            .border_b_1()
-            .border_color(theme.border)
-            .window_control_area(gpui::WindowControlArea::Drag)
-            .child(
-                icon_button("rail-toggle", "☰", !rail_collapsed, &theme).on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.state.update(cx, |s, cx| s.toggle_rail(cx));
-                    },
-                )),
-            )
-            .children(pinned_tab)
-            .child(strip)
-            .when_some(project.as_ref().filter(|p| !p.is_people()), |el, p| {
-                el.child(people::project_controls(
-                    p,
-                    &self.state,
-                    self.members_open,
-                    cx,
-                ))
-            })
-            .when(can_group, |el| {
-                el.child(
-                    groups::header_button(picker_open, &theme).on_click(cx.listener(
-                        |this, _, _, cx| {
-                            let open = !this.group_picker_open;
-                            this.set_group_picker(open, cx);
-                        },
-                    )),
-                )
-            })
-            .child(
-                icon_button("call-toggle", "☎", in_call, &theme).on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.voice.update(cx, |v, cx| v.toggle_call(cx));
-                    },
-                )),
-            )
-            .child(
-                icon_button("panel-toggle", "▣", panel_open, &theme).on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.state.update(cx, |s, cx| s.toggle_right_panel(cx));
-                    },
-                )),
-            )
+        )
     }
 
-    // ----- banners (S11–S14) ------------------------------------------------
+    // ----- banners (S11–S14) ------------------------------------------
 
-    /// One machine-level banner, only while the user's machine is waking or
-    /// errored (and S14 while the relay link is down). Workspace state never
-    /// banners: it is the tiny dot on the tab/rail.
     fn render_banner(&self, cx: &mut Context<Self>) -> Option<Div> {
         let theme = Theme::of(cx).clone();
         let state = self.state.read(cx);
@@ -1082,126 +525,7 @@ impl Shell {
         }
     }
 
-    /// Rail footer: the machine indicator (dot + state word); hover shows
-    /// spec, uptime and spend; click opens Settings (Machine section).
-    fn render_machine_indicator(&self, collapsed: bool, cx: &mut Context<Self>) -> Stateful<Div> {
-        let theme = Theme::of(cx).clone();
-        let state = self.state.read(cx);
-        let machine = state.machine.clone();
-        let hover = state.machine_hover;
-        let shown = machine.shown_state();
-        let color = match shown {
-            MachineState::Awake => theme.accent,
-            MachineState::Waking => theme.warn,
-            MachineState::Asleep | MachineState::Unknown => theme.text_faint,
-            MachineState::Stopped => theme.text_muted,
-            MachineState::Error => theme.danger,
-        };
-        if shown == MachineState::Waking {
-            PulseClock::request(cx);
-        }
-        let phase = PulseClock::phase(cx, 1100);
-        let dot_alpha = if shown == MachineState::Waking {
-            0.35 + 0.65 * phase
-        } else {
-            1.0
-        };
-        let mut tile = div()
-            .id("machine-indicator")
-            .relative()
-            .w(px(if collapsed { 36.0 } else { RAIL_TILE }))
-            .h(px(22.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .gap(px(6.0))
-            .rounded(px(6.0))
-            .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
-            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                this.state.update(cx, |s, cx| {
-                    s.machine_hover = *hovered;
-                    cx.notify();
-                });
-            }))
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.settings_open = true;
-                cx.notify();
-            }))
-            .child(
-                div()
-                    .size(px(7.0))
-                    .rounded_full()
-                    .bg(Theme::with_alpha(color, dot_alpha)),
-            );
-        if !collapsed {
-            tile = tile.child(
-                div()
-                    .text_size(px(10.5))
-                    .text_color(theme.text_faint)
-                    .child(shown.label()),
-            );
-        }
-        if hover {
-            let uptime = machine
-                .since
-                .filter(|_| shown == MachineState::Awake)
-                .map(|since| fmt_uptime(now_ms().saturating_sub(since)))
-                .unwrap_or_else(|| "—".into());
-            let card = div()
-                .absolute()
-                .left(px(if collapsed { 44.0 } else { RAIL_TILE + 8.0 }))
-                .bottom(px(0.0))
-                .w(px(230.0))
-                .flex()
-                .flex_col()
-                .gap(px(4.0))
-                .p(px(10.0))
-                .rounded(px(PANEL_RADIUS))
-                .bg(theme.card())
-                .border_1()
-                .border_color(theme.border_strong)
-                .shadow_lg()
-                .text_size(px(11.5))
-                .text_color(theme.text)
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .child(div().size(px(7.0)).rounded_full().bg(color))
-                        .child(format!("Machine · {}", shown.label())),
-                )
-                .child(
-                    div().text_color(theme.text_muted).child(
-                        machine
-                            .spec
-                            .clone()
-                            .unwrap_or_else(|| "spec unknown".into()),
-                    ),
-                )
-                .when_some(machine.class.clone(), |el, c| {
-                    el.child(div().text_color(theme.text_faint).child(c))
-                })
-                .child(
-                    div()
-                        .text_color(theme.text_muted)
-                        .child(format!("Uptime {uptime}")),
-                )
-                .child(
-                    div()
-                        .text_color(theme.text_muted)
-                        .child(machine_spend_line(&machine)),
-                )
-                .when_some(machine.detail.clone(), |el, d| {
-                    el.child(div().text_color(theme.text_faint).child(d))
-                });
-            tile = tile.child(frosted(PANEL_RADIUS, MENU_BLUR, card));
-        }
-        tile
-    }
-
-    // ----- center column ------------------------------------------------------
+    // ----- conversation pane ---------------------------------------------------
 
     fn render_center(&self, cx: &mut Context<Self>) -> Div {
         let theme = Theme::of(cx).clone();
@@ -1223,80 +547,130 @@ impl Shell {
             .map(|t| now_ms().saturating_sub(t))
             .unwrap_or(COMPOSER_DROP_MS + 1);
         let animating = dropped && drop_elapsed < COMPOSER_DROP_MS;
-        if animating {
+        let shake = self
+            .shake_started_at
+            .map(|t| now_ms().saturating_sub(t))
+            .filter(|dt| *dt < SHAKE_MS);
+
+        // Everything the empty-state hero needs, read before `cx` is borrowed mutably.
+        let hero_data = project.as_ref().map(|space| {
+            (
+                if space.is_people() {
+                    None
+                } else {
+                    state.avatar_slug(space)
+                },
+                state.avatar_state(&space.id),
+                space
+                    .person()
+                    .filter(|_| space.is_people())
+                    .and_then(|p| state.avatar(&p.avatar_url)),
+            )
+        });
+        let typing = chat_id.as_deref().and_then(|id| state.typing_in(id));
+        if animating || shake.is_some() {
             PulseClock::request(cx);
         }
 
         let composer_block = div()
             .w_full()
-            .max_w(px(COMPOSER_WIDTH.max(COLUMN_MAX_WIDTH - 56.0)))
+            .max_w(px(COMPOSER_WIDTH.max(COLUMN_MAX_WIDTH + 2.0 * PLUS_BUTTON)))
             .child(self.composer.clone());
 
         let mut column = div()
+            .relative()
             .flex()
             .flex_col()
             .flex_1()
             .min_w_0()
-            .h_full()
-            .child(frosted(0.0, PANEL_BLUR, self.render_tab_bar(cx)));
-        if let Some(space) = project.as_ref().filter(|p| p.is_people()) {
-            column = column.child(people::header(
-                space,
-                &self.state,
-                self.add_agent_open,
-                self.members_open,
-                cx,
-            ));
-        } else if let Some(banner) = self.render_banner(cx) {
+            .h_full();
+
+        let Some(space) = project else {
+            // Nothing selected: the window title strip stays draggable.
+            return column
+                .child(
+                    div()
+                        .h(px(HEADER_HEIGHT))
+                        .w_full()
+                        .window_control_area(gpui::WindowControlArea::Drag),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(8.0))
+                        .px(px(28.0))
+                        .child(
+                            div()
+                                .text_size(px(TEXT_BODY + 2.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme.text)
+                                .child("Pick a chat"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(TEXT_SMALL))
+                                .text_color(theme.text_muted)
+                                .text_center()
+                                .child(
+                                    "Choose an agent or a person on the left, or press + for a new one.",
+                                ),
+                        ),
+                );
+        };
+
+        let shake_offset = shake
+            .map(|dt| ((dt as f32 / SHAKE_MS as f32) * std::f32::consts::PI * 4.0).sin() * 3.0)
+            .unwrap_or(0.0);
+        column = column.child(
+            div()
+                .relative()
+                .left(px(shake_offset))
+                .child(header::render(self, &space, cx)),
+        );
+        if let Some(chips) = header::chips(self, &space, cx) {
+            column = column.child(chips);
+        }
+        if let Some(banner) = self.render_banner(cx) {
             column = column.child(banner);
         }
 
-        if project.is_none() {
-            return column.child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(10.0))
-                    .px(px(28.0))
-                    .child(
-                        div()
-                            .text_size(px(22.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.text)
-                            .child("No projects yet"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .text_color(theme.text_muted)
-                            .child(
-                                "Press + in the rail. Each project is a workspace on your machine.",
-                            ),
-                    ),
-            );
-        }
         if !dropped {
-            // S1/S2: empty chat, composer centered with the project name and a hint.
-            let is_people = project.as_ref().map(|p| p.is_people()).unwrap_or(false);
-            let name = project
-                .as_ref()
-                .map(|p| {
-                    if p.is_people() {
-                        format!("@{}", p.name)
-                    } else {
-                        p.name.clone()
-                    }
-                })
-                .unwrap_or_default();
+            // S1/S2: empty chat — the agent's picture and a line, composer centred.
+            let is_people = space.is_people();
+            let name = if is_people {
+                space
+                    .person()
+                    .map(|p| p.display_name())
+                    .unwrap_or_else(|| space.name.clone())
+            } else {
+                space.name.clone()
+            };
             let hint = if is_people {
-                "Say hi. It lands for both of you at once; + Add agent brings one of yours in."
+                "Say hi. It lands for both of you at once; Add agent brings one of yours in."
                     .to_string()
             } else {
-                format!("Ask {name} anything. It will plan, delegate, or answer.")
+                format!("Ask {name} anything. It plans, delegates, or just answers.")
             };
+            let mut hero = div().flex().flex_col().items_center().gap(px(10.0));
+            let (slug, avatar_state, person_image) =
+                hero_data.unwrap_or((None, avatars::AvatarState::Idle, None));
+            if !is_people {
+                hero = hero.child(avatars::element(
+                    slug.as_deref(),
+                    space.avatar_color.as_deref(),
+                    avatar_state,
+                    88.0,
+                    &space.icon,
+                    groups::project_color(&space.color, theme.accent),
+                    &theme,
+                ));
+            } else if let Some(person) = space.person() {
+                hero = hero.child(people::avatar(person_image, person, 88.0, &theme));
+            }
             column = column.child(
                 div()
                     .flex_1()
@@ -1306,41 +680,39 @@ impl Shell {
                     .justify_center()
                     .gap(px(14.0))
                     .px(px(28.0))
+                    .child(hero)
                     .child(
                         div()
-                            .text_size(px(22.0))
+                            .text_size(px(TEXT_BODY + 5.0))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.text)
                             .child(name.clone()),
                     )
                     .child(
                         div()
-                            .text_size(px(13.0))
+                            .text_size(px(TEXT_SMALL))
                             .text_color(theme.text_muted)
+                            .text_center()
+                            .max_w(px(460.0))
                             .child(hint),
                     )
                     .child(
                         div()
                             .w(px(COMPOSER_WIDTH))
                             .max_w_full()
-                            .pt(px(8.0))
+                            .pt(px(12.0))
                             .child(self.composer.clone()),
                     ),
             );
         } else {
             // Transcript above, composer pinned at the bottom. On the first
-            // send the composer slides down from the center over 220 ms using
+            // send the composer slides down from the centre over 220 ms using
             // a relative `top` inset (GPUI has no transform).
             let body = div()
                 .flex_1()
                 .min_h_0()
                 .relative()
                 .child(self.transcript.clone());
-            let typing = self
-                .state
-                .read(cx)
-                .active_chat_id()
-                .and_then(|id| self.state.read(cx).typing_in(&id));
             if typing.is_some() {
                 PulseClock::request(cx);
             }
@@ -1349,9 +721,9 @@ impl Shell {
                 .flex()
                 .flex_col()
                 .items_center()
-                .px(px(28.0))
-                .pb(px(18.0))
-                .pt(px(8.0))
+                .px(px(20.0))
+                .pb(px(16.0))
+                .pt(px(6.0))
                 .when_some(typing, |el, handle| {
                     el.child(people::typing_line(&handle, &theme))
                 })
@@ -1377,8 +749,6 @@ impl Shell {
         }
         column
     }
-
-    // ----- right panel (S16) and Details drawer --------------------------------
 
     fn render_right_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
@@ -1816,6 +1186,8 @@ impl Shell {
         frosted(0.0, PANEL_BLUR, drawer)
     }
 
+    // ----- settings sheet -----------------------------------------------------------
+
     fn render_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let state = self.state.read(cx);
@@ -1824,9 +1196,11 @@ impl Shell {
         let device = state.device_id.clone();
         let show_details = state.show_details;
         let account = state.account.clone();
+        let account_image = account.as_ref().and_then(|a| state.avatar(&a.avatar_url));
         let notify_on = state.notifier.enabled;
         let skill_count = state.skills.len();
         let update = state.update.clone();
+        let update_failed = matches!(update.phase, crate::update::UpdatePhase::Failed { .. });
         let update_action: Option<(&'static str, &'static str, bool)> = match &update.phase {
             crate::update::UpdatePhase::Available(_)
             | crate::update::UpdatePhase::Failed {
@@ -1843,186 +1217,292 @@ impl Shell {
             | crate::update::UpdatePhase::Restarting(_) => None,
         };
         let machine = state.machine.clone();
+        let shown = machine.shown_state();
+        if shown == MachineState::Waking {
+            PulseClock::request(cx);
+        }
         let glass_ok = Theme::glass_available();
 
-        let option = |id: &'static str,
-                      label: &'static str,
-                      selected: bool,
-                      enabled: bool,
-                      theme: &Theme| {
+        let value = |text: String, theme: &Theme| {
+            div()
+                .flex_shrink_0()
+                .text_size(px(TEXT_BODY))
+                .text_color(theme.text_muted)
+                .child(text)
+        };
+        let link_button = |id: &'static str, label: &'static str, danger: bool, theme: &Theme| {
             div()
                 .id(id)
-                .px(px(10.0))
-                .py(px(5.0))
-                .rounded(px(6.0))
-                .text_size(px(12.5))
-                .bg(if selected {
-                    theme.surface_2
-                } else {
-                    gpui::transparent_black()
-                })
-                .text_color(if enabled {
-                    theme.text
-                } else {
-                    theme.text_faint
-                })
-                .when(enabled, |el| {
-                    el.cursor_pointer().hover(|s| s.bg(theme.surface_2))
-                })
+                .flex_shrink_0()
+                .text_size(px(TEXT_BODY))
+                .text_color(if danger { theme.danger } else { theme.accent })
+                .cursor_pointer()
+                .hover(|s| s.opacity(0.8))
                 .child(label)
         };
+        let footnote = |text: String, theme: &Theme| {
+            div()
+                .px(px(16.0))
+                .pt(px(6.0))
+                .text_size(px(TEXT_TINY))
+                .text_color(theme.text_muted)
+                .child(text)
+        };
+        let section = |label: &str, group: Div, note: Option<Div>, theme: &Theme| {
+            div()
+                .flex()
+                .flex_col()
+                .child(glass::section_label(label, theme))
+                .child(group)
+                .children(note)
+        };
 
-        let card = div()
-            .id("settings-popover")
-            .w(px(272.0))
+        let mut body = div()
+            .id("settings-body")
             .flex()
             .flex_col()
-            .gap(px(8.0))
-            .p(px(10.0))
-            .rounded(px(PANEL_RADIUS))
-            .bg(theme.card())
-            .border_1()
-            .border_color(theme.border_strong)
-            .shadow_lg()
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(theme.text_faint)
-                    .child("UPDATES"),
-            )
-            .child(
+            .gap(px(22.0))
+            .px(px(16.0))
+            .pb(px(20.0))
+            .min_h_0()
+            .overflow_y_scroll();
+
+        // Account.
+        if let Some(account) = account.clone() {
+            let who = if account.login.is_empty() {
+                "Signed in".to_string()
+            } else {
+                format!("@{}", account.login)
+            };
+            let person = crate::model::Person {
+                id: account.id.clone(),
+                handle: account.login.clone(),
+                name: Some(account.name.clone()),
+                avatar_url: account.avatar_url.clone(),
+                status: String::new(),
+                role: String::new(),
+            };
+            let mut group = glass::group(&theme).child(
                 div()
                     .flex()
                     .items_center()
-                    .justify_between()
-                    .gap(px(8.0))
+                    .gap(px(14.0))
+                    .px(px(16.0))
+                    .py(px(14.0))
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(people::avatar(account_image, &person, 56.0, &theme))
                     .child(
                         div()
+                            .flex()
+                            .flex_col()
                             .flex_1()
                             .min_w_0()
-                            .text_size(px(11.5))
-                            .text_color(
-                                if matches!(update.phase, crate::update::UpdatePhase::Failed { .. })
-                                {
-                                    theme.danger
-                                } else {
-                                    theme.text_muted
-                                },
+                            .child(
+                                div()
+                                    .text_size(px(TEXT_BODY + 1.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.text)
+                                    .child(if account.name.trim().is_empty() {
+                                        who.clone()
+                                    } else {
+                                        account.name.clone()
+                                    }),
                             )
-                            .child(update.status_line()),
+                            .child(
+                                div()
+                                    .text_size(px(TEXT_SMALL))
+                                    .text_color(theme.text_muted)
+                                    .child(who.clone()),
+                            ),
+                    ),
+            );
+            if account.balance_usd > 0.0 || account.daily_cap_usd.is_some() {
+                group = group.child(
+                    glass::row("Credits", &theme)
+                        .child(value(format!("${:.2} left", account.balance_usd), &theme)),
+                );
+                group = group.child(glass::row("Today", &theme).child(value(
+                    match account.daily_cap_usd {
+                        Some(cap) => {
+                            format!("${:.2} of ${cap:.0} cap", account.spent_today_usd)
+                        }
+                        None => format!("${:.2}", account.spent_today_usd),
+                    },
+                    &theme,
+                )));
+            }
+            group = group.child(glass::row("", &theme).border_b_0().child(
+                link_button("sign-out", "Sign out", true, &theme).on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.settings_open = false;
+                        this.state.update(cx, |s, cx| s.sign_out(cx));
+                    },
+                )),
+            ));
+            body = body.child(section("Account", group, None, &theme));
+        }
+
+        // Machine.
+        let dot = sidebar::machine_dot(shown, &theme);
+        let uptime = machine
+            .since
+            .filter(|_| shown == MachineState::Awake)
+            .map(|since| fmt_uptime(now_ms().saturating_sub(since)))
+            .unwrap_or_else(|| "—".into());
+        let mut group = glass::group(&theme)
+            .child(
+                glass::row("State", &theme).child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(7.0))
+                        .child(div().size(px(8.0)).rounded_full().bg(Theme::with_alpha(
+                            dot,
+                            if shown == MachineState::Waking {
+                                0.4 + 0.6 * PulseClock::phase(cx, 1100)
+                            } else {
+                                1.0
+                            },
+                        )))
+                        .child(value(shown.label().to_string(), &theme)),
+                ),
+            )
+            .child(glass::row("Since", &theme).child(value(uptime, &theme)))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .px(px(16.0))
+                    .py(px(10.0))
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .text_size(px(TEXT_BODY))
+                            .text_color(theme.text)
+                            .child("Spec"),
                     )
-                    .when_some(update_action, |el, (id, label, installs)| {
-                        el.child(
-                            div()
-                                .id(id)
-                                .flex_shrink_0()
-                                .px(px(8.0))
-                                .py(px(3.0))
-                                .rounded(px(6.0))
-                                .text_size(px(11.5))
-                                .text_color(theme.accent)
-                                .cursor_pointer()
-                                .hover(|s| s.bg(theme.surface_2))
-                                .child(label)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.state.update(cx, |s, cx| {
-                                        if installs {
-                                            s.install_update(cx);
-                                        } else {
-                                            s.check_for_updates(cx);
-                                        }
-                                    });
-                                })),
-                        )
-                    })
-                    // Self-update could not finish here (read-only copy, unwritable folder…):
-                    // the newest build is one click away in the browser.
-                    .when(
-                        matches!(update.phase, crate::update::UpdatePhase::Failed { .. }),
-                        |el| {
+                    .child(
+                        div()
+                            .text_size(px(TEXT_SMALL))
+                            .text_color(theme.text_muted)
+                            .child(format!(
+                                "{}{}",
+                                machine
+                                    .spec
+                                    .clone()
+                                    .unwrap_or_else(|| "spec unknown".into()),
+                                machine
+                                    .class
+                                    .as_deref()
+                                    .map(|c| format!(" · {c}"))
+                                    .unwrap_or_default()
+                            )),
+                    ),
+            )
+            .child(
+                glass::row(
+                    if machine.always_on {
+                        "Machine time today"
+                    } else {
+                        "Spend today"
+                    },
+                    &theme,
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_end()
+                        .child(value(
+                            if machine.always_on {
+                                format!("${:.2}", machine.spend_today_usd)
+                            } else {
+                                format!(
+                                    "${:.2} of ${:.0}",
+                                    machine.spend_today_usd, machine.spend_cap_usd
+                                )
+                            },
+                            &theme,
+                        ))
+                        .when(machine.always_on, |el| {
                             el.child(
                                 div()
-                                    .id("settings-update-download")
-                                    .flex_shrink_0()
-                                    .px(px(8.0))
-                                    .py(px(3.0))
-                                    .rounded(px(6.0))
-                                    .text_size(px(11.5))
-                                    .text_color(theme.accent)
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(theme.surface_2))
-                                    .child("Download")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.state.update(cx, |s, cx| s.open_download_page(cx));
-                                    })),
+                                    .text_size(px(TEXT_TINY))
+                                    .text_color(theme.text_muted)
+                                    .child("Not taken from credits"),
                             )
-                        },
-                    ),
-            )
-            .child(div().h(px(1.0)).bg(theme.border))
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(theme.text_faint)
-                    .child("APPEARANCE · SURFACE"),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap(px(4.0))
-                    .child(
-                        option(
-                            "surface-matte",
-                            "Matte",
-                            theme.surface == Surface::Matte,
-                            true,
-                            &theme,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            let a = Theme::of(cx).appearance;
-                            this.set_theme(a, Surface::Matte, cx);
-                        })),
-                    )
-                    .child(
-                        option(
-                            "surface-glass",
-                            "Glass",
-                            theme.surface == Surface::Glass,
-                            true,
-                            &theme,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            let a = Theme::of(cx).appearance;
-                            this.set_theme(a, Surface::Glass, cx);
-                        })),
-                    ),
-            )
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(theme.text_faint)
-                    .child(if glass_ok {
-                        "Glass: window vibrancy + frosted panels (0.80 shell alpha)."
-                    } else {
-                        "Glass here: frosted panels only; window vibrancy needs macOS."
+                        }),
+                ),
+            );
+        if let Some(detail) = machine.detail.clone() {
+            group = group.child(footnote(detail, &theme).pb(px(8.0)));
+        }
+        if machine.always_on {
+            group = group.child(glass::row("", &theme).border_b_0().child(
+                link_button("machine-restart", "Restart machine", false, &theme).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.state.update(cx, |s, cx| s.machine_restart(cx));
                     }),
-            )
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(theme.text_faint)
-                    .child("APPEARANCE · MODE"),
-            )
-            .child(
+                ),
+            ));
+        } else if machine.state.is_down() {
+            group = group.child(glass::row("", &theme).border_b_0().child(
+                link_button("machine-start", "Start machine", false, &theme).on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.state.update(cx, |s, cx| s.machine_start(cx));
+                    },
+                )),
+            ));
+        } else {
+            group = group.child(glass::row("", &theme).border_b_0().child(
+                link_button("machine-stop", "Stop machine", true, &theme).on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.state.update(cx, |s, cx| s.machine_stop(cx));
+                    },
+                )),
+            ));
+        }
+        body = body.child(section(
+            "Machine",
+            group,
+            Some(footnote(
+                "Your one cloud computer, always on. Agents are workspaces on it. Machine time \
+                 is billed separately from your credits."
+                    .into(),
+                &theme,
+            )),
+            &theme,
+        ));
+
+        // Appearance.
+        let seg_row = |label: &str, segs: Div, theme: &Theme| {
+            glass::row(label.to_string(), theme).child(
                 div()
                     .flex()
-                    .gap(px(4.0))
+                    .items_center()
+                    .gap(px(2.0))
+                    .p(px(2.0))
+                    .rounded_full()
+                    .bg(theme.field)
+                    .border_1()
+                    .border_color(theme.field_border)
+                    .child(segs),
+            )
+        };
+        let group = glass::group(&theme)
+            .child(seg_row(
+                "Theme",
+                div()
+                    .flex()
+                    .gap(px(2.0))
                     .child(
-                        option(
+                        glass::segment(
                             "mode-dark",
                             "Dark",
                             theme.appearance == Appearance::Dark,
-                            true,
                             &theme,
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -2031,11 +1511,10 @@ impl Shell {
                         })),
                     )
                     .child(
-                        option(
+                        glass::segment(
                             "mode-light",
                             "Light",
                             theme.appearance == Appearance::Light,
-                            true,
                             &theme,
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -2043,103 +1522,227 @@ impl Shell {
                             this.set_theme(Appearance::Light, s, cx);
                         })),
                     ),
-            )
-            .child(div().h(px(1.0)).bg(theme.border))
+                &theme,
+            ))
             .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(theme.text_faint)
-                    .child("MACHINE"),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .px(px(2.0))
-                    .text_size(px(12.0))
-                    .text_color(theme.text)
-                    .child(format!(
-                        "State: {}{}",
-                        machine.shown_state().label(),
-                        machine
-                            .detail
-                            .as_deref()
-                            .map(|d| format!(" · {d}"))
-                            .unwrap_or_default()
-                    ))
-                    .child(div().text_color(theme.text_muted).child(format!(
-                            "{}{}",
-                            machine.spec.clone().unwrap_or_else(|| "spec unknown".into()),
-                            machine
-                                .class
-                                .as_deref()
-                                .map(|c| format!(" · {c}"))
-                                .unwrap_or_default()
-                        )))
-                    .child(
-                        div()
-                            .text_color(theme.text_muted)
-                            .child(machine_spend_line(&machine)),
-                    ),
-            )
-            .when(machine.always_on, |el| {
-                el.child(div().flex().gap(px(4.0)).child(
-                    option("machine-restart", "Restart machine", false, true, &theme).on_click(
-                        cx.listener(|this, _, _, cx| {
-                            this.state.update(cx, |s, cx| s.machine_restart(cx));
-                        }),
-                    ),
-                ))
-            })
-            .when(!machine.always_on, |el| {
-                el.child(
+                seg_row(
+                    "Surface",
                     div()
                         .flex()
-                        .gap(px(4.0))
+                        .gap(px(2.0))
                         .child(
-                            option(
-                                "machine-start",
-                                "Start",
-                                false,
-                                machine.state.is_down(),
+                            glass::segment(
+                                "surface-matte",
+                                "Matte",
+                                theme.surface == Surface::Matte,
                                 &theme,
                             )
                             .on_click(cx.listener(|this, _, _, cx| {
-                                if this.state.read(cx).machine.state.is_down() {
-                                    this.state.update(cx, |s, cx| s.machine_start(cx));
-                                }
+                                let a = Theme::of(cx).appearance;
+                                this.set_theme(a, Surface::Matte, cx);
                             })),
                         )
                         .child(
-                            option(
-                                "machine-stop",
-                                "Stop",
-                                false,
-                                !machine.state.is_down(),
+                            glass::segment(
+                                "surface-glass",
+                                "Glass",
+                                theme.surface == Surface::Glass,
                                 &theme,
                             )
                             .on_click(cx.listener(|this, _, _, cx| {
-                                if !this.state.read(cx).machine.state.is_down() {
-                                    this.state.update(cx, |s, cx| s.machine_stop(cx));
-                                }
+                                let a = Theme::of(cx).appearance;
+                                this.set_theme(a, Surface::Glass, cx);
                             })),
                         ),
+                    &theme,
                 )
-            })
-            .child(div().h(px(1.0)).bg(theme.border))
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(theme.text_faint)
-                    .child("DEBUG"),
-            )
-            .child(
+                .border_b_0(),
+            );
+        body = body.child(section(
+            "Appearance",
+            group,
+            Some(footnote(
+                if glass_ok {
+                    "Glass: window vibrancy and frosted panels.".into()
+                } else {
+                    "Glass here: frosted panels only; window vibrancy needs macOS.".into()
+                },
+                &theme,
+            )),
+            &theme,
+        ));
+
+        // Notifications.
+        let group = glass::group(&theme).child(
+            seg_row(
+                "Notifications",
                 div()
                     .flex()
-                    .gap(px(4.0))
+                    .gap(px(2.0))
                     .child(
-                        option("details-off", "Details off", !show_details, true, &theme).on_click(
+                        glass::segment("notify-on", "On", notify_on, &theme).on_click(cx.listener(
+                            |this, _, _, cx| {
+                                this.state
+                                    .update(cx, |s, cx| s.set_notifications_enabled(true, cx));
+                            },
+                        )),
+                    )
+                    .child(
+                        glass::segment("notify-off", "Off", !notify_on, &theme).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.state
+                                    .update(cx, |s, cx| s.set_notifications_enabled(false, cx));
+                            }),
+                        ),
+                    ),
+                &theme,
+            )
+            .border_b_0(),
+        );
+        body = body.child(section(
+            "Notifications",
+            group,
+            Some(footnote(
+                "A banner with the sender's picture when an agent finishes or a person writes, \
+                 only while you are not looking."
+                    .into(),
+                &theme,
+            )),
+            &theme,
+        ));
+
+        // Updates — status, Check now / Install, and Download when self-update failed.
+        let mut actions = div().flex().items_center().gap(px(14.0));
+        if let Some((id, label, installs)) = update_action {
+            actions = actions.child(link_button(id, label, false, &theme).on_click(cx.listener(
+                move |this, _, _, cx| {
+                    this.state.update(cx, |s, cx| {
+                        if installs {
+                            s.install_update(cx);
+                        } else {
+                            s.check_for_updates(cx);
+                        }
+                    });
+                },
+            )));
+        }
+        if update_failed {
+            // Self-update could not finish here (read-only copy, unwritable
+            // folder…): the newest build is one click away in the browser.
+            actions = actions.child(
+                link_button("settings-update-download", "Download", false, &theme).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.state.update(cx, |s, cx| s.open_download_page(cx));
+                    }),
+                ),
+            );
+        }
+        let group = glass::group(&theme).child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .min_h(px(44.0))
+                .px(px(16.0))
+                .py(px(10.0))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(TEXT_BODY))
+                        .text_color(if update_failed {
+                            theme.danger
+                        } else {
+                            theme.text
+                        })
+                        .child(update.status_line()),
+                )
+                .child(actions),
+        );
+        body = body.child(section("Updates", group, None, &theme));
+
+        // More: the feature panels.
+        let group = glass::group(&theme)
+            .child(
+                glass::nav_row("settings-connectors", "Connectors", None, &theme).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.settings_open = false;
+                        this.connectors.update(cx, |p, cx| p.show(cx));
+                        cx.notify();
+                    }),
+                ),
+            )
+            .child(
+                glass::nav_row("settings-routines", "Routines", None, &theme).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.settings_open = false;
+                        this.routines_open = true;
+                        this.routines.update(cx, |p, cx| p.open(cx));
+                        cx.notify();
+                    }),
+                ),
+            )
+            .child(
+                glass::nav_row("settings-channels", "Channels", None, &theme).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.settings_open = false;
+                        this.channels.update(cx, |p, cx| p.show(cx));
+                        cx.notify();
+                    }),
+                ),
+            )
+            .child(
+                glass::nav_row(
+                    "settings-skills",
+                    "Skills",
+                    Some(format!("{skill_count} in library")),
+                    &theme,
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.settings_open = false;
+                    this.skills.update(cx, |p, cx| p.open(window, cx));
+                    cx.notify();
+                })),
+            )
+            .child(
+                glass::nav_row("settings-local", "This Mac", None, &theme).on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.settings_open = false;
+                        this.local.update(cx, |p, cx| p.show(cx));
+                        cx.notify();
+                    },
+                )),
+            )
+            .child(
+                glass::nav_row("settings-vault", "Vault", None, &theme).on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.settings_open = false;
+                        this.vault.update(cx, |p, cx| p.show(cx));
+                        cx.notify();
+                    },
+                )),
+            )
+            .child(
+                glass::nav_row(
+                    "settings-feedback",
+                    "Send feedback",
+                    Some("⌘⇧F".into()),
+                    &theme,
+                )
+                .border_b_0()
+                .on_click(cx.listener(|this, _, window, cx| this.open_feedback(window, cx))),
+            );
+        body = body.child(section("More", group, None, &theme));
+
+        // Debug + about.
+        let group = glass::group(&theme)
+            .child(seg_row(
+                "Turn details",
+                div()
+                    .flex()
+                    .gap(px(2.0))
+                    .child(
+                        glass::segment("details-off", "Off", !show_details, &theme).on_click(
                             cx.listener(|this, _, _, cx| {
                                 if this.state.read(cx).show_details {
                                     this.state.update(cx, |s, cx| s.toggle_show_details(cx));
@@ -2148,7 +1751,7 @@ impl Shell {
                         ),
                     )
                     .child(
-                        option("details-on", "Show details", show_details, true, &theme).on_click(
+                        glass::segment("details-on", "On", show_details, &theme).on_click(
                             cx.listener(|this, _, _, cx| {
                                 if !this.state.read(cx).show_details {
                                     this.state.update(cx, |s, cx| s.toggle_show_details(cx));
@@ -2156,264 +1759,71 @@ impl Shell {
                             }),
                         ),
                     ),
-            )
-            .child(div().h(px(1.0)).bg(theme.border))
-            .child(
-                div()
-                    .id("settings-connectors")
-                    .flex()
-                    .items_center()
-                    .px(px(10.0))
-                    .py(px(6.0))
-                    .rounded(px(6.0))
-                    .text_size(px(12.5))
-                    .text_color(theme.text)
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.surface_2))
-                    .child(div().flex_1().child("Connectors"))
-                    .child(div().text_color(theme.text_faint).child("›"))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.settings_open = false;
-                        this.connectors.update(cx, |p, cx| p.show(cx));
-                        cx.notify();
-                    })),
-            )
-            .child(
-                div()
-                    .id("settings-routines")
-                    .flex()
-                    .items_center()
-                    .px(px(10.0))
-                    .py(px(6.0))
-                    .rounded(px(6.0))
-                    .text_size(px(12.5))
-                    .text_color(theme.text)
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.surface_2))
-                    .child(div().flex_1().child("Routines"))
-                    .child(div().text_color(theme.text_faint).child("›"))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.settings_open = false;
-                        this.routines_open = true;
-                        this.routines.update(cx, |p, cx| p.open(cx));
-                        cx.notify();
-                    })),
-            )
-            .child(
-                div()
-                    .id("settings-channels")
-                    .flex()
-                    .items_center()
-                    .px(px(10.0))
-                    .py(px(6.0))
-                    .rounded(px(6.0))
-                    .text_size(px(12.5))
-                    .text_color(theme.text)
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.surface_2))
-                    .child(div().flex_1().child("Channels"))
-                    .child(div().text_color(theme.text_faint).child("›"))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.settings_open = false;
-                        this.channels.update(cx, |p, cx| p.show(cx));
-                        cx.notify();
-                    })),
-            )
-            .child(
-                div()
-                    .id("settings-skills")
-                    .flex()
-                    .items_center()
-                    .px(px(10.0))
-                    .py(px(6.0))
-                    .rounded(px(6.0))
-                    .text_size(px(12.5))
-                    .text_color(theme.text)
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.surface_2))
-                    .child(div().flex_1().child("Skills"))
-                    .child(
-                        div()
-                            .text_color(theme.text_faint)
-                            .child(format!("{skill_count} in library ›")),
-                    )
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.settings_open = false;
-                        this.skills.update(cx, |p, cx| p.open(window, cx));
-                        cx.notify();
-                    })),
-            )
-            .child(
-                div()
-                    .id("settings-local")
-                    .flex()
-                    .items_center()
-                    .px(px(10.0))
-                    .py(px(6.0))
-                    .rounded(px(6.0))
-                    .text_size(px(12.5))
-                    .text_color(theme.text)
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.surface_2))
-                    .child(div().flex_1().child("This Mac"))
-                    .child(div().text_color(theme.text_faint).child("›"))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.settings_open = false;
-                        this.local.update(cx, |p, cx| p.show(cx));
-                        cx.notify();
-                    })),
-            )
-            .child(
-                div()
-                    .id("settings-vault")
-                    .flex()
-                    .items_center()
-                    .px(px(10.0))
-                    .py(px(6.0))
-                    .rounded(px(6.0))
-                    .text_size(px(12.5))
-                    .text_color(theme.text)
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.surface_2))
-                    .child(div().flex_1().child("Vault"))
-                    .child(div().text_color(theme.text_faint).child("›"))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.settings_open = false;
-                        this.vault.update(cx, |p, cx| p.show(cx));
-                        cx.notify();
-                    })),
-            )
-            .child(div().h(px(1.0)).bg(theme.border))
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(theme.text_faint)
-                    .child("NOTIFICATIONS"),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap(px(4.0))
-                    .child(option("notify-on", "On", notify_on, true, &theme).on_click(
-                        cx.listener(|this, _, _, cx| {
-                            this.state
-                                .update(cx, |s, cx| s.set_notifications_enabled(true, cx));
-                        }),
-                    ))
-                    .child(
-                        option("notify-off", "Off", !notify_on, true, &theme).on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.state
-                                    .update(cx, |s, cx| s.set_notifications_enabled(false, cx));
-                            }),
-                        ),
-                    ),
-            )
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(theme.text_faint)
-                    .child("One per project per minute, only while you are not looking."),
-            )
-            .child(div().h(px(1.0)).bg(theme.border))
-            .when_some(account.clone(), |el, account| {
-                let who = if account.login.is_empty() {
-                    "Signed in".to_string()
-                } else {
-                    format!("@{}", account.login)
-                };
-                let credits = if account.balance_usd > 0.0 || account.daily_cap_usd.is_some() {
-                    match account.daily_cap_usd {
-                        Some(cap) => format!(
-                            " · ${:.2} left · ${:.2} of ${cap:.0} today",
-                            account.balance_usd, account.spent_today_usd
-                        ),
-                        None => format!(" · ${:.2} left", account.balance_usd),
-                    }
-                } else {
-                    String::new()
-                };
-                el.child(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(theme.text_faint)
-                        .child("ACCOUNT"),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .text_size(px(12.0))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .text_color(theme.text)
-                                .child(format!("{who}{credits}")),
-                        )
-                        .child(
-                            div()
-                                .id("sign-out")
-                                .text_color(theme.accent)
-                                .cursor_pointer()
-                                .child("Sign out")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.settings_open = false;
-                                    this.state.update(cx, |s, cx| s.sign_out(cx));
-                                })),
-                        ),
-                )
-                .child(div().h(px(1.0)).bg(theme.border))
-            })
-            .child(
-                div()
-                    .text_size(px(11.5))
-                    .text_color(theme.text_muted)
-                    .child(format!(
-                        "Source: {source} · link: {link:?}{}",
-                        device.map(|d| format!(" · device {d}")).unwrap_or_default()
-                    )),
-            );
-        // Pinned to the bottom, never taller than the window: the card
-        // scrolls once the sections outgrow the height.
-        div()
-            .absolute()
-            .left(px(RAIL_WIDTH + 8.0))
-            .top(px(TAB_BAR_HEIGHT + 8.0))
-            .bottom(px(14.0))
-            .flex()
-            .flex_col()
-            .justify_end()
-            .child(frosted(
-                PANEL_RADIUS,
-                MENU_BLUR,
-                card.min_h_0().flex_shrink(1.0).overflow_y_scroll(),
+                &theme,
             ))
+            .child(
+                glass::row("Version", &theme)
+                    .child(value(update.current_version.to_string(), &theme)),
+            )
+            .child(glass::row("Relay", &theme).border_b_0().child(value(
+                format!(
+                    "{source} · {}{}",
+                    format!("{link:?}").to_lowercase(),
+                    device.map(|d| format!(" · {d}")).unwrap_or_default()
+                ),
+                &theme,
+            )));
+        body = body.child(section(
+            "About",
+            group,
+            Some(footnote(
+                "Turn details adds a \"Show details\" line under each reply with the model, \
+                 tools and tokens."
+                    .into(),
+                &theme,
+            )),
+            &theme,
+        ));
+
+        let header = glass::sheet_header(
+            "Settings",
+            None,
+            Some(
+                glass::sheet_button("settings-done", "Done", &theme).on_click(cx.listener(
+                    |this, _, window, cx| {
+                        this.settings_open = false;
+                        Composer::focus(&this.composer, window, cx);
+                        cx.notify();
+                    },
+                )),
+            ),
+            &theme,
+        );
+        glass::sheet(480.0, &theme, header, body.max_h(px(720.0)))
     }
 
-    /// First run against a relay: enter the one-time code the relay printed
-    /// (`arbos-relay` logs it; `POST /pair/new` mints more).
+    // ----- sign-in -------------------------------------------------------------------
+
     /// First launch: the mark, one sentence, "Sign in with GitHub". The
     /// pairing-code entry only appears when the relay runs in paircode mode.
     fn render_pairing(&self, pairing: &crate::app::Pairing, cx: &mut Context<Self>) -> Div {
         let theme = Theme::of(cx).clone();
         let mark_image = self.state.read(cx).mark.clone();
         let mark = div()
-            .size(px(72.0))
+            .size(px(96.0))
             .flex()
             .items_center()
             .justify_center()
             .map(|el| match mark_image {
                 Some(image) => el.child(
                     gpui::img(image)
-                        .size(px(72.0))
+                        .size(px(96.0))
                         .object_fit(gpui::ObjectFit::Contain),
                 ),
                 None => el
-                    .rounded(px(18.0))
+                    .rounded(px(24.0))
                     .bg(theme.text)
-                    .text_size(px(34.0))
+                    .text_size(px(44.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.bg)
                     .child("Y"),
@@ -2426,98 +1836,89 @@ impl Shell {
             .justify_center()
             .gap(px(14.0))
             .px(px(28.0))
+            .window_control_area(gpui::WindowControlArea::Drag)
             .child(mark)
             .child(
                 div()
                     .pt(px(6.0))
-                    .text_size(px(22.0))
+                    .text_size(px(26.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.text)
                     .child("Arbos"),
             )
             .child(
                 div()
-                    .text_size(px(13.0))
+                    .text_size(px(TEXT_BODY))
                     .text_color(theme.text_muted)
                     .text_center()
+                    .max_w(px(380.0))
                     .child(
-                        "Your agents work from one machine in the cloud; sign in and start a chat.",
+                        "Your agents work from one machine in the cloud. Sign in and start a chat.",
                     ),
             );
         match pairing.mode {
             SignInMode::GitHub => {
                 let busy = pairing.busy;
-                let button = div()
-                    .id("sign-in-github")
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .mt(px(10.0))
-                    .px(px(18.0))
-                    .h(px(40.0))
-                    .rounded_full()
-                    .bg(theme.text)
-                    .text_color(theme.bg)
-                    .text_size(px(13.5))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .cursor_pointer()
-                    .when(busy, |el| el.opacity(0.7))
-                    .child(if busy {
+                let button = glass::primary_button(
+                    "sign-in-github",
+                    if busy {
                         "Waiting for GitHub…"
                     } else {
                         "Sign in with GitHub"
-                    })
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.state.update(cx, |s, cx| s.sign_in(cx));
-                    }));
-                screen.child(frosted(20.0, PANEL_BLUR, button)).when_some(
-                    pairing.error.clone(),
-                    |el, err| {
+                    },
+                    &theme,
+                )
+                .mt(px(12.0))
+                .h(px(44.0))
+                .px(px(24.0))
+                .text_size(px(TEXT_BODY))
+                .when(busy, |el| el.opacity(0.7))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.state.update(cx, |s, cx| s.sign_in(cx));
+                }));
+                screen
+                    .child(button)
+                    .when_some(pairing.error.clone(), |el, err| {
                         el.child(
                             div()
                                 .max_w(px(420.0))
                                 .text_center()
-                                .text_size(px(12.0))
+                                .text_size(px(TEXT_SMALL))
                                 .text_color(theme.danger)
                                 .child(err),
                         )
-                    },
-                )
+                    })
             }
             SignInMode::PairCode => {
                 let input_row = div()
                     .flex()
                     .items_center()
                     .gap(px(10.0))
-                    .h(px(COMPOSER_HEIGHT))
-                    .px(px(16.0))
-                    .rounded(px(COMPOSER_HEIGHT / 2.0))
-                    .bg(theme.card())
+                    .h(px(44.0))
+                    .pl(px(16.0))
+                    .pr(px(5.0))
+                    .rounded_full()
+                    .bg(theme.field)
                     .border_1()
                     .border_color(if pairing.error.is_some() {
                         theme.danger
                     } else {
-                        theme.border_strong
+                        theme.field_border
                     })
                     .child(self.pairing_input.clone())
                     .child(
-                        div()
-                            .id("pair-submit")
-                            .px(px(12.0))
-                            .py(px(6.0))
-                            .rounded_full()
-                            .bg(theme.text)
-                            .text_color(theme.bg)
-                            .text_size(px(12.5))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .cursor_pointer()
-                            .child(if pairing.busy { "Pairing…" } else { "Pair" })
-                            .on_click(cx.listener(|this, _, _, cx| this.submit_pairing(cx))),
+                        glass::primary_button(
+                            "pair-submit",
+                            if pairing.busy { "Pairing…" } else { "Pair" },
+                            &theme,
+                        )
+                        .h(px(34.0))
+                        .on_click(cx.listener(|this, _, _, cx| this.submit_pairing(cx))),
                     );
                 screen
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(px(TEXT_TINY))
                             .text_color(theme.text_faint)
                             .text_center()
                             .child(format!(
@@ -2527,180 +1928,101 @@ impl Shell {
                     )
                     .child(
                         div()
-                            .w(px(COMPOSER_WIDTH))
+                            .w(px(420.0))
                             .max_w_full()
                             .pt(px(4.0))
-                            .child(frosted(COMPOSER_HEIGHT / 2.0, PANEL_BLUR, input_row)),
+                            .child(frosted(22.0, PANEL_BLUR, input_row)),
                     )
                     .when_some(pairing.error.clone(), |el, err| {
-                        el.child(div().text_size(px(12.0)).text_color(theme.danger).child(err))
+                        el.child(
+                            div()
+                                .text_size(px(TEXT_SMALL))
+                                .text_color(theme.danger)
+                                .child(err),
+                        )
                     })
             }
         }
     }
 
-    fn render_new_project(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// One-time explainer before macOS asks for notification permission: a
+    /// Grok-style card in the top-right corner of the conversation.
+    fn render_notify_prompt(&self, cx: &mut Context<Self>) -> Option<Div> {
+        if !self.state.read(cx).notify_prompt {
+            return None;
+        }
         let theme = Theme::of(cx).clone();
         let card = div()
-            .w(px(300.0))
+            .w(px(360.0))
             .flex()
             .flex_col()
-            .gap(px(8.0))
-            .p(px(12.0))
-            .rounded(px(PANEL_RADIUS))
+            .gap(px(12.0))
+            .p(px(16.0))
+            .rounded(px(PANEL_RADIUS + 6.0))
             .bg(theme.card())
             .border_1()
             .border_color(theme.border_strong)
             .shadow_lg()
             .child(
                 div()
-                    .text_size(px(12.5))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
-                    .child("New project"),
-            )
-            .child(
-                div()
-                    .text_size(px(11.5))
-                    .text_color(theme.text_muted)
-                    .child("It becomes a workspace on your machine. Enter to create."),
-            )
-            .child(
-                div()
                     .flex()
                     .items_center()
-                    .h(px(36.0))
-                    .px(px(12.0))
-                    .rounded(px(8.0))
-                    .bg(theme.surface_2)
-                    .border_1()
-                    .border_color(theme.border)
-                    .child(self.project_input.clone()),
-            )
-            .child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .gap(px(6.0))
+                    .gap(px(12.0))
                     .child(
-                        div()
-                            .id("new-project-cancel")
-                            .px(px(10.0))
-                            .py(px(5.0))
-                            .rounded(px(6.0))
-                            .text_size(px(12.0))
-                            .text_color(theme.text_muted)
-                            .cursor_pointer()
-                            .hover(|s| s.bg(theme.surface_2))
-                            .child("Cancel")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.state.update(cx, |s, cx| {
-                                    s.new_project_open = false;
-                                    cx.notify();
-                                });
-                                Composer::focus(&this.composer, window, cx);
-                            })),
+                        glass::circle("notify-glyph", 40.0, &theme)
+                            .child(icon("bell", 17.0, theme.text)),
                     )
                     .child(
                         div()
-                            .id("new-project-create")
-                            .px(px(10.0))
-                            .py(px(5.0))
-                            .rounded(px(6.0))
-                            .text_size(px(12.0))
-                            .bg(theme.text)
-                            .text_color(theme.bg)
-                            .cursor_pointer()
-                            .child("Create")
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.submit_project(window, cx)),
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .child(
+                                div()
+                                    .text_size(px(TEXT_BODY))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.text)
+                                    .child("Get told when someone writes"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(TEXT_SMALL))
+                                    .text_color(theme.text_muted)
+                                    .child("Banners with the sender's picture, even in the back."),
                             ),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(TEXT_TINY))
+                    .text_color(theme.text_muted)
+                    .child("macOS will ask you to allow it next."),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap(px(10.0))
+                    .child(
+                        glass::quiet_button("notify-later", "Not now", &theme)
+                            .flex_1()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.state.update(cx, |s, cx| s.dismiss_notify_prompt(cx));
+                            })),
+                    )
+                    .child(
+                        glass::primary_button("notify-allow", "Allow notifications", &theme)
+                            .flex_1()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.state.update(cx, |s, cx| s.allow_notifications(cx));
+                            })),
                     ),
             );
-        div()
-            .absolute()
-            .left(px(RAIL_WIDTH + 8.0))
-            .bottom(px(48.0))
-            .child(frosted(PANEL_RADIUS, MENU_BLUR, card))
-    }
-
-    /// One-time explainer before macOS asks for notification permission.
-    fn render_notify_prompt(&self, cx: &mut Context<Self>) -> Option<Div> {
-        if !self.state.read(cx).notify_prompt {
-            return None;
-        }
-        let theme = Theme::of(cx).clone();
-        let button = |id: &'static str, label: &'static str, primary: bool, theme: &Theme| {
-            div()
-                .id(id)
-                .px(px(10.0))
-                .py(px(5.0))
-                .rounded(px(6.0))
-                .text_size(px(12.0))
-                .cursor_pointer()
-                .bg(if primary {
-                    theme.accent
-                } else {
-                    gpui::transparent_black()
-                })
-                .text_color(if primary { theme.bg } else { theme.text_muted })
-                .hover(|s| s.opacity(0.85))
-                .child(label)
-        };
-        let card =
-            div()
-                .w(px(340.0))
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .px(px(14.0))
-                .py(px(12.0))
-                .rounded(px(PANEL_RADIUS))
-                .bg(theme.card())
-                .border_1()
-                .border_color(theme.border_strong)
-                .shadow_lg()
-                .child(
-                    div()
-                        .text_size(px(13.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme.text)
-                        .child("Get told when someone writes"),
-                )
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(theme.text_muted)
-                        .child(
-                        "Arbos can show a banner when an agent finishes or a person messages you, \
-                         with their picture, even when the window is in the back. macOS will ask \
-                         you to allow it next.",
-                    ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .justify_end()
-                        .gap(px(6.0))
-                        .child(button("notify-later", "Not now", false, &theme).on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.state.update(cx, |s, cx| s.dismiss_notify_prompt(cx));
-                            }),
-                        ))
-                        .child(
-                            button("notify-allow", "Allow notifications", true, &theme).on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    this.state.update(cx, |s, cx| s.allow_notifications(cx));
-                                }),
-                            ),
-                        ),
-                );
         Some(
             div()
                 .absolute()
                 .right(px(16.0))
-                .top(px(TAB_BAR_HEIGHT + 12.0))
-                .child(frosted(PANEL_RADIUS, MENU_BLUR, card)),
+                .top(px(HEADER_HEIGHT + 8.0))
+                .child(frosted(PANEL_RADIUS + 6.0, MENU_BLUR, card)),
         )
     }
 
@@ -2721,15 +2043,15 @@ impl Shell {
         for n in notices {
             stack = stack.child(
                 div()
-                    .max_w(px(360.0))
-                    .px(px(12.0))
-                    .py(px(8.0))
-                    .rounded(px(8.0))
+                    .max_w(px(380.0))
+                    .px(px(14.0))
+                    .py(px(10.0))
+                    .rounded(px(PANEL_RADIUS))
                     .bg(theme.surface_2)
                     .border_1()
                     .border_color(theme.border_strong)
                     .shadow_md()
-                    .text_size(px(12.0))
+                    .text_size(px(TEXT_SMALL))
                     .text_color(theme.text)
                     .child(n.text),
             );
@@ -2771,18 +2093,6 @@ fn json_rows(v: &serde_json::Value) -> Vec<(String, String)> {
     }
 }
 
-/// Hosted machines are included; self-hosted ones count against the cap.
-fn machine_spend_line(machine: &crate::model::Machine) -> String {
-    if machine.always_on {
-        format!("Machine today ${:.2} (included)", machine.spend_today_usd)
-    } else {
-        format!(
-            "Spend today ${:.2} of ${:.2}",
-            machine.spend_today_usd, machine.spend_cap_usd
-        )
-    }
-}
-
 fn fmt_uptime(ms: u64) -> String {
     let secs = ms / 1000;
     if secs < 60 {
@@ -2809,14 +2119,14 @@ impl Render for Shell {
         let theme = Theme::of(cx).clone();
         let width: f32 = window.viewport_size().width.into();
         let state = self.state.read(cx);
-        let collapsed = state.rail_collapsed || state.window_is_narrow(width);
+        let sidebar_hidden = state.rail_collapsed || state.window_is_narrow(width);
         let panel_open = state.right_panel_open;
         let details = state.details_open.clone();
         let pairing = state.pairing.clone();
-        let new_project_open = state.new_project_open;
         let new_chat_open = state.new_chat_open;
         let people_space = state.selected().filter(|p| p.is_people()).cloned();
         let project_space = state.selected().filter(|p| !p.is_people()).cloned();
+        let selected = state.selected().cloned();
         let avatar_picker = state.avatar_picker.clone();
 
         let mut root = div()
@@ -2827,18 +2137,25 @@ impl Render for Shell {
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::toggle_rail))
             .on_action(cx.listener(Self::toggle_panel))
+            .on_action(cx.listener(Self::escape))
             .on_action(cx.listener(Self::send_feedback))
             // Clicks on chrome must not strand keyboard focus: unless another
-            // text field took it, the composer keeps it.
+            // text field took it, the composer keeps it. Floating menus close.
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
+                    this.close_popovers(cx);
+                    if this.feedback.read(cx).is_open() {
+                        return;
+                    }
                     let pairing = this.pairing_input.read(cx).focus_handle(cx);
                     let project = this.project_input.read(cx).focus_handle(cx);
+                    let search = this.search_input.read(cx).focus_handle(cx);
                     let shown = this.state.read(cx).new_project_open;
                     let people = this.people_input.read(cx).focus_handle(cx);
                     if pairing.is_focused(window)
                         || (shown && project.is_focused(window))
+                        || search.is_focused(window)
                         || (this.state.read(cx).new_chat_open && people.is_focused(window))
                         || this.connectors.read(cx).input_focused(window, cx)
                         || this.skills.read(cx).has_focus(window, cx)
@@ -2847,9 +2164,6 @@ impl Render for Shell {
                         return;
                     }
                     if this.routines_open && this.routines.read(cx).has_focus(window, cx) {
-                        return;
-                    }
-                    if this.feedback.read(cx).is_open() {
                         return;
                     }
                     if this.state.read(cx).pairing.is_none() {
@@ -2864,7 +2178,7 @@ impl Render for Shell {
             .bg(theme.shell())
             .text_color(theme.text)
             .font_family(theme.font_sans)
-            .text_size(px(13.0));
+            .text_size(px(TEXT_BODY));
 
         if let Some(pairing) = pairing {
             self.signing_in = true;
@@ -2878,26 +2192,73 @@ impl Render for Shell {
             Composer::focus(&self.composer, window, cx);
         }
 
-        root = root
-            .child(frosted(0.0, PANEL_BLUR, self.render_rail(collapsed, cx)))
-            .child(self.render_center(cx));
-        self.reveal_tab = None;
+        if !sidebar_hidden {
+            root = root.child(frosted(0.0, PANEL_BLUR, sidebar::render(self, cx)));
+        }
+        root = root.child(self.render_center(cx));
         if panel_open {
             root = root.child(self.render_right_panel(cx));
         }
         if let Some(target) = details {
             root = root.child(self.render_details(&target, cx));
         }
-        if self.settings_open {
-            root = root.child(self.render_settings(cx));
+        if self.menu_open {
+            if let Some(space) = selected.as_ref() {
+                root = root.child(glass::popover(header::menu(self, space, cx)));
+            }
         }
         if self.group_picker_open {
             let right = if panel_open {
-                RIGHT_PANEL_WIDTH + 44.0
+                RIGHT_PANEL_WIDTH + 16.0
             } else {
-                44.0
+                16.0
             };
-            root = root.child(groups::picker(&self.state, TAB_BAR_HEIGHT + 4.0, right, cx));
+            root = root.child(glass::popover(groups::picker(
+                &self.state,
+                TAB_BAR_HEIGHT - 4.0,
+                right,
+                cx,
+            )));
+        }
+        if let Some(space) = people_space {
+            let right = if panel_open {
+                RIGHT_PANEL_WIDTH + 16.0
+            } else {
+                16.0
+            };
+            if self.add_agent_open {
+                root = root.child(glass::popover(people::add_agent_picker(
+                    &space,
+                    &self.state,
+                    right,
+                    cx,
+                )));
+            }
+            if self.members_open {
+                root = root.child(glass::popover(people::members_popover(
+                    &space,
+                    &self.state,
+                    right,
+                    cx,
+                )));
+            }
+        } else if let Some(project) = project_space {
+            let right = if panel_open {
+                RIGHT_PANEL_WIDTH + 16.0
+            } else {
+                16.0
+            };
+            if self.members_open {
+                root = root.child(glass::popover(people::project_members_popover(
+                    &project,
+                    &self.state,
+                    right,
+                    cx,
+                )));
+            }
+            if avatar_picker.as_deref() == Some(project.id.as_str()) {
+                root = root.child(profile::sheet(&project, &self.state, cx));
+            }
         }
         if self.connectors.read(cx).is_open() {
             root = root.child(self.connectors.clone());
@@ -2917,53 +2278,25 @@ impl Render for Shell {
         if self.skills.read(cx).open {
             root = root.child(self.skills.clone());
         }
+        if self.settings_open {
+            root = root.child(self.render_settings(cx));
+        }
+        if new_chat_open {
+            root = root.child(people::new_chat_sheet(
+                self,
+                &self.state,
+                &self.people_input,
+                cx,
+            ));
+        }
         if self.feedback.read(cx).is_open() {
             root = root.child(self.feedback.clone());
         }
-        if new_project_open {
-            root = root.child(self.render_new_project(cx));
-        }
-        if self.new_menu_open {
-            root = root.child(people::new_menu(cx));
-        }
-        if let Some(space) = people_space {
-            let right = if panel_open {
-                RIGHT_PANEL_WIDTH + 16.0
-            } else {
-                16.0
-            };
-            if self.add_agent_open {
-                root = root.child(people::add_agent_picker(&space, &self.state, right, cx));
-            }
-            if self.members_open {
-                root = root.child(people::members_popover(&space, &self.state, right, cx));
-            }
-        } else if let Some(project) = project_space {
-            let right = if panel_open {
-                RIGHT_PANEL_WIDTH + 90.0
-            } else {
-                90.0
-            };
-            if avatar_picker.as_deref() == Some(project.id.as_str()) {
-                root = root.child(avatars::picker(&project, &self.state, right, cx));
-            }
-            if self.members_open {
-                root = root.child(people::project_members_popover(
-                    &project,
-                    &self.state,
-                    right,
-                    cx,
-                ));
-            }
-        }
-        if new_chat_open {
-            root = root.child(people::new_chat_sheet(&self.state, &self.people_input, cx));
+        if let Some(prompt) = self.render_notify_prompt(cx) {
+            root = root.child(prompt);
         }
         if let Some(notices) = self.render_notices(cx) {
             root = root.child(notices);
-        }
-        if let Some(prompt) = self.render_notify_prompt(cx) {
-            root = root.child(prompt);
         }
         root.into_any_element()
     }
