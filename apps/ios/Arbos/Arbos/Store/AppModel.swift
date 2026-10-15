@@ -132,12 +132,27 @@ final class AppModel: ObservableObject {
         let endpoint = RelayEndpoint(raw)
         UserDefaults.standard.set(endpoint.httpUrl, forKey: "relayUrl")
         guard endpoint != api.endpoint else { return }
+        let previous = credentials
         unpair(forget: false)
         api = RelayAPI(endpoint: endpoint) { [weak self] in self?.credentials?.deviceToken ?? "" }
         credentials = Keychain.load(relayUrl: endpoint.httpUrl)
         if credentials != nil {
             startAfterPairing()
+        } else if let previous {
+            // A quick-tunnel URL changes while the relay (and this device's
+            // token) stays the same: try the old token on the new address
+            // before asking for a pairing code.
+            Task { await adopt(previous, at: endpoint) }
         }
+    }
+
+    private func adopt(_ old: DeviceCredentials, at endpoint: RelayEndpoint) async {
+        let probe = RelayAPI(endpoint: endpoint) { old.deviceToken }
+        guard (try? await probe.registry()) != nil else { return }
+        let creds = DeviceCredentials(relayUrl: endpoint.httpUrl, deviceId: old.deviceId, deviceToken: old.deviceToken)
+        try? Keychain.store(creds)
+        credentials = creds
+        startAfterPairing()
     }
 
     func pair(code: String) {
