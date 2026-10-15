@@ -1,24 +1,494 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Arbos</title>
-  <meta name="description" content="Arbos is a Mac app that gives every project its own always-on agent, working in its own cloud machine while you chat.">
-  <meta name="theme-color" content="#0f1115">
-  <meta property="og:title" content="Arbos">
-  <meta property="og:description" content="Every project gets its own always-on agent, working in its own cloud machine while you chat.">
+  <title>Arbos — an always-on agent for every project</title>
+  <meta name="description" content="Arbos gives every project its own always-on agent on your own cloud machine. Chat from your Mac and iPhone; we run the machine, the inference, and the updates.">
+  <meta name="theme-color" content="#0a0a0a">
+  <meta property="og:title" content="Arbos — an always-on agent for every project">
+  <meta property="og:description" content="Every project gets its own always-on agent, working in your own cloud machine while you chat from Mac and iPhone.">
   <meta property="og:url" content="https://arbos.life/">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230f1115'/%3E%3Ccircle cx='16' cy='16' r='6' fill='%23a78bfa'/%3E%3C/svg%3E">
+  <meta property="og:image" content="https://arbos.life/assets/logo/app-icon-1024.png">
+  <link rel="icon" href="/assets/logo/favicon.svg" type="image/svg+xml">
+  <link rel="alternate icon" href="/assets/logo/favicon.ico" sizes="16x16 32x32 48x48">
+  <link rel="apple-touch-icon" href="/assets/logo/app-icon-256.png">
+  <link rel="preload" href="/assets/fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/style.css">
+  <script src="/main.js" defer></script>
 </head>
 <body>
-  <main class="hero">
-    <div class="mark" aria-hidden="true"></div>
-    <h1>Arbos</h1>
-    <p class="lede">Every project gets its own always-on agent, working in its own cloud machine while you chat.</p>
-    <a class="button" href="https://relay.arbos.life/download/mac">Download for Mac</a>
-    <p class="fine">macOS 14 or later · Apple silicon and Intel · edge build, updates itself</p>
-  </main>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="site-header" id="top">
+  <div class="header-bg" aria-hidden="true"></div>
+  <nav class="header-inner container-wide" aria-label="Primary">
+    <a class="brand" href="/" aria-label="Arbos home">
+      <svg class="brand-mark" viewBox="0 0 64 64" aria-hidden="true"><use href="#arbos-mark"/></svg>
+      <span class="brand-name">Arbos</span>
+    </a>
+    <ul class="nav-links">
+      <li><a href="#features">Features</a></li>
+      <li><a href="#projects">Projects</a></li>
+      <li><a href="#pricing">Pricing</a></li>
+      <li><a href="#download">Download</a></li>
+      <li><a href="#faqs">FAQs</a></li>
+      <li><a href="https://github.com/unarbos/arbos" rel="noopener">GitHub</a></li>
+    </ul>
+    <div class="nav-actions">
+      <a class="btn btn-nav-secondary" href="https://relay.arbos.life/auth/github/start?redirect=https://arbos.life/welcome">Sign in with GitHub</a>
+      <div class="split" data-menu>
+        <a class="btn btn-nav-primary split-main" href="https://relay.arbos.life/download/mac">Download</a>
+        <button class="split-toggle" type="button" aria-haspopup="true" aria-expanded="false" aria-label="More download options" data-menu-button>
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <div class="menu" role="menu" data-menu-panel hidden>
+          <div class="menu-label">Download</div>
+          <a role="menuitem" href="https://relay.arbos.life/download/mac">macOS <span class="menu-sub">Apple silicon and Intel</span></a>
+          <a role="menuitem" href="https://testflight.apple.com/join/ec5fWCuJ" rel="noopener">iPhone <span class="menu-sub">TestFlight beta</span></a>
+          <div class="menu-label">Source</div>
+          <a role="menuitem" href="https://github.com/unarbos/arbos/releases" rel="noopener">All releases <span class="ext" aria-hidden="true">↗</span></a>
+        </div>
+      </div>
+      <button class="menu-button" type="button" aria-expanded="false" aria-controls="mobile-menu" aria-label="Open menu" data-mobile-toggle>
+        <span></span><span></span>
+      </button>
+    </div>
+  </nav>
+  <div class="mobile-menu" id="mobile-menu" hidden>
+    <a href="#features">Features</a>
+    <a href="#projects">Projects</a>
+    <a href="#pricing">Pricing</a>
+    <a href="#download">Download</a>
+    <a href="#faqs">FAQs</a>
+    <a href="https://github.com/unarbos/arbos" rel="noopener">GitHub</a>
+    <div class="mobile-menu-actions">
+      <a class="btn btn-primary" href="https://relay.arbos.life/download/mac">Download for Mac</a>
+      <a class="btn btn-secondary" href="https://testflight.apple.com/join/ec5fWCuJ" rel="noopener">Join the iPhone beta</a>
+      <a class="btn btn-secondary" href="https://relay.arbos.life/auth/github/start?redirect=https://arbos.life/welcome">Sign in with GitHub</a>
+    </div>
+  </div>
+</header>
+
+<main id="main">
+
+<!-- Hero -->
+<section id="hero">
+  <div class="container hero-inner">
+    <div class="hero-copy">
+      <a class="launch-pill" href="https://testflight.apple.com/join/ec5fWCuJ" rel="noopener" data-fade>
+        <span class="launch-text"><strong>Arbos is in public beta</strong><span class="launch-more"><span class="dot"> • </span>Join the iPhone beta</span></span>
+        <span class="launch-arrow" aria-hidden="true">↗</span>
+      </a>
+      <h1 class="display" data-words>
+        <span class="word">Meet</span>
+        <span class="word word-mark"><svg class="h1-mark" viewBox="0 0 64 64" aria-hidden="true"><use href="#arbos-mark"/></svg></span>
+        <span class="word">Arbos</span>
+      </h1>
+      <p class="lede" data-fade>Every project gets an always-on agent on your own cloud machine. Hand it real work from your Mac or iPhone, and it comes back finished.</p>
+      <div class="hero-actions" data-fade>
+        <a class="btn btn-primary" href="https://relay.arbos.life/download/mac">
+          <svg class="apple" viewBox="0 0 17 20" aria-hidden="true"><use href="#apple-logo"/></svg>Download for Mac
+        </a>
+        <a class="btn btn-secondary" href="https://relay.arbos.life/auth/github/start?redirect=https://arbos.life/welcome">Sign in with GitHub</a>
+      </div>
+    </div>
+
+    <div class="hero-frame-wrap" data-frame>
+      <div class="hero-frame media-frame" aria-label="The Arbos Mac app: a project list on the left, a chat with the Website project in the middle" role="img">
+        <div class="app">
+          <aside class="app-rail">
+            <div class="app-traffic" aria-hidden="true"><i></i><i></i><i></i></div>
+            <div class="app-rail-title">Projects</div>
+            <ul class="app-projects">
+              <li><span class="pj pj-home"></span>Home</li>
+              <li class="is-active"><span class="pj pj-web"></span>Website<span class="pj-state working" title="working"></span></li>
+              <li><span class="pj pj-research"></span>Research<span class="pj-state"></span></li>
+              <li><span class="pj pj-books"></span>Books</li>
+              <li><span class="pj pj-travel"></span>Travel</li>
+              <li><span class="pj pj-hiring"></span>Hiring</li>
+            </ul>
+            <div class="app-rail-foot">
+              <span class="machine-dot"></span>Your machine · running
+            </div>
+          </aside>
+          <div class="app-main">
+            <div class="app-tabs">
+              <span class="tab is-active">Launch checklist</span>
+              <span class="tab">Pricing page copy</span>
+              <span class="tab">Lighthouse</span>
+              <span class="tab tab-plus" aria-hidden="true">+</span>
+            </div>
+            <div class="app-thread">
+              <div class="msg msg-user">Can you get the launch checklist done before I land? Ping Research for the numbers.</div>
+              <div class="msg msg-agent">
+                <p>On it. I asked Research for the latest benchmark numbers and they replied in two minutes. The checklist is in <code>/work/website/launch.md</code>.</p>
+                <p>Three items are done; the last one needs you:</p>
+                <ul>
+                  <li>Pricing page copy rewritten and committed</li>
+                  <li>Lighthouse at 97 on the new hero</li>
+                  <li>Release notes drafted</li>
+                </ul>
+              </div>
+              <div class="card approval">
+                <div class="approval-head"><span class="approval-tag">Approval</span>Send the launch email to the beta list?</div>
+                <div class="approval-body">To 412 people · from you · via Gmail</div>
+                <div class="approval-actions"><span class="chip chip-solid">Approve</span><span class="chip">Edit</span></div>
+              </div>
+              <div class="msg msg-user">Approve. And book the Tuesday flight through Travel.</div>
+              <div class="msg msg-agent working-line"><span class="working-dots" aria-hidden="true"><i></i><i></i><i></i></span>Working with Travel…</div>
+            </div>
+            <div class="app-composer"><span>Message Website…</span><span class="composer-mic" aria-hidden="true"></span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Statement -->
+<section id="statement">
+  <div class="container-wide">
+    <div class="statement-card" data-reveal>
+      <div class="statement-copy">
+        <h2>Message projects like teammates</h2>
+        <p>Give work to a project the way you would to a colleague, from your Mac or your iPhone. The project agent takes it from start to finish, keeps the context on how you work, and comes back when it needs your approval.</p>
+      </div>
+      <svg class="statement-mark" viewBox="0 0 64 64" aria-hidden="true"><use href="#arbos-mark"/></svg>
+    </div>
+  </div>
+</section>
+
+<!-- Features -->
+<section id="features">
+  <div class="container section-head" data-reveal>
+    <h2>Work with many projects at once</h2>
+    <p>Create a project, give it a task, and add another when the work grows — one on the website, one on research, one on the books. They run in parallel on your machine, talk to each other when it helps, and keep working while your laptop is closed.</p>
+  </div>
+  <div class="container-wide feature-grid">
+    <article class="feature-card" data-reveal>
+      <h3>Your own cloud machine</h3>
+      <p>Every user gets one cloud computer. It starts when you send a message and stops when you leave, so there is nothing to run and nothing to pay for while it sleeps.</p>
+      <div class="illus illus-machine" aria-hidden="true">
+        <div class="mini-panel">
+          <div class="mini-row mini-head"><span>Your machine</span><span class="pill-state on">Running</span></div>
+          <div class="mini-row"><span>Projects</span><span class="mini-muted">Website · Research · Books · Travel</span></div>
+          <div class="mini-row"><span>Started</span><span class="mini-muted">12 s ago, on your first message</span></div>
+          <div class="mini-row"><span>Sleeps</span><span class="mini-muted">20 min after you go quiet</span></div>
+          <div class="mini-bar"><i></i></div>
+        </div>
+      </div>
+    </article>
+    <article class="feature-card" data-reveal>
+      <h3>Chat from your Mac and your iPhone</h3>
+      <p>One thread, two devices. Start a task at your desk, approve the result from your pocket. Voice memos in, finished work out.</p>
+      <div class="illus illus-devices" aria-hidden="true">
+        <div class="dev-mac">
+          <div class="dev-bar"><i></i><i></i><i></i></div>
+          <div class="dev-line w60"></div><div class="dev-line w80 dim"></div><div class="dev-line w40 dim"></div>
+          <div class="dev-bubble">Draft the Q3 update for the board.</div>
+        </div>
+        <div class="dev-phone">
+          <div class="dev-notch"></div>
+          <div class="dev-line w70 dim"></div><div class="dev-line w50 dim"></div>
+          <div class="dev-bubble dev-bubble-agent">Done. Two charts and a one-page summary are in the thread.</div>
+          <div class="dev-home"></div>
+        </div>
+      </div>
+    </article>
+    <article class="feature-card" data-reveal>
+      <h3>Projects stay separate, and still talk</h3>
+      <p>Each project has its own directory, memory, and history on your machine. Put a few in one group chat and they hand work between themselves while you watch.</p>
+      <div class="illus illus-group" aria-hidden="true">
+        <div class="relay-line"><span class="av av-web"></span>Asking Research…</div>
+        <div class="relay-line"><span class="av av-research"></span>Looping in Books…</div>
+        <div class="relay-line"><span class="av av-books"></span>Sending to Website…</div>
+        <div class="relay-line"><span class="av av-travel"></span>Pinging Travel…</div>
+        <div class="av-stack"><span class="av av-web"></span><span class="av av-research"></span><span class="av av-books"></span><span class="av av-travel"></span></div>
+      </div>
+    </article>
+    <article class="feature-card" data-reveal>
+      <h3>You stay in control</h3>
+      <p>Anything that leaves the machine — an email, a Slack post, a payment — shows up as a draft first. Approve it, edit it, or say no. Logins and keys stay in an encrypted vault the agent never sees.</p>
+      <div class="illus illus-approve" aria-hidden="true">
+        <div class="card approval approval-lg">
+          <div class="approval-head"><span class="approval-tag">Approval</span>Reply to Dana about the annual plan?</div>
+          <div class="approval-quote">“Annual works for us. I’ll send the order form today — same terms as last quarter.”</div>
+          <div class="approval-body">Gmail · as you · to dana@acme.com</div>
+          <div class="approval-actions"><span class="chip chip-solid">Approve</span><span class="chip">Edit</span><span class="chip chip-ghost">Not now</span></div>
+        </div>
+      </div>
+    </article>
+  </div>
+</section>
+
+<!-- Projects / use cases -->
+<section id="projects">
+  <div class="container usecases">
+    <div class="usecases-copy" data-reveal>
+      <h2>Give each project a job</h2>
+      <div class="chips" role="tablist" aria-label="Example projects" data-chips>
+        <button class="chip-tab is-active" role="tab" aria-selected="true" data-chip="inbox"><span class="av av-xs av-web"></span>Inbox</button>
+        <button class="chip-tab" role="tab" aria-selected="false" data-chip="research">Research</button>
+        <button class="chip-tab" role="tab" aria-selected="false" data-chip="website">Website</button>
+        <button class="chip-tab" role="tab" aria-selected="false" data-chip="books">Books</button>
+        <button class="chip-tab" role="tab" aria-selected="false" data-chip="hiring">Hiring</button>
+        <button class="chip-tab" role="tab" aria-selected="false" data-chip="travel">Travel</button>
+        <button class="chip-tab" role="tab" aria-selected="false" data-chip="oncall">On-call</button>
+        <button class="chip-tab" role="tab" aria-selected="false" data-chip="chief">Chief of staff</button>
+      </div>
+      <div class="usecase-panels">
+        <p class="usecase" data-panel="inbox"><strong>Clear your inbox overnight.</strong> Reads every thread through your Gmail connector, drafts replies in your voice, files what needs no answer, and leaves a short review list for the morning.</p>
+        <p class="usecase" data-panel="research" hidden><strong>Research that keeps going.</strong> Follows a question across papers, docs, and your own notes, keeps a running memo, and pings you only when it finds something that changes the plan.</p>
+        <p class="usecase" data-panel="website" hidden><strong>Ship the website.</strong> Edits the repo on its own machine, runs the build and Lighthouse, opens the pull request, and asks before anything goes live.</p>
+        <p class="usecase" data-panel="books" hidden><strong>Keep the books current.</strong> Pulls receipts from email, matches them to transactions, drafts the monthly summary, and never pays anything without your approval.</p>
+        <p class="usecase" data-panel="hiring" hidden><strong>Run the hiring loop.</strong> Screens applications against the brief, schedules through your calendar, and writes the debrief after each round.</p>
+        <p class="usecase" data-panel="travel" hidden><strong>Handle the trip.</strong> Finds the flights and hotel that fit your rules, holds them as drafts, books on approval, and drops the itinerary in the thread.</p>
+        <p class="usecase" data-panel="oncall" hidden><strong>Watch production.</strong> A routine checks the dashboards every ten minutes, triages alerts, reproduces the bug on its machine, and wakes you only for the real ones.</p>
+        <p class="usecase" data-panel="chief" hidden><strong>Chief of staff.</strong> Sits in a group chat with your other projects, keeps the weekly plan, chases what is late, and writes the Friday summary.</p>
+      </div>
+      <a class="btn btn-nav-secondary" href="https://github.com/unarbos/arbos#readme" rel="noopener">See how projects work</a>
+    </div>
+    <div class="usecases-visual" data-reveal aria-hidden="true">
+      <div class="thread-card">
+        <div class="thread-head"><span class="av av-sm av-web"></span><span class="thread-title" data-thread-title>Inbox</span><span class="thread-meta">routine · every night at 2:00</span></div>
+        <div class="thread-body">
+          <div class="msg msg-user">Anything I need to see before standup?</div>
+          <div class="msg msg-agent">Two things. Acme accepted the annual terms — I drafted the thank-you and it is waiting for your approval. And the vendor invoice is 40% higher than last month; I asked Books to check it.</div>
+          <div class="card approval">
+            <div class="approval-head"><span class="approval-tag">Approval</span>Send the thank-you to Acme?</div>
+            <div class="approval-body">Gmail · as you · to procurement@acme.com</div>
+            <div class="approval-actions"><span class="chip chip-solid">Approve</span><span class="chip">Edit</span></div>
+          </div>
+          <div class="msg msg-user">Approve. What did Books say?</div>
+          <div class="msg msg-agent working-line"><span class="working-dots"><i></i><i></i><i></i></span>Books is replying…</div>
+        </div>
+        <div class="app-composer"><span>Message Inbox…</span><span class="composer-mic"></span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Demo -->
+<section id="demo">
+  <div class="container-wide">
+    <h2 class="center" data-reveal>A day with Arbos</h2>
+    <div class="demo-frame media-frame" data-reveal>
+      <div class="demo-stage" data-demo>
+        <div class="demo-msg demo-user" data-step="1">Morning. What happened overnight?</div>
+        <div class="demo-msg demo-agent" data-step="2">Research finished the competitor memo and Website shipped the pricing fix at 03:12. Books flagged one invoice. Two approvals are waiting for you.</div>
+        <div class="demo-msg demo-user" data-step="3">Approve the first one, hold the second. Then have Travel move my flight to Tuesday.</div>
+        <div class="demo-msg demo-agent" data-step="4"><span class="working-dots" aria-hidden="true"><i></i><i></i><i></i></span>Done. Email sent. Travel found a 9:40 on Tuesday — it is a draft in your thread, waiting for a yes.</div>
+        <div class="demo-caption">Mac at the desk, iPhone on the way — the same thread, the same machine.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Pricing -->
+<section id="pricing">
+  <div class="container-wide">
+    <div class="section-head" data-reveal>
+      <h2>Pricing</h2>
+      <a class="btn btn-nav-secondary" href="https://github.com/unarbos/arbos/issues" rel="noopener">Ask a question</a>
+    </div>
+    <div class="price-grid">
+      <article class="price-card" data-reveal>
+        <div class="price-top"><h3>Personal</h3><span class="seg"><span class="seg-on">Beta</span></span></div>
+        <div class="price"><span class="amount">$0</span><span class="per">/ month during the beta</span></div>
+        <p class="billed">Usage credit included</p>
+        <a class="btn btn-primary btn-block" href="https://relay.arbos.life/auth/github/start?redirect=https://arbos.life/welcome">Sign in with GitHub</a>
+        <p class="includes">Includes:</p>
+        <ul class="feature-list">
+          <li>Your own cloud machine, started and stopped for you</li>
+          <li>Unlimited projects on it</li>
+          <li>Mac app and iPhone beta</li>
+          <li>Connectors, routines, approvals, skills</li>
+          <li>Inference, hosting, and updates managed by us</li>
+        </ul>
+      </article>
+      <article class="price-card" data-reveal>
+        <div class="price-top"><h3>Pro</h3><span class="seg"><span class="seg-off">Soon</span></span></div>
+        <div class="price"><span class="amount">—</span><span class="per">/ month</span></div>
+        <p class="billed">Opens after the beta</p>
+        <a class="btn btn-secondary btn-block" href="https://testflight.apple.com/join/ec5fWCuJ" rel="noopener">Join the beta first</a>
+        <p class="includes">Everything in Personal, plus:</p>
+        <ul class="feature-list">
+          <li>Higher daily usage</li>
+          <li>Bigger machine class</li>
+          <li>Group chats across more projects</li>
+          <li>Voice calls with a project</li>
+          <li>Priority at peak times</li>
+        </ul>
+      </article>
+      <article class="price-card" data-reveal>
+        <div class="price-top"><h3>Self-host</h3><span class="seg"><span class="seg-on">Open source</span></span></div>
+        <div class="price"><span class="amount">Free</span><span class="per">MIT licence</span></div>
+        <p class="billed">Bring your own keys</p>
+        <a class="btn btn-secondary btn-block" href="https://github.com/unarbos/arbos#readme" rel="noopener">Read the setup guide</a>
+        <p class="includes">You run:</p>
+        <ul class="feature-list">
+          <li>The relay on your own server</li>
+          <li>Your own GitHub OAuth app</li>
+          <li>Your own model provider and sandbox keys</li>
+          <li>The same Mac and iPhone apps</li>
+        </ul>
+      </article>
+    </div>
+    <div class="banner" data-reveal>
+      <div class="banner-text"><svg class="banner-mark" viewBox="0 0 64 64" aria-hidden="true"><use href="#arbos-mark"/></svg>Already have the app? <span class="muted">Sign in and your machine wakes up where you left it.</span></div>
+      <a class="btn btn-outline" href="https://relay.arbos.life/auth/github/start?redirect=https://arbos.life/welcome">Sign in with GitHub</a>
+    </div>
+  </div>
+</section>
+
+<!-- Download -->
+<section id="download">
+  <div class="container download">
+    <div class="download-copy" data-reveal>
+      <h2>Download Arbos</h2>
+      <p>One thread, wherever you are — on your desk and in your pocket.</p>
+    </div>
+    <div class="download-list" data-reveal>
+      <a class="dl-row" href="https://relay.arbos.life/download/mac">
+        <svg class="dl-icon" viewBox="0 0 17 20" aria-hidden="true"><use href="#apple-logo"/></svg>
+        <span class="dl-text"><span class="dl-title">macOS</span><span class="dl-sub">Apple silicon and Intel · macOS 14 or later · updates itself</span></span>
+        <svg class="dl-arrow" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2v9M4.5 7.5L8 11l3.5-3.5M3 13.5h10" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </a>
+      <a class="dl-row" href="https://testflight.apple.com/join/ec5fWCuJ" rel="noopener">
+        <svg class="dl-icon" viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="1" width="8" height="14" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M7 12.5h2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+        <span class="dl-text"><span class="dl-title">iPhone</span><span class="dl-sub">Join the TestFlight beta</span></span>
+        <span class="dl-arrow ext" aria-hidden="true">↗</span>
+      </a>
+    </div>
+  </div>
+</section>
+
+<!-- Open source -->
+<section id="source">
+  <div class="container section-head" data-reveal>
+    <h2>Open source, end to end</h2>
+    <p>The Mac app, the iPhone app, the relay, and the machine image are all in one public repository.</p>
+    <a class="btn btn-secondary" href="https://github.com/unarbos/arbos" rel="noopener">Read the code on GitHub</a>
+  </div>
+</section>
+
+<!-- FAQs -->
+<section id="faqs">
+  <div class="container faqs">
+    <h2 data-reveal>FAQs</h2>
+    <div class="faq-list" data-reveal data-accordion>
+      <details open>
+        <summary>How is Arbos different from a chat assistant?</summary>
+        <div class="faq-body"><p>A project in Arbos has its own computer. It can run code, use a browser, sign in to your tools, and keep working after you close the laptop. A chat assistant answers; a project finishes the work and comes back.</p></div>
+      </details>
+      <details>
+        <summary>Do projects share one computer?</summary>
+        <div class="faq-body"><p>Yes. Every user gets one cloud machine. Each project is a separate workspace on it with its own directory, process group, memory, and history. Isolation is per user, so your projects can hand files and context to each other, and nobody else's can.</p></div>
+      </details>
+      <details>
+        <summary>Who runs the machine?</summary>
+        <div class="faq-body"><p>We do. The machine starts when you send a message and sleeps when you go quiet. Inference, hosting, and app updates are managed for you. If you would rather run it yourself, the whole stack is open source.</p></div>
+      </details>
+      <details>
+        <summary>Where do I talk to Arbos?</summary>
+        <div class="faq-body"><p>From the Mac app, and from the iPhone app in the TestFlight beta. Both show the same threads. Voice memos work on both; channels such as Slack and Telegram are on the roadmap.</p></div>
+      </details>
+      <details>
+        <summary>Can projects talk to each other?</summary>
+        <div class="faq-body"><p>Yes. A project can message another project directly, and you can put several in one group chat. They pass work between themselves and you watch the thread instead of relaying messages.</p></div>
+      </details>
+      <details>
+        <summary>What can a project connect to?</summary>
+        <div class="faq-body"><p>Connectors for Gmail, Google Calendar, Slack, and GitHub, used as you. Routines that run on a schedule or on an event. A skills library you can edit. A credential vault for logins and keys. Local access to your Mac, with a separate approval for every action.</p></div>
+      </details>
+      <details>
+        <summary>How does Arbos handle my data?</summary>
+        <div class="faq-body"><p>Sign-in is GitHub OAuth. Tokens for your connectors stay in the relay and never enter the machine. Vault items are encrypted at rest and injected as placeholders, so the model sees <code>••••</code>. Anything that leaves the machine goes through an approval card first. The code is public, so you can check all of this.</p></div>
+      </details>
+    </div>
+  </div>
+</section>
+
+<!-- Get started -->
+<section id="get-started">
+  <div class="container get-started">
+    <div data-reveal>
+      <h2>Meet your first project</h2>
+      <p>An always-on agent, on its own machine, that you can hand real work to.</p>
+      <div class="hero-actions">
+        <a class="btn btn-primary" href="https://relay.arbos.life/download/mac"><svg class="apple" viewBox="0 0 17 20" aria-hidden="true"><use href="#apple-logo"/></svg>Download for Mac</a>
+        <a class="btn btn-secondary" href="https://testflight.apple.com/join/ec5fWCuJ" rel="noopener">Join the iPhone beta</a>
+      </div>
+    </div>
+  </div>
+  <div class="outline-mark" aria-hidden="true">
+    <svg viewBox="0 0 64 64"><use href="#arbos-mark-outline"/></svg>
+  </div>
+</section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="container-wide footer-inner">
+    <div class="footer-brand">
+      <a class="brand" href="/" aria-label="Arbos home">
+        <svg class="brand-mark" viewBox="0 0 64 64" aria-hidden="true"><use href="#arbos-mark"/></svg>
+        <span class="brand-name">Arbos</span>
+      </a>
+      <p class="copyright">© 2026 Arbos</p>
+      <a class="built" href="https://github.com/unarbos/arbos" rel="noopener">Open source · MIT</a>
+    </div>
+    <div class="footer-cols">
+      <div class="footer-col">
+        <h4>Product</h4>
+        <a href="https://relay.arbos.life/download/mac">Download for Mac</a>
+        <a href="https://testflight.apple.com/join/ec5fWCuJ" rel="noopener">iPhone beta</a>
+        <a href="https://relay.arbos.life/auth/github/start?redirect=https://arbos.life/welcome">Sign in</a>
+        <a href="#features">Features</a>
+        <a href="#pricing">Pricing</a>
+      </div>
+      <div class="footer-col">
+        <h4>Developers</h4>
+        <a href="https://github.com/unarbos/arbos" rel="noopener">GitHub</a>
+        <a href="https://github.com/unarbos/arbos#readme" rel="noopener">Setup guide</a>
+        <a href="https://github.com/unarbos/arbos/releases" rel="noopener">Releases</a>
+        <a href="https://github.com/unarbos/arbos/issues" rel="noopener">Issues</a>
+        <a href="https://relay.arbos.life/healthz" rel="noopener">Relay status</a>
+      </div>
+      <div class="footer-col">
+        <h4>How it works</h4>
+        <a href="#projects">Projects</a>
+        <a href="#faqs">FAQs</a>
+        <a href="#download">Download</a>
+        <a href="#source">Open source</a>
+      </div>
+      <div class="footer-col">
+        <h4>Legal</h4>
+        <a href="https://github.com/unarbos/arbos/blob/main/LICENSE" rel="noopener">MIT licence</a>
+        <a href="https://github.com/unarbos/arbos/blob/main/site/assets/fonts/LICENSE-Geist.txt" rel="noopener">Font licence</a>
+      </div>
+    </div>
+  </div>
+</footer>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <mask id="arbos-cut" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64">
+      <rect width="64" height="64" fill="#fff"/>
+      <path d="M32 50V32M32 34L19 21M32 30L45 17" stroke="#000" stroke-width="8" stroke-linecap="round" fill="none"/>
+    </mask>
+    <g id="arbos-mark" mask="url(#arbos-cut)">
+      <circle cx="32" cy="26" r="24" fill="currentColor"/>
+      <path d="M26 44h12v10a6 6 0 0 1-12 0z" fill="currentColor"/>
+    </g>
+    <g id="arbos-mark-outline" fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M26 49.24A24 24 0 1 1 38 49.24M26 49.24V54a6 6 0 0 0 12 0V49.24" stroke="currentColor" stroke-width="0.6"/>
+      <path d="M32 50V32M32 34L19 21M32 30L45 17" stroke="currentColor" stroke-width="8.6"/>
+      <path d="M32 50V32M32 34L19 21M32 30L45 17" stroke="var(--bg)" stroke-width="7.4"/>
+    </g>
+    <path id="apple-logo" d="M13.6 10.6c0-2.4 2-3.6 2.1-3.6-1.1-1.7-2.9-1.9-3.5-1.9-1.5-.2-2.9.9-3.7.9-.8 0-1.9-.9-3.2-.8-1.6 0-3.1 1-4 2.4-1.7 3-.4 7.3 1.2 9.7.8 1.2 1.8 2.5 3 2.4 1.2 0 1.7-.8 3.2-.8 1.5 0 1.9.8 3.2.8 1.3 0 2.2-1.2 3-2.4.9-1.3 1.3-2.6 1.3-2.7 0 0-2.6-1-2.6-4zM11.2 3.4c.7-.8 1.1-1.9 1-3-1 0-2.1.7-2.8 1.5-.6.7-1.2 1.8-1 2.9 1.1.1 2.2-.6 2.8-1.4z" fill="currentColor"/>
+  </defs>
+</svg>
 </body>
 </html>

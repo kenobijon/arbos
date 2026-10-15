@@ -1,0 +1,12 @@
+.welcome-main { min-height: 100vh; min-height: 100dvh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2rem; padding: 2rem 1rem; }
+.welcome-card { width: 100%; max-width: 30rem; padding: 2rem 1.5rem; border-radius: 1.5rem; background: #141414; box-shadow: 0 0 0 1px rgba(237,236,236,0.1); text-align: center; }
+.welcome-card[hidden] { display: none; }
+.welcome-card h1 { font-size: 1.75rem; line-height: 1.2; letter-spacing: -0.01em; }
+.welcome-lede { margin-top: 0.75rem; color: #7d8187; line-height: 1.6; }
+.welcome-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 0.5rem; margin-top: 1.5rem; }
+.welcome-code { display: flex; flex-direction: column; align-items: center; gap: 0.5rem; margin-top: 1.5rem; padding: 1rem; border-radius: 1rem; background: #0f0f0f; border: 1px solid rgba(255,255,255,0.08); }
+.welcome-code[hidden] { display: none; }
+.welcome-code-label { font-size: 0.8125rem; color: #7d8187; }
+.welcome-code code { font-size: 1.25rem; letter-spacing: 0.08em; color: #fff; word-break: break-all; }
+.welcome-fine { margin-top: 1.25rem; font-size: 0.8125rem; color: #7d8187; }
+@media (min-width: 640px) { .welcome-card { padding: 2.5rem 2.5rem; } .welcome-card h1 { font-size: 2.25rem; } }

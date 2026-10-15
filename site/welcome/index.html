@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Welcome — Arbos</title>
+  <meta name="robots" content="noindex">
+  <meta name="theme-color" content="#0a0a0a">
+  <link rel="icon" href="/assets/logo/favicon.svg" type="image/svg+xml">
+  <link rel="alternate icon" href="/assets/logo/favicon.ico" sizes="16x16 32x32 48x48">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/welcome/welcome.css">
+  <script src="/welcome/welcome.js" defer></script>
+</head>
+<body class="welcome">
+  <main class="welcome-main">
+    <a class="brand" href="/" aria-label="Arbos home">
+      <svg class="brand-mark" viewBox="0 0 64 64" aria-hidden="true"><use href="#arbos-mark"/></svg>
+      <span class="brand-name">Arbos</span>
+    </a>
+    <div class="welcome-card" data-state="signed-in">
+      <h1>You're signed in</h1>
+      <p class="welcome-lede">Open the Arbos app on your Mac to finish. It picks up this sign-in and starts your machine.</p>
+      <div class="welcome-actions">
+        <a class="btn btn-primary" id="open-app" href="arbos://auth/callback">Open the Mac app</a>
+        <a class="btn btn-secondary" href="https://relay.arbos.life/download/mac">Download for Mac</a>
+      </div>
+      <div class="welcome-code" id="code-box" hidden>
+        <span class="welcome-code-label">Code expires in 60 seconds. If the app asks for it, paste:</span>
+        <code id="code"></code>
+        <button class="btn btn-outline" id="copy" type="button">Copy</button>
+      </div>
+      <p class="welcome-fine">On iPhone? Join the beta from TestFlight and sign in there with the same GitHub account.</p>
+    </div>
+    <div class="welcome-card" data-state="no-code" hidden>
+      <h1>Sign in to Arbos</h1>
+      <p class="welcome-lede">This page completes a GitHub sign-in. Start from the app, or sign in here and come back.</p>
+      <div class="welcome-actions">
+        <a class="btn btn-primary" href="https://relay.arbos.life/auth/github/start?redirect=https://arbos.life/welcome">Sign in with GitHub</a>
+        <a class="btn btn-secondary" href="/">Back to arbos.life</a>
+      </div>
+    </div>
+  </main>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <mask id="arbos-cut" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64">
+        <rect width="64" height="64" fill="#fff"/>
+        <path d="M32 50V32M32 34L19 21M32 30L45 17" stroke="#000" stroke-width="8" stroke-linecap="round" fill="none"/>
+      </mask>
+      <g id="arbos-mark" mask="url(#arbos-cut)">
+        <circle cx="32" cy="26" r="24" fill="currentColor"/>
+        <path d="M26 44h12v10a6 6 0 0 1-12 0z" fill="currentColor"/>
+      </g>
+    </defs>
+  </svg>
+</body>
+</html>
