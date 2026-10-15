@@ -41,11 +41,8 @@ struct TreeColor: Identifiable, Equatable, Hashable {
         return TreeColor(name: hex.lowercased(), label: hex, bg: hex, ring: "#ffffff", tree: "#ffffff", face: hex)
     }
 
-    /// Swatch colour for pickers: the disc, or the tree when the disc is black.
-    var swatch: Color {
-        let bgc = Color(hex: bg) ?? .black
-        return bg.lowercased() == "#000000" ? (Color(hex: tree) ?? .white) : bgc
-    }
+    /// Accent for swatches: the ring (the scheme keeps the disc dark).
+    var swatch: Color { Color(hex: ring) ?? .white }
 }
 
 struct TreeCharacter: Identifiable, Equatable {
@@ -239,17 +236,17 @@ struct TreeCharacterView: View {
             .accessibilityHidden(true)
     }
 
-    /// Runtime retint on the documented layer keypaths: `bg` (older art:
-    /// `disc`), `ring`, `tree`, then `face` (nested under `tree`, so it is
-    /// applied last and wins). Fills and strokes both end in `Color`.
+    /// Runtime retint on the manifest's documented keypaths: the fills and
+    /// strokes are named `bg`, `ring`, `tree`, `face` inside the layers of
+    /// the same name (`face` sits under `tree`).
     private func tinted(_ view: LottieView<EmptyView>) -> LottieView<EmptyView> {
         guard let color, !color.isMono else { return view }
         var v = view
         let pairs: [(String, String)] = [
-            ("bg.**.Color", color.bg), ("disc.**.Color", color.bg),
-            ("ring.**.Color", color.ring),
-            ("tree.**.Color", color.tree),
-            ("**.face.**.Color", color.face),
+            ("bg.**.bg.Color", color.bg),
+            ("ring.**.ring.Color", color.ring),
+            ("tree.**.tree.Color", color.tree),
+            ("tree.**.face.Color", color.face),
         ]
         for (path, hex) in pairs {
             guard let c = TreeCharacterView.lottieColor(hex) else { continue }
