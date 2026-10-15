@@ -157,6 +157,7 @@ platform :ios do
     upload_to_testflight(
       api_key: api_key,
       app_identifier: "com.unarbos.arbos.ios",
+      app_platform: "ios",
       distribute_only: true,
       build_number: number,
       distribute_external: true,
