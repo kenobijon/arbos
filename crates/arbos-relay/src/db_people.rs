@@ -708,6 +708,38 @@ impl Db {
 
     // ---- users: invited placeholders ----------------------------------------------------------
 
+    /// The directory: every member or invited user with a handle, except `exclude`, by handle;
+    /// `(rows, total)`.
+    pub fn list_directory(
+        &self,
+        exclude: &str,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<Value>, i64)> {
+        self.with(|c| {
+            let total: i64 = c.query_row(
+                "SELECT COUNT(*) FROM users WHERE login IS NOT NULL AND status IN ('member', 'invited') AND id != ?1",
+                params![exclude],
+                |r| r.get(0),
+            )?;
+            let mut st = c.prepare(
+                "SELECT id, login, avatar_url, name, status, test FROM users
+                 WHERE login IS NOT NULL AND status IN ('member', 'invited') AND id != ?1
+                 ORDER BY lower(login) LIMIT ?2 OFFSET ?3",
+            )?;
+            let rows = st
+                .query_map(params![exclude, limit, offset], |r| {
+                    Ok(serde_json::json!({
+                        "id": r.get::<_, String>(0)?, "handle": r.get::<_, String>(1)?,
+                        "avatar_url": r.get::<_, Option<String>>(2)?, "name": r.get::<_, Option<String>>(3)?,
+                        "status": r.get::<_, String>(4)?, "test": r.get::<_, i64>(5)? != 0,
+                    }))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok((rows, total))
+        })
+    }
+
     /// Prefix search on GitHub logins (members and invited placeholders).
     pub fn search_users(&self, prefix: &str, limit: i64) -> Result<Vec<Value>> {
         let like = format!(
@@ -716,13 +748,13 @@ impl Db {
         );
         self.with(|c| {
             let mut st = c.prepare(
-                "SELECT id, login, avatar_url, name, status FROM users WHERE login IS NOT NULL AND lower(login) LIKE ?1 ESCAPE '\\' ORDER BY (status = 'member') DESC, lower(login) LIMIT ?2",
+                "SELECT id, login, avatar_url, name, status, test FROM users WHERE login IS NOT NULL AND status IN ('member', 'invited') AND lower(login) LIKE ?1 ESCAPE '\\' ORDER BY (status = 'member') DESC, lower(login) LIMIT ?2",
             )?;
             let rows = st.query_map(params![like, limit], |r| {
                 Ok(serde_json::json!({
                     "id": r.get::<_, String>(0)?, "handle": r.get::<_, String>(1)?,
                     "avatar_url": r.get::<_, Option<String>>(2)?, "name": r.get::<_, Option<String>>(3)?,
-                    "status": r.get::<_, String>(4)?,
+                    "status": r.get::<_, String>(4)?, "test": r.get::<_, i64>(5)? != 0,
                 }))
             })?;
             rows.collect()

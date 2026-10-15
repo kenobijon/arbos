@@ -400,6 +400,51 @@ pub async fn users_search(
 }
 
 #[derive(Deserialize)]
+pub struct DirectoryQuery {
+    #[serde(default)]
+    pub offset: Option<i64>,
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+/// `GET /users?offset=0&limit=100` — the directory (members and invited people except me),
+/// alphabetical by handle, with `total` and `next_offset` for paging.
+pub async fn users_directory(
+    State(state): State<AppState>,
+    principal: Principal,
+    Query(q): Query<DirectoryQuery>,
+) -> Response {
+    let me = match user_of(&principal) {
+        Ok(u) => u,
+        Err(r) => return *r,
+    };
+    let offset = q.offset.unwrap_or(0).max(0);
+    let limit = q.limit.unwrap_or(100).clamp(1, 500);
+    match state.db.list_directory(&me, offset, limit) {
+        Ok((users, total)) => {
+            let next = offset + users.len() as i64;
+            Json(json!({
+                "users": users,
+                "total": total,
+                "offset": offset,
+                "next_offset": if next < total { Some(next) } else { None },
+            }))
+            .into_response()
+        }
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    }
+}
+
+/// `POST /chats` — people groups are v2; say so instead of a bare 404.
+pub async fn chats_create_group() -> Response {
+    api_error(
+        StatusCode::NOT_IMPLEMENTED,
+        "not_implemented",
+        "people groups (POST /chats {kind: group, members}) are not available yet; open a DM with POST /chats/dm",
+    )
+}
+
+#[derive(Deserialize)]
 pub struct DmBody {
     pub handle: String,
 }

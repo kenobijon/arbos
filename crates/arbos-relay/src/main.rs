@@ -314,7 +314,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/me", get(signin::me))
         .route("/me/pushes", get(people::me_pushes))
         .route("/users/search", get(people::users_search))
-        .route("/chats", get(people::chats_list))
+        .route("/users", get(people::users_directory))
+        .route(
+            "/chats",
+            get(people::chats_list).post(people::chats_create_group),
+        )
         .route("/chats/dm", post(people::dm_create))
         .route(
             "/chats/{id}",
