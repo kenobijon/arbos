@@ -737,6 +737,7 @@ mod tests {
             last_client_push: Arc::new(Mutex::new(HashMap::new())),
             conn_seq: Arc::new(AtomicU64::new(0)),
             relay_key: Arc::new(RelayKey::derive("test-key")),
+            stale_bounces: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
