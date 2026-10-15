@@ -287,6 +287,16 @@ impl Db {
         })
     }
 
+    pub fn set_people_chat_kind(&self, chat_id: &str, kind: &str) -> Result<bool> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE people_chats SET kind = ?2 WHERE id = ?1 AND deleted_at IS NULL",
+                params![chat_id, kind],
+            )
+            .map(|n| n > 0)
+        })
+    }
+
     pub fn delete_people_chat(&self, chat_id: &str) -> Result<bool> {
         self.with(|c| {
             c.execute(

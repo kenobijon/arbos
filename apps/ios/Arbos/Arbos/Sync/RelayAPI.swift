@@ -461,6 +461,12 @@ final class RelayAPI {
         _ = try await request("PUT", "/chats/\(chatId)/agents/\(projectId)/settings", body: ["reply_policy": policy])
     }
 
+    func addMember(chatId: String, handle: String) async throws -> PeopleChat {
+        let v = try await json("POST", "/chats/\(chatId)/members", body: ["handle": handle.trimmingCharacters(in: CharacterSet(charactersIn: "@ "))])
+        if let chat = PeopleChat.parse(v) { return chat }
+        return try await peopleChat(chatId)
+    }
+
     func removeMember(chatId: String, userId: String) async throws {
         _ = try await request("DELETE", "/chats/\(chatId)/members/\(userId)")
     }

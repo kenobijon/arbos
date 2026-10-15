@@ -345,6 +345,7 @@ async fn main() -> anyhow::Result<()> {
             "/chats/{id}/agents/{project_id}/settings",
             axum::routing::put(people::agent_settings),
         )
+        .route("/chats/{id}/members", post(people::member_add))
         .route(
             "/chats/{id}/members/{user_id}",
             delete(people::member_remove),

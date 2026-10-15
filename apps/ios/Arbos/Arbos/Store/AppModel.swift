@@ -1040,6 +1040,21 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func addPerson(chatId: String, handle: String) {
+        Task {
+            do {
+                let chat = try await api.addMember(chatId: chatId, handle: handle)
+                if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i] = chat }
+            } catch {
+                let e = error as? RelayError
+                notice = Notice(text: e?.type == "already_member" ? "@\(handle) is already in this chat."
+                                 : e?.type == "not_available" ? "You can't add this person."
+                                 : (e?.status == 404 || e?.status == 405 || e?.status == 501) ? "Adding people is not on this relay yet."
+                                 : "Add person failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
     func removeAgent(chatId: String, projectId: Id) {
         Task {
             do {

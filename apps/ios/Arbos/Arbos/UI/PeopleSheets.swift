@@ -1,5 +1,5 @@
 // People-chat sheets (D72): New Message (Telegram-style: search, New agent,
-// New group, every Arbos user), members (people, agents, add-agent picker, block, leave/delete) and
+// New group, every Arbos user), members (people, add-person, agents, add-agent picker, block, leave/delete) and
 // project members (invite by handle).
 
 import SwiftUI
@@ -453,18 +453,20 @@ struct NewGroupView: View {
 }
 
 /// Members of a people chat: people, shared agents (with owner), lock state,
-/// Add agent (own projects), reply policy, remove, block, leave, delete.
+/// Add person / Add agent (own projects), reply policy, remove, block, leave, delete.
 struct MembersSheet: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
     let chatId: String
+    @State private var showAddPerson = false
     @State private var showAddAgent = false
     @State private var confirmDelete = false
     @State private var confirmLeave = false
 
     private var chat: PeopleChat? { model.peopleChat(chatId) }
     private var myProjects: [Project] { model.projects.filter { !$0.shared } }
+    private var memberIds: Set<String> { Set((chat?.humans ?? []).map(\.id)) }
 
     var body: some View {
         NavigationStack {
@@ -486,6 +488,9 @@ struct MembersSheet: View {
                                     Button("Block") { model.block(m) }.tint(theme.danger)
                                 }
                             }
+                        }
+                        Button { showAddPerson = true } label: {
+                            Label("Add person", systemImage: "plus.circle").foregroundStyle(theme.text)
                         }
                     } header: { Text("People") } footer: { Text(chat.lockLabel) }
                     .listRowBackground(theme.card)
@@ -535,6 +540,13 @@ struct MembersSheet: View {
             .navigationTitle("Members")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
+            .sheet(isPresented: $showAddPerson) {
+                PersonPicker(excludeIds: memberIds) { person in
+                    model.addPerson(chatId: chatId, handle: person.handle)
+                }
+                .environmentObject(model)
+                .environment(\.theme, theme)
+            }
             .sheet(isPresented: $showAddAgent) {
                 AgentPicker(projects: myProjects) { p in
                     model.addAgent(chatId: chatId, projectId: p.id)
@@ -549,6 +561,92 @@ struct MembersSheet: View {
             } message: { Text("Messages, files and the sync log are removed for every member.") }
         }
         .presentationDetents([.medium, .large])
+    }
+}
+
+/// Pick a person (directory + GitHub search) who is not already in the chat.
+struct PersonPicker: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    @Environment(\.dismiss) private var dismiss
+    let excludeIds: Set<String>
+    let onPick: (Person) -> Void
+    @State private var query = ""
+    @State private var remote: [Person] = []
+    @State private var searching = false
+
+    private var trimmed: String {
+        query.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "@"))
+    }
+
+    private var people: [Person] {
+        let q = trimmed.lowercased()
+        let local = (q.isEmpty ? model.directory : model.directory.filter {
+            $0.handle.lowercased().contains(q) || ($0.name ?? "").lowercased().contains(q)
+        }).filter { !excludeIds.contains($0.id) && $0.id != model.user?.id }
+        var seen = Set(local.map(\.id))
+        var out = local
+        for p in remote where !seen.contains(p.id) && !excludeIds.contains(p.id) && p.id != model.user?.id {
+            seen.insert(p.id)
+            out.append(p)
+        }
+        return out
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    HStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass").foregroundStyle(theme.muted)
+                        TextField("", text: $query, prompt: Text("Search people").foregroundStyle(theme.placeholder))
+                            .textInputAutocapitalization(.never).autocorrectionDisabled()
+                            .foregroundStyle(theme.text)
+                        if searching { ProgressView().controlSize(.small).tint(theme.muted) }
+                    }
+                }
+                .listRowBackground(theme.card)
+
+                Section {
+                    ForEach(people) { p in
+                        Button {
+                            onPick(p)
+                            dismiss()
+                        } label: {
+                            PersonRow(person: p)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    if people.isEmpty {
+                        Text(trimmed.isEmpty
+                             ? "No one else on Arbos yet. Search a GitHub username."
+                             : "No one matches @\(trimmed).")
+                            .font(.system(size: Theme.small)).foregroundStyle(theme.muted)
+                    }
+                }
+                .listRowBackground(theme.card)
+            }
+            .scrollContentBackground(.hidden)
+            .background(theme.bg)
+            .navigationTitle("Add person")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .topBarLeading) { Button("Cancel") { dismiss() } } }
+            .task { await model.loadDirectory() }
+            .onChange(of: query) { _, _ in search() }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    private func search() {
+        let q = trimmed
+        guard q.count >= 2 else { remote = []; searching = false; return }
+        searching = true
+        Task {
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard q == trimmed else { return }
+            remote = await model.searchPeople(q)
+            if q == trimmed { searching = false }
+        }
     }
 }
 

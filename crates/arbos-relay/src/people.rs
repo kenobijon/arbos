@@ -979,6 +979,100 @@ pub async fn agent_remove(
     StatusCode::NO_CONTENT.into_response()
 }
 
+#[derive(Deserialize)]
+pub struct AddMemberBody {
+    pub handle: String,
+}
+
+/// `POST /chats/{id}/members {"handle"}` — any human member adds another person. A DM becomes a
+/// group when a third person joins so the two can still open a fresh DM later.
+pub async fn member_add(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    Json(b): Json<AddMemberBody>,
+) -> Response {
+    let (me, cm) = match member_chat(&state, &principal, &id) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    let Some(handle) = normalize_handle(&b.handle) else {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "bad_handle",
+            "that is not a GitHub login",
+        );
+    };
+    let Some(other) = find_person(&state, &handle).await else {
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no GitHub account with that login",
+        );
+    };
+    let other_id = other["id"].as_str().unwrap_or_default().to_owned();
+    if other_id == me {
+        return api_error(StatusCode::BAD_REQUEST, "bad_handle", "that is you");
+    }
+    if cm
+        .members
+        .iter()
+        .any(|m| m.user_id() == Some(other_id.as_str()))
+    {
+        return api_error(
+            StatusCode::CONFLICT,
+            "already_member",
+            "already in this chat",
+        );
+    }
+    if state.db.blocked_either_way(&me, &other_id).unwrap_or(false) {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "not_available",
+            "this person is not available",
+        );
+    }
+    let humans = human_user_ids(&cm);
+    if state
+        .db
+        .blocked_by_any(&other_id, &humans)
+        .unwrap_or(false)
+    {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "not_available",
+            "this person is not available",
+        );
+    }
+    if let Err(e) = state.db.add_member(
+        &id,
+        &format!("user:{other_id}"),
+        "member",
+        &me,
+        &json!({}),
+    ) {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+    }
+    if cm.chat.kind == "dm" {
+        let _ = state.db.set_people_chat_kind(&id, "group");
+    }
+    let payload = json!({
+        "chat_id": id,
+        "user_id": other_id,
+        "handle": handle_of(&state, &other_id),
+        "by_handle": handle_of(&state, &me),
+    });
+    let _ = state
+        .db
+        .push_user(&other_id, "people_member_added", &payload, Some(&id));
+    notify_members(&state, &cm, &me, "people_member_added", payload);
+    tracing::info!(chat = %id, user = %other_id, %me, "person added to a people chat");
+    match load_chat(&state, &id) {
+        Ok(cm) => Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response(),
+        Err(r) => *r,
+    }
+}
+
 /// `DELETE /chats/{id}/members/{user_id}` — a chat owner removes a person; access ends at once.
 pub async fn member_remove(
     State(state): State<AppState>,
