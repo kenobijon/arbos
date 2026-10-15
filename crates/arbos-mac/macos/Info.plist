@@ -10,6 +10,8 @@
     <string>arbos-mac</string>
     <key>CFBundleIconFile</key>
     <string>Arbos.icns</string>
+    <key>CFBundleIconName</key>
+    <string>Arbos</string>
     <key>CFBundleIdentifier</key>
     <string>sh.arbos.mac</string>
     <key>CFBundleInfoDictionaryVersion</key>

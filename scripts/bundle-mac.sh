@@ -167,10 +167,53 @@ tar -czf "$TARBALL" -C "$DIST" "$APP_NAME.app"
 
 echo "==> $DMG"
 DMG_SRC="$DIST/dmg-src"
-rm -rf "$DMG_SRC" && mkdir -p "$DMG_SRC"
+rm -rf "$DMG_SRC" && mkdir -p "$DMG_SRC/.background"
 ditto "$APP" "$DMG_SRC/$APP_NAME.app"
 ln -s /Applications "$DMG_SRC/Applications"
-hdiutil create -quiet -volname "$APP_NAME" -srcfolder "$DMG_SRC" -ov -format UDZO "$DMG"
+cp crates/arbos-mac/macos/dmg-background.png "$DMG_SRC/.background/background.png"
+cp crates/arbos-mac/macos/dmg-background@2x.png "$DMG_SRC/.background/background@2x.png"
+# Two passes: a writable image so Finder can lay the window out (dark
+# background, app left, Applications right), then compress. The layout step
+# is best effort — a runner without a Finder session still ships a plain DMG.
+DMG_RW="$DIST/$APP_NAME-rw.dmg"
+rm -f "$DMG_RW"
+hdiutil create -quiet -volname "$APP_NAME" -srcfolder "$DMG_SRC" -ov -format UDRW -fs HFS+ "$DMG_RW"
+MOUNT_DIR="/Volumes/$APP_NAME"
+hdiutil detach -quiet "$MOUNT_DIR" 2>/dev/null || true
+hdiutil attach -quiet -readwrite -noverify -noautoopen "$DMG_RW"
+if osascript <<EOS >/dev/null 2>&1
+tell application "Finder"
+  tell disk "$APP_NAME"
+    open
+    set current view of container window to icon view
+    set toolbar visible of container window to false
+    set statusbar visible of container window to false
+    set the bounds of container window to {200, 120, 860, 520}
+    set theViewOptions to the icon view options of container window
+    set arrangement of theViewOptions to not arranged
+    set icon size of theViewOptions to 128
+    set background picture of theViewOptions to file ".background:background.png"
+    set position of item "$APP_NAME.app" of container window to {165, 190}
+    set position of item "Applications" of container window to {495, 190}
+    close
+    open
+    update without registering applications
+    delay 2
+    close
+  end tell
+end tell
+EOS
+then
+  echo "==> dmg window laid out"
+else
+  echo "==> dmg layout skipped (no Finder session)"
+fi
+# Hide the background folder from the window either way.
+SetFile -a V "$MOUNT_DIR/.background" 2>/dev/null || chflags hidden "$MOUNT_DIR/.background" 2>/dev/null || true
+sync
+hdiutil detach -quiet "$MOUNT_DIR" || { sleep 2; hdiutil detach -quiet -force "$MOUNT_DIR"; }
+hdiutil convert -quiet "$DMG_RW" -format UDZO -imagekey zlib-level=9 -ov -o "$DMG"
+rm -f "$DMG_RW"
 rm -rf "$DMG_SRC"
 if [[ "$SIGNING" != "ad-hoc" ]]; then
   codesign --force --timestamp --sign "$ARBOS_SIGN_IDENTITY" "$DMG"
