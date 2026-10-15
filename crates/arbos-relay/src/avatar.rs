@@ -4,13 +4,15 @@
 //!
 //! The manifest reaches the relay through `ARBOS_AVATAR_MANIFEST` (a JSON file: `["oak", …]`,
 //! `{"slugs": […]}`, or `{"avatars": [{"slug": …}, …]}`) or `ARBOS_AVATAR_SLUGS` (comma list);
-//! without either, the built-in list below is used — keep it equal to the apps' manifest.
+//! without either, the built-in list below is used; it equals the apps' manifest (2026-10-15),
+//! in manifest order.
 
 use serde_json::Value;
 
 pub const DEFAULT_SLUGS: &[&str] = &[
-    "oak", "birch", "pine", "maple", "willow", "cedar", "aspen", "elm", "fir", "ginkgo", "sequoia",
-    "baobab", "cypress", "magnolia", "olive", "palm",
+    "oak", "pine", "lollipop", "fractal", "mushroom", "cypress", "willow", "palm", "bonsai",
+    "birch", "baobab", "sapling", "maple", "acacia", "spruce", "cherry", "cactus", "sequoia",
+    "olive", "ginkgo",
 ];
 
 /// FNV-1a 64 over the UTF-8 bytes (the same arithmetic is one line in Swift).
