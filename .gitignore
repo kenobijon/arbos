@@ -7,3 +7,13 @@ harness/**/dist/
 *.db-shm
 /.arbos-local/
 .env
+
+# Never commit credentials: env files, Apple signing material, private keys.
+.env.*
+!.env.example
+*.p8
+*.p12
+*.pem
+*.key
+/keys/
+/secrets/
