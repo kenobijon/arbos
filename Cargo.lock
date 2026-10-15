@@ -331,6 +331,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "arbos-local"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arbos-core",
+ "base64 0.22.1",
+ "clap",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.26.2",
+ "tracing",
+ "tracing-subscriber",
+ "ulid",
+]
+
+[[package]]
 name = "arbos-mac"
 version = "0.1.0"
 dependencies = [

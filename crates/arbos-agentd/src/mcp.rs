@@ -1,7 +1,8 @@
 //! The project MCP server (design §6.7): Streamable-HTTP JSON-RPC on loopback.
 //! Tools: history_search, history_read, read_thread, memory_search, memory_read,
 //! peek, sub_llm, remember, recall, projects_list, projects_send, ask_user,
-//! spawn_subagent, wake_subagent, connectors_list, connector_call.
+//! spawn_subagent, wake_subagent, connectors_list, connector_call, local_devices,
+//! local_run, local_read, local_list.
 
 use std::sync::Arc;
 
@@ -61,6 +62,7 @@ fn tools() -> Value {
     ]);
     if let Some(a) = list.as_array_mut() {
         a.extend(crate::connectors::tool_specs());
+        a.extend(crate::local::tool_specs());
     }
     list
 }
@@ -107,8 +109,12 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
     );
     // Risky actions run only after an approved card (design S18, `arbos_core::approval`).
     // `connector_call` is gated inside `connectors::connector_call`, where the catalog kind is
-    // known, so it is classified exactly once and gets one card.
-    if name != "connector_call" {
+    // known, so it is classified exactly once and gets one card. `local_run/read/list` are gated
+    // inside `local::local_call`, which knows the device and its "allow reads" switch.
+    if !matches!(
+        name,
+        "connector_call" | "local_run" | "local_read" | "local_list"
+    ) {
         if let Err(refusal) = a.gate_tool(name, args, &chat_for_scratch).await {
             return err_result(format!("not executed: {refusal}"));
         }
@@ -564,6 +570,10 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
                 )),
                 Err(e) => err_result(e),
             }
+        }
+        "local_devices" => crate::local::local_devices(a).await,
+        "local_run" | "local_read" | "local_list" => {
+            crate::local::local_call(a, name, args, &chat_for_scratch).await
         }
         _ => err_result(format!("unknown tool {name}")),
     }

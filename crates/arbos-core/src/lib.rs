@@ -5,6 +5,7 @@ pub mod approval;
 pub mod auth;
 pub mod doc;
 pub mod ids;
+pub mod local;
 pub mod route;
 pub mod rpc;
 pub mod skill;
