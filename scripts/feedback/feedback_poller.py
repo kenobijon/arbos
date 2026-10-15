@@ -18,6 +18,7 @@ Runs every 2 minutes from arbos-feedback-poller.timer (see install-feedback-loop
                -> rejected  the screen said "obviously malicious": issue opened with label `flagged`, no agent
        running -> pushed    the agent's run finished and a commit tagged [feedback <id>] is on main
                -> rejected  the agent answered REFUSED (malicious request)
+               -> no_change the agent answered PUSHED: no (nothing to fix, needs a decision)
                -> failed    the run errored, timed out, or finished without a push
        pushed  -> shipped   ios.yml / CI+release.yml succeeded for that commit and the TestFlight build is
                             processed; the issue gets build number / edge version + elapsed time
@@ -78,7 +79,7 @@ GITHUB_API = "https://api.github.com"
 ASSET_RELEASE_TAG = "feedback-screenshots"
 USER_AGENT = "arbos-feedback-poller/1 (+https://github.com/unarbos/arbos)"
 
-TERMINAL = {"shipped", "failed", "ignored", "rejected", "duplicate"}
+TERMINAL = {"shipped", "failed", "ignored", "rejected", "duplicate", "no_change"}
 
 # Obvious-malice patterns: a cheap first pass before the model. Anything here is flagged, never built.
 MALICE_PATTERNS = [
@@ -1048,6 +1049,15 @@ class Loop:
             return
         commit = self.find_commit(fid, st["launched"])
         if not commit:
+            if re.search(r"^PUSHED:\s*no\b", result, re.M | re.I):
+                # The agent looked and decided there is nothing to change (not a bug, needs a decision, …).
+                st.update(status="no_change", error=self.summary_line(result))
+                self.store.save_state(fid, st)
+                self.store.event(fid, "no_change", summary=st["error"])
+                self.gh.ensure_label("no-change", "C5DEF5", "The agent looked and found nothing to change")
+                self.gh.comment(st["issue"], f"No change: {self.summary_line(result)}\n\nAgent: {st.get('agent_url')}")
+                self.gh.set_labels(st["issue"], ["no-change"], [])
+                return
             self.fail(fid, st, "agent finished without pushing a [feedback] commit to main", extra=result)
             return
         files = [f["filename"] for f in self.gh.commit(commit["sha"]).get("files", [])]
