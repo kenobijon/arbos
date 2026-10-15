@@ -12,9 +12,9 @@ use gpui_tokio::Tokio;
 use tokio::sync::mpsc;
 
 use crate::model::{
-    new_id, now_ms, BoxState, ChannelsView, Chat, ConnectorsView, Effort, Id, Link, Message,
-    MessageStatus, Part, Project, ProjectDocView, QuestionState, Role, Routine, RoutineRun,
-    RoutineTrigger, Skill, StatusKind,
+    new_id, now_ms, BoxState, ChannelsView, Chat, ConnectorsView, Effort, Id, Link, LocalView,
+    Message, MessageStatus, Part, Project, ProjectDocView, QuestionState, Role, Routine,
+    RoutineRun, RoutineTrigger, Skill, StatusKind,
 };
 use crate::sync::{ClientCommand, SyncEvent, SyncSource};
 use crate::ui::notify::{Gate, Notifier, NotifyEvent, NotifyKind};
@@ -116,6 +116,8 @@ pub struct AppState {
     pub channels: ChannelsView,
     /// In-app update (D42): what the rail button and settings show.
     pub update: UpdateState,
+    /// Settings → This Mac (F9).
+    pub local: LocalView,
     awaiting_new_project: bool,
     commands: mpsc::UnboundedSender<ClientCommand>,
     update_commands: mpsc::UnboundedSender<UpdateCommand>,
@@ -212,6 +214,7 @@ impl AppState {
             window_active: true,
             channels: ChannelsView::default(),
             update: update_state,
+            local: LocalView::default(),
             awaiting_new_project: false,
             commands: command_tx,
             update_commands: update_command_tx,
@@ -575,6 +578,10 @@ impl AppState {
             }
             SyncEvent::Channels(view) => {
                 self.channels = view;
+                cx.notify();
+            }
+            SyncEvent::LocalDevices(view) => {
+                self.local = view;
                 cx.notify();
             }
         }
@@ -1363,6 +1370,32 @@ impl AppState {
     pub fn disconnect_connector(&mut self, id: Id, cx: &mut Context<Self>) {
         self.connectors.items.retain(|c| c.id != id);
         self.command(ClientCommand::ConnectorDisconnect { id });
+        cx.notify();
+    }
+
+    // ----- this mac (F9) ---------------------------------------------------
+
+    pub fn local_refresh(&mut self, cx: &mut Context<Self>) {
+        self.command(ClientCommand::LocalRefresh);
+        cx.notify();
+    }
+
+    pub fn local_set_allow_reads(&mut self, device_id: Id, allow: bool, cx: &mut Context<Self>) {
+        if let Some(d) = self
+            .local
+            .devices
+            .iter_mut()
+            .find(|d| d.device_id == device_id)
+        {
+            d.allow_reads = allow;
+        }
+        self.command(ClientCommand::LocalSetAllowReads { device_id, allow });
+        cx.notify();
+    }
+
+    pub fn local_forget(&mut self, device_id: Id, cx: &mut Context<Self>) {
+        self.local.devices.retain(|d| d.device_id != device_id);
+        self.command(ClientCommand::LocalForget { device_id });
         cx.notify();
     }
 

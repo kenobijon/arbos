@@ -7,6 +7,7 @@ mod channels;
 mod connectors;
 mod daytona;
 mod db;
+mod local;
 mod migrate;
 mod proxy;
 mod rooms;
@@ -189,6 +190,7 @@ async fn main() -> anyhow::Result<()> {
         stale_bounces: Arc::new(Mutex::new(HashMap::new())),
         conn_seq: Arc::new(AtomicU64::new(0)),
         relay_key,
+        local_conns: Arc::new(Mutex::new(HashMap::new())),
     };
     if state.cfg.connectors_mock {
         tracing::info!("ARBOS_CONNECTORS_MOCK=1: connectors return canned data; sends land in connector_outbox");
@@ -203,6 +205,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("no devices paired yet; one-time pairing code (1 h): {code}");
     }
 
+    db.local_devices_reset()?;
     rooms::spawn_sweeper(state.clone()).await;
     boxes::spawn_wake_runner(state.clone()).await;
     routines::spawn_scheduler(state.clone()).await;
@@ -283,6 +286,13 @@ async fn main() -> anyhow::Result<()> {
             "/projects/{id}/audit",
             post(api::record_audit).get(api::list_audit),
         )
+        .route("/local/{device}", get(local::ws_local))
+        .route("/local/devices", get(local::list))
+        .route(
+            "/local/devices/{device}",
+            axum::routing::patch(local::patch).delete(local::delete),
+        )
+        .route("/projects/{id}/local/{device}/exec", post(local::exec))
         .route("/room/{project}/{chat}", get(rooms::ws_room))
         .route(
             "/room/{project}/{chat}/checkpoint",

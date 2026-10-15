@@ -802,6 +802,7 @@ mod tests {
             stale_bounces: Arc::new(Mutex::new(HashMap::new())),
             conn_seq: Arc::new(AtomicU64::new(0)),
             relay_key: Arc::new(crypto::RelayKey::derive("test-key")),
+            local_conns: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 

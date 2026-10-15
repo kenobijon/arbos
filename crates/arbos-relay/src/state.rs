@@ -69,6 +69,8 @@ pub struct AppState {
     pub conn_seq: Arc<std::sync::atomic::AtomicU64>,
     /// Encrypts connector tokens at rest (F1).
     pub relay_key: Arc<crate::connectors::crypto::RelayKey>,
+    /// device_id → live `arbos-local` helper socket (F9).
+    pub local_conns: crate::local::LocalConns,
 }
 
 impl AppState {

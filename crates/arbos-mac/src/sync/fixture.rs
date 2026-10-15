@@ -23,9 +23,9 @@ use crate::model::{
     new_id, now_ms, ApprovalRisk, ApprovalState, Attachment, BoxState, ChannelBinding,
     ChannelPairing, ChannelPlatform, ChannelPlatformState, ChannelsView, Chat, ChoiceOption,
     Connector, ConnectorAction, ConnectorProvider, ConnectorStatus, ConnectorsView, Effort,
-    FieldKind, FormField, Id, Link, Message, MessageStatus, Part, Project, QuestionState, Role,
-    Routine, RoutineRun, RoutineRunStatus, RoutineTrigger, Skill, StatusKind, ToolCall, ToolStatus,
-    TurnKind, Widget,
+    FieldKind, FormField, Id, Link, LocalDevice, LocalView, Message, MessageStatus, Part, Project,
+    QuestionState, Role, Routine, RoutineRun, RoutineRunStatus, RoutineTrigger, Skill, StatusKind,
+    ToolCall, ToolStatus, TurnKind, Widget,
 };
 
 pub const STREAM_FRAME_MS: u64 = arbos_core::STREAM_COMMIT_MS;
@@ -71,6 +71,7 @@ struct Shared {
     channels: Mutex<ChannelsView>,
     routines: Mutex<Vec<Routine>>,
     routine_runs: Mutex<HashMap<Id, Vec<RoutineRun>>>,
+    local: Mutex<LocalView>,
 }
 
 pub struct FixtureSource;
@@ -107,6 +108,7 @@ impl SyncSource for FixtureSource {
                 channels: Mutex::new(seed_channels()),
                 routines: Mutex::new(seed_routines()),
                 routine_runs: Mutex::new(seed_routine_runs()),
+                local: Mutex::new(seed_local()),
             });
             seed_docs(&shared);
 
@@ -126,6 +128,7 @@ impl SyncSource for FixtureSource {
             emit_connectors(&shared);
             emit_skills(&shared);
             emit_channels(&shared);
+            emit_local(&shared);
             let _ = events.send(SyncEvent::Link(Link::Live));
 
             loop {
@@ -666,6 +669,29 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 .retain(|b| b.id != id);
             emit_channels(shared);
         }
+        ClientCommand::LocalRefresh => emit_local(shared),
+        ClientCommand::LocalSetAllowReads { device_id, allow } => {
+            if let Some(d) = shared
+                .local
+                .lock()
+                .unwrap()
+                .devices
+                .iter_mut()
+                .find(|d| d.device_id == device_id)
+            {
+                d.allow_reads = allow;
+            }
+            emit_local(shared);
+        }
+        ClientCommand::LocalForget { device_id } => {
+            shared
+                .local
+                .lock()
+                .unwrap()
+                .devices
+                .retain(|d| d.device_id != device_id);
+            emit_local(shared);
+        }
     }
 }
 
@@ -724,6 +750,29 @@ fn seed_channels() -> ChannelsView {
             bound_at: now_ms().saturating_sub(3 * 86_400_000),
         }],
         pairing: None,
+        loaded: true,
+    }
+}
+
+fn emit_local(shared: &Shared) {
+    let view = shared.local.lock().unwrap().clone();
+    let _ = shared.events.send(SyncEvent::LocalDevices(view));
+}
+
+/// Settings → This Mac demo: one helper online, reads still ask.
+fn seed_local() -> LocalView {
+    LocalView {
+        devices: vec![LocalDevice {
+            device_id: "01JFIXTURELOCALMACBOOK0001".into(),
+            name: "Jacob's MacBook Pro".into(),
+            hostname: "jacobs-mbp".into(),
+            os: "macos".into(),
+            home: "/Users/jacob".into(),
+            connected: true,
+            last_seen: Some(now_ms() as i64 - 12_000),
+            allow_reads: false,
+        }],
+        relay_url: "http://127.0.0.1:7700".into(),
         loaded: true,
     }
 }

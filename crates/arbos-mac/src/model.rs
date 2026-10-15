@@ -655,6 +655,46 @@ impl ConnectorsView {
     }
 }
 
+/// One `arbos-local` helper the relay knows (`GET /local/devices` item, F9).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LocalDevice {
+    pub device_id: Id,
+    pub name: String,
+    #[serde(default)]
+    pub hostname: String,
+    #[serde(default)]
+    pub os: String,
+    #[serde(default)]
+    pub home: String,
+    #[serde(default)]
+    pub connected: bool,
+    #[serde(default)]
+    pub last_seen: Option<i64>,
+    /// `read_file` / `list_dir` skip the approval card (still audited) when on.
+    #[serde(default)]
+    pub allow_reads: bool,
+}
+
+impl LocalDevice {
+    pub fn os_label(&self) -> &'static str {
+        match self.os.as_str() {
+            "macos" => "macOS",
+            "linux" => "Linux",
+            "windows" => "Windows",
+            _ => "Computer",
+        }
+    }
+}
+
+/// Settings → This Mac state.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LocalView {
+    pub devices: Vec<LocalDevice>,
+    /// Relay URL the install command points the helper at.
+    pub relay_url: String,
+    pub loaded: bool,
+}
+
 /// How a routine fires (relay `routines.trigger`, F3).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

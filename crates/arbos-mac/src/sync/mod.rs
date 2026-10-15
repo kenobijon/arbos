@@ -19,7 +19,7 @@ use futures::future::BoxFuture;
 use tokio::sync::mpsc;
 
 use crate::model::{
-    BoxState, ChannelsView, Chat, ConnectorsView, Effort, Id, Link, Message, Project,
+    BoxState, ChannelsView, Chat, ConnectorsView, Effort, Id, Link, LocalView, Message, Project,
     ProjectDocView, Routine, RoutineRun, RoutineTrigger, Skill,
 };
 
@@ -110,6 +110,8 @@ pub enum SyncEvent {
     Skills(Vec<Skill>),
     /// Settings → Channels: platform states, bound chats, active pairing code (F7).
     Channels(ChannelsView),
+    /// Settings → This Mac: paired `arbos-local` helpers with online state (F9).
+    LocalDevices(LocalView),
 }
 
 /// Something the user did; the source writes it into the doc / outbox.
@@ -242,6 +244,17 @@ pub enum ClientCommand {
     },
     ChannelUnbind {
         id: Id,
+    },
+    /// Settings → This Mac opened or needs a refresh.
+    LocalRefresh,
+    /// Per-device "Allow reads without asking".
+    LocalSetAllowReads {
+        device_id: Id,
+        allow: bool,
+    },
+    /// Forget a helper (and revoke its device token).
+    LocalForget {
+        device_id: Id,
     },
 }
 

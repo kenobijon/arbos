@@ -7,6 +7,7 @@ mod harness;
 mod hooks;
 mod http;
 mod llm;
+mod local;
 mod mcp;
 mod memory;
 mod routines;

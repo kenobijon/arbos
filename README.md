@@ -183,6 +183,18 @@ cargo run -p arbosctl -- audit demo                                  # approval_
 
 `ARBOS_APPROVAL_TIMEOUT_SECS` (box, default 86400) caps how long an inline-gated tool call waits.
 
+## Your computer: `arbos-local`
+
+`arbos-local` is a small helper that runs on the user's own machine so a project agent can run a command or read a file there. It pairs like any device (D35), keeps one WebSocket to the relay (`WS /local/{deviceId}`), announces hostname/os/home and performs `run` (shell, timeout ≤ 600 s, 256 KiB per stream), `read_file` (≤ 1 MiB inline; bigger files land in the relay blob store and reach the agent as a handle) and `list_dir` (≤ 2000 entries). The relay only forwards: a box calls `POST /projects/{id}/local/{device}/exec` (box token) and the relay waits on the helper's socket for the result. The agent's MCP tools are `local_devices`, `local_run`, `local_read`, `local_list`; every call shows the user an approval card (risk `computer`) with the exact command or path and is refused without an approved outcome (unit-tested). Settings → This Mac lists paired helpers with online state, the install command, and a per-device "Allow reads without asking" toggle (default off; when on, `read_file`/`list_dir` skip the card but are still audited; commands always ask). The card is a real approval (see Approvals above): `arbosctl chat approve/reject` or the Mac app decide it, and a late approval re-runs the identical call once.
+
+```bash
+arbos-relay pair-code                                   # on the relay host: a one-time code
+arbos-local pair <code> --relay http://127.0.0.1:7700 --name "Jacob's MacBook"
+arbos-local run                                         # reconnects with backoff; Ctrl-C to stop
+```
+
+Device endpoints: `GET /local/devices`, `PATCH /local/devices/{id} {"allow_reads": bool}`, `DELETE /local/devices/{id}` (forgets the helper and revokes its token). Config lives in `~/.config/arbos/arbos-local.json` (`ARBOS_LOCAL_CONFIG` overrides); `ARBOS_LOCAL_HOSTNAME` overrides the advertised hostname.
+
 ## Image
 
 `.github/workflows/image.yml` builds `image/Dockerfile` on an image tag (`image-v0.1.7`) or by hand, pushes it to GHCR, smoke-tests it, and registers the Daytona snapshot `arbos-agent-<version>` with `image/register-snapshot.sh` (secrets `DAYTONA_API_KEY`, `GHCR_READ_TOKEN`).
