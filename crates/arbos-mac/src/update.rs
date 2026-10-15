@@ -17,6 +17,11 @@ use tokio::sync::mpsc;
 /// `0.1.0` from Cargo.toml, with the CI build number behind it (`0.1.0.212`)
 /// when the bundle script exported `ARBOS_BUILD` at compile time.
 pub fn current_version() -> String {
+    // A stable (tag) build is exactly the Cargo version — the same string as the tag, the
+    // appcast item, and the DMG name; edge builds append the commit count.
+    if option_env!("ARBOS_DEFAULT_UPDATE_CHANNEL") == Some("stable") {
+        return env!("CARGO_PKG_VERSION").to_string();
+    }
     match option_env!("ARBOS_BUILD") {
         Some(build) if !build.is_empty() => format!("{}.{}", env!("CARGO_PKG_VERSION"), build),
         _ => env!("CARGO_PKG_VERSION").to_string(),

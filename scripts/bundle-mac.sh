@@ -37,7 +37,13 @@ if [[ ! "$BUILD" =~ ^[0-9]+$ ]]; then
   echo "ARBOS_BUILD must be a decimal build number, got '$BUILD'" >&2
   exit 1
 fi
-VERSION="$BASE.$BUILD"
+# Edge builds are `<base>.<build>`; a stable (tag) build is just `<base>`, matching the tag,
+# the appcast item, and what publish-release.sh looks for.
+if [[ "${ARBOS_DEFAULT_UPDATE_CHANNEL:-edge}" == "stable" ]]; then
+  VERSION="$BASE"
+else
+  VERSION="$BASE.$BUILD"
+fi
 TARGETS="${ARBOS_TARGETS:-aarch64-apple-darwin x86_64-apple-darwin}"
 ARCH_LABEL="universal"
 if [[ "$TARGETS" != *" "* ]]; then
