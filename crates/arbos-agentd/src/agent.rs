@@ -385,6 +385,7 @@ pub struct Agent {
     pub subagent_msgs: Mutex<HashMap<String, (String, String)>>,
     /// Group-chat bookkeeping (chat kinds from the registry, this box's "Projects ⇄" tab).
     pub groups: crate::groups::GroupState,
+    pub people: crate::people::PeopleState,
 }
 
 impl Agent {
@@ -442,6 +443,7 @@ impl Agent {
             approvals: crate::approval::Approvals::default(),
             subagent_msgs: Mutex::new(HashMap::new()),
             groups: crate::groups::GroupState::default(),
+            people: crate::people::PeopleState::default(),
         })
     }
 
@@ -705,6 +707,18 @@ impl Agent {
         let Some(host) = self.sync.host(chat_id).await else {
             return Err(anyhow!("no room for chat {chat_id}"));
         };
+        // People chats route by mention: a message not for this agent is left pending for
+        // whichever agent (if any) it is for; the humans' own `send` commands are theirs.
+        if cmd.kind == "send" && self.people.is_people_chat(chat_id) {
+            let msg_id = cmd
+                .payload
+                .get("messageId")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if !self.people_wants(chat_id, &host, msg_id).await {
+                return Ok(());
+            }
+        }
         {
             host.lock()
                 .await
@@ -764,6 +778,11 @@ impl Agent {
             }
         }
         res
+    }
+
+    /// Abort the turn running in `chat_id` (people chat removal).
+    pub(crate) async fn stop_turn(&self, chat_id: &str) -> Result<()> {
+        self.handle_stop(chat_id).await
     }
 
     /// `stop` runs out of band (its own task, no turn lock): abort the pi turn now, mark the turn
@@ -929,10 +948,16 @@ impl Agent {
             }
             prompt_text = format!("{}{prompt_text}", gt.prelude);
         }
+        // People chats (D72): who is asking, in what role; the reply is attributed to them.
+        if let Some(prelude) = self.people_turn_context(chat_id, host, &user_msg_id).await {
+            prompt_text = format!("{prelude}{prompt_text}");
+        }
 
         let outcome = self
             .drive_turn(chat_id, host, &user_msg_id, &prompt_text, TurnKind::User)
-            .await?;
+            .await;
+        self.people.set_current(None);
+        let outcome = outcome?;
         let TurnOutcome {
             assistant_msg_id,
             route_name: _,
@@ -1143,6 +1168,12 @@ impl Agent {
                 TurnKind::User => {
                     h.doc
                         .add_status_part(&assistant_msg_id, "working", "Working…");
+                    if let Some(attr) = self.people_reply_fields(chat_id) {
+                        h.doc.set_message_fields(&assistant_msg_id, &attr.fields);
+                        if let Some(q) = attr.quote {
+                            h.doc.append_text(&assistant_msg_id, &pid, &q);
+                        }
+                    }
                 }
                 TurnKind::SubagentResult { subagent_id, name } => {
                     h.doc

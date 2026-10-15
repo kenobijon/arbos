@@ -49,6 +49,8 @@ pub struct DocHost {
     seen_commands: std::collections::HashSet<String>,
     recovered: bool,
     ever_caught_up: bool,
+    /// Set by `close_room`: the session ends and is not reopened.
+    pub closed: bool,
 }
 
 impl DocHost {
@@ -173,17 +175,30 @@ impl SyncHub {
 
     /// Open (or re-open) a room: load the local snapshot + cursor, start the client task.
     pub async fn open_room(&self, chat_id: &str) -> Result<SharedHost> {
+        let room = wire::room_name(&self.cfg.project_id, chat_id);
+        self.open_room_named(chat_id, &room, &self.cfg.project_id.clone())
+            .await
+    }
+
+    /// Open a room that is not under this project (a people chat: `people/<chat>`); `doc_project`
+    /// is what a fresh doc's `meta.projectId` says.
+    pub async fn open_room_named(
+        &self,
+        chat_id: &str,
+        room: &str,
+        doc_project: &str,
+    ) -> Result<SharedHost> {
         if let Some(h) = self.hosts.lock().await.get(chat_id) {
             return Ok(h.clone());
         }
-        let room = wire::room_name(&self.cfg.project_id, chat_id);
+        let room = room.to_owned();
         let (cursor, snapshot, acked) = self.store.room_doc(&room)?.unwrap_or((0, None, None));
         let doc = match &snapshot {
             Some(s) if !s.is_empty() => ChatDoc::from_snapshot(self.peer_id, true, s)?,
             _ => {
                 let d = ChatDoc::new(self.peer_id, true);
                 if chat_id != PROJECT_DOC_CHAT_ID {
-                    d.init_meta(chat_id, &self.cfg.project_id, 1);
+                    d.init_meta(chat_id, doc_project, 1);
                 }
                 d
             }
@@ -200,6 +215,7 @@ impl SyncHub {
             seen_commands: Default::default(),
             recovered: false,
             ever_caught_up: false,
+            closed: false,
         }));
         self.hosts
             .lock()
@@ -209,6 +225,14 @@ impl SyncHub {
         let h2 = host.clone();
         tokio::spawn(async move { hub.run_room(h2).await });
         Ok(host)
+    }
+
+    /// Leave a room for good (the agent was removed from a people chat): the session closes and
+    /// is not reopened; the local snapshot stays until the next persist sweep ignores it.
+    pub async fn close_room(&self, chat_id: &str) {
+        if let Some(h) = self.hosts.lock().await.remove(chat_id) {
+            h.lock().await.closed = true;
+        }
     }
 
     pub async fn host(&self, chat_id: &str) -> Option<SharedHost> {
@@ -260,6 +284,9 @@ impl SyncHub {
     async fn run_room(&self, host: SharedHost) {
         let mut backoff = Duration::from_millis(250);
         loop {
+            if host.lock().await.closed {
+                return;
+            }
             let started = std::time::Instant::now();
             let room_name = host.lock().await.room.clone();
             match self.room_session(&host).await {
@@ -422,6 +449,9 @@ impl SyncHub {
                     }
                 }
                 _ = tick.tick() => {
+                    if host.lock().await.closed {
+                        return Ok(());
+                    }
                     let push = { host.lock().await.next_push() };
                     if let Some((batch, bytes)) = push {
                         let f = Frame::new(FrameType::Push, json!({ "batchId": batch }), Bytes::from(bytes));

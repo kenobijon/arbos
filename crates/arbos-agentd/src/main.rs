@@ -13,6 +13,7 @@ mod local;
 mod mcp;
 mod media;
 mod memory;
+mod people;
 mod routines;
 mod rpc_child;
 mod settings;

@@ -208,10 +208,14 @@ async fn handle_frame(
                     .await?;
                 return Ok(());
             }
+            let mut wake_owners = Vec::new();
             if let Some(chat_id) = room_name.strip_prefix(&format!("{}/", people::PEOPLE_PROJECT)) {
-                if let Err(r) = people::on_room_push(state, principal, chat_id) {
-                    sink.send(error_frame(r.code(), r.message())).await?;
-                    return Ok(());
+                match people::on_room_push(state, principal, chat_id) {
+                    Ok(owners) => wake_owners = owners,
+                    Err(r) => {
+                        sink.send(error_frame(r.code(), r.message())).await?;
+                        return Ok(());
+                    }
                 }
             }
             let (seq, dup) = state
@@ -244,6 +248,15 @@ async fn handle_frame(
                             .insert(u, arbos_core::ids::now_ms());
                     }
                     boxes::ensure_awake_project(state, project_id, "send").await;
+                    // A people chat with shared agents wakes every agent owner's box.
+                    for owner in wake_owners {
+                        state
+                            .last_client_push
+                            .lock()
+                            .await
+                            .insert(owner.clone(), arbos_core::ids::now_ms());
+                        boxes::ensure_awake(state, &owner, "send").await;
+                    }
                 }
             }
         }

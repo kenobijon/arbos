@@ -407,8 +407,16 @@ impl Supervisor {
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
+            let people_chats = e
+                .get("people_chats")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
             match self.ensure_workspace(project, &chats, &pushes).await {
-                Ok(w) => seen.push(w.project_id.clone()),
+                Ok(w) => {
+                    w.agent.note_people_chats(&people_chats, true).await;
+                    seen.push(w.project_id.clone());
+                }
                 Err(err) => {
                     tracing::error!(error = %err, project = ?project.get("id"), "workspace failed to start");
                     if let Some(id) = project.get("id").and_then(Value::as_str) {

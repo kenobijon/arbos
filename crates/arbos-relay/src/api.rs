@@ -937,7 +937,8 @@ pub async fn box_projects(State(state): State<AppState>, principal: Principal) -
         let chats = state.db.list_chats(&p.id).map_err(internal)?;
         let mut project = serde_json::to_value(p).unwrap_or(Value::Null);
         project["skills_rev"] = json!(state.db.skills_rev(Some(&p.id)).map_err(internal)?);
-        out.push(json!({ "project": project, "chats": chats }));
+        let people_chats = crate::people::people_chats_of_project(&state, &p.id, user_id);
+        out.push(json!({ "project": project, "chats": chats, "people_chats": people_chats }));
     }
     Ok(Json(json!({ "user_id": user_id, "workspaces": out })).into_response())
 }

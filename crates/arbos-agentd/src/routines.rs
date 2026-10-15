@@ -33,6 +33,18 @@ impl Agent {
                     tracing::warn!(error = %e, "channel_message push failed");
                 }
             }
+            "people_agent_added" => {
+                if let Some(chat_id) = payload.get("chat_id").and_then(Value::as_str) {
+                    if let Err(e) = self.join_people_chat(chat_id).await {
+                        tracing::warn!(error = %e, chat_id, "people_agent_added push failed");
+                    }
+                }
+            }
+            "people_agent_removed" => {
+                if let Some(chat_id) = payload.get("chat_id").and_then(Value::as_str) {
+                    self.people_agent_removed(chat_id).await;
+                }
+            }
             "group_message" => {
                 if let Err(e) = self.handle_group_message(payload).await {
                     tracing::warn!(error = %e, "group_message push failed");

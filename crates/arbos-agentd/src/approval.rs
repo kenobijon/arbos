@@ -116,6 +116,11 @@ impl Agent {
             o.insert("ts".into(), json!(now_ms()));
             o.insert("kind".into(), json!(kind));
             o.insert("source".into(), json!("agentd"));
+            // People chats: which person's request this action serves (owner or guest).
+            if let Some(a) = self.people.current_asker() {
+                o.entry("asked_by").or_insert(json!(a.handle));
+                o.entry("asked_by_role").or_insert(json!(a.role));
+            }
         }
         let path = self.cfg.audit_path();
         if let Some(p) = path.parent() {

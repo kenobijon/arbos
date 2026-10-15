@@ -729,6 +729,267 @@ pub async fn blocks_list(State(state): State<AppState>, principal: Principal) ->
     Json(out).into_response()
 }
 
+// ---- agents in a chat (step 2) ------------------------------------------------------------------
+
+fn default_agent_settings() -> Value {
+    json!({ "reply_policy": "mention", "restrict_guests": false })
+}
+
+/// The project, if it belongs to the caller.
+fn own_project(
+    state: &AppState,
+    me: &str,
+    project_id: &str,
+) -> Result<crate::db::Project, Box<Response>> {
+    match state.db.project(project_id) {
+        Ok(Some(p)) if p.user_id == me => Ok(p),
+        Ok(Some(_)) => Err(Box::new(api_error(
+            StatusCode::FORBIDDEN,
+            "own_project_only",
+            "you can only add or change your own Project's agent",
+        ))),
+        Ok(None) => Err(Box::new(api_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no such project",
+        ))),
+        Err(e) => Err(Box::new(api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "db",
+            e.to_string(),
+        ))),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct AddAgentBody {
+    pub project_id: String,
+}
+
+/// `POST /chats/{id}/agents {"project_id"}` — any member adds their OWN Project's agent. The
+/// owner's box is told (push) and woken so the agent joins the room.
+pub async fn agent_add(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    Json(b): Json<AddAgentBody>,
+) -> Response {
+    let (me, cm) = match member_chat(&state, &principal, &id) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    let project = match own_project(&state, &me, &b.project_id) {
+        Ok(p) => p,
+        Err(r) => return *r,
+    };
+    let humans = human_user_ids(&cm);
+    if state.db.blocked_by_any(&me, &humans).unwrap_or(false) {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "not_available",
+            "this chat is not available",
+        );
+    }
+    let member = format!("agent:{}", project.id);
+    if let Err(e) = state
+        .db
+        .add_member(&id, &member, "agent", &me, &default_agent_settings())
+    {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+    }
+    let _ = state
+        .db
+        .enqueue_push(&project.id, "people_agent_added", &json!({ "chat_id": id }));
+    crate::boxes::ensure_awake(&state, &project.user_id, "people").await;
+    notify_members(
+        &state,
+        &cm,
+        &me,
+        "people_agent_added",
+        json!({ "chat_id": id, "project_id": project.id, "by_handle": handle_of(&state, &me) }),
+    );
+    tracing::info!(chat = %id, project = %project.id, %me, "agent added to a people chat");
+    match load_chat(&state, &id) {
+        Ok(cm) => Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response(),
+        Err(r) => *r,
+    }
+}
+
+#[derive(Deserialize)]
+pub struct AgentSettingsBody {
+    #[serde(default)]
+    pub reply_policy: Option<String>,
+    #[serde(default)]
+    pub restrict_guests: Option<bool>,
+}
+
+/// `PUT /chats/{id}/agents/{project_id}/settings` — the agent's owner only.
+pub async fn agent_settings(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((id, project_id)): Path<(String, String)>,
+    Json(b): Json<AgentSettingsBody>,
+) -> Response {
+    let (me, _cm) = match member_chat(&state, &principal, &id) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    if let Err(r) = own_project(&state, &me, &project_id) {
+        return *r;
+    }
+    let member = format!("agent:{project_id}");
+    let Ok(Some(m)) = state.db.membership(&id, &member) else {
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "that agent is not in this chat",
+        );
+    };
+    let mut settings = if m.settings.is_object() {
+        m.settings
+    } else {
+        default_agent_settings()
+    };
+    if let Some(p) = b.reply_policy {
+        if p != "mention" && p != "every_message" {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "bad_policy",
+                "reply_policy must be mention or every_message",
+            );
+        }
+        settings["reply_policy"] = json!(p);
+    }
+    if let Some(r) = b.restrict_guests {
+        settings["restrict_guests"] = json!(r);
+    }
+    if let Err(e) = state.db.set_member_settings(&id, &member, &settings) {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+    }
+    // The box re-reads members and settings through the same push as a join.
+    let _ = state
+        .db
+        .enqueue_push(&project_id, "people_agent_added", &json!({ "chat_id": id }));
+    match load_chat(&state, &id) {
+        Ok(cm) => Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response(),
+        Err(r) => *r,
+    }
+}
+
+/// `DELETE /chats/{id}/agents/{project_id}` — the agent's owner only. The agent's queue ends at
+/// once and its memory of the chat is soft-invalidated on the box.
+pub async fn agent_remove(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((id, project_id)): Path<(String, String)>,
+) -> Response {
+    let (me, cm) = match member_chat(&state, &principal, &id) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    if let Err(r) = own_project(&state, &me, &project_id) {
+        return *r;
+    }
+    match state.db.remove_member(&id, &format!("agent:{project_id}")) {
+        Ok(true) => {}
+        Ok(false) => {
+            return api_error(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "that agent is not in this chat",
+            )
+        }
+        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    }
+    let _ = state.db.enqueue_push(
+        &project_id,
+        "people_agent_removed",
+        &json!({ "chat_id": id }),
+    );
+    notify_members(
+        &state,
+        &cm,
+        &me,
+        "people_agent_removed",
+        json!({ "chat_id": id, "project_id": project_id, "by_handle": handle_of(&state, &me) }),
+    );
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// `DELETE /chats/{id}/members/{user_id}` — a chat owner removes a person; access ends at once.
+pub async fn member_remove(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((id, user_id)): Path<(String, String)>,
+) -> Response {
+    let (me, cm) = match member_chat(&state, &principal, &id) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    if !cm
+        .members
+        .iter()
+        .any(|m| m.user_id() == Some(me.as_str()) && m.role == "owner")
+    {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "owner_only",
+            "only an owner can remove people",
+        );
+    }
+    if user_id == me {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "use leave to remove yourself",
+        );
+    }
+    match state.db.remove_member(&id, &format!("user:{user_id}")) {
+        Ok(true) => {}
+        Ok(false) => return api_error(StatusCode::NOT_FOUND, "not_found", "not a member"),
+        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    }
+    let payload = json!({ "chat_id": id, "user_id": user_id, "handle": handle_of(&state, &user_id), "by_handle": handle_of(&state, &me) });
+    let _ = state
+        .db
+        .push_user(&user_id, "people_member_removed", &payload, None);
+    notify_members(&state, &cm, &me, "people_member_removed", payload);
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// `GET /box/people/{chat_id}` — the chat as the owner's box sees it (members and settings).
+pub async fn box_people_chat(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+) -> Response {
+    let Principal::Box { user_id } = &principal else {
+        return api_error(StatusCode::FORBIDDEN, "forbidden", "box only");
+    };
+    if !room_access(&state, &principal, &id) {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "not_member",
+            "no agent of yours is in this chat",
+        );
+    }
+    match load_chat(&state, &id) {
+        Ok(cm) => Json(chat_json(&state, &cm, user_id, &device_of(&principal))).into_response(),
+        Err(r) => *r,
+    }
+}
+
+/// People chats a project's agent is in, for `/box/projects`.
+pub fn people_chats_of_project(state: &AppState, project_id: &str, owner: &str) -> Vec<Value> {
+    state
+        .db
+        .chats_of_member(&format!("agent:{project_id}"))
+        .unwrap_or_default()
+        .iter()
+        .map(|cm| chat_json(state, cm, owner, "box"))
+        .collect()
+}
+
 // ---- room hooks ---------------------------------------------------------------------------------
 
 /// Why a row push into a people room was refused (sent back as an `error` frame).
@@ -753,15 +1014,16 @@ impl PushRefused {
     }
 }
 
-/// Called on every row a device pushes into `people/<chat>`: rate limit, block check, and a
-/// coalesced `people_message` push to the other people in the chat.
+/// Called on every row a device pushes into `people/<chat>`: rate limit, block check, a
+/// coalesced `people_message` push to the other people in the chat. Returns the users whose
+/// boxes host an agent of this chat, so the caller can wake them.
 pub fn on_room_push(
     state: &AppState,
     principal: &Principal,
     chat_id: &str,
-) -> Result<(), PushRefused> {
+) -> Result<Vec<String>, PushRefused> {
     let Principal::Device { user_id, .. } = principal else {
-        return Ok(()); // boxes (agents) are metered by their owner's credits, not here
+        return Ok(Vec::new()); // boxes (agents) are metered by their owner's credits, not here
     };
     let limit = if young_account(state, user_id) {
         MSGS_PER_MIN / 2
@@ -799,7 +1061,16 @@ pub fn on_room_push(
             }
         }
     }
-    Ok(())
+    let mut owners: Vec<String> = cm
+        .members
+        .iter()
+        .filter_map(|m| m.project_id())
+        .filter_map(|pid| state.db.project(pid).ok().flatten())
+        .map(|p| p.user_id)
+        .collect();
+    owners.sort();
+    owners.dedup();
+    Ok(owners)
 }
 
 /// Notify every human member except `skip`.
@@ -824,56 +1095,10 @@ mod tests {
 
     use arbos_core::ids::ulid;
 
+    use super::tests_support::{dm, person, project_of};
     use super::*;
-    use crate::db::{Chat, Project};
-    use crate::db_accounts::GithubIdentity;
     use crate::state::test_support::test_state;
     use crate::state::AuthMode;
-
-    fn person(state: &AppState, github_id: i64) -> (String, Principal) {
-        let (user, _) = state
-            .db
-            .upsert_github_user(
-                &GithubIdentity {
-                    id: github_id,
-                    login: format!("user{github_id}"),
-                    avatar_url: None,
-                    name: None,
-                },
-                20.0,
-            )
-            .expect("user");
-        let device_id = ulid();
-        state
-            .db
-            .insert_device(&device_id, "d", &ulid(), &user.id, "github")
-            .expect("device");
-        (
-            user.id.clone(),
-            Principal::Device {
-                id: device_id,
-                token: String::new(),
-                user_id: user.id,
-            },
-        )
-    }
-
-    fn dm(state: &AppState, a: &str, b: &str) -> String {
-        let chat = PeopleChat {
-            id: ulid(),
-            kind: "dm".into(),
-            created_by: a.to_owned(),
-            created_at: now_ms(),
-        };
-        state.db.insert_people_chat(&chat).expect("chat");
-        for u in [a, b] {
-            state
-                .db
-                .add_member(&chat.id, &format!("user:{u}"), "owner", a, &json!({}))
-                .expect("member");
-        }
-        chat.id
-    }
 
     #[test]
     fn non_member_cannot_read_a_people_room() {
@@ -901,40 +1126,12 @@ mod tests {
             user_id: alice.clone(),
         };
         assert!(!state.allows(&alice_box, &key), "no agent in the chat yet");
-        let project = Project {
-            id: ulid(),
-            name: "Research".into(),
-            icon: "R".into(),
-            instructions: String::new(),
-            models: json!({}),
-            state: "hibernated_light".into(),
-            created_at: now_ms(),
-            last_active_at: now_ms(),
-            spend_cap_daily: 25.0,
-            color: "#000".into(),
-            user_id: alice.clone(),
-            workspace_state: "stopped".into(),
-        };
-        state.db.insert_project(&project).expect("project");
-        state
-            .db
-            .insert_chat(&Chat {
-                id: ulid(),
-                project_id: project.id.clone(),
-                title: "Research".into(),
-                is_pinned: true,
-                position: 0,
-                created_at: now_ms(),
-                doc_epoch: 1,
-                kind: "chat".into(),
-                participants: Vec::new(),
-            })
-            .expect("pinned chat");
+        let project_id = project_of(&state, &alice, "Research");
         state
             .db
             .add_member(
                 &chat,
-                &format!("agent:{}", project.id),
+                &format!("agent:{project_id}"),
                 "agent",
                 &alice,
                 &json!({}),
@@ -955,5 +1152,249 @@ mod tests {
             .remove_member(&chat, &format!("user:{bob}"))
             .expect("leave");
         assert!(!state.allows(&bob_dev, &key));
+    }
+}
+
+#[cfg(test)]
+mod agent_tests {
+    //! Only your own Project's agent can be added; only an owner removes people; only the
+    //! agent's owner removes the agent.
+
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+    use axum::Json;
+
+    use arbos_core::ids::ulid;
+
+    use super::tests_support::{dm, person, project_of};
+    use super::*;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    #[tokio::test]
+    async fn only_own_agent_can_be_added_and_only_its_owner_removes_it() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let chat = dm(&state, &alice, &bob);
+        let alices_project = project_of(&state, &alice, "Research");
+
+        // Bob tries to add Alice's agent: refused.
+        let r = agent_add(
+            State(state.clone()),
+            bob_dev.clone(),
+            Path(chat.clone()),
+            Json(AddAgentBody {
+                project_id: alices_project.clone(),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        assert!(state.db.members_of(&chat).unwrap().len() == 2);
+
+        // Alice adds her own: fine, the box is told.
+        let r = agent_add(
+            State(state.clone()),
+            alice_dev.clone(),
+            Path(chat.clone()),
+            Json(AddAgentBody {
+                project_id: alices_project.clone(),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert!(state
+            .db
+            .membership(&chat, &format!("agent:{alices_project}"))
+            .unwrap()
+            .is_some());
+        let pushes = state.db.take_pushes(&alices_project).unwrap();
+        assert!(pushes.iter().any(|(_, k, _)| k == "people_agent_added"));
+
+        // Bob cannot remove Alice's agent; Alice can.
+        let r = agent_remove(
+            State(state.clone()),
+            bob_dev.clone(),
+            Path((chat.clone(), alices_project.clone())),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        let r = agent_remove(
+            State(state.clone()),
+            alice_dev.clone(),
+            Path((chat.clone(), alices_project.clone())),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        assert!(state
+            .db
+            .membership(&chat, &format!("agent:{alices_project}"))
+            .unwrap()
+            .is_none());
+        let pushes = state.db.take_pushes(&alices_project).unwrap();
+        assert!(pushes.iter().any(|(_, k, _)| k == "people_agent_removed"));
+
+        // A non-member cannot add anything at all.
+        let (_carol, carol_dev) = person(&state, 3);
+        let carols_project = project_of(&state, "gh_3", "Side");
+        let r = agent_add(
+            State(state.clone()),
+            carol_dev,
+            Path(chat.clone()),
+            Json(AddAgentBody {
+                project_id: carols_project,
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn only_an_owner_removes_people() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 11);
+        let (bob, bob_dev) = person(&state, 12);
+        let (carol, _carol_dev) = person(&state, 13);
+        let chat = dm(&state, &alice, &bob);
+        // Carol joins as a plain member (a group-shaped chat).
+        state
+            .db
+            .add_member(
+                &chat,
+                &format!("user:{carol}"),
+                "member",
+                &alice,
+                &json!({}),
+            )
+            .unwrap();
+        // Make Bob a plain member too, so only Alice owns the chat.
+        state
+            .db
+            .add_member(&chat, &format!("user:{bob}"), "member", &alice, &json!({}))
+            .unwrap();
+
+        let r = member_remove(
+            State(state.clone()),
+            bob_dev,
+            Path((chat.clone(), carol.clone())),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        assert!(state
+            .db
+            .membership(&chat, &format!("user:{carol}"))
+            .unwrap()
+            .is_some());
+
+        let r = member_remove(
+            State(state.clone()),
+            alice_dev,
+            Path((chat.clone(), carol.clone())),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        assert!(state
+            .db
+            .membership(&chat, &format!("user:{carol}"))
+            .unwrap()
+            .is_none());
+        assert!(!state.allows(
+            &Principal::Device {
+                id: ulid(),
+                token: String::new(),
+                user_id: carol.clone()
+            },
+            &format!("{PEOPLE_ACL_PREFIX}{chat}")
+        ));
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests_support {
+    use arbos_core::ids::{now_ms, ulid};
+    use serde_json::json;
+
+    use crate::auth::Principal;
+    use crate::db::{Chat, Project};
+    use crate::db_accounts::GithubIdentity;
+    use crate::db_people::PeopleChat;
+    use crate::state::AppState;
+
+    pub fn person(state: &AppState, github_id: i64) -> (String, Principal) {
+        let (user, _) = state
+            .db
+            .upsert_github_user(
+                &GithubIdentity {
+                    id: github_id,
+                    login: format!("user{github_id}"),
+                    avatar_url: None,
+                    name: None,
+                },
+                20.0,
+            )
+            .expect("user");
+        let device_id = ulid();
+        state
+            .db
+            .insert_device(&device_id, "d", &ulid(), &user.id, "github")
+            .expect("device");
+        (
+            user.id.clone(),
+            Principal::Device {
+                id: device_id,
+                token: String::new(),
+                user_id: user.id,
+            },
+        )
+    }
+
+    pub fn dm(state: &AppState, a: &str, b: &str) -> String {
+        let chat = PeopleChat {
+            id: ulid(),
+            kind: "dm".into(),
+            created_by: a.to_owned(),
+            created_at: now_ms(),
+        };
+        state.db.insert_people_chat(&chat).expect("chat");
+        for u in [a, b] {
+            state
+                .db
+                .add_member(&chat.id, &format!("user:{u}"), "owner", a, &json!({}))
+                .expect("member");
+        }
+        chat.id
+    }
+
+    pub fn project_of(state: &AppState, owner: &str, name: &str) -> String {
+        let project = Project {
+            id: ulid(),
+            name: name.into(),
+            icon: "R".into(),
+            instructions: String::new(),
+            models: json!({}),
+            state: "hibernated_light".into(),
+            created_at: now_ms(),
+            last_active_at: now_ms(),
+            spend_cap_daily: 25.0,
+            color: "#000".into(),
+            user_id: owner.to_owned(),
+            workspace_state: "stopped".into(),
+        };
+        state.db.insert_project(&project).expect("project");
+        state
+            .db
+            .insert_chat(&Chat {
+                id: ulid(),
+                project_id: project.id.clone(),
+                title: name.into(),
+                is_pinned: true,
+                position: 0,
+                created_at: now_ms(),
+                doc_epoch: 1,
+                kind: "chat".into(),
+                participants: Vec::new(),
+            })
+            .expect("pinned chat");
+        project.id
     }
 }

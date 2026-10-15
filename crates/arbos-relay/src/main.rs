@@ -310,6 +310,20 @@ async fn main() -> anyhow::Result<()> {
         .route("/chats/{id}/read", axum::routing::put(people::chat_read))
         .route("/chats/{id}/hide", post(people::chat_hide))
         .route("/chats/{id}/leave", post(people::chat_leave))
+        .route("/chats/{id}/agents", post(people::agent_add))
+        .route(
+            "/chats/{id}/agents/{project_id}",
+            delete(people::agent_remove),
+        )
+        .route(
+            "/chats/{id}/agents/{project_id}/settings",
+            axum::routing::put(people::agent_settings),
+        )
+        .route(
+            "/chats/{id}/members/{user_id}",
+            delete(people::member_remove),
+        )
+        .route("/box/people/{id}", get(people::box_people_chat))
         .route(
             "/blocks",
             get(people::blocks_list).post(people::block_create),

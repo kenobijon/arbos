@@ -710,6 +710,17 @@ impl Store {
     }
 
     /// INVALIDATE: set `invalid_at` and `expired_at`; the row stays (D7).
+    /// Soft-invalidate every live memory learned in one thread (an agent leaving a people chat,
+    /// D7): rows keep their text and become `invalid_at = now`. Returns how many.
+    pub fn memory_invalidate_thread(&self, thread_id: &str, now: i64) -> Result<usize> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE memory SET invalid_at = ?2, expired_at = ?2 WHERE thread_id = ?1 AND expired_at IS NULL",
+                params![thread_id, now],
+            )
+        })
+    }
+
     pub fn memory_invalidate(&self, id: &str, invalid_at: Option<i64>) -> Result<()> {
         let now = now_ms();
         self.with(|c| c.execute("UPDATE memory SET invalid_at = COALESCE(?2, ?3), expired_at = ?3 WHERE id = ?1 AND expired_at IS NULL", params![id, invalid_at, now]).map(|_| ()))
