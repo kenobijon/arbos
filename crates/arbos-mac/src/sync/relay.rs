@@ -904,6 +904,13 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
             continue;
         };
         let detail = shared.get_json(&format!("/projects/{id}")).await?;
+        // Who else is in this project (D72 step 3); older relays answer 404.
+        let members = shared
+            .get_json(&format!("/projects/{id}/members"))
+            .await
+            .ok()
+            .and_then(|v| v.get("members").cloned())
+            .unwrap_or(Value::Null);
         let p = detail.get("project").cloned().unwrap_or(item.clone());
         let models = p.get("models").cloned().unwrap_or(Value::Null);
         let talking = models.get("talking_model").cloned().unwrap_or(Value::Null);
@@ -956,10 +963,9 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
             kind: SpaceKind::Project,
             agents: Vec::new(),
             pending: false,
-            people: item
-                .get("members")
-                .or_else(|| detail.get("members"))
-                .and_then(Value::as_array)
+            people: members
+                .as_array()
+                .or_else(|| item.get("members").and_then(Value::as_array))
                 .map(|a| {
                     a.iter()
                         .filter_map(|m| {
