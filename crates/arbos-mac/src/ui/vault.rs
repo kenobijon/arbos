@@ -318,7 +318,7 @@ impl VaultPanel {
             "env" => "env placeholder",
             _ => "header placeholder",
         };
-        let mut actions = div().flex().items_center().gap(px(5.0));
+        let mut actions = div().flex().flex_shrink_0().items_center().gap(px(5.0));
         if pending {
             let id_a = r.id.clone();
             let id_d = r.id.clone();
@@ -356,6 +356,10 @@ impl VaultPanel {
                     .child(
                         div()
                             .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
                             .text_size(px(12.5))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.text)
@@ -376,6 +380,10 @@ impl VaultPanel {
                     .child(
                         div()
                             .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
                             .text_size(px(11.0))
                             .text_color(theme.text_muted)
                             .child(format!(
@@ -418,6 +426,10 @@ impl VaultPanel {
                     .child(
                         div()
                             .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
                             .text_size(px(12.5))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.text)
@@ -518,20 +530,25 @@ impl VaultPanel {
                 .child(
                     div()
                         .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
                         .text_size(px(10.5))
                         .text_color(theme.text_faint)
                         .child("Encrypted on the relay. The agent only ever gets a placeholder."),
                 )
                 .child(
-                    Self::button("vault-add-cancel", "Cancel", false, theme).on_click(cx.listener(
-                        |this, _, _, cx| {
+                    Self::button("vault-add-cancel", "Cancel", false, theme)
+                        .flex_shrink_0()
+                        .on_click(cx.listener(|this, _, _, cx| {
                             this.reset_form(cx);
                             cx.notify();
-                        },
-                    )),
+                        })),
                 )
                 .child(
                     Self::button("vault-add-save", "Save", true, theme)
+                        .flex_shrink_0()
                         .on_click(cx.listener(|this, _, _, cx| this.submit_add(cx))),
                 ),
         )
