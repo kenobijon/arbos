@@ -216,13 +216,13 @@ async fn migrate_one(
             let _ = dt
                 .toolbox_exec(
                     &old_id,
-                    "pkill -TERM -x arbos-agentd 2>/dev/null; sleep 3; pkill -KILL -x arbos-agentd 2>/dev/null; pkill -KILL -f 'pi --mode rpc' 2>/dev/null; pkill -KILL -x prime-agent 2>/dev/null; true",
+                    "sudo -n pkill -TERM -x arbos-agentd 2>/dev/null; sleep 3; sudo -n pkill -KILL -x arbos-agentd 2>/dev/null; sudo -n pkill -KILL -f 'pi --mode rpc' 2>/dev/null; sudo -n pkill -KILL -x prime-agent 2>/dev/null; true",
                     60,
                 )
                 .await;
             // 3. Size, then one tarball of /work (WAL/SHM included: a quiescent WAL is consistent).
             let du = dt
-                .toolbox_exec(&old_id, "du -sm /work | cut -f1", 120)
+                .toolbox_exec(&old_id, "sudo -n du -sm /work | cut -f1", 120)
                 .await?;
             let mib: i64 = du
                 .get("result")
@@ -237,7 +237,8 @@ async fn migrate_one(
             let tar = dt
                 .toolbox_exec(
                     &old_id,
-                    "cd /work && tar czf /tmp/arbos-migrate.tgz --exclude='./.arbos/logs' . && ls -l /tmp/arbos-migrate.tgz",
+                    // Not /tmp: fs.protected_regular stops root from reopening another user's file there.
+                    "sudo -n rm -f /tmp/arbos-migrate.tgz /home/daytona/arbos-migrate.tgz; cd /work && sudo -n tar czf /home/daytona/arbos-migrate.tgz --exclude='./.arbos/logs' . && sudo -n chmod 644 /home/daytona/arbos-migrate.tgz && ls -l /home/daytona/arbos-migrate.tgz",
                     900,
                 )
                 .await?;
@@ -248,7 +249,7 @@ async fn migrate_one(
                 ));
             }
             let bytes = dt
-                .toolbox_download(&old_id, "/tmp/arbos-migrate.tgz")
+                .toolbox_download(&old_id, "/home/daytona/arbos-migrate.tgz")
                 .await
                 .context("download tarball")?;
             tracing::info!(project = %project_id, mib, bytes = bytes.len(), "legacy /work packed");
@@ -263,7 +264,7 @@ async fn migrate_one(
                     dt.toolbox_exec(
                         &new_id,
                         &format!(
-                            "for i in 1 2 3 4 5; do rm -rf /work/{p} && break; sleep 2; done; mkdir -p /work/{p} && tar xzf {t} -C /work/{p} && rm -f {t} && echo ok",
+                            "for i in 1 2 3 4 5; do sudo -n rm -rf /work/{p} && break; sleep 2; done; sudo -n mkdir -p /work/{p} && sudo -n tar xzf {t} -C /work/{p} && sudo -n rm -f /work/{p}/.arbos/.owner; rm -f {t} && echo ok",
                             p = project_id,
                             t = remote_tgz
                         ),
@@ -282,7 +283,7 @@ async fn migrate_one(
                 ));
             }
             let _ = dt
-                .toolbox_exec(&old_id, "rm -f /tmp/arbos-migrate.tgz", 60)
+                .toolbox_exec(&old_id, "sudo -n rm -f /home/daytona/arbos-migrate.tgz", 60)
                 .await;
             // 5. Hibernate the old sandbox; it stays as a fallback (never deleted here).
             let _ = dt.stop(&old_id, false).await;

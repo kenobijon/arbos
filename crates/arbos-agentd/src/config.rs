@@ -7,6 +7,8 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
+use crate::isolation::RunAs;
+
 fn env_or(k: &str, d: &str) -> String {
     std::env::var(k)
         .ok()
@@ -125,6 +127,7 @@ impl BoxConfig {
             mcp_port: base + 1,
             hook_port: base + 2,
             proxy_port: base + 3,
+            browser_stream_port: 9223 + index,
             decision_model: slot("decision_model", &talking),
             talking_model: talking,
             subagent_model: slot("subagent_model", &self.default_subagent_model),
@@ -146,6 +149,7 @@ impl BoxConfig {
             device_id: self.device_id.clone(),
             state_dir,
             work_dir,
+            run_as: None,
         }
     }
 }
@@ -163,6 +167,8 @@ pub struct Config {
     pub mcp_port: u16,
     pub hook_port: u16,
     pub proxy_port: u16,
+    /// agent-browser's JPEG stream port for this workspace (9223 + index); one browser per workspace.
+    pub browser_stream_port: u16,
     pub talking_model: String,
     pub subagent_model: String,
     pub decision_model: String,
@@ -172,6 +178,8 @@ pub struct Config {
     pub claude_bin: String,
     pub pi_ext_path: PathBuf,
     pub device_id: String,
+    /// The Unix identity this workspace's children run as (`None` = agentd's own, local boxes).
+    pub run_as: Option<RunAs>,
 }
 
 impl Config {
@@ -229,5 +237,24 @@ impl Config {
 
     pub fn audit_path(&self) -> PathBuf {
         self.state_dir.join("audit.jsonl")
+    }
+
+    /// Browser settings per workspace: own profile, screenshots, stream port (the image's
+    /// box-wide defaults would collide between workspaces and are unwritable to their users).
+    pub fn browser_env(&self) -> Vec<(String, String)> {
+        vec![
+            (
+                "AGENT_BROWSER_PROFILE".into(),
+                self.state_dir.join("browser").display().to_string(),
+            ),
+            (
+                "AGENT_BROWSER_SCREENSHOT_DIR".into(),
+                self.state_dir.join("shots").display().to_string(),
+            ),
+            (
+                "AGENT_BROWSER_STREAM_PORT".into(),
+                self.browser_stream_port.to_string(),
+            ),
+        ]
     }
 }

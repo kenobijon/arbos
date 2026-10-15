@@ -366,6 +366,9 @@ pub struct Agent {
     pub subagent_turns: std::sync::atomic::AtomicU32,
     pub pi_ready: AtomicBool,
     pub ext_loaded: AtomicBool,
+    /// Set by `shutdown`: the pi supervisor must not respawn a child we are stopping (an orphaned
+    /// pi dies with `write EPIPE` at its next reply once agentd is gone).
+    pub shutting_down: AtomicBool,
     turn_lock: Mutex<()>,
     /// FIFO gate on concurrent subagent runs in this workspace (`SUBAGENT_MAX_CONCURRENT`).
     subagent_slots: Arc<Semaphore>,
@@ -429,6 +432,7 @@ impl Agent {
             subagent_turns: std::sync::atomic::AtomicU32::new(0),
             pi_ready: AtomicBool::new(false),
             ext_loaded: AtomicBool::new(false),
+            shutting_down: AtomicBool::new(false),
             turn_lock: Mutex::new(()),
             subagent_slots: Arc::new(Semaphore::new(SUBAGENT_MAX_CONCURRENT)),
             box_slots,
@@ -520,6 +524,10 @@ impl Agent {
         let path = dir.join(format!("{ts}_{chat_id}.jsonl"));
         let header = json!({ "type": "session", "version": 3, "id": chat_id, "timestamp": chrono::Utc::now().to_rfc3339(), "cwd": self.cfg.work_dir });
         std::fs::write(&path, format!("{header}\n"))?;
+        // pi appends to this file as the workspace user; agentd (root) created it.
+        if let Some(ra) = &self.cfg.run_as {
+            let _ = std::os::unix::fs::chown(&path, Some(ra.uid), Some(ra.gid));
+        }
         self.store
             .set_chat_session_path(chat_id, &path.display().to_string())?;
         Ok(path)
@@ -547,6 +555,7 @@ impl Agent {
             &PiAdapter::envs(&self.cfg, initial_chat, "main"),
             &self.cfg.work_dir,
             &log,
+            self.cfg.run_as.as_ref(),
         )
         .await?;
         let state = child
@@ -594,6 +603,9 @@ impl Agent {
                     .as_ref()
                     .map(|c| c.is_alive())
                     .unwrap_or(false);
+                if me.shutting_down.load(Ordering::SeqCst) {
+                    return;
+                }
                 if !alive && !me.turn_running.load(Ordering::SeqCst) {
                     me.pi_ready.store(false, Ordering::SeqCst);
                     let chat = me.current_chat.lock().await.clone().unwrap_or_default();
@@ -629,6 +641,7 @@ impl Agent {
             &PiAdapter::envs(&self.cfg, chat_id, "main"),
             &self.cfg.work_dir,
             &log,
+            self.cfg.run_as.as_ref(),
         )
         .await?;
         child
@@ -2690,6 +2703,8 @@ impl Agent {
 
     /// Stop every child in order (subagents, then pi) so session files and kernel snapshots land.
     pub async fn shutdown(&self) {
+        self.shutting_down.store(true, Ordering::SeqCst);
+        self.pi_ready.store(false, Ordering::SeqCst);
         for a in self.adapters.values() {
             a.shutdown_all().await;
         }

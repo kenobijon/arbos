@@ -102,7 +102,10 @@ COPY image/AGENTS.md   /etc/arbos/AGENTS.md
 RUN userdel -r node \
  && useradd -m -u 1000 -s /bin/bash daytona \
  && echo "daytona ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/91-daytona \
- && mkdir -p /work /run/arbos /opt/arbos && chown -R daytona:daytona /work /run/arbos /opt/arbos
+ && groupadd arbos \
+ && mkdir -p /work /run/arbos /opt/arbos/shared && chown -R daytona:daytona /work /opt/arbos \
+ && chown root:arbos /opt/arbos/shared && chmod 755 /opt/arbos/shared \
+ && chmod 1777 /run/arbos
 
 ENV HOME=/home/daytona \
     ARBOS_STATE_DIR=/work/.arbos \

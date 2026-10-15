@@ -505,7 +505,13 @@ pub async fn stop_box(state: &AppState, user_id: &str, force: bool) -> Result<()
                 if let Some(pid) = child.id() {
                     let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
                 }
-                let _ = tokio::time::timeout(Duration::from_secs(10), child.wait()).await;
+                // One agentd now stops every workspace's children; give it the full grace.
+                if tokio::time::timeout(Duration::from_secs(40), child.wait())
+                    .await
+                    .is_err()
+                {
+                    let _ = child.kill().await;
+                }
             } else if let Some(pid) = sb.local_pid {
                 let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
             }

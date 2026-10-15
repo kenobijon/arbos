@@ -7,6 +7,7 @@ mod groups;
 mod harness;
 mod hooks;
 mod http;
+mod isolation;
 mod llm;
 mod local;
 mod mcp;
@@ -55,7 +56,12 @@ async fn main() -> Result<()> {
         .init();
     let args = Args::parse();
     match args.cmd {
-        Cmd::Boot => boot().await,
+        Cmd::Boot => {
+            // Daytona starts us as `daytona`; per-workspace users need root (sudo is passwordless).
+            let local_box = std::env::var("ARBOS_LOCAL_BOX").is_ok_and(|v| v == "1");
+            isolation::reexec_as_root_if_needed(local_box);
+            boot().await
+        }
         Cmd::Config => {
             let cfg = BoxConfig::from_env()?;
             println!(
