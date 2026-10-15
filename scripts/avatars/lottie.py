@@ -32,6 +32,7 @@ from shapes import Circle, r2
 from trees import SPARKLES, SWAY_PIVOT, face_parts
 
 FPS = 60
+RING_OPACITY = 25  # neutral ring: white at 25 % over the black disc
 DURATION = {"idle": 180, "working": 180, "reply": 60}
 LOOPS = {"idle": True, "working": True, "reply": False}
 
@@ -76,7 +77,10 @@ def transform(anchor=(0, 0), position=None, scale=None, rotation=None, opacity=N
 
 
 def paint_groups(prims):
-    """Prims that share a paint collapse into one group: [shapes..., paint, tr]."""
+    """Prims that share a paint collapse into one group: [shapes..., paint, tr].
+
+    Lottie draws the FIRST item of a list on top, so the groups come back in
+    reverse of the (bottom-to-top) drawing order used by the SVG."""
     groups = []
     for _, run in groupby(prims, key=lambda p: p.paint_key()):
         run = list(run)
@@ -86,6 +90,7 @@ def paint_groups(prims):
                 "it": [p.lottie() for p in run] + [run[0].lottie_paint(), transform()],
             }
         )
+    groups.reverse()
     return groups
 
 
@@ -121,7 +126,7 @@ def layer_ks(anchor, position=None, scale=None, rotation=None):
 
 
 def ring_items():
-    return [group("ring", paint_groups([Circle(32, 32, 31, stroke=("w", 2), role="ring")]))]
+    return [group("ring", paint_groups([Circle(32, 32, 31, stroke=("w", 2), role="ring", opacity=RING_OPACITY)]))]
 
 
 def disc_items():

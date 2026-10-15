@@ -11,8 +11,11 @@ WHITE = "#ffffff"
 BLACK = "#000000"
 KAPPA = 0.5522847498
 
-_COLOR = {"w": WHITE, "k": BLACK}
-_RGB = {"w": [1, 1, 1, 1], "k": [0, 0, 0, 1]}
+# Ink keys: w = tree base, d = tree dark (trunk, shade), l = tree light
+# (highlight), k = face. In the mono source every tree ink is white; the
+# colors[] entries of the manifest retint them by role.
+_COLOR = {"w": WHITE, "d": WHITE, "l": WHITE, "k": BLACK}
+_RGB = {"w": [1, 1, 1, 1], "d": [1, 1, 1, 1], "l": [1, 1, 1, 1], "k": [0, 0, 0, 1]}
 
 
 def r2(x):
@@ -27,16 +30,17 @@ def fmt(x):
 # Recolor roles. Every paint carries one of these names (SVG `class`, Lottie
 # `nm`) so apps can retint by role: bg = disc, ring = outline, tree = white
 # ink, face = the dark ink (eyes, mouth, bark marks), which takes the bg color.
-ROLE_OF_COLOR = {"w": "tree", "k": "face"}
+ROLE_OF_COLOR = {"w": "tree", "d": "tree_dark", "l": "tree_light", "k": "face"}
 
 
 class Prim:
     fill = None
     stroke = None
     role = None
+    opacity = 100
 
     def paint_key(self):
-        return (("f", self.fill) if self.fill else ("s",) + tuple(self.stroke)) + (self.role,)
+        return (("f", self.fill) if self.fill else ("s",) + tuple(self.stroke)) + (self.role, self.opacity)
 
     def paint_role(self):
         return self.role or ROLE_OF_COLOR[self.fill or self.stroke[0]]
@@ -44,23 +48,25 @@ class Prim:
     def svg_paint(self):
         cls = f'class="{self.paint_role()}" '
         if self.fill:
-            return f'{cls}fill="{_COLOR[self.fill]}"'
+            op = f' fill-opacity="{self.opacity / 100:g}"' if self.opacity != 100 else ""
+            return f'{cls}fill="{_COLOR[self.fill]}"{op}'
         c, w = self.stroke
+        op = f' stroke-opacity="{self.opacity / 100:g}"' if self.opacity != 100 else ""
         return (
-            f'{cls}fill="none" stroke="{_COLOR[c]}" stroke-width="{fmt(w)}" '
+            f'{cls}fill="none" stroke="{_COLOR[c]}"{op} stroke-width="{fmt(w)}" '
             'stroke-linecap="round" stroke-linejoin="round"'
         )
 
     def lottie_paint(self):
         nm = self.paint_role()
         if self.fill:
-            return {"ty": "fl", "nm": nm, "c": {"a": 0, "k": _RGB[self.fill]}, "o": {"a": 0, "k": 100}, "r": 1}
+            return {"ty": "fl", "nm": nm, "c": {"a": 0, "k": _RGB[self.fill]}, "o": {"a": 0, "k": self.opacity}, "r": 1}
         c, w = self.stroke
         return {
             "ty": "st",
             "nm": nm,
             "c": {"a": 0, "k": _RGB[c]},
-            "o": {"a": 0, "k": 100},
+            "o": {"a": 0, "k": self.opacity},
             "w": {"a": 0, "k": r2(w)},
             "lc": 2,
             "lj": 2,
@@ -68,10 +74,11 @@ class Prim:
 
 
 class Circle(Prim):
-    def __init__(self, cx, cy, r, fill="w", stroke=None, role=None):
+    def __init__(self, cx, cy, r, fill="w", stroke=None, role=None, opacity=100):
         self.cx, self.cy, self.r = cx, cy, r
         self.fill, self.stroke = (None if stroke else fill), stroke
         self.role = role
+        self.opacity = opacity
 
     def svg(self):
         return f'<circle cx="{fmt(self.cx)}" cy="{fmt(self.cy)}" r="{fmt(self.r)}" {self.svg_paint()}/>'

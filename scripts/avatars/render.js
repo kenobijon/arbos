@@ -9,9 +9,9 @@
 //
 // `strips` writes assets/avatars/trees/frames/<slug>-<state>[@2x|-rail|-rail@2x].png:
 //   a horizontal strip of square frames sampled at 30 fps, transparent outside
-//   the disc; plus <slug>-<state>-tree[@2x|-rail].png: the tree alone as a
-//   white mask on transparent with the face cut out (bg + ring layers dropped,
-//   dark ink turned into alpha). `frames` dumps every 60 fps frame of each
+//   the disc; plus <slug>-<state>-tree[@2x|-rail].png: the tree alone on
+//   transparent in grey levels (tree 255, tree_light 220, tree_dark 170,
+//   face 0; bg + ring layers dropped). `frames` dumps every 60 fps frame of each
 //   state as numbered PNGs over a dark background, for ffmpeg (previews);
 //   `color` is a slug from manifest.colors and retints by role name.
 
@@ -36,7 +36,10 @@ function hexToRgba(hex) {
 // Retints a Lottie document by role name (bg, ring, tree, face), the same
 // walk the apps do; `color` is an entry of manifest.colors.
 function recolor(data, color) {
-  const roles = { bg: hexToRgba(color.bg), ring: hexToRgba(color.ring), tree: hexToRgba(color.tree), face: hexToRgba(color.face) };
+  const roles = {};
+  for (const role of ["bg", "ring", "tree", "tree_dark", "tree_light", "face"]) {
+    if (color[role]) roles[role] = typeof color[role] === "string" ? hexToRgba(color[role]) : color[role];
+  }
   const walk = (items) => {
     for (const it of items) {
       if ((it.ty === "fl" || it.ty === "st") && roles[it.nm]) it.c.k = roles[it.nm];
@@ -47,9 +50,12 @@ function recolor(data, color) {
   return data;
 }
 
-// Keeps only the tree layer, for the mask strips.
-function treeOnly(data) {
-  return { ...data, layers: data.layers.filter((l) => l.nm === "tree") };
+// Keeps only the tree layer and paints it in the manifest's grey levels
+// (tree 255, tree_light 220, tree_dark 170, face 0), for the `-tree` strips.
+function treeLevels(data) {
+  const grey = (v) => [v / 255, v / 255, v / 255, 1];
+  const levels = Object.fromEntries(Object.entries(manifest.recolor.levels).map(([k, v]) => [k, grey(v)]));
+  return recolor({ ...data, layers: data.layers.filter((l) => l.nm === "tree") }, levels);
 }
 const CHROME = process.env.CHROME || "/usr/local/bin/google-chrome";
 const lottieSrc = fs.readFileSync(require.resolve("lottie-web/build/player/lottie_canvas.min.js"), "utf8");
@@ -68,8 +74,7 @@ async function newPage(browser) {
   await page.evaluate(() => {
     // Renders `data` at `px` and returns one base64 PNG per requested frame,
     // composed either as a horizontal strip or as separate images.
-    // mode: "strip" (one PNG, transparent), "mask" (strip; dark ink becomes
-    // alpha so the tree is a pure white mask), "frames" (one PNG per frame).
+    // mode: "strip" (one PNG, transparent), "frames" (one PNG per frame).
     window.renderFrames = (data, px, frames, mode, bg) => {
       const holder = document.createElement("div");
       holder.style.cssText = `width:${px}px;height:${px}px;position:absolute;left:0;top:0`;
@@ -84,7 +89,7 @@ async function newPage(browser) {
       });
       const src = holder.querySelector("canvas");
       let out;
-      if (mode === "strip" || mode === "mask") {
+      if (mode === "strip") {
         const strip = document.createElement("canvas");
         strip.width = px * frames.length;
         strip.height = px;
@@ -93,16 +98,6 @@ async function newPage(browser) {
           anim.goToAndStop(f, true);
           ctx.drawImage(src, k * px, 0, px, px);
         });
-        if (mode === "mask") {
-          // White stays, black becomes transparent, grey edges become partial alpha.
-          const img = ctx.getImageData(0, 0, strip.width, strip.height);
-          const d = img.data;
-          for (let i = 0; i < d.length; i += 4) {
-            d[i + 3] = Math.round((d[i + 3] * d[i]) / 255);
-            d[i] = d[i + 1] = d[i + 2] = 255;
-          }
-          ctx.putImageData(img, 0, 0);
-        }
         out = [strip.toDataURL("image/png")];
       } else {
         out = frames.map((f) => {
@@ -147,12 +142,12 @@ async function strips(page, slugs) {
         const [png] = await page.evaluate((...a) => window.renderFrames(...a), data, px, frames, "strip", null);
         savePng(png, path.join(outDir, `${slug}-${state}${SUFFIX[key]}.png`));
       }
-      const tree = treeOnly(data);
+      const tree = treeLevels(data);
       for (const [key, px] of Object.entries(TREE_STRIP_SIZES)) {
-        const [png] = await page.evaluate((...a) => window.renderFrames(...a), tree, px, frames, "mask", null);
+        const [png] = await page.evaluate((...a) => window.renderFrames(...a), tree, px, frames, "strip", null);
         savePng(png, path.join(outDir, `${slug}-${state}-tree${SUFFIX[key]}.png`));
       }
-      console.log(`${slug} ${state}: ${count} frames x ${Object.values(STRIP_SIZES).join("/")} px + tree masks`);
+      console.log(`${slug} ${state}: ${count} frames x ${Object.values(STRIP_SIZES).join("/")} px + tree level strips`);
     }
   }
 }
