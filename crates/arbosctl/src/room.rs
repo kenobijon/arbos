@@ -454,7 +454,13 @@ fn reply_done_for(doc: &ChatDoc, user_msg_id: &str) -> bool {
             .parts
             .iter()
             .any(|p| p.get("code").and_then(|c| c.as_str()) == Some("handed_off"));
-    if expects_followup && replies.len() < 2 {
+    // A hand-off is complete once the main agent's prose result turn landed (or a run failed).
+    if expects_followup
+        && !replies.iter().any(|m| {
+            m.rest.pointer("/turn/kind").and_then(|v| v.as_str()) == Some("subagent_result")
+                || m.status == "error"
+        })
+    {
         return false;
     }
     !any_streaming

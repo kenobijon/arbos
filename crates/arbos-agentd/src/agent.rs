@@ -759,7 +759,10 @@ impl Agent {
                     );
                     h.doc.set_message_fields(
                         &assistant_msg_id,
-                        &[("subagentId", json!(subagent_id))],
+                        &[
+                            ("subagentId", json!(subagent_id)),
+                            ("subagentName", json!(name)),
+                        ],
                     );
                 }
             }

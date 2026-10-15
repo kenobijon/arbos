@@ -193,8 +193,8 @@ export default function arbosPiExt(pi: ExtensionAPI) {
     return { content: [{ type: "text", text }], details: { arbosHandle: id } };
   });
 
-  // ---- 3. route ------------------------------------------------------------------------------
-  pi.registerTool({
+  // ---- 3. route (main session only: a pi subagent's `route` would hit the main turn's state) ----
+  if (SESSION_ROLE === "main") pi.registerTool({
     name: "route",
     label: "Route",
     description: "Required first call of every turn: reply | act | wake | new (see the system prompt).",
@@ -205,7 +205,7 @@ export default function arbosPiExt(pi: ExtensionAPI) {
     async execute(_toolCallId, params): Promise<{ content: { type: "text"; text: string }[]; details: RouteDetails; terminate?: boolean }> {
       const args = params as RouteArgs;
       routeAttempts += 1;
-      const res = await hook("/hook/route", { session_id: sessionId, attempt: routeAttempts, args });
+      const res = await hook("/hook/route", { session_id: sessionId, role: SESSION_ROLE, attempt: routeAttempts, args });
       if (res && !res.ok) {
         if (routeAttempts >= 2) {
           routed = true;

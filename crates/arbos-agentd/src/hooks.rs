@@ -35,6 +35,10 @@ async fn route(State(a): State<S>, headers: HeaderMap, Json(b): Json<Value>) -> 
     if !authed(&a, &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+    // Only the main session routes; a subagent's call must never touch the running turn's state.
+    if b.get("role").and_then(Value::as_str).unwrap_or("main") != "main" {
+        return err("route is only for the main session");
+    }
     match a.hook_route(b.get("args").unwrap_or(&Value::Null)).await {
         Ok(()) => ok(),
         Err(e) => err(e),
