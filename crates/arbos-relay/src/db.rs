@@ -186,6 +186,23 @@ pub struct Chat {
     pub position: i64,
     pub created_at: i64,
     pub doc_epoch: i64,
+    /// `chat` (default), `group` (F6: the user plus several project agents), or `projects`
+    /// (the S15 "Projects ⇄" system tab).
+    #[serde(default = "default_chat_kind")]
+    pub kind: String,
+    /// Group chats only: participant project ids, the host project first.
+    #[serde(default)]
+    pub participants: Vec<String>,
+}
+
+fn default_chat_kind() -> String {
+    "chat".to_owned()
+}
+
+impl Chat {
+    pub fn is_group(&self) -> bool {
+        self.kind == "group"
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -374,6 +391,21 @@ impl Db {
         );
         let _ = c.execute("ALTER TABLE sandboxes ADD COLUMN migrated_to TEXT", []);
         let _ = c.execute("ALTER TABLE sandboxes ADD COLUMN migrated_at INTEGER", []);
+        let _ = c.execute(
+            "ALTER TABLE chats ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat'",
+            [],
+        );
+        let _ = c.execute(
+            "ALTER TABLE chats ADD COLUMN participants TEXT NOT NULL DEFAULT '[]'",
+            [],
+        );
+        c.execute_batch(
+            "CREATE TABLE IF NOT EXISTS group_traffic (
+               id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL, chat_id TEXT NOT NULL,
+               trace_id TEXT NOT NULL, at INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS group_traffic_project_at ON group_traffic(project_id, at);",
+        )?;
         Ok(Self(Arc::new(Mutex::new(c))))
     }
 
@@ -592,30 +624,91 @@ impl Db {
     pub fn insert_chat(&self, ch: &Chat) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO chats(id, project_id, title, is_pinned, position, created_at, doc_epoch) VALUES (?1,?2,?3,?4,?5,?6,?7)",
-                params![ch.id, ch.project_id, ch.title, ch.is_pinned as i64, ch.position, ch.created_at, ch.doc_epoch],
+                "INSERT INTO chats(id, project_id, title, is_pinned, position, created_at, doc_epoch, kind, participants) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                params![ch.id, ch.project_id, ch.title, ch.is_pinned as i64, ch.position, ch.created_at, ch.doc_epoch, ch.kind, serde_json::to_string(&ch.participants).unwrap_or_else(|_| "[]".into())],
             )
             .map(|_| ())
         })
     }
 
+    const CHAT_COLS: &'static str =
+        "id, project_id, title, is_pinned, position, created_at, doc_epoch, kind, participants";
+
+    fn row_to_chat(r: &rusqlite::Row<'_>) -> rusqlite::Result<Chat> {
+        Ok(Chat {
+            id: r.get(0)?,
+            project_id: r.get(1)?,
+            title: r.get(2)?,
+            is_pinned: r.get::<_, i64>(3)? != 0,
+            position: r.get(4)?,
+            created_at: r.get(5)?,
+            doc_epoch: r.get(6)?,
+            kind: r.get(7)?,
+            participants: serde_json::from_str(&r.get::<_, String>(8)?).unwrap_or_default(),
+        })
+    }
+
     pub fn list_chats(&self, project_id: &str) -> Result<Vec<Chat>> {
         self.with(|c| {
-            let mut st = c.prepare(
-                "SELECT id, project_id, title, is_pinned, position, created_at, doc_epoch FROM chats WHERE project_id = ?1 AND closed_at IS NULL ORDER BY position, created_at",
-            )?;
-            let rows = st.query_map(params![project_id], |r| {
-                Ok(Chat {
-                    id: r.get(0)?,
-                    project_id: r.get(1)?,
-                    title: r.get(2)?,
-                    is_pinned: r.get::<_, i64>(3)? != 0,
-                    position: r.get(4)?,
-                    created_at: r.get(5)?,
-                    doc_epoch: r.get(6)?,
-                })
-            })?;
+            let mut st = c.prepare(&format!(
+                "SELECT {} FROM chats WHERE project_id = ?1 AND closed_at IS NULL ORDER BY position, created_at",
+                Self::CHAT_COLS
+            ))?;
+            let rows = st.query_map(params![project_id], Self::row_to_chat)?;
             rows.collect()
+        })
+    }
+
+    pub fn chat(&self, project_id: &str, chat_id: &str) -> Result<Option<Chat>> {
+        self.with(|c| {
+            c.query_row(
+                &format!(
+                    "SELECT {} FROM chats WHERE project_id = ?1 AND id = ?2 AND closed_at IS NULL",
+                    Self::CHAT_COLS
+                ),
+                params![project_id, chat_id],
+                Self::row_to_chat,
+            )
+            .optional()
+        })
+    }
+
+    /// Group chats (F6): replace the participant list (host first).
+    pub fn set_chat_participants(
+        &self,
+        project_id: &str,
+        chat_id: &str,
+        participants: &[String],
+    ) -> Result<bool> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE chats SET participants = ?3 WHERE project_id = ?1 AND id = ?2 AND kind = 'group'",
+                params![project_id, chat_id, serde_json::to_string(participants).unwrap_or_else(|_| "[]".into())],
+            )
+            .map(|n| n > 0)
+        })
+    }
+
+    /// D37 rate guard: group messages a project sent in the last hour, then record this one.
+    pub fn group_traffic_record(
+        &self,
+        project_id: &str,
+        chat_id: &str,
+        trace_id: &str,
+        window_ms: i64,
+    ) -> Result<i64> {
+        let now = now_ms();
+        self.with(|c| {
+            let n: i64 = c.query_row(
+                "SELECT COUNT(*) FROM group_traffic WHERE project_id = ?1 AND at > ?2",
+                params![project_id, now - window_ms],
+                |r| r.get(0),
+            )?;
+            c.execute(
+                "INSERT INTO group_traffic(project_id, chat_id, trace_id, at) VALUES (?1,?2,?3,?4)",
+                params![project_id, chat_id, trace_id, now],
+            )?;
+            Ok(n)
         })
     }
 

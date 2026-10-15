@@ -16,9 +16,9 @@ use crate::boxes::{self, Provider};
 use crate::db::{Chat, Project};
 use crate::state::AppState;
 
-type ApiResult = Result<Response, (StatusCode, String)>;
+pub(crate) type ApiResult = Result<Response, (StatusCode, String)>;
 
-fn internal(e: impl std::fmt::Display) -> (StatusCode, String) {
+pub(crate) fn internal(e: impl std::fmt::Display) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
 }
 
@@ -186,6 +186,8 @@ pub async fn create_project(
         position: 0,
         created_at: now,
         doc_epoch: 1,
+        kind: "chat".into(),
+        participants: Vec::new(),
     };
     state.db.insert_chat(&pinned).map_err(internal)?;
     // One box per user: the first project creates it, later projects are workspaces on it. A
@@ -428,7 +430,10 @@ pub async fn chat_history(
 }
 
 /// Accept a project id or name in the path and return the id.
-fn resolve_project_id(state: &AppState, id_or_name: &str) -> Result<String, (StatusCode, String)> {
+pub(crate) fn resolve_project_id(
+    state: &AppState,
+    id_or_name: &str,
+) -> Result<String, (StatusCode, String)> {
     match state.db.project(id_or_name) {
         Ok(Some(p)) => Ok(p.id),
         Ok(None) => Err((StatusCode::NOT_FOUND, "no such project".into())),
@@ -437,7 +442,7 @@ fn resolve_project_id(state: &AppState, id_or_name: &str) -> Result<String, (Sta
 }
 
 /// The project record as clients see it (additive; `arbos-mac` maps it onto its `Project`).
-async fn project_json(state: &AppState, p: &Project) -> Value {
+pub(crate) async fn project_json(state: &AppState, p: &Project) -> Value {
     let (bs, since) = state.box_state(&p.user_id).await;
     let today = state
         .db
@@ -453,8 +458,9 @@ async fn project_json(state: &AppState, p: &Project) -> Value {
     })
 }
 
-fn chat_json(c: &Chat) -> Value {
-    json!({ "id": c.id, "project_id": c.project_id, "title": c.title, "is_pinned": c.is_pinned, "is_system": false,
+pub(crate) fn chat_json(c: &Chat) -> Value {
+    json!({ "id": c.id, "project_id": c.project_id, "title": c.title, "is_pinned": c.is_pinned, "is_system": c.kind == "projects",
+            "kind": c.kind, "participants": c.participants,
             "position": c.position, "created_at": c.created_at, "doc_epoch": c.doc_epoch, "room": format!("/room/{}/{}", c.project_id, c.id) })
 }
 
@@ -653,6 +659,10 @@ pub async fn admin_set_user_box(
 pub struct CreateChatBody {
     #[serde(default)]
     pub title: Option<String>,
+    /// `chat` (default) or `projects` (the box creates its S15 "Projects ⇄" tab on the first
+    /// cross-project message). Group chats go through `POST /projects/{id}/groups`.
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 pub async fn create_chat(
@@ -669,19 +679,46 @@ pub async fn create_chat(
     if !principal.can_access_project(&p.user_id) {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
-    let n = state.db.list_chats(&p.id).map_err(internal)?.len() as i64;
+    let kind = match b.kind.as_deref() {
+        None | Some("chat") => "chat",
+        Some("projects") => "projects",
+        Some(other) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("kind must be chat|projects, got {other}"),
+            ))
+        }
+    };
+    let existing = state.db.list_chats(&p.id).map_err(internal)?;
+    // One "Projects ⇄" tab per project: a second request returns the first.
+    if kind == "projects" {
+        if let Some(c) = existing.iter().find(|c| c.kind == "projects") {
+            return Ok(Json(
+                json!({ "chat": chat_json(c), "room": format!("/room/{}/{}", p.id, c.id) }),
+            )
+            .into_response());
+        }
+    }
     let chat = Chat {
         id: ulid(),
         project_id: p.id.clone(),
-        title: b.title.unwrap_or_else(|| "New chat".into()),
+        title: b.title.unwrap_or_else(|| {
+            if kind == "projects" {
+                "Projects ⇄".into()
+            } else {
+                "New chat".into()
+            }
+        }),
         is_pinned: false,
-        position: n,
+        position: existing.len() as i64,
         created_at: now_ms(),
         doc_epoch: 1,
+        kind: kind.into(),
+        participants: Vec::new(),
     };
     state.db.insert_chat(&chat).map_err(internal)?;
     Ok(
-        Json(json!({ "chat": chat, "room": format!("/room/{}/{}", p.id, chat.id) }))
+        Json(json!({ "chat": chat_json(&chat), "room": format!("/room/{}/{}", p.id, chat.id) }))
             .into_response(),
     )
 }

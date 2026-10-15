@@ -7,6 +7,7 @@ mod channels;
 mod connectors;
 mod daytona;
 mod db;
+mod groups;
 mod images;
 mod local;
 mod migrate;
@@ -264,6 +265,19 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/projects/{id}/chats",
             get(api::list_chats).post(api::create_chat),
+        )
+        .route("/projects/{id}/groups", post(groups::create_group))
+        .route(
+            "/projects/{id}/groups/{chat}",
+            get(groups::get_group).patch(groups::patch_group),
+        )
+        .route(
+            "/projects/{id}/groups/{chat}/send",
+            post(groups::group_send),
+        )
+        .route(
+            "/projects/{id}/groups/{chat}/reply",
+            post(groups::group_reply),
         )
         .route("/projects/{id}/wake", post(api::wake))
         .route("/projects/{id}/start", post(api::start))
