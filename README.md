@@ -149,6 +149,18 @@ A skill is a Markdown how-to with YAML frontmatter (`name`, `description`, `tags
 
 agentd caches the index (refresh every 60 s, on a `skills_rev` change seen in the 3 s project poll, on the `skills_changed` push, and after `skills_save`) and, per turn, selects up to 3 skills by keyword overlap with the prompt under a 600-token budget. They enter the pi system prompt as the `arbos-skills` section (after the byte-stable prefix, as `## Relevant skills`) and the subagent pack as section 11; the chosen slugs and text are a hidden `skills` part on the turn (Mac Details drawer, `arbosctl chat dump`) and an INFO log line `skills injected into the working set`. MCP tools: `skills_list(q?)`, `skills_read(slug)`, `skills_save(...)` (audited to `.arbos/audit.jsonl`). Headless: `arbosctl skills list [--q]|show <slug>|add --name … [--file skill.md] [--shared]|delete <slug>`. Mac: Settings → Skills.
 
+## Approvals (draft-and-approve)
+
+Risky actions wait for the user. The agent drafts outbound messages with the `draft_message` tool (email, Slack, Telegram, WhatsApp, SMS); sending connectors (`connector_call` send/write), vault requests, local computer use and destructive shell commands (`rm -rf` outside `tmp/`, `git push --force`, `DROP TABLE`, cloud deletes, …; the list is `arbos_core::approval::RISKY_RULES`) are gated the same way. Each one becomes an `approval` card in the chat (`state: pending|approved|rejected|expired`, 24 h expiry); nothing runs until the client writes an `approve` or `reject` command. Both decisions land in `/work/.arbos/audit.jsonl` on the box and are mirrored to the relay (`GET /projects/{id}/audit`). With no connector configured, an approved draft is recorded in the box's `outbox` table and the agent says so.
+
+```bash
+cargo run -p arbosctl -- chat send demo <chat> "Draft an email to sam@example.com confirming Tuesday" --stream   # prints the card and its id
+cargo run -p arbosctl -- chat approve demo <chat> <approvalId>      # or: chat reject … --reason "too long"
+cargo run -p arbosctl -- audit demo                                  # approval_requested / approval_decided entries
+```
+
+`ARBOS_APPROVAL_TIMEOUT_SECS` (box, default 86400) caps how long an inline-gated tool call waits.
+
 ## Image
 
 `.github/workflows/image.yml` builds `image/Dockerfile` on an image tag (`image-v0.1.5`) or by hand, pushes it to GHCR, smoke-tests it, and registers the Daytona snapshot `arbos-agent-<version>` with `image/register-snapshot.sh` (secrets `DAYTONA_API_KEY`, `GHCR_READ_TOKEN`).
