@@ -3,6 +3,7 @@ mod auth;
 mod blobs;
 mod boxes;
 mod browser;
+mod connectors;
 mod daytona;
 mod db;
 mod proxy;
@@ -153,7 +154,9 @@ async fn main() -> anyhow::Result<()> {
         agentd_bin: args.agentd_bin.clone(),
         local_box_image: args.local_box_image.clone(),
         box_idle_grace_ms: 30_000,
+        connectors_mock: std::env::var("ARBOS_CONNECTORS_MOCK").is_ok_and(|v| v == "1"),
     };
+    let relay_key = Arc::new(connectors::crypto::RelayKey::load(&db)?);
     let daytona = daytona_key.map(|k| {
         daytona::Daytona::new(
             k,
@@ -179,7 +182,11 @@ async fn main() -> anyhow::Result<()> {
         wake_started: Arc::new(Mutex::new(HashMap::new())),
         last_client_push: Arc::new(Mutex::new(HashMap::new())),
         conn_seq: Arc::new(AtomicU64::new(0)),
+        relay_key,
     };
+    if state.cfg.connectors_mock {
+        tracing::info!("ARBOS_CONNECTORS_MOCK=1: connectors return canned data; sends land in connector_outbox");
+    }
 
     if db.device_count()? == 0 {
         let code = arbos_core::auth::pairing_code();
@@ -238,6 +245,16 @@ async fn main() -> anyhow::Result<()> {
         .route("/proxy/v1/models", get(proxy::openai_models))
         .route("/proxy/v1/{*tail}", post(proxy::openai))
         .route("/proxy/anthropic/{*tail}", post(proxy::anthropic))
+        .route("/connectors", get(connectors::list))
+        .route("/connectors/catalog", get(connectors::catalog))
+        .route("/connectors/outbox", get(connectors::outbox))
+        .route("/connectors/call", post(connectors::call))
+        .route(
+            "/connectors/oauth/callback",
+            get(connectors::oauth_callback),
+        )
+        .route("/connectors/{provider}/connect", post(connectors::connect))
+        .route("/connectors/{id}", delete(connectors::disconnect))
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(state);

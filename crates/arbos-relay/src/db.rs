@@ -75,6 +75,23 @@ CREATE TABLE IF NOT EXISTS timings (
   id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL, kind TEXT NOT NULL, ms INTEGER NOT NULL,
   detail TEXT, at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS connectors (
+  id TEXT PRIMARY KEY, provider TEXT NOT NULL, label TEXT NOT NULL DEFAULT '', scopes TEXT NOT NULL DEFAULT '[]',
+  status TEXT NOT NULL DEFAULT 'needs_auth', config TEXT NOT NULL DEFAULT '{}', created_at INTEGER NOT NULL,
+  last_used_at INTEGER, last_error TEXT
+);
+CREATE TABLE IF NOT EXISTS connector_tokens (
+  connector_id TEXT PRIMARY KEY, access_token TEXT NOT NULL, refresh_token TEXT, expires_at INTEGER,
+  token_type TEXT NOT NULL DEFAULT 'Bearer', updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS oauth_states (
+  state TEXT PRIMARY KEY, provider TEXT NOT NULL, code_verifier TEXT NOT NULL, redirect_uri TEXT NOT NULL,
+  scopes TEXT NOT NULL DEFAULT '[]', created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS connector_outbox (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT NOT NULL, action TEXT NOT NULL, args TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
 "#;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -137,6 +154,41 @@ pub struct RoomState {
     pub checkpoint_frontier: Vec<u8>,
     pub row_count: i64,
     pub row_bytes: i64,
+}
+
+/// One connected external account (`connectors` table). Tokens live in `connector_tokens`, never here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Connector {
+    pub id: String,
+    pub provider: String,
+    pub label: String,
+    pub scopes: Vec<String>,
+    /// `connected | needs_auth | error`.
+    pub status: String,
+    /// Provider-specific settings (e.g. `baseUrl` for `harness_comms`); never secrets.
+    pub config: serde_json::Value,
+    pub created_at: i64,
+    pub last_used_at: Option<i64>,
+    pub last_error: Option<String>,
+}
+
+/// Encrypted token row (`connector_tokens`). The strings are ciphertext from `connectors::crypto`.
+#[derive(Debug, Clone)]
+pub struct ConnectorTokenRow {
+    pub connector_id: String,
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    pub expires_at: Option<i64>,
+    pub token_type: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct OauthState {
+    pub state: String,
+    pub provider: String,
+    pub code_verifier: String,
+    pub redirect_uri: String,
+    pub scopes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -776,6 +828,234 @@ impl Db {
             let mut st = c.prepare("SELECT kind, ms, detail, at FROM timings WHERE project_id = ?1 ORDER BY at")?;
             let rows = st.query_map(params![project_id], |r| {
                 Ok(serde_json::json!({"kind": r.get::<_, String>(0)?, "ms": r.get::<_, i64>(1)?, "detail": r.get::<_, Option<String>>(2)?, "at": r.get::<_, i64>(3)?}))
+            })?;
+            rows.collect()
+        })
+    }
+
+    // ---- meta ---------------------------------------------------------------------------------
+
+    pub fn meta_get(&self, key: &str) -> Result<Option<String>> {
+        self.with(|c| {
+            c.query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| {
+                r.get(0)
+            })
+            .optional()
+        })
+    }
+
+    pub fn meta_set(&self, key: &str, value: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO meta(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![key, value],
+            )
+            .map(|_| ())
+        })
+    }
+
+    // ---- connectors (F1) ----------------------------------------------------------------------
+
+    const CONNECTOR_COLS: &'static str =
+        "id, provider, label, scopes, status, config, created_at, last_used_at, last_error";
+
+    fn row_to_connector(r: &rusqlite::Row<'_>) -> rusqlite::Result<Connector> {
+        Ok(Connector {
+            id: r.get(0)?,
+            provider: r.get(1)?,
+            label: r.get(2)?,
+            scopes: serde_json::from_str(&r.get::<_, String>(3)?).unwrap_or_default(),
+            status: r.get(4)?,
+            config: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or_default(),
+            created_at: r.get(6)?,
+            last_used_at: r.get(7)?,
+            last_error: r.get(8)?,
+        })
+    }
+
+    pub fn upsert_connector(&self, cn: &Connector) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO connectors(id, provider, label, scopes, status, config, created_at, last_used_at, last_error)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+                 ON CONFLICT(id) DO UPDATE SET provider=excluded.provider, label=excluded.label, scopes=excluded.scopes,
+                    status=excluded.status, config=excluded.config, last_used_at=excluded.last_used_at, last_error=excluded.last_error",
+                params![
+                    cn.id, cn.provider, cn.label, serde_json::to_string(&cn.scopes).unwrap_or_else(|_| "[]".into()),
+                    cn.status, cn.config.to_string(), cn.created_at, cn.last_used_at, cn.last_error
+                ],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn list_connectors(&self) -> Result<Vec<Connector>> {
+        self.with(|c| {
+            let mut st = c.prepare(&format!(
+                "SELECT {} FROM connectors ORDER BY created_at",
+                Self::CONNECTOR_COLS
+            ))?;
+            let rows = st.query_map([], Self::row_to_connector)?;
+            rows.collect()
+        })
+    }
+
+    pub fn connector(&self, id: &str) -> Result<Option<Connector>> {
+        self.with(|c| {
+            c.query_row(
+                &format!(
+                    "SELECT {} FROM connectors WHERE id = ?1",
+                    Self::CONNECTOR_COLS
+                ),
+                params![id],
+                Self::row_to_connector,
+            )
+            .optional()
+        })
+    }
+
+    /// The newest connector of a provider (one account per provider on a single-user relay).
+    pub fn connector_by_provider(&self, provider: &str) -> Result<Option<Connector>> {
+        self.with(|c| {
+            c.query_row(
+                &format!(
+                    "SELECT {} FROM connectors WHERE provider = ?1 ORDER BY created_at DESC LIMIT 1",
+                    Self::CONNECTOR_COLS
+                ),
+                params![provider],
+                Self::row_to_connector,
+            )
+            .optional()
+        })
+    }
+
+    pub fn set_connector_status(&self, id: &str, status: &str, error: Option<&str>) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE connectors SET status = ?2, last_error = ?3 WHERE id = ?1",
+                params![id, status, error],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn touch_connector(&self, id: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE connectors SET last_used_at = ?2 WHERE id = ?1",
+                params![id, now_ms()],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// Delete a connector and its tokens. Returns whether a row existed.
+    pub fn delete_connector(&self, id: &str) -> Result<bool> {
+        self.with(|c| {
+            c.execute(
+                "DELETE FROM connector_tokens WHERE connector_id = ?1",
+                params![id],
+            )?;
+            c.execute("DELETE FROM connectors WHERE id = ?1", params![id])
+                .map(|n| n > 0)
+        })
+    }
+
+    pub fn put_connector_token(&self, t: &ConnectorTokenRow) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO connector_tokens(connector_id, access_token, refresh_token, expires_at, token_type, updated_at)
+                 VALUES (?1,?2,?3,?4,?5,?6)
+                 ON CONFLICT(connector_id) DO UPDATE SET access_token=excluded.access_token, refresh_token=excluded.refresh_token,
+                    expires_at=excluded.expires_at, token_type=excluded.token_type, updated_at=excluded.updated_at",
+                params![t.connector_id, t.access_token, t.refresh_token, t.expires_at, t.token_type, now_ms()],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn connector_token(&self, connector_id: &str) -> Result<Option<ConnectorTokenRow>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT connector_id, access_token, refresh_token, expires_at, token_type FROM connector_tokens WHERE connector_id = ?1",
+                params![connector_id],
+                |r| {
+                    Ok(ConnectorTokenRow {
+                        connector_id: r.get(0)?,
+                        access_token: r.get(1)?,
+                        refresh_token: r.get(2)?,
+                        expires_at: r.get(3)?,
+                        token_type: r.get(4)?,
+                    })
+                },
+            )
+            .optional()
+        })
+    }
+
+    pub fn put_oauth_state(&self, s: &OauthState, ttl_ms: i64) -> Result<()> {
+        let now = now_ms();
+        self.with(|c| {
+            c.execute("DELETE FROM oauth_states WHERE expires_at < ?1", params![now])?;
+            c.execute(
+                "INSERT INTO oauth_states(state, provider, code_verifier, redirect_uri, scopes, created_at, expires_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                params![
+                    s.state, s.provider, s.code_verifier, s.redirect_uri,
+                    serde_json::to_string(&s.scopes).unwrap_or_else(|_| "[]".into()), now, now + ttl_ms
+                ],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// Consume an OAuth state (one use). `None` when unknown or expired.
+    pub fn take_oauth_state(&self, state: &str) -> Result<Option<OauthState>> {
+        self.with(|c| {
+            let row = c
+                .query_row(
+                    "SELECT state, provider, code_verifier, redirect_uri, scopes FROM oauth_states WHERE state = ?1 AND expires_at >= ?2",
+                    params![state, now_ms()],
+                    |r| {
+                        Ok(OauthState {
+                            state: r.get(0)?,
+                            provider: r.get(1)?,
+                            code_verifier: r.get(2)?,
+                            redirect_uri: r.get(3)?,
+                            scopes: serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or_default(),
+                        })
+                    },
+                )
+                .optional()?;
+            c.execute("DELETE FROM oauth_states WHERE state = ?1", params![state])?;
+            Ok(row)
+        })
+    }
+
+    pub fn record_connector_outbox(
+        &self,
+        provider: &str,
+        action: &str,
+        args: &serde_json::Value,
+    ) -> Result<i64> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO connector_outbox(provider, action, args, created_at) VALUES (?1,?2,?3,?4)",
+                params![provider, action, args.to_string(), now_ms()],
+            )?;
+            Ok(c.last_insert_rowid())
+        })
+    }
+
+    pub fn connector_outbox(&self, limit: i64) -> Result<Vec<serde_json::Value>> {
+        self.with(|c| {
+            let mut st = c.prepare("SELECT id, provider, action, args, created_at FROM connector_outbox ORDER BY id DESC LIMIT ?1")?;
+            let rows = st.query_map(params![limit], |r| {
+                Ok(serde_json::json!({
+                    "id": r.get::<_, i64>(0)?, "provider": r.get::<_, String>(1)?, "action": r.get::<_, String>(2)?,
+                    "args": serde_json::from_str::<serde_json::Value>(&r.get::<_, String>(3)?).unwrap_or_default(),
+                    "created_at": r.get::<_, i64>(4)?,
+                }))
             })?;
             rows.collect()
         })
