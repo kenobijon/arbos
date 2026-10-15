@@ -468,7 +468,33 @@ impl Db {
         c.execute_batch(crate::db_accounts::ACCOUNTS_SCHEMA)?;
         crate::db_people::migrate_people(&c);
         c.execute_batch(crate::db_people::PEOPLE_SCHEMA)?;
+        Self::migrate_mono_avatar_defaults(&c)?;
         Ok(Self(Arc::new(Mutex::new(c))))
+    }
+
+    /// D74: until 2026-10-15 the relay's hash default could land on `mono`, so about one project
+    /// in thirteen stored `avatar_color = 'mono'` without anyone choosing it. Clear those once;
+    /// NULL means "the (now always coloured) default" on every client. Later explicit `mono`
+    /// picks stay: the `meta` flag makes this a one-shot.
+    fn migrate_mono_avatar_defaults(c: &Connection) -> Result<()> {
+        const KEY: &str = "avatar_mono_defaults_cleared";
+        let done: Option<String> = c
+            .query_row("SELECT value FROM meta WHERE key = ?1", params![KEY], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        if done.is_some() {
+            return Ok(());
+        }
+        c.execute(
+            "UPDATE projects SET avatar_color = NULL WHERE avatar_color = 'mono'",
+            [],
+        )?;
+        c.execute(
+            "INSERT INTO meta(key, value) VALUES (?1, '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![KEY],
+        )?;
+        Ok(())
     }
 
     /// Project names used to be unique across the whole relay (`name TEXT NOT NULL UNIQUE`), so
@@ -2660,5 +2686,79 @@ impl Db {
             let rows = st.query_map(params![project_id, item_id], Self::row_to_vault_request)?;
             rows.collect()
         })
+    }
+}
+
+#[cfg(test)]
+mod avatar_migration_tests {
+    use super::*;
+
+    fn project(id: &str, avatar_color: Option<&str>) -> Project {
+        Project {
+            id: id.into(),
+            name: id.into(),
+            icon: "P".into(),
+            instructions: String::new(),
+            models: serde_json::json!({}),
+            state: "awake".into(),
+            created_at: 0,
+            last_active_at: 0,
+            spend_cap_daily: 25.0,
+            color: "#000".into(),
+            user_id: "u_default".into(),
+            workspace_state: "stopped".into(),
+            avatar: None,
+            avatar_color: avatar_color.map(str::to_owned),
+        }
+    }
+
+    /// D74: hash-assigned `mono` is cleared once; a `mono` picked after that stays.
+    #[test]
+    fn mono_defaults_cleared_once() {
+        let dir = std::env::temp_dir().join(format!(
+            "arbos-avatar-mig-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = dir.join("relay.db");
+        {
+            let db = Db::open(&path).expect("db");
+            db.insert_project(&project("p_mono", Some("mono"))).unwrap();
+            db.insert_project(&project("p_red", Some("red"))).unwrap();
+            // Simulate a database from before the migration existed.
+            db.with(|c| {
+                c.execute(
+                    "DELETE FROM meta WHERE key = 'avatar_mono_defaults_cleared'",
+                    [],
+                )
+            })
+            .unwrap();
+        }
+        {
+            let db = Db::open(&path).expect("reopen");
+            assert_eq!(db.project("p_mono").unwrap().unwrap().avatar_color, None);
+            assert_eq!(
+                db.project("p_red")
+                    .unwrap()
+                    .unwrap()
+                    .avatar_color
+                    .as_deref(),
+                Some("red")
+            );
+            // An explicit pick made after the migration survives the next start.
+            db.insert_project(&project("p_pick", Some("mono"))).unwrap();
+        }
+        let db = Db::open(&path).expect("reopen again");
+        assert_eq!(
+            db.project("p_pick")
+                .unwrap()
+                .unwrap()
+                .avatar_color
+                .as_deref(),
+            Some("mono")
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
