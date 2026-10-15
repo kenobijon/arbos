@@ -311,6 +311,7 @@ impl Db {
     }
 
     /// Partial update of the editable project fields (settings writes from clients or the box).
+    #[allow(clippy::too_many_arguments)]
     pub fn update_project(
         &self,
         id: &str,
