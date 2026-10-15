@@ -3,11 +3,12 @@
 //! `arbos-design.md` §3.2 and the mock.
 
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
     actions, div, prelude::*, px, Animation, AnimationExt, App, Context, Div, ElementId, Entity,
-    FocusHandle, Focusable, FontWeight, Render, SharedString, Stateful, Window,
+    FocusHandle, Focusable, FontWeight, Render, RenderImage, SharedString, Stateful, Window,
 };
 
 use crate::app::SignInMode;
@@ -20,6 +21,7 @@ use crate::ui::frost::{edge_faded, frosted, rounded_clip, MENU_BLUR, PANEL_BLUR}
 use crate::ui::groups;
 use crate::ui::local::{LocalEvent, LocalPanel};
 use crate::ui::motion::{ease_out_cubic, PulseClock, COMPOSER_DROP_MS, SHAKE_MS};
+use crate::ui::people;
 use crate::ui::routines::{RoutinesEvent, RoutinesPanel};
 use crate::ui::skills::SkillsPanel;
 use crate::ui::theme::{
@@ -34,13 +36,13 @@ use crate::ui::voice::Voice;
 actions!(shell, [CloseTab, NewTab, ToggleRail, TogglePanel, Quit]);
 
 pub struct Shell {
-    state: Entity<AppState>,
+    pub(crate) state: Entity<AppState>,
     transcript: Entity<Transcript>,
-    composer: Entity<Composer>,
+    pub(crate) composer: Entity<Composer>,
     /// F11: call strip + mic/TTS owner.
     voice: Entity<Voice>,
     pairing_input: Entity<ComposerInput>,
-    project_input: Entity<ComposerInput>,
+    pub(crate) project_input: Entity<ComposerInput>,
     connectors: Entity<ConnectorsPanel>,
     skills: Entity<SkillsPanel>,
     local: Entity<LocalPanel>,
@@ -58,6 +60,11 @@ pub struct Shell {
     reveal_tab: Option<usize>,
     /// True while the sign-in screen is up; its clearing focuses the composer.
     signing_in: bool,
+    /// People chats (D72): the `+` menu, the @search field, the header pickers.
+    pub new_menu_open: bool,
+    pub people_input: Entity<ComposerInput>,
+    pub add_agent_open: bool,
+    pub members_open: bool,
 }
 
 impl Shell {
@@ -74,6 +81,20 @@ impl Shell {
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
         let voice = cx.new(|cx| Voice::new(state.clone(), cx));
         let composer = cx.new(|cx| Composer::new(state.clone(), voice.clone(), cx));
+        {
+            // Keystrokes in a people chat → presence "typing" (throttled in AppState).
+            let composer_input = composer.read(cx).input.clone();
+            cx.observe(&composer_input, |this, input, cx| {
+                if input.read(cx).text().trim().is_empty() {
+                    return;
+                }
+                let chat = this.state.read(cx).active_chat_id();
+                if let Some(chat) = chat {
+                    this.state.update(cx, |s, _| s.typed_in(&chat));
+                }
+            })
+            .detach();
+        }
         cx.observe(&state, |_, _, cx| cx.notify()).detach();
         cx.observe(&voice, |_, _, cx| cx.notify()).detach();
         cx.observe_window_activation(window, |this, window, cx| {
@@ -118,6 +139,36 @@ impl Shell {
         }
         cx.observe(&pairing_input, |_, _, cx| cx.notify()).detach();
         cx.observe(&project_input, |_, _, cx| cx.notify()).detach();
+        let people_input = cx.new(ComposerInput::new);
+        {
+            let weak = cx.entity().downgrade();
+            people_input.update(cx, |input, _| {
+                input.set_placeholder("username");
+                input.on_submit = Some(Rc::new(move |_window, cx| {
+                    let _ = weak.update(cx, |this, cx| {
+                        let typed = this.people_input.read(cx).text().trim().to_string();
+                        let pick = {
+                            let s = this.state.read(cx);
+                            s.people_results
+                                .first()
+                                .map(|p| p.handle.clone())
+                                .or_else(|| (!typed.is_empty()).then_some(typed.clone()))
+                        };
+                        if let Some(handle) = pick {
+                            this.state.update(cx, |s, cx| s.start_dm(handle, cx));
+                        }
+                    });
+                }));
+            });
+        }
+        cx.observe(&people_input, |this, input, cx| {
+            let text = input.read(cx).text().trim().to_string();
+            if this.state.read(cx).new_chat_open && this.state.read(cx).people_query != text {
+                this.state.update(cx, |s, cx| s.search_people(text, cx));
+            }
+            cx.notify();
+        })
+        .detach();
         let connectors = cx.new(|cx| ConnectorsPanel::new(state.clone(), cx));
         cx.observe(&connectors, |_, _, cx| cx.notify()).detach();
         cx.subscribe(
@@ -195,6 +246,10 @@ impl Shell {
             tab_scroll: gpui::ScrollHandle::new(),
             reveal_tab: None,
             signing_in: false,
+            new_menu_open: false,
+            people_input,
+            add_agent_open: false,
+            members_open: false,
         }
     }
 
@@ -252,9 +307,21 @@ impl Shell {
         let theme = Theme::of(cx).clone();
         let state = self.state.read(cx);
         let selected = state.selected_project.clone();
+        let people_tiles: Vec<(Project, Option<Arc<RenderImage>>, usize, bool)> = state
+            .people_spaces()
+            .map(|p| {
+                (
+                    p.clone(),
+                    p.person().and_then(|x| state.avatar(&x.avatar_url)),
+                    state.project_unread(&p.id),
+                    state.typing_in(&p.id).is_some(),
+                )
+            })
+            .collect();
         let projects: Vec<(Project, bool, usize)> = state
             .projects
             .iter()
+            .filter(|p| !p.is_people())
             .map(|p| {
                 (
                     p.clone(),
@@ -387,6 +454,31 @@ impl Shell {
             }
             tiles = tiles.child(tile);
         }
+        if !people_tiles.is_empty() {
+            tiles = tiles.child(
+                div()
+                    .w(px(if collapsed { 24.0 } else { RAIL_TILE - 20.0 }))
+                    .h(px(1.0))
+                    .my(px(2.0))
+                    .bg(theme.border),
+            );
+        }
+        for (space, image, unread, typing) in people_tiles {
+            let is_selected = selected.as_deref() == Some(space.id.as_str());
+            if typing {
+                PulseClock::request(cx);
+            }
+            tiles = tiles.child(people::person_tile(
+                &space,
+                image,
+                is_selected,
+                collapsed,
+                unread,
+                typing,
+                &theme,
+                cx,
+            ));
+        }
 
         // Bottom controls: same footprint and spacing as the tiles, centred on
         // the same axis (§3.3).
@@ -415,16 +507,20 @@ impl Shell {
             .child(self.render_machine_indicator(collapsed, cx))
             .child(
                 bottom_button("rail-new-project", "+", 20.0, &theme).on_click(cx.listener(
-                    |this, _, window, cx| {
-                        let open = !this.state.read(cx).new_project_open;
-                        this.state.update(cx, |s, cx| {
-                            s.new_project_open = open;
-                            cx.notify();
-                        });
-                        if open {
-                            let handle = this.project_input.read(cx).focus_handle(cx);
-                            window.focus(&handle, cx);
+                    |this, _, _, cx| {
+                        let any_open = this.new_menu_open
+                            || this.state.read(cx).new_project_open
+                            || this.state.read(cx).new_chat_open;
+                        if any_open {
+                            this.new_menu_open = false;
+                            this.state.update(cx, |s, cx| {
+                                s.new_project_open = false;
+                                s.close_new_chat(cx);
+                            });
+                        } else {
+                            this.new_menu_open = true;
                         }
+                        cx.notify();
                     },
                 )),
             )
@@ -1028,7 +1124,15 @@ impl Shell {
             .min_w_0()
             .h_full()
             .child(frosted(0.0, PANEL_BLUR, self.render_tab_bar(cx)));
-        if let Some(banner) = self.render_banner(cx) {
+        if let Some(space) = project.as_ref().filter(|p| p.is_people()) {
+            column = column.child(people::header(
+                space,
+                &self.state,
+                self.add_agent_open,
+                self.members_open,
+                cx,
+            ));
+        } else if let Some(banner) = self.render_banner(cx) {
             column = column.child(banner);
         }
 
@@ -1061,7 +1165,23 @@ impl Shell {
         }
         if !dropped {
             // S1/S2: empty chat, composer centered with the project name and a hint.
-            let name = project.as_ref().map(|p| p.name.clone()).unwrap_or_default();
+            let is_people = project.as_ref().map(|p| p.is_people()).unwrap_or(false);
+            let name = project
+                .as_ref()
+                .map(|p| {
+                    if p.is_people() {
+                        format!("@{}", p.name)
+                    } else {
+                        p.name.clone()
+                    }
+                })
+                .unwrap_or_default();
+            let hint = if is_people {
+                "Say hi. It lands for both of you at once; + Add agent brings one of yours in."
+                    .to_string()
+            } else {
+                format!("Ask {name} anything. It will plan, delegate, or answer.")
+            };
             column = column.child(
                 div()
                     .flex_1()
@@ -1082,9 +1202,7 @@ impl Shell {
                         div()
                             .text_size(px(13.0))
                             .text_color(theme.text_muted)
-                            .child(format!(
-                                "Ask {name} anything. It will plan, delegate, or answer."
-                            )),
+                            .child(hint),
                     )
                     .child(
                         div()
@@ -1103,13 +1221,25 @@ impl Shell {
                 .min_h_0()
                 .relative()
                 .child(self.transcript.clone());
+            let typing = self
+                .state
+                .read(cx)
+                .active_chat_id()
+                .and_then(|id| self.state.read(cx).typing_in(&id));
+            if typing.is_some() {
+                PulseClock::request(cx);
+            }
             let composer_row = div()
                 .w_full()
                 .flex()
-                .justify_center()
+                .flex_col()
+                .items_center()
                 .px(px(28.0))
                 .pb(px(18.0))
                 .pt(px(8.0))
+                .when_some(typing, |el, handle| {
+                    el.child(people::typing_line(&handle, &theme))
+                })
                 .child(composer_block);
             let composer_row = if animating {
                 composer_row
@@ -2442,6 +2572,8 @@ impl Render for Shell {
         let details = state.details_open.clone();
         let pairing = state.pairing.clone();
         let new_project_open = state.new_project_open;
+        let new_chat_open = state.new_chat_open;
+        let people_space = state.selected().filter(|p| p.is_people()).cloned();
 
         let mut root = div()
             .id("shell-root")
@@ -2459,8 +2591,10 @@ impl Render for Shell {
                     let pairing = this.pairing_input.read(cx).focus_handle(cx);
                     let project = this.project_input.read(cx).focus_handle(cx);
                     let shown = this.state.read(cx).new_project_open;
+                    let people = this.people_input.read(cx).focus_handle(cx);
                     if pairing.is_focused(window)
                         || (shown && project.is_focused(window))
+                        || (this.state.read(cx).new_chat_open && people.is_focused(window))
                         || this.connectors.read(cx).input_focused(window, cx)
                         || this.skills.read(cx).has_focus(window, cx)
                         || this.vault.read(cx).input_focused(window, cx)
@@ -2537,6 +2671,25 @@ impl Render for Shell {
         }
         if new_project_open {
             root = root.child(self.render_new_project(cx));
+        }
+        if self.new_menu_open {
+            root = root.child(people::new_menu(cx));
+        }
+        if let Some(space) = people_space {
+            let right = if panel_open {
+                RIGHT_PANEL_WIDTH + 16.0
+            } else {
+                16.0
+            };
+            if self.add_agent_open {
+                root = root.child(people::add_agent_picker(&space, &self.state, right, cx));
+            }
+            if self.members_open {
+                root = root.child(people::members_popover(&space, &self.state, right, cx));
+            }
+        }
+        if new_chat_open {
+            root = root.child(people::new_chat_sheet(&self.state, &self.people_input, cx));
         }
         if let Some(notices) = self.render_notices(cx) {
             root = root.child(notices);

@@ -45,6 +45,111 @@ pub struct Project {
     pub effort: Effort,
     pub spend_today_usd: f64,
     pub spend_cap_usd: f64,
+    /// A project of mine, or a people chat (DM / group) that shares the rail.
+    #[serde(default)]
+    pub kind: SpaceKind,
+    /// People chat: the other members. Project: invited members (D72 step 3).
+    #[serde(default)]
+    pub people: Vec<Person>,
+    /// People chat: shared agents.
+    #[serde(default)]
+    pub agents: Vec<AgentMember>,
+    /// People chat with someone who has not signed in yet.
+    #[serde(default)]
+    pub pending: bool,
+    /// Project shared with me by its owner (`shared: true`).
+    #[serde(default)]
+    pub shared: bool,
+    #[serde(default)]
+    pub owner_handle: Option<String>,
+}
+
+impl Project {
+    pub fn is_people(&self) -> bool {
+        matches!(self.kind, SpaceKind::Dm | SpaceKind::Group)
+    }
+
+    /// The other person of a DM.
+    pub fn person(&self) -> Option<&Person> {
+        self.people.first()
+    }
+
+    /// `@slug` the composer resolves to this agent (project name, lower-case, `-`).
+    pub fn mention_slug(name: &str) -> String {
+        name.trim()
+            .to_lowercase()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join("-")
+    }
+}
+
+/// What a rail tile is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpaceKind {
+    #[default]
+    Project,
+    Dm,
+    Group,
+}
+
+/// An Arbos user as the relay lists them (`GET /users/search`, chat members).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Person {
+    /// `gh_<github id>`.
+    #[serde(default)]
+    pub id: String,
+    /// GitHub login without `@`.
+    #[serde(default)]
+    pub handle: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub avatar_url: String,
+    /// `member` (has signed in) or `invited` (placeholder).
+    #[serde(default)]
+    pub status: String,
+}
+
+impl Person {
+    pub fn display_name(&self) -> String {
+        self.name
+            .clone()
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| self.handle.clone())
+    }
+
+    pub fn initial(&self) -> String {
+        self.display_name()
+            .chars()
+            .next()
+            .map(|c| c.to_uppercase().to_string())
+            .unwrap_or_else(|| "?".into())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplyPolicy {
+    #[default]
+    Mention,
+    EveryMessage,
+}
+
+/// A project agent someone added to a people chat.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AgentMember {
+    pub project_id: Id,
+    pub name: String,
+    pub icon: String,
+    pub color: String,
+    /// Mention slug (`@research`).
+    pub handle: String,
+    pub owner_id: String,
+    pub owner_handle: String,
+    #[serde(default)]
+    pub reply_policy: ReplyPolicy,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -566,6 +671,21 @@ pub struct Message {
     pub sender_name: Option<String>,
     #[serde(default)]
     pub sender_icon: Option<String>,
+    /// People chats (D72): who wrote it (`sender: user:<id>`), their handle and avatar.
+    #[serde(default)]
+    pub sender_handle: Option<String>,
+    #[serde(default)]
+    pub sender_avatar: Option<String>,
+    /// `agent:<project_id>` / `user:<id>` the composer resolved from `@`.
+    #[serde(default)]
+    pub mentions: Vec<String>,
+    #[serde(default)]
+    pub reply_to: Option<String>,
+    /// On an agent's reply in a people chat: who asked and whose machine answered.
+    #[serde(default)]
+    pub asked_by_handle: Option<String>,
+    #[serde(default)]
+    pub owner_handle: Option<String>,
     /// Token usage as the box reports it (shape varies by harness).
     #[serde(default)]
     pub usage: Option<serde_json::Value>,
@@ -1170,6 +1290,8 @@ pub struct Machine {
 /// Settings → Account: who is signed in and what is left (`GET /me`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AccountView {
+    /// `gh_<github id>`; what `sender: user:<id>` carries.
+    pub id: String,
     pub login: String,
     pub name: String,
     pub avatar_url: String,

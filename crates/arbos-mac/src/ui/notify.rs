@@ -23,6 +23,8 @@ pub enum NotifyKind {
     SpendCapReached,
     CrossProject,
     RoutineRan,
+    /// A person wrote in a people chat (D72).
+    DirectMessage,
 }
 
 impl NotifyKind {
@@ -35,6 +37,7 @@ impl NotifyKind {
             NotifyKind::SpendCapReached => format!("{project} · spend cap reached"),
             NotifyKind::CrossProject => format!("{project} · message from another project"),
             NotifyKind::RoutineRan => format!("{project} · routine ran"),
+            NotifyKind::DirectMessage => format!("@{project}"),
         }
     }
 }

@@ -12,13 +12,13 @@ use gpui_tokio::Tokio;
 use tokio::sync::mpsc;
 
 use crate::auth;
-use crate::model::AccountView;
 use crate::model::{
     new_id, now_ms, AttachmentKind, BoxState, ChannelsView, Chat, ChatKind, ConnectorsView, Effort,
     Id, Link, LocalView, Machine, Message, MessageStatus, Part, Project, ProjectDocView,
     QuestionState, Role, Routine, RoutineRun, RoutineTrigger, Skill, StatusKind, VaultNewItem,
     VaultRequestStatus, VaultView,
 };
+use crate::model::{AccountView, Person};
 use crate::sync::{ClientCommand, SyncEvent, SyncSource};
 use crate::ui::notify::{Gate, Notifier, NotifyEvent, NotifyKind};
 
@@ -115,6 +115,20 @@ pub struct AppState {
     pub account: Option<AccountView>,
     /// The tree mark (the macOS app icon), drawn on the sign-in screen.
     pub mark: Option<Arc<RenderImage>>,
+    /// People chats (D72): the new-chat sheet, directory results, typing, avatars.
+    pub new_chat_open: bool,
+    pub people_query: String,
+    pub people_results: Vec<Person>,
+    pub people_busy: bool,
+    pub people_error: Option<String>,
+    /// handle → until (ms) per chat; shown as "@sam is typing…".
+    pub typing: HashMap<Id, (String, u64)>,
+    /// Decoded avatars by `avatar_url`; `None` while a fetch is in flight.
+    pub avatars: HashMap<String, Option<Arc<RenderImage>>>,
+    /// A DM just started from the sheet: select it when it arrives.
+    awaiting_dm: Option<String>,
+    /// Last time we told the room we are typing, per chat.
+    typing_sent_at: HashMap<Id, u64>,
     /// Set by a fresh sign-in: with no projects yet, create "Home" and land in it.
     first_project_pending: bool,
     pub projects: Vec<Project>,
@@ -241,6 +255,15 @@ impl AppState {
             ))
             .map(Arc::new),
             first_project_pending: false,
+            new_chat_open: false,
+            people_query: String::new(),
+            people_results: Vec::new(),
+            people_busy: false,
+            people_error: None,
+            typing: HashMap::new(),
+            avatars: HashMap::new(),
+            awaiting_dm: None,
+            typing_sent_at: HashMap::new(),
             device_id: None,
             projects: Vec::new(),
             models: Vec::new(),
@@ -411,6 +434,44 @@ impl AppState {
                 self.account = account;
                 cx.notify();
             }
+            SyncEvent::PeopleSearch { query, results } => {
+                if query == self.people_query {
+                    self.people_results = results;
+                    self.people_busy = false;
+                    let urls: Vec<String> = self
+                        .people_results
+                        .iter()
+                        .map(|p| p.avatar_url.clone())
+                        .collect();
+                    for url in urls {
+                        self.want_avatar(url);
+                    }
+                }
+                cx.notify();
+            }
+            SyncEvent::PeopleError(err) => {
+                self.people_busy = false;
+                self.people_error = Some(err);
+                self.awaiting_dm = None;
+                cx.notify();
+            }
+            SyncEvent::Typing {
+                chat_id,
+                handle,
+                active,
+            } => {
+                if active {
+                    self.typing.insert(chat_id, (handle, now_ms() + 6_000));
+                } else {
+                    self.typing.remove(&chat_id);
+                }
+                cx.notify();
+            }
+            SyncEvent::Avatar { url, bytes } => {
+                let image = decode_image(&bytes).map(Arc::new);
+                self.avatars.insert(url, image);
+                cx.notify();
+            }
             SyncEvent::PairingFailed(err) => {
                 if let Some(p) = &mut self.pairing {
                     p.busy = false;
@@ -517,6 +578,23 @@ impl AppState {
                             NotifyKind::SpendCapReached,
                             format!("${:.2} of ${:.2} today", p.spend_today_usd, p.spend_cap_usd),
                         );
+                    }
+                }
+                for p in &projects {
+                    for person in &p.people {
+                        let url = person.avatar_url.clone();
+                        self.want_avatar(url);
+                    }
+                }
+                if let Some(handle) = self.awaiting_dm.clone() {
+                    if let Some(space) = projects.iter().find(|p| {
+                        p.is_people() && p.person().map(|x| x.handle == handle).unwrap_or(false)
+                    }) {
+                        self.awaiting_dm = None;
+                        self.new_chat_open = false;
+                        let id = space.id.clone();
+                        self.projects = projects.clone();
+                        self.select_project(id, cx);
                     }
                 }
                 if self.first_project_pending {
@@ -1084,6 +1162,12 @@ impl AppState {
                 routine_name: None,
                 sender_name: None,
                 sender_icon: None,
+                sender_handle: None,
+                sender_avatar: None,
+                mentions: Vec::new(),
+                reply_to: None,
+                asked_by_handle: None,
+                owner_handle: None,
                 usage: None,
                 return_contract: None,
                 waiting_user: false,
@@ -1245,6 +1329,12 @@ impl AppState {
                 routine_name: None,
                 sender_name: None,
                 sender_icon: None,
+                sender_handle: None,
+                sender_avatar: None,
+                mentions: Vec::new(),
+                reply_to: None,
+                asked_by_handle: None,
+                owner_handle: None,
                 created_at: now_ms(),
                 completed_at: None,
                 pending: true,
@@ -1490,7 +1580,25 @@ impl AppState {
         let is_system = chat.is_system;
 
         let sender = message.sender.as_str();
+        let in_people = self
+            .projects
+            .iter()
+            .any(|p| p.id == project_id && p.is_people());
         if message.role == Role::User {
+            // Someone else wrote in a people chat (D72 + D49): "@sam: …".
+            if is_new && in_people && !self.is_mine(message) {
+                let handle = message
+                    .sender_handle
+                    .clone()
+                    .unwrap_or_else(|| "someone".into());
+                self.notify(
+                    project_id,
+                    Some(chat_id),
+                    NotifyKind::DirectMessage,
+                    format!("@{handle}: {}", preview(message)),
+                );
+                return;
+            }
             // A prompt another project injected is news; our own typed
             // messages and routine prompts are not (the routine's reply is).
             if is_new && (sender.starts_with("project:") || (is_system && sender != "user")) {
@@ -1679,6 +1787,208 @@ impl AppState {
                 cx.notify();
             });
         });
+    }
+
+    // ----- people chats (D72)
+
+    /// `gh_<id>` of the signed-in user; the fixture signs in as `gh_1`.
+    pub fn me_id(&self) -> String {
+        self.account
+            .as_ref()
+            .map(|a| a.id.clone())
+            .filter(|id| !id.is_empty())
+            .unwrap_or_else(|| {
+                if self.source_name == "fixture" {
+                    crate::sync::fixture::ME_ID.into()
+                } else {
+                    String::new()
+                }
+            })
+    }
+
+    pub fn me_handle(&self) -> String {
+        self.account
+            .as_ref()
+            .map(|a| a.login.clone())
+            .filter(|h| !h.is_empty())
+            .unwrap_or_else(|| {
+                if self.source_name == "fixture" {
+                    crate::sync::fixture::ME_HANDLE.into()
+                } else {
+                    String::new()
+                }
+            })
+    }
+
+    /// Projects of mine (not people chats, not shared with me) — the add-agent picker.
+    pub fn my_projects(&self) -> impl Iterator<Item = &Project> {
+        self.projects.iter().filter(|p| !p.is_people() && !p.shared)
+    }
+
+    pub fn people_spaces(&self) -> impl Iterator<Item = &Project> {
+        self.projects.iter().filter(|p| p.is_people())
+    }
+
+    /// Is this message mine? (`sender: user:<my id>` or the plain `user` of a project chat.)
+    pub fn is_mine(&self, message: &Message) -> bool {
+        let sender = message.sender.as_str();
+        sender == "user" || sender == format!("user:{}", self.me_id())
+    }
+
+    pub fn open_new_chat(&mut self, cx: &mut Context<Self>) {
+        self.new_chat_open = true;
+        self.new_project_open = false;
+        self.people_query.clear();
+        self.people_results.clear();
+        self.people_error = None;
+        cx.notify();
+    }
+
+    pub fn close_new_chat(&mut self, cx: &mut Context<Self>) {
+        self.new_chat_open = false;
+        self.awaiting_dm = None;
+        cx.notify();
+    }
+
+    pub fn search_people(&mut self, query: String, cx: &mut Context<Self>) {
+        self.people_query = query.clone();
+        self.people_error = None;
+        let q = query.trim().trim_start_matches('@');
+        if q.is_empty() {
+            self.people_results.clear();
+            self.people_busy = false;
+        } else {
+            self.people_busy = true;
+            self.command(ClientCommand::SearchPeople { query });
+        }
+        cx.notify();
+    }
+
+    pub fn start_dm(&mut self, handle: String, cx: &mut Context<Self>) {
+        let handle = handle.trim().trim_start_matches('@').to_string();
+        if handle.is_empty() {
+            return;
+        }
+        let existing = self
+            .people_spaces()
+            .find(|p| p.person().map(|x| x.handle == handle).unwrap_or(false))
+            .map(|p| p.id.clone());
+        if let Some(existing) = existing {
+            self.new_chat_open = false;
+            self.select_project(existing, cx);
+            return;
+        }
+        self.people_busy = true;
+        self.awaiting_dm = Some(handle.clone());
+        self.command(ClientCommand::StartDm { handle });
+        cx.notify();
+    }
+
+    /// Composer keystroke in a people chat: at most one presence ping per 3 s.
+    pub fn typed_in(&mut self, chat_id: &Id) {
+        let Some(space) = self.project_of_chat(chat_id) else {
+            return;
+        };
+        if !space.is_people() {
+            return;
+        }
+        let now = now_ms();
+        let last = self.typing_sent_at.get(chat_id).copied().unwrap_or(0);
+        if now.saturating_sub(last) > 3_000 {
+            self.typing_sent_at.insert(chat_id.clone(), now);
+            self.command(ClientCommand::SetTyping {
+                chat_id: chat_id.clone(),
+                active: true,
+            });
+        }
+    }
+
+    pub fn typing_in(&self, chat_id: &str) -> Option<String> {
+        self.typing
+            .get(chat_id)
+            .filter(|(_, until)| *until > now_ms())
+            .map(|(handle, _)| handle.clone())
+    }
+
+    fn project_of_chat(&self, chat_id: &str) -> Option<&Project> {
+        let pid = self
+            .chats
+            .values()
+            .flat_map(|v| v.iter())
+            .find(|c| c.id == chat_id)
+            .map(|c| c.project_id.clone())?;
+        self.projects.iter().find(|p| p.id == pid)
+    }
+
+    pub fn add_agent(&mut self, chat_id: Id, project_id: Id, cx: &mut Context<Self>) {
+        self.command(ClientCommand::AddAgent {
+            chat_id,
+            project_id,
+        });
+        cx.notify();
+    }
+
+    pub fn remove_agent(&mut self, chat_id: Id, project_id: Id, cx: &mut Context<Self>) {
+        self.command(ClientCommand::RemoveAgent {
+            chat_id,
+            project_id,
+        });
+        cx.notify();
+    }
+
+    pub fn remove_member(&mut self, chat_id: Id, user_id: String, cx: &mut Context<Self>) {
+        self.command(ClientCommand::RemoveMember { chat_id, user_id });
+        cx.notify();
+    }
+
+    pub fn leave_chat(&mut self, chat_id: Id, cx: &mut Context<Self>) {
+        if self.selected_project.as_deref() == Some(chat_id.as_str()) {
+            self.selected_project = None;
+        }
+        self.command(ClientCommand::LeaveChat { chat_id });
+        cx.notify();
+    }
+
+    pub fn block_user(&mut self, handle: String, cx: &mut Context<Self>) {
+        self.command(ClientCommand::BlockUser { handle });
+        cx.notify();
+    }
+
+    #[allow(dead_code)] // D72 step 3 wires the project header to these.
+    pub fn invite_to_project(&mut self, project_id: Id, handle: String, cx: &mut Context<Self>) {
+        let handle = handle.trim().trim_start_matches('@').to_string();
+        if handle.is_empty() {
+            return;
+        }
+        self.command(ClientCommand::InviteToProject { project_id, handle });
+        cx.notify();
+    }
+
+    #[allow(dead_code)]
+    pub fn remove_project_member(
+        &mut self,
+        project_id: Id,
+        user_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.command(ClientCommand::RemoveProjectMember {
+            project_id,
+            user_id,
+        });
+        cx.notify();
+    }
+
+    /// Decoded avatar for a URL, requesting it once when unknown.
+    pub fn avatar(&self, url: &str) -> Option<Arc<RenderImage>> {
+        self.avatars.get(url).cloned().flatten()
+    }
+
+    fn want_avatar(&mut self, url: String) {
+        if url.is_empty() || self.avatars.contains_key(&url) {
+            return;
+        }
+        self.avatars.insert(url.clone(), None);
+        self.command(ClientCommand::FetchAvatar { url });
     }
 
     pub fn sign_out(&mut self, cx: &mut Context<Self>) {
