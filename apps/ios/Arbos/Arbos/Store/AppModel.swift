@@ -808,9 +808,25 @@ final class AppModel: ObservableObject {
     }
 
     /// Send into a people chat: author fields + mentions resolved from `@slug`s.
-    func sendPeople(chatId: String, text: String, replyTo: String?, attachments: [PendingAttachment] = []) {
+    /// `address` is an optional chip target (`agent:…` / `user:…` / `"everyone"`) when the
+    /// text itself has no `@` mention — so a follow-up can keep talking to one agent, or
+    /// "hey everyone" can reach every agent, without typing `@`.
+    func sendPeople(chatId: String, text: String, replyTo: String?, address: String? = nil, attachments: [PendingAttachment] = []) {
         guard let doc = docs[chatId], let chat = peopleChat(chatId), let me = user else { return }
-        let mentions = AppModel.mentions(in: text, members: chat.members)
+        var mentions = AppModel.mentions(in: text, members: chat.members)
+        if mentions.isEmpty, let address {
+            if address == "everyone" {
+                mentions = chat.agents.map(\.member)
+            } else if chat.members.contains(where: { $0.member == address }) {
+                mentions = [address]
+            }
+        }
+        // Carry on with the agent who just spoke when nothing (and nobody) was addressed.
+        var reply = replyTo
+        if mentions.isEmpty && reply == nil,
+           let last = messages(of: chatId).last, last.role == .assistant {
+            reply = last.id
+        }
         let author = ChatDoc.Author(sender: "user:\(me.id)", handle: me.login, name: me.name, avatar: me.avatarUrl)
         let messageId = newId()
         unacked.insert(messageId)
@@ -827,7 +843,7 @@ final class AppModel: ObservableObject {
             }
             do {
                 try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: uploaded,
-                                          author: author, mentions: mentions, replyTo: replyTo)
+                                          author: author, mentions: mentions, replyTo: reply)
                 try doc.pushCommand("send", payload: ["messageId": messageId], device: deviceId)
             } catch {
                 notice = Notice(text: "Could not write the message: \(error.localizedDescription)")
@@ -840,12 +856,21 @@ final class AppModel: ObservableObject {
     }
 
     /// `@slug` tokens that name a member: agents by their mention slug, people by handle.
+    /// `@everyone` / `@all` and a leading "hey everyone" (etc.) address every agent in the chat.
     static func mentions(in text: String, members: [ChatMember]) -> [String] {
         var out: [String] = []
+        let agents = members.filter(\.isAgent)
+        func appendAgents() {
+            for a in agents where !out.contains(a.member) { out.append(a.member) }
+        }
         let tokens = text.split(whereSeparator: { $0.isWhitespace })
         for t in tokens where t.hasPrefix("@") {
             let slug = t.dropFirst().trimmingCharacters(in: CharacterSet(charactersIn: ".,!?:;")).lowercased()
-            if slug == "arbos", members.filter(\.isAgent).count == 1, let a = members.first(where: \.isAgent) {
+            if slug == "everyone" || slug == "all" {
+                appendAgents()
+                continue
+            }
+            if slug == "arbos", agents.count == 1, let a = agents.first {
                 if !out.contains(a.member) { out.append(a.member) }
                 continue
             }
@@ -853,7 +878,22 @@ final class AppModel: ObservableObject {
                 if !out.contains(m.member) { out.append(m.member) }
             }
         }
+        if out.isEmpty && AppModel.addressesEveryone(text) {
+            appendAgents()
+        }
         return out
+    }
+
+    /// "hey everyone" / "hi everyone" / … at the start of the message (no `@` required).
+    static func addressesEveryone(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        for g in ["hey everyone", "hi everyone", "hello everyone", "yo everyone", "ok everyone", "okay everyone"] {
+            if trimmed == g { return true }
+            for sep in [" ", ",", "!", ":", "—", "-"] {
+                if trimmed.hasPrefix(g + sep) { return true }
+            }
+        }
+        return false
     }
 
     /// Mark a people chat read up to the relay head (cross-launch cursor).

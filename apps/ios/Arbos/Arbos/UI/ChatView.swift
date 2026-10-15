@@ -39,6 +39,9 @@ struct ChatView: View {
     @State private var showProfile = false
     @State private var replyTo: Message?
     @State private var mentionQuery: String?
+    /// Chip-picked addressee in a people chat: `agent:…`, `user:…`, or `"everyone"`.
+    /// Nil means infer from the last agent reply (carry the convo) or the human counterpart.
+    @State private var talkTo: String?
 
     private var project: Project? { model.project(projectId) }
     private var chat: Chat? { model.chat(chatId) }
@@ -56,6 +59,37 @@ struct ChatView: View {
     private var workingName: String {
         if isPeople, let m = messages.last(where: { $0.role == .assistant && $0.isStreaming }), let h = m.senderHandle { return h }
         return name
+    }
+
+    /// Who the next people-chat message is for — chip pick, reply-to, or the agent who just spoke.
+    private var effectiveTalkTo: String? {
+        if let talkTo { return talkTo }
+        if let r = replyTo, r.role == .assistant, let member = agentMember(for: r) {
+            return member.member
+        }
+        if let last = messages.last, last.role == .assistant, let member = agentMember(for: last) {
+            return member.member
+        }
+        return nil
+    }
+
+    /// Composer prompt that names the addressee so it is obvious who will answer.
+    private var composerPrompt: String {
+        if transcribing { return "Transcribing…" }
+        if !isPeople { return needsAnswer ? "Answer \(name)" : "Ask \(name)" }
+        if AppModel.addressesEveryone(draft) || talkTo == "everyone" { return "Message everyone" }
+        if let member = people?.members.first(where: { $0.member == effectiveTalkTo }) {
+            let slug = member.isAgent ? mentionSlug(member.project?.name ?? member.handle) : member.handle
+            return "Message @\(slug)"
+        }
+        return "Message \(name)"
+    }
+
+    private func agentMember(for message: Message) -> ChatMember? {
+        guard let h = message.senderHandle?.lowercased() else { return nil }
+        return people?.agents.first {
+            mentionSlug($0.project?.name ?? "").lowercased() == h || $0.handle.lowercased() == h
+        }
     }
 
     var body: some View {
@@ -356,9 +390,17 @@ struct ChatView: View {
                             .id(row.id)
                             .contextMenu {
                                 if isPeople, let m = messages.first(where: { $0.id == row.messageId }) {
-                                    Button { replyTo = m; composerFocused = true } label: { Label("Reply", systemImage: "arrowshape.turn.up.left") }
+                                    Button {
+                                        replyTo = m
+                                        talkTo = agentMember(for: m)?.member
+                                        composerFocused = true
+                                    } label: { Label("Reply", systemImage: "arrowshape.turn.up.left") }
                                     if m.role == .assistant, let h = m.senderHandle {
-                                        Button { draft = "@\(h) " + draft; composerFocused = true } label: { Label("Mention @\(h)", systemImage: "at") }
+                                        Button {
+                                            draft = "@\(h) " + draft
+                                            talkTo = agentMember(for: m)?.member
+                                            composerFocused = true
+                                        } label: { Label("Mention @\(h)", systemImage: "at") }
                                     }
                                 }
                                 Button { UIPasteboard.general.string = m_text(row) } label: { Label("Copy", systemImage: "doc.on.doc") }
@@ -445,25 +487,36 @@ struct ChatView: View {
     }
 
     /// Avatars + handles of everyone in a people chat; agents show their owner.
+    /// Tap a chip to talk to that person or agent without typing `@` — the composer
+    /// prompt and the next send follow the selection.
     private func memberChips(_ people: PeopleChat) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 ForEach(people.members) { m in
-                    HStack(spacing: 6) {
-                        if m.isAgent, let p = m.project {
-                            AgentAvatar(project: p, theme: theme, size: 18, still: true)
-                        } else {
-                            PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 18)
+                    let selected = effectiveTalkTo == m.member
+                    Button {
+                        talkTo = talkTo == m.member ? nil : m.member
+                        replyTo = nil
+                    } label: {
+                        HStack(spacing: 6) {
+                            if m.isAgent, let p = m.project {
+                                AgentAvatar(project: p, theme: theme, size: 18, still: true)
+                            } else {
+                                PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 18)
+                            }
+                            Text(m.isAgent ? "@\(mentionSlug(m.project?.name ?? m.handle))" : "@\(m.handle)")
+                                .font(.system(size: Theme.tiny, weight: .medium))
+                                .foregroundStyle(theme.text)
+                            if m.isAgent, let o = m.ownerHandle {
+                                Text("· @\(o)").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                            }
                         }
-                        Text(m.isAgent ? "@\(mentionSlug(m.project?.name ?? m.handle))" : "@\(m.handle)")
-                            .font(.system(size: Theme.tiny, weight: .medium))
-                            .foregroundStyle(theme.text)
-                        if m.isAgent, let o = m.ownerHandle {
-                            Text("· @\(o)").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
-                        }
+                        .padding(.leading, 6).padding(.trailing, 10).padding(.vertical, 5)
+                        .background(Capsule().fill(selected ? theme.bubbleUser.opacity(theme.isDark ? 0.55 : 0.18) : theme.bubbleAssistant))
+                        .overlay(Capsule().strokeBorder(selected ? theme.text.opacity(0.35) : Color.clear, lineWidth: 1))
                     }
-                    .padding(.leading, 6).padding(.trailing, 10).padding(.vertical, 5)
-                    .background(Capsule().fill(theme.bubbleAssistant))
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(selected ? "Talking to \(m.displayName)" : "Talk to \(m.displayName)")
                 }
                 Button { showMembers = true } label: {
                     HStack(spacing: 4) {
@@ -599,7 +652,7 @@ struct ChatView: View {
 
     private var textField: some View {
         HStack(spacing: 8) {
-            TextField("", text: $draft, prompt: Text(transcribing ? "Transcribing…" : (isPeople ? "Message \(name)" : (needsAnswer ? "Answer \(name)" : "Ask \(name)"))).foregroundStyle(theme.placeholder), axis: .vertical)
+            TextField("", text: $draft, prompt: Text(composerPrompt).foregroundStyle(theme.placeholder), axis: .vertical)
                 .lineLimit(1...8)
                 .font(.system(size: Theme.body))
                 .foregroundStyle(theme.text)
@@ -729,6 +782,7 @@ struct ChatView: View {
         var parts = draft.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
         if let last = parts.last, last.hasPrefix("@") { parts[parts.count - 1] = "@\(slug)" } else { parts.append("@\(slug)") }
         draft = parts.joined(separator: " ") + " "
+        talkTo = m.member
         mentionQuery = nil
     }
 
@@ -757,9 +811,11 @@ struct ChatView: View {
         let typed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         let extras = pending
         let reply = replyTo?.id
+        let address = talkTo
         pending.removeAll()
         draft = ""
         replyTo = nil
+        if address == "everyone" { talkTo = nil }
         sentOnce = true
         transcribing = true
         Task {
@@ -767,7 +823,7 @@ struct ChatView: View {
             transcribing = false
             let text = [typed, transcript ?? ""].filter { !$0.isEmpty }.joined(separator: "\n\n")
             if isPeople {
-                model.sendPeople(chatId: chatId, text: text, replyTo: reply, attachments: extras + [memo])
+                model.sendPeople(chatId: chatId, text: text, replyTo: reply, address: address, attachments: extras + [memo])
             } else {
                 model.send(chatId: chatId, text: text, attachments: extras + [memo])
             }
@@ -778,11 +834,14 @@ struct ChatView: View {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !pending.isEmpty else { return }
         if isPeople {
-            model.sendPeople(chatId: chatId, text: text, replyTo: replyTo?.id, attachments: pending)
+            let address = talkTo
+            model.sendPeople(chatId: chatId, text: text, replyTo: replyTo?.id, address: address, attachments: pending)
             pending.removeAll()
             draft = ""
             replyTo = nil
             mentionQuery = nil
+            // Keep talkTo so the next line stays with the same agent; clear "everyone".
+            if address == "everyone" { talkTo = nil }
             sentOnce = true
             return
         }
