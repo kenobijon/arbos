@@ -24,6 +24,9 @@ on:
     paths:
       - "apps/ios/**"
       - ".github/workflows/ios.yml"
+      # The phone bundles the tree avatars: an art drop is a new TestFlight build.
+      - "assets/avatars/trees/manifest.json"
+      - "assets/avatars/trees/lottie/**"
   workflow_dispatch:
     inputs:
       upload:
