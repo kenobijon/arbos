@@ -236,8 +236,10 @@ impl AppState {
             source_name,
             pairing: None,
             account: None,
-            mark: decode_image(include_bytes!("../../../site/assets/logo/arbos-macos-icon-1024.png"))
-                .map(Arc::new),
+            mark: decode_image(include_bytes!(
+                "../../../site/assets/logo/arbos-macos-icon-1024.png"
+            ))
+            .map(Arc::new),
             first_project_pending: false,
             device_id: None,
             projects: Vec::new(),
