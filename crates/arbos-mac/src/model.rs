@@ -680,6 +680,86 @@ pub struct RoutineRun {
     pub note: Option<String>,
 }
 
+/// One platform row in Settings → Channels (`GET /channels` `platforms[]`, F7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelPlatformState {
+    Configured,
+    Missing,
+    Mock,
+    #[serde(other)]
+    Other,
+}
+
+impl ChannelPlatformState {
+    pub fn label(self) -> &'static str {
+        match self {
+            ChannelPlatformState::Configured => "Configured",
+            ChannelPlatformState::Missing => "Missing credentials",
+            ChannelPlatformState::Mock => "Mock",
+            ChannelPlatformState::Other => "Unknown",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ChannelPlatform {
+    pub platform: String,
+    pub label: String,
+    pub state: ChannelPlatformState,
+    #[serde(default)]
+    pub detail: String,
+    #[serde(default)]
+    pub inbound: String,
+}
+
+/// One paired external chat (`GET /channels` `bindings[]`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ChannelBinding {
+    pub id: Id,
+    pub platform: String,
+    #[serde(rename = "externalChatId")]
+    pub external_chat_id: String,
+    #[serde(rename = "externalUserId")]
+    pub external_user_id: String,
+    #[serde(rename = "projectId")]
+    pub project_id: Id,
+    #[serde(rename = "chatId")]
+    pub chat_id: Id,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub bound_at: u64,
+}
+
+/// The active pairing code (10 min, one use).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ChannelPairing {
+    pub code: String,
+    #[serde(rename = "projectId")]
+    pub project_id: Id,
+    #[serde(rename = "chatId")]
+    pub chat_id: Id,
+    #[serde(rename = "expiresAt")]
+    pub expires_at: u64,
+}
+
+impl ChannelPairing {
+    pub fn seconds_left(&self) -> u64 {
+        self.expires_at.saturating_sub(now_ms()) / 1000
+    }
+}
+
+/// Settings → Channels state.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ChannelsView {
+    pub mock: bool,
+    pub platforms: Vec<ChannelPlatform>,
+    pub bindings: Vec<ChannelBinding>,
+    pub pairing: Option<ChannelPairing>,
+    pub loaded: bool,
+}
+
 /// Connection to the relay, S14.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Link {

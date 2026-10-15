@@ -12,6 +12,7 @@ use gpui::{
 
 use crate::app::{AppState, DetailsTarget};
 use crate::model::{now_ms, BoxState, Chat, Link, Project};
+use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
 use crate::ui::composer::{Composer, ComposerEvent, ComposerInput};
 use crate::ui::connectors::{ConnectorsEvent, ConnectorsPanel};
 use crate::ui::frost::{edge_faded, frosted, rounded_clip, MENU_BLUR, PANEL_BLUR};
@@ -39,6 +40,7 @@ pub struct Shell {
     settings_open: bool,
     routines: Entity<RoutinesPanel>,
     routines_open: bool,
+    channels: Entity<ChannelsPanel>,
     shake_started_at: Option<u64>,
     tab_scroll: gpui::ScrollHandle,
     /// Tab index to scroll into view on the next frame (new/selected tab).
@@ -115,6 +117,18 @@ impl Shell {
             },
         )
         .detach();
+        let channels = cx.new(|cx| ChannelsPanel::new(state.clone(), cx));
+        cx.observe(&channels, |_, _, cx| cx.notify()).detach();
+        cx.subscribe(
+            &channels,
+            |this, _, event: &ChannelsEvent, cx| match event {
+                ChannelsEvent::Back => {
+                    this.settings_open = true;
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
         let skills = cx.new(|cx| SkillsPanel::new(state.clone(), cx));
         cx.observe(&skills, |_, _, cx| cx.notify()).detach();
 
@@ -130,6 +144,7 @@ impl Shell {
             settings_open: false,
             routines,
             routines_open: false,
+            channels,
             shake_started_at: None,
             tab_scroll: gpui::ScrollHandle::new(),
             reveal_tab: None,
@@ -1535,6 +1550,26 @@ impl Shell {
                 )
                 .child(
                     div()
+                        .id("settings-channels")
+                        .flex()
+                        .items_center()
+                        .px(px(10.0))
+                        .py(px(6.0))
+                        .rounded(px(6.0))
+                        .text_size(px(12.5))
+                        .text_color(theme.text)
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.surface_2))
+                        .child(div().flex_1().child("Channels"))
+                        .child(div().text_color(theme.text_faint).child("›"))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.settings_open = false;
+                            this.channels.update(cx, |p, cx| p.show(cx));
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    div()
                         .id("settings-skills")
                         .flex()
                         .items_center()
@@ -1894,6 +1929,9 @@ impl Render for Shell {
         }
         if self.routines_open {
             root = root.child(self.routines.clone());
+        }
+        if self.channels.read(cx).is_open() {
+            root = root.child(self.channels.clone());
         }
         if self.skills.read(cx).open {
             root = root.child(self.skills.clone());
