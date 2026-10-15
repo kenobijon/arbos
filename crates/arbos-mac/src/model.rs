@@ -177,6 +177,63 @@ impl ToolCall {
     }
 }
 
+/// What an attachment is, for the card's icon and layout (F10). Unknown strings decode as `File`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentKind {
+    Image,
+    Video,
+    Slides,
+    Doc,
+    Sheet,
+    Pdf,
+    Audio,
+    #[serde(other)]
+    File,
+}
+
+impl AttachmentKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            AttachmentKind::Image => "Image",
+            AttachmentKind::Video => "Video",
+            AttachmentKind::Slides => "Slides",
+            AttachmentKind::Doc => "Document",
+            AttachmentKind::Sheet => "Spreadsheet",
+            AttachmentKind::Pdf => "PDF",
+            AttachmentKind::Audio => "Audio",
+            AttachmentKind::File => "File",
+        }
+    }
+
+    fn from_name_and_mime(name: &str, mime: &str) -> Self {
+        let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+        match ext.as_str() {
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "heic" => {
+                return AttachmentKind::Image
+            }
+            "mp4" | "mov" | "webm" | "mkv" => return AttachmentKind::Video,
+            "pptx" | "ppt" | "key" | "odp" => return AttachmentKind::Slides,
+            "docx" | "doc" | "odt" | "rtf" | "md" | "txt" => return AttachmentKind::Doc,
+            "xlsx" | "xls" | "csv" | "ods" => return AttachmentKind::Sheet,
+            "pdf" => return AttachmentKind::Pdf,
+            "mp3" | "wav" | "m4a" | "ogg" | "flac" => return AttachmentKind::Audio,
+            _ => {}
+        }
+        if mime.starts_with("image/") {
+            AttachmentKind::Image
+        } else if mime.starts_with("video/") {
+            AttachmentKind::Video
+        } else if mime.starts_with("audio/") {
+            AttachmentKind::Audio
+        } else if mime == "application/pdf" {
+            AttachmentKind::Pdf
+        } else {
+            AttachmentKind::File
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Attachment {
@@ -184,6 +241,39 @@ pub struct Attachment {
     pub mime: String,
     #[serde(rename = "ref", default)]
     pub blob_ref: Option<String>,
+    /// Size on the relay, when the producer knew it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<AttachmentKind>,
+    /// Caption for the card; the file name when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
+impl Attachment {
+    pub fn kind(&self) -> AttachmentKind {
+        self.kind
+            .unwrap_or_else(|| AttachmentKind::from_name_and_mime(&self.name, &self.mime))
+    }
+
+    pub fn title(&self) -> &str {
+        self.title
+            .as_deref()
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or(&self.name)
+    }
+
+    /// "1.2 MB" style size, empty when unknown.
+    pub fn size_label(&self) -> String {
+        match self.bytes {
+            None => String::new(),
+            Some(b) if b < 1024 => format!("{b} B"),
+            Some(b) if b < 1024 * 1024 => format!("{:.0} KB", b as f64 / 1024.0),
+            Some(b) if b < 1024 * 1024 * 1024 => format!("{:.1} MB", b as f64 / (1024.0 * 1024.0)),
+            Some(b) => format!("{:.2} GB", b as f64 / (1024.0 * 1024.0 * 1024.0)),
+        }
+    }
 }
 
 /// One row of `messages[].parts` (`crdt-sync.md` §6.2). Unknown kinds decode

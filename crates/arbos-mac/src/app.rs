@@ -3,7 +3,7 @@
 //! (zeron-study §4.4 step 4). It owns the sync channel; nothing here touches
 //! GPUI elements.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -12,8 +12,8 @@ use gpui_tokio::Tokio;
 use tokio::sync::mpsc;
 
 use crate::model::{
-    new_id, now_ms, BoxState, ChannelsView, Chat, ConnectorsView, Effort, Id, Link, LocalView,
-    Message, MessageStatus, Part, Project, ProjectDocView, QuestionState, Role, Routine,
+    new_id, now_ms, AttachmentKind, BoxState, ChannelsView, Chat, ConnectorsView, Effort, Id, Link,
+    LocalView, Message, MessageStatus, Part, Project, ProjectDocView, QuestionState, Role, Routine,
     RoutineRun, RoutineTrigger, Skill, StatusKind,
 };
 use crate::sync::{ClientCommand, SyncEvent, SyncSource};
@@ -91,6 +91,10 @@ pub struct AppState {
     pub messages: HashMap<Id, Vec<Message>>,
     pub chat_ui: HashMap<Id, ChatUi>,
     pub blobs: HashMap<String, BlobView>,
+    /// Decoded inline thumbnails of image attachments, by blob key (F10).
+    pub thumbnails: HashMap<String, Arc<RenderImage>>,
+    /// Thumbnail fetches in flight or failed (never asked twice).
+    thumbnails_requested: HashSet<String>,
     pub browser_frame: Option<Arc<RenderImage>>,
     pub browser_frames_seen: u64,
     pub notices: Vec<Notice>,
@@ -196,6 +200,8 @@ impl AppState {
             messages: HashMap::new(),
             chat_ui: HashMap::new(),
             blobs: HashMap::new(),
+            thumbnails: HashMap::new(),
+            thumbnails_requested: HashSet::new(),
             browser_frame: None,
             browser_frames_seen: 0,
             notices: Vec::new(),
@@ -397,6 +403,20 @@ impl AppState {
                 self.details_open = Some(DetailsTarget::Blob(key));
                 cx.notify();
             }
+            SyncEvent::Thumbnail { key, bytes } => {
+                if let Some(image) = decode_jpeg(&bytes) {
+                    self.thumbnails.insert(key, Arc::new(image));
+                    if let Some(chat_id) = self.active_chat_id() {
+                        cx.emit(AppEvent::TranscriptChanged { chat_id });
+                    }
+                    cx.notify();
+                }
+            }
+            SyncEvent::AttachmentSaved { path } => {
+                self.push_notice(format!("Saved to {}", path.display()));
+                crate::ui::attachments::reveal(&path);
+                cx.notify();
+            }
             SyncEvent::BrowserFrame { project_id, jpeg } => {
                 if self.selected_project.as_deref() != Some(project_id.as_str()) {
                     return;
@@ -502,11 +522,13 @@ impl AppState {
                     ui.composer_dropped = true;
                 }
                 self.messages.insert(chat_id.clone(), messages);
+                self.request_thumbnails(&chat_id);
                 cx.emit(AppEvent::TranscriptChanged { chat_id });
                 cx.notify();
             }
             SyncEvent::MessageUpsert { chat_id, message } => {
                 let message = *message;
+                self.request_thumbnails_for(&chat_id, std::slice::from_ref(&message));
                 let list = self.messages.entry(chat_id.clone()).or_default();
                 let mut text_only = false;
                 let mut appended = 0;
@@ -834,6 +856,9 @@ impl AppState {
                         .to_string(),
                     mime: "application/octet-stream".into(),
                     blob_ref: None,
+                    bytes: None,
+                    kind: None,
+                    title: None,
                 },
             })
             .collect();
@@ -1330,6 +1355,58 @@ impl AppState {
             project_id,
             key,
             save,
+        });
+        cx.notify();
+    }
+
+    /// Ask the source for the bytes of every image attachment in a chat that has no thumbnail yet.
+    fn request_thumbnails(&mut self, chat_id: &Id) {
+        let messages = self.messages.get(chat_id).cloned().unwrap_or_default();
+        self.request_thumbnails_for(chat_id, &messages);
+    }
+
+    fn request_thumbnails_for(&mut self, chat_id: &Id, messages: &[Message]) {
+        let project_id = self
+            .chats
+            .iter()
+            .find(|(_, tabs)| tabs.iter().any(|c| &c.id == chat_id))
+            .map(|(pid, _)| pid.clone())
+            .or_else(|| self.selected_project.clone());
+        let Some(project_id) = project_id else {
+            return;
+        };
+        for message in messages {
+            for part in &message.parts {
+                let Part::Attachment { attachment, .. } = part else {
+                    continue;
+                };
+                if attachment.kind() != AttachmentKind::Image {
+                    continue;
+                }
+                let Some(key) = attachment.blob_ref.clone() else {
+                    continue;
+                };
+                if !self.thumbnails_requested.insert(key.clone()) {
+                    continue;
+                }
+                self.command(ClientCommand::FetchThumbnail {
+                    project_id: project_id.clone(),
+                    key,
+                });
+            }
+        }
+    }
+
+    /// Download an attachment to `~/Downloads/<name>`; the source answers with `AttachmentSaved`.
+    pub fn download_attachment(&mut self, key: String, name: String, cx: &mut Context<Self>) {
+        let Some(project_id) = self.selected_project.clone() else {
+            return;
+        };
+        self.push_notice(format!("Downloading {name}…"));
+        self.command(ClientCommand::DownloadAttachment {
+            project_id,
+            key,
+            name,
         });
         cx.notify();
     }
