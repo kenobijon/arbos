@@ -437,6 +437,12 @@ impl Agent {
     /// Router prompt (byte-stable, first) + project instructions + T0/T1 (design §6.9 layout).
     pub fn write_system_prompt(&self) -> Result<()> {
         let mut s = String::from(include_str!("../prompts/router.md"));
+        // One box, many workspaces (D70): the project's files live in its own folder, not /work.
+        s.push_str(&format!(
+            "\n\n## This project\n\nProject \"{}\". Its folder is `{}`: every file you create or read for this project goes there (relative paths resolve there; do not use `/work` itself, other folders under `/work` belong to other projects).\n",
+            self.cfg.project_name,
+            self.cfg.work_dir.display()
+        ));
         if !self.cfg.instructions.trim().is_empty() {
             s.push_str("\n\n## Project instructions\n\n");
             s.push_str(self.cfg.instructions.trim());
@@ -1730,6 +1736,10 @@ impl Agent {
     fn build_pack(&self, name: &str, purpose: &str, brief: &str, data_heavy: bool) -> String {
         let mut s = String::new();
         s.push_str(&format!("# Task: {name}\n\n{purpose}\n\n{brief}\n\n"));
+        s.push_str(&format!(
+            "## Project folder\n\n`{}` (your working directory). Keep every file of this project there; other folders under `/work` belong to other projects.\n\n",
+            self.cfg.work_dir.display()
+        ));
         if !self.cfg.instructions.trim().is_empty() {
             s.push_str(&format!(
                 "## Project instructions\n\n{}\n\n",
