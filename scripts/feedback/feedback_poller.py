@@ -42,7 +42,7 @@ Config comes from the environment (systemd EnvironmentFile=/etc/arbos/feedback.e
 
 Only the standard library plus `cryptography` (for the ES256 App Store Connect token).
 
-CLI:  feedback_poller.py [run] | status | set-cursor <ISO-8601> | inject <image> "<comment>" [ios|mac]
+CLI:  feedback_poller.py [run] | status | set-cursor <ISO-8601> | inject <image> "<comment>" [ios|mac] | requeue <id>…
 """
 
 from __future__ import annotations
@@ -1080,12 +1080,18 @@ class Loop:
                                 f"shape (`fix(feedback): <summary> [feedback {fid}]`), pull --rebase, and push to main again. "
                                 "Compiler output:\n\n```\n" + "\n".join(errors or ["(no error lines captured; open the run)"]) + "\n```\n\n"
                                 "End with the SUMMARY:/PUSHED: lines again.")
-                    self.store.record_launch()
                     try:
                         run = self.cursor.followup(st["agent_id"], followup)
                     except HttpError as e:
+                        if e.status == 409:
+                            # The agent is still finishing its last run; ask again next tick.
+                            st["retries"] -= 1
+                            self.store.save_state(fid, st)
+                            log(f"[{fid}] agent busy; iOS follow-up deferred")
+                            return
                         self.fail(fid, st, f"iOS build failed; follow-up could not start (HTTP {e.status})", extra="\n".join(errors))
                         return
+                    self.store.record_launch(st.get("tester_key", ""))
                     st.update(status="running", run_id=run["id"], launched=iso(), ios_failed_run=ios["html_url"])
                     self.store.save_state(fid, st)
                     self.store.event(fid, "retry", run=ios["html_url"])
@@ -1117,33 +1123,38 @@ class Loop:
                 self.store.event(fid, "release_failed", run=rel["html_url"])
                 self.gh.comment(st["issue"], f"Release workflow failed: {rel['html_url']} (the iOS build is unaffected).")
         if st.get("expects_ci") and ci and ci["status"] == "completed" and ci["conclusion"] != "success" and not st.get("ci_failed_noted"):
-            st["ci_failed_noted"] = True
             errors = self.gh.run_error_lines(ci["id"])
             if st.get("retries", 0) < 1 and not (self.rate_limit_reason() or "").endswith("already today"):
-                st["retries"] = st.get("retries", 0) + 1
                 followup = (f"CI on `main` failed after your push ({ci['html_url']}): fmt, clippy (-D warnings) or tests. "
                             "Fix it with the smallest change, run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings` "
                             f"and `cargo test --workspace --locked` before pushing, keep the commit message shape (`fix(feedback): <summary> [feedback {fid}]`), "
                             "pull --rebase, push to main. Output:\n\n```\n" + "\n".join(errors or ["(no error lines captured; open the run)"]) + "\n```\n\n"
                             "End with the SUMMARY:/PUSHED: lines again.")
-                self.store.record_launch(st.get("tester_key", ""))
                 try:
                     run = self.cursor.followup(st["agent_id"], followup)
+                except HttpError as e:
+                    if e.status == 409:
+                        self.store.save_state(fid, st)
+                        log(f"[{fid}] agent busy; CI follow-up deferred")
+                        return
+                    log(f"[{fid}] CI follow-up could not start: {e}")
+                    run = None
+                if run:
+                    st["retries"] = st.get("retries", 0) + 1
+                    self.store.record_launch(st.get("tester_key", ""))
                     st.update(status="running", run_id=run["id"], launched=iso(), ci_failed_run=ci["html_url"])
-                    st.pop("ci_failed_noted", None)
                     self.store.save_state(fid, st)
                     self.store.event(fid, "retry", run=ci["html_url"])
                     self.gh.comment(st["issue"], f"CI failed: {ci['html_url']}. Sent the errors back to the agent for one retry.\n\n```\n" + "\n".join(errors[:20]) + "\n```")
                     return
-                except HttpError as e:
-                    log(f"[{fid}] CI follow-up could not start: {e}")
+            st["ci_failed_noted"] = True
             self.store.event(fid, "ci_failed", run=ci["html_url"])
-            self.gh.comment(st["issue"], f"CI failed on this commit: {ci['html_url']}. No edge release will be built from it; needs a human.")
-            self.gh.set_labels(st["issue"], ["needs-human"], [])
+            self.fail(fid, st, f"CI failed on the pushed commit: {ci['html_url']} (no edge release from it)", extra="\n".join(errors))
+            return
 
         # done?
         ios_ok = (not st.get("expects_ios")) or bool(st.get("testflight_ready_at"))
-        mac_ok = (not st.get("expects_ci")) or bool(st.get("release_done")) or bool(st.get("ci_failed_noted"))
+        mac_ok = (not st.get("expects_ci")) or bool(st.get("release_done"))
         if ios_ok and mac_ok and (st.get("expects_ios") or st.get("expects_ci")):
             self.ship(fid, st)
             return
@@ -1233,6 +1244,23 @@ def main(argv: list[str]) -> int:
             print(__doc__)
             return 2
         inject(cfg, Path(argv[2]), argv[3], argv[4] if len(argv) > 4 else None)
+        return 0
+    if cmd == "requeue":
+        store = Store(cfg)
+        loop = Loop(cfg)
+        for fid in argv[2:]:
+            st = store.state(fid)
+            if not st:
+                print(f"{fid}: unknown")
+                continue
+            info = store.submission(fid)
+            for k in ("issue", "issue_url", "agent_id", "agent_url", "run_id", "commit", "error", "deferred_reason", "duplicate_of"):
+                st.pop(k, None)
+            tier = loop.tier(info)
+            st.update(status="queued", retries=0, tier=tier, tester=loop.tester_label(info, tier), tester_key=loop.tester_key(info))
+            store.save_state(fid, st)
+            store.event(fid, "requeued", tier=tier, tester=st["tester"])
+            print(f"{fid}: queued ({tier}, {st['tester']})")
         return 0
     if cmd == "set-cursor":
         store = Store(cfg)

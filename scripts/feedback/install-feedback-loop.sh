@@ -143,7 +143,7 @@ fi
 say "cli wrapper"
 cat > /usr/local/bin/arbos-feedback <<'EOF2'
 #!/usr/bin/env bash
-# arbos-feedback status | inject <image> "<comment>" [ios|mac] | set-cursor <ISO> | run  — as root.
+# arbos-feedback status | inject <image> "<comment>" [ios|mac] | set-cursor <ISO> | requeue <id>… | run  — as root.
 set -euo pipefail
 set -a; . /etc/arbos/feedback.env; set +a
 exec sudo -E -u arbos-feedback /usr/bin/python3 /opt/arbos-feedback/feedback_poller.py "$@"
