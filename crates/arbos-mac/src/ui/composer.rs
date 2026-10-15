@@ -1322,13 +1322,31 @@ impl Render for Composer {
             );
         }
 
+        // `settings.modelNote`: the box replaced an unknown model id.
+        let model_note = self
+            .state
+            .read(cx)
+            .selected_doc()
+            .map(|d| d.model_note.clone())
+            .filter(|n| !n.is_empty());
         let mut root = div()
             .relative()
             .w_full()
             .flex()
             .flex_col()
             .when_some(tasks_strip, |el, strip| el.child(strip))
-            .child(frosted(COMPOSER_RADIUS, PANEL_BLUR, pill));
+            .child(frosted(COMPOSER_RADIUS, PANEL_BLUR, pill))
+            .when_some(model_note, |el, note| {
+                el.child(
+                    div()
+                        .w_full()
+                        .px(px(14.0))
+                        .pt(px(6.0))
+                        .text_size(px(11.0))
+                        .text_color(theme.warn)
+                        .child(note),
+                )
+            });
         if let Some(picker) = self.open_picker {
             root = root.child(self.render_picker_menu(picker, cx));
         }

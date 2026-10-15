@@ -197,6 +197,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         turn: None,
                         decision: None,
                         subagent_id: None,
+                        subagent_name: None,
                         in_reply_to: None,
                         usage: None,
                         return_contract: None,
@@ -239,6 +240,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         turn: None,
                         decision: None,
                         subagent_id: None,
+                        subagent_name: None,
                         in_reply_to: None,
                         usage: None,
                         return_contract: None,
@@ -523,6 +525,7 @@ fn emit_project_docs(shared: &Shared) {
         status: json!({ "box": "awake", "runningTurns": 0, "spendTodayUsd": 3.87 }),
         settings: json!({ "agentModel": MODELS[0], "agentEffort": "high" }),
         memory_t1: "- The UI is a messenger: rail left, chat center, nothing else at rest.\n- Jacob prefers conservative defaults chosen without asking.".into(),
+        model_note: String::new(),
     };
     let _ = shared.events.send(SyncEvent::ProjectDoc {
         project_id: PROJECT_ARBOS.into(),
@@ -818,6 +821,7 @@ async fn run_turn(
             turn: None,
             decision: None,
             subagent_id: None,
+            subagent_name: None,
             in_reply_to: None,
             usage: None,
             return_contract: None,
@@ -958,7 +962,7 @@ async fn run_turn(
                     0,
                     &Part::Status {
                         id: new_id(),
-                        code: StatusKind::SubagentWorking,
+                        code: StatusKind::Working,
                         message: "Working in sandbox · starting browser · 00:00".into(),
                     },
                 );
@@ -1287,6 +1291,7 @@ impl Seeder<'_> {
             turn: None,
             decision: None,
             subagent_id: None,
+            subagent_name: None,
             in_reply_to: None,
             usage: None,
             return_contract: None,
@@ -1315,6 +1320,7 @@ impl Seeder<'_> {
             turn: Some(turn),
             decision: None,
             subagent_id: None,
+            subagent_name: None,
             in_reply_to: None,
             usage: None,
             return_contract: None,
@@ -1415,7 +1421,7 @@ fn seed_docs(shared: &Arc<Shared>) {
             vec![
                 Part::Status {
                     id: new_id(),
-                    code: StatusKind::SubagentWorking,
+                    code: StatusKind::Working,
                     message: "Worked in sandbox · 4 actions · 00:41".into(),
                 },
                 Part::Tool {

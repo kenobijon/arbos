@@ -12,7 +12,7 @@ use gpui::{
 };
 
 use crate::app::{AppEvent, AppState, DetailsTarget};
-use crate::model::{Attachment, Id, Message, MessageStatus, Part, Role, StatusKind};
+use crate::model::{Attachment, Id, Message, MessageStatus, Part, Role, StatusKind, TurnKind};
 use crate::ui::cards;
 use crate::ui::frost::edge_faded;
 use crate::ui::markdown::{inline_spans, split_blocks, Block};
@@ -525,9 +525,10 @@ pub fn build_rows(messages: &[Message]) -> Vec<Row> {
                             message_id: message.id.clone(),
                             kind: RowKind::AskUser { text: text.clone() },
                         }),
+                        // Thin notes the user should see: stopped, failed, fixture notes.
                         Part::Status {
                             id,
-                            code: StatusKind::Note,
+                            code: StatusKind::Note | StatusKind::Stopped | StatusKind::Failed,
                             message: text,
                         } => rows.push(Row {
                             version: hash_version(text, false),
@@ -551,6 +552,7 @@ pub fn build_rows(messages: &[Message]) -> Vec<Row> {
                         // Everything the agent did, not said: Details drawer only.
                         Part::Status { .. }
                         | Part::Tool { .. }
+                        | Part::SubagentResult { .. }
                         | Part::Reasoning { .. }
                         | Part::Diff { .. }
                         | Part::File { .. }
@@ -559,26 +561,26 @@ pub fn build_rows(messages: &[Message]) -> Vec<Row> {
                         | Part::Unknown => {}
                     }
                 }
+                // A finished progress turn (status events only) collapses to
+                // nothing; the prose result arrives as its own message.
+                let is_progress = message.turn.map(TurnKind::is_progress).unwrap_or(false);
                 let shown_any = rows.iter().any(|r| r.message_id == message.id);
-                if !streaming && message.role == Role::Assistant && !shown_any {
-                    rows.push(Row {
-                        version: 1,
-                        id: format!("{}#empty", message.id),
-                        message_id: message.id.clone(),
-                        kind: RowKind::Note {
-                            text: match message.status {
-                                MessageStatus::Error => {
-                                    "The turn failed before it said anything.".into()
-                                }
-                                MessageStatus::Cancelled => {
-                                    "Stopped before it said anything.".into()
-                                }
-                                MessageStatus::Done
-                                | MessageStatus::Queued
-                                | MessageStatus::Streaming => "No reply text for this turn.".into(),
-                            },
-                        },
-                    });
+                if !streaming && message.role == Role::Assistant && !shown_any && !is_progress {
+                    let note = match message.status {
+                        MessageStatus::Error => Some("The turn failed before it said anything."),
+                        MessageStatus::Cancelled => Some("Stopped before it said anything."),
+                        MessageStatus::Done | MessageStatus::Queued | MessageStatus::Streaming => {
+                            None
+                        }
+                    };
+                    if let Some(text) = note {
+                        rows.push(Row {
+                            version: 1,
+                            id: format!("{}#empty", message.id),
+                            message_id: message.id.clone(),
+                            kind: RowKind::Note { text: text.into() },
+                        });
+                    }
                 }
                 if message.status == MessageStatus::Error
                     && !message
@@ -606,7 +608,7 @@ pub fn build_rows(messages: &[Message]) -> Vec<Row> {
                         message_id: message.id.clone(),
                         kind: RowKind::Working { label },
                     });
-                } else if message.role == Role::Assistant {
+                } else if message.role == Role::Assistant && !is_progress {
                     let meta = meta_line(message);
                     if !meta.is_empty() {
                         rows.push(Row {

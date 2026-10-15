@@ -73,9 +73,12 @@ pub fn status_row(code: StatusKind, text: &str, live: bool, theme: &Theme, cx: &
                     ),
             ),
         StatusKind::Deciding
-        | StatusKind::SubagentWorking
-        | StatusKind::SubagentDone
-        | StatusKind::ToolStart
+        | StatusKind::Working
+        | StatusKind::Step
+        | StatusKind::Queued
+        | StatusKind::Done
+        | StatusKind::Failed
+        | StatusKind::Stopped
         | StatusKind::Handoff
         | StatusKind::Note
         | StatusKind::Other => {

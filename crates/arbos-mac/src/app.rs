@@ -432,9 +432,17 @@ impl AppState {
             .messages_of(chat_id)
             .iter()
             .filter(|m| m.is_streaming() && m.role == Role::Assistant)
-            .map(|m| RunningTask {
-                label: m.working_label().unwrap_or_else(|| "Working…".to_string()),
-                stoppable: true,
+            .map(|m| {
+                let step = m.working_label().unwrap_or_else(|| "Working…".to_string());
+                RunningTask {
+                    label: match &m.subagent_name {
+                        Some(name) if !step.starts_with(name.as_str()) => {
+                            format!("{name} · {step}")
+                        }
+                        Some(_) | None => step,
+                    },
+                    stoppable: true,
+                }
             })
             .collect();
         if let Some(doc) = self.selected_doc() {
@@ -617,6 +625,7 @@ impl AppState {
                 turn: None,
                 decision: None,
                 subagent_id: None,
+                subagent_name: None,
                 in_reply_to: None,
                 usage: None,
                 return_contract: None,

@@ -477,11 +477,19 @@ fn emit_project_doc(shared: &Shared, project_id: &str) {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string(),
+        model_note: view_settings_note(&doc.doc),
     };
     let _ = shared.events.send(SyncEvent::ProjectDoc {
         project_id: project_id.to_string(),
         view,
     });
+}
+
+fn view_settings_note(doc: &loro::LoroDoc) -> String {
+    match doc.get_map("settings").get("modelNote") {
+        Some(loro::ValueOrContainer::Value(loro::LoroValue::String(s))) => s.to_string(),
+        Some(_) | None => String::new(),
+    }
 }
 
 /// Open a room once; `key` is the docs map key, `room_chat` the URL segment.
@@ -1030,6 +1038,7 @@ async fn send_message(
             turn: None,
             decision: None,
             subagent_id: None,
+            subagent_name: None,
             in_reply_to: None,
             usage: None,
             return_contract: None,

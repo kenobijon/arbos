@@ -101,10 +101,22 @@ pub enum MessageStatus {
 pub enum TurnKind {
     Reply,
     Act,
+    /// Hand-off ack: a new subagent was started.
+    New,
+    /// Progress message of a subagent (status events only).
     Spawn,
     Wake,
+    /// Prose written by the main agent about a finished subagent.
+    SubagentResult,
     #[serde(other)]
     Other,
+}
+
+impl TurnKind {
+    /// Progress messages carry status events only; no prose is expected.
+    pub fn is_progress(self) -> bool {
+        matches!(self, TurnKind::Spawn | TurnKind::Wake)
+    }
 }
 
 /// `turn` is written by the box as `{ "kind": "reply" }` and by older
@@ -248,6 +260,20 @@ pub enum Part {
         lines: u32,
         blob_ref: Option<String>,
     },
+    /// Raw subagent output; always `hidden: true` (Details drawer only).
+    SubagentResult {
+        id: Id,
+        #[serde(default)]
+        text: String,
+        #[serde(default)]
+        subagent_id: Option<String>,
+        #[serde(default)]
+        status: Option<String>,
+        #[serde(default)]
+        return_contract: Option<serde_json::Value>,
+        #[serde(default)]
+        duration_ms: Option<u64>,
+    },
     /// S16 browser card.
     Browser {
         id: Id,
@@ -263,16 +289,25 @@ pub enum Part {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StatusKind {
+    /// Start of every user turn.
     Deciding,
-    SubagentWorking,
-    /// Box: "{name} · {status} · {secs}s" when a subagent finishes.
-    SubagentDone,
-    /// Box: "{tool} {one-line input}" when an act tool starts (S17).
-    ToolStart,
+    /// Act accepted / subagent slot acquired / result turn starting.
+    Working,
+    /// One tool call; the message is the short label for the working line.
+    Step,
+    /// Subagent waits for a slot.
+    Queued,
+    /// Subagent finished (collapses).
+    Done,
+    /// Subagent failed.
+    Failed,
+    /// User pressed stop mid-turn.
+    Stopped,
     #[serde(alias = "waiting_user")]
     AskUser,
     #[serde(alias = "handed_off")]
     Handoff,
+    /// Fixture-only thin note.
     Note,
     #[serde(other)]
     Other,
@@ -295,6 +330,8 @@ pub struct Message {
     pub decision: Option<String>,
     #[serde(default)]
     pub subagent_id: Option<String>,
+    #[serde(default)]
+    pub subagent_name: Option<String>,
     #[serde(default)]
     pub in_reply_to: Option<String>,
     /// Token usage as the box reports it (shape varies by harness).
@@ -347,8 +384,9 @@ impl Message {
             .find_map(|p| match p {
                 Part::Status {
                     code:
-                        StatusKind::ToolStart
-                        | StatusKind::SubagentWorking
+                        StatusKind::Step
+                        | StatusKind::Working
+                        | StatusKind::Queued
                         | StatusKind::Deciding
                         | StatusKind::Handoff,
                     message,
@@ -421,6 +459,8 @@ pub struct ProjectDocView {
     pub status: serde_json::Value,
     pub settings: serde_json::Value,
     pub memory_t1: String,
+    /// `settings.modelNote`: set when a model id was replaced by a default.
+    pub model_note: String,
 }
 
 /// Connection to the relay, S14.

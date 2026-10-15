@@ -1069,8 +1069,41 @@ impl Shell {
                     if !steps.is_empty() {
                         sections.push(("Steps · status events".into(), steps));
                     }
+                    if let Some(name) = &m.subagent_name {
+                        sections.push(("Subagent".into(), vec![("Name".into(), name.clone())]));
+                    }
                     if let Some(c) = &m.return_contract {
                         sections.push(("Return contract".into(), json_rows(c)));
+                    }
+                    for p in m.parts.iter().chain(m.hidden_parts.iter()) {
+                        if let crate::model::Part::SubagentResult {
+                            text,
+                            status,
+                            duration_ms,
+                            ..
+                        } = p
+                        {
+                            sections.push((
+                                "Subagent result (raw)".into(),
+                                vec![
+                                    (
+                                        "Status".into(),
+                                        status.clone().unwrap_or_else(|| "—".into()),
+                                    ),
+                                    (
+                                        "Duration".into(),
+                                        duration_ms
+                                            .map(|d| format!("{:.1} s", d as f64 / 1000.0))
+                                            .unwrap_or_else(|| "—".into()),
+                                    ),
+                                ],
+                            ));
+                            let mut head: String = text.chars().take(4_000).collect();
+                            if text.len() > head.len() {
+                                head.push_str("\n…");
+                            }
+                            preview = Some(head);
+                        }
                     }
                 }
                 if let Some(doc) = state.selected_doc() {
