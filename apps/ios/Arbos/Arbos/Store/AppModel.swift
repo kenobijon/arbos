@@ -58,6 +58,9 @@ final class AppModel: ObservableObject {
     /// Chat ids with unread rows (per device, from head_seq > read_seq and pushes).
     @Published private(set) var peopleUnread: Set<String> = []
     @Published private(set) var blocked: [Person] = []
+    /// Every Arbos user the relay knows (members + invited), for the New Message sheet.
+    @Published var directory: [Person] = []
+    private var directoryLoadedAt: Int64 = 0
     /// The people chat currently on screen; pushes for it never notify.
     var visibleChatId: String?
     private var notifiedPushIds: Set<String> = []
@@ -660,7 +663,60 @@ final class AppModel: ObservableObject {
 
     /// Search handles (prefix) for the new-chat sheet.
     func searchPeople(_ q: String) async -> [Person] {
-        (try? await api.searchUsers(q)) ?? []
+        if isFixture {
+            let needle = q.lowercased()
+            return directory.filter { $0.handle.lowercased().contains(needle) || ($0.name ?? "").lowercased().contains(needle) }
+        }
+        return (try? await api.searchUsers(q)) ?? []
+    }
+
+    /// The relay has no directory endpoint yet, only prefix search, so the
+    /// directory is the union of one-letter searches (36 calls, cached 10 min),
+    /// keeping people who are on Arbos (member/invited) and dropping the
+    /// GitHub literal-login hits.
+    func loadDirectory(force: Bool = false) async {
+        guard credentials != nil, !isFixture else { return }
+        if !force, nowMs() - directoryLoadedAt < 600_000, !directory.isEmpty { return }
+        directoryLoadedAt = nowMs()
+        var seen: [String: Person] = [:]
+        await withTaskGroup(of: [Person].self) { group in
+            for ch in "abcdefghijklmnopqrstuvwxyz0123456789" {
+                group.addTask { [api] in (try? await api.searchUsers(String(ch))) ?? [] }
+            }
+            for await list in group {
+                for p in list where p.status != "github" && p.id != user?.id { seen[p.id] = p }
+            }
+        }
+        directory = seen.values.sorted { $0.handle.lowercased() < $1.handle.lowercased() }
+    }
+
+    /// People group (v2 on the relay; the app is ready for it).
+    func createGroup(handles: [String]) async -> Bool {
+        do {
+            let chat = try await api.createGroup(handles: handles)
+            if !peopleChats.contains(where: { $0.id == chat.id }) { peopleChats.insert(chat, at: 0) }
+            ensureRoom(projectId: peopleSlot, key: chat.id, roomChat: chat.id)
+            path = [.chat(chatId: chat.id, projectId: peopleSlot)]
+            return true
+        } catch {
+            let e = error as? RelayError
+            notice = Notice(text: (e?.status == 404 || e?.status == 405) ? "Groups are not on this relay yet — DMs work today." : "Could not create the group: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    /// Agent profile: rename / recolour a project (`PATCH /projects/{id}`).
+    func updateProject(_ projectId: Id, name: String? = nil, color: String? = nil, icon: String? = nil) {
+        if let i = projects.firstIndex(where: { $0.id == projectId }) {
+            if let name { projects[i].name = name }
+            if let color { projects[i].color = color }
+            if let icon { projects[i].icon = icon }
+        }
+        guard !isFixture else { return }
+        Task {
+            do { try await api.patchProject(projectId, name: name, color: color, icon: icon) }
+            catch { notice = Notice(text: "Could not save: \(error.localizedDescription)") }
+        }
     }
 
     /// Open (or create) the DM with a handle and navigate to it.

@@ -74,6 +74,13 @@ extension AppModel {
                           provider: "daytona", sandboxId: "fixture-box", spendTodayUsd: 1.6, spendCapUsd: 25,
                           workspaces: Dictionary(uniqueKeysWithValues: list.map { ($0.id, $0.id == "fx-comms" ? WorkspaceState.active : .idle) }),
                           alwaysOn: DebugHooks.alwaysOn, machineTodayUsd: 2.88, reported: true)
+        directory = [
+            Person(id: "fx-u1", handle: "alex-rivera", avatarUrl: nil, name: "Alex Rivera", status: "member"),
+            Person(id: "fx-u2", handle: "jacob", avatarUrl: nil, name: "Jacob Steeves", status: "member"),
+            Person(id: "fx-u3", handle: "mira-k", avatarUrl: nil, name: "Mira Kaplan", status: "member"),
+            Person(id: "fx-u4", handle: "sam", avatarUrl: nil, name: "Sam Okafor", status: "invited"),
+            Person(id: "fx-u5", handle: "tobias", avatarUrl: nil, name: "Tobias Lund", status: "member"),
+        ]
         link = .live
     }
 

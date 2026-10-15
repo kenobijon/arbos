@@ -93,6 +93,9 @@ struct HomeView: View {
             }
         }
         .onAppear {
+            if DebugHooks.show == "newchat", DebugHooks.openProject == nil {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showNewChat = true }
+            }
             if !DebugHooks.liveDemo, let id = DebugHooks.openProject, model.path.isEmpty, let p = model.project(id) {
                 if let cid = DebugHooks.openChat, let c = model.chat(cid) { model.open(chat: c) } else { model.open(project: p) }
             }

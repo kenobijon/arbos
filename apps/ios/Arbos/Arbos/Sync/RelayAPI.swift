@@ -347,6 +347,21 @@ final class RelayAPI {
         return chat
     }
 
+    func createGroup(handles: [String]) async throws -> PeopleChat {
+        let v = try await json("POST", "/chats", body: ["kind": "group", "members": handles])
+        guard let chat = PeopleChat.parse(v) else { throw RelayError(status: 0, message: "The relay returned no chat") }
+        return chat
+    }
+
+    func patchProject(_ projectId: Id, name: String?, color: String?, icon: String?) async throws {
+        var body: [String: Any] = [:]
+        if let name { body["name"] = name }
+        if let color { body["color"] = color }
+        if let icon { body["icon"] = icon }
+        guard !body.isEmpty else { return }
+        _ = try await request("PATCH", "/projects/\(projectId)", body: body)
+    }
+
     func peopleChats() async throws -> [PeopleChat] {
         ((try await json("GET", "/chats")) as? [Any] ?? []).compactMap(PeopleChat.parse)
     }
