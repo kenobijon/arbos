@@ -10,7 +10,7 @@ use crate::state::AppState;
 
 #[derive(Debug, Clone)]
 pub enum Principal {
-    Device { id: String },
+    Device { id: String, token: String },
     Box { project_id: String },
     Admin,
 }
@@ -18,7 +18,7 @@ pub enum Principal {
 impl Principal {
     pub fn device_name(&self) -> String {
         match self {
-            Principal::Device { id } => format!("dev:{id}"),
+            Principal::Device { id, .. } => format!("dev:{id}"),
             Principal::Box { project_id } => format!("box:{project_id}"),
             Principal::Admin => "admin".to_owned(),
         }
@@ -34,6 +34,14 @@ impl Principal {
     pub fn is_box(&self) -> bool {
         matches!(self, Principal::Box { .. })
     }
+
+    /// The device's own bearer token (for URLs the relay hands back to that device only).
+    pub fn raw_token(&self) -> Option<&str> {
+        match self {
+            Principal::Device { token, .. } => Some(token),
+            Principal::Box { .. } | Principal::Admin => None,
+        }
+    }
 }
 
 /// Resolve a raw token string to a principal.
@@ -48,7 +56,10 @@ pub fn resolve(state: &AppState, token: &str) -> Option<Principal> {
     }
     let h = hash(token);
     if let Ok(Some(id)) = state.db.device_by_token_hash(&h) {
-        return Some(Principal::Device { id });
+        return Some(Principal::Device {
+            id,
+            token: token.to_owned(),
+        });
     }
     if let Ok(Some(project_id)) = state.db.project_by_box_token_hash(&h) {
         let _ = state.db.touch_sandbox(&project_id);

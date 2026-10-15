@@ -213,6 +213,32 @@ pub async fn create_box(
     Ok(sb)
 }
 
+/// Four consecutive free loopback ports for a process box (main, MCP, hook, model stub), chosen
+/// by binding rather than hashing the project id (ULID digits w–z are not base-32 digits).
+async fn allocate_local_ports(state: &AppState) -> Result<u16> {
+    let taken: std::collections::HashSet<u16> = state
+        .db
+        .list_projects()?
+        .iter()
+        .filter_map(|p| state.db.sandbox(&p.id).ok().flatten())
+        .filter_map(|s| {
+            s.box_url
+                .and_then(|u| u.rsplit(':').next().and_then(|p| p.parse().ok()))
+        })
+        .collect();
+    let mut base = 17_000u16;
+    while base < 60_000 {
+        if (0..4).all(|i| {
+            !taken.contains(&(base + i))
+                && std::net::TcpListener::bind(("127.0.0.1", base + i)).is_ok()
+        }) {
+            return Ok(base);
+        }
+        base += 4;
+    }
+    Err(anyhow!("no free local port range"))
+}
+
 async fn start_process(
     state: &AppState,
     project: &Project,
@@ -227,8 +253,17 @@ async fn start_process(
         .join(&project.id)
         .join("work");
     std::fs::create_dir_all(&work)?;
-    let port = 17_000
-        + (u64::from_str_radix(&project.id[project.id.len() - 4..], 32).unwrap_or(0) % 2000) as u16;
+    // A process box that is still alive (relay restart, double wake) must go before a new one binds.
+    if let Some(mut child) = state.local_children.lock().await.remove(&project.id) {
+        if let Some(pid) = child.id() {
+            let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+        }
+        let _ = tokio::time::timeout(Duration::from_secs(10), child.wait()).await;
+    } else if let Some(pid) = sb.local_pid {
+        let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    let port = allocate_local_ports(state).await?;
     let env = box_env(state, project, box_token, mcp_token, &state.cfg.public_url);
     let mut cmd = tokio::process::Command::new(&state.cfg.agentd_bin);
     // D2 also holds for a local box: start from an empty environment and pass an allow-list, so the
@@ -534,9 +569,25 @@ pub fn load_local_tokens(state: &AppState, project_id: &str) -> Result<Option<(S
 
 /// A client needs the box: queue a wake obligation unless it is already awake or waking.
 pub async fn ensure_awake(state: &AppState, project_id: &str, reason: &str) {
-    let (st, _) = state.box_state(project_id).await;
-    if st == BoxState::Awake || st == BoxState::Waking {
+    let (st, since) = state.box_state(project_id).await;
+    if st == BoxState::Awake {
         return;
+    }
+    if st == BoxState::Waking {
+        // A wake that never produced a box socket (the process died, the start call failed) is
+        // retried after a grace period instead of being treated as "already in progress".
+        let connected = state
+            .box_conns
+            .lock()
+            .await
+            .get(project_id)
+            .map(|c| c.0 > 0)
+            .unwrap_or(false);
+        if connected || now_ms() - since < 45_000 {
+            return;
+        }
+        tracing::warn!(%project_id, "box has been waking for >45 s without connecting; retrying");
+        let _ = state.db.finish_wake_job(project_id);
     }
     if let Err(e) = state.db.upsert_wake_job(project_id, reason) {
         tracing::warn!(error = %e, "wake job");

@@ -56,6 +56,24 @@ cargo run -p arbosctl -- timings demo                          # boot, wake, TTF
 
 `arbosctl` keeps its device token and per-chat replicas under `~/.config/arbos/` (`ARBOSCTL_CONFIG` overrides). All commands: `cargo run -p arbosctl -- --help`.
 
+Relay environment (all optional unless noted):
+
+| Variable | Meaning |
+| --- | --- |
+| `ARBOS_RELAY_LISTEN` | bind address, default `127.0.0.1:7700`; use `0.0.0.0:7700` on a server |
+| `ARBOS_RELAY_PUBLIC_URL` | the URL boxes and clients dial back (**required for Daytona boxes**), e.g. `https://relay.example.com` or a cloudflared/ngrok URL in front of the plain-HTTP relay; WebSockets pass through such tunnels |
+| `ARBOS_RELAY_DATA` | SQLite + blobs + local boxes, default `./.arbos-local/relay` |
+| `ARBOS_RELAY_ADMIN_TOKEN` | token for `POST /pair/new`; generated and logged when unset |
+| `OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | provider keys for the model proxy (never reach a box) |
+| `ARBOS_OPENAI_BASE`, `ARBOS_ANTHROPIC_BASE` | upstreams, default OpenRouter |
+| `DAYTONA_API_KEY`, `DAYTONA_API_URL`, `DAYTONA_ORG_ID` | Daytona access; without a key new projects get `process` boxes |
+| `ARBOS_DAYTONA_SNAPSHOT` | snapshot for new boxes, default `arbos-agent-0.1.0` |
+| `ARBOS_DAYTONA_DOCKERFILE`, `ARBOS_BOOTSTRAP_DIR` | dev-image path (see below) |
+| `ARBOS_AGENTD_BIN`, `ARBOS_PI_BIN`, `ARBOS_PI_EXT`, `ARBOS_PRIME_BIN`, `ARBOS_DEFAULT_HARNESS` | process-box binaries and default subagent harness |
+| `RUST_LOG` | e.g. `info,arbos_relay=debug` |
+
+Example for a public relay on one machine (the Daytona boxes dial `https://…` back): `ARBOS_RELAY_LISTEN=0.0.0.0:7700 ARBOS_RELAY_PUBLIC_URL=https://relay.example.com cargo run --release -p arbos-relay`, with TLS terminated by a reverse proxy or `cloudflared tunnel --url http://127.0.0.1:7700`. The relay itself speaks plain HTTP/WS.
+
 ## Run on Daytona
 
 With `DAYTONA_API_KEY` set, `project create` (without `--local-box`) creates a real sandbox from the snapshot named by `ARBOS_DAYTONA_SNAPSHOT` (default `arbos-agent-0.1.0`; the current registered build is `arbos-agent-0.1.2`). The relay must be reachable from the box (`ARBOS_RELAY_PUBLIC_URL`). If no production snapshot is registered yet, point the relay at the dev image instead:

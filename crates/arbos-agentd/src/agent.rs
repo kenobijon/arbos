@@ -160,6 +160,8 @@ pub struct TurnState {
     pub metrics: TurnMetrics,
     pub streamed_text: String,
     pub act_transcript: Vec<String>,
+    /// call id → args from `tool_execution_start`, so the tool part records the real input.
+    pub tool_inputs: HashMap<String, Value>,
     pub reply_extractor: ReplyExtractor,
     pub route_call_id: Option<String>,
     pub text_part_dirty: bool,
@@ -454,7 +456,16 @@ impl Agent {
             "send" => self.handle_send(chat_id, &host, &cmd).await,
             "stop" => self.handle_stop().await,
             "answer" => self.handle_send(chat_id, &host, &cmd).await,
-            "retitle" => Ok(()),
+            "retitle" => {
+                let title = cmd
+                    .payload
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim()
+                    .to_owned();
+                self.retitle(chat_id, &title).await
+            }
             "retry" => Ok(()),
             other => Err(anyhow!("unknown command kind {other}")),
         };
@@ -516,6 +527,21 @@ impl Agent {
             &user_text,
             Some(&json!({ "message_id": user_msg_id })),
         );
+        // Title from the first message (design §3.4) when the chat still has the default title.
+        if let Ok(Some(c)) = self.store.chat(chat_id) {
+            if c.title.is_empty() || c.title == "New chat" {
+                let title: String = user_text
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .chars()
+                    .take(48)
+                    .collect();
+                let _ = self
+                    .retitle(chat_id, title.trim_end_matches(['.', ',', ':', ';']).trim())
+                    .await;
+            }
+        }
         self.ensure_chat_session(chat_id).await?;
 
         let assistant_msg_id = ulid();
@@ -549,6 +575,7 @@ impl Agent {
             metrics: TurnMetrics::default(),
             streamed_text: String::new(),
             act_transcript: Vec::new(),
+            tool_inputs: HashMap::new(),
             reply_extractor: ReplyExtractor::default(),
             route_call_id: None,
             text_part_dirty: false,
@@ -734,6 +761,33 @@ impl Agent {
                 let _ = me.keepalive(true).await;
             }
         })
+    }
+
+    /// Rename a chat: registry (`PATCH /projects/{id}/chats/{chat}`), local index, and the project
+    /// doc `chats` list on the next poll.
+    pub async fn retitle(&self, chat_id: &str, title: &str) -> Result<()> {
+        if title.is_empty() {
+            return Err(anyhow!("retitle: empty title"));
+        }
+        if let Ok(Some(c)) = self.store.chat(chat_id) {
+            let _ = self
+                .store
+                .upsert_chat(chat_id, title, c.is_pinned, c.created_at);
+        }
+        let r = self
+            .http
+            .patch(format!(
+                "{}/projects/{}/chats/{}",
+                self.cfg.relay_url, self.cfg.project_id, chat_id
+            ))
+            .bearer_auth(&self.cfg.box_token)
+            .json(&json!({ "title": title }))
+            .send()
+            .await?;
+        if !r.status().is_success() {
+            return Err(anyhow!("retitle: relay HTTP {}", r.status()));
+        }
+        Ok(())
     }
 
     pub async fn keepalive(&self, turn_running: bool) -> Result<()> {
@@ -930,13 +984,14 @@ impl Agent {
                 }
             }
             Event::ToolExecutionStart {
-                tool_call_id: _,
+                tool_call_id,
                 tool_name,
                 args,
             } => {
                 if tool_name == "route" {
                     return Ok(false);
                 }
+                t.tool_inputs.insert(tool_call_id.clone(), args.clone());
                 t.metrics.tool_calls += 1;
                 let one_line = args.to_string().chars().take(120).collect::<String>();
                 t.act_transcript.push(format!("→ {tool_name} {one_line}"));
@@ -993,12 +1048,13 @@ impl Agent {
                 } else {
                     None
                 };
+                let input = t.tool_inputs.remove(tool_call_id).unwrap_or(json!({}));
                 let mut h = host.lock().await;
                 h.doc.add_tool_part(
                     &t.assistant_msg_id,
                     tool_call_id,
                     tool_name,
-                    &json!({}),
+                    &input,
                     &summary,
                     output_ref.as_deref(),
                     Some(output.len() as i64),
@@ -1328,6 +1384,7 @@ impl Agent {
         self.subagent_turns.fetch_add(1, Ordering::SeqCst);
         let keepalive = self.spawn_keepalive();
         let mut text = String::new();
+        let mut sub_tool_inputs: HashMap<String, Value> = HashMap::new();
         let mut part_id = text_part;
         let mut part_dirty = true;
         let mut usage_total = json!({});
@@ -1360,7 +1417,8 @@ impl Agent {
                     text.push_str(&d);
                 }
                 AgentEvent::ReasoningDelta(_) => {}
-                AgentEvent::ToolCall { id: _, name, input } => {
+                AgentEvent::ToolCall { id, name, input } => {
+                    sub_tool_inputs.insert(id, input.clone());
                     let one_line = input.to_string().chars().take(120).collect::<String>();
                     let mut h = host.lock().await;
                     h.doc
@@ -1397,12 +1455,13 @@ impl Agent {
                     } else {
                         None
                     };
+                    let input = sub_tool_inputs.remove(&id).unwrap_or(json!({}));
                     let mut h = host.lock().await;
                     h.doc.add_tool_part(
                         &msg_id,
                         &id,
                         &name,
-                        &json!({}),
+                        &input,
                         &summary,
                         output_ref.as_deref(),
                         Some(output.len() as i64),

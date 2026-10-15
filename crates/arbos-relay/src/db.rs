@@ -164,6 +164,7 @@ impl Db {
             "ALTER TABLE projects ADD COLUMN color TEXT NOT NULL DEFAULT '#8b7cf6'",
             [],
         );
+        let _ = c.execute("ALTER TABLE chats ADD COLUMN closed_at INTEGER", []);
         Ok(Self(Arc::new(Mutex::new(c))))
     }
 
@@ -333,6 +334,30 @@ impl Db {
         })
     }
 
+    /// Soft-close a chat (D55: history is never deleted; the tab goes away). Pinned chats refuse.
+    pub fn close_chat(&self, project_id: &str, chat_id: &str) -> Result<Option<bool>> {
+        self.with(|c| {
+            let pinned: Option<i64> = c
+                .query_row(
+                    "SELECT is_pinned FROM chats WHERE project_id = ?1 AND id = ?2",
+                    params![project_id, chat_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            match pinned {
+                None => Ok(None),
+                Some(1) => Ok(Some(false)),
+                Some(_) => {
+                    c.execute(
+                        "UPDATE chats SET closed_at = ?3 WHERE project_id = ?1 AND id = ?2",
+                        params![project_id, chat_id, now_ms()],
+                    )?;
+                    Ok(Some(true))
+                }
+            }
+        })
+    }
+
     pub fn update_chat_title(&self, project_id: &str, chat_id: &str, title: &str) -> Result<bool> {
         self.with(|c| {
             c.execute(
@@ -366,7 +391,7 @@ impl Db {
     pub fn list_chats(&self, project_id: &str) -> Result<Vec<Chat>> {
         self.with(|c| {
             let mut st = c.prepare(
-                "SELECT id, project_id, title, is_pinned, position, created_at, doc_epoch FROM chats WHERE project_id = ?1 ORDER BY position, created_at",
+                "SELECT id, project_id, title, is_pinned, position, created_at, doc_epoch FROM chats WHERE project_id = ?1 AND closed_at IS NULL ORDER BY position, created_at",
             )?;
             let rows = st.query_map(params![project_id], |r| {
                 Ok(Chat {

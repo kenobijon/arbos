@@ -2,6 +2,7 @@ mod api;
 mod auth;
 mod blobs;
 mod boxes;
+mod browser;
 mod daytona;
 mod db;
 mod proxy;
@@ -204,7 +205,11 @@ async fn main() -> anyhow::Result<()> {
         )
         .route(
             "/projects/{id}/chats/{chat}",
-            axum::routing::patch(api::patch_chat),
+            axum::routing::patch(api::patch_chat).delete(api::delete_chat),
+        )
+        .route(
+            "/projects/{id}/browser/stream",
+            get(browser::browser_stream),
         )
         .route("/projects/{id}/history/{chat}", get(api::chat_history))
         .route("/projects/{id}/status", get(api::project_status))

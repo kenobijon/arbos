@@ -324,6 +324,26 @@ pub async fn patch_chat(
     .into_response())
 }
 
+/// `DELETE /projects/{id}/chats/{chat}`: close a tab. Rows and history stay (D55); the pinned chat refuses (409).
+pub async fn delete_chat(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((id, chat)): Path<(String, String)>,
+) -> ApiResult {
+    let id = resolve_project_id(&state, &id)?;
+    if !principal.can_access_project(&id) || principal.is_box() {
+        return Err((StatusCode::FORBIDDEN, "not your project".into()));
+    }
+    match state.db.close_chat(&id, &chat).map_err(internal)? {
+        None => Ok(StatusCode::NOT_FOUND.into_response()),
+        Some(false) => Err((
+            StatusCode::CONFLICT,
+            "the pinned chat cannot be closed".into(),
+        )),
+        Some(true) => Ok(StatusCode::NO_CONTENT.into_response()),
+    }
+}
+
 /// `GET /projects/{id}/history/{chat}?before=&limit=`: older T3 turns of a chat, proxied from the box
 /// (`crdt-sync.md` §6.4). Needs the box awake; 409 otherwise.
 pub async fn chat_history(
@@ -415,7 +435,17 @@ pub async fn project_status(
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
     let (bs, since) = state.box_state(&p.id).await;
-    let provider = boxes::provider_status(&state, &p.id).await;
+    let mut provider = boxes::provider_status(&state, &p.id).await;
+    // Laptops cannot reach a Daytona preview URL without its token: hand them the relay's proxy instead.
+    if let Some(tok) = principal.raw_token() {
+        let ws = state
+            .cfg
+            .public_url
+            .replacen("https://", "wss://", 1)
+            .replacen("http://", "ws://", 1);
+        provider["browser_stream_url"] =
+            json!(format!("{ws}/projects/{}/browser/stream?token={tok}", p.id));
+    }
     let timings = state.db.timings(&p.id).map_err(internal)?;
     Ok(Json(json!({ "project_id": p.id, "state": p.state, "box": bs, "box_since": since, "provider": provider, "timings": timings })).into_response())
 }
