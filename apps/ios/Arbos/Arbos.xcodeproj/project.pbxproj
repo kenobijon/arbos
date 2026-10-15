@@ -32,8 +32,11 @@
 		A1A1AFC1950307E92773C31D /* SignInView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1663DB81AC930654B7D6C58 /* SignInView.swift */; };
 		A11743C65532A7DD3DB13DA9 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = A186CA2D73C6ABA8F66A42F3 /* Theme.swift */; };
 		A1578C1E9E55FED0F05761B7 /* Transcript.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A5ADDC945944096DDB1F56 /* Transcript.swift */; };
+		A12EFD20BAD37F1994727785 /* TreeAvatar.swift in Sources */ = {isa = PBXBuildFile; fileRef = A164D22BA633A730FB31BB3D /* TreeAvatar.swift */; };
 		A1D5B3AEBDCF93FE7CA572E6 /* VoiceModeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1FA131A56ED616D44B1D8E0 /* VoiceModeView.swift */; };
 		A1C2F6278D4FFE2C67A91076 /* Loro in Frameworks */ = {isa = PBXBuildFile; productRef = A1ECE6E6AE5F254159178833 /* Loro */; };
+		A137411B23802AF0A2964C18 /* Lottie in Frameworks */ = {isa = PBXBuildFile; productRef = A13AA99EEF34F72DE1CEE678 /* Lottie */; };
+		A1CE7422DCFF5980F0FB8F6F /* trees in Resources */ = {isa = PBXBuildFile; fileRef = A12555874C90AC4A8B6639F4 /* trees */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -62,8 +65,10 @@
 		A1663DB81AC930654B7D6C58 /* SignInView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignInView.swift; sourceTree = "<group>"; };
 		A186CA2D73C6ABA8F66A42F3 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		A1A5ADDC945944096DDB1F56 /* Transcript.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Transcript.swift; sourceTree = "<group>"; };
+		A164D22BA633A730FB31BB3D /* TreeAvatar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TreeAvatar.swift; sourceTree = "<group>"; };
 		A1FA131A56ED616D44B1D8E0 /* VoiceModeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceModeView.swift; sourceTree = "<group>"; };
 		A1D1358493A4FD5407CE1D11 /* Arbos.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Arbos.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A12555874C90AC4A8B6639F4 /* trees */ = {isa = PBXFileReference; lastKnownFileType = folder; name = trees; path = "../../../assets/avatars/trees"; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -72,6 +77,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A1C2F6278D4FFE2C67A91076 /* Loro in Frameworks */,
+				A137411B23802AF0A2964C18 /* Lottie in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -82,6 +88,7 @@
 			isa = PBXGroup;
 			children = (
 				A1564A0EBD33D8D4B92AD461,
+				A12555874C90AC4A8B6639F4,
 				A1CA9DEF8434A85687602C88,
 			);
 			sourceTree = "<group>";
@@ -170,6 +177,7 @@
 				A1663DB81AC930654B7D6C58,
 				A186CA2D73C6ABA8F66A42F3,
 				A1A5ADDC945944096DDB1F56,
+				A164D22BA633A730FB31BB3D,
 				A1FA131A56ED616D44B1D8E0,
 			);
 			path = UI;
@@ -193,6 +201,7 @@
 			name = Arbos;
 			packageProductDependencies = (
 				A1ECE6E6AE5F254159178833 /* Loro */,
+				A13AA99EEF34F72DE1CEE678 /* Lottie */,
 			);
 			productName = Arbos;
 			productReference = A1D1358493A4FD5407CE1D11 /* Arbos.app */;
@@ -223,6 +232,7 @@
 			mainGroup = A19BA62AACF9AABB98774F6F;
 			packageReferences = (
 				A1B12C4DAB52DBC6960BE255 /* XCRemoteSwiftPackageReference "loro-swift" */,
+				A1442F24100113CD3717BBCB /* XCRemoteSwiftPackageReference "lottie-spm" */,
 			);
 			productRefGroup = A1CA9DEF8434A85687602C88 /* Products */;
 			projectDirPath = "";
@@ -239,6 +249,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A1627BBC9C62B0C159B656E4 /* Assets.xcassets in Resources */,
+				A1CE7422DCFF5980F0FB8F6F /* trees in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -273,6 +284,7 @@
 				A1A1AFC1950307E92773C31D /* SignInView.swift in Sources */,
 				A11743C65532A7DD3DB13DA9 /* Theme.swift in Sources */,
 				A1578C1E9E55FED0F05761B7 /* Transcript.swift in Sources */,
+				A12EFD20BAD37F1994727785 /* TreeAvatar.swift in Sources */,
 				A1D5B3AEBDCF93FE7CA572E6 /* VoiceModeView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -404,6 +416,14 @@
 				version = 1.16.2;
 			};
 		};
+		A1442F24100113CD3717BBCB /* XCRemoteSwiftPackageReference "lottie-spm" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/airbnb/lottie-spm";
+			requirement = {
+				kind = exactVersion;
+				version = 4.6.1;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -411,6 +431,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = A1B12C4DAB52DBC6960BE255 /* XCRemoteSwiftPackageReference "loro-swift" */;
 			productName = Loro;
+		};
+		A13AA99EEF34F72DE1CEE678 /* Lottie */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A1442F24100113CD3717BBCB /* XCRemoteSwiftPackageReference "lottie-spm" */;
+			productName = Lottie;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

@@ -396,7 +396,7 @@ struct RowView: View {
             HStack(spacing: 5) {
                 Text(before)
                 if let target {
-                    BlobAvatar(project: target, theme: theme, size: 16)
+                    AgentAvatar(project: target, theme: theme, size: 16, still: true)
                 } else {
                     BlobAvatar(color: theme.muted, shape: BlobShape.pick(for: after), size: 16)
                 }

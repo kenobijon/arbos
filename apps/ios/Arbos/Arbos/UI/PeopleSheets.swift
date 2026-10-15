@@ -275,9 +275,17 @@ struct NewAgentView: View {
 
     var body: some View {
         VStack(spacing: 18) {
-            BlobAvatar(color: Theme.palette[NewAgentView.stableIndex(clean, Theme.palette.count)], shape: BlobShape.pick(for: clean), size: 92)
-                .padding(.top, 28)
-                .animation(.snappy, value: clean)
+            Group {
+                let trees = TreeAvatars.shared.characters
+                if trees.isEmpty {
+                    BlobAvatar(color: Theme.palette[NewAgentView.stableIndex(clean, Theme.palette.count)], shape: BlobShape.pick(for: clean), size: 92)
+                } else {
+                    let slug = trees[NewAgentView.stableIndex(clean, trees.count)].slug
+                    TreeCharacterView(slug: slug, size: 92).id(slug)
+                }
+            }
+            .padding(.top, 28)
+            .animation(.snappy, value: clean)
             Text(clean.isEmpty ? "Name your agent" : "@\(mentionSlug(clean))")
                 .font(.system(size: Theme.small)).foregroundStyle(theme.muted)
             TextField("", text: $name, prompt: Text("Agent name").foregroundStyle(theme.placeholder))
@@ -485,7 +493,7 @@ struct MembersSheet: View {
                     Section {
                         ForEach(chat.agents) { a in
                             HStack(spacing: 12) {
-                                if let p = a.project { BlobAvatar(project: p, theme: theme, size: 40) }
+                                if let p = a.project { AgentAvatar(project: p, theme: theme, size: 40) }
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(a.displayName).foregroundStyle(theme.text)
                                     Text("@\(mentionSlug(a.project?.name ?? a.handle)) · owned by @\(a.ownerHandle ?? "?")\(a.replyPolicy == "every_message" ? " · replies to everything" : "")")
@@ -556,7 +564,7 @@ struct AgentPicker: View {
             List(projects) { p in
                 Button { onPick(p); dismiss() } label: {
                     HStack(spacing: 12) {
-                        BlobAvatar(project: p, theme: theme, size: 40)
+                        AgentAvatar(project: p, theme: theme, size: 40)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(p.name).foregroundStyle(theme.text)
                             Text("@\(mentionSlug(p.name))").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)

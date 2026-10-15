@@ -18,9 +18,14 @@ struct SignInView: View {
                 VStack(spacing: 16) {
                     Spacer(minLength: 120)
                     HStack(spacing: -10) {
-                        BlobAvatar(color: Theme.palette[1], shape: .blob, size: 54)
-                        BlobAvatar(color: Theme.palette[0], shape: .drop, size: 54)
-                        BlobAvatar(color: Theme.palette[2], shape: .cloud, size: 54)
+                        let trees = TreeAvatars.shared.characters
+                        if trees.count >= 3 {
+                            ForEach(trees.prefix(3)) { c in TreeCharacterView(slug: c.slug, size: 54) }
+                        } else {
+                            BlobAvatar(color: Theme.palette[1], shape: .blob, size: 54)
+                            BlobAvatar(color: Theme.palette[0], shape: .drop, size: 54)
+                            BlobAvatar(color: Theme.palette[2], shape: .cloud, size: 54)
+                        }
                     }
                     .padding(.bottom, 10)
                     Text("Arbos")

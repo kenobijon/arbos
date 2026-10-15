@@ -169,6 +169,8 @@ struct Project: Identifiable, Equatable {
     /// D72 step 3: a project someone else shared with me.
     var shared: Bool = false
     var ownerHandle: String? = nil
+    /// Tree-character slug chosen by the owner (`avatar` on the relay); nil → hashed.
+    var avatar: String? = nil
 
     var shortModel: String { Project.shortModel(model) }
 

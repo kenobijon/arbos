@@ -69,7 +69,11 @@ final class AppModel: ObservableObject {
     @Published private(set) var signInError: String?
     private let webAuth = WebAuth()
     private var refreshTask: Task<Bool, Never>?
-    @Published var projects: [Project] = []
+    @Published var projects: [Project] = [] {
+        didSet {
+            if projects.map(\.id) != oldValue.map(\.id) || projects.map(\.avatar) != oldValue.map(\.avatar) { recomputeAvatars() }
+        }
+    }
     @Published var chats: [Id: [Chat]] = [:]
     @Published var messages: [Id: [Message]] = [:]
     @Published var caughtUp: Set<Id> = []
@@ -708,17 +712,39 @@ final class AppModel: ObservableObject {
     }
 
     /// Agent profile: rename / recolour a project (`PATCH /projects/{id}`).
-    func updateProject(_ projectId: Id, name: String? = nil, color: String? = nil, icon: String? = nil) {
+    func updateProject(_ projectId: Id, name: String? = nil, color: String? = nil, icon: String? = nil, avatar: String? = nil) {
         if let i = projects.firstIndex(where: { $0.id == projectId }) {
             if let name { projects[i].name = name }
             if let color { projects[i].color = color }
             if let icon { projects[i].icon = icon }
+            if let avatar { projects[i].avatar = avatar }
         }
         guard !isFixture else { return }
         Task {
-            do { try await api.patchProject(projectId, name: name, color: color, icon: icon) }
+            do { try await api.patchProject(projectId, name: name, color: color, icon: icon, avatar: avatar) }
             catch { notice = Notice(text: "Could not save: \(error.localizedDescription)") }
         }
+    }
+
+    // MARK: Tree avatars
+
+    /// Project id → tree slug (explicit `avatar`, else hashed + deduplicated).
+    /// Recomputed whenever the project list changes.
+    @Published private(set) var avatarMap: [Id: String] = [:]
+
+    func avatarSlug(for project: Project) -> String? {
+        if let slug = project.avatar, TreeAvatars.shared.has(slug) { return slug }
+        if let slug = avatarMap[project.id] { return slug }
+        // Agents from other people's lists (shared agents in a DM) are not in
+        // `projects`; hash them alone so they still get a tree.
+        let all = TreeAvatars.shared.characters
+        guard !all.isEmpty else { return nil }
+        return all[TreeAvatars.hashIndex(project.id, count: all.count)].slug
+    }
+
+    func recomputeAvatars() {
+        let map = TreeAvatars.shared.assign(projects)
+        if map != avatarMap { avatarMap = map }
     }
 
     /// Open (or create) the DM with a handle and navigate to it.

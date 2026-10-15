@@ -363,7 +363,7 @@ struct AgentRow: View {
 
     var body: some View {
         HStack(spacing: 14) {
-            BlobAvatar(project: project, theme: theme, size: 46)
+            AgentAvatar(project: project, theme: theme, size: 46, working: streaming)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(project.name)
@@ -409,7 +409,7 @@ struct PeopleRow: View {
             ZStack(alignment: .bottomTrailing) {
                 PersonAvatar(url: other?.avatarUrl, handle: other?.handle ?? "?", size: 46)
                 if let a = chat.agents.first?.project {
-                    BlobAvatar(project: a, theme: theme, size: 18)
+                    AgentAvatar(project: a, theme: theme, size: 18, still: true)
                         .overlay(Circle().strokeBorder(theme.bg, lineWidth: 2))
                         .offset(x: 3, y: 3)
                 }

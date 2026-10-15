@@ -84,7 +84,7 @@ struct ChatRow: View {
     var body: some View {
         HStack(spacing: 12) {
             if let project {
-                BlobAvatar(project: project, theme: theme, size: 40)
+                AgentAvatar(project: project, theme: theme, size: 40, still: true)
                     .opacity(chat.isPinned ? 1 : 0.55)
             }
             VStack(alignment: .leading, spacing: 3) {

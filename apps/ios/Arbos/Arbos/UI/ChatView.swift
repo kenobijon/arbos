@@ -268,7 +268,7 @@ struct ChatView: View {
                         }
                     } else {
                         if let project {
-                            BlobAvatar(project: project, theme: theme, size: Theme.avatar, dot: machineDotColor(model.machine.state, theme: theme))
+                            AgentAvatar(project: project, theme: theme, size: Theme.avatar, dot: machineDotColor(model.machine.state, theme: theme), working: streaming)
                         }
                         Text(name)
                             .font(.system(size: Theme.body, weight: .semibold))
@@ -429,7 +429,7 @@ struct ChatView: View {
     private var emptyHint: some View {
         VStack(spacing: 10) {
             if let project {
-                BlobAvatar(project: project, theme: theme, size: 64)
+                AgentAvatar(project: project, theme: theme, size: 64)
             }
             Text(name)
                 .font(.system(size: 20, weight: .semibold))
@@ -451,7 +451,7 @@ struct ChatView: View {
                 ForEach(people.members) { m in
                     HStack(spacing: 6) {
                         if m.isAgent, let p = m.project {
-                            BlobAvatar(project: p, theme: theme, size: 18)
+                            AgentAvatar(project: p, theme: theme, size: 18, still: true)
                         } else {
                             PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 18)
                         }
@@ -486,9 +486,9 @@ struct ChatView: View {
             if isPeople, let m = messages.last(where: { $0.role == .assistant && $0.isStreaming }),
                let agent = people?.agents.first(where: { mentionSlug($0.project?.name ?? "") == m.senderHandle || $0.handle == m.senderHandle }),
                let p = agent.project {
-                BlobAvatar(project: p, theme: theme, size: 26)
+                AgentAvatar(project: p, theme: theme, size: 26, working: true)
             } else if let project {
-                BlobAvatar(project: project, theme: theme, size: 26)
+                AgentAvatar(project: project, theme: theme, size: 26, working: true)
             }
             Text("\(workingName) is working")
                 .font(.system(size: Theme.small))
@@ -708,7 +708,7 @@ struct ChatView: View {
                         ForEach(items) { m in
                             Button { completeMention(m) } label: {
                                 HStack(spacing: 6) {
-                                    if m.isAgent, let p = m.project { BlobAvatar(project: p, theme: theme, size: 20) } else { PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 20) }
+                                    if m.isAgent, let p = m.project { AgentAvatar(project: p, theme: theme, size: 20, still: true) } else { PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 20) }
                                     Text("@\(m.isAgent ? mentionSlug(m.project?.name ?? m.handle) : m.handle)")
                                         .font(.system(size: Theme.small, weight: .medium)).foregroundStyle(theme.text)
                                 }

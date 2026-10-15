@@ -32,7 +32,7 @@ struct VoiceModeView: View {
                         .fill(theme.projectColor(project).opacity(0.18))
                         .frame(width: 220, height: 220)
                         .scaleEffect(pulse ? 1.08 : 0.94)
-                    BlobAvatar(project: project, theme: theme, size: 128)
+                    AgentAvatar(project: project, theme: theme, size: 128, working: model.isStreaming(project: project.id))
                 }
                 .onAppear {
                     withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: true)) { pulse = true }
