@@ -544,7 +544,7 @@ pub struct RequestBody {
     pub purpose: String,
     #[serde(rename = "use")]
     pub use_kind: String,
-    #[serde(default, alias = "chat_id")]
+    #[serde(default, rename = "chatId", alias = "chat_id")]
     pub chat_id: String,
 }
 
