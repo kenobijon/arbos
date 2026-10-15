@@ -1153,7 +1153,7 @@ fn render_block(
                                 .text_color(theme.text_muted)
                                 .child(marker),
                         )
-                        .child(div().flex_1().child(styled_text(
+                        .child(div().flex_1().min_w_0().child(styled_text(
                             &format!("{row_id}.li{i}"),
                             item,
                             theme.text,

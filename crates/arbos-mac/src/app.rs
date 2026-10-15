@@ -90,6 +90,7 @@ pub struct AppState {
     pub right_panel_open: bool,
     pub details_open: Option<DetailsTarget>,
     pub new_project_open: bool,
+    awaiting_new_project: bool,
     commands: mpsc::UnboundedSender<ClientCommand>,
     _pump: Task<()>,
 }
@@ -146,6 +147,7 @@ impl AppState {
             right_panel_open: false,
             details_open: None,
             new_project_open: false,
+            awaiting_new_project: false,
             commands: command_tx,
             _pump: pump,
         }
@@ -241,6 +243,17 @@ impl AppState {
                 cx.notify();
             }
             SyncEvent::Projects(projects) => {
+                // A project this device just created becomes the selection.
+                if self.awaiting_new_project {
+                    let known: std::collections::HashSet<Id> =
+                        self.projects.iter().map(|p| p.id.clone()).collect();
+                    if let Some(fresh) = projects.iter().find(|p| !known.contains(&p.id)) {
+                        self.awaiting_new_project = false;
+                        let id = fresh.id.clone();
+                        self.projects = projects.clone();
+                        self.select_project(id, cx);
+                    }
+                }
                 self.projects = projects;
                 if self.selected_project.is_none() {
                     let pick = self
@@ -681,6 +694,7 @@ impl AppState {
 
     pub fn create_project(&mut self, name: String, cx: &mut Context<Self>) {
         self.new_project_open = false;
+        self.awaiting_new_project = true;
         self.command(ClientCommand::CreateProject { name });
         self.push_notice("Creating project…");
         cx.notify();
