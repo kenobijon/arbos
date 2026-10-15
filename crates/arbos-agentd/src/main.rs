@@ -1,5 +1,6 @@
 mod agent;
 mod approval;
+mod attachments;
 mod channels;
 mod config;
 mod connectors;

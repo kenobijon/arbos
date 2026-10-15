@@ -457,6 +457,7 @@ impl HarnessAdapter for PrimeAdapter {
             id: c.next_id("p"),
             message: text.to_owned(),
             streaming_behavior: None,
+            images: Vec::new(),
         })
         .await
         .map(|_| ())
@@ -717,6 +718,7 @@ impl HarnessAdapter for PiAdapter {
             id: c.next_id("p"),
             message: text.to_owned(),
             streaming_behavior: None,
+            images: Vec::new(),
         })
         .await
         .map(|_| ())

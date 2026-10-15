@@ -386,6 +386,8 @@ pub struct Agent {
     /// Group-chat bookkeeping (chat kinds from the registry, this box's "Projects ⇄" tab).
     pub groups: crate::groups::GroupState,
     pub people: crate::people::PeopleState,
+    /// Image inputs for the next pi prompt (set by `handle_send` from the message's attachments).
+    pub turn_images: std::sync::Mutex<Vec<Value>>,
 }
 
 impl Agent {
@@ -444,6 +446,7 @@ impl Agent {
             subagent_msgs: Mutex::new(HashMap::new()),
             groups: crate::groups::GroupState::default(),
             people: crate::people::PeopleState::default(),
+            turn_images: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -888,16 +891,30 @@ impl Agent {
         // A structured answer (`answer { questionId, value }`): render the value to text with the
         // widget the question was asked with, and mark the part answered before the turn runs.
         let structured = self.resolve_structured_answer(host, cmd).await;
-        let (mut user_text, channel_note) = {
+        let (mut user_text, channel_note, message_view) = {
             let h = host.lock().await;
             let m = h.doc.message(&user_msg_id);
             let text = m.as_ref().map(|m| m.text()).unwrap_or_default();
-            (text, m.as_ref().and_then(crate::channels::prompt_note))
+            (text, m.as_ref().and_then(crate::channels::prompt_note), m)
         };
         if user_text.trim().is_empty() {
             if let Some((_, rendered)) = &structured {
                 user_text = rendered.clone();
             }
+        }
+        // Attachments (images, voice notes, files): fetched into the workspace; images ride
+        // along as vision input, a voice note's transcript becomes the text when none was typed.
+        let attachments = match &message_view {
+            Some(m) => self.turn_attachments(m).await,
+            None => crate::attachments::TurnAttachments::default(),
+        };
+        if user_text.trim().is_empty() {
+            if let Some(t) = &attachments.transcript {
+                user_text = t.clone();
+            }
+        }
+        if user_text.trim().is_empty() && !attachments.notes.is_empty() {
+            user_text = "(attachment)".to_owned();
         }
         if user_text.trim().is_empty() {
             return Err(anyhow!("send: message {user_msg_id} not found or empty"));
@@ -957,6 +974,16 @@ impl Agent {
         {
             prompt_text = format!("{note}{prompt_text}");
         }
+        if !attachments.notes.is_empty() {
+            let mut extra = attachments.notes.join("\n");
+            if let Some(t) = &attachments.transcript {
+                if user_text.trim() != t.trim() {
+                    extra = format!("{extra}\n[Voice note transcript]: {t}");
+                }
+            }
+            prompt_text = format!("{extra}\n\n{prompt_text}");
+        }
+        *self.turn_images.lock().expect("turn images") = attachments.images;
 
         let outcome = self
             .drive_turn(chat_id, host, &user_msg_id, &prompt_text, TurnKind::User)
@@ -1537,11 +1564,13 @@ impl Agent {
     ) -> Result<()> {
         let pi = self.pi().await?;
         let mut events = pi.subscribe();
+        let images = std::mem::take(&mut *self.turn_images.lock().expect("turn images"));
         let r = pi
             .call(RpcCommand::Prompt {
                 id: pi.next_id("p"),
                 message: prompt_text.to_owned(),
                 streaming_behavior: None,
+                images,
             })
             .await?;
         if !r.success {

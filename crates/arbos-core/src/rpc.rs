@@ -14,6 +14,9 @@ pub enum Command {
         message: String,
         #[serde(rename = "streamingBehavior", skip_serializing_if = "Option::is_none")]
         streaming_behavior: Option<StreamingBehavior>,
+        /// Image inputs for vision-capable models: `{ "type": "image", "data": base64, "mimeType" }`.
+        #[serde(skip_serializing_if = "Vec::is_empty", default)]
+        images: Vec<Value>,
     },
     Steer {
         id: String,
