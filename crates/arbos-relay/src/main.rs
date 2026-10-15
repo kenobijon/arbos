@@ -9,6 +9,7 @@ mod daytona;
 mod db;
 mod local;
 mod migrate;
+mod images;
 mod proxy;
 mod rooms;
 mod routines;
@@ -73,6 +74,13 @@ struct Args {
         default_value = "https://openrouter.ai/api/v1"
     )]
     openai_base: String,
+    /// Upstream for image generation (needs `OPENAI_API_KEY`; OpenRouter has no images endpoint).
+    #[arg(
+        long,
+        env = "ARBOS_OPENAI_IMAGES_BASE",
+        default_value = "https://api.openai.com/v1"
+    )]
+    openai_images_base: String,
     /// Anthropic-compatible upstream; OpenRouter's `/api/v1` when only an OpenRouter key exists.
     #[arg(long, env = "ARBOS_ANTHROPIC_BASE")]
     anthropic_base: Option<String>,
@@ -152,6 +160,7 @@ async fn main() -> anyhow::Result<()> {
         anthropic_key,
         openai_key,
         openai_base: args.openai_base.clone(),
+        openai_images_base: args.openai_images_base.clone(),
         anthropic_base,
         daytona_snapshot: args.daytona_snapshot.clone(),
         daytona_dockerfile: args.daytona_dockerfile.clone(),
@@ -161,6 +170,7 @@ async fn main() -> anyhow::Result<()> {
         box_idle_grace_ms: 30_000,
         connectors_mock: std::env::var("ARBOS_CONNECTORS_MOCK").is_ok_and(|v| v == "1"),
         channels_mock: std::env::var("ARBOS_CHANNELS_MOCK").is_ok_and(|v| v == "1"),
+        image_mock: std::env::var("ARBOS_IMAGE_MOCK").is_ok_and(|v| v == "1"),
     };
     let relay_key = Arc::new(connectors::crypto::RelayKey::load(&db)?);
     let daytona = daytona_key.map(|k| {
@@ -197,6 +207,12 @@ async fn main() -> anyhow::Result<()> {
     }
     if state.cfg.channels_mock {
         tracing::info!("ARBOS_CHANNELS_MOCK=1: channel sends land in channel_outbox; POST /channels/mock/inbound injects messages");
+    }
+
+    if state.cfg.image_mock {
+        tracing::info!("ARBOS_IMAGE_MOCK=1: /proxy/v1/images/generations draws placeholder PNGs");
+    } else if state.cfg.openai_key.is_none() {
+        tracing::info!("no OPENAI_API_KEY: image generation is unavailable (set ARBOS_IMAGE_MOCK=1 for placeholders)");
     }
 
     if db.device_count()? == 0 {
@@ -302,6 +318,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/blob/{project}/{key}", get(blobs::get).put(blobs::put))
         .route("/bootstrap/{file}", get(blobs::bootstrap))
         .route("/proxy/v1/models", get(proxy::openai_models))
+        .route("/proxy/v1/images/generations", post(images::generations))
         .route("/proxy/v1/{*tail}", post(proxy::openai))
         .route("/proxy/anthropic/{*tail}", post(proxy::anthropic))
         .route("/connectors", get(connectors::list))

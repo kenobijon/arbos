@@ -31,7 +31,7 @@ struct Meter {
     cost: Option<f64>,
 }
 
-fn start_of_utc_day_ms() -> i64 {
+pub(crate) fn start_of_utc_day_ms() -> i64 {
     let now = arbos_core::ids::now_ms();
     now - now.rem_euclid(86_400_000)
 }

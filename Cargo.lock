@@ -389,6 +389,7 @@ dependencies = [
  "futures",
  "hex",
  "hmac",
+ "image",
  "nix",
  "rand 0.8.8",
  "reqwest",
