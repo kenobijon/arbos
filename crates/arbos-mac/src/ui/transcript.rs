@@ -12,7 +12,7 @@ use gpui::{
 };
 
 use crate::app::{AppEvent, AppState, DetailsTarget};
-use crate::model::{Attachment, Id, Message, MessageStatus, Part, Role, StatusKind};
+use crate::model::{Attachment, Id, Message, MessageStatus, Part, Person, Role, StatusKind};
 use crate::ui::approve::{approval_card, ApprovalView};
 use crate::ui::attachments;
 use crate::ui::cards;
@@ -20,6 +20,7 @@ use crate::ui::frost::edge_faded;
 use crate::ui::groups;
 use crate::ui::markdown::{inline_spans, split_blocks, Block};
 use crate::ui::motion::PulseClock;
+use crate::ui::people;
 use crate::ui::theme::{Theme, BUBBLE_RADIUS};
 use crate::ui::veil::Veil;
 use crate::ui::widgets::QuestionCard;
@@ -38,6 +39,9 @@ pub enum RowKind {
         pending: bool,
         /// Caption for prompts not typed by the user (a routine, another project).
         sender_label: Option<String>,
+        /// Another person in a people chat (D72): left bubble with their
+        /// avatar and handle instead of my right bubble.
+        from: Option<Person>,
     },
     Markdown {
         block: Block,
@@ -81,6 +85,8 @@ pub enum RowKind {
         icon: Option<String>,
         /// Stable seed for the chip colour (the sender id).
         seed: String,
+        /// "answering @sam · owned by @jacob" for a shared agent (D72).
+        note: Option<String>,
     },
     /// F11: small speaker under a reply; click speaks it (again).
     Speaker {
@@ -239,7 +245,8 @@ impl Transcript {
             spoken: &state.spoken,
             voice_mode: state.voice_mode,
         };
-        let new_rows = build_rows(&messages, show_details, speech);
+        let me_id = state.me_id();
+        let new_rows = build_rows(&messages, show_details, speech, &me_id);
 
         // Veils: observe text growth of live markdown rows.
         for row in &new_rows {
@@ -302,6 +309,7 @@ impl Transcript {
                 attachments,
                 pending,
                 sender_label,
+                from,
             } => {
                 let mut bubble = div()
                     .flex()
@@ -338,6 +346,38 @@ impl Transcript {
                     bubble = bubble.child(chips);
                 }
                 bubble = bubble.child(text);
+                if let Some(person) = from {
+                    // Someone else: left-aligned, their avatar and handle above.
+                    let image = self.state.read(cx).avatar(&person.avatar_url);
+                    let color = groups::sender_color(&person.handle, &theme);
+                    return div()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .items_start()
+                        .gap(px(3.0))
+                        .py(px(6.0))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .pl(px(2.0))
+                                .child(people::avatar(image, &person, 18.0, &theme))
+                                .child(
+                                    div()
+                                        .text_size(px(10.5))
+                                        .text_color(theme.text_muted)
+                                        .child(format!("@{}", person.handle)),
+                                ),
+                        )
+                        .child(
+                            bubble
+                                .bg(Theme::with_alpha(color, 0.14))
+                                .when(pending, |el| el.opacity(0.6)),
+                        )
+                        .into_any_element();
+                }
                 div()
                     .w_full()
                     .flex()
@@ -473,16 +513,34 @@ impl Transcript {
                 PulseClock::request(cx);
                 cards::indicator(queued, &theme, cx).into_any_element()
             }
-            RowKind::Sender { name, icon, seed } => {
+            RowKind::Sender {
+                name,
+                icon,
+                seed,
+                note,
+            } => {
                 let color = self
                     .state
                     .read(cx)
                     .projects
                     .iter()
-                    .find(|p| format!("project:{}", p.id) == seed)
+                    .find(|p| {
+                        format!("project:{}", p.id) == seed || format!("agent:{}", p.id) == seed
+                    })
                     .map(|p| groups::project_color(&p.color, theme.accent))
                     .unwrap_or_else(|| groups::sender_color(&seed, &theme));
-                groups::sender_chip(&name, icon.as_deref(), color, &theme).into_any_element()
+                let chip = groups::sender_chip(&name, icon.as_deref(), color, &theme);
+                match note {
+                    Some(note) => chip
+                        .child(
+                            div()
+                                .text_size(px(10.5))
+                                .text_color(theme.text_faint)
+                                .child(format!("· {note}")),
+                        )
+                        .into_any_element(),
+                    None => chip.into_any_element(),
+                }
             }
             RowKind::Details => {
                 let state = self.state.clone();
@@ -587,7 +645,7 @@ fn block_text_len(block: &Block) -> usize {
 /// user's own messages (`sender` empty or `user`).
 fn sender_caption(message: &Message) -> Option<String> {
     let sender = message.sender.as_str();
-    if sender.is_empty() || sender == "user" {
+    if sender.is_empty() || sender == "user" || sender.starts_with("user:") {
         return None;
     }
     if let Some(id) = sender.strip_prefix("routine:") {
@@ -620,7 +678,15 @@ fn is_json_block(block: &Block) -> bool {
 /// questions, errors. Everything the agent did (tool calls, status events,
 /// JSON, usage) is hidden; the Details drawer has it. One indicator per chat
 /// pulses under the last message while anything runs.
-pub fn build_rows(messages: &[Message], show_details: bool, speech: SpeechRows<'_>) -> Vec<Row> {
+pub fn build_rows(
+    messages: &[Message],
+    show_details: bool,
+    speech: SpeechRows<'_>,
+    me_id: &str,
+) -> Vec<Row> {
+    let mine = |m: &Message| {
+        m.sender == "user" || m.sender.is_empty() || m.sender == format!("user:{me_id}")
+    };
     let mut rows = Vec::new();
     let mut running = false;
     let mut queued = false;
@@ -641,10 +707,34 @@ pub fn build_rows(messages: &[Message], show_details: bool, speech: SpeechRows<'
                     })
                     .collect();
                 let id = format!("{}#user", message.id);
-                let sender_label = sender_caption(message);
+                let from = if message.sender.starts_with("user:") && !mine(message) {
+                    Some(Person {
+                        id: message.sender.trim_start_matches("user:").to_string(),
+                        handle: message
+                            .sender_handle
+                            .clone()
+                            .unwrap_or_else(|| "someone".into()),
+                        name: message.sender_name.clone(),
+                        avatar_url: message.sender_avatar.clone().unwrap_or_default(),
+                        status: "member".into(),
+                    })
+                } else {
+                    None
+                };
+                let sender_label = if from.is_some() {
+                    None
+                } else {
+                    sender_caption(message)
+                };
                 rows.push(Row {
                     version: hash_version(
-                        &(&text, message.pending, attachments.len(), &sender_label),
+                        &(
+                            &text,
+                            message.pending,
+                            attachments.len(),
+                            &sender_label,
+                            from.as_ref().map(|p| &p.handle),
+                        ),
                         false,
                     ),
                     id,
@@ -654,6 +744,7 @@ pub fn build_rows(messages: &[Message], show_details: bool, speech: SpeechRows<'
                         attachments,
                         pending: message.pending,
                         sender_label,
+                        from,
                     },
                 });
                 if message.status == MessageStatus::Queued {
@@ -678,6 +769,32 @@ pub fn build_rows(messages: &[Message], show_details: bool, speech: SpeechRows<'
                             name,
                             icon: message.sender_icon.clone(),
                             seed: message.sender.clone(),
+                            note: None,
+                        },
+                    });
+                } else if message.sender.starts_with("agent:") && message.asked_by_handle.is_some()
+                {
+                    // A shared agent in a people chat: name it and whom it answers.
+                    let name = message
+                        .sender_name
+                        .clone()
+                        .unwrap_or_else(|| "Agent".to_owned());
+                    let mut note = format!(
+                        "answering @{}",
+                        message.asked_by_handle.clone().unwrap_or_default()
+                    );
+                    if let Some(owner) = &message.owner_handle {
+                        note.push_str(&format!(" · owned by @{owner}"));
+                    }
+                    rows.push(Row {
+                        version: hash_version(&(&name, &message.sender_icon, &note), false),
+                        id: format!("{}#sender", message.id),
+                        message_id: message.id.clone(),
+                        kind: RowKind::Sender {
+                            name,
+                            icon: message.sender_icon.clone(),
+                            seed: message.sender.clone(),
+                            note: Some(note),
                         },
                     });
                 }

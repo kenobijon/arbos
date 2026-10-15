@@ -29,11 +29,11 @@ use super::credentials::{self, DeviceCredentials};
 use super::doc::ChatDoc;
 use super::{ClientCommand, SyncEvent, SyncSource};
 use crate::model::{
-    new_id, now_ms, AccountView, Attachment, AttachmentKind, BoxState, ChannelBinding,
-    ChannelPairing, ChannelPlatform, ChannelsView, Chat, Connector, ConnectorProvider,
+    new_id, now_ms, AccountView, AgentMember, Attachment, AttachmentKind, BoxState, ChannelBinding,
+    ChannelPairing, ChannelPlatform, ChannelsView, Chat, ChatKind, Connector, ConnectorProvider,
     ConnectorsView, Effort, Id, Link, LocalDevice, LocalView, Machine, MachineState, Message,
-    MessageStatus, Part, Project, ProjectDocView, Role, Routine, RoutineRun, Skill, ThreadInfo,
-    VaultItem, VaultRequest, VaultView,
+    MessageStatus, Part, Person, Project, ProjectDocView, ReplyPolicy, Role, Routine, RoutineRun,
+    Skill, SpaceKind, ThreadInfo, VaultItem, VaultRequest, VaultView,
 };
 
 const HELLO_DEADLINE: Duration = Duration::from_secs(15);
@@ -71,6 +71,8 @@ impl RelaySource {
 
 enum RoomCmd {
     Wake(&'static str),
+    /// Presence frame with `typing` (people chats, D53).
+    Typing(bool),
 }
 
 struct Room {
@@ -95,6 +97,12 @@ struct Shared {
     browser_watch: Mutex<HashMap<Id, JoinHandle<()>>>,
     machine: Mutex<Machine>,
     refresh_lock: tokio::sync::Mutex<()>,
+    /// People chat ids (rooms live under `/room/people/{id}`).
+    people: Mutex<HashSet<Id>>,
+    /// Highest relay seq seen per room key (read marks, D61).
+    room_seq: Mutex<HashMap<Id, i64>>,
+    /// Avatars already fetched (by URL).
+    avatars_done: Mutex<HashSet<String>>,
 }
 
 fn project_doc_key(project_id: &str) -> String {
@@ -181,6 +189,63 @@ impl Shared {
         }
         *self.creds.write().unwrap() = Some(creds.clone());
         Ok(creds)
+    }
+
+    fn me_id(&self) -> String {
+        self.creds
+            .read()
+            .unwrap()
+            .as_ref()
+            .and_then(|c| c.user.as_ref())
+            .map(|u| u.id.clone())
+            .unwrap_or_default()
+    }
+
+    fn me_handle(&self) -> String {
+        self.creds
+            .read()
+            .unwrap()
+            .as_ref()
+            .and_then(|c| c.user.as_ref())
+            .map(|u| u.login.clone())
+            .unwrap_or_default()
+    }
+
+    fn is_people(&self, chat_id: &str) -> bool {
+        self.people.lock().unwrap().contains(chat_id)
+    }
+
+    async fn delete(self: &Arc<Self>, path: &str) -> Result<()> {
+        let resp = self
+            .http
+            .delete(format!("{}{}", self.http_url, path))
+            .bearer_auth(self.token())
+            .send()
+            .await
+            .with_context(|| format!("DELETE {path}"))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("DELETE {path}: HTTP {status} {text}"));
+        }
+        Ok(())
+    }
+
+    async fn put_json(self: &Arc<Self>, path: &str, body: Value) -> Result<Value> {
+        let resp = self
+            .http
+            .put(format!("{}{}", self.http_url, path))
+            .bearer_auth(self.token())
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("PUT {path}"))?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(anyhow!("PUT {path}: HTTP {status} {text}"));
+        }
+        Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
     }
 
     /// Forget the tokens and show the sign-in screen.
@@ -317,6 +382,9 @@ impl SyncSource for RelaySource {
                 browser_watch: Mutex::new(HashMap::new()),
                 machine: Mutex::new(Machine::default()),
                 refresh_lock: tokio::sync::Mutex::new(()),
+                people: Mutex::new(HashSet::new()),
+                room_seq: Mutex::new(HashMap::new()),
+                avatars_done: Mutex::new(HashSet::new()),
             });
             let _ = events.send(SyncEvent::Link(Link::Connecting));
 
@@ -366,6 +434,7 @@ async fn refresh_me(shared: &Arc<Shared>) {
             .and_then(|c| c.user.clone());
         if let Some(user) = user {
             let _ = shared.events.send(SyncEvent::Account(Some(AccountView {
+                id: user.id,
                 login: user.login,
                 name: user.name,
                 avatar_url: user.avatar_url,
@@ -383,6 +452,7 @@ async fn refresh_me(shared: &Arc<Shared>) {
             .to_string()
     };
     let view = AccountView {
+        id: str_of(&user, "id"),
         login: str_of(&user, "login"),
         name: str_of(&user, "name"),
         avatar_url: str_of(&user, "avatar_url"),
@@ -488,6 +558,7 @@ fn start_after_pairing(shared: &Arc<Shared>) {
             loop {
                 poll.tick().await;
                 refresh_machine(&shared).await;
+                poll_me_pushes(&shared).await;
             }
         });
     }
@@ -550,6 +621,214 @@ fn box_state_from(state: &str, box_state: &str) -> BoxState {
             _ => BoxState::HibernatedLight,
         },
     }
+}
+
+/// `GET /chats` item → a rail space (kind dm/group) and its one chat.
+fn people_space_from(shared: &Shared, v: &Value) -> Option<(Project, Chat)> {
+    let id = v.get("id")?.as_str()?.to_string();
+    let me = shared.me_id();
+    let mut people: Vec<Person> = Vec::new();
+    let mut agents: Vec<AgentMember> = Vec::new();
+    for m in v
+        .get("members")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+    {
+        let member = m.get("member").and_then(Value::as_str).unwrap_or("");
+        if let Some(uid) = member.strip_prefix("user:") {
+            if uid == me {
+                continue;
+            }
+            people.push(Person {
+                id: uid.to_string(),
+                handle: m
+                    .get("handle")
+                    .and_then(Value::as_str)
+                    .unwrap_or(uid)
+                    .to_string(),
+                name: m.get("name").and_then(Value::as_str).map(str::to_string),
+                avatar_url: m
+                    .get("avatar_url")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                status: m
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("member")
+                    .to_string(),
+            });
+        } else if let Some(pid) = member.strip_prefix("agent:") {
+            let project = m.get("project").cloned().unwrap_or(Value::Null);
+            let name = project
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("Agent")
+                .to_string();
+            agents.push(AgentMember {
+                project_id: pid.to_string(),
+                handle: m
+                    .get("handle")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| Project::mention_slug(&name)),
+                icon: project
+                    .get("icon")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Ω")
+                    .to_string(),
+                color: project
+                    .get("color")
+                    .and_then(Value::as_str)
+                    .unwrap_or("#8b7cf6")
+                    .to_string(),
+                name,
+                owner_id: m
+                    .get("owner")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                owner_handle: m
+                    .get("owner_handle")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                reply_policy: match m.pointer("/settings/reply_policy").and_then(Value::as_str) {
+                    Some("every_message") => ReplyPolicy::EveryMessage,
+                    _ => ReplyPolicy::Mention,
+                },
+            });
+        }
+    }
+    let kind = match v.get("kind").and_then(Value::as_str) {
+        Some("group") => SpaceKind::Group,
+        _ => SpaceKind::Dm,
+    };
+    let title = v
+        .get("title")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| people.first().map(|p| p.handle.clone()))
+        .unwrap_or_else(|| "chat".into());
+    let pending = v.get("pending").and_then(Value::as_bool).unwrap_or(false)
+        || people.iter().all(|p| p.status == "invited");
+    let unread = v.get("unread").and_then(Value::as_bool).unwrap_or(false);
+    let last = v
+        .get("last_activity_at")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let icon = people
+        .first()
+        .map(|p| p.initial())
+        .unwrap_or_else(|| "@".into());
+    let space = Project {
+        id: id.clone(),
+        name: title.clone(),
+        icon,
+        color: "#8b7cf6".into(),
+        state: BoxState::Awake,
+        state_detail: None,
+        wake_progress: None,
+        model: String::new(),
+        effort: Effort::Low,
+        spend_today_usd: 0.0,
+        spend_cap_usd: 0.0,
+        kind,
+        people,
+        agents,
+        pending,
+        shared: false,
+        owner_handle: None,
+    };
+    let previous_unread = shared
+        .chats
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|c| c.id == id)
+        .map(|c| c.unread);
+    let chat = Chat {
+        id: id.clone(),
+        project_id: id,
+        title,
+        is_pinned: true,
+        is_system: false,
+        kind: ChatKind::Chat,
+        participants: Vec::new(),
+        unread: previous_unread.unwrap_or(unread),
+        last_message_at: last,
+    };
+    Some((space, chat))
+}
+
+/// `GET /me/pushes`: people_* kinds that change the chat list refresh it.
+async fn poll_me_pushes(shared: &Arc<Shared>) {
+    let Ok(list) = shared.get_json("/me/pushes").await else {
+        return;
+    };
+    let mut refresh = false;
+    for push in list.as_array().cloned().unwrap_or_default() {
+        let kind = push.get("kind").and_then(Value::as_str).unwrap_or("");
+        let chat_id = push
+            .pointer("/payload/chat_id")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        match kind {
+            "people_chat_created"
+            | "people_member_added"
+            | "people_member_removed"
+            | "people_agent_added"
+            | "people_agent_removed"
+            | "people_project_shared" => refresh = true,
+            "people_message" if !shared.is_people(chat_id) => refresh = true,
+            _ => {}
+        }
+    }
+    if refresh {
+        if let Err(err) = refresh_registry(shared).await {
+            shared.notice(format!("Relay: {err:#}"));
+        }
+    }
+}
+
+async fn fetch_avatar(shared: Arc<Shared>, url: String) {
+    if url.is_empty() || !url.starts_with("http") {
+        return;
+    }
+    if !shared.avatars_done.lock().unwrap().insert(url.clone()) {
+        return;
+    }
+    let Ok(resp) = shared.http.get(&url).send().await else {
+        return;
+    };
+    if !resp.status().is_success() {
+        return;
+    }
+    if let Ok(bytes) = resp.bytes().await {
+        let _ = shared.events.send(SyncEvent::Avatar {
+            url,
+            bytes: Arc::new(bytes.to_vec()),
+        });
+    }
+}
+
+fn people_error(err: &anyhow::Error) -> String {
+    let text = format!("{err:#}");
+    serde_json::from_str::<Value>(
+        text.split_once(" HTTP ")
+            .map(|(_, r)| r)
+            .and_then(|r| r.split_once(' '))
+            .map(|(_, b)| b)
+            .unwrap_or(""),
+    )
+    .ok()
+    .and_then(|v| {
+        v.pointer("/error/message")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    })
+    .unwrap_or(text)
 }
 
 fn parse_chat(v: &Value) -> Option<Chat> {
@@ -642,6 +921,42 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
                 .get("spend_cap_daily")
                 .and_then(Value::as_f64)
                 .unwrap_or(25.0),
+            kind: SpaceKind::Project,
+            agents: Vec::new(),
+            pending: false,
+            people: item
+                .get("members")
+                .or_else(|| detail.get("members"))
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|m| {
+                            let id = m.get("user_id").and_then(Value::as_str)?;
+                            Some(Person {
+                                id: id.to_string(),
+                                handle: m
+                                    .get("handle")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or(id)
+                                    .to_string(),
+                                name: m.get("name").and_then(Value::as_str).map(str::to_string),
+                                avatar_url: m
+                                    .get("avatar_url")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("")
+                                    .to_string(),
+                                status: "member".into(),
+                            })
+                        })
+                        .filter(|p| p.id != shared.me_id())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            shared: item.get("shared").and_then(Value::as_bool).unwrap_or(false),
+            owner_handle: item
+                .get("owner_handle")
+                .and_then(Value::as_str)
+                .map(str::to_string),
         });
         let chats: Vec<Chat> = detail
             .get("chats")
@@ -668,10 +983,48 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
         }
         *local = merged;
     }
+    // People chats (D72) share the rail: one space + one pinned chat each.
+    let people_ids: Vec<Id> = projects
+        .iter()
+        .filter(|p| p.is_people())
+        .map(|p| p.id.clone())
+        .collect();
+    match shared.get_json("/chats").await {
+        Ok(list) => {
+            let mut ids = shared.people.lock().unwrap();
+            for item in list.as_array().cloned().unwrap_or_default() {
+                let Some((space, chat)) = people_space_from(shared, &item) else {
+                    continue;
+                };
+                ids.insert(space.id.clone());
+                projects.push(space);
+                all_chats.push(chat);
+            }
+        }
+        Err(err) => {
+            // Older relays have no /chats; keep whatever we already knew.
+            if !format!("{err:#}").contains("HTTP 404") {
+                shared.notice(format!("People chats: {err:#}"));
+            }
+            let known = shared.people.lock().unwrap().clone();
+            let previous = shared.projects.lock().unwrap().clone();
+            for p in previous.into_iter().filter(|p| known.contains(&p.id)) {
+                projects.push(p);
+            }
+            let prev_chats = shared.chats.lock().unwrap().clone();
+            for c in prev_chats
+                .into_iter()
+                .filter(|c| known.contains(&c.project_id))
+            {
+                all_chats.push(c);
+            }
+        }
+    }
+    let _ = people_ids;
     *shared.projects.lock().unwrap() = projects.clone();
     let _ = shared.events.send(SyncEvent::Projects(projects.clone()));
     emit_chats(shared);
-    for p in &projects {
+    for p in projects.iter().filter(|p| !p.is_people()) {
         ensure_room(shared, &p.id, &project_doc_key(&p.id), PROJECT_DOC_CHAT_ID);
     }
     for c in &all_chats {
@@ -849,6 +1202,27 @@ async fn forward_changes(
             }
         }
     }
+}
+
+/// `@slug` / `@handle` in the text → `agent:<project>` / `user:<id>` (API §3).
+fn mentions_for(shared: &Shared, chat_id: &str, text: &str) -> Vec<String> {
+    let lower = text.to_lowercase();
+    let projects = shared.projects.lock().unwrap();
+    let Some(space) = projects.iter().find(|p| p.id == chat_id) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for a in &space.agents {
+        if lower.contains(&format!("@{}", a.handle.to_lowercase())) {
+            out.push(format!("agent:{}", a.project_id));
+        }
+    }
+    for p in &space.people {
+        if lower.contains(&format!("@{}", p.handle.to_lowercase())) {
+            out.push(format!("user:{}", p.id));
+        }
+    }
+    out
 }
 
 fn mark_activity(shared: &Shared, chat_id: &str) {
@@ -1087,7 +1461,12 @@ async fn run_session(
     local_rx: &mut mpsc::UnboundedReceiver<Vec<u8>>,
     cmd_rx: &mut mpsc::UnboundedReceiver<RoomCmd>,
 ) -> Result<()> {
-    let room = wire::room_name(project_id, room_chat);
+    let is_people = shared.people.lock().unwrap().contains(room_chat);
+    let room = if is_people {
+        format!("people/{room_chat}")
+    } else {
+        wire::room_name(project_id, room_chat)
+    };
     let url = format!("{}/room/{}?token={}", shared.ws_url, room, shared.token());
     let (ws, _) = timeout(HELLO_DEADLINE, connect_async(&url))
         .await
@@ -1189,6 +1568,7 @@ async fn run_session(
                             }
                         }
                         *cursor = (*cursor).max(header.seq);
+                        shared.room_seq.lock().unwrap().insert(key.to_string(), *cursor);
                     }
                     FrameType::RowsDone => {
                         let head_seq = frame.header.get("headSeq").and_then(Value::as_i64).unwrap_or(*cursor);
@@ -1228,7 +1608,24 @@ async fn run_session(
                             anyhow::bail!("relay error {}: {}", header.code, header.message);
                         }
                     }
-                    FrameType::ProbeOk | FrameType::Presence | FrameType::State => {}
+                    FrameType::Presence => {
+                        if is_people {
+                            let h = &frame.header;
+                            if let (Some(typing), Some(handle)) = (
+                                h.get("typing").and_then(Value::as_bool),
+                                h.get("handle").and_then(Value::as_str),
+                            ) {
+                                if h.get("device").and_then(Value::as_str) != Some(shared.device_id().as_str()) {
+                                    let _ = shared.events.send(SyncEvent::Typing {
+                                        chat_id: room_chat.to_string(),
+                                        handle: handle.to_string(),
+                                        active: typing,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    FrameType::ProbeOk | FrameType::State => {}
                     FrameType::Hello | FrameType::RowsReq | FrameType::Push | FrameType::Probe | FrameType::Wake => {}
                 }
             }
@@ -1253,6 +1650,13 @@ async fn run_session(
                         tx.send(binary(Frame::new(
                             FrameType::Wake,
                             serde_json::to_value(WakeHeader { reason: reason.to_string() })?,
+                            Vec::new(),
+                        ))).await?;
+                    }
+                    RoomCmd::Typing(active) => {
+                        tx.send(binary(Frame::new(
+                            FrameType::Presence,
+                            json!({ "device": shared.device_id(), "at": now_ms(), "typing": active, "handle": shared.me_handle(), "user": shared.me_id() }),
                             Vec::new(),
                         ))).await?;
                     }
@@ -1459,6 +1863,12 @@ async fn send_message(
     answer: Option<(String, serde_json::Value)>,
 ) {
     let project_id = project_of(&shared, &chat_id).unwrap_or_default();
+    // People chats keep their blobs under `people:<chat_id>` and have no box to wake.
+    let blob_slot = if shared.is_people(&chat_id) {
+        format!("people:{chat_id}")
+    } else {
+        project_id.clone()
+    };
     let mut parts: Vec<Part> = Vec::new();
     for path in attachments {
         let name = path
@@ -1472,7 +1882,7 @@ async fn send_message(
             Ok(bytes) => {
                 let put = shared
                     .http
-                    .put(format!("{}/blob/{}/{}", shared.http_url, project_id, key))
+                    .put(format!("{}/blob/{}/{}", shared.http_url, blob_slot, key))
                     .bearer_auth(shared.token())
                     .header("content-type", mime)
                     .body(bytes)
@@ -1520,11 +1930,45 @@ async fn send_message(
         let Some(doc) = docs.get(&chat_id) else {
             return;
         };
+        let in_people = shared.is_people(&chat_id);
+        let me = shared
+            .creds
+            .read()
+            .unwrap()
+            .as_ref()
+            .and_then(|c| c.user.clone());
+        let mentions = if in_people {
+            mentions_for(&shared, &chat_id, &text)
+        } else {
+            Vec::new()
+        };
         let msg = Message {
             id: message_id.clone(),
             chat_id: chat_id.clone(),
             role: Role::User,
-            sender: "user".into(),
+            sender: if in_people {
+                format!("user:{}", shared.me_id())
+            } else {
+                "user".into()
+            },
+            sender_handle: if in_people {
+                me.as_ref().map(|u| u.login.clone())
+            } else {
+                None
+            },
+            sender_name: if in_people {
+                me.as_ref()
+                    .map(|u| u.name.clone())
+                    .filter(|n| !n.is_empty())
+            } else {
+                None
+            },
+            sender_avatar: if in_people {
+                me.as_ref().map(|u| u.avatar_url.clone())
+            } else {
+                None
+            },
+            mentions,
             status: MessageStatus::Done,
             turn: None,
             decision: None,
@@ -1532,8 +1976,10 @@ async fn send_message(
             subagent_name: None,
             in_reply_to: None,
             routine_name: None,
-            sender_name: None,
             sender_icon: None,
+            reply_to: None,
+            asked_by_handle: None,
+            owner_handle: None,
             usage: None,
             return_contract: None,
             waiting_user: false,
@@ -1576,6 +2022,12 @@ async fn send_message(
         doc.commit();
     }
     mark_activity(&shared, &chat_id);
+    if shared.is_people(&chat_id) {
+        if let Some(room) = shared.rooms.lock().unwrap().get(&chat_id) {
+            let _ = room.cmds.send(RoomCmd::Typing(false));
+        }
+        return;
+    }
     if project_asleep(&shared, &project_id) {
         send_wake(&shared, &project_id, "send");
     }
@@ -1868,6 +2320,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     Ok(creds) => {
                         if let Some(user) = creds.user.clone() {
                             let _ = shared.events.send(SyncEvent::Account(Some(AccountView {
+                                id: user.id,
                                 login: user.login,
                                 name: user.name,
                                 avatar_url: user.avatar_url,
@@ -1895,10 +2348,214 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             });
         }
         ClientCommand::OpenChat { chat_id } | ClientCommand::MarkRead { chat_id } => {
-            let mut chats = shared.chats.lock().unwrap();
-            if let Some(c) = chats.iter_mut().find(|c| c.id == chat_id) {
-                c.unread = false;
+            {
+                let mut chats = shared.chats.lock().unwrap();
+                if let Some(c) = chats.iter_mut().find(|c| c.id == chat_id) {
+                    c.unread = false;
+                }
             }
+            if shared.is_people(&chat_id) {
+                let seq = shared
+                    .room_seq
+                    .lock()
+                    .unwrap()
+                    .get(&chat_id)
+                    .copied()
+                    .unwrap_or(0);
+                if seq > 0 {
+                    let shared = shared.clone();
+                    tokio::spawn(async move {
+                        let _ = shared
+                            .put_json(&format!("/chats/{chat_id}/read"), json!({ "seq": seq }))
+                            .await;
+                    });
+                }
+            }
+        }
+        ClientCommand::SearchPeople { query } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let q = query.trim().trim_start_matches('@');
+                match shared
+                    .get_json(&format!("/users/search?q={}", crate::auth::url_encode(q)))
+                    .await
+                {
+                    Ok(v) => {
+                        let results: Vec<Person> = v
+                            .as_array()
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|p| {
+                                        serde_json::from_value::<Person>(p.clone()).ok()
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let _ = shared
+                            .events
+                            .send(SyncEvent::PeopleSearch { query, results });
+                    }
+                    Err(err) => {
+                        let _ = shared
+                            .events
+                            .send(SyncEvent::PeopleError(people_error(&err)));
+                    }
+                }
+            });
+        }
+        ClientCommand::StartDm { handle } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                match shared
+                    .post_json("/chats/dm", json!({ "handle": handle }))
+                    .await
+                {
+                    Ok(_) => {
+                        if let Err(err) = refresh_registry(&shared).await {
+                            shared.notice(format!("Relay: {err:#}"));
+                        }
+                    }
+                    Err(err) => {
+                        let _ = shared
+                            .events
+                            .send(SyncEvent::PeopleError(people_error(&err)));
+                    }
+                }
+            });
+        }
+        ClientCommand::SetTyping { chat_id, active } => {
+            if let Some(room) = shared.rooms.lock().unwrap().get(&chat_id) {
+                let _ = room.cmds.send(RoomCmd::Typing(active));
+            }
+        }
+        ClientCommand::AddAgent {
+            chat_id,
+            project_id,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                match shared
+                    .post_json(
+                        &format!("/chats/{chat_id}/agents"),
+                        json!({ "project_id": project_id }),
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        if let Err(err) = refresh_registry(&shared).await {
+                            shared.notice(format!("Relay: {err:#}"));
+                        }
+                    }
+                    Err(err) => {
+                        let _ = shared
+                            .events
+                            .send(SyncEvent::PeopleError(people_error(&err)));
+                    }
+                }
+            });
+        }
+        ClientCommand::RemoveAgent {
+            chat_id,
+            project_id,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared
+                    .delete(&format!("/chats/{chat_id}/agents/{project_id}"))
+                    .await
+                {
+                    let _ = shared
+                        .events
+                        .send(SyncEvent::PeopleError(people_error(&err)));
+                }
+                let _ = refresh_registry(&shared).await;
+            });
+        }
+        ClientCommand::RemoveMember { chat_id, user_id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared
+                    .delete(&format!("/chats/{chat_id}/members/{user_id}"))
+                    .await
+                {
+                    let _ = shared
+                        .events
+                        .send(SyncEvent::PeopleError(people_error(&err)));
+                }
+                let _ = refresh_registry(&shared).await;
+            });
+        }
+        ClientCommand::LeaveChat { chat_id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared
+                    .post_json(&format!("/chats/{chat_id}/leave"), json!({}))
+                    .await
+                {
+                    let _ = shared
+                        .events
+                        .send(SyncEvent::PeopleError(people_error(&err)));
+                }
+                shared.people.lock().unwrap().remove(&chat_id);
+                let _ = refresh_registry(&shared).await;
+            });
+        }
+        ClientCommand::BlockUser { handle } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                match shared
+                    .post_json("/blocks", json!({ "handle": handle }))
+                    .await
+                {
+                    Ok(_) => shared.notice(format!("@{handle} blocked.")),
+                    Err(err) => {
+                        let _ = shared
+                            .events
+                            .send(SyncEvent::PeopleError(people_error(&err)));
+                    }
+                }
+            });
+        }
+        ClientCommand::InviteToProject { project_id, handle } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                match shared
+                    .post_json(
+                        &format!("/projects/{project_id}/members"),
+                        json!({ "handle": handle }),
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        let _ = refresh_registry(&shared).await;
+                    }
+                    Err(err) => {
+                        let _ = shared
+                            .events
+                            .send(SyncEvent::PeopleError(people_error(&err)));
+                    }
+                }
+            });
+        }
+        ClientCommand::RemoveProjectMember {
+            project_id,
+            user_id,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared
+                    .delete(&format!("/projects/{project_id}/members/{user_id}"))
+                    .await
+                {
+                    let _ = shared
+                        .events
+                        .send(SyncEvent::PeopleError(people_error(&err)));
+                }
+                let _ = refresh_registry(&shared).await;
+            });
+        }
+        ClientCommand::FetchAvatar { url } => {
+            tokio::spawn(fetch_avatar(shared.clone(), url));
         }
         ClientCommand::Send {
             chat_id,
