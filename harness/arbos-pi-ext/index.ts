@@ -30,6 +30,7 @@ const OFFLOAD_CHARS = Number(process.env.ARBOS_OFFLOAD_CHARS ?? 4000);
 const ACT_MAX_CALLS = Number(process.env.ARBOS_ACT_MAX_CALLS ?? 8);
 const HEAD_LINES = 20;
 const TAIL_LINES = 10;
+const ROUTE_PREFIX = "(Arbos: call `route` first.) ";
 
 type HookResponse = { ok: boolean; error?: string; terminate?: boolean; text?: string; [k: string]: unknown };
 
@@ -344,12 +345,21 @@ export default function arbosPiExt(pi: ExtensionAPI) {
     },
   });
 
-  // Post-resume route guard: a main-agent run that ends without a `route` call gets one corrective
-  // continuation (a hidden custom message) and one more model request; a second miss is logged only.
+  // Route guard, part 1 (prevention): every main-agent prompt carries a one-line reminder, so a resumed or
+  // long session cannot drift into answering without `route` (measured 2/20 skips without it).
+  pi.on("input", async (event) => {
+    if (SESSION_ROLE !== "main" || event.source === "extension" || event.text.startsWith("/")) return { action: "continue" };
+    if (event.text.startsWith(ROUTE_PREFIX)) return { action: "continue" };
+    return { action: "transform", text: `${ROUTE_PREFIX}${event.text}`, images: event.images };
+  });
+
+  // Route guard, part 2 (correction): a run that still ends without `route` gets one corrective
+  // continuation when pi allows one (`canContinue`: the run ended on tool calls, not on plain text);
+  // otherwise the miss is logged and agentd records the route as `reply`.
   pi.on("agent_before_settle", async (event) => {
     if (SESSION_ROLE !== "main" || routed) return undefined;
     if (routeCorrections >= 1 || !event.context.canContinue) {
-      void hook("/hook/turn-without-route", { session_id: sessionId, corrected: false });
+      void hook("/hook/turn-without-route", { session_id: sessionId, corrected: false, can_continue: event.context.canContinue });
       return undefined;
     }
     routeCorrections += 1;
