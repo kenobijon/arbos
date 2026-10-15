@@ -4,11 +4,20 @@
 //! [`WINDOW_MS`]; events that land inside the window fold into one "N updates
 //! in <Project>"; nothing fires while that Project is streaming (the turn end
 //! will) or while the window is focused and the chat is on screen. The
-//! [`Notifier`] wraps it with the platform backend: `osascript` on macOS,
-//! `notify-send` on Linux. Both are plain subprocesses with no entitlements.
+//! [`Notifier`] wraps it with the platform backend: `UNUserNotificationCenter`
+//! on macOS (the bundled app; `osascript` when run unbundled from `cargo run`),
+//! `notify-send` on Linux.
+//!
+//! Message notifications look like Grok Bot's: title = sender, body = preview,
+//! the sender's chat image as the attachment, one thread per chat. Clicking
+//! one activates the app and opens that chat ([`take_clicks`]). The Dock icon
+//! badge mirrors the total unread count ([`set_badge`]).
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 pub const WINDOW_MS: u64 = 60_000;
 
@@ -28,6 +37,15 @@ pub enum NotifyKind {
 }
 
 impl NotifyKind {
+    /// A message from someone (agent reply or a person's line): the banner is
+    /// titled with the sender, like a chat app, not with the event.
+    fn is_message(self) -> bool {
+        matches!(
+            self,
+            NotifyKind::TurnFinished | NotifyKind::DirectMessage | NotifyKind::CrossProject
+        )
+    }
+
     fn title(self, project: &str) -> String {
         match self {
             NotifyKind::TurnFinished => format!("{project} · done"),
@@ -50,6 +68,31 @@ pub struct NotifyEvent {
     pub kind: NotifyKind,
     /// Chat title, question text, error… ≤ one line.
     pub detail: String,
+    /// The chat it belongs to: the notification thread, and what a click opens.
+    pub chat_id: Option<String>,
+    /// Who wrote it (message kinds): the banner title.
+    pub sender: Option<String>,
+    /// The sender's chat image as a PNG on disk (see [`image_file`]).
+    pub image: Option<PathBuf>,
+}
+
+impl NotifyEvent {
+    pub fn new(
+        project_id: impl Into<String>,
+        project_name: impl Into<String>,
+        kind: NotifyKind,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            project_id: project_id.into(),
+            project_name: project_name.into(),
+            kind,
+            detail: detail.into(),
+            chat_id: None,
+            sender: None,
+            image: None,
+        }
+    }
 }
 
 /// What actually reaches the OS.
@@ -60,6 +103,8 @@ pub struct Notification {
     pub body: String,
     /// How many events this one stands for.
     pub count: usize,
+    pub chat_id: Option<String>,
+    pub image: Option<PathBuf>,
 }
 
 /// Why an event may not fire right now.
@@ -157,24 +202,48 @@ fn render(event: &NotifyEvent, count: usize) -> Notification {
             title: format!("{count} updates in {}", event.project_name),
             body: event.detail.clone(),
             count,
+            chat_id: event.chat_id.clone(),
+            image: event.image.clone(),
         };
     }
+    let title = match (&event.sender, event.kind.is_message()) {
+        (Some(sender), true) if !sender.is_empty() => sender.clone(),
+        _ => event.kind.title(&event.project_name),
+    };
     Notification {
         project_id: event.project_id.clone(),
-        title: event.kind.title(&event.project_name),
+        title,
         body: event.detail.clone(),
         count: 1,
+        chat_id: event.chat_id.clone(),
+        image: event.image.clone(),
     }
 }
 
 /// Deliver through the platform's notification center.
 pub fn deliver(n: &Notification) {
     if std::env::var_os("ARBOS_NOTIFY_DRY_RUN").is_some() {
-        eprintln!("notify: {} — {}", n.title, n.body);
+        eprintln!(
+            "notify: {} — {}{}{}",
+            n.title,
+            n.body,
+            n.chat_id
+                .as_deref()
+                .map(|c| format!(" [chat {c}]"))
+                .unwrap_or_default(),
+            n.image
+                .as_deref()
+                .map(|p| format!(" [image {}]", p.display()))
+                .unwrap_or_default()
+        );
         return;
     }
     #[cfg(target_os = "macos")]
     {
+        if mac::available() {
+            mac::deliver(n);
+            return;
+        }
         let script = format!(
             "display notification \"{}\" with title \"{}\"",
             applescript_escape(&n.body),
@@ -184,18 +253,145 @@ pub fn deliver(n: &Notification) {
     }
     #[cfg(target_os = "linux")]
     {
-        spawn_quiet(
-            Command::new("notify-send")
-                .arg("--app-name=Arbos")
-                .arg("--expire-time=8000")
-                .arg(&n.title)
-                .arg(&n.body),
-        );
+        let mut cmd = Command::new("notify-send");
+        cmd.arg("--app-name=Arbos").arg("--expire-time=8000");
+        if let Some(image) = &n.image {
+            cmd.arg(format!("--icon={}", image.display()));
+        }
+        match &n.chat_id {
+            // libnotify ≥ 0.7.10: `--wait` prints the action the user chose.
+            Some(chat) => {
+                cmd.arg("--action=default=Open").arg("--wait");
+                let chat = chat.clone();
+                spawn_then(cmd.arg(&n.title).arg(&n.body), move |out| {
+                    if out.lines().any(|l| l.trim() == "default") {
+                        push_click(chat);
+                    }
+                });
+            }
+            None => spawn_quiet(cmd.arg(&n.title).arg(&n.body)),
+        }
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         eprintln!("notify: {} — {}", n.title, n.body);
     }
+}
+
+// ----- platform glue shared by the backends --------------------------------
+
+/// Where sender images for notifications live (`$TMPDIR/arbos-notify`).
+pub fn image_dir() -> PathBuf {
+    let dir = std::env::temp_dir().join("arbos-notify");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+/// Write `rgba` (`w`×`h`, straight alpha) as `<key>.png` in [`image_dir`],
+/// once per key. Returns the path to hand to the notification backend.
+pub fn image_file(key: &str, w: u32, h: u32, rgba: &[u8]) -> Option<PathBuf> {
+    let safe: String = key
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let path = image_dir().join(format!("{safe}.png"));
+    if path.is_file() {
+        return Some(path);
+    }
+    let img = image::RgbaImage::from_raw(w, h, rgba.to_vec())?;
+    img.save(&path).ok()?;
+    Some(path)
+}
+
+/// A fresh copy of `path` for one notification (the macOS center moves the
+/// attachment file into its own store, so the cached PNG must stay put).
+#[cfg(target_os = "macos")]
+fn image_copy(path: &Path) -> Option<PathBuf> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let name = path.file_stem()?.to_string_lossy().to_string();
+    let copy = image_dir().join(format!("{name}-{stamp}.png"));
+    std::fs::copy(path, &copy).ok()?;
+    Some(copy)
+}
+
+/// Chats whose notification the user clicked since the last call.
+pub fn take_clicks() -> Vec<String> {
+    std::mem::take(&mut *clicks().lock().unwrap())
+}
+
+fn clicks() -> &'static Mutex<Vec<String>> {
+    static CLICKS: std::sync::OnceLock<Mutex<Vec<String>>> = std::sync::OnceLock::new();
+    CLICKS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Record a click on a chat's notification (the delegate on macOS; tests).
+pub fn push_click(chat_id: String) {
+    clicks().lock().unwrap().push(chat_id);
+}
+
+/// The app's unread badge. `0` clears it. Dock icon on macOS; elsewhere only
+/// remembered (the rail already shows the per-project counts).
+pub fn set_badge(total: usize) {
+    static LAST: AtomicUsize = AtomicUsize::new(usize::MAX);
+    if LAST.swap(total, Ordering::Relaxed) == total {
+        return;
+    }
+    if std::env::var_os("ARBOS_NOTIFY_DRY_RUN").is_some() {
+        eprintln!("notify: badge {total}");
+    }
+    #[cfg(target_os = "macos")]
+    mac::set_badge(total);
+    #[cfg(not(target_os = "macos"))]
+    let _ = total;
+}
+
+/// Install the notification-center delegate (clicks, foreground banners).
+/// Call once on the main thread at start-up; a no-op off macOS.
+pub fn init() {
+    #[cfg(target_os = "macos")]
+    mac::init();
+}
+
+/// Does this platform ask the user before showing notifications?
+pub fn needs_permission() -> bool {
+    if std::env::var_os("ARBOS_NOTIFY_PROMPT").is_some() {
+        return true;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        mac::available()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+const ASKED_MARK: &str = "notifications-asked";
+
+/// Has the one-time explainer already been shown (any answer)?
+pub fn permission_asked(config_dir: &Path) -> bool {
+    config_dir.join(ASKED_MARK).is_file()
+}
+
+pub fn mark_permission_asked(config_dir: &Path) {
+    let _ = std::fs::create_dir_all(config_dir);
+    let _ = std::fs::write(config_dir.join(ASKED_MARK), b"1");
+}
+
+/// Show the system permission prompt (macOS). Elsewhere nothing to ask.
+pub fn request_permission() {
+    #[cfg(target_os = "macos")]
+    mac::request_authorization();
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -216,9 +412,222 @@ fn spawn_quiet(cmd: &mut Command) {
     }
 }
 
+/// Run `cmd`, hand its stdout to `then` when it exits (notification clicks).
+#[cfg(target_os = "linux")]
+fn spawn_then(cmd: &mut Command, then: impl FnOnce(String) + Send + 'static) {
+    let spawned = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn();
+    match spawned {
+        Ok(child) => {
+            std::thread::spawn(move || {
+                if let Ok(out) = child.wait_with_output() {
+                    then(String::from_utf8_lossy(&out.stdout).to_string());
+                }
+            });
+        }
+        Err(err) => eprintln!("notify: backend unavailable: {err}"),
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn applescript_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// `UNUserNotificationCenter` through objc2. Only usable from a bundle (the
+/// center refuses processes without a bundle identifier), so the unbundled
+/// dev binary keeps the `osascript` path.
+#[cfg(target_os = "macos")]
+mod mac {
+    use std::cell::RefCell;
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    use block2::RcBlock;
+    use objc2::rc::Retained;
+    use objc2::runtime::ProtocolObject;
+    use objc2::{define_class, msg_send, MainThreadMarker, MainThreadOnly};
+    use objc2_app_kit::NSApplication;
+    use objc2_foundation::{
+        NSArray, NSBundle, NSError, NSObject, NSObjectProtocol, NSString, NSURL,
+    };
+    use objc2_user_notifications::{
+        UNAuthorizationOptions, UNMutableNotificationContent, UNNotification,
+        UNNotificationAttachment, UNNotificationPresentationOptions, UNNotificationRequest,
+        UNNotificationResponse, UNNotificationSound, UNUserNotificationCenter,
+        UNUserNotificationCenterDelegate,
+    };
+
+    use super::Notification;
+
+    /// Request identifiers carry the chat: `chat:<id>:<stamp>`.
+    const CHAT_PREFIX: &str = "chat:";
+
+    define_class!(
+        // SAFETY: NSObject has no subclassing requirements and the type
+        // does not implement Drop.
+        #[unsafe(super(NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "ArbosNotifyDelegate"]
+        struct Delegate;
+
+        unsafe impl NSObjectProtocol for Delegate {}
+
+        unsafe impl UNUserNotificationCenterDelegate for Delegate {
+            // Banners while the app is frontmost too (the coalescer already
+            // drops what the user is looking at).
+            #[unsafe(method(userNotificationCenter:willPresentNotification:withCompletionHandler:))]
+            unsafe fn will_present(
+                &self,
+                _center: &UNUserNotificationCenter,
+                _notification: &UNNotification,
+                completion: &block2::DynBlock<dyn Fn(UNNotificationPresentationOptions)>,
+            ) {
+                completion.call((UNNotificationPresentationOptions::Banner
+                    | UNNotificationPresentationOptions::List
+                    | UNNotificationPresentationOptions::Sound,));
+            }
+
+            #[unsafe(method(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:))]
+            unsafe fn did_receive(
+                &self,
+                _center: &UNUserNotificationCenter,
+                response: &UNNotificationResponse,
+                completion: &block2::DynBlock<dyn Fn()>,
+            ) {
+                let id = response.notification().request().identifier().to_string();
+                if let Some(rest) = id.strip_prefix(CHAT_PREFIX) {
+                    if let Some((chat, _stamp)) = rest.rsplit_once(':') {
+                        super::push_click(chat.to_string());
+                    }
+                }
+                if let Some(mtm) = MainThreadMarker::new() {
+                    NSApplication::sharedApplication(mtm).activate();
+                }
+                completion.call(());
+            }
+        }
+    );
+
+    impl Delegate {
+        fn new(mtm: MainThreadMarker) -> Retained<Self> {
+            let this = Self::alloc(mtm).set_ivars(());
+            // SAFETY: plain NSObject init on a freshly allocated instance.
+            unsafe { msg_send![super(this), init] }
+        }
+    }
+
+    thread_local! {
+        // The center holds its delegate weakly; keep ours for the app's life.
+        static DELEGATE: RefCell<Option<Retained<Delegate>>> = const { RefCell::new(None) };
+    }
+
+    /// 0 = unknown, 1 = bundled (center usable), 2 = not bundled.
+    static BUNDLED: AtomicU8 = AtomicU8::new(0);
+
+    pub fn available() -> bool {
+        match BUNDLED.load(Ordering::Relaxed) {
+            1 => true,
+            2 => false,
+            _ => {
+                let bundled = NSBundle::mainBundle().bundleIdentifier().is_some();
+                BUNDLED.store(if bundled { 1 } else { 2 }, Ordering::Relaxed);
+                bundled
+            }
+        }
+    }
+
+    pub fn init() {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        if !available() {
+            return;
+        }
+        let delegate = Delegate::new(mtm);
+        let center = UNUserNotificationCenter::currentNotificationCenter();
+        center.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+        DELEGATE.with(|d| *d.borrow_mut() = Some(delegate));
+    }
+
+    pub fn request_authorization() {
+        if !available() {
+            return;
+        }
+        let handler = RcBlock::new(|granted: objc2::runtime::Bool, error: *mut NSError| {
+            if !granted.as_bool() && !error.is_null() {
+                // SAFETY: non-null NSError* handed to the completion block.
+                let error = unsafe { &*error };
+                eprintln!("notify: permission: {}", error.localizedDescription());
+            }
+        });
+        UNUserNotificationCenter::currentNotificationCenter()
+            .requestAuthorizationWithOptions_completionHandler(
+                UNAuthorizationOptions::Alert
+                    | UNAuthorizationOptions::Sound
+                    | UNAuthorizationOptions::Badge,
+                &handler,
+            );
+    }
+
+    pub fn deliver(n: &Notification) {
+        let content = UNMutableNotificationContent::new();
+        content.setTitle(&NSString::from_str(&n.title));
+        content.setBody(&NSString::from_str(&n.body));
+        content.setSound(Some(&UNNotificationSound::defaultSound()));
+        if let Some(chat) = &n.chat_id {
+            content.setThreadIdentifier(&NSString::from_str(chat));
+        }
+        if let Some(copy) = n.image.as_deref().and_then(super::image_copy) {
+            let url = NSURL::fileURLWithPath(&NSString::from_str(&copy.to_string_lossy()));
+            // SAFETY: no options dictionary; the URL is a readable local PNG.
+            let attachment = unsafe {
+                UNNotificationAttachment::attachmentWithIdentifier_URL_options_error(
+                    &NSString::from_str("sender"),
+                    &url,
+                    None,
+                )
+            };
+            match attachment {
+                Ok(a) => content.setAttachments(&NSArray::from_retained_slice(&[a])),
+                Err(e) => eprintln!("notify: attachment: {}", e.localizedDescription()),
+            }
+        }
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let id = match &n.chat_id {
+            Some(chat) => format!("{CHAT_PREFIX}{chat}:{stamp}"),
+            None => format!("event:{}:{stamp}", n.project_id),
+        };
+        let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
+            &NSString::from_str(&id),
+            &content,
+            None,
+        );
+        let done = RcBlock::new(|error: *mut NSError| {
+            if !error.is_null() {
+                // SAFETY: non-null NSError* handed to the completion block.
+                let error = unsafe { &*error };
+                eprintln!("notify: {}", error.localizedDescription());
+            }
+        });
+        UNUserNotificationCenter::currentNotificationCenter()
+            .addNotificationRequest_withCompletionHandler(&request, Some(&done));
+    }
+
+    pub fn set_badge(total: usize) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let label = (total > 0).then(|| NSString::from_str(&total.to_string()));
+        NSApplication::sharedApplication(mtm)
+            .dockTile()
+            .setBadgeLabel(label.as_deref());
+    }
 }
 
 /// Coalescer + backend + the user's on/off switch.
@@ -291,12 +700,7 @@ mod tests {
     use super::*;
 
     fn ev(kind: NotifyKind, detail: &str) -> NotifyEvent {
-        NotifyEvent {
-            project_id: "comms".into(),
-            project_name: "Comms".into(),
-            kind,
-            detail: detail.into(),
-        }
+        NotifyEvent::new("comms", "Comms", kind, detail)
     }
 
     const OFF: Gate = Gate {
@@ -384,13 +788,34 @@ mod tests {
     #[test]
     fn projects_are_independent() {
         let mut c = Coalescer::default();
-        let other = NotifyEvent {
-            project_id: "arbos".into(),
-            project_name: "Arbos".into(),
-            kind: NotifyKind::RoutineRan,
-            detail: "Morning digest".into(),
-        };
+        let other = NotifyEvent::new("arbos", "Arbos", NotifyKind::RoutineRan, "Morning digest");
         assert!(c.offer(ev(NotifyKind::TurnFinished, "a"), 0, OFF).is_some());
         assert!(c.offer(other, 1, OFF).is_some());
+    }
+
+    #[test]
+    fn message_kinds_are_titled_with_the_sender() {
+        let mut c = Coalescer::default();
+        let mut e = ev(NotifyKind::TurnFinished, "On it.");
+        e.sender = Some("Comms".into());
+        e.chat_id = Some("c1".into());
+        let n = c.offer(e, 0, OFF).unwrap();
+        assert_eq!(n.title, "Comms");
+        assert_eq!(n.body, "On it.");
+        assert_eq!(n.chat_id.as_deref(), Some("c1"));
+
+        let mut c = Coalescer::default();
+        let mut e = ev(NotifyKind::DirectMessage, "hey");
+        e.sender = Some("Sam".into());
+        assert_eq!(c.offer(e, 0, OFF).unwrap().title, "Sam");
+
+        // Non-message kinds keep the event wording even with a sender.
+        let mut c = Coalescer::default();
+        let mut e = ev(NotifyKind::NeedsInput, "Which branch?");
+        e.sender = Some("Comms".into());
+        assert_eq!(
+            c.offer(e, 0, OFF).unwrap().title,
+            "Comms · needs your input"
+        );
     }
 }

@@ -65,6 +65,8 @@ fn main() {
             )
             .expect("open main window");
         reapply_window_background(cx);
+        // Notification clicks and foreground banners (macOS); no-op elsewhere.
+        crate::ui::notify::init();
         let _ = window.update(cx, |_, _, cx| cx.activate(true));
         // Some X servers (Xvfb, no compositor) do not present the first frame
         // until an event arrives; nudge a second frame shortly after launch.
