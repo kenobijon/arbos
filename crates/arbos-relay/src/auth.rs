@@ -4,6 +4,7 @@
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum::http::StatusCode;
+use axum::response::Response;
 
 use arbos_core::auth::hash;
 
@@ -63,16 +64,66 @@ impl Principal {
     }
 }
 
-/// Resolve a raw token string to a principal.
-pub fn resolve(state: &AppState, token: &str) -> Option<Principal> {
+/// Why a bearer was refused; `Expired` tells clients to refresh instead of signing in again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refused {
+    Missing,
+    Invalid,
+    Expired,
+}
+
+impl Refused {
+    fn kind(self) -> &'static str {
+        match self {
+            Refused::Missing => "missing_token",
+            Refused::Invalid => "invalid_token",
+            Refused::Expired => "token_expired",
+        }
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            Refused::Missing => "missing token",
+            Refused::Invalid => "invalid token",
+            Refused::Expired => "access token expired; refresh it",
+        }
+    }
+}
+
+/// Resolve a raw token string to a principal, or say why not.
+pub fn resolve_checked(state: &AppState, token: &str) -> Result<Principal, Refused> {
     if token.is_empty() {
-        return None;
+        return Err(Refused::Missing);
     }
     if let Some(admin) = &state.cfg.admin_token {
         if token == admin {
-            return Some(Principal::Admin);
+            return Ok(Principal::Admin);
         }
     }
+    if crate::signin::looks_like_jwt(token) {
+        // Access tokens are bound to a device row: a revoked device's tokens die with it even
+        // before they expire.
+        return match crate::signin::verify_access(&state.jwt_key, token) {
+            Ok(claims) => match state.db.device_status(&claims.device_id) {
+                Ok(Some((user_id, false))) if user_id == claims.user_id => {
+                    let _ = state.db.touch_device(&claims.device_id);
+                    Ok(Principal::Device {
+                        id: claims.device_id,
+                        token: token.to_owned(),
+                        user_id,
+                    })
+                }
+                _ => Err(Refused::Invalid),
+            },
+            Err(crate::signin::AccessError::Expired) => Err(Refused::Expired),
+            Err(crate::signin::AccessError::Invalid) => Err(Refused::Invalid),
+        };
+    }
+    resolve_legacy(state, token).ok_or(Refused::Invalid)
+}
+
+/// `adv_` device tokens and `abx_` box tokens (hash lookup).
+fn resolve_legacy(state: &AppState, token: &str) -> Option<Principal> {
     let h = hash(token);
     if let Ok(Some(id)) = state.db.device_by_token_hash(&h) {
         let user_id = state
@@ -111,13 +162,14 @@ pub fn token_from_parts(parts: &Parts) -> Option<String> {
 }
 
 impl FromRequestParts<AppState> for Principal {
-    type Rejection = (StatusCode, &'static str);
+    type Rejection = Response;
 
     async fn from_request_parts(
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let tok = token_from_parts(parts).ok_or((StatusCode::UNAUTHORIZED, "missing token"))?;
-        resolve(state, &tok).ok_or((StatusCode::UNAUTHORIZED, "invalid token"))
+        let tok = token_from_parts(parts).unwrap_or_default();
+        resolve_checked(state, &tok)
+            .map_err(|r| crate::signin::api_error(StatusCode::UNAUTHORIZED, r.kind(), r.message()))
     }
 }

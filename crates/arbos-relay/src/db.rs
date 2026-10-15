@@ -452,10 +452,12 @@ impl Db {
              );
              CREATE INDEX IF NOT EXISTS group_traffic_project_at ON group_traffic(project_id, at);",
         )?;
+        crate::db_accounts::migrate_accounts(&c);
+        c.execute_batch(crate::db_accounts::ACCOUNTS_SCHEMA)?;
         Ok(Self(Arc::new(Mutex::new(c))))
     }
 
-    fn with<T>(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> Result<T> {
+    pub(crate) fn with<T>(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> Result<T> {
         let c = self.0.lock().expect("db lock");
         Ok(f(&c)?)
     }

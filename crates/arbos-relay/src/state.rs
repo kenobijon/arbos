@@ -45,6 +45,33 @@ pub struct Config {
     pub openai_audio_base: String,
     /// `ARBOS_VAULT_MOCK=1`: two demo vault items and a local echo target (F8).
     pub vault_mock: bool,
+    /// How devices sign in: GitHub OAuth (self-serve) or one-time pairing codes (self-hosters).
+    pub auth_mode: AuthMode,
+    pub github_client_id: Option<String>,
+    pub github_client_secret: Option<String>,
+    /// Extra allowed `redirect` prefixes for `/auth/github/start` (`ARBOS_AUTH_REDIRECTS`).
+    pub auth_redirects: Vec<String>,
+    /// Credits a new GitHub account starts with (`ARBOS_DEFAULT_GRANT_USD`).
+    pub default_grant_usd: f64,
+    /// Soft per-user daily debit cap for new accounts (`ARBOS_DEFAULT_DAILY_CAP_USD`).
+    pub default_daily_cap_usd: f64,
+    /// `owner/repo` whose `edge` release feeds `GET /download/mac` (`ARBOS_RELEASES_REPO`).
+    pub releases_repo: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthMode {
+    Github,
+    Paircode,
+}
+
+impl AuthMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AuthMode::Github => "github",
+            AuthMode::Paircode => "paircode",
+        }
+    }
 }
 
 /// One frame to fan out to the other sockets in a room.
@@ -82,6 +109,10 @@ pub struct AppState {
     pub relay_key: Arc<crate::connectors::crypto::RelayKey>,
     /// device_id → live `arbos-local` helper socket (F9).
     pub local_conns: crate::local::LocalConns,
+    /// HS256 key for access tokens (`ARBOS_JWT_KEY`, else derived from the relay key).
+    pub jwt_key: Arc<[u8; 32]>,
+    /// `(fetched_at_ms, dmg_url)` for `GET /download/mac`.
+    pub download_cache: Arc<Mutex<Option<(i64, String)>>>,
 }
 
 impl AppState {

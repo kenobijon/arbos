@@ -7,6 +7,7 @@ mod channels;
 mod connectors;
 mod daytona;
 mod db;
+mod db_accounts;
 mod groups;
 mod images;
 mod local;
@@ -14,6 +15,7 @@ mod migrate;
 mod proxy;
 mod rooms;
 mod routines;
+mod signin;
 mod skills;
 mod smoke;
 mod state;
@@ -29,7 +31,7 @@ use axum::Router;
 use clap::{Parser, Subcommand};
 use tokio::sync::{Mutex, RwLock};
 
-use crate::state::{AppState, Config};
+use crate::state::{AppState, AuthMode, Config};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -149,10 +151,26 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("no ARBOS_RELAY_ADMIN_TOKEN set; generated admin token: {t}");
         Some(t)
     });
-    let public_url = args
-        .public_url
-        .clone()
+    let public_url = env_nonempty("ARBOS_PUBLIC_URL")
+        .or_else(|| args.public_url.clone())
         .unwrap_or_else(|| format!("http://{}", args.listen));
+    // Both spellings work: the vault item uses ARBOS_GITHUB_CLIENT_*, the design ARBOS_GITHUB_OAUTH_CLIENT_*.
+    let github_client_id = env_nonempty("ARBOS_GITHUB_OAUTH_CLIENT_ID")
+        .or_else(|| env_nonempty("ARBOS_GITHUB_CLIENT_ID"));
+    let github_client_secret = env_nonempty("ARBOS_GITHUB_OAUTH_CLIENT_SECRET")
+        .or_else(|| env_nonempty("ARBOS_GITHUB_CLIENT_SECRET"));
+    let auth_mode = match env_nonempty("ARBOS_AUTH_MODE").as_deref() {
+        Some("github") => AuthMode::Github,
+        Some("paircode") => AuthMode::Paircode,
+        Some(other) => anyhow::bail!("ARBOS_AUTH_MODE must be github or paircode, not {other:?}"),
+        None if github_client_id.is_some() => AuthMode::Github,
+        None => AuthMode::Paircode,
+    };
+    if auth_mode == AuthMode::Github
+        && (github_client_id.is_none() || github_client_secret.is_none())
+    {
+        anyhow::bail!("ARBOS_AUTH_MODE=github needs ARBOS_GITHUB_CLIENT_ID and ARBOS_GITHUB_CLIENT_SECRET (or the ARBOS_GITHUB_OAUTH_CLIENT_* names)");
+    }
 
     let cfg = Config {
         public_url,
@@ -179,8 +197,27 @@ async fn main() -> anyhow::Result<()> {
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| "https://api.openai.com/v1".to_owned()),
         vault_mock: std::env::var("ARBOS_VAULT_MOCK").is_ok_and(|v| v == "1"),
+        auth_mode,
+        github_client_id,
+        github_client_secret,
+        auth_redirects: env_nonempty("ARBOS_AUTH_REDIRECTS")
+            .map(|s| {
+                s.split(',')
+                    .map(|p| p.trim().to_owned())
+                    .filter(|p| !p.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        default_grant_usd: env_f64("ARBOS_DEFAULT_GRANT_USD", 100.0),
+        default_daily_cap_usd: env_f64("ARBOS_DEFAULT_DAILY_CAP_USD", 20.0),
+        releases_repo: env_nonempty("ARBOS_RELEASES_REPO")
+            .unwrap_or_else(|| "unarbos/arbos".to_owned()),
     };
     let relay_key = Arc::new(connectors::crypto::RelayKey::load(&db)?);
+    let jwt_key: [u8; 32] = match env_nonempty("ARBOS_JWT_KEY") {
+        Some(k) => connectors::crypto::RelayKey::derive(&k).subkey("jwt"),
+        None => relay_key.subkey("jwt"),
+    };
     let daytona = daytona_key.map(|k| {
         daytona::Daytona::new(
             k,
@@ -209,7 +246,10 @@ async fn main() -> anyhow::Result<()> {
         conn_seq: Arc::new(AtomicU64::new(0)),
         relay_key,
         local_conns: Arc::new(Mutex::new(HashMap::new())),
+        jwt_key: Arc::new(jwt_key),
+        download_cache: Arc::new(Mutex::new(None)),
     };
+    tracing::info!(auth_mode = auth_mode.as_str(), public_url = %state.cfg.public_url, "sign-in");
     if state.cfg.connectors_mock {
         tracing::info!("ARBOS_CONNECTORS_MOCK=1: connectors return canned data; sends land in connector_outbox");
     }
@@ -229,7 +269,7 @@ async fn main() -> anyhow::Result<()> {
     }
     vault::seed_mock(&state)?;
 
-    if db.device_count()? == 0 {
+    if auth_mode == AuthMode::Paircode && db.device_count()? == 0 {
         let code = arbos_core::auth::pairing_code();
         db.new_pairing_code(&code, 60 * 60 * 1000)?;
         tracing::info!("no devices paired yet; one-time pairing code (1 h): {code}");
@@ -245,6 +285,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/healthz", get(api::healthz))
         .route("/pair/new", post(api::pair_new))
         .route("/pair", post(api::pair))
+        .route("/auth/github/start", get(signin::github_start))
+        .route("/auth/github/callback", get(signin::github_callback))
+        .route("/auth/token", post(signin::token))
+        .route("/auth/refresh", post(signin::refresh))
+        .route("/auth/logout", post(signin::logout))
+        .route("/me", get(signin::me))
+        .route("/download/mac", get(signin::download_mac))
         .route("/devices", get(api::list_devices))
         .route("/devices/{id}", delete(api::revoke_device))
         .route(
@@ -402,4 +449,18 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(listen = %args.listen, data = %args.data.display(), "arbos-relay listening");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+fn env_nonempty(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+}
+
+fn env_f64(name: &str, default: f64) -> f64 {
+    env_nonempty(name)
+        .and_then(|s| s.parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .unwrap_or(default)
 }

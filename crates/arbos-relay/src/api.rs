@@ -14,7 +14,7 @@ use arbos_core::wire::PROJECT_DOC_CHAT_ID;
 use crate::auth::Principal;
 use crate::boxes::{self, Provider};
 use crate::db::{Chat, Project};
-use crate::state::AppState;
+use crate::state::{AppState, AuthMode};
 
 pub(crate) type ApiResult = Result<Response, (StatusCode, String)>;
 
@@ -25,13 +25,27 @@ pub(crate) fn internal(e: impl std::fmt::Display) -> (StatusCode, String) {
 pub async fn healthz(State(state): State<AppState>) -> Response {
     let devices = state.db.device_count().unwrap_or(0);
     Json(json!({ "ok": true, "proto": arbos_core::PROTO_VERSION, "devices": devices, "daytona": state.daytona.is_some(),
+        "auth_mode": state.cfg.auth_mode.as_str(),
         "providers": { "openai_compatible": state.cfg.openrouter_key.is_some() || state.cfg.openai_key.is_some(), "anthropic": state.cfg.anthropic_key.is_some() || state.cfg.openrouter_key.is_some() } }))
     .into_response()
 }
 
 // ---- pairing (D35) ----------------------------------------------------------------------------
 
+/// In GitHub mode the pairing-code path is closed (self-hosters keep it with
+/// `ARBOS_AUTH_MODE=paircode`).
+fn pair_enabled(state: &AppState) -> Result<(), (StatusCode, String)> {
+    match state.cfg.auth_mode {
+        AuthMode::Paircode => Ok(()),
+        AuthMode::Github => Err((
+            StatusCode::GONE,
+            "pairing codes are off on this relay; sign in with GitHub".to_owned(),
+        )),
+    }
+}
+
 pub async fn pair_new(State(state): State<AppState>, principal: Principal) -> ApiResult {
+    pair_enabled(&state)?;
     if !matches!(principal, Principal::Admin) {
         return Err((StatusCode::FORBIDDEN, "admin only".into()));
     }
@@ -51,6 +65,7 @@ pub struct PairBody {
 }
 
 pub async fn pair(State(state): State<AppState>, Json(b): Json<PairBody>) -> ApiResult {
+    pair_enabled(&state)?;
     let token = mint(TokenKind::Device);
     let device_id = ulid();
     let ok = state

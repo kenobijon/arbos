@@ -52,6 +52,18 @@ impl RelayKey {
         Self(out)
     }
 
+    /// A 32-byte key for another purpose (JWT signing), derived so the two never share bytes.
+    pub fn subkey(&self, purpose: &str) -> [u8; 32] {
+        let mut h = Sha256::new();
+        h.update(b"arbos-relay-subkey:");
+        h.update(purpose.as_bytes());
+        h.update(b":");
+        h.update(self.0);
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&h.finalize());
+        out
+    }
+
     /// `base64(nonce || ciphertext)`.
     pub fn encrypt(&self, plaintext: &str) -> Result<String> {
         let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&self.0));

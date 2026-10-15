@@ -728,6 +728,13 @@ mod tests {
             voice_mock: true,
             openai_audio_base: String::new(),
             vault_mock: false,
+            auth_mode: crate::state::AuthMode::Paircode,
+            github_client_id: None,
+            github_client_secret: None,
+            auth_redirects: Vec::new(),
+            default_grant_usd: 100.0,
+            default_daily_cap_usd: 20.0,
+            releases_repo: "unarbos/arbos".into(),
         };
         AppState {
             db,
@@ -742,6 +749,8 @@ mod tests {
             last_client_push: Arc::new(Mutex::new(HashMap::new())),
             conn_seq: Arc::new(AtomicU64::new(0)),
             relay_key: Arc::new(RelayKey::derive("test-key")),
+            jwt_key: Arc::new(RelayKey::derive("test-key").subkey("jwt")),
+            download_cache: Arc::new(Mutex::new(None)),
             stale_bounces: Arc::new(Mutex::new(HashMap::new())),
             local_conns: Arc::new(Mutex::new(HashMap::new())),
         }
