@@ -20,14 +20,14 @@ pub async fn browser_stream(
     principal: Principal,
     Path(id): Path<String>,
 ) -> Response {
-    let project_id = match state.db.project(&id) {
-        Ok(Some(p)) => p.id,
+    let project = match state.db.project(&id) {
+        Ok(Some(p)) => p,
         _ => return (StatusCode::NOT_FOUND, "no such project").into_response(),
     };
-    if !principal.can_access_project(&project_id) {
+    if !principal.can_access_project(&project.user_id) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let sb = match state.db.sandbox(&project_id) {
+    let sb = match state.db.user_box(&project.user_id) {
         Ok(Some(s)) => s,
         _ => return (StatusCode::NOT_FOUND, "no sandbox").into_response(),
     };
@@ -44,7 +44,7 @@ pub async fn browser_stream(
     ws.max_message_size(32 * 1024 * 1024)
         .on_upgrade(move |socket| async move {
             if let Err(e) = pipe(socket, &upstream, token.as_deref()).await {
-                tracing::debug!(error = %e, project_id, "browser stream proxy closed");
+                tracing::debug!(error = %e, project = %project.id, "browser stream proxy closed");
             }
         })
 }

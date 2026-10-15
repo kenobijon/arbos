@@ -42,6 +42,24 @@ CREATE TABLE IF NOT EXISTS sandboxes (
   snapshot TEXT, region TEXT, last_started_at INTEGER, last_stopped_at INTEGER, last_seen_at INTEGER,
   box_url TEXT, preview_token TEXT, local_pid INTEGER
 );
+-- One Daytona computer per user (design change 2026-10-15): every project of a user is a workspace
+-- on that box. `sandboxes` above is the legacy per-project registry, kept for migration only.
+CREATE TABLE IF NOT EXISTS boxes (
+  user_id TEXT PRIMARY KEY, provider TEXT NOT NULL, sandbox_id TEXT,
+  daytona_state TEXT, device_id TEXT NOT NULL, box_token_hash TEXT NOT NULL, mcp_token TEXT NOT NULL,
+  snapshot TEXT, region TEXT, last_started_at INTEGER, last_stopped_at INTEGER, last_seen_at INTEGER,
+  box_url TEXT, preview_token TEXT, local_pid INTEGER, migrated_from TEXT NOT NULL DEFAULT '[]'
+);
+-- Per-user box class: the Daytona snapshot (which fixes vCPU/RAM/disk) a user's box is created
+-- from; NULL = the relay default (ARBOS_DAYTONA_SNAPSHOT). Raise a user's class later by setting
+-- it and recreating the box; no code change needed.
+CREATE TABLE IF NOT EXISTS users (
+  id TEXT PRIMARY KEY, snapshot TEXT, spend_cap_usd REAL NOT NULL DEFAULT 25.0, created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS box_wake_jobs (
+  user_id TEXT PRIMARY KEY, reason TEXT NOT NULL, due_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL, last_error TEXT
+);
 CREATE TABLE IF NOT EXISTS rows (
   room TEXT NOT NULL, seq INTEGER NOT NULL, device TEXT NOT NULL, batch_id TEXT NOT NULL,
   bytes BLOB NOT NULL, created_at INTEGER NOT NULL,
@@ -89,6 +107,10 @@ pub struct Project {
     pub last_active_at: i64,
     pub spend_cap_daily: f64,
     pub color: String,
+    /// Owner; all of a user's projects share one box.
+    pub user_id: String,
+    /// Workspace state on the user box as last reported: `running` | `stopped`.
+    pub workspace_state: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,7 +126,8 @@ pub struct Chat {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Sandbox {
-    pub project_id: String,
+    /// The owning user (one box per user). Legacy rows from `sandboxes` carry the project id here.
+    pub user_id: String,
     pub provider: String,
     pub sandbox_id: Option<String>,
     pub daytona_state: Option<String>,
@@ -118,6 +141,9 @@ pub struct Sandbox {
     pub box_url: Option<String>,
     pub preview_token: Option<String>,
     pub local_pid: Option<i64>,
+    /// Project ids whose legacy per-project sandbox was copied into this box.
+    #[serde(default)]
+    pub migrated_from: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -165,6 +191,22 @@ impl Db {
             [],
         );
         let _ = c.execute("ALTER TABLE chats ADD COLUMN closed_at INTEGER", []);
+        // One box per user: devices and projects belong to a user; legacy sandboxes record where
+        // their /work went.
+        let _ = c.execute(
+            "ALTER TABLE devices ADD COLUMN user_id TEXT NOT NULL DEFAULT 'u_default'",
+            [],
+        );
+        let _ = c.execute(
+            "ALTER TABLE projects ADD COLUMN user_id TEXT NOT NULL DEFAULT 'u_default'",
+            [],
+        );
+        let _ = c.execute(
+            "ALTER TABLE projects ADD COLUMN workspace_state TEXT NOT NULL DEFAULT 'stopped'",
+            [],
+        );
+        let _ = c.execute("ALTER TABLE sandboxes ADD COLUMN migrated_to TEXT", []);
+        let _ = c.execute("ALTER TABLE sandboxes ADD COLUMN migrated_at INTEGER", []);
         Ok(Self(Arc::new(Mutex::new(c))))
     }
 
@@ -260,9 +302,9 @@ impl Db {
     pub fn insert_project(&self, p: &Project) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO projects(id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                params![p.id, p.name, p.icon, p.instructions, p.models.to_string(), p.state, p.created_at, p.last_active_at, p.spend_cap_daily, p.color],
+                "INSERT INTO projects(id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color, user_id, workspace_state)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![p.id, p.name, p.icon, p.instructions, p.models.to_string(), p.state, p.created_at, p.last_active_at, p.spend_cap_daily, p.color, p.user_id, p.workspace_state],
             )
             .map(|_| ())
         })
@@ -280,11 +322,13 @@ impl Db {
             last_active_at: r.get(7)?,
             spend_cap_daily: r.get(8)?,
             color: r.get(9)?,
+            user_id: r.get(10)?,
+            workspace_state: r.get(11)?,
         })
     }
 
     const PROJECT_COLS: &'static str =
-        "id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color";
+        "id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color, user_id, workspace_state";
 
     pub fn project(&self, id_or_name: &str) -> Result<Option<Project>> {
         self.with(|c| {
@@ -420,38 +464,195 @@ impl Db {
         })
     }
 
-    // ---- sandboxes ----------------------------------------------------------------------------
+    // ---- boxes (one per user) + legacy per-project sandboxes ----------------------------------
 
-    pub fn upsert_sandbox(&self, s: &Sandbox) -> Result<()> {
+    const BOX_COLS: &'static str = "user_id, provider, sandbox_id, daytona_state, device_id, box_token_hash, mcp_token, snapshot,
+                        last_started_at, last_stopped_at, last_seen_at, box_url, preview_token, local_pid, migrated_from";
+
+    fn row_to_box(r: &rusqlite::Row<'_>) -> rusqlite::Result<Sandbox> {
+        Ok(Sandbox {
+            user_id: r.get(0)?,
+            provider: r.get(1)?,
+            sandbox_id: r.get(2)?,
+            daytona_state: r.get(3)?,
+            device_id: r.get(4)?,
+            box_token_hash: r.get(5)?,
+            mcp_token: r.get(6)?,
+            snapshot: r.get(7)?,
+            last_started_at: r.get(8)?,
+            last_stopped_at: r.get(9)?,
+            last_seen_at: r.get(10)?,
+            box_url: r.get(11)?,
+            preview_token: r.get(12)?,
+            local_pid: r.get(13)?,
+            migrated_from: serde_json::from_str(
+                &r.get::<_, String>(14).unwrap_or_else(|_| "[]".into()),
+            )
+            .unwrap_or_default(),
+        })
+    }
+
+    pub fn upsert_box(&self, s: &Sandbox) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO sandboxes(project_id, provider, sandbox_id, daytona_state, device_id, box_token_hash, mcp_token, snapshot,
-                    last_started_at, last_stopped_at, last_seen_at, box_url, preview_token, local_pid)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
-                 ON CONFLICT(project_id) DO UPDATE SET provider=excluded.provider, sandbox_id=excluded.sandbox_id,
+                "INSERT INTO boxes(user_id, provider, sandbox_id, daytona_state, device_id, box_token_hash, mcp_token, snapshot,
+                    last_started_at, last_stopped_at, last_seen_at, box_url, preview_token, local_pid, migrated_from)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
+                 ON CONFLICT(user_id) DO UPDATE SET provider=excluded.provider, sandbox_id=excluded.sandbox_id,
                     daytona_state=excluded.daytona_state, device_id=excluded.device_id, box_token_hash=excluded.box_token_hash,
                     mcp_token=excluded.mcp_token, snapshot=excluded.snapshot, last_started_at=excluded.last_started_at,
                     last_stopped_at=excluded.last_stopped_at, last_seen_at=excluded.last_seen_at, box_url=excluded.box_url,
-                    preview_token=excluded.preview_token, local_pid=excluded.local_pid",
+                    preview_token=excluded.preview_token, local_pid=excluded.local_pid, migrated_from=excluded.migrated_from",
                 params![
-                    s.project_id, s.provider, s.sandbox_id, s.daytona_state, s.device_id, s.box_token_hash, s.mcp_token, s.snapshot,
-                    s.last_started_at, s.last_stopped_at, s.last_seen_at, s.box_url, s.preview_token, s.local_pid
+                    s.user_id, s.provider, s.sandbox_id, s.daytona_state, s.device_id, s.box_token_hash, s.mcp_token, s.snapshot,
+                    s.last_started_at, s.last_stopped_at, s.last_seen_at, s.box_url, s.preview_token, s.local_pid,
+                    serde_json::to_string(&s.migrated_from).unwrap_or_else(|_| "[]".into())
                 ],
             )
             .map(|_| ())
         })
     }
 
-    pub fn sandbox(&self, project_id: &str) -> Result<Option<Sandbox>> {
+    /// The user's box, if one was created.
+    pub fn user_box(&self, user_id: &str) -> Result<Option<Sandbox>> {
         self.with(|c| {
             c.query_row(
+                &format!("SELECT {} FROM boxes WHERE user_id = ?1", Self::BOX_COLS),
+                params![user_id],
+                Self::row_to_box,
+            )
+            .optional()
+        })
+    }
+
+    pub fn list_boxes(&self) -> Result<Vec<Sandbox>> {
+        self.with(|c| {
+            let mut st = c.prepare(&format!("SELECT {} FROM boxes", Self::BOX_COLS))?;
+            let rows = st.query_map([], Self::row_to_box)?;
+            rows.collect()
+        })
+    }
+
+    /// The box that serves a project = its user's box.
+    pub fn box_for_project(&self, project_id: &str) -> Result<Option<Sandbox>> {
+        let Some(p) = self.project(project_id)? else {
+            return Ok(None);
+        };
+        self.user_box(&p.user_id)
+    }
+
+    pub fn user_by_box_token_hash(&self, h: &str) -> Result<Option<String>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT user_id FROM boxes WHERE box_token_hash = ?1",
+                params![h],
+                |r| r.get(0),
+            )
+            .optional()
+        })
+    }
+
+    pub fn touch_box(&self, user_id: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE boxes SET last_seen_at = ?2 WHERE user_id = ?1",
+                params![user_id, now_ms()],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn user_snapshot(&self, user_id: &str) -> Result<Option<String>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT snapshot FROM users WHERE id = ?1",
+                params![user_id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map(|o| o.flatten())
+        })
+    }
+
+    pub fn set_user_snapshot(&self, user_id: &str, snapshot: Option<&str>) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO users(id, snapshot, created_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(id) DO UPDATE SET snapshot = excluded.snapshot",
+                params![user_id, snapshot, now_ms()],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn user_spend_cap(&self, user_id: &str) -> Result<f64> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT spend_cap_usd FROM users WHERE id = ?1",
+                params![user_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map(|o| o.unwrap_or(25.0))
+        })
+    }
+
+    /// Today's spend across every project of the user.
+    pub fn user_usage_since(&self, user_id: &str, since_ms: i64) -> Result<f64> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT COALESCE(SUM(u.usd), 0) FROM usage u JOIN projects p ON p.id = u.project_id WHERE p.user_id = ?1 AND u.at >= ?2",
+                params![user_id, since_ms],
+                |r| r.get(0),
+            )
+        })
+    }
+
+    pub fn device_user(&self, device_id: &str) -> Result<Option<String>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT user_id FROM devices WHERE id = ?1",
+                params![device_id],
+                |r| r.get(0),
+            )
+            .optional()
+        })
+    }
+
+    pub fn projects_of_user(&self, user_id: &str) -> Result<Vec<Project>> {
+        self.with(|c| {
+            let mut st = c.prepare(&format!(
+                "SELECT {} FROM projects WHERE user_id = ?1 ORDER BY last_active_at DESC",
+                Self::PROJECT_COLS
+            ))?;
+            let rows = st.query_map(params![user_id], Self::row_to_project)?;
+            rows.collect()
+        })
+    }
+
+    pub fn set_workspace_state(&self, project_id: &str, state: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE projects SET workspace_state = ?2 WHERE id = ?1",
+                params![project_id, state],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// Legacy per-project sandboxes (pre one-box-per-user) that still hold a project's /work.
+    pub fn legacy_sandboxes(&self) -> Result<Vec<(String, Sandbox, Option<String>)>> {
+        self.with(|c| {
+            let mut st = c.prepare(
                 "SELECT project_id, provider, sandbox_id, daytona_state, device_id, box_token_hash, mcp_token, snapshot,
-                        last_started_at, last_stopped_at, last_seen_at, box_url, preview_token, local_pid
-                 FROM sandboxes WHERE project_id = ?1",
-                params![project_id],
-                |r| {
-                    Ok(Sandbox {
-                        project_id: r.get(0)?,
+                        last_started_at, last_stopped_at, last_seen_at, box_url, preview_token, local_pid, migrated_to
+                 FROM sandboxes",
+            )?;
+            let rows = st.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    Sandbox {
+                        user_id: r.get(0)?,
                         provider: r.get(1)?,
                         sandbox_id: r.get(2)?,
                         daytona_state: r.get(3)?,
@@ -465,29 +666,20 @@ impl Db {
                         box_url: r.get(11)?,
                         preview_token: r.get(12)?,
                         local_pid: r.get(13)?,
-                    })
-                },
-            )
-            .optional()
+                        migrated_from: Vec::new(),
+                    },
+                    r.get::<_, Option<String>>(14)?,
+                ))
+            })?;
+            rows.collect()
         })
     }
 
-    pub fn project_by_box_token_hash(&self, h: &str) -> Result<Option<String>> {
-        self.with(|c| {
-            c.query_row(
-                "SELECT project_id FROM sandboxes WHERE box_token_hash = ?1",
-                params![h],
-                |r| r.get(0),
-            )
-            .optional()
-        })
-    }
-
-    pub fn touch_sandbox(&self, project_id: &str) -> Result<()> {
+    pub fn mark_legacy_migrated(&self, project_id: &str, user_id: &str) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "UPDATE sandboxes SET last_seen_at = ?2 WHERE project_id = ?1",
-                params![project_id, now_ms()],
+                "UPDATE sandboxes SET migrated_to = ?2, migrated_at = ?3 WHERE project_id = ?1",
+                params![project_id, user_id, now_ms()],
             )
             .map(|_| ())
         })
@@ -683,13 +875,13 @@ impl Db {
 
     // ---- wake jobs, push queue, timings -------------------------------------------------------
 
-    pub fn upsert_wake_job(&self, project_id: &str, reason: &str) -> Result<()> {
+    pub fn upsert_wake_job(&self, user_id: &str, reason: &str) -> Result<()> {
         let now = now_ms();
         self.with(|c| {
             c.execute(
-                "INSERT INTO wake_jobs(project_id, reason, due_at, attempts, created_at) VALUES (?1,?2,?3,0,?3)
-                 ON CONFLICT(project_id) DO UPDATE SET reason = excluded.reason, due_at = MIN(wake_jobs.due_at, excluded.due_at)",
-                params![project_id, reason, now],
+                "INSERT INTO box_wake_jobs(user_id, reason, due_at, attempts, created_at) VALUES (?1,?2,?3,0,?3)
+                 ON CONFLICT(user_id) DO UPDATE SET reason = excluded.reason, due_at = MIN(box_wake_jobs.due_at, excluded.due_at)",
+                params![user_id, reason, now],
             )
             .map(|_| ())
         })
@@ -697,31 +889,32 @@ impl Db {
 
     pub fn due_wake_jobs(&self) -> Result<Vec<(String, String, i64)>> {
         self.with(|c| {
-            let mut st =
-                c.prepare("SELECT project_id, reason, attempts FROM wake_jobs WHERE due_at <= ?1")?;
+            let mut st = c.prepare(
+                "SELECT user_id, reason, attempts FROM box_wake_jobs WHERE due_at <= ?1",
+            )?;
             let rows =
                 st.query_map(params![now_ms()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
             rows.collect()
         })
     }
 
-    pub fn finish_wake_job(&self, project_id: &str) -> Result<()> {
+    pub fn finish_wake_job(&self, user_id: &str) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "DELETE FROM wake_jobs WHERE project_id = ?1",
-                params![project_id],
+                "DELETE FROM box_wake_jobs WHERE user_id = ?1",
+                params![user_id],
             )
             .map(|_| ())
         })
     }
 
-    pub fn retry_wake_job(&self, project_id: &str, delay_ms: i64, err: &str) -> Result<i64> {
+    pub fn retry_wake_job(&self, user_id: &str, delay_ms: i64, err: &str) -> Result<i64> {
         self.with(|c| {
             c.execute(
-                "UPDATE wake_jobs SET attempts = attempts + 1, due_at = ?2, last_error = ?3 WHERE project_id = ?1",
-                params![project_id, now_ms() + delay_ms, err],
+                "UPDATE box_wake_jobs SET attempts = attempts + 1, due_at = ?2, last_error = ?3 WHERE user_id = ?1",
+                params![user_id, now_ms() + delay_ms, err],
             )?;
-            c.query_row("SELECT attempts FROM wake_jobs WHERE project_id = ?1", params![project_id], |r| r.get(0))
+            c.query_row("SELECT attempts FROM box_wake_jobs WHERE user_id = ?1", params![user_id], |r| r.get(0))
         })
     }
 

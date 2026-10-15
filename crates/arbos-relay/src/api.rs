@@ -171,6 +171,8 @@ pub async fn create_project(
         last_active_at: now,
         spend_cap_daily: 25.0,
         color: b.color.clone().unwrap_or_else(|| "#8b7cf6".into()),
+        user_id: principal.user_id().unwrap_or("u_default").to_owned(),
+        workspace_state: "stopped".into(),
     };
     state
         .db
@@ -186,9 +188,12 @@ pub async fn create_project(
         doc_epoch: 1,
     };
     state.db.insert_chat(&pinned).map_err(internal)?;
-    let sb = boxes::create_box(&state, &project, provider)
+    // One box per user: the first project creates it, later projects are workspaces on it. A
+    // sleeping box is woken so the new workspace starts right away.
+    let sb = boxes::ensure_user_box(&state, &project.user_id, provider)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("box create: {e}")))?;
+    boxes::ensure_awake(&state, &project.user_id, "api").await;
     Ok(Json(json!({
         "project": project_json(&state, &project).await,
         "pinned_chat": chat_json(&pinned),
@@ -216,7 +221,7 @@ pub async fn get_project(
         .project(&id)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if !principal.can_access_project(&p.id) {
+    if !principal.can_access_project(&p.user_id) {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
     let chats: Vec<Value> = state
@@ -226,7 +231,7 @@ pub async fn get_project(
         .iter()
         .map(chat_json)
         .collect();
-    let (bs, since) = state.box_state(&p.id).await;
+    let (bs, since) = state.box_state(&p.user_id).await;
     let today = state
         .db
         .usage_since(&p.id, start_of_day())
@@ -275,7 +280,7 @@ pub async fn patch_project(
         .project(&id)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if !principal.can_access_project(&p.id) {
+    if !principal.can_access_project(&p.user_id) {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
     if let Some(o) = b.models.as_ref().and_then(Value::as_object) {
@@ -340,7 +345,7 @@ pub async fn patch_chat(
     Json(b): Json<PatchChatBody>,
 ) -> ApiResult {
     let id = resolve_project_id(&state, &id)?;
-    if !principal.can_access_project(&id) {
+    if !state.allows(&principal, &id) {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
     let ok = state
@@ -362,7 +367,7 @@ pub async fn delete_chat(
     Path((id, chat)): Path<(String, String)>,
 ) -> ApiResult {
     let id = resolve_project_id(&state, &id)?;
-    if !principal.can_access_project(&id) || principal.is_box() {
+    if !state.allows(&principal, &id) || principal.is_box() {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
     match state.db.close_chat(&id, &chat).map_err(internal)? {
@@ -384,18 +389,22 @@ pub async fn chat_history(
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> ApiResult {
     let id = resolve_project_id(&state, &id)?;
-    if !principal.can_access_project(&id) {
+    if !state.allows(&principal, &id) {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
     let sb = state
         .db
-        .sandbox(&id)
+        .box_for_project(&id)
         .map_err(internal)?
-        .ok_or((StatusCode::NOT_FOUND, "no sandbox".to_owned()))?;
+        .ok_or((StatusCode::NOT_FOUND, "no box".to_owned()))?;
     let Some(url) = sb.box_url else {
         return Err((StatusCode::CONFLICT, "box has no url yet".into()));
     };
-    let mut req = state.http.get(format!("{url}/history/{chat}")).query(&q);
+    // One box per user: the workspace is named in the path.
+    let mut req = state
+        .http
+        .get(format!("{url}/w/{id}/history/{chat}"))
+        .query(&q);
     if let Some(t) = &sb.preview_token {
         req = req.header("x-daytona-preview-token", t);
     }
@@ -427,7 +436,7 @@ fn resolve_project_id(state: &AppState, id_or_name: &str) -> Result<String, (Sta
 
 /// The project record as clients see it (additive; `arbos-mac` maps it onto its `Project`).
 async fn project_json(state: &AppState, p: &Project) -> Value {
-    let (bs, since) = state.box_state(&p.id).await;
+    let (bs, since) = state.box_state(&p.user_id).await;
     let today = state
         .db
         .usage_since(&p.id, start_of_day())
@@ -462,11 +471,11 @@ pub async fn project_status(
         .project(&id)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if !principal.can_access_project(&p.id) {
+    if !principal.can_access_project(&p.user_id) {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
-    let (bs, since) = state.box_state(&p.id).await;
-    let mut provider = boxes::provider_status(&state, &p.id).await;
+    let (bs, since) = state.box_state(&p.user_id).await;
+    let mut provider = boxes::provider_status(&state, &p.user_id).await;
     // Laptops cannot reach a Daytona preview URL without its token: hand them the relay's proxy instead.
     if let Some(tok) = principal.raw_token() {
         let ws = state
@@ -477,8 +486,137 @@ pub async fn project_status(
         provider["browser_stream_url"] =
             json!(format!("{ws}/projects/{}/browser/stream?token={tok}", p.id));
     }
-    let timings = state.db.timings(&p.id).map_err(internal)?;
+    let mut timings = state.db.timings(&p.id).map_err(internal)?;
+    timings.extend(
+        state
+            .db
+            .timings(&boxes::timing_key(&p.user_id))
+            .map_err(internal)?,
+    );
     Ok(Json(json!({ "project_id": p.id, "state": p.state, "box": bs, "box_since": since, "provider": provider, "timings": timings })).into_response())
+}
+
+/// `GET /machine`: the caller's box (one per user), its class, spend, and the workspace state of
+/// every project on it. Field names are the contract for the Mac and iOS apps.
+pub async fn machine(State(state): State<AppState>, principal: Principal) -> ApiResult {
+    let user_id = principal
+        .user_id()
+        .ok_or((
+            StatusCode::FORBIDDEN,
+            "device or box token required".to_owned(),
+        ))?
+        .to_owned();
+    let (bs, since) = state.box_state(&user_id).await;
+    let sb = state.db.user_box(&user_id).map_err(internal)?;
+    let snapshot_name = sb
+        .as_ref()
+        .and_then(|s| s.snapshot.clone())
+        .or(state.db.user_snapshot(&user_id).map_err(internal)?)
+        .unwrap_or_else(|| state.cfg.daytona_snapshot.clone());
+    // Class from the snapshot when Daytona answers; the known default otherwise.
+    let (mut cpu, mut mem, mut disk) = (4_i64, 8_i64, 10_i64);
+    if let Some(dt) = &state.daytona {
+        if let Ok(snap) = dt.get_snapshot(&snapshot_name).await {
+            cpu = snap.cpu.unwrap_or(cpu);
+            mem = snap.mem.unwrap_or(mem);
+            disk = snap.disk.unwrap_or(disk);
+        }
+    }
+    let projects = state.db.projects_of_user(&user_id).map_err(internal)?;
+    let workspaces: Vec<Value> = projects
+        .iter()
+        .map(|p| {
+            json!({
+                "project_id": p.id,
+                "state": if bs == arbos_core::wire::BoxState::Awake { p.workspace_state.as_str() } else { "stopped" },
+            })
+        })
+        .collect();
+    let spend_today = state
+        .db
+        .user_usage_since(&user_id, start_of_day())
+        .map_err(internal)?;
+    Ok(Json(json!({
+        "user_id": user_id,
+        "state": bs,
+        "since": since,
+        "provider": sb.as_ref().map(|s| s.provider.clone()),
+        "sandbox_id": sb.as_ref().and_then(|s| s.sandbox_id.clone()),
+        "spec": { "cpu": cpu, "mem_gib": mem, "disk_gib": disk, "class": snapshot_name },
+        "spend_today_usd": spend_today,
+        "spend_cap_usd": state.db.user_spend_cap(&user_id).map_err(internal)?,
+        "workspaces": workspaces,
+        "migrated_from": sb.as_ref().map(|s| s.migrated_from.clone()).unwrap_or_default(),
+    }))
+    .into_response())
+}
+
+/// `POST /machine/start`: wake the caller's box (creating it if the user has none yet).
+pub async fn machine_start(State(state): State<AppState>, principal: Principal) -> ApiResult {
+    let user_id = principal
+        .user_id()
+        .ok_or((StatusCode::FORBIDDEN, "device token required".to_owned()))?
+        .to_owned();
+    if principal.is_box() {
+        return Err((StatusCode::FORBIDDEN, "devices only".into()));
+    }
+    if state.db.user_box(&user_id).map_err(internal)?.is_none() {
+        let provider = if state.daytona.is_some() {
+            Provider::Daytona
+        } else {
+            Provider::Process
+        };
+        boxes::ensure_user_box(&state, &user_id, provider)
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("box create: {e}")))?;
+    }
+    boxes::ensure_awake(&state, &user_id, "api").await;
+    let (bs, since) = state.box_state(&user_id).await;
+    Ok(Json(json!({ "state": bs, "since": since })).into_response())
+}
+
+/// `POST /machine/stop`: hibernate the caller's box; every workspace stops with it.
+pub async fn machine_stop(
+    State(state): State<AppState>,
+    principal: Principal,
+    Query(q): Query<StopQuery>,
+) -> ApiResult {
+    let user_id = principal
+        .user_id()
+        .ok_or((StatusCode::FORBIDDEN, "device token required".to_owned()))?
+        .to_owned();
+    if principal.is_box() {
+        return Err((StatusCode::FORBIDDEN, "devices only".into()));
+    }
+    boxes::stop_box(&state, &user_id, q.force)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+    let (bs, since) = state.box_state(&user_id).await;
+    Ok(Json(json!({ "state": bs, "since": since })).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct UserBoxBody {
+    /// Daytona snapshot name (fixes vCPU/RAM/disk); null clears the override.
+    pub snapshot: Option<String>,
+}
+
+/// `PUT /admin/users/{id}/box`: per-user box class. Applies to the next box create (stop and
+/// delete the current sandbox to re-create at the new class).
+pub async fn admin_set_user_box(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    Json(b): Json<UserBoxBody>,
+) -> ApiResult {
+    if !matches!(principal, Principal::Admin) {
+        return Err((StatusCode::FORBIDDEN, "admin only".into()));
+    }
+    state
+        .db
+        .set_user_snapshot(&id, b.snapshot.as_deref())
+        .map_err(internal)?;
+    Ok(Json(json!({ "user_id": id, "snapshot": b.snapshot })).into_response())
 }
 
 #[derive(Deserialize)]
@@ -498,7 +636,7 @@ pub async fn create_chat(
         .project(&id)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if !principal.can_access_project(&p.id) {
+    if !principal.can_access_project(&p.user_id) {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
     let n = state.db.list_chats(&p.id).map_err(internal)?.len() as i64;
@@ -528,7 +666,7 @@ pub async fn list_chats(
         .project(&id)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if !principal.can_access_project(&p.id) {
+    if !principal.can_access_project(&p.user_id) {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
     Ok(Json(
@@ -555,11 +693,11 @@ pub async fn wake(
         .project(&id)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if !principal.can_access_project(&p.id) {
+    if !principal.can_access_project(&p.user_id) {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
-    boxes::ensure_awake(&state, &p.id, "api").await;
-    let (bs, since) = state.box_state(&p.id).await;
+    boxes::ensure_awake(&state, &p.user_id, "api").await;
+    let (bs, since) = state.box_state(&p.user_id).await;
     Ok(Json(json!({ "box": bs, "since": since })).into_response())
 }
 
@@ -573,13 +711,13 @@ pub async fn start(
         .project(&id)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if !principal.can_access_project(&p.id) || principal.is_box() {
+    if !principal.can_access_project(&p.user_id) || principal.is_box() {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
-    boxes::start_box(&state, &p.id)
+    boxes::start_box(&state, &p.user_id)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
-    let (bs, since) = state.box_state(&p.id).await;
+    let (bs, since) = state.box_state(&p.user_id).await;
     Ok(Json(json!({ "box": bs, "since": since })).into_response())
 }
 
@@ -600,13 +738,13 @@ pub async fn stop(
         .project(&id)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if !principal.can_access_project(&p.id) || principal.is_box() {
+    if !principal.can_access_project(&p.user_id) || principal.is_box() {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
-    boxes::stop_box(&state, &p.id, q.force)
+    boxes::stop_box(&state, &p.user_id, q.force)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
-    let (bs, since) = state.box_state(&p.id).await;
+    let (bs, since) = state.box_state(&p.user_id).await;
     Ok(Json(json!({ "box": bs, "since": since })).into_response())
 }
 
@@ -623,10 +761,13 @@ pub async fn keepalive(
     Json(b): Json<KeepaliveBody>,
 ) -> ApiResult {
     let id = resolve_project_id(&state, &id)?;
-    if !principal.can_access_project(&id) {
+    if !state.allows(&principal, &id) {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
-    boxes::keepalive(&state, &id, b.turn_running)
+    let owner = state
+        .user_of(&id)
+        .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
+    boxes::keepalive(&state, &owner, b.turn_running)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
     Ok(StatusCode::NO_CONTENT.into_response())
@@ -642,48 +783,111 @@ pub struct BoxHelloBody {
     pub proto: Option<u32>,
 }
 
-/// The box announces itself after boot; the relay returns its settings and the queued pushes.
+/// One project as the box sees it: settings, chats, and the pushes queued for it.
+fn workspace_json(state: &AppState, p: &Project) -> Result<Value, (StatusCode, String)> {
+    let chats = state.db.list_chats(&p.id).map_err(internal)?;
+    let pushes = state.db.take_pushes(&p.id).map_err(internal)?;
+    Ok(json!({
+        "project": p,
+        "chats": chats,
+        "pushes": pushes.into_iter().map(|(i, k, v)| json!({ "id": i, "kind": k, "payload": v })).collect::<Vec<_>>(),
+    }))
+}
+
+/// The box announces itself after boot (`POST /box/hello`): one box per user, so the answer lists
+/// every project of that user as a workspace, with settings, chats, and queued pushes.
 pub async fn box_hello(
     State(state): State<AppState>,
     principal: Principal,
-    Path(id): Path<String>,
     Json(b): Json<BoxHelloBody>,
 ) -> ApiResult {
-    let Principal::Box { project_id } = &principal else {
+    let Principal::Box { user_id } = &principal else {
         return Err((StatusCode::FORBIDDEN, "box only".into()));
     };
-    if project_id != &id {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
-    tracing::info!(project = %id, version = ?b.version, "box hello");
+    tracing::info!(user = %user_id, version = ?b.version, "box hello");
     if b.proto.unwrap_or(arbos_core::PROTO_VERSION) != arbos_core::PROTO_VERSION {
         return Err((
             StatusCode::CONFLICT,
             "incompatible agentd protocol; rebuild box (D44)".into(),
         ));
     }
-    let p = state
-        .db
-        .project(&id)
-        .map_err(internal)?
-        .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
     if let Some(url) = &b.url {
-        if let Ok(Some(mut sb)) = state.db.sandbox(&id) {
+        if let Ok(Some(mut sb)) = state.db.user_box(user_id) {
             if sb.provider != "daytona" {
                 sb.box_url = Some(url.clone());
-                let _ = state.db.upsert_sandbox(&sb);
+                let _ = state.db.upsert_box(&sb);
             }
         }
     }
-    let chats = state.db.list_chats(&id).map_err(internal)?;
-    let pushes = state.db.take_pushes(&id).map_err(internal)?;
+    let projects = state.db.projects_of_user(user_id).map_err(internal)?;
+    let mut workspaces = Vec::new();
+    for p in &projects {
+        workspaces.push(workspace_json(&state, p)?);
+    }
     Ok(Json(json!({
-        "project": p,
-        "chats": chats,
-        "pushes": pushes.into_iter().map(|(i, k, v)| json!({ "id": i, "kind": k, "payload": v })).collect::<Vec<_>>(),
+        "user_id": user_id,
+        "workspaces": workspaces,
         "relay_version": env!("CARGO_PKG_VERSION"),
     }))
     .into_response())
+}
+
+/// `GET /box/projects`: the box's 3 s poll — every project of its user (settings + chats), so new
+/// projects become workspaces and settings changes land without a restart.
+pub async fn box_projects(State(state): State<AppState>, principal: Principal) -> ApiResult {
+    let Principal::Box { user_id } = &principal else {
+        return Err((StatusCode::FORBIDDEN, "box only".into()));
+    };
+    let projects = state.db.projects_of_user(user_id).map_err(internal)?;
+    let mut out = Vec::new();
+    for p in &projects {
+        let chats = state.db.list_chats(&p.id).map_err(internal)?;
+        out.push(json!({ "project": p, "chats": chats }));
+    }
+    Ok(Json(json!({ "user_id": user_id, "workspaces": out })).into_response())
+}
+
+/// `POST /box/keepalive`: box-level keep-alive (any workspace mid-turn keeps the box awake).
+pub async fn box_keepalive(
+    State(state): State<AppState>,
+    principal: Principal,
+    Json(b): Json<KeepaliveBody>,
+) -> ApiResult {
+    let Principal::Box { user_id } = &principal else {
+        return Err((StatusCode::FORBIDDEN, "box only".into()));
+    };
+    boxes::keepalive(&state, user_id, b.turn_running)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[derive(Deserialize)]
+pub struct WorkspaceStateBody {
+    pub state: String,
+}
+
+/// `POST /projects/{id}/workspace`: the box reports a workspace's state (`running` | `stopped`).
+pub async fn set_workspace_state(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    Json(b): Json<WorkspaceStateBody>,
+) -> ApiResult {
+    if !principal.is_box() || !state.allows(&principal, &id) {
+        return Err((StatusCode::FORBIDDEN, "box of this project only".into()));
+    }
+    let st = match b.state.as_str() {
+        "running" | "starting" | "stopped" | "error" => b.state.as_str(),
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "state must be running|starting|stopped|error".into(),
+            ))
+        }
+    };
+    state.db.set_workspace_state(&id, st).map_err(internal)?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 #[derive(Deserialize)]
@@ -710,7 +914,7 @@ pub async fn push(
         .enqueue_push(&p.id, &b.kind, &b.payload)
         .map_err(internal)?;
     if b.kind == "message" {
-        boxes::ensure_awake(&state, &p.id, "cross-project").await;
+        boxes::ensure_awake(&state, &p.user_id, "cross-project").await;
     }
     Ok(StatusCode::ACCEPTED.into_response())
 }
@@ -721,7 +925,7 @@ pub async fn take_pushes(
     Path(id): Path<String>,
 ) -> ApiResult {
     let id = resolve_project_id(&state, &id)?;
-    if !principal.can_access_project(&id) {
+    if !state.allows(&principal, &id) {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
     let pushes = state.db.take_pushes(&id).map_err(internal)?;
@@ -740,7 +944,7 @@ pub async fn usage(
     Path(id): Path<String>,
 ) -> ApiResult {
     let id = resolve_project_id(&state, &id)?;
-    if !principal.can_access_project(&id) {
+    if !state.allows(&principal, &id) {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
     let today = state
@@ -767,7 +971,7 @@ pub async fn record_timing(
     Json(b): Json<TimingBody>,
 ) -> ApiResult {
     let id = resolve_project_id(&state, &id)?;
-    if !principal.can_access_project(&id) {
+    if !state.allows(&principal, &id) {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
     state

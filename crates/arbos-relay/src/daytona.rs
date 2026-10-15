@@ -155,6 +155,12 @@ pub struct Snapshot {
     pub name: String,
     #[serde(default)]
     pub state: Option<String>,
+    #[serde(default)]
+    pub cpu: Option<i64>,
+    #[serde(default)]
+    pub mem: Option<i64>,
+    #[serde(default)]
+    pub disk: Option<i64>,
     #[serde(rename = "errorReason", default)]
     pub error_reason: Option<String>,
 }

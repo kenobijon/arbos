@@ -1,5 +1,6 @@
-//! The box's HTTP surfaces: `:7788` (`/healthz`, `/browser/stream`, `/history`, `/metrics`)
-//! and the loopback model stub `:7791` that forwards to the relay proxy with the box token.
+//! The box's HTTP surfaces: `:7788` (box-level: `/healthz`, `/browser/stream`; per workspace:
+//! `/w/{project}/history`, `/w/{project}/metrics`, `/w/{project}/t3/search`) and each workspace's
+//! loopback model stub that forwards to the relay proxy with the box token.
 
 use std::sync::Arc;
 
@@ -15,14 +16,32 @@ use futures::{SinkExt, StreamExt};
 use serde_json::json;
 
 use crate::agent::Agent;
+use crate::workspace::Supervisor;
 
 type S = Arc<Agent>;
+type B = Arc<Supervisor>;
 
-async fn healthz(State(a): State<S>) -> Response {
-    let ok = a.is_healthy();
-    let body = json!({ "ok": ok, "pi": a.pi_ready.load(std::sync::atomic::Ordering::SeqCst), "extension": a.ext_loaded.load(std::sync::atomic::Ordering::SeqCst), "project": a.cfg.project_id, "device": a.cfg.device_id, "version": env!("CARGO_PKG_VERSION") });
+/// Box health: every workspace with its pi/extension state. 503 until at least one workspace runs
+/// (or the relay listed none yet).
+async fn healthz(State(b): State<B>) -> Response {
+    let ws = b.list().await;
+    let mut items = Vec::new();
+    let mut all_ok = true;
+    for w in &ws {
+        let ok = w.agent.is_healthy();
+        all_ok &= ok;
+        items.push(json!({
+            "project": w.project_id,
+            "ok": ok,
+            "pi": w.agent.pi_ready.load(std::sync::atomic::Ordering::SeqCst),
+            "extension": w.agent.ext_loaded.load(std::sync::atomic::Ordering::SeqCst),
+            "mcp_port": w.cfg.mcp_port,
+            "started_at": w.started_at,
+        }));
+    }
+    let body = json!({ "ok": all_ok, "user": b.cfg.user_id, "device": b.cfg.device_id, "version": env!("CARGO_PKG_VERSION"), "booted_at": b.booted_at, "workspaces": items });
     (
-        if ok {
+        if all_ok {
             StatusCode::OK
         } else {
             StatusCode::SERVICE_UNAVAILABLE
@@ -32,17 +51,44 @@ async fn healthz(State(a): State<S>) -> Response {
         .into_response()
 }
 
-async fn metrics(State(a): State<S>) -> Response {
-    Json(json!({ "turns": a.store.turn_metrics(200).unwrap_or_default() })).into_response()
+async fn metrics(State(b): State<B>, Path(project): Path<String>) -> Response {
+    match b.get(&project).await {
+        Some(w) => {
+            Json(json!({ "turns": w.store.turn_metrics(200).unwrap_or_default() })).into_response()
+        }
+        None => (StatusCode::NOT_FOUND, "no such workspace").into_response(),
+    }
 }
 
 async fn history(
-    State(a): State<S>,
+    State(b): State<B>,
+    Path((project, chat_id)): Path<(String, String)>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let Some(w) = b.get(&project).await else {
+        return (StatusCode::NOT_FOUND, "no such workspace").into_response();
+    };
+    let limit = q.get("limit").and_then(|s| s.parse().ok()).unwrap_or(50);
+    match w
+        .store
+        .t3_thread_before(&chat_id, q.get("before").map(String::as_str), limit)
+    {
+        Ok(rows) => Json(rows).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// Pre-D70 clients ask `/history/{chat}` without a project: find the workspace that owns the chat.
+async fn history_legacy(
+    State(b): State<B>,
     Path(chat_id): Path<String>,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
+    let Some(w) = b.find_chat(&chat_id).await else {
+        return (StatusCode::NOT_FOUND, "no workspace knows this chat").into_response();
+    };
     let limit = q.get("limit").and_then(|s| s.parse().ok()).unwrap_or(50);
-    match a
+    match w
         .store
         .t3_thread_before(&chat_id, q.get("before").map(String::as_str), limit)
     {
@@ -52,19 +98,23 @@ async fn history(
 }
 
 async fn t3_search(
-    State(a): State<S>,
+    State(b): State<B>,
+    Path(project): Path<String>,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
+    let Some(w) = b.get(&project).await else {
+        return (StatusCode::NOT_FOUND, "no such workspace").into_response();
+    };
     let query = q.get("q").cloned().unwrap_or_default();
-    match a.store.t3_search(&query, None, None, 20, 0) {
+    match w.store.t3_search(&query, None, None, 20, 0) {
         Ok(hits) => Json(hits.into_iter().map(|(r, s, snip)| json!({ "id": r.id, "thread_id": r.thread_id, "kind": r.kind, "score": -s, "snippet": snip })).collect::<Vec<_>>()).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 
 /// S16: proxy agent-browser's JPEG stream (`ws://127.0.0.1:9223`) on `/browser/stream`.
-async fn browser_stream(ws: WebSocketUpgrade, State(a): State<S>) -> Response {
-    let _ = a;
+async fn browser_stream(ws: WebSocketUpgrade, State(b): State<B>) -> Response {
+    let _ = b;
     ws.on_upgrade(|socket| async move {
         if let Err(e) = pipe_browser(socket).await {
             tracing::debug!(error = %e, "browser stream closed");
@@ -136,14 +186,15 @@ async fn pipe_browser(client: WebSocket) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn router(agent: Arc<Agent>) -> Router {
+pub fn box_router(sup: Arc<Supervisor>) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
-        .route("/metrics", get(metrics))
-        .route("/history/{chat_id}", get(history))
-        .route("/t3/search", get(t3_search))
+        .route("/w/{project}/metrics", get(metrics))
+        .route("/w/{project}/history/{chat_id}", get(history))
+        .route("/w/{project}/t3/search", get(t3_search))
+        .route("/history/{chat_id}", get(history_legacy))
         .route("/browser/stream", get(browser_stream))
-        .with_state(agent)
+        .with_state(sup)
 }
 
 // ---- loopback model stub (:7791) --------------------------------------------------------------
@@ -171,9 +222,11 @@ async fn stub_forward(
         format!("{}/proxy{}{}", a.cfg.relay_url, path, query)
     };
     let client = reqwest::Client::new();
+    // One box serves every project of the user: the relay meters usage per project by this header.
     let mut req = client
         .request(method, &target)
         .bearer_auth(&a.cfg.box_token)
+        .header("x-arbos-project", &a.cfg.project_id)
         .body(body);
     for h in [
         "content-type",

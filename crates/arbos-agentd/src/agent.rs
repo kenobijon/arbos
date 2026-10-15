@@ -357,8 +357,10 @@ pub struct Agent {
     pub pi_ready: AtomicBool,
     pub ext_loaded: AtomicBool,
     turn_lock: Mutex<()>,
-    /// FIFO gate on concurrent subagent runs (`SUBAGENT_MAX_CONCURRENT`).
+    /// FIFO gate on concurrent subagent runs in this workspace (`SUBAGENT_MAX_CONCURRENT`).
     subagent_slots: Arc<Semaphore>,
+    /// Box-wide gate shared by every workspace (`workspace::BOX_MAX_SUBAGENTS`).
+    box_slots: Arc<Semaphore>,
     http: reqwest::Client,
     pub settings: crate::settings::Settings,
 }
@@ -372,7 +374,12 @@ impl Agent {
         &self.http
     }
 
-    pub fn new(cfg: Arc<Config>, store: Store, sync: SyncHub) -> Arc<Self> {
+    pub fn new(
+        cfg: Arc<Config>,
+        store: Store,
+        sync: SyncHub,
+        box_slots: Arc<Semaphore>,
+    ) -> Arc<Self> {
         let cfg_for_settings = cfg.clone();
         let llm = Arc::new(Llm::new(&cfg));
         let memory = Arc::new(Memory::new(cfg.clone(), store.clone(), llm.clone()));
@@ -405,6 +412,7 @@ impl Agent {
             ext_loaded: AtomicBool::new(false),
             turn_lock: Mutex::new(()),
             subagent_slots: Arc::new(Semaphore::new(SUBAGENT_MAX_CONCURRENT)),
+            box_slots,
             http: reqwest::Client::new(),
             settings: crate::settings::Settings::new(&cfg_for_settings),
         })
@@ -1238,10 +1246,7 @@ impl Agent {
 
     pub async fn keepalive(&self, turn_running: bool) -> Result<()> {
         self.http
-            .post(format!(
-                "{}/projects/{}/keepalive",
-                self.cfg.relay_url, self.cfg.project_id
-            ))
+            .post(format!("{}/box/keepalive", self.cfg.relay_url))
             .bearer_auth(&self.cfg.box_token)
             .json(&json!({ "turn_running": turn_running }))
             .send()
@@ -1851,6 +1856,12 @@ impl Agent {
             .acquire_owned()
             .await
             .map_err(|_| anyhow!("subagent slots closed"))?;
+        let _box_slot = self
+            .box_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| anyhow!("box subagent slots closed"))?;
         let queued_ms = queued_at.elapsed().as_millis() as i64;
         if queued_ms > 500 {
             let _ = self
@@ -2174,6 +2185,7 @@ impl Agent {
                 let _ = me.write_system_prompt();
             });
         }
+        drop(_box_slot);
         drop(_slot);
         // The user hears about it from the main agent, in prose, in this chat.
         let result_text = match &contract {

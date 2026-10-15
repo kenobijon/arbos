@@ -143,11 +143,30 @@ impl Meter {
     }
 }
 
-fn project_of(p: &Principal) -> Option<String> {
-    match p {
-        Principal::Box { project_id } => Some(project_id.clone()),
-        Principal::Device { .. } | Principal::Admin => None,
+/// Which project a box's model call is for: the box serves every project of its user, so the
+/// per-workspace model stub names the project in `X-Arbos-Project`; without it, usage lands on the
+/// user's most recently active project.
+fn project_of(state: &AppState, p: &Principal, headers: &HeaderMap) -> Option<String> {
+    let Principal::Box { user_id } = p else {
+        return None;
+    };
+    if let Some(h) = headers
+        .get("x-arbos-project")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+    {
+        if let Ok(Some(proj)) = state.db.project(h) {
+            if proj.user_id == *user_id {
+                return Some(proj.id);
+            }
+        }
     }
+    state
+        .db
+        .projects_of_user(user_id)
+        .ok()
+        .and_then(|v| v.into_iter().next())
+        .map(|p| p.id)
 }
 
 const PASS_HEADERS: &[&str] = &[
@@ -168,7 +187,7 @@ async fn forward(
     mut body: Bytes,
     project_override: Option<String>,
 ) -> Response {
-    let project_id = project_of(&principal)
+    let project_id = project_of(&state, &principal, &headers)
         .or(project_override)
         .unwrap_or_else(|| "relay-admin".to_owned());
     if let Ok(Some(p)) = state.db.project(&project_id) {
