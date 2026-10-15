@@ -25,7 +25,8 @@ use crate::model::{
     ChatKind, ChoiceOption, Connector, ConnectorAction, ConnectorProvider, ConnectorStatus,
     ConnectorsView, Effort, FieldKind, FormField, Id, Link, LocalDevice, LocalView, Message,
     MessageStatus, Part, Project, QuestionState, Role, Routine, RoutineRun, RoutineRunStatus,
-    RoutineTrigger, Skill, StatusKind, ToolCall, ToolStatus, TurnKind, Widget,
+    RoutineTrigger, Skill, StatusKind, ToolCall, ToolStatus, TurnKind, VaultItem, VaultRequest,
+    VaultRequestStatus, VaultView, Widget,
 };
 
 pub const STREAM_FRAME_MS: u64 = arbos_core::STREAM_COMMIT_MS;
@@ -73,6 +74,7 @@ struct Shared {
     subscriptions: Mutex<Vec<loro::Subscription>>,
     connectors: Mutex<ConnectorsView>,
     channels: Mutex<ChannelsView>,
+    vault: Mutex<VaultView>,
     routines: Mutex<Vec<Routine>>,
     routine_runs: Mutex<HashMap<Id, Vec<RoutineRun>>>,
     local: Mutex<LocalView>,
@@ -116,6 +118,7 @@ impl SyncSource for FixtureSource {
                 subscriptions: Mutex::new(Vec::new()),
                 connectors: Mutex::new(seed_connectors()),
                 channels: Mutex::new(seed_channels()),
+                vault: Mutex::new(seed_vault()),
                 routines: Mutex::new(seed_routines()),
                 routine_runs: Mutex::new(seed_routine_runs()),
                 local: Mutex::new(seed_local()),
@@ -140,6 +143,7 @@ impl SyncSource for FixtureSource {
             emit_skills(&shared);
             emit_channels(&shared);
             emit_local(&shared);
+            emit_vault(&shared);
             let _ = events.send(SyncEvent::Link(Link::Live));
 
             loop {
@@ -641,6 +645,62 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 .retain(|c| c.id != id);
             emit_connectors(shared);
         }
+        ClientCommand::VaultRefresh => emit_vault(shared),
+        ClientCommand::VaultAddItem { item } => {
+            {
+                let mut view = shared.vault.lock().unwrap();
+                view.items.retain(|i| i.name != item.name);
+                view.items.push(VaultItem {
+                    id: new_id(),
+                    name: item.name.clone(),
+                    kind: item.kind.clone(),
+                    allowed_hosts: item.allowed_hosts.clone(),
+                    fields: item.fields.iter().map(|(k, _)| k.clone()).collect(),
+                    env: format!(
+                        "ARBOS_SECRET_{}",
+                        item.name.to_ascii_uppercase().replace(['-', '.'], "_")
+                    ),
+                    created_at: now_ms() as i64,
+                    last_used_at: None,
+                    mock: true,
+                });
+                view.items.sort_by(|a, b| a.name.cmp(&b.name));
+            }
+            emit_vault(shared);
+            let _ = shared.events.send(SyncEvent::Notice(format!(
+                "Vault: saved {} (fixture; values are not kept).",
+                item.name
+            )));
+        }
+        ClientCommand::VaultDeleteItem { id } => {
+            shared.vault.lock().unwrap().items.retain(|i| i.id != id);
+            emit_vault(shared);
+        }
+        ClientCommand::VaultDecide {
+            request_id,
+            approve,
+        } => {
+            let name = {
+                let mut view = shared.vault.lock().unwrap();
+                let r = view.requests.iter_mut().find(|r| r.id == request_id);
+                r.map(|r| {
+                    r.status = if approve {
+                        VaultRequestStatus::Approved
+                    } else {
+                        VaultRequestStatus::Denied
+                    };
+                    r.decided_at = Some(now_ms() as i64);
+                    r.item_name.clone()
+                })
+            };
+            emit_vault(shared);
+            if let Some(name) = name {
+                let _ = shared.events.send(SyncEvent::Notice(format!(
+                    "Vault: {} {name} (fixture).",
+                    if approve { "approved" } else { "denied" }
+                )));
+            }
+        }
         ClientCommand::RoutinesRefresh { project_id } => emit_routines(shared, &project_id),
         ClientCommand::RoutineCreate {
             project_id,
@@ -968,6 +1028,71 @@ fn send_user(
 fn emit_connectors(shared: &Shared) {
     let view = shared.connectors.lock().unwrap().clone();
     let _ = shared.events.send(SyncEvent::Connectors(view));
+}
+
+fn emit_vault(shared: &Shared) {
+    let view = shared.vault.lock().unwrap().clone();
+    let _ = shared.events.send(SyncEvent::Vault(view));
+}
+
+/// Settings → Vault demo (F8): a login and two keys, one pending request from the Comms project,
+/// one approved earlier. No value exists anywhere in the fixture.
+fn seed_vault() -> VaultView {
+    let item = |name: &str, kind: &str, hosts: &[&str], fields: &[&str], days_ago: i64| VaultItem {
+        id: new_id(),
+        name: name.into(),
+        kind: kind.into(),
+        allowed_hosts: hosts.iter().map(|h| h.to_string()).collect(),
+        fields: fields.iter().map(|f| f.to_string()).collect(),
+        env: format!(
+            "ARBOS_SECRET_{}",
+            name.to_ascii_uppercase().replace(['-', '.'], "_")
+        ),
+        created_at: now_ms() as i64 - days_ago * 86_400_000,
+        last_used_at: (days_ago > 3).then(|| now_ms() as i64 - 3_600_000),
+        mock: true,
+    };
+    let items = vec![
+        item(
+            "github-unarbos",
+            "login",
+            &["github.com", "*.github.com"],
+            &["url", "username", "password"],
+            12,
+        ),
+        item("openai-api", "api_key", &["api.openai.com"], &["value"], 5),
+        item("stripe-test", "secret", &["api.stripe.com"], &["value"], 1),
+    ];
+    let requests = vec![
+        VaultRequest {
+            id: new_id(),
+            project_id: "comms".into(),
+            chat_id: "comms-pinned".into(),
+            item_name: "openai-api".into(),
+            purpose: "Transcribe the voice memo through the Whisper API".into(),
+            use_kind: "header".into(),
+            status: VaultRequestStatus::Pending,
+            created_at: now_ms() as i64 - 40_000,
+            decided_at: None,
+        },
+        VaultRequest {
+            id: new_id(),
+            project_id: "website".into(),
+            chat_id: "website-pinned".into(),
+            item_name: "github-unarbos".into(),
+            purpose: "Sign in to review the failing Actions run".into(),
+            use_kind: "browser_fill".into(),
+            status: VaultRequestStatus::Approved,
+            created_at: now_ms() as i64 - 7_200_000,
+            decided_at: Some(now_ms() as i64 - 7_100_000),
+        },
+    ];
+    VaultView {
+        mock: true,
+        items,
+        requests,
+        loaded: true,
+    }
 }
 
 /// Settings → Connectors demo: GitHub and Harness Comms connected, Google waiting for sign-in,

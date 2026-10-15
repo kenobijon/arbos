@@ -14,7 +14,8 @@ use tokio::sync::mpsc;
 use crate::model::{
     new_id, now_ms, AttachmentKind, BoxState, ChannelsView, Chat, ChatKind, ConnectorsView, Effort,
     Id, Link, LocalView, Message, MessageStatus, Part, Project, ProjectDocView, QuestionState,
-    Role, Routine, RoutineRun, RoutineTrigger, Skill, StatusKind,
+    Role, Routine, RoutineRun, RoutineTrigger, Skill, StatusKind, VaultNewItem, VaultRequestStatus,
+    VaultView,
 };
 use crate::sync::{ClientCommand, SyncEvent, SyncSource};
 use crate::ui::notify::{Gate, Notifier, NotifyEvent, NotifyKind};
@@ -126,6 +127,8 @@ pub struct AppState {
     pub show_details: bool,
     /// Settings → Connectors (F1).
     pub connectors: ConnectorsView,
+    /// Settings → Vault (F8).
+    pub vault: VaultView,
     /// Settings → Routines, per project (F3).
     pub routines: HashMap<Id, Vec<Routine>>,
     /// Run history per routine, newest first.
@@ -235,6 +238,7 @@ impl AppState {
             new_project_open: false,
             show_details: false,
             connectors: ConnectorsView::default(),
+            vault: VaultView::default(),
             routines: HashMap::new(),
             routine_runs: HashMap::new(),
             notifier: Notifier::new(),
@@ -602,6 +606,10 @@ impl AppState {
                 self.push_notice(format!(
                     "Opened the browser to connect {provider}; the relay finishes the sign-in."
                 ));
+                cx.notify();
+            }
+            SyncEvent::Vault(view) => {
+                self.vault = view;
                 cx.notify();
             }
             SyncEvent::Routines {
@@ -1250,6 +1258,7 @@ impl AppState {
 
     /// S18: approve an approval card; the box dispatches and flips the card's state.
     pub fn approve(&mut self, chat_id: Id, approval_id: String, cx: &mut Context<Self>) {
+        self.forward_vault_decision(&chat_id, &approval_id, true, cx);
         self.command(ClientCommand::Approve {
             chat_id,
             approval_id,
@@ -1265,12 +1274,45 @@ impl AppState {
         reason: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        self.forward_vault_decision(&chat_id, &approval_id, false, cx);
         self.command(ClientCommand::Reject {
             chat_id,
             approval_id,
             reason,
         });
         cx.notify();
+    }
+
+    /// F8: a vault card carries the relay request id in its payload; the relay row is the
+    /// authority (`POST /vault/requests/{id}/decide` needs a device token), so the card's
+    /// decision goes there too.
+    fn forward_vault_decision(
+        &mut self,
+        chat_id: &Id,
+        approval_id: &str,
+        approve: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let request_id = self
+            .messages
+            .get(chat_id)
+            .into_iter()
+            .flatten()
+            .flat_map(|m| m.parts.iter())
+            .find_map(|p| match p {
+                Part::Approval {
+                    approval_id: id,
+                    payload,
+                    ..
+                } if id == approval_id => payload
+                    .get("vaultRequestId")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned),
+                _ => None,
+            });
+        if let Some(request_id) = request_id {
+            self.vault_decide(request_id, approve, cx);
+        }
     }
 
     pub fn wake(&mut self, project_id: Id, cx: &mut Context<Self>) {
@@ -1677,6 +1719,41 @@ impl AppState {
     pub fn local_forget(&mut self, device_id: Id, cx: &mut Context<Self>) {
         self.local.devices.retain(|d| d.device_id != device_id);
         self.command(ClientCommand::LocalForget { device_id });
+        cx.notify();
+    }
+
+    // ----- vault (F8) ------------------------------------------------------
+
+    pub fn vault_refresh(&mut self, cx: &mut Context<Self>) {
+        self.command(ClientCommand::VaultRefresh);
+        cx.notify();
+    }
+
+    pub fn vault_add_item(&mut self, item: VaultNewItem, cx: &mut Context<Self>) {
+        self.push_notice(format!("Saving {} on the relay…", item.name));
+        self.command(ClientCommand::VaultAddItem { item });
+        cx.notify();
+    }
+
+    pub fn vault_delete_item(&mut self, id: Id, cx: &mut Context<Self>) {
+        self.vault.items.retain(|i| i.id != id);
+        self.command(ClientCommand::VaultDeleteItem { id });
+        cx.notify();
+    }
+
+    pub fn vault_decide(&mut self, request_id: Id, approve: bool, cx: &mut Context<Self>) {
+        if let Some(r) = self.vault.requests.iter_mut().find(|r| r.id == request_id) {
+            r.status = if approve {
+                VaultRequestStatus::Approved
+            } else {
+                VaultRequestStatus::Denied
+            };
+            r.decided_at = Some(now_ms() as i64);
+        }
+        self.command(ClientCommand::VaultDecide {
+            request_id,
+            approve,
+        });
         cx.notify();
     }
 
