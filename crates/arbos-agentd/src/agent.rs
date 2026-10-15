@@ -628,9 +628,11 @@ impl Agent {
 
     // ---- commands -----------------------------------------------------------------------------
 
-    pub async fn handle_command(self: &Arc<Self>, chat_id: &str, cmd: CommandView) {
+    /// Mark-before-execute, then `done`/`failed` in the doc. The result is also returned for
+    /// callers that report it elsewhere (routine runs); the command loop ignores it.
+    pub async fn handle_command(self: &Arc<Self>, chat_id: &str, cmd: CommandView) -> Result<()> {
         let Some(host) = self.sync.host(chat_id).await else {
-            return;
+            return Err(anyhow!("no room for chat {chat_id}"));
         };
         {
             host.lock()
@@ -656,7 +658,7 @@ impl Agent {
             other => Err(anyhow!("unknown command kind {other}")),
         };
         let h = host.lock().await;
-        match res {
+        match &res {
             Ok(()) => h.doc.set_command_status(&cmd.id, CommandStatus::Done, None),
             Err(e) => {
                 tracing::warn!(chat_id, cmd = %cmd.kind, error = %e, "command failed");
@@ -667,6 +669,7 @@ impl Agent {
                 );
             }
         }
+        res
     }
 
     /// `stop` runs out of band (its own task, no turn lock): abort the pi turn now, mark the turn
