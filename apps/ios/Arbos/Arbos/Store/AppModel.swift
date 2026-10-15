@@ -228,8 +228,9 @@ final class AppModel: ObservableObject {
         if let (who, cr, summary) = try? await api.me() {
             user = who
             credits = cr
-            if let on = (summary["always_on"] as? Bool) ?? (summary["always_on"] as? NSNumber)?.boolValue {
+            if let on = (summary["always_on"] as? NSNumber)?.boolValue {
                 meAlwaysOn = on
+                if let held = (summary["held"] as? NSNumber)?.boolValue { machine.held = held }
                 if on, !machine.alwaysOn {
                     machine.alwaysOn = true
                     machine.state = machine.coerced(machine.state)

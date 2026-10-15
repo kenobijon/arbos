@@ -92,15 +92,21 @@ struct Machine: Equatable {
     /// awake or in error — no waking/sleeping states, and machine spend is
     /// informational (not taken from credits). False when the field is absent.
     var alwaysOn = false
+    /// A manual Stop on an always-on box: the relay's sweep leaves it down
+    /// until Start or a message. The one case an always-on box shows Stopped.
+    var held = false
+    /// Machine time today (`machine_today_usd`), its own ledger bucket — not
+    /// part of credits or `spendTodayUsd`.
+    var machineTodayUsd: Double = 0
     /// False until the relay has answered `/machine` once.
     var reported = false
 
     static let unknown = Machine(state: .hibernatedLight, since: nil, spec: "")
 
     /// The state the UI may show: always-on boxes collapse everything but
-    /// error onto awake.
+    /// error onto awake (unless a manual Stop holds the box down).
     func coerced(_ s: BoxState) -> BoxState {
-        alwaysOn && s != .error ? .awake : s
+        alwaysOn && !held && s != .error ? .awake : s
     }
 
     var label: String {

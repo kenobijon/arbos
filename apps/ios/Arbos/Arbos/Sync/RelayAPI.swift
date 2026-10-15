@@ -227,10 +227,11 @@ final class RelayAPI {
                 workspaces[pid] = WorkspaceState.from(w["state"] as? String)
             }
         }
-        let alwaysOn = (m["always_on"] as? Bool) ?? ((m["always_on"] as? NSNumber)?.boolValue ?? false)
+        let alwaysOn = (m["always_on"] as? NSNumber)?.boolValue ?? false
+        let held = (m["held"] as? NSNumber)?.boolValue ?? false
         let wire = BoxState.fromWire(m["state"] as? String ?? "") ?? .hibernatedLight
         return Machine(
-            state: alwaysOn && wire != .error ? .awake : wire,
+            state: alwaysOn && !held && wire != .error ? .awake : wire,
             since: (m["since"] as? NSNumber)?.int64Value,
             spec: Machine.specLine(
                 cpu: (spec["cpu"] as? NSNumber)?.intValue,
@@ -245,6 +246,8 @@ final class RelayAPI {
             spendCapUsd: (m["spend_cap_usd"] as? NSNumber)?.doubleValue ?? 0,
             workspaces: workspaces,
             alwaysOn: alwaysOn,
+            held: held,
+            machineTodayUsd: (m["machine_today_usd"] as? NSNumber)?.doubleValue ?? 0,
             reported: true
         )
     }

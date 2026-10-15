@@ -51,7 +51,7 @@ struct SettingsView: View {
                         Text("State")
                         Spacer()
                         HStack(spacing: 7) {
-                            if model.machine.alwaysOn, model.machineBusy {
+                            if model.machine.alwaysOn, !model.machine.held, model.machineBusy {
                                 ProgressView().controlSize(.mini).tint(theme.muted)
                                 Text("Restarting…").foregroundStyle(theme.muted)
                             } else {
@@ -69,9 +69,9 @@ struct SettingsView: View {
                     }
                     if model.machine.reported {
                         if model.machine.alwaysOn {
-                            LabeledContent("Machine spend today") {
+                            LabeledContent("Machine time today") {
                                 VStack(alignment: .trailing, spacing: 2) {
-                                    Text(String(format: "$%.2f", model.machine.spendTodayUsd))
+                                    Text(String(format: "$%.2f", model.machine.machineTodayUsd))
                                     Text("Not taken from credits").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
                                 }
                             }
@@ -86,8 +86,13 @@ struct SettingsView: View {
                         }
                     }
                     if model.machine.alwaysOn {
-                        Button("Restart machine") { model.restartMachine() }
-                            .disabled(model.machineBusy)
+                        if model.machine.held {
+                            Button("Start machine") { model.startMachine() }
+                                .disabled(model.machineBusy)
+                        } else {
+                            Button("Restart machine") { model.restartMachine() }
+                                .disabled(model.machineBusy)
+                        }
                     } else {
                         switch model.machine.state {
                         case .awake, .waking:

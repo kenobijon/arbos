@@ -73,7 +73,7 @@ extension AppModel {
         machine = Machine(state: .awake, since: now - 3_600_000, spec: "Daytona · 4 vCPU · 8 GiB · 10 GiB disk · arbos-agent-0.2.0",
                           provider: "daytona", sandboxId: "fixture-box", spendTodayUsd: 1.6, spendCapUsd: 25,
                           workspaces: Dictionary(uniqueKeysWithValues: list.map { ($0.id, $0.id == "fx-comms" ? WorkspaceState.active : .idle) }),
-                          alwaysOn: DebugHooks.alwaysOn, reported: true)
+                          alwaysOn: DebugHooks.alwaysOn, machineTodayUsd: 2.88, reported: true)
         link = .live
     }
 
