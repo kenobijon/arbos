@@ -113,6 +113,8 @@ pub struct AppState {
     pub device_id: Option<String>,
     /// Signed-in account (`/auth/token` user, then `/me`).
     pub account: Option<AccountView>,
+    /// The tree mark (the macOS app icon), drawn on the sign-in screen.
+    pub mark: Option<Arc<RenderImage>>,
     /// Set by a fresh sign-in: with no projects yet, create "Home" and land in it.
     first_project_pending: bool,
     pub projects: Vec<Project>,
@@ -234,6 +236,10 @@ impl AppState {
             source_name,
             pairing: None,
             account: None,
+            mark: decode_image(include_bytes!(
+                "../../../site/assets/logo/arbos-macos-icon-1024.png"
+            ))
+            .map(Arc::new),
             first_project_pending: false,
             device_id: None,
             projects: Vec::new(),
@@ -466,7 +472,7 @@ impl AppState {
                 cx.notify();
             }
             SyncEvent::Thumbnail { key, bytes } => {
-                if let Some(image) = decode_jpeg(&bytes) {
+                if let Some(image) = decode_image(&bytes) {
                     self.thumbnails.insert(key, Arc::new(image));
                     if let Some(chat_id) = self.active_chat_id() {
                         cx.emit(AppEvent::TranscriptChanged { chat_id });
@@ -483,7 +489,7 @@ impl AppState {
                 if self.selected_project.as_deref() != Some(project_id.as_str()) {
                     return;
                 }
-                if let Some(image) = decode_jpeg(&jpeg) {
+                if let Some(image) = decode_image(&jpeg) {
                     self.browser_frame = Some(Arc::new(image));
                     self.browser_frames_seen += 1;
                     cx.notify();
@@ -2069,8 +2075,8 @@ pub fn title_from(text: &str) -> String {
     }
 }
 
-/// JPEG → BGRA frame for GPUI (`RenderImage` is BGRA).
-fn decode_jpeg(bytes: &[u8]) -> Option<RenderImage> {
+/// PNG/JPEG → BGRA frame for GPUI (`RenderImage` is BGRA).
+pub fn decode_image(bytes: &[u8]) -> Option<RenderImage> {
     let img = image::load_from_memory(bytes).ok()?.into_rgba8();
     let (w, h) = img.dimensions();
     let mut raw = img.into_raw();
