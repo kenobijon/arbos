@@ -322,6 +322,7 @@ dependencies = [
  "hex",
  "loro",
  "rand 0.8.8",
+ "regex-lite",
  "serde",
  "serde_json",
  "sha2",
