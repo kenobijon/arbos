@@ -35,6 +35,8 @@ pub struct Workspace {
 pub struct Supervisor {
     pub cfg: BoxConfig,
     pub workspaces: RwLock<HashMap<String, Arc<Workspace>>>,
+    /// Projects the relay asked us to keep stopped (migration copies files under them).
+    pub held: RwLock<std::collections::HashSet<String>>,
     pub box_slots: Arc<Semaphore>,
     pub booted_at: i64,
     http: reqwest::Client,
@@ -47,6 +49,7 @@ impl Supervisor {
         Arc::new(Self {
             cfg,
             workspaces: RwLock::new(HashMap::new()),
+            held: RwLock::new(std::collections::HashSet::new()),
             box_slots: Arc::new(Semaphore::new(BOX_MAX_SUBAGENTS)),
             booted_at: arbos_core::ids::now_ms(),
             http: reqwest::Client::new(),
@@ -329,10 +332,17 @@ impl Supervisor {
             .cloned()
             .unwrap_or_default();
         let mut seen = Vec::new();
+        let held = self.held.read().await.clone();
         for e in &entries {
             let Some(project) = e.get("project") else {
                 continue;
             };
+            if let Some(id) = project.get("id").and_then(Value::as_str) {
+                if held.contains(id) {
+                    seen.push(id.to_owned());
+                    continue;
+                }
+            }
             let chats = e
                 .get("chats")
                 .and_then(Value::as_array)
@@ -364,6 +374,17 @@ impl Supervisor {
         for id in gone {
             self.remove_workspace(&id).await;
         }
+    }
+
+    /// Migration support: stop a workspace and keep it stopped while the relay replaces its files.
+    pub async fn hold(&self, project_id: &str) {
+        self.held.write().await.insert(project_id.to_owned());
+        self.remove_workspace(project_id).await;
+    }
+
+    /// The files are in place: the next poll starts the workspace again from them.
+    pub async fn release(&self, project_id: &str) {
+        self.held.write().await.remove(project_id);
     }
 
     /// SIGTERM: every workspace persists and stops; the doc records the box as asleep.

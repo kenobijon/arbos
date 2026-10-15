@@ -595,6 +595,20 @@ pub async fn machine_stop(
     Ok(Json(json!({ "state": bs, "since": since })).into_response())
 }
 
+/// `POST /machine/migrate`: copy every legacy per-project sandbox of the caller's user into the
+/// user box (D70). Idempotent; old sandboxes are stopped and marked, never deleted.
+pub async fn machine_migrate(State(state): State<AppState>, principal: Principal) -> ApiResult {
+    let user_id = match &principal {
+        Principal::Device { user_id, .. } => user_id.clone(),
+        Principal::Admin => "u_default".to_owned(),
+        Principal::Box { .. } => return Err((StatusCode::FORBIDDEN, "devices only".into())),
+    };
+    let reports = crate::migrate::migrate_user(&state, &user_id)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
+    Ok(Json(crate::migrate::report_json(&user_id, &reports)).into_response())
+}
+
 #[derive(Deserialize)]
 pub struct UserBoxBody {
     /// Daytona snapshot name (fixes vCPU/RAM/disk); null clears the override.

@@ -186,9 +186,49 @@ async fn pipe_browser(client: WebSocket) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `POST /w/{project}/hold` and `/release` (bearer = the box's MCP token, which the relay holds):
+/// the relay stops a workspace while it copies a legacy box's files under it, then releases it.
+async fn workspace_hold(
+    State(b): State<B>,
+    Path(project): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !box_admin_authed(&b, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    b.hold(&project).await;
+    Json(json!({ "project": project, "held": true })).into_response()
+}
+
+async fn workspace_release(
+    State(b): State<B>,
+    Path(project): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !box_admin_authed(&b, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    b.release(&project).await;
+    Json(json!({ "project": project, "held": false })).into_response()
+}
+
+fn box_admin_authed(b: &Supervisor, headers: &HeaderMap) -> bool {
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|t| !b.cfg.mcp_token.is_empty() && t.trim() == b.cfg.mcp_token)
+        .unwrap_or(false)
+}
+
 pub fn box_router(sup: Arc<Supervisor>) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/w/{project}/hold", axum::routing::post(workspace_hold))
+        .route(
+            "/w/{project}/release",
+            axum::routing::post(workspace_release),
+        )
         .route("/w/{project}/metrics", get(metrics))
         .route("/w/{project}/history/{chat_id}", get(history))
         .route("/w/{project}/t3/search", get(t3_search))

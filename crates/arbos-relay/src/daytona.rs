@@ -458,6 +458,29 @@ impl Daytona {
         Ok(())
     }
 
+    /// `GET {proxy}/{sandboxId}/files/download?path=` — read one file out of a started sandbox.
+    pub async fn toolbox_download(&self, id: &str, path: &str) -> Result<Vec<u8>> {
+        let base = self.toolbox_base(id).await;
+        let mut r = self
+            .http
+            .get(format!("{base}/files/download"))
+            .bearer_auth(&self.key)
+            .query(&[("path", path)])
+            .timeout(Duration::from_secs(600));
+        if let Some(org) = &self.org {
+            r = r.header("X-Daytona-Organization-ID", org);
+        }
+        let resp = r.send().await.context("toolbox download")?;
+        if !resp.status().is_success() {
+            return Err(anyhow!(
+                "toolbox download: HTTP {} {}",
+                resp.status(),
+                resp.text().await.unwrap_or_default()
+            ));
+        }
+        Ok(resp.bytes().await?.to_vec())
+    }
+
     /// `POST {proxy}/{sandboxId}/process/execute`.
     pub async fn toolbox_exec(&self, id: &str, command: &str, timeout_s: u64) -> Result<Value> {
         let base = self.toolbox_base(id).await;

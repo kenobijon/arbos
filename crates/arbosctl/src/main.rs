@@ -53,10 +53,28 @@ enum Cmd {
     Usage { project: String },
     /// Recorded timings (boot, wake, TTFT, cold start).
     Timings { project: String },
+    /// The user's machine (one box for all projects, D70): state, class, spend, workspaces.
+    Machine {
+        #[command(subcommand)]
+        cmd: MachineCmd,
+    },
+    /// Copy every legacy per-project sandbox into the user box (idempotent; old sandboxes are
+    /// stopped and marked `migrated_to`, never deleted).
+    MigrateToUserBox,
     /// Devices.
     Devices {
         #[command(subcommand)]
         cmd: DeviceCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum MachineCmd {
+    Status,
+    Start,
+    Stop {
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -328,6 +346,52 @@ async fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&v)?);
             }
         },
+        Cmd::Machine { cmd } => {
+            let v = match cmd {
+                MachineCmd::Status => relay.get("/machine").await?,
+                MachineCmd::Start => relay.post("/machine/start", &json!({})).await?,
+                MachineCmd::Stop { force } => {
+                    relay
+                        .post(&format!("/machine/stop?force={force}"), &json!({}))
+                        .await?
+                }
+            };
+            println!("{}", serde_json::to_string_pretty(&v)?);
+        }
+        Cmd::MigrateToUserBox => {
+            let v = relay.post("/machine/migrate", &json!({})).await?;
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+            } else {
+                println!(
+                    "user {}",
+                    v.get("user_id").and_then(|u| u.as_str()).unwrap_or("?")
+                );
+                for r in v
+                    .get("reports")
+                    .and_then(|r| r.as_array())
+                    .cloned()
+                    .unwrap_or_default()
+                {
+                    println!(
+                        "  {} legacy={} {} {} {}",
+                        r.get("project_id").and_then(|x| x.as_str()).unwrap_or("?"),
+                        r.get("legacy_sandbox")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("-"),
+                        r.get("outcome").and_then(|x| x.as_str()).unwrap_or("?"),
+                        r.get("work_mib")
+                            .and_then(|x| x.as_i64())
+                            .map(|m| format!("{m} MiB"))
+                            .unwrap_or_default(),
+                        r.get("ms")
+                            .and_then(|x| x.as_i64())
+                            .map(|m| format!("{:.1}s", m as f64 / 1000.0))
+                            .unwrap_or_default(),
+                    );
+                }
+            }
+        }
         Cmd::Usage { project } => {
             let v = relay.get(&format!("/projects/{project}/usage")).await?;
             println!("{}", serde_json::to_string_pretty(&v)?);
