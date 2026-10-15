@@ -429,15 +429,21 @@ struct ChatView: View {
                 }
                 .ignoresSafeArea()
             }
+            .onAppear { settleToBottom(proxy) }
             .onChange(of: rows.last?.id) { old, _ in
                 if old == nil {
-                    proxy.scrollTo("bottom", anchor: .bottom)
+                    settleToBottom(proxy)
                 } else {
                     withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
                 }
             }
+            .onChange(of: rows.count) { old, new in
+                // The first snapshot can land as many rows at once after the
+                // view is up (tap-open before the room's backfill, debug hook).
+                if old == 0, new > 0 { settleToBottom(proxy) }
+            }
             .onChange(of: model.caughtUp.contains(chatId)) { _, ready in
-                if ready { DispatchQueue.main.async { proxy.scrollTo("bottom", anchor: .bottom) } }
+                if ready { settleToBottom(proxy) }
             }
             .onChange(of: streaming) { _, _ in
                 withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
@@ -449,6 +455,15 @@ struct ChatView: View {
                 }
             }
         }
+    }
+
+    /// Pin the transcript to its end once the lazy rows have a height: the
+    /// first `scrollTo` runs before layout knows the content size, so repeat
+    /// after the next runloop turn and once more after the rows settle.
+    private func settleToBottom(_ proxy: ScrollViewProxy) {
+        proxy.scrollTo("bottom", anchor: .bottom)
+        DispatchQueue.main.async { proxy.scrollTo("bottom", anchor: .bottom) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { proxy.scrollTo("bottom", anchor: .bottom) }
     }
 
     private func m_text(_ row: Row) -> String {
