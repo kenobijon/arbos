@@ -16,6 +16,7 @@ Chromium), which reads the Lottie files this script writes.
 import argparse
 import io
 import json
+import re
 from pathlib import Path
 
 import cairosvg
@@ -24,7 +25,7 @@ from PIL import Image, ImageDraw, ImageFont
 from characters import CHARACTERS
 from lottie import DURATION, tree_lottie
 from manifest import OUT as MANIFEST_PATH
-from manifest import PNG_SIZES, write_manifest
+from manifest import COLORS, PNG_SIZES, color_entry, write_manifest
 from svg import tree_svg
 from trees import TREES
 
@@ -59,6 +60,45 @@ def build_character(slug, name, personality, face):
         (ldir / f"{state}.json").write_text(data)
         sizes[state] = len(data)
     return sizes
+
+
+def recolor_svg(svg: str, color: dict) -> str:
+    """Retints a still by role class, the same way an app would."""
+
+    def retint(match):
+        element = match.group(0)
+        role = re.search(r'class="(\w+)"', element).group(1)
+        hexv = color[role]
+        element = re.sub(r'fill="#[0-9a-fA-F]{6}"', f'fill="{hexv}"', element)
+        return re.sub(r'stroke="#[0-9a-fA-F]{6}"', f'stroke="{hexv}"', element)
+
+    return re.sub(r"<(?:circle|rect|path)[^>]*class=\"\w+\"[^>]*/>", retint, svg)
+
+
+def color_sheet(path, slugs, color_slugs, cell=112):
+    """Grid: one row per tree, one column per color, each tile retinted by role."""
+    colors = {c[0]: color_entry(*c) for c in COLORS}
+    pad, label_w, header_h = 18, 110, 34
+    w = label_w + len(color_slugs) * (cell + pad) + pad
+    h = header_h + len(slugs) * (cell + pad) + pad
+    sheet = Image.new("RGBA", (w, h), (18, 18, 18, 255))
+    draw = ImageDraw.Draw(sheet)
+    font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14)
+    names = {c[0]: c[1] for c in CHARACTERS}
+    for j, cslug in enumerate(color_slugs):
+        x = label_w + j * (cell + pad)
+        draw.text((x + cell / 2, 10), colors[cslug]["name"], fill=(200, 200, 200), font=font, anchor="ma")
+    for i, slug in enumerate(slugs):
+        y = header_h + i * (cell + pad)
+        draw.text((12, y + cell / 2), names[slug], fill=(200, 200, 200), font=font, anchor="lm")
+        svg = (ROOT / f"{slug}.svg").read_text()
+        for j, cslug in enumerate(color_slugs):
+            x = label_w + j * (cell + pad)
+            png = cairosvg.svg2png(bytestring=recolor_svg(svg, colors[cslug]).encode(), output_width=cell, output_height=cell)
+            sheet.alpha_composite(Image.open(io.BytesIO(png)), (x, y))
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    sheet.save(path)
+    return path
 
 
 def ready_slugs():
@@ -108,9 +148,14 @@ def main():
     ap.add_argument("--only", default="", help="comma list of slugs (default: all)")
     ap.add_argument("--contact-sheet", default="", help="also write a contact sheet PNG here")
     ap.add_argument("--optimize-frames", action="store_true", help="only re-compress frames/*.png")
+    ap.add_argument("--color-sheet", default="", help="write a trees x colors sheet here (with --only and --colors)")
+    ap.add_argument("--colors", default="mono,red,amber,green,blue,violet", help="color slugs for --color-sheet")
     args = ap.parse_args()
     if args.optimize_frames:
         optimize_frames()
+        return
+    if args.color_sheet:
+        print("color sheet:", color_sheet(args.color_sheet, args.only.split(","), args.colors.split(",")))
         return
     wanted = set(args.only.split(",")) if args.only else {c[0] for c in CHARACTERS}
     ROOT.mkdir(parents=True, exist_ok=True)

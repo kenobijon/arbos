@@ -24,28 +24,41 @@ def fmt(x):
     return repr(r2(x))
 
 
+# Recolor roles. Every paint carries one of these names (SVG `class`, Lottie
+# `nm`) so apps can retint by role: bg = disc, ring = outline, tree = white
+# ink, face = the dark ink (eyes, mouth, bark marks), which takes the bg color.
+ROLE_OF_COLOR = {"w": "tree", "k": "face"}
+
+
 class Prim:
     fill = None
     stroke = None
+    role = None
 
     def paint_key(self):
-        return ("f", self.fill) if self.fill else ("s",) + tuple(self.stroke)
+        return (("f", self.fill) if self.fill else ("s",) + tuple(self.stroke)) + (self.role,)
+
+    def paint_role(self):
+        return self.role or ROLE_OF_COLOR[self.fill or self.stroke[0]]
 
     def svg_paint(self):
+        cls = f'class="{self.paint_role()}" '
         if self.fill:
-            return f'fill="{_COLOR[self.fill]}"'
+            return f'{cls}fill="{_COLOR[self.fill]}"'
         c, w = self.stroke
         return (
-            f'fill="none" stroke="{_COLOR[c]}" stroke-width="{fmt(w)}" '
+            f'{cls}fill="none" stroke="{_COLOR[c]}" stroke-width="{fmt(w)}" '
             'stroke-linecap="round" stroke-linejoin="round"'
         )
 
     def lottie_paint(self):
+        nm = self.paint_role()
         if self.fill:
-            return {"ty": "fl", "c": {"a": 0, "k": _RGB[self.fill]}, "o": {"a": 0, "k": 100}, "r": 1}
+            return {"ty": "fl", "nm": nm, "c": {"a": 0, "k": _RGB[self.fill]}, "o": {"a": 0, "k": 100}, "r": 1}
         c, w = self.stroke
         return {
             "ty": "st",
+            "nm": nm,
             "c": {"a": 0, "k": _RGB[c]},
             "o": {"a": 0, "k": 100},
             "w": {"a": 0, "k": r2(w)},
@@ -55,9 +68,10 @@ class Prim:
 
 
 class Circle(Prim):
-    def __init__(self, cx, cy, r, fill="w", stroke=None):
+    def __init__(self, cx, cy, r, fill="w", stroke=None, role=None):
         self.cx, self.cy, self.r = cx, cy, r
         self.fill, self.stroke = (None if stroke else fill), stroke
+        self.role = role
 
     def svg(self):
         return f'<circle cx="{fmt(self.cx)}" cy="{fmt(self.cy)}" r="{fmt(self.r)}" {self.svg_paint()}/>'

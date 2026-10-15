@@ -5,7 +5,9 @@
     "`ready: false` means the art is a placeholder and the files may not exist yet.",
     "SVG/PNG: 64x64 viewBox, black #000 disc with a 2 px white #fff ring, white tree, black face; transparent outside the disc.",
     "Lottie: 60 fps, shapes only, no expressions, no raster, no masks; `idle` and `working` loop seamlessly, `reply` plays once.",
-    "Frame strips: horizontal row of square frames sampled from the Lottie at 30 fps; `1x` = 28 px, `2x` = 56 px, `rail` = 72 px, `rail@2x` = 144 px; transparent outside the disc."
+    "Frame strips: horizontal row of square frames sampled from the Lottie at 30 fps; `1x` = 28 px, `2x` = 56 px, `rail` = 72 px, `rail@2x` = 144 px; transparent outside the disc.",
+    "Tree strips (`frames[state].tree`): same frames, but only the tree as a white mask on transparent with the face cut out; the app draws its own tinted disc + ring behind and may multiply the mask by `tree`.",
+    "Colors: one scheme for every entry in `colors` \u2014 deep tinted `bg` disc, accent `ring`, white `tree`, `face` = `bg` (cut-out look). `mono` is the default. Order of `colors` is a contract with the relay (hashed like `characters`); append only."
   ],
   "style": {
     "background": "#000000",
@@ -18,6 +20,136 @@
       64
     ]
   },
+  "colors": [
+    {
+      "slug": "mono",
+      "name": "Mono",
+      "bg": "#000000",
+      "ring": "#ffffff",
+      "tree": "#ffffff",
+      "face": "#000000"
+    },
+    {
+      "slug": "red",
+      "name": "Red",
+      "bg": "#2a1210",
+      "ring": "#f87171",
+      "tree": "#ffffff",
+      "face": "#2a1210"
+    },
+    {
+      "slug": "orange",
+      "name": "Orange",
+      "bg": "#2b1708",
+      "ring": "#fb923c",
+      "tree": "#ffffff",
+      "face": "#2b1708"
+    },
+    {
+      "slug": "amber",
+      "name": "Amber",
+      "bg": "#2a1f08",
+      "ring": "#fbbf24",
+      "tree": "#ffffff",
+      "face": "#2a1f08"
+    },
+    {
+      "slug": "green",
+      "name": "Green",
+      "bg": "#0f2a1a",
+      "ring": "#4ade80",
+      "tree": "#ffffff",
+      "face": "#0f2a1a"
+    },
+    {
+      "slug": "teal",
+      "name": "Teal",
+      "bg": "#0b2826",
+      "ring": "#2dd4bf",
+      "tree": "#ffffff",
+      "face": "#0b2826"
+    },
+    {
+      "slug": "cyan",
+      "name": "Cyan",
+      "bg": "#0b2430",
+      "ring": "#22d3ee",
+      "tree": "#ffffff",
+      "face": "#0b2430"
+    },
+    {
+      "slug": "blue",
+      "name": "Blue",
+      "bg": "#0f1f3a",
+      "ring": "#60a5fa",
+      "tree": "#ffffff",
+      "face": "#0f1f3a"
+    },
+    {
+      "slug": "indigo",
+      "name": "Indigo",
+      "bg": "#171a3c",
+      "ring": "#818cf8",
+      "tree": "#ffffff",
+      "face": "#171a3c"
+    },
+    {
+      "slug": "violet",
+      "name": "Violet",
+      "bg": "#221540",
+      "ring": "#a78bfa",
+      "tree": "#ffffff",
+      "face": "#221540"
+    },
+    {
+      "slug": "pink",
+      "name": "Pink",
+      "bg": "#2a1230",
+      "ring": "#f472b6",
+      "tree": "#ffffff",
+      "face": "#2a1230"
+    },
+    {
+      "slug": "rose",
+      "name": "Rose",
+      "bg": "#2c1020",
+      "ring": "#fb7185",
+      "tree": "#ffffff",
+      "face": "#2c1020"
+    },
+    {
+      "slug": "slate",
+      "name": "Slate",
+      "bg": "#1a1f2a",
+      "ring": "#94a3b8",
+      "tree": "#ffffff",
+      "face": "#1a1f2a"
+    }
+  ],
+  "default_color": "mono",
+  "recolor": {
+    "roles": [
+      "bg",
+      "ring",
+      "tree",
+      "face"
+    ],
+    "svg": "Elements carry class=\"bg|ring|tree|face\"; set fill (and stroke for ring and stroke-based face/tree parts) per class.",
+    "lottie_layers": {
+      "bg": "disc",
+      "ring": "outline",
+      "tree": "the animated tree"
+    },
+    "lottie_keypaths": {
+      "bg": "bg.**.bg.Color",
+      "ring": "ring.**.ring.Color",
+      "tree": "tree.**.tree.Color",
+      "face": "tree.**.face.Color"
+    },
+    "lottie_ios": "animationView.setValueProvider(ColorValueProvider(color.lottieColorValue), keypath: AnimationKeypath(keypath: \"tree.**.face.Color\")) \u2014 one call per role; `**` spans the group nesting.",
+    "lottie_web": "Before loadAnimation, walk animationData.layers[*].shapes recursively and set `c.k` (RGBA 0-1) on every `fl`/`st` item whose `nm` is the role.",
+    "frame_strips": "The white-on-black strips are the `mono` look only. For a color, draw a disc in `bg` with a 2 px `ring` stroke, then the `tree` mask strip on top (multiply by `tree` if it is not white)."
+  },
   "default_size": 56,
   "usage": {
     "still": "Use `svg` (or the nearest `png`) wherever the avatar is static: lists, headers, notifications.",
@@ -25,6 +157,8 @@
     "working": "Loop while a run is active; switch back to idle when it ends (both loops share frame 0, so cut on a loop boundary).",
     "reply": "Play once when a reply lands, then return to idle. It starts and ends on the idle pose.",
     "frame_strips": "Frame k of a strip is the square at x = k * size. Advance at `fps`; loop idle/working, play reply once. The widest strip (rail@2x, 90 frames) is 12960 px wide.",
+    "tree_strips": "`frames[state].tree` = white mask strips at 56 (`2x`) and 72 (`rail`) px with the face cut out. Draw the tinted disc + ring, then the mask. See `recolor`.",
+    "color": "Per-agent color = one entry of `colors`; default `mono`. Apply the same entry to the still, the Lotties and the strips.",
     "pick": "Default avatar for a project = characters[fnv1a64(project_id) % characters.length]."
   },
   "png_sizes": [
@@ -90,7 +224,11 @@
           "1x": "assets/avatars/trees/frames/oak-idle.png",
           "2x": "assets/avatars/trees/frames/oak-idle@2x.png",
           "rail": "assets/avatars/trees/frames/oak-idle-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/oak-idle-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/oak-idle-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/oak-idle-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/oak-idle-tree-rail.png"
+          }
         },
         "working": {
           "frames": 90,
@@ -99,7 +237,11 @@
           "1x": "assets/avatars/trees/frames/oak-working.png",
           "2x": "assets/avatars/trees/frames/oak-working@2x.png",
           "rail": "assets/avatars/trees/frames/oak-working-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/oak-working-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/oak-working-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/oak-working-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/oak-working-tree-rail.png"
+          }
         },
         "reply": {
           "frames": 30,
@@ -108,7 +250,11 @@
           "1x": "assets/avatars/trees/frames/oak-reply.png",
           "2x": "assets/avatars/trees/frames/oak-reply@2x.png",
           "rail": "assets/avatars/trees/frames/oak-reply-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/oak-reply-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/oak-reply-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/oak-reply-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/oak-reply-tree-rail.png"
+          }
         }
       }
     },
@@ -138,7 +284,11 @@
           "1x": "assets/avatars/trees/frames/pine-idle.png",
           "2x": "assets/avatars/trees/frames/pine-idle@2x.png",
           "rail": "assets/avatars/trees/frames/pine-idle-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/pine-idle-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/pine-idle-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/pine-idle-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/pine-idle-tree-rail.png"
+          }
         },
         "working": {
           "frames": 90,
@@ -147,7 +297,11 @@
           "1x": "assets/avatars/trees/frames/pine-working.png",
           "2x": "assets/avatars/trees/frames/pine-working@2x.png",
           "rail": "assets/avatars/trees/frames/pine-working-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/pine-working-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/pine-working-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/pine-working-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/pine-working-tree-rail.png"
+          }
         },
         "reply": {
           "frames": 30,
@@ -156,7 +310,11 @@
           "1x": "assets/avatars/trees/frames/pine-reply.png",
           "2x": "assets/avatars/trees/frames/pine-reply@2x.png",
           "rail": "assets/avatars/trees/frames/pine-reply-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/pine-reply-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/pine-reply-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/pine-reply-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/pine-reply-tree-rail.png"
+          }
         }
       }
     },
@@ -186,7 +344,11 @@
           "1x": "assets/avatars/trees/frames/lollipop-idle.png",
           "2x": "assets/avatars/trees/frames/lollipop-idle@2x.png",
           "rail": "assets/avatars/trees/frames/lollipop-idle-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/lollipop-idle-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/lollipop-idle-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/lollipop-idle-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/lollipop-idle-tree-rail.png"
+          }
         },
         "working": {
           "frames": 90,
@@ -195,7 +357,11 @@
           "1x": "assets/avatars/trees/frames/lollipop-working.png",
           "2x": "assets/avatars/trees/frames/lollipop-working@2x.png",
           "rail": "assets/avatars/trees/frames/lollipop-working-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/lollipop-working-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/lollipop-working-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/lollipop-working-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/lollipop-working-tree-rail.png"
+          }
         },
         "reply": {
           "frames": 30,
@@ -204,7 +370,11 @@
           "1x": "assets/avatars/trees/frames/lollipop-reply.png",
           "2x": "assets/avatars/trees/frames/lollipop-reply@2x.png",
           "rail": "assets/avatars/trees/frames/lollipop-reply-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/lollipop-reply-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/lollipop-reply-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/lollipop-reply-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/lollipop-reply-tree-rail.png"
+          }
         }
       }
     },
@@ -234,7 +404,11 @@
           "1x": "assets/avatars/trees/frames/fractal-idle.png",
           "2x": "assets/avatars/trees/frames/fractal-idle@2x.png",
           "rail": "assets/avatars/trees/frames/fractal-idle-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/fractal-idle-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/fractal-idle-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/fractal-idle-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/fractal-idle-tree-rail.png"
+          }
         },
         "working": {
           "frames": 90,
@@ -243,7 +417,11 @@
           "1x": "assets/avatars/trees/frames/fractal-working.png",
           "2x": "assets/avatars/trees/frames/fractal-working@2x.png",
           "rail": "assets/avatars/trees/frames/fractal-working-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/fractal-working-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/fractal-working-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/fractal-working-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/fractal-working-tree-rail.png"
+          }
         },
         "reply": {
           "frames": 30,
@@ -252,7 +430,11 @@
           "1x": "assets/avatars/trees/frames/fractal-reply.png",
           "2x": "assets/avatars/trees/frames/fractal-reply@2x.png",
           "rail": "assets/avatars/trees/frames/fractal-reply-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/fractal-reply-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/fractal-reply-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/fractal-reply-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/fractal-reply-tree-rail.png"
+          }
         }
       }
     },
@@ -282,7 +464,11 @@
           "1x": "assets/avatars/trees/frames/mushroom-idle.png",
           "2x": "assets/avatars/trees/frames/mushroom-idle@2x.png",
           "rail": "assets/avatars/trees/frames/mushroom-idle-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/mushroom-idle-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/mushroom-idle-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/mushroom-idle-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/mushroom-idle-tree-rail.png"
+          }
         },
         "working": {
           "frames": 90,
@@ -291,7 +477,11 @@
           "1x": "assets/avatars/trees/frames/mushroom-working.png",
           "2x": "assets/avatars/trees/frames/mushroom-working@2x.png",
           "rail": "assets/avatars/trees/frames/mushroom-working-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/mushroom-working-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/mushroom-working-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/mushroom-working-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/mushroom-working-tree-rail.png"
+          }
         },
         "reply": {
           "frames": 30,
@@ -300,7 +490,11 @@
           "1x": "assets/avatars/trees/frames/mushroom-reply.png",
           "2x": "assets/avatars/trees/frames/mushroom-reply@2x.png",
           "rail": "assets/avatars/trees/frames/mushroom-reply-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/mushroom-reply-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/mushroom-reply-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/mushroom-reply-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/mushroom-reply-tree-rail.png"
+          }
         }
       }
     },
@@ -330,7 +524,11 @@
           "1x": "assets/avatars/trees/frames/cypress-idle.png",
           "2x": "assets/avatars/trees/frames/cypress-idle@2x.png",
           "rail": "assets/avatars/trees/frames/cypress-idle-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/cypress-idle-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/cypress-idle-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/cypress-idle-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/cypress-idle-tree-rail.png"
+          }
         },
         "working": {
           "frames": 90,
@@ -339,7 +537,11 @@
           "1x": "assets/avatars/trees/frames/cypress-working.png",
           "2x": "assets/avatars/trees/frames/cypress-working@2x.png",
           "rail": "assets/avatars/trees/frames/cypress-working-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/cypress-working-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/cypress-working-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/cypress-working-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/cypress-working-tree-rail.png"
+          }
         },
         "reply": {
           "frames": 30,
@@ -348,7 +550,11 @@
           "1x": "assets/avatars/trees/frames/cypress-reply.png",
           "2x": "assets/avatars/trees/frames/cypress-reply@2x.png",
           "rail": "assets/avatars/trees/frames/cypress-reply-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/cypress-reply-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/cypress-reply-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/cypress-reply-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/cypress-reply-tree-rail.png"
+          }
         }
       }
     },
@@ -378,7 +584,11 @@
           "1x": "assets/avatars/trees/frames/willow-idle.png",
           "2x": "assets/avatars/trees/frames/willow-idle@2x.png",
           "rail": "assets/avatars/trees/frames/willow-idle-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/willow-idle-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/willow-idle-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/willow-idle-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/willow-idle-tree-rail.png"
+          }
         },
         "working": {
           "frames": 90,
@@ -387,7 +597,11 @@
           "1x": "assets/avatars/trees/frames/willow-working.png",
           "2x": "assets/avatars/trees/frames/willow-working@2x.png",
           "rail": "assets/avatars/trees/frames/willow-working-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/willow-working-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/willow-working-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/willow-working-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/willow-working-tree-rail.png"
+          }
         },
         "reply": {
           "frames": 30,
@@ -396,7 +610,11 @@
           "1x": "assets/avatars/trees/frames/willow-reply.png",
           "2x": "assets/avatars/trees/frames/willow-reply@2x.png",
           "rail": "assets/avatars/trees/frames/willow-reply-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/willow-reply-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/willow-reply-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/willow-reply-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/willow-reply-tree-rail.png"
+          }
         }
       }
     },
@@ -426,7 +644,11 @@
           "1x": "assets/avatars/trees/frames/palm-idle.png",
           "2x": "assets/avatars/trees/frames/palm-idle@2x.png",
           "rail": "assets/avatars/trees/frames/palm-idle-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/palm-idle-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/palm-idle-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/palm-idle-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/palm-idle-tree-rail.png"
+          }
         },
         "working": {
           "frames": 90,
@@ -435,7 +657,11 @@
           "1x": "assets/avatars/trees/frames/palm-working.png",
           "2x": "assets/avatars/trees/frames/palm-working@2x.png",
           "rail": "assets/avatars/trees/frames/palm-working-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/palm-working-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/palm-working-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/palm-working-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/palm-working-tree-rail.png"
+          }
         },
         "reply": {
           "frames": 30,
@@ -444,7 +670,11 @@
           "1x": "assets/avatars/trees/frames/palm-reply.png",
           "2x": "assets/avatars/trees/frames/palm-reply@2x.png",
           "rail": "assets/avatars/trees/frames/palm-reply-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/palm-reply-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/palm-reply-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/palm-reply-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/palm-reply-tree-rail.png"
+          }
         }
       }
     },
@@ -474,7 +704,11 @@
           "1x": "assets/avatars/trees/frames/bonsai-idle.png",
           "2x": "assets/avatars/trees/frames/bonsai-idle@2x.png",
           "rail": "assets/avatars/trees/frames/bonsai-idle-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/bonsai-idle-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/bonsai-idle-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/bonsai-idle-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/bonsai-idle-tree-rail.png"
+          }
         },
         "working": {
           "frames": 90,
@@ -483,7 +717,11 @@
           "1x": "assets/avatars/trees/frames/bonsai-working.png",
           "2x": "assets/avatars/trees/frames/bonsai-working@2x.png",
           "rail": "assets/avatars/trees/frames/bonsai-working-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/bonsai-working-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/bonsai-working-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/bonsai-working-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/bonsai-working-tree-rail.png"
+          }
         },
         "reply": {
           "frames": 30,
@@ -492,7 +730,11 @@
           "1x": "assets/avatars/trees/frames/bonsai-reply.png",
           "2x": "assets/avatars/trees/frames/bonsai-reply@2x.png",
           "rail": "assets/avatars/trees/frames/bonsai-reply-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/bonsai-reply-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/bonsai-reply-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/bonsai-reply-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/bonsai-reply-tree-rail.png"
+          }
         }
       }
     },
@@ -522,7 +764,11 @@
           "1x": "assets/avatars/trees/frames/birch-idle.png",
           "2x": "assets/avatars/trees/frames/birch-idle@2x.png",
           "rail": "assets/avatars/trees/frames/birch-idle-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/birch-idle-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/birch-idle-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/birch-idle-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/birch-idle-tree-rail.png"
+          }
         },
         "working": {
           "frames": 90,
@@ -531,7 +777,11 @@
           "1x": "assets/avatars/trees/frames/birch-working.png",
           "2x": "assets/avatars/trees/frames/birch-working@2x.png",
           "rail": "assets/avatars/trees/frames/birch-working-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/birch-working-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/birch-working-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/birch-working-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/birch-working-tree-rail.png"
+          }
         },
         "reply": {
           "frames": 30,
@@ -540,7 +790,11 @@
           "1x": "assets/avatars/trees/frames/birch-reply.png",
           "2x": "assets/avatars/trees/frames/birch-reply@2x.png",
           "rail": "assets/avatars/trees/frames/birch-reply-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/birch-reply-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/birch-reply-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/birch-reply-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/birch-reply-tree-rail.png"
+          }
         }
       }
     },
@@ -570,7 +824,11 @@
           "1x": "assets/avatars/trees/frames/baobab-idle.png",
           "2x": "assets/avatars/trees/frames/baobab-idle@2x.png",
           "rail": "assets/avatars/trees/frames/baobab-idle-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/baobab-idle-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/baobab-idle-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/baobab-idle-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/baobab-idle-tree-rail.png"
+          }
         },
         "working": {
           "frames": 90,
@@ -579,7 +837,11 @@
           "1x": "assets/avatars/trees/frames/baobab-working.png",
           "2x": "assets/avatars/trees/frames/baobab-working@2x.png",
           "rail": "assets/avatars/trees/frames/baobab-working-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/baobab-working-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/baobab-working-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/baobab-working-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/baobab-working-tree-rail.png"
+          }
         },
         "reply": {
           "frames": 30,
@@ -588,7 +850,11 @@
           "1x": "assets/avatars/trees/frames/baobab-reply.png",
           "2x": "assets/avatars/trees/frames/baobab-reply@2x.png",
           "rail": "assets/avatars/trees/frames/baobab-reply-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/baobab-reply-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/baobab-reply-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/baobab-reply-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/baobab-reply-tree-rail.png"
+          }
         }
       }
     },
@@ -618,7 +884,11 @@
           "1x": "assets/avatars/trees/frames/sapling-idle.png",
           "2x": "assets/avatars/trees/frames/sapling-idle@2x.png",
           "rail": "assets/avatars/trees/frames/sapling-idle-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/sapling-idle-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/sapling-idle-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/sapling-idle-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/sapling-idle-tree-rail.png"
+          }
         },
         "working": {
           "frames": 90,
@@ -627,7 +897,11 @@
           "1x": "assets/avatars/trees/frames/sapling-working.png",
           "2x": "assets/avatars/trees/frames/sapling-working@2x.png",
           "rail": "assets/avatars/trees/frames/sapling-working-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/sapling-working-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/sapling-working-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/sapling-working-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/sapling-working-tree-rail.png"
+          }
         },
         "reply": {
           "frames": 30,
@@ -636,7 +910,11 @@
           "1x": "assets/avatars/trees/frames/sapling-reply.png",
           "2x": "assets/avatars/trees/frames/sapling-reply@2x.png",
           "rail": "assets/avatars/trees/frames/sapling-reply-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/sapling-reply-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/sapling-reply-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/sapling-reply-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/sapling-reply-tree-rail.png"
+          }
         }
       }
     },
@@ -666,7 +944,11 @@
           "1x": "assets/avatars/trees/frames/maple-idle.png",
           "2x": "assets/avatars/trees/frames/maple-idle@2x.png",
           "rail": "assets/avatars/trees/frames/maple-idle-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/maple-idle-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/maple-idle-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/maple-idle-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/maple-idle-tree-rail.png"
+          }
         },
         "working": {
           "frames": 90,
@@ -675,7 +957,11 @@
           "1x": "assets/avatars/trees/frames/maple-working.png",
           "2x": "assets/avatars/trees/frames/maple-working@2x.png",
           "rail": "assets/avatars/trees/frames/maple-working-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/maple-working-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/maple-working-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/maple-working-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/maple-working-tree-rail.png"
+          }
         },
         "reply": {
           "frames": 30,
@@ -684,7 +970,11 @@
           "1x": "assets/avatars/trees/frames/maple-reply.png",
           "2x": "assets/avatars/trees/frames/maple-reply@2x.png",
           "rail": "assets/avatars/trees/frames/maple-reply-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/maple-reply-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/maple-reply-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/maple-reply-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/maple-reply-tree-rail.png"
+          }
         }
       }
     },
@@ -714,7 +1004,11 @@
           "1x": "assets/avatars/trees/frames/acacia-idle.png",
           "2x": "assets/avatars/trees/frames/acacia-idle@2x.png",
           "rail": "assets/avatars/trees/frames/acacia-idle-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/acacia-idle-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/acacia-idle-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/acacia-idle-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/acacia-idle-tree-rail.png"
+          }
         },
         "working": {
           "frames": 90,
@@ -723,7 +1017,11 @@
           "1x": "assets/avatars/trees/frames/acacia-working.png",
           "2x": "assets/avatars/trees/frames/acacia-working@2x.png",
           "rail": "assets/avatars/trees/frames/acacia-working-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/acacia-working-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/acacia-working-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/acacia-working-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/acacia-working-tree-rail.png"
+          }
         },
         "reply": {
           "frames": 30,
@@ -732,7 +1030,11 @@
           "1x": "assets/avatars/trees/frames/acacia-reply.png",
           "2x": "assets/avatars/trees/frames/acacia-reply@2x.png",
           "rail": "assets/avatars/trees/frames/acacia-reply-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/acacia-reply-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/acacia-reply-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/acacia-reply-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/acacia-reply-tree-rail.png"
+          }
         }
       }
     },
@@ -762,7 +1064,11 @@
           "1x": "assets/avatars/trees/frames/spruce-idle.png",
           "2x": "assets/avatars/trees/frames/spruce-idle@2x.png",
           "rail": "assets/avatars/trees/frames/spruce-idle-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/spruce-idle-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/spruce-idle-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/spruce-idle-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/spruce-idle-tree-rail.png"
+          }
         },
         "working": {
           "frames": 90,
@@ -771,7 +1077,11 @@
           "1x": "assets/avatars/trees/frames/spruce-working.png",
           "2x": "assets/avatars/trees/frames/spruce-working@2x.png",
           "rail": "assets/avatars/trees/frames/spruce-working-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/spruce-working-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/spruce-working-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/spruce-working-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/spruce-working-tree-rail.png"
+          }
         },
         "reply": {
           "frames": 30,
@@ -780,7 +1090,11 @@
           "1x": "assets/avatars/trees/frames/spruce-reply.png",
           "2x": "assets/avatars/trees/frames/spruce-reply@2x.png",
           "rail": "assets/avatars/trees/frames/spruce-reply-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/spruce-reply-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/spruce-reply-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/spruce-reply-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/spruce-reply-tree-rail.png"
+          }
         }
       }
     },
@@ -810,7 +1124,11 @@
           "1x": "assets/avatars/trees/frames/cherry-idle.png",
           "2x": "assets/avatars/trees/frames/cherry-idle@2x.png",
           "rail": "assets/avatars/trees/frames/cherry-idle-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/cherry-idle-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/cherry-idle-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/cherry-idle-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/cherry-idle-tree-rail.png"
+          }
         },
         "working": {
           "frames": 90,
@@ -819,7 +1137,11 @@
           "1x": "assets/avatars/trees/frames/cherry-working.png",
           "2x": "assets/avatars/trees/frames/cherry-working@2x.png",
           "rail": "assets/avatars/trees/frames/cherry-working-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/cherry-working-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/cherry-working-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/cherry-working-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/cherry-working-tree-rail.png"
+          }
         },
         "reply": {
           "frames": 30,
@@ -828,7 +1150,11 @@
           "1x": "assets/avatars/trees/frames/cherry-reply.png",
           "2x": "assets/avatars/trees/frames/cherry-reply@2x.png",
           "rail": "assets/avatars/trees/frames/cherry-reply-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/cherry-reply-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/cherry-reply-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/cherry-reply-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/cherry-reply-tree-rail.png"
+          }
         }
       }
     },
@@ -858,7 +1184,11 @@
           "1x": "assets/avatars/trees/frames/cactus-idle.png",
           "2x": "assets/avatars/trees/frames/cactus-idle@2x.png",
           "rail": "assets/avatars/trees/frames/cactus-idle-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/cactus-idle-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/cactus-idle-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/cactus-idle-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/cactus-idle-tree-rail.png"
+          }
         },
         "working": {
           "frames": 90,
@@ -867,7 +1197,11 @@
           "1x": "assets/avatars/trees/frames/cactus-working.png",
           "2x": "assets/avatars/trees/frames/cactus-working@2x.png",
           "rail": "assets/avatars/trees/frames/cactus-working-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/cactus-working-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/cactus-working-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/cactus-working-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/cactus-working-tree-rail.png"
+          }
         },
         "reply": {
           "frames": 30,
@@ -876,7 +1210,11 @@
           "1x": "assets/avatars/trees/frames/cactus-reply.png",
           "2x": "assets/avatars/trees/frames/cactus-reply@2x.png",
           "rail": "assets/avatars/trees/frames/cactus-reply-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/cactus-reply-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/cactus-reply-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/cactus-reply-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/cactus-reply-tree-rail.png"
+          }
         }
       }
     },
@@ -906,7 +1244,11 @@
           "1x": "assets/avatars/trees/frames/sequoia-idle.png",
           "2x": "assets/avatars/trees/frames/sequoia-idle@2x.png",
           "rail": "assets/avatars/trees/frames/sequoia-idle-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/sequoia-idle-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/sequoia-idle-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/sequoia-idle-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/sequoia-idle-tree-rail.png"
+          }
         },
         "working": {
           "frames": 90,
@@ -915,7 +1257,11 @@
           "1x": "assets/avatars/trees/frames/sequoia-working.png",
           "2x": "assets/avatars/trees/frames/sequoia-working@2x.png",
           "rail": "assets/avatars/trees/frames/sequoia-working-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/sequoia-working-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/sequoia-working-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/sequoia-working-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/sequoia-working-tree-rail.png"
+          }
         },
         "reply": {
           "frames": 30,
@@ -924,7 +1270,11 @@
           "1x": "assets/avatars/trees/frames/sequoia-reply.png",
           "2x": "assets/avatars/trees/frames/sequoia-reply@2x.png",
           "rail": "assets/avatars/trees/frames/sequoia-reply-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/sequoia-reply-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/sequoia-reply-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/sequoia-reply-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/sequoia-reply-tree-rail.png"
+          }
         }
       }
     },
@@ -954,7 +1304,11 @@
           "1x": "assets/avatars/trees/frames/olive-idle.png",
           "2x": "assets/avatars/trees/frames/olive-idle@2x.png",
           "rail": "assets/avatars/trees/frames/olive-idle-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/olive-idle-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/olive-idle-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/olive-idle-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/olive-idle-tree-rail.png"
+          }
         },
         "working": {
           "frames": 90,
@@ -963,7 +1317,11 @@
           "1x": "assets/avatars/trees/frames/olive-working.png",
           "2x": "assets/avatars/trees/frames/olive-working@2x.png",
           "rail": "assets/avatars/trees/frames/olive-working-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/olive-working-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/olive-working-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/olive-working-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/olive-working-tree-rail.png"
+          }
         },
         "reply": {
           "frames": 30,
@@ -972,7 +1330,11 @@
           "1x": "assets/avatars/trees/frames/olive-reply.png",
           "2x": "assets/avatars/trees/frames/olive-reply@2x.png",
           "rail": "assets/avatars/trees/frames/olive-reply-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/olive-reply-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/olive-reply-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/olive-reply-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/olive-reply-tree-rail.png"
+          }
         }
       }
     },
@@ -1002,7 +1364,11 @@
           "1x": "assets/avatars/trees/frames/ginkgo-idle.png",
           "2x": "assets/avatars/trees/frames/ginkgo-idle@2x.png",
           "rail": "assets/avatars/trees/frames/ginkgo-idle-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/ginkgo-idle-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/ginkgo-idle-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/ginkgo-idle-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/ginkgo-idle-tree-rail.png"
+          }
         },
         "working": {
           "frames": 90,
@@ -1011,7 +1377,11 @@
           "1x": "assets/avatars/trees/frames/ginkgo-working.png",
           "2x": "assets/avatars/trees/frames/ginkgo-working@2x.png",
           "rail": "assets/avatars/trees/frames/ginkgo-working-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/ginkgo-working-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/ginkgo-working-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/ginkgo-working-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/ginkgo-working-tree-rail.png"
+          }
         },
         "reply": {
           "frames": 30,
@@ -1020,7 +1390,11 @@
           "1x": "assets/avatars/trees/frames/ginkgo-reply.png",
           "2x": "assets/avatars/trees/frames/ginkgo-reply@2x.png",
           "rail": "assets/avatars/trees/frames/ginkgo-reply-rail.png",
-          "rail@2x": "assets/avatars/trees/frames/ginkgo-reply-rail@2x.png"
+          "rail@2x": "assets/avatars/trees/frames/ginkgo-reply-rail@2x.png",
+          "tree": {
+            "2x": "assets/avatars/trees/frames/ginkgo-reply-tree@2x.png",
+            "rail": "assets/avatars/trees/frames/ginkgo-reply-tree-rail.png"
+          }
         }
       }
     }
