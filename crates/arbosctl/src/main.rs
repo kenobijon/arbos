@@ -94,6 +94,23 @@ enum Cmd {
         #[command(subcommand)]
         cmd: ChannelsCmd,
     },
+    /// Blobs (attachments, offloaded tool outputs) from the relay mirror.
+    Blob {
+        #[command(subcommand)]
+        cmd: BlobCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum BlobCmd {
+    /// Download `GET /blob/{project}/{key}` to a file (default: ./<key>, or the name after `--name`).
+    Get {
+        project: String,
+        key: String,
+        /// Output path.
+        #[arg(long, short)]
+        out: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -869,6 +886,21 @@ async fn main() -> Result<()> {
                             it["text"].as_str().unwrap_or("").replace('\n', " ⏎ ")
                         );
                     }
+                }
+            }
+        },
+        Cmd::Blob { cmd } => match cmd {
+            BlobCmd::Get { project, key, out } => {
+                let (mime, bytes) = relay.get_bytes(&format!("/blob/{project}/{key}")).await?;
+                let out = out.unwrap_or_else(|| std::path::PathBuf::from(&key));
+                std::fs::write(&out, &bytes)?;
+                if args.json {
+                    println!(
+                        "{}",
+                        json!({ "key": key, "mime": mime, "bytes": bytes.len(), "path": out })
+                    );
+                } else {
+                    println!("{} ({mime}, {} bytes)", out.display(), bytes.len());
                 }
             }
         },

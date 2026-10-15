@@ -120,6 +120,29 @@ impl Relay {
         .await
     }
 
+    /// Raw body with its content type (blobs).
+    pub async fn get_bytes(&self, path: &str) -> Result<(String, Vec<u8>)> {
+        self.need_token()?;
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base, path))
+            .bearer_auth(&self.token)
+            .send()
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("relay HTTP {status}: {text}"));
+        }
+        let mime = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("application/octet-stream")
+            .to_owned();
+        Ok((mime, resp.bytes().await?.to_vec()))
+    }
+
     pub async fn post(&self, path: &str, body: &Value) -> Result<Value> {
         self.need_token()?;
         Self::finish(
