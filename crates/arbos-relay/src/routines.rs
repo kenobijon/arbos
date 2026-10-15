@@ -301,7 +301,7 @@ fn authorize(
         .project(id_or_name)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if !principal.can_access_project(&p.id) {
+    if !state.allows(principal, &p.id) {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
     Ok(p.id)

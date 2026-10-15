@@ -158,7 +158,7 @@ pub async fn exec(
     Path((project_id, device_id)): Path<(String, String)>,
     Json(op): Json<LocalOp>,
 ) -> ApiResult {
-    if !principal.can_access_project(&project_id) {
+    if !state.allows(&principal, &project_id) {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
     if !matches!(principal, Principal::Box { .. } | Principal::Admin) {

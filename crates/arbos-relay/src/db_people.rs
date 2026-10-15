@@ -37,6 +37,12 @@ CREATE TABLE IF NOT EXISTS user_pushes (
   kind TEXT NOT NULL, payload TEXT NOT NULL, chat_id TEXT, created_at INTEGER NOT NULL, delivered_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS user_pushes_device ON user_pushes(device_id, delivered_at);
+CREATE TABLE IF NOT EXISTS project_members (
+  project_id TEXT NOT NULL, user_id TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'member',
+  added_by TEXT NOT NULL, joined_at INTEGER NOT NULL, left_at INTEGER,
+  PRIMARY KEY (project_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS project_members_user ON project_members(user_id);
 CREATE TABLE IF NOT EXISTS rate_events (
   user_id TEXT NOT NULL, kind TEXT NOT NULL, at INTEGER NOT NULL
 );
@@ -492,6 +498,75 @@ impl Db {
                 params![user_id, kind, now - window_ms],
                 |r| r.get(0),
             )
+        })
+    }
+
+    // ---- projects together (step 3) -----------------------------------------------------------
+
+    pub fn add_project_member(
+        &self,
+        project_id: &str,
+        user_id: &str,
+        added_by: &str,
+    ) -> Result<bool> {
+        self.with(|c| {
+            let live: i64 = c.query_row(
+                "SELECT COUNT(*) FROM project_members WHERE project_id = ?1 AND user_id = ?2 AND left_at IS NULL",
+                params![project_id, user_id],
+                |r| r.get(0),
+            )?;
+            if live > 0 {
+                return Ok(false);
+            }
+            c.execute(
+                "INSERT INTO project_members(project_id, user_id, role, added_by, joined_at) VALUES (?1, ?2, 'member', ?3, ?4)
+                 ON CONFLICT(project_id, user_id) DO UPDATE SET added_by = excluded.added_by, joined_at = excluded.joined_at, left_at = NULL",
+                params![project_id, user_id, added_by, now_ms()],
+            )?;
+            Ok(true)
+        })
+    }
+
+    pub fn remove_project_member(&self, project_id: &str, user_id: &str) -> Result<bool> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE project_members SET left_at = ?3 WHERE project_id = ?1 AND user_id = ?2 AND left_at IS NULL",
+                params![project_id, user_id, now_ms()],
+            )
+            .map(|n| n > 0)
+        })
+    }
+
+    pub fn is_project_member(&self, project_id: &str, user_id: &str) -> Result<bool> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM project_members WHERE project_id = ?1 AND user_id = ?2 AND left_at IS NULL",
+                params![project_id, user_id],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n > 0)
+        })
+    }
+
+    /// `(user_id, added_by, joined_at)` of the live guests of a project.
+    pub fn project_members(&self, project_id: &str) -> Result<Vec<(String, String, i64)>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT user_id, added_by, joined_at FROM project_members WHERE project_id = ?1 AND left_at IS NULL ORDER BY joined_at",
+            )?;
+            let rows = st.query_map(params![project_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            rows.collect()
+        })
+    }
+
+    /// Project ids shared with a user (they are a live guest).
+    pub fn shared_project_ids(&self, user_id: &str) -> Result<Vec<String>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT project_id FROM project_members WHERE user_id = ?1 AND left_at IS NULL ORDER BY joined_at",
+            )?;
+            let rows = st.query_map(params![user_id], |r| r.get(0))?;
+            rows.collect()
         })
     }
 

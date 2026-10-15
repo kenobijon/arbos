@@ -24,7 +24,7 @@ pub async fn browser_stream(
         Ok(Some(p)) => p,
         _ => return (StatusCode::NOT_FOUND, "no such project").into_response(),
     };
-    if !principal.can_access_project(&project.user_id) {
+    if !state.allows(&principal, &project.id) {
         return StatusCode::FORBIDDEN.into_response();
     }
     let sb = match state.db.user_box(&project.user_id) {

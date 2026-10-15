@@ -990,6 +990,178 @@ pub fn people_chats_of_project(state: &AppState, project_id: &str, owner: &str) 
         .collect()
 }
 
+// ---- projects together (step 3) ----------------------------------------------------------------
+
+fn project_members_json(state: &AppState, project: &crate::db::Project) -> Value {
+    let mut members = vec![{
+        let mut v = state
+            .db
+            .user_card(&project.user_id)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| json!({ "id": project.user_id }));
+        v["user_id"] = json!(project.user_id);
+        v["role"] = json!("owner");
+        v["joined_at"] = json!(project.created_at);
+        v
+    }];
+    for (uid, added_by, joined_at) in state.db.project_members(&project.id).unwrap_or_default() {
+        let mut v = state
+            .db
+            .user_card(&uid)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| json!({ "id": uid }));
+        v["user_id"] = json!(uid);
+        v["role"] = json!("member");
+        v["added_by"] = json!(added_by);
+        v["joined_at"] = json!(joined_at);
+        members.push(v);
+    }
+    json!({ "project_id": project.id, "owner": project.user_id, "members": members })
+}
+
+fn project_for(state: &AppState, id: &str) -> Result<crate::db::Project, Box<Response>> {
+    match state.db.project(id) {
+        Ok(Some(p)) => Ok(p),
+        Ok(None) => Err(Box::new(api_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no such project",
+        ))),
+        Err(e) => Err(Box::new(api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "db",
+            e.to_string(),
+        ))),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ProjectMemberBody {
+    pub handle: String,
+}
+
+/// `POST /projects/{id}/members {"handle"}` — the owner invites a person into the project: they
+/// see its chats in their rail and drive its agent.
+pub async fn project_member_add(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    Json(b): Json<ProjectMemberBody>,
+) -> Response {
+    let me = match user_of(&principal) {
+        Ok(u) => u,
+        Err(r) => return *r,
+    };
+    let project = match project_for(&state, &id) {
+        Ok(p) => p,
+        Err(r) => return *r,
+    };
+    if !state.owns(&principal, &project.id) {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "owner_only",
+            "only the project's owner invites people",
+        );
+    }
+    let Some(handle) = normalize_handle(&b.handle) else {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "bad_handle",
+            "that is not a GitHub login",
+        );
+    };
+    let Some(other) = find_person(&state, &handle).await else {
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no GitHub account with that login",
+        );
+    };
+    let other_id = other["id"].as_str().unwrap_or_default().to_owned();
+    if other_id == project.user_id {
+        return api_error(StatusCode::BAD_REQUEST, "bad_handle", "that is the owner");
+    }
+    if state.db.blocked_either_way(&me, &other_id).unwrap_or(false) {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "not_available",
+            "this person is not available",
+        );
+    }
+    match state.db.add_project_member(&project.id, &other_id, &me) {
+        Ok(true) => {}
+        Ok(false) => {
+            return api_error(
+                StatusCode::CONFLICT,
+                "already_member",
+                "already in this project",
+            )
+        }
+        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    }
+    let _ = state.db.push_user(
+        &other_id,
+        "people_project_shared",
+        &json!({ "project_id": project.id, "by_handle": handle_of(&state, &me) }),
+        None,
+    );
+    tracing::info!(project = %project.id, guest = %other_id, %me, "project shared");
+    Json(project_members_json(&state, &project)).into_response()
+}
+
+/// `GET /projects/{id}/members` — any member.
+pub async fn project_members_list(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+) -> Response {
+    let project = match project_for(&state, &id) {
+        Ok(p) => p,
+        Err(r) => return *r,
+    };
+    if !state.allows(&principal, &project.id) {
+        return api_error(StatusCode::FORBIDDEN, "not_member", "not your project");
+    }
+    Json(project_members_json(&state, &project)).into_response()
+}
+
+/// `DELETE /projects/{id}/members/{user_id}` — owner only; a guest may remove themselves.
+pub async fn project_member_remove(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((id, user_id)): Path<(String, String)>,
+) -> Response {
+    let me = match user_of(&principal) {
+        Ok(u) => u,
+        Err(r) => return *r,
+    };
+    let project = match project_for(&state, &id) {
+        Ok(p) => p,
+        Err(r) => return *r,
+    };
+    if !state.owns(&principal, &project.id) && user_id != me {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "owner_only",
+            "only the project's owner removes people",
+        );
+    }
+    match state.db.remove_project_member(&project.id, &user_id) {
+        Ok(true) => {}
+        Ok(false) => return api_error(StatusCode::NOT_FOUND, "not_found", "not a member"),
+        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    }
+    let _ = state.db.push_user(
+        &user_id,
+        "project_member_removed",
+        &json!({ "project_id": project.id, "by_handle": handle_of(&state, &me) }),
+        None,
+    );
+    StatusCode::NO_CONTENT.into_response()
+}
+
 // ---- room hooks ---------------------------------------------------------------------------------
 
 /// Why a row push into a people room was refused (sent back as an `error` frame).
@@ -1306,6 +1478,82 @@ mod agent_tests {
             },
             &format!("{PEOPLE_ACL_PREFIX}{chat}")
         ));
+    }
+}
+
+#[cfg(test)]
+mod shared_project_tests {
+    //! Projects together: a guest the owner invited drives the project (member access), only the
+    //! owner changes settings or members, and removal ends access at once.
+
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+    use axum::Json;
+
+    use super::tests_support::{person, project_of};
+    use super::*;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    #[tokio::test]
+    async fn guests_drive_but_do_not_own() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 21);
+        let (bob, bob_dev) = person(&state, 22);
+        let (_carol, carol_dev) = person(&state, 23);
+        let project = project_of(&state, &alice, "Shared");
+
+        assert!(state.allows(&alice_dev, &project));
+        assert!(!state.allows(&bob_dev, &project), "not invited yet");
+
+        // Bob cannot invite himself; Alice can invite Bob.
+        let r = project_member_add(
+            State(state.clone()),
+            bob_dev.clone(),
+            Path(project.clone()),
+            Json(ProjectMemberBody {
+                handle: "user22".into(),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        let r = project_member_add(
+            State(state.clone()),
+            alice_dev.clone(),
+            Path(project.clone()),
+            Json(ProjectMemberBody {
+                handle: "@user22".into(),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+
+        // Member access, owner-level refused.
+        assert!(state.allows(&bob_dev, &project));
+        assert!(!state.owns(&bob_dev, &project));
+        assert!(state.owns(&alice_dev, &project));
+        assert!(!state.allows(&carol_dev, &project));
+        assert_eq!(
+            state.db.shared_project_ids(&bob).unwrap(),
+            vec![project.clone()]
+        );
+
+        // Only the owner removes a guest (a guest may leave).
+        let r = project_member_remove(
+            State(state.clone()),
+            carol_dev.clone(),
+            Path((project.clone(), bob.clone())),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        let r = project_member_remove(
+            State(state.clone()),
+            alice_dev.clone(),
+            Path((project.clone(), bob.clone())),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        assert!(!state.allows(&bob_dev, &project), "access ends at once");
     }
 }
 

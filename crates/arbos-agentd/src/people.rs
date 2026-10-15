@@ -91,9 +91,19 @@ pub struct PeopleState {
     askers: Mutex<HashMap<String, Asker>>,
     /// The chat whose turn holds the turn lock right now (for audit attribution).
     current: Mutex<Option<String>>,
+    /// This Project's owner (from the relay's project record), for guest labels in project chats.
+    project_owner: Mutex<String>,
 }
 
 impl PeopleState {
+    pub fn set_project_owner(&self, user_id: &str) {
+        *self.project_owner.lock().expect("people") = user_id.to_owned();
+    }
+
+    pub fn project_owner(&self) -> String {
+        self.project_owner.lock().expect("people").clone()
+    }
+
     pub fn info(&self, chat_id: &str) -> Option<PeopleChatInfo> {
         self.chats.lock().expect("people").get(chat_id).cloned()
     }
@@ -382,6 +392,46 @@ impl Agent {
                 String::new()
             },
             handle,
+        ))
+    }
+
+    /// Projects together (D72 step 3): in this Project's own chats, a message written by a guest
+    /// the owner invited is labelled so the agent knows who is talking. `None` for the owner's
+    /// own messages and for people chats (which have their own prelude).
+    pub async fn shared_project_guest_note(
+        &self,
+        chat_id: &str,
+        host: &SharedHost,
+        user_msg_id: &str,
+    ) -> Option<String> {
+        if self.people.is_people_chat(chat_id) {
+            return None;
+        }
+        let msg = host.lock().await.doc.message(user_msg_id)?;
+        let sender = msg.rest.get("sender").and_then(Value::as_str)?;
+        let user_id = sender.strip_prefix("user:")?;
+        let owner = self.people.project_owner();
+        if owner.is_empty() || user_id == owner {
+            return None;
+        }
+        let handle = msg
+            .rest
+            .get("senderHandle")
+            .and_then(Value::as_str)
+            .unwrap_or(user_id);
+        self.people.askers.lock().expect("people").insert(
+            chat_id.to_owned(),
+            Asker {
+                user_id: user_id.to_owned(),
+                handle: handle.to_owned(),
+                role: "guest",
+                message_id: user_msg_id.to_owned(),
+                text: msg.text(),
+            },
+        );
+        self.people.set_current(Some(chat_id));
+        Some(format!(
+            "[This message is from @{handle}, a person the owner of this Project invited to work in it with you. Address them by handle; they have the same say here as the owner.]\n\n"
         ))
     }
 

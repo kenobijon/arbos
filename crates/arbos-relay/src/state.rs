@@ -150,6 +150,29 @@ impl AppState {
             return crate::people::room_access(self, principal, chat_id);
         }
         match self.user_of(project_id) {
+            Some(u) if principal.can_access_project(&u) => true,
+            // Projects together (D72 step 3): a person the owner invited drives the project too.
+            Some(_) => match principal {
+                crate::auth::Principal::Device { user_id, .. } => {
+                    let id = self
+                        .db
+                        .project(project_id)
+                        .ok()
+                        .flatten()
+                        .map(|p| p.id)
+                        .unwrap_or_else(|| project_id.to_owned());
+                    self.db.is_project_member(&id, user_id).unwrap_or(false)
+                }
+                crate::auth::Principal::Box { .. } | crate::auth::Principal::Admin => false,
+            },
+            None => false,
+        }
+    }
+
+    /// Owner-level access: the project's own user (any of their devices, their box) or the admin;
+    /// guests of a shared project are not owners.
+    pub fn owns(&self, principal: &crate::auth::Principal, project_id: &str) -> bool {
+        match self.user_of(project_id) {
             Some(u) => principal.can_access_project(&u),
             None => false,
         }

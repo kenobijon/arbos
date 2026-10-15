@@ -226,10 +226,43 @@ pub async fn create_project(
     .into_response())
 }
 
-pub async fn list_projects(State(state): State<AppState>, _principal: Principal) -> ApiResult {
+/// `GET /projects`: the caller's own projects, then the ones shared with them (`shared: true`,
+/// with the owner's handle). The admin sees every project.
+pub async fn list_projects(State(state): State<AppState>, principal: Principal) -> ApiResult {
     let mut out = Vec::new();
-    for p in state.db.list_projects().map_err(internal)? {
-        out.push(project_json(&state, &p).await);
+    match &principal {
+        Principal::Admin => {
+            for p in state.db.list_projects().map_err(internal)? {
+                out.push(project_json(&state, &p).await);
+            }
+        }
+        Principal::Device { user_id, .. } | Principal::Box { user_id } => {
+            for p in state.db.projects_of_user(user_id).map_err(internal)? {
+                let mut v = project_json(&state, &p).await;
+                v["shared"] = json!(false);
+                v["owner"] = json!(p.user_id);
+                v["my_role"] = json!("owner");
+                out.push(v);
+            }
+            if matches!(principal, Principal::Device { .. }) {
+                for pid in state.db.shared_project_ids(user_id).map_err(internal)? {
+                    if let Ok(Some(p)) = state.db.project(&pid) {
+                        let mut v = project_json(&state, &p).await;
+                        v["shared"] = json!(true);
+                        v["owner"] = json!(p.user_id);
+                        v["owner_handle"] = state
+                            .db
+                            .user_card(&p.user_id)
+                            .ok()
+                            .flatten()
+                            .map(|c| c["handle"].clone())
+                            .unwrap_or(Value::Null);
+                        v["my_role"] = json!("member");
+                        out.push(v);
+                    }
+                }
+            }
+        }
     }
     Ok(Json(out).into_response())
 }
@@ -244,7 +277,7 @@ pub async fn get_project(
         .project(&id)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if !principal.can_access_project(&p.user_id) {
+    if !state.allows(&principal, &p.id) {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
     let chats: Vec<Value> = state
@@ -305,7 +338,7 @@ pub async fn patch_project(
         .project(&id)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if !principal.can_access_project(&p.user_id) {
+    if !state.owns(&principal, &p.id) {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
     if let Some(o) = b.models.as_ref().and_then(Value::as_object) {
@@ -500,7 +533,7 @@ pub async fn project_status(
         .project(&id)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if !principal.can_access_project(&p.user_id) {
+    if !state.allows(&principal, &p.id) {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
     let (bs, since) = state.box_state(&p.user_id).await;
@@ -700,7 +733,7 @@ pub async fn create_chat(
         .project(&id)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if !principal.can_access_project(&p.user_id) {
+    if !state.allows(&principal, &p.id) {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
     let kind = match b.kind.as_deref() {
@@ -757,7 +790,7 @@ pub async fn list_chats(
         .project(&id)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if !principal.can_access_project(&p.user_id) {
+    if !state.allows(&principal, &p.id) {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
     Ok(Json(
@@ -784,7 +817,7 @@ pub async fn wake(
         .project(&id)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if !principal.can_access_project(&p.user_id) {
+    if !state.allows(&principal, &p.id) {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
     boxes::ensure_awake(&state, &p.user_id, "api").await;
@@ -802,7 +835,7 @@ pub async fn start(
         .project(&id)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if !principal.can_access_project(&p.user_id) || principal.is_box() {
+    if !state.allows(&principal, &p.id) || principal.is_box() {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
     boxes::start_box(&state, &p.user_id)
@@ -829,7 +862,7 @@ pub async fn stop(
         .project(&id)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if !principal.can_access_project(&p.user_id) || principal.is_box() {
+    if !state.owns(&principal, &p.id) || principal.is_box() {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
     boxes::stop_box(&state, &p.user_id, q.force)

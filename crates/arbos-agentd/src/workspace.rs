@@ -110,6 +110,9 @@ impl Supervisor {
             .context("project without id")?
             .to_owned();
         if let Some(w) = self.get(&project_id).await {
+            if let Some(owner) = project.get("user_id").and_then(Value::as_str) {
+                w.agent.people.set_project_owner(owner);
+            }
             // Settings and chats change without a restart.
             if let Err(e) = w.agent.settings_from_relay(project, chats).await {
                 tracing::warn!(project = %project_id, error = %e, "settings from relay");
@@ -210,6 +213,9 @@ impl Supervisor {
             ("spendTodayUsd", json!(0.0)),
         ])
         .await;
+        if let Some(owner) = project.get("user_id").and_then(Value::as_str) {
+            agent.people.set_project_owner(owner);
+        }
         if let Err(e) = agent.settings_from_relay(project, chats).await {
             tracing::warn!(project = %project_id, error = %e, "settings from relay");
         }

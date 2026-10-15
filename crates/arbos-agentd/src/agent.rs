@@ -951,6 +951,11 @@ impl Agent {
         // People chats (D72): who is asking, in what role; the reply is attributed to them.
         if let Some(prelude) = self.people_turn_context(chat_id, host, &user_msg_id).await {
             prompt_text = format!("{prelude}{prompt_text}");
+        } else if let Some(note) = self
+            .shared_project_guest_note(chat_id, host, &user_msg_id)
+            .await
+        {
+            prompt_text = format!("{note}{prompt_text}");
         }
 
         let outcome = self
