@@ -1,0 +1,33 @@
+[package]
+name = "arbos-update"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+description = "Arbos self-updater: Sparkle-format appcast, EdDSA (Ed25519) payload signatures, bundle swap and relaunch"
+
+# The library is what the Mac app polls and installs with. The binary is what
+# the release pipeline signs and writes the appcast with, so both ends share
+# one definition of the feed, the signature, and the version order.
+[[bin]]
+name = "arbos-updatectl"
+path = "src/bin/updatectl.rs"
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+chrono.workspace = true
+clap.workspace = true
+dirs.workspace = true
+ed25519-dalek.workspace = true
+futures.workspace = true
+rand.workspace = true
+reqwest.workspace = true
+roxmltree.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+tokio.workspace = true
+tracing.workspace = true

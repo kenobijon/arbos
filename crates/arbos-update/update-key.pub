@@ -1,0 +1,5 @@
+# The public half of the Arbos update signing key (Ed25519, Sparkle
+# `SUPublicEDKey` encoding). Compiled into the app: a payload installs only
+# when its sparkle:edSignature verifies against this line. The private half
+# is in the 1Password vault "Arbos" and in CI; it is never committed.
+ed25519 j9n8EEb06cZGvCnSqJg4+gy4x63kLlwtxAe8NH7JLu0=

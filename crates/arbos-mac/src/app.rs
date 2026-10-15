@@ -21,6 +21,7 @@ use crate::ui::notify::{Gate, Notifier, NotifyEvent, NotifyKind};
 
 /// How often held notification batches are re-checked.
 const NOTIFY_TICK_MS: u64 = 5_000;
+use crate::update::{self, UpdateCommand, UpdateEvent, UpdatePhase, UpdateState};
 
 /// Pairing screen state (crdt-sync §10.1).
 #[derive(Clone, Debug)]
@@ -113,10 +114,14 @@ pub struct AppState {
     pub window_active: bool,
     /// Settings → Channels (F7).
     pub channels: ChannelsView,
+    /// In-app update (D42): what the rail button and settings show.
+    pub update: UpdateState,
     awaiting_new_project: bool,
     commands: mpsc::UnboundedSender<ClientCommand>,
+    update_commands: mpsc::UnboundedSender<UpdateCommand>,
     _pump: Task<()>,
     _notify_tick: Task<()>,
+    _update_pump: Task<()>,
 }
 
 /// What the Details drawer (stub) describes.
@@ -160,6 +165,23 @@ impl AppState {
             }
         });
 
+        let update_state = UpdateState::new();
+        let (update_event_tx, mut update_event_rx) = mpsc::unbounded_channel::<UpdateEvent>();
+        let (update_command_tx, update_command_rx) = mpsc::unbounded_channel::<UpdateCommand>();
+        let update_worker = Tokio::spawn(
+            cx,
+            update::run(update_state.clone(), update_command_rx, update_event_tx),
+        );
+        let update_pump = cx.spawn(async move |this, cx| {
+            let _worker = update_worker;
+            while let Some(event) = update_event_rx.recv().await {
+                let applied = this.update(cx, |state, cx| state.apply_update(event, cx));
+                if applied.is_err() {
+                    break;
+                }
+            }
+        });
+
         Self {
             source_name,
             pairing: None,
@@ -189,11 +211,112 @@ impl AppState {
             notifier: Notifier::new(),
             window_active: true,
             channels: ChannelsView::default(),
+            update: update_state,
             awaiting_new_project: false,
             commands: command_tx,
+            update_commands: update_command_tx,
             _pump: pump,
             _notify_tick: notify_tick,
+            _update_pump: update_pump,
         }
+    }
+
+    fn apply_update(&mut self, event: UpdateEvent, cx: &mut Context<Self>) {
+        match event {
+            UpdateEvent::Checking => {
+                if matches!(self.update.phase, UpdatePhase::Idle | UpdatePhase::UpToDate) {
+                    self.update.phase = UpdatePhase::Checking;
+                }
+            }
+            UpdateEvent::UpToDate => {
+                self.update.last_checked_at = Some(now_ms());
+                if !self.update.busy() {
+                    self.update.phase = UpdatePhase::UpToDate;
+                }
+            }
+            UpdateEvent::Available(available) => {
+                let available = *available;
+                self.update.last_checked_at = Some(now_ms());
+                if !self.update.busy() {
+                    let fresh = self.update.available() != Some(&available);
+                    self.update.phase = UpdatePhase::Available(available.clone());
+                    if fresh {
+                        self.push_notice(format!(
+                            "Arbos {} is ready to install — press Update in the rail.",
+                            available.item.version
+                        ));
+                    }
+                }
+            }
+            UpdateEvent::Progress { got, total } => {
+                if let Some(available) = self.update.available().cloned() {
+                    self.update.phase = UpdatePhase::Downloading {
+                        available,
+                        got,
+                        total,
+                    };
+                }
+            }
+            UpdateEvent::Installing => {
+                if let Some(available) = self.update.available().cloned() {
+                    self.update.phase = UpdatePhase::Installing(available);
+                }
+            }
+            UpdateEvent::Installed(installed) => {
+                if let Some(available) = self.update.available().cloned() {
+                    self.update.phase = UpdatePhase::Restarting(available);
+                }
+                // One frame shows "Restarting", then the relauncher takes over.
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(700))
+                        .await;
+                    let _ = this.update(cx, |state, cx| match update::relaunch(&installed) {
+                        Ok(()) => cx.quit(),
+                        Err(err) => {
+                            state.update.phase = UpdatePhase::Failed {
+                                message: format!("installed, but could not relaunch: {err:#}"),
+                                available: state.update.available().cloned(),
+                            };
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
+            }
+            UpdateEvent::Failed(message) => {
+                self.update.phase = UpdatePhase::Failed {
+                    available: self.update.available().cloned(),
+                    message,
+                };
+            }
+        }
+        cx.notify();
+    }
+
+    pub fn check_for_updates(&mut self, cx: &mut Context<Self>) {
+        if self.update.busy() {
+            return;
+        }
+        let _ = self.update_commands.send(UpdateCommand::Check);
+        cx.notify();
+    }
+
+    /// The rail button: download, verify, swap, relaunch in one click.
+    pub fn install_update(&mut self, cx: &mut Context<Self>) {
+        if self.update.busy() {
+            return;
+        }
+        let Some(available) = self.update.available().cloned() else {
+            return;
+        };
+        self.update.phase = UpdatePhase::Downloading {
+            available,
+            got: 0,
+            total: None,
+        };
+        let _ = self.update_commands.send(UpdateCommand::Install);
+        cx.notify();
     }
 
     fn apply(&mut self, event: SyncEvent, cx: &mut Context<Self>) {
