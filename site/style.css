@@ -527,3 +527,12 @@ details[open] summary::after { transform: rotate(45deg); }
   *, *::before, *::after { animation-duration: 0.001s !important; animation-iteration-count: 1 !important; transition-duration: 0.001s !important; transition-delay: 0s !important; }
   .js [data-fade], .js [data-words] .word, .js [data-frame], .js [data-reveal], .js [data-demo] .demo-msg { opacity: 1; filter: none; transform: none; }
 }
+
+/* ---------- Tree avatars (assets/js/avatars.js) ---------- */
+.avatar { display: inline-block; width: 2rem; height: 2rem; border-radius: 50%; overflow: hidden; vertical-align: middle; flex: none; position: relative; background: #000; }
+.avatar > svg, .avatar-anim, .avatar-anim > svg { display: block; width: 100%; height: 100%; }
+.avatar.is-missing { background: var(--card-3); }
+.avatar-xs { width: 1.125rem; height: 1.125rem; }
+.avatar-sm { width: 1.5rem; height: 1.5rem; }
+.avatar-lg { width: 3rem; height: 3rem; }
+.avatar-xl { width: 6rem; height: 6rem; }
