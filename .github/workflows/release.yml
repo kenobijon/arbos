@@ -1,0 +1,415 @@
+name: Release
+
+# Every green push to `main` becomes an installable, signed, notarized build
+# of the Mac app that the running app offers through its Update button; every
+# `v*` tag becomes a stable release. Nobody picks a version number by hand
+# (D42 distribution, D43 CI, D44 versioning).
+#
+# ── channels ────────────────────────────────────────────────────────────────
+#   edge    workflow_run after CI succeeded on main. Version = Cargo.toml
+#           version + "." + commit count (0.1.0.212). Release `edge-0.1.0.212`
+#           (pre-release) holds the payloads; the rolling release `edge` holds
+#           appcast.xml, which the app polls:
+#             https://github.com/<repo>/releases/download/edge/appcast.xml
+#   stable  push of a tag v<version>. Release `v<version>` is marked latest and
+#           carries its own appcast.xml:
+#             https://github.com/<repo>/releases/latest/download/appcast.xml
+#
+# ── never a red build ───────────────────────────────────────────────────────
+# The edge trigger is `workflow_run` on the CI workflow; the jobs run only when
+# that run concluded `success` on a push to `main`.
+#
+# ── what is signed, by whom ─────────────────────────────────────────────────
+# Apple: Developer ID Application certificate, hardened runtime, notarytool
+# with an App Store Connect API key, stapled (scripts/bundle-mac.sh).
+# Us: an Ed25519 signature over the payload bytes in the appcast
+# (sparkle:edSignature), verified by the app against the public key compiled
+# in from crates/arbos-update/update-key.pub. The private key is read from the
+# 1Password vault "Arbos" with the OP_SERVICE_ACCOUNT_TOKEN secret, or from the
+# ARBOS_SPARKLE_PRIVATE_KEY secret when that is set instead.
+#
+# ── runners ─────────────────────────────────────────────────────────────────
+# The macOS job runs on the repository variable ARBOS_MAC_RUNNER when set
+# (`arbos-mac` = the self-hosted EC2 Mac installed by
+# scripts/runner/install-self-hosted-runner.sh), otherwise on GitHub's
+# macos-15 image. The Linux job builds the static relay/agentd/arbosctl
+# binaries and the sandbox image.
+#
+# ── secrets ─────────────────────────────────────────────────────────────────
+#   DEVELOPER_ID_CERT_P12, P12_PASSWORD            Developer ID Application (.p12, base64)
+#   NOTARY_KEY_P8, NOTARY_KEY_ID, NOTARY_ISSUER_ID App Store Connect API key for notarytool
+#   OP_SERVICE_ACCOUNT_TOKEN                       1Password: the updater signing key
+#   ARBOS_SPARKLE_PRIVATE_KEY                      (alternative to the above)
+#   GITHUB_TOKEN                                   releases + GHCR (automatic)
+# Missing Apple secrets degrade the build (ad-hoc signed, not notarized) and
+# say so; a missing updater key stops the publish, because an app would refuse
+# the payload anyway.
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "Channel to publish to"
+        type: choice
+        options: [edge, stable]
+        default: edge
+      publish:
+        description: "Create the GitHub release (off = build, sign, notarize, upload artifacts only)"
+        type: boolean
+        default: true
+      promote:
+        description: "Move the channel feed (edge appcast / latest) to this build. Off = a pre-release tag only, for dry runs"
+        type: boolean
+        default: true
+      runner:
+        description: "runs-on label for the Mac job; empty = vars.ARBOS_MAC_RUNNER or macos-15"
+        type: string
+        default: ""
+      targets:
+        description: "Rust targets for the Mac build (space-separated); empty = universal"
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: release-${{ github.event_name == 'push' && github.ref || 'main' }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  plan:
+    name: What to publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main')
+    outputs:
+      channel: ${{ steps.plan.outputs.channel }}
+      publish: ${{ steps.plan.outputs.publish }}
+      promote: ${{ steps.plan.outputs.promote }}
+      sha: ${{ steps.plan.outputs.sha }}
+      version: ${{ steps.plan.outputs.version }}
+      build: ${{ steps.plan.outputs.build }}
+      notes: ${{ steps.plan.outputs.notes }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
+      - id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          IN_CHANNEL: ${{ inputs.channel }}
+          IN_PUBLISH: ${{ inputs.publish }}
+          IN_PROMOTE: ${{ inputs.promote }}
+        run: |
+          set -euo pipefail
+          base="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          build="$(git rev-list --count HEAD)"
+          promote=true
+          case "$EVENT" in
+            push)
+              channel=stable
+              version="${REF_NAME#v}"
+              if [[ "$version" != "$base"* ]]; then
+                echo "::error title=Tag does not match Cargo.toml::tag $REF_NAME but Cargo.toml says $base. Bump the workspace version first."
+                exit 1
+              fi
+              publish=true
+              ;;
+            workflow_dispatch)
+              channel="${IN_CHANNEL:-edge}"
+              if [[ "$channel" == stable ]]; then version="$base"; else version="$base.$build"; fi
+              publish="${IN_PUBLISH:-true}"
+              promote="${IN_PROMOTE:-true}"
+              ;;
+            *)
+              channel=edge
+              version="$base.$build"
+              publish=true
+              ;;
+          esac
+          {
+            echo "channel=$channel"
+            echo "publish=$publish"
+            echo "promote=$promote"
+            echo "sha=$(git rev-parse HEAD)"
+            echo "version=$version"
+            echo "build=$build"
+            echo "notes<<ARBOS_EOF"
+            git log -1 --format=%s
+            echo "ARBOS_EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "Arbos $version ($channel), publish=$publish" >> "$GITHUB_STEP_SUMMARY"
+
+  macos:
+    name: Mac app (sign, notarize, dmg)
+    needs: plan
+    runs-on: ${{ inputs.runner || vars.ARBOS_MAC_RUNNER || 'macos-15' }}
+    timeout-minutes: 150
+    outputs:
+      signing: ${{ steps.build.outputs.signing }}
+      notarized: ${{ steps.build.outputs.notarized }}
+      stapled: ${{ steps.build.outputs.stapled }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+      - name: Rust toolchain
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          fi
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.cargo/bin:$PATH"
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-macos
+          cache-on-failure: true
+      # The certificate goes into a throwaway keychain in $RUNNER_TEMP and is
+      # removed by the last step whatever happens. No tracing in these steps.
+      - name: Import the Developer ID certificate
+        id: cert
+        env:
+          DEVELOPER_ID_CERT_P12: ${{ secrets.DEVELOPER_ID_CERT_P12 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          set +x
+          if [[ -z "$DEVELOPER_ID_CERT_P12" ]]; then
+            echo "::warning title=Not signed::DEVELOPER_ID_CERT_P12 is not set; the app is ad-hoc signed and not notarized."
+            exit 0
+          fi
+          umask 077
+          p12="$RUNNER_TEMP/developer-id.p12"
+          printf '%s' "$DEVELOPER_ID_CERT_P12" | base64 --decode > "$p12"
+          export TMPDIR="$RUNNER_TEMP"
+          eval "$(scripts/release/signing-keychain.sh import "$p12" "$P12_PASSWORD")"
+          rm -f "$p12"
+          {
+            echo "ARBOS_SIGN_IDENTITY=$ARBOS_SIGN_IDENTITY"
+            echo "ARBOS_SIGNING_KEYCHAIN=$ARBOS_SIGNING_KEYCHAIN"
+            echo "ARBOS_KEYCHAINS_WERE=$ARBOS_KEYCHAINS_WERE"
+          } >> "$GITHUB_ENV"
+          echo "identity: $ARBOS_SIGN_IDENTITY"
+      - name: Build, sign, notarize, staple
+        id: build
+        env:
+          ARBOS_BUILD: ${{ needs.plan.outputs.build }}
+          ARBOS_TARGETS: ${{ inputs.targets || vars.ARBOS_MAC_TARGETS }}
+          NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          set +x
+          if [[ -z "${ARBOS_TARGETS:-}" ]]; then unset ARBOS_TARGETS; fi
+          if [[ -n "${ARBOS_SIGN_IDENTITY:-}" && -n "$NOTARY_KEY_P8" && -n "$NOTARY_KEY_ID" && -n "$NOTARY_ISSUER_ID" ]]; then
+            umask 077
+            key="$RUNNER_TEMP/notary.p8"
+            if printf '%s' "$NOTARY_KEY_P8" | grep -q -- '-----BEGIN'; then
+              printf '%s\n' "$NOTARY_KEY_P8" > "$key"
+            else
+              printf '%s' "$NOTARY_KEY_P8" | base64 --decode > "$key"
+            fi
+            export NOTARY_KEY_PATH="$key"
+            echo "ARBOS_NOTARY_KEY=$key" >> "$GITHUB_ENV"
+          elif [[ -n "${ARBOS_SIGN_IDENTITY:-}" ]]; then
+            echo "::warning title=Not notarized::NOTARY_KEY_P8 / NOTARY_KEY_ID / NOTARY_ISSUER_ID are not all set."
+          fi
+          export ARBOS_DIST="$GITHUB_WORKSPACE/dist"
+          scripts/bundle-mac.sh
+          source dist/build-info.env
+          {
+            echo "signing=$ARBOS_SIGNING"
+            echo "notarized=$ARBOS_NOTARIZED"
+            echo "stapled=$ARBOS_STAPLED"
+          } >> "$GITHUB_OUTPUT"
+          # Notarization was possible and failed: nothing ships that Gatekeeper
+          # would reject. (bundle-mac.sh already exits non-zero on a rejection;
+          # this guards the "credentials present, step skipped" case.)
+          if [[ -n "${NOTARY_KEY_PATH:-}" && "$ARBOS_NOTARIZED" != "true" ]]; then
+            echo "::error title=Not notarized::notary credentials were present but the build was not notarized."
+            exit 1
+          fi
+          rm -rf dist/Arbos.app
+          echo "macOS: version $ARBOS_VERSION, signing $ARBOS_SIGNING, notarized $ARBOS_NOTARIZED, stapled $ARBOS_STAPLED" >> "$GITHUB_STEP_SUMMARY"
+      - name: Put the keychain back
+        if: always()
+        run: |
+          set +e
+          [[ -n "${ARBOS_NOTARY_KEY:-}" ]] && rm -f "$ARBOS_NOTARY_KEY"
+          scripts/release/signing-keychain.sh remove "${ARBOS_SIGNING_KEYCHAIN:-}" "${ARBOS_KEYCHAINS_WERE:-}"
+          { echo "ARBOS_SIGN_IDENTITY="; echo "ARBOS_SIGNING_KEYCHAIN="; echo "ARBOS_NOTARY_KEY="; } >> "$GITHUB_ENV"
+          exit 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: payload-macos
+          path: |
+            dist/*.dmg
+            dist/*.tar.gz
+            dist/build-info.env
+            dist/notarization-*.log
+          retention-days: 7
+          if-no-files-found: error
+
+  linux:
+    name: Relay, agentd, arbosctl, image
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}/arbos-agent
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-linux
+          cache-on-failure: true
+      - name: Static binaries
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q && sudo apt-get install -y -q musl-tools
+          export CC_x86_64_unknown_linux_musl=musl-gcc
+          cargo build --release --locked --target x86_64-unknown-linux-musl -p arbos-relay -p arbos-agentd -p arbosctl
+          mkdir -p dist
+          for bin in arbos-relay arbos-agentd arbosctl; do
+            tar -czf "dist/$bin-$VERSION-linux-x86_64.tar.gz" -C target/x86_64-unknown-linux-musl/release "$bin"
+          done
+          cp target/x86_64-unknown-linux-musl/release/arbos-agentd dist/arbos-agentd
+          ls -la dist
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        if: needs.plan.outputs.publish == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # The sandbox image, tagged with this version and the channel. The
+      # Daytona snapshot is still registered by image.yml on an image-v* tag
+      # (D43): boxes pin an image version per Project (D44), so a push to main
+      # must not move what running Projects use.
+      - uses: docker/build-push-action@v6
+        env:
+          # No *.dockerbuild artifact: publish downloads the payload-* ones only.
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
+        with:
+          context: .
+          file: image/Dockerfile
+          platforms: linux/amd64
+          push: ${{ needs.plan.outputs.publish == 'true' }}
+          # The channel tag (`edge`, `stable`) moves only when the build is promoted.
+          tags: |
+            ${{ env.IMAGE }}:${{ needs.plan.outputs.version }}
+            ${{ needs.plan.outputs.promote == 'true' && format('{0}:{1}', env.IMAGE, needs.plan.outputs.channel) || '' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - uses: actions/upload-artifact@v4
+        with:
+          name: payload-linux
+          path: dist/*.tar.gz
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    name: Appcast and release
+    needs: [plan, macos, linux]
+    if: needs.plan.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      HAVE_OP: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN != '' }}
+      HAVE_KEY_SECRET: ${{ secrets.ARBOS_SPARKLE_PRIVATE_KEY != '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-publish
+          cache-on-failure: true
+      # Built from the same commit as the app, so the public key it verifies
+      # against is the one the app carries.
+      - name: Build arbos-updatectl
+        run: cargo build --locked -p arbos-update --bin arbos-updatectl
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: payload-*
+          path: dist
+          merge-multiple: true
+      - name: Updater signing key from 1Password
+        if: env.HAVE_OP == 'true'
+        uses: 1password/load-secrets-action@v2
+        with:
+          export-env: true
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          ARBOS_SPARKLE_PRIVATE_KEY: op://Arbos/kaioxc67zr5cu25fuu3nw5qwdi/credential
+      - name: Updater signing key from the repository secret
+        if: env.HAVE_OP != 'true' && env.HAVE_KEY_SECRET == 'true'
+        run: echo "ARBOS_SPARKLE_PRIVATE_KEY=${{ secrets.ARBOS_SPARKLE_PRIVATE_KEY }}" >> "$GITHUB_ENV"
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARBOS_UPDATECTL: ${{ github.workspace }}/target/debug/arbos-updatectl
+          CHANNEL: ${{ needs.plan.outputs.channel }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          SHA: ${{ needs.plan.outputs.sha }}
+          PROMOTE: ${{ needs.plan.outputs.promote }}
+          NOTES: ${{ needs.plan.outputs.notes }}
+        run: |
+          set -euo pipefail
+          set +x
+          if [[ -z "${ARBOS_SPARKLE_PRIVATE_KEY:-}" ]]; then
+            echo "::error title=No updater signing key::Neither OP_SERVICE_ACCOUNT_TOKEN (1Password item kaioxc67zr5cu25fuu3nw5qwdi) nor ARBOS_SPARKLE_PRIVATE_KEY is set; the app would refuse an unsigned payload, so nothing was published."
+            exit 1
+          fi
+          printf '%s\n' "$NOTES" > dist/notes.md
+          ls -la dist
+          extra=()
+          if [[ "$PROMOTE" != "true" ]]; then extra+=(--no-promote); fi
+          scripts/release/publish-release.sh --channel "$CHANNEL" --version "$VERSION" --sha "$SHA" \
+            --dist dist --repo "$GITHUB_REPOSITORY" --notes-file dist/notes.md "${extra[@]}"
+          {
+            echo "### Release"
+            echo
+            echo "Published **$VERSION** ($CHANNEL) from \`${SHA:0:7}\`."
+            echo
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| macOS signature | \`${{ needs.macos.outputs.signing }}\` |"
+            echo "| Notarized | \`${{ needs.macos.outputs.notarized }}\` |"
+            echo "| Stapled | \`${{ needs.macos.outputs.stapled }}\` |"
+            if [[ "$CHANNEL" == edge ]]; then
+              echo "| Feed | <https://github.com/$GITHUB_REPOSITORY/releases/download/edge/appcast.xml> |"
+            else
+              echo "| Feed | <https://github.com/$GITHUB_REPOSITORY/releases/latest/download/appcast.xml> |"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

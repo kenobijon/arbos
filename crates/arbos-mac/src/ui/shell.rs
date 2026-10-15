@@ -374,6 +374,7 @@ impl Shell {
                     },
                 )),
             )
+            .children(self.render_update_button(collapsed, cx))
             .child(
                 bottom_button("rail-settings", "⚙", 17.0, &theme).on_click(cx.listener(
                     |this, _, _, cx| {
@@ -395,6 +396,67 @@ impl Shell {
             .border_color(theme.border)
             .child(edge_faded(18.0, true, true, tiles))
             .child(bottom)
+    }
+
+    /// The Update button (D42): absent while up to date; appears the moment
+    /// the feed has a newer build; one click downloads, verifies, swaps the
+    /// bundle, and relaunches. It sits just above the settings gear.
+    fn render_update_button(
+        &self,
+        collapsed: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Stateful<Div>> {
+        let theme = Theme::of(cx).clone();
+        let update = self.state.read(cx).update.clone();
+        if !update.button_visible() {
+            return None;
+        }
+        let busy = update.busy();
+        let failed = matches!(update.phase, crate::update::UpdatePhase::Failed { .. });
+        if busy {
+            PulseClock::request(cx);
+        }
+        let phase = if busy {
+            PulseClock::phase(cx, 1400)
+        } else {
+            1.0
+        };
+        let bg = if failed {
+            theme.danger_soft
+        } else {
+            Theme::with_alpha(theme.accent, 0.55 + 0.45 * phase)
+        };
+        let fg = if failed { theme.text } else { theme.bg };
+        let label = update.button_label();
+        let mut button = div()
+            .id("rail-update")
+            .w(px(if collapsed { 36.0 } else { RAIL_TILE }))
+            .h(px(32.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap(px(5.0))
+            .rounded(px(PANEL_RADIUS))
+            .bg(bg)
+            .text_color(fg)
+            .text_size(px(12.0))
+            .font_weight(FontWeight::SEMIBOLD)
+            .when(!busy, |el| {
+                el.cursor_pointer()
+                    .hover(|s| s.bg(Theme::with_alpha(theme.accent, 0.85)))
+            })
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.state.update(cx, |s, cx| s.install_update(cx));
+            }));
+        button = button.child(
+            div()
+                .text_size(px(14.0))
+                .child(if failed { "!" } else { "↑" }),
+        );
+        if !collapsed {
+            button = button.child(div().child(label));
+        }
+        Some(button)
     }
 
     // ----- tab bar -----------------------------------------------------------
@@ -1402,6 +1464,22 @@ impl Shell {
         let show_details = state.show_details;
         let notify_on = state.notifier.enabled;
         let skill_count = state.skills.len();
+        let update = state.update.clone();
+        let update_action: Option<(&'static str, &'static str, bool)> = match &update.phase {
+            crate::update::UpdatePhase::Available(_)
+            | crate::update::UpdatePhase::Failed {
+                available: Some(_), ..
+            } => Some(("update-install", "Install and relaunch", true)),
+            crate::update::UpdatePhase::Idle
+            | crate::update::UpdatePhase::UpToDate
+            | crate::update::UpdatePhase::Failed {
+                available: None, ..
+            } => Some(("update-check", "Check now", false)),
+            crate::update::UpdatePhase::Checking
+            | crate::update::UpdatePhase::Downloading { .. }
+            | crate::update::UpdatePhase::Installing(_)
+            | crate::update::UpdatePhase::Restarting(_) => None,
+        };
         let glass_ok = Theme::glass_available();
 
         let option = |id: &'static str,
@@ -1431,259 +1509,313 @@ impl Shell {
                 .child(label)
         };
 
-        let card =
-            div()
-                .id("settings-popover")
-                .w(px(272.0))
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .p(px(10.0))
-                .rounded(px(PANEL_RADIUS))
-                .bg(theme.card())
-                .border_1()
-                .border_color(theme.border_strong)
-                .shadow_lg()
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(theme.text_faint)
-                        .child("APPEARANCE · SURFACE"),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(4.0))
-                        .child(
-                            option(
-                                "surface-matte",
-                                "Matte",
-                                theme.surface == Surface::Matte,
-                                true,
-                                &theme,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let a = Theme::of(cx).appearance;
-                                this.set_theme(a, Surface::Matte, cx);
-                            })),
+        let card = div()
+            .id("settings-popover")
+            .w(px(272.0))
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .p(px(10.0))
+            .rounded(px(PANEL_RADIUS))
+            .bg(theme.card())
+            .border_1()
+            .border_color(theme.border_strong)
+            .shadow_lg()
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(theme.text_faint)
+                    .child("APPEARANCE · SURFACE"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap(px(4.0))
+                    .child(
+                        option(
+                            "surface-matte",
+                            "Matte",
+                            theme.surface == Surface::Matte,
+                            true,
+                            &theme,
                         )
-                        .child(
-                            option(
-                                "surface-glass",
-                                "Glass",
-                                theme.surface == Surface::Glass,
-                                true,
-                                &theme,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let a = Theme::of(cx).appearance;
-                                this.set_theme(a, Surface::Glass, cx);
-                            })),
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let a = Theme::of(cx).appearance;
+                            this.set_theme(a, Surface::Matte, cx);
+                        })),
+                    )
+                    .child(
+                        option(
+                            "surface-glass",
+                            "Glass",
+                            theme.surface == Surface::Glass,
+                            true,
+                            &theme,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let a = Theme::of(cx).appearance;
+                            this.set_theme(a, Surface::Glass, cx);
+                        })),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(theme.text_faint)
+                    .child(if glass_ok {
+                        "Glass: window vibrancy + frosted panels (0.80 shell alpha)."
+                    } else {
+                        "Glass here: frosted panels only; window vibrancy needs macOS."
+                    }),
+            )
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(theme.text_faint)
+                    .child("APPEARANCE · MODE"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap(px(4.0))
+                    .child(
+                        option(
+                            "mode-dark",
+                            "Dark",
+                            theme.appearance == Appearance::Dark,
+                            true,
+                            &theme,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let s = Theme::of(cx).surface;
+                            this.set_theme(Appearance::Dark, s, cx);
+                        })),
+                    )
+                    .child(
+                        option(
+                            "mode-light",
+                            "Light",
+                            theme.appearance == Appearance::Light,
+                            true,
+                            &theme,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let s = Theme::of(cx).surface;
+                            this.set_theme(Appearance::Light, s, cx);
+                        })),
+                    ),
+            )
+            .child(div().h(px(1.0)).bg(theme.border))
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(theme.text_faint)
+                    .child("DEBUG"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap(px(4.0))
+                    .child(
+                        option("details-off", "Details off", !show_details, true, &theme).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                if this.state.read(cx).show_details {
+                                    this.state.update(cx, |s, cx| s.toggle_show_details(cx));
+                                }
+                            }),
                         ),
-                )
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(theme.text_faint)
-                        .child(if glass_ok {
-                            "Glass: window vibrancy + frosted panels (0.80 shell alpha)."
-                        } else {
-                            "Glass here: frosted panels only; window vibrancy needs macOS."
+                    )
+                    .child(
+                        option("details-on", "Show details", show_details, true, &theme).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                if !this.state.read(cx).show_details {
+                                    this.state.update(cx, |s, cx| s.toggle_show_details(cx));
+                                }
+                            }),
+                        ),
+                    ),
+            )
+            .child(div().h(px(1.0)).bg(theme.border))
+            .child(
+                div()
+                    .id("settings-connectors")
+                    .flex()
+                    .items_center()
+                    .px(px(10.0))
+                    .py(px(6.0))
+                    .rounded(px(6.0))
+                    .text_size(px(12.5))
+                    .text_color(theme.text)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.surface_2))
+                    .child(div().flex_1().child("Connectors"))
+                    .child(div().text_color(theme.text_faint).child("›"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.settings_open = false;
+                        this.connectors.update(cx, |p, cx| p.show(cx));
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div()
+                    .id("settings-routines")
+                    .flex()
+                    .items_center()
+                    .px(px(10.0))
+                    .py(px(6.0))
+                    .rounded(px(6.0))
+                    .text_size(px(12.5))
+                    .text_color(theme.text)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.surface_2))
+                    .child(div().flex_1().child("Routines"))
+                    .child(div().text_color(theme.text_faint).child("›"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.settings_open = false;
+                        this.routines_open = true;
+                        this.routines.update(cx, |p, cx| p.open(cx));
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div()
+                    .id("settings-channels")
+                    .flex()
+                    .items_center()
+                    .px(px(10.0))
+                    .py(px(6.0))
+                    .rounded(px(6.0))
+                    .text_size(px(12.5))
+                    .text_color(theme.text)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.surface_2))
+                    .child(div().flex_1().child("Channels"))
+                    .child(div().text_color(theme.text_faint).child("›"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.settings_open = false;
+                        this.channels.update(cx, |p, cx| p.show(cx));
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div()
+                    .id("settings-skills")
+                    .flex()
+                    .items_center()
+                    .px(px(10.0))
+                    .py(px(6.0))
+                    .rounded(px(6.0))
+                    .text_size(px(12.5))
+                    .text_color(theme.text)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.surface_2))
+                    .child(div().flex_1().child("Skills"))
+                    .child(
+                        div()
+                            .text_color(theme.text_faint)
+                            .child(format!("{skill_count} in library ›")),
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.settings_open = false;
+                        this.skills.update(cx, |p, cx| p.open(window, cx));
+                        cx.notify();
+                    })),
+            )
+            .child(div().h(px(1.0)).bg(theme.border))
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(theme.text_faint)
+                    .child("NOTIFICATIONS"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap(px(4.0))
+                    .child(option("notify-on", "On", notify_on, true, &theme).on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.state
+                                .update(cx, |s, cx| s.set_notifications_enabled(true, cx));
                         }),
-                )
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(theme.text_faint)
-                        .child("APPEARANCE · MODE"),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(4.0))
-                        .child(
-                            option(
-                                "mode-dark",
-                                "Dark",
-                                theme.appearance == Appearance::Dark,
-                                true,
-                                &theme,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let s = Theme::of(cx).surface;
-                                this.set_theme(Appearance::Dark, s, cx);
-                            })),
-                        )
-                        .child(
-                            option(
-                                "mode-light",
-                                "Light",
-                                theme.appearance == Appearance::Light,
-                                true,
-                                &theme,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let s = Theme::of(cx).surface;
-                                this.set_theme(Appearance::Light, s, cx);
-                            })),
-                        ),
-                )
-                .child(div().h(px(1.0)).bg(theme.border))
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(theme.text_faint)
-                        .child("DEBUG"),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(4.0))
-                        .child(
-                            option("details-off", "Details off", !show_details, true, &theme)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    if this.state.read(cx).show_details {
-                                        this.state.update(cx, |s, cx| s.toggle_show_details(cx));
-                                    }
-                                })),
-                        )
-                        .child(
-                            option("details-on", "Show details", show_details, true, &theme)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    if !this.state.read(cx).show_details {
-                                        this.state.update(cx, |s, cx| s.toggle_show_details(cx));
-                                    }
-                                })),
-                        ),
-                )
-                .child(div().h(px(1.0)).bg(theme.border))
-                .child(
-                    div()
-                        .id("settings-connectors")
-                        .flex()
-                        .items_center()
-                        .px(px(10.0))
-                        .py(px(6.0))
-                        .rounded(px(6.0))
-                        .text_size(px(12.5))
-                        .text_color(theme.text)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme.surface_2))
-                        .child(div().flex_1().child("Connectors"))
-                        .child(div().text_color(theme.text_faint).child("›"))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.settings_open = false;
-                            this.connectors.update(cx, |p, cx| p.show(cx));
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    div()
-                        .id("settings-routines")
-                        .flex()
-                        .items_center()
-                        .px(px(10.0))
-                        .py(px(6.0))
-                        .rounded(px(6.0))
-                        .text_size(px(12.5))
-                        .text_color(theme.text)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme.surface_2))
-                        .child(div().flex_1().child("Routines"))
-                        .child(div().text_color(theme.text_faint).child("›"))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.settings_open = false;
-                            this.routines_open = true;
-                            this.routines.update(cx, |p, cx| p.open(cx));
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    div()
-                        .id("settings-channels")
-                        .flex()
-                        .items_center()
-                        .px(px(10.0))
-                        .py(px(6.0))
-                        .rounded(px(6.0))
-                        .text_size(px(12.5))
-                        .text_color(theme.text)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme.surface_2))
-                        .child(div().flex_1().child("Channels"))
-                        .child(div().text_color(theme.text_faint).child("›"))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.settings_open = false;
-                            this.channels.update(cx, |p, cx| p.show(cx));
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    div()
-                        .id("settings-skills")
-                        .flex()
-                        .items_center()
-                        .px(px(10.0))
-                        .py(px(6.0))
-                        .rounded(px(6.0))
-                        .text_size(px(12.5))
-                        .text_color(theme.text)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme.surface_2))
-                        .child(div().flex_1().child("Skills"))
-                        .child(
-                            div()
-                                .text_color(theme.text_faint)
-                                .child(format!("{skill_count} in library ›")),
-                        )
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.settings_open = false;
-                            this.skills.update(cx, |p, cx| p.open(window, cx));
-                            cx.notify();
-                        })),
-                )
-                .child(div().h(px(1.0)).bg(theme.border))
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(theme.text_faint)
-                        .child("NOTIFICATIONS"),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(4.0))
-                        .child(option("notify-on", "On", notify_on, true, &theme).on_click(
+                    ))
+                    .child(
+                        option("notify-off", "Off", !notify_on, true, &theme).on_click(
                             cx.listener(|this, _, _, cx| {
                                 this.state
-                                    .update(cx, |s, cx| s.set_notifications_enabled(true, cx));
+                                    .update(cx, |s, cx| s.set_notifications_enabled(false, cx));
                             }),
-                        ))
-                        .child(
-                            option("notify-off", "Off", !notify_on, true, &theme).on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    this.state
-                                        .update(cx, |s, cx| s.set_notifications_enabled(false, cx));
-                                }),
-                            ),
                         ),
-                )
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(theme.text_faint)
-                        .child("One per project per minute, only while you are not looking."),
-                )
-                .child(div().h(px(1.0)).bg(theme.border))
-                .child(
-                    div()
-                        .text_size(px(11.5))
-                        .text_color(theme.text_muted)
-                        .child(format!(
-                            "Source: {source} · link: {link:?}{}",
-                            device.map(|d| format!(" · device {d}")).unwrap_or_default()
-                        )),
-                );
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(theme.text_faint)
+                    .child("One per project per minute, only while you are not looking."),
+            )
+            .child(div().h(px(1.0)).bg(theme.border))
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(theme.text_faint)
+                    .child("UPDATES"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(11.5))
+                            .text_color(
+                                if matches!(update.phase, crate::update::UpdatePhase::Failed { .. })
+                                {
+                                    theme.danger
+                                } else {
+                                    theme.text_muted
+                                },
+                            )
+                            .child(update.status_line()),
+                    )
+                    .when_some(update_action, |el, (id, label, installs)| {
+                        el.child(
+                            div()
+                                .id(id)
+                                .flex_shrink_0()
+                                .px(px(8.0))
+                                .py(px(3.0))
+                                .rounded(px(6.0))
+                                .text_size(px(11.5))
+                                .text_color(theme.accent)
+                                .cursor_pointer()
+                                .hover(|s| s.bg(theme.surface_2))
+                                .child(label)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.state.update(cx, |s, cx| {
+                                        if installs {
+                                            s.install_update(cx);
+                                        } else {
+                                            s.check_for_updates(cx);
+                                        }
+                                    });
+                                })),
+                        )
+                    }),
+            )
+            .child(div().h(px(1.0)).bg(theme.border))
+            .child(
+                div()
+                    .text_size(px(11.5))
+                    .text_color(theme.text_muted)
+                    .child(format!(
+                        "Source: {source} · link: {link:?}{}",
+                        device.map(|d| format!(" · device {d}")).unwrap_or_default()
+                    )),
+            );
         div()
             .absolute()
             .left(px(RAIL_WIDTH + 8.0))

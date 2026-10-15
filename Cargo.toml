@@ -6,6 +6,7 @@ members = [
     "crates/arbos-agentd",
     "crates/arbosctl",
     "crates/arbos-mac",
+    "crates/arbos-update",
 ]
 
 [workspace.package]
@@ -17,6 +18,7 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 arbos-core = { path = "crates/arbos-core" }
+arbos-update = { path = "crates/arbos-update" }
 
 anyhow = "1"
 thiserror = "2"
@@ -47,6 +49,9 @@ base64 = "0.22"
 regex-lite = "0.1"
 async-trait = "0.1"
 nix = { version = "0.29", features = ["signal", "process"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+roxmltree = "0.20"
+dirs = "6"
 
 [profile.release]
 lto = "thin"

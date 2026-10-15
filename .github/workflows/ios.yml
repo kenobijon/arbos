@@ -1,0 +1,111 @@
+name: iOS
+
+# The phone app (apps/ios/Arbos) to TestFlight. Pushes to `main` and
+# `arbos-v2` that touch it upload; pushes to `cursor/**` only archive (a
+# TestFlight build per feature-branch push would be noise); workflow_dispatch
+# chooses. The work is the fastlane lanes in apps/ios/Arbos/fastlane
+# (`archive`, `beta`): archive with signing off, then exportArchive with
+# App Store Connect automatic signing and the API key.
+#
+# Secrets: AC_API_KEY_P8, AC_API_KEY_ID, AC_API_ISSUER_ID (the App Store
+# Connect key named "Arbos IOS", id ZV82D3ZWRT — the "arbos ci" key cannot
+# cloud-sign), ARBOS_APPLE_TEAM_ID (25SCF3Q2AK). An upload failure fails the
+# job: a silent TestFlight miss is worse than a red check.
+#
+# Build number: UTC YYYYMMDDHHMM. It always rises, and it is above the builds
+# already on TestFlight (202610150502 at the time of writing).
+
+on:
+  push:
+    branches: [main, arbos-v2, "cursor/**"]
+    paths:
+      - "apps/ios/**"
+      - ".github/workflows/ios.yml"
+  workflow_dispatch:
+    inputs:
+      upload:
+        description: "Upload to TestFlight (off = archive only)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  phone:
+    name: Build and upload the phone app
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      APP_DIR: apps/ios/Arbos
+      UPLOAD: >-
+        ${{ (github.event_name == 'workflow_dispatch' && inputs.upload) ||
+            (github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'arbos-v2')) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build number
+        id: build
+        run: echo "number=$(date -u +%Y%m%d%H%M)" >> "$GITHUB_OUTPUT"
+      - name: Select Xcode
+        run: |
+          set -euo pipefail
+          newest="$(find /Applications -maxdepth 1 -name 'Xcode_*.app' | sort -V | tail -1)"
+          if [[ -n "$newest" ]]; then sudo xcode-select -s "$newest"; fi
+          xcodebuild -version
+      - name: Archive, and upload to TestFlight when this ref ships
+        env:
+          AC_API_KEY_P8: ${{ secrets.AC_API_KEY_P8 }}
+          AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
+          AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
+          ARBOS_APPLE_TEAM_ID: ${{ secrets.ARBOS_APPLE_TEAM_ID }}
+          BUILD_NUMBER: ${{ steps.build.outputs.number }}
+        run: |
+          set -euo pipefail
+          set +x
+          if [[ ! -d "$APP_DIR/Arbos.xcodeproj" ]]; then
+            if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+              echo "::error title=No iOS project::$APP_DIR/Arbos.xcodeproj is not in this tree."
+              exit 1
+            fi
+            echo "::notice title=No iOS project on this branch::$APP_DIR is not here yet; nothing to build."
+            exit 0
+          fi
+          if [[ ! -f "$APP_DIR/fastlane/Fastfile" ]]; then
+            echo "::error title=No Fastfile::$APP_DIR/fastlane/Fastfile is missing; the lanes archive and beta are what this job runs."
+            exit 1
+          fi
+          cd "$APP_DIR"
+          if [[ "$UPLOAD" != "true" ]]; then
+            echo "==> fastlane archive (build $BUILD_NUMBER, no upload on $GITHUB_REF_NAME)"
+            fastlane archive
+            echo "Archived build $BUILD_NUMBER; not uploaded (ref $GITHUB_REF_NAME)." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          missing=0
+          for name in AC_API_KEY_P8 AC_API_KEY_ID AC_API_ISSUER_ID ARBOS_APPLE_TEAM_ID; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error title=Apple secret missing::$name is not set."
+              missing=1
+            fi
+          done
+          [[ "$missing" -eq 0 ]] || exit 1
+          if [[ "$AC_API_KEY_ID" != "ZV82D3ZWRT" ]]; then
+            echo "::warning title=Unexpected App Store Connect key::AC_API_KEY_ID is $AC_API_KEY_ID; the key that can cloud-sign the phone app is \"Arbos IOS\" (ZV82D3ZWRT)."
+          fi
+          # The lane accepts the key as text (AC_API_KEY_P8) or a file; hand it
+          # a 0600 file in $RUNNER_TEMP so the text never reaches a command line.
+          umask 077
+          key_path="$RUNNER_TEMP/AuthKey_$AC_API_KEY_ID.p8"
+          if printf '%s' "$AC_API_KEY_P8" | grep -q -- '-----BEGIN'; then
+            printf '%s\n' "$AC_API_KEY_P8" > "$key_path"
+          else
+            printf '%s' "$AC_API_KEY_P8" | base64 --decode > "$key_path"
+          fi
+          trap 'rm -f "$key_path"' EXIT
+          echo "==> fastlane beta (build $BUILD_NUMBER)"
+          AC_API_KEY_P8="" AC_API_KEY_PATH="$key_path" fastlane beta
+          echo "TestFlight upload finished: build $BUILD_NUMBER (com.unarbos.arbos.ios)." >> "$GITHUB_STEP_SUMMARY"

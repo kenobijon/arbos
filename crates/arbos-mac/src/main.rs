@@ -4,6 +4,7 @@ mod app;
 mod model;
 mod sync;
 mod ui;
+mod update;
 
 use gpui::{
     point, px, size, App, AppContext as _, Bounds, KeyBinding, TitlebarOptions, WindowBounds,
