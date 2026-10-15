@@ -20,8 +20,9 @@ use crate::model::{ProjectDocView, ThreadInfo};
 use super::doc::ChatDoc;
 use super::{ClientCommand, SyncEvent, SyncSource};
 use crate::model::{
-    new_id, now_ms, Attachment, BoxState, Chat, Effort, Id, Link, Message, MessageStatus, Part,
-    Project, Role, StatusKind, ToolCall, ToolStatus, TurnKind,
+    new_id, now_ms, Attachment, BoxState, Chat, Connector, ConnectorAction, ConnectorProvider,
+    ConnectorStatus, ConnectorsView, Effort, Id, Link, Message, MessageStatus, Part, Project, Role,
+    StatusKind, ToolCall, ToolStatus, TurnKind,
 };
 
 pub const STREAM_FRAME_MS: u64 = arbos_core::STREAM_COMMIT_MS;
@@ -60,6 +61,7 @@ struct Shared {
     events: mpsc::UnboundedSender<SyncEvent>,
     doc_tx: mpsc::UnboundedSender<DocChanged>,
     subscriptions: Mutex<Vec<loro::Subscription>>,
+    connectors: Mutex<ConnectorsView>,
 }
 
 pub struct FixtureSource;
@@ -91,6 +93,7 @@ impl SyncSource for FixtureSource {
                 events: events.clone(),
                 doc_tx,
                 subscriptions: Mutex::new(Vec::new()),
+                connectors: Mutex::new(seed_connectors()),
             });
             seed_docs(&shared);
 
@@ -107,6 +110,7 @@ impl SyncSource for FixtureSource {
                 }
             }
             emit_project_docs(&shared);
+            emit_connectors(&shared);
             let _ = events.send(SyncEvent::Link(Link::Live));
 
             loop {
@@ -422,6 +426,163 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             ));
         }
         ClientCommand::WatchBrowser { on: false, .. } => {}
+        ClientCommand::RefreshConnectors => emit_connectors(shared),
+        ClientCommand::ConnectorConnect { provider, token } => {
+            // Mock relay: the "OAuth dance" completes by itself after a moment.
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                sleep(Duration::from_millis(700)).await;
+                let label = {
+                    let mut view = shared.connectors.lock().unwrap();
+                    let label = view
+                        .providers
+                        .iter()
+                        .find(|p| p.provider == provider)
+                        .map(|p| p.label.clone())
+                        .unwrap_or_else(|| provider.clone());
+                    let label = format!(
+                        "{label} · {}",
+                        if token.is_some() { "token" } else { "mock" }
+                    );
+                    view.items.retain(|c| c.provider != provider);
+                    view.items.push(Connector {
+                        id: new_id(),
+                        provider: provider.clone(),
+                        label: label.clone(),
+                        scopes: Vec::new(),
+                        status: ConnectorStatus::Connected,
+                        last_error: None,
+                        mock: true,
+                    });
+                    label
+                };
+                emit_connectors(&shared);
+                let _ = shared
+                    .events
+                    .send(SyncEvent::Notice(format!("{label} connected (fixture).")));
+            });
+        }
+        ClientCommand::ConnectorDisconnect { id } => {
+            shared
+                .connectors
+                .lock()
+                .unwrap()
+                .items
+                .retain(|c| c.id != id);
+            emit_connectors(shared);
+        }
+    }
+}
+
+fn emit_connectors(shared: &Shared) {
+    let view = shared.connectors.lock().unwrap().clone();
+    let _ = shared.events.send(SyncEvent::Connectors(view));
+}
+
+/// Settings → Connectors demo: GitHub and Harness Comms connected, Google waiting for sign-in,
+/// Slack not connected; everything flagged mock.
+fn seed_connectors() -> ConnectorsView {
+    let act = |name: &str, kind: &str| ConnectorAction {
+        name: name.into(),
+        kind: kind.into(),
+    };
+    let providers = vec![
+        ConnectorProvider {
+            provider: "google".into(),
+            label: "Google (Gmail, Calendar)".into(),
+            connect: "oauth".into(),
+            oauth_configured: false,
+            actions: vec![
+                act("list_threads", "read"),
+                act("search", "read"),
+                act("read_message", "read"),
+                act("create_draft", "write"),
+                act("send", "send"),
+                act("list_events", "read"),
+                act("create_event", "send"),
+            ],
+        },
+        ConnectorProvider {
+            provider: "slack".into(),
+            label: "Slack".into(),
+            connect: "oauth_or_token".into(),
+            oauth_configured: false,
+            actions: vec![
+                act("list_channels", "read"),
+                act("read_channel", "read"),
+                act("search", "read"),
+                act("post_message", "send"),
+            ],
+        },
+        ConnectorProvider {
+            provider: "github".into(),
+            label: "GitHub".into(),
+            connect: "oauth_or_token".into(),
+            oauth_configured: false,
+            actions: vec![
+                act("list_repos", "read"),
+                act("list_issues", "read"),
+                act("read_issue", "read"),
+                act("list_prs", "read"),
+                act("create_issue", "write"),
+                act("comment", "send"),
+            ],
+        },
+        ConnectorProvider {
+            provider: "harness_comms".into(),
+            label: "Harness Comms (Beeper + Gmail)".into(),
+            connect: "token".into(),
+            oauth_configured: true,
+            actions: vec![
+                act("status", "read"),
+                act("search", "read"),
+                act("read", "read"),
+                act("search_conversations", "read"),
+                act("read_chat", "read"),
+                act("draft", "write"),
+                act("send", "send"),
+            ],
+        },
+    ];
+    let items = vec![
+        Connector {
+            id: "01J9CONNGITHUB00000000000".into(),
+            provider: "github".into(),
+            label: "GitHub · unarbos".into(),
+            scopes: vec!["repo".into(), "read:user".into()],
+            status: ConnectorStatus::Connected,
+            last_error: None,
+            mock: true,
+        },
+        Connector {
+            id: "01J9CONNGOOGLE00000000000".into(),
+            provider: "google".into(),
+            label: "Google (Gmail, Calendar)".into(),
+            scopes: Vec::new(),
+            status: ConnectorStatus::NeedsAuth,
+            last_error: Some("consent not finished".into()),
+            mock: true,
+        },
+        Connector {
+            id: "01J9CONNHARNESS0000000000".into(),
+            provider: "harness_comms".into(),
+            label: "Harness Comms · arbos-comms".into(),
+            scopes: vec![
+                "read".into(),
+                "search".into(),
+                "draft".into(),
+                "request_send".into(),
+            ],
+            status: ConnectorStatus::Connected,
+            last_error: None,
+            mock: true,
+        },
+    ];
+    ConnectorsView {
+        mock: true,
+        providers,
+        items,
+        loaded: true,
     }
 }
 

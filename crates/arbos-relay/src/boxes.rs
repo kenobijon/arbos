@@ -44,7 +44,7 @@ impl Provider {
 }
 
 /// Environment every box gets. No provider key is in it (D2).
-fn box_env(
+pub(crate) fn box_env(
     state: &AppState,
     project: &Project,
     box_token: &str,

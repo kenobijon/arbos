@@ -30,6 +30,8 @@ pub struct Config {
     pub agentd_bin: PathBuf,
     pub local_box_image: String,
     pub box_idle_grace_ms: i64,
+    /// `ARBOS_CONNECTORS_MOCK=1`: connectors answer with canned data (F1).
+    pub connectors_mock: bool,
 }
 
 /// One frame to fan out to the other sockets in a room.
@@ -61,6 +63,8 @@ pub struct AppState {
     /// project_id → ms of the last client row; rows pushed while a box was dying must re-wake it.
     pub last_client_push: Arc<Mutex<HashMap<String, i64>>>,
     pub conn_seq: Arc<std::sync::atomic::AtomicU64>,
+    /// Encrypts connector tokens at rest (F1).
+    pub relay_key: Arc<crate::connectors::crypto::RelayKey>,
 }
 
 impl AppState {

@@ -1,5 +1,6 @@
 mod agent;
 mod config;
+mod connectors;
 mod harness;
 mod hooks;
 mod http;

@@ -13,6 +13,7 @@ use gpui::{
 use crate::app::{AppState, DetailsTarget};
 use crate::model::{now_ms, BoxState, Chat, Link, Project};
 use crate::ui::composer::{Composer, ComposerEvent, ComposerInput};
+use crate::ui::connectors::{ConnectorsEvent, ConnectorsPanel};
 use crate::ui::frost::{edge_faded, frosted, rounded_clip, MENU_BLUR, PANEL_BLUR};
 use crate::ui::motion::{ease_out_cubic, PulseClock, COMPOSER_DROP_MS, SHAKE_MS};
 use crate::ui::theme::{
@@ -30,6 +31,7 @@ pub struct Shell {
     composer: Entity<Composer>,
     pairing_input: Entity<ComposerInput>,
     project_input: Entity<ComposerInput>,
+    connectors: Entity<ConnectorsPanel>,
     focus_handle: FocusHandle,
     settings_open: bool,
     shake_started_at: Option<u64>,
@@ -79,6 +81,18 @@ impl Shell {
         }
         cx.observe(&pairing_input, |_, _, cx| cx.notify()).detach();
         cx.observe(&project_input, |_, _, cx| cx.notify()).detach();
+        let connectors = cx.new(|cx| ConnectorsPanel::new(state.clone(), cx));
+        cx.observe(&connectors, |_, _, cx| cx.notify()).detach();
+        cx.subscribe(
+            &connectors,
+            |this, _, event: &ConnectorsEvent, cx| match event {
+                ConnectorsEvent::Back => {
+                    this.settings_open = true;
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
 
         Self {
             state,
@@ -86,6 +100,7 @@ impl Shell {
             composer,
             pairing_input,
             project_input,
+            connectors,
             focus_handle: cx.focus_handle(),
             settings_open: false,
             shake_started_at: None,
@@ -1445,6 +1460,27 @@ impl Shell {
                 .child(div().h(px(1.0)).bg(theme.border))
                 .child(
                     div()
+                        .id("settings-connectors")
+                        .flex()
+                        .items_center()
+                        .px(px(10.0))
+                        .py(px(6.0))
+                        .rounded(px(6.0))
+                        .text_size(px(12.5))
+                        .text_color(theme.text)
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.surface_2))
+                        .child(div().flex_1().child("Connectors"))
+                        .child(div().text_color(theme.text_faint).child("›"))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.settings_open = false;
+                            this.connectors.update(cx, |p, cx| p.show(cx));
+                            cx.notify();
+                        })),
+                )
+                .child(div().h(px(1.0)).bg(theme.border))
+                .child(
+                    div()
                         .text_size(px(11.5))
                         .text_color(theme.text_muted)
                         .child(format!(
@@ -1699,7 +1735,10 @@ impl Render for Shell {
                     let pairing = this.pairing_input.read(cx).focus_handle(cx);
                     let project = this.project_input.read(cx).focus_handle(cx);
                     let shown = this.state.read(cx).new_project_open;
-                    if pairing.is_focused(window) || (shown && project.is_focused(window)) {
+                    if pairing.is_focused(window)
+                        || (shown && project.is_focused(window))
+                        || this.connectors.read(cx).input_focused(window, cx)
+                    {
                         return;
                     }
                     if this.state.read(cx).pairing.is_none() {
@@ -1734,6 +1773,9 @@ impl Render for Shell {
         }
         if self.settings_open {
             root = root.child(self.render_settings(cx));
+        }
+        if self.connectors.read(cx).is_open() {
+            root = root.child(self.connectors.clone());
         }
         if new_project_open {
             root = root.child(self.render_new_project(cx));
