@@ -2,6 +2,7 @@ import SwiftUI
 
 @main
 struct ArbosApp: App {
+    @UIApplicationDelegateAdaptor(PushAppDelegate.self) private var pushDelegate
     @StateObject private var model = AppModel()
     @Environment(\.colorScheme) private var systemScheme
 
@@ -15,7 +16,10 @@ struct ArbosApp: App {
 
 struct RootView: View {
     @EnvironmentObject private var model: AppModel
+    @ObservedObject private var push = PushManager.shared
     @Environment(\.colorScheme) private var systemScheme
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var showPrimer = false
 
     private var theme: Theme {
         Theme.resolve(appearance: model.appearance, surface: model.surface, systemDark: systemScheme == .dark)
@@ -34,6 +38,22 @@ struct RootView: View {
         .tint(theme.text)
         .alert(item: $model.notice) { n in
             Alert(title: Text("Arbos"), message: Text(n.text), dismissButton: .default(Text("OK")))
+        }
+        .sheet(isPresented: $showPrimer) {
+            NotificationsPrimerView().environment(\.theme, theme)
+        }
+        .onChange(of: model.isPaired, initial: true) { _, paired in schedulePrimer(paired) }
+        .onChange(of: push.status) { _, _ in schedulePrimer(model.isPaired) }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { Task { await push.refreshStatus(); await model.refreshUnread() } }
+        }
+    }
+
+    /// Ask once, a beat after the home screen appears (never in the fixture or a live demo).
+    private func schedulePrimer(_ paired: Bool) {
+        guard paired, !model.isFixture, !DebugHooks.liveDemo, push.shouldShowPrimer, !showPrimer else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            if push.shouldShowPrimer, model.isPaired { showPrimer = true }
         }
     }
 

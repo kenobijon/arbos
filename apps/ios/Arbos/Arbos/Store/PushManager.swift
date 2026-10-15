@@ -1,0 +1,183 @@
+// Notifications: permission (asked once, after sign-in, behind a one-line
+// primer), APNs registration (token → POST /devices/{id}/push), the
+// foreground/tap delegate (suppressed while that chat is on screen; a tap
+// opens the chat), the app-icon badge, and the local fallback the
+// `/me/pushes` poll still uses on relays without APNs.
+//
+// Remote payload: `aps.category == "ARBOS_MESSAGE"`, `chat_id`, `project_id`
+// ("people" for DMs), `thread-id` = chat id; the service extension turns it
+// into a communication notification with the sender's avatar.
+
+import Foundation
+import UIKit
+import UserNotifications
+
+@MainActor
+final class PushManager: NSObject, ObservableObject, UNUserNotificationCenterDelegate {
+    static let shared = PushManager()
+    /// Posted with `chat_id` and `project_id` when a notification is tapped.
+    static let openChat = Notification.Name("arbos.openChat")
+    static let category = "ARBOS_MESSAGE"
+
+    @Published private(set) var status: UNAuthorizationStatus = .notDetermined
+    /// Hex APNs token from the system; re-registered on every launch.
+    @Published private(set) var apnsToken: String?
+    /// Who to send the token to; set by AppModel once signed in.
+    var register: ((String, String) async -> Void)?
+    /// The chat currently on screen; banners for it are swallowed.
+    var visibleChatId: () -> String? = { nil }
+    private var registeredToken: String?
+
+    private let primerKey = "pushPrimerShown"
+    var primerShown: Bool {
+        get { UserDefaults.standard.bool(forKey: primerKey) }
+        set { UserDefaults.standard.set(newValue, forKey: primerKey) }
+    }
+
+    func prepare() {
+        UNUserNotificationCenter.current().delegate = self
+        let messageCategory = UNNotificationCategory(identifier: PushManager.category, actions: [], intentIdentifiers: ["INSendMessageIntent"],
+                                                     options: [.customDismissAction])
+        UNUserNotificationCenter.current().setNotificationCategories([messageCategory])
+        Task { await refreshStatus() }
+    }
+
+    func refreshStatus() async {
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        status = settings.authorizationStatus
+        if status == .authorized || status == .provisional || status == .ephemeral {
+            UIApplication.shared.registerForRemoteNotifications()
+        }
+    }
+
+    /// The primer should show: signed in, never asked, system still undecided.
+    var shouldShowPrimer: Bool { status == .notDetermined && !primerShown }
+
+    /// The system prompt; returns whether the user allowed.
+    @discardableResult
+    func requestPermission() async -> Bool {
+        primerShown = true
+        let granted = (try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])) ?? false
+        await refreshStatus()
+        return granted
+    }
+
+    // MARK: APNs token (from the app delegate)
+
+    func didRegister(deviceToken: Data) {
+        let hex = deviceToken.map { String(format: "%02x", $0) }.joined()
+        apnsToken = hex
+        Task { await sendTokenIfNeeded() }
+    }
+
+    func didFailToRegister(_ error: Error) {
+        #if DEBUG
+        print("push: registration failed: \(error.localizedDescription)")
+        #endif
+    }
+
+    /// Sends the token once per (token, relay) — called after sign-in and on token change.
+    func sendTokenIfNeeded(force: Bool = false) async {
+        guard let token = apnsToken, let register else { return }
+        if !force, registeredToken == token { return }
+        registeredToken = token
+        await register(token, PushManager.environment)
+    }
+
+    func forgetRegistration() { registeredToken = nil }
+
+    /// `development` for Xcode/simulator builds, `production` for TestFlight/App Store
+    /// (the exported archive carries aps-environment = production).
+    static var environment: String {
+        #if DEBUG
+        return "development"
+        #else
+        return "production"
+        #endif
+    }
+
+    // MARK: Badge
+
+    func setBadge(_ count: Int) {
+        UNUserNotificationCenter.current().setBadgeCount(max(0, count)) { _ in }
+    }
+
+    /// Drop delivered notifications for a chat once it is read.
+    func clearDelivered(chatId: String) {
+        let center = UNUserNotificationCenter.current()
+        center.getDeliveredNotifications { list in
+            let ids = list.filter { ($0.request.content.userInfo["chat_id"] as? String) == chatId || $0.request.content.threadIdentifier == chatId }
+                .map(\.request.identifier)
+            if !ids.isEmpty { center.removeDeliveredNotifications(withIdentifiers: ids) }
+        }
+    }
+
+    // MARK: Local fallback (relays without APNs)
+
+    /// A message notification with the sender's picture, built like the
+    /// service extension builds remote ones.
+    func postMessage(id: String, info: [AnyHashable: Any]) async {
+        guard let push = MessagePush(userInfo: info) else { return }
+        let base = UNMutableNotificationContent()
+        base.sound = .default
+        base.userInfo = info
+        base.threadIdentifier = push.chatId
+        let content = await push.makeContent(base: base)
+        try? await UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: id, content: content, trigger: nil))
+    }
+
+    static func post(id: String, title: String, body: String, chatId: String, projectId: String = "people") {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        content.categoryIdentifier = category
+        content.userInfo = ["chat_id": chatId, "project_id": projectId]
+        content.threadIdentifier = chatId.isEmpty ? "arbos" : chatId
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: id, content: content, trigger: nil)) { _ in }
+    }
+
+    // MARK: Delegate
+
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
+        let chatId = notification.request.content.userInfo["chat_id"] as? String
+        let onScreen = await MainActor.run { chatId != nil && chatId == visibleChatId() }
+        return onScreen ? [] : [.banner, .sound, .list, .badge]
+    }
+
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
+        let info = response.notification.request.content.userInfo
+        let chatId = (info["chat_id"] as? String) ?? ""
+        let projectId = (info["project_id"] as? String) ?? "people"
+        guard !chatId.isEmpty, response.actionIdentifier != UNNotificationDismissActionIdentifier else { return }
+        await MainActor.run {
+            NotificationCenter.default.post(name: PushManager.openChat, object: nil, userInfo: ["chat_id": chatId, "project_id": projectId])
+        }
+    }
+}
+
+/// UIKit delegate for the APNs callbacks SwiftUI has no hook for.
+final class PushAppDelegate: NSObject, UIApplicationDelegate {
+    func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        PushManager.shared.prepare()
+        return true
+    }
+
+    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        PushManager.shared.didRegister(deviceToken: deviceToken)
+    }
+
+    func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
+        PushManager.shared.didFailToRegister(error)
+    }
+
+    /// Silent / content-available pushes: let the model refresh counts.
+    func application(_ application: UIApplication, didReceiveRemoteNotification userInfo: [AnyHashable: Any]) async -> UIBackgroundFetchResult {
+        await MainActor.run { NotificationCenter.default.post(name: PushManager.remoteReceived, object: nil, userInfo: userInfo) }
+        return .newData
+    }
+}
+
+extension PushManager {
+    static let remoteReceived = Notification.Name("arbos.remoteReceived")
+}

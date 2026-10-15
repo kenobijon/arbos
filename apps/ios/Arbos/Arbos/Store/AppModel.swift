@@ -54,15 +54,28 @@ final class AppModel: ObservableObject {
     @Published private(set) var credits: Credits?
     @Published private(set) var approvals: [PendingDevice] = []
     /// People chats (D72): DMs I am a member of, newest activity first.
-    @Published private(set) var peopleChats: [PeopleChat] = []
+    @Published var peopleChats: [PeopleChat] = []
     /// Chat ids with unread rows (per device, from head_seq > read_seq and pushes).
-    @Published private(set) var peopleUnread: Set<String> = []
+    @Published var peopleUnread: Set<String> = []
     @Published private(set) var blocked: [Person] = []
     /// Every Arbos user the relay knows (members + invited), for the New Message sheet.
     @Published var directory: [Person] = []
     private var directoryLoadedAt: Int64 = 0
     /// The people chat currently on screen; pushes for it never notify.
-    var visibleChatId: String?
+    var visibleChatId: String? {
+        didSet {
+            guard visibleChatId != oldValue else { return }
+            if let old = oldValue { rooms[old]?.focused = false }
+            if let new = visibleChatId {
+                rooms[new]?.focused = true
+                PushManager.shared.clearDelivered(chatId: new)
+            }
+        }
+    }
+    /// Per-chat unread counts from `GET /me/unread` (empty on relays without it).
+    @Published private(set) var unreadCounts: [String: Int] = [:]
+    /// A chat a notification asked for before its list had loaded.
+    private var pendingOpen: (chatId: String, projectId: String)?
     private var notifiedPushIds: Set<String> = []
     @Published private(set) var authMode: AuthMode = .github
     @Published private(set) var signingIn = false
@@ -159,12 +172,85 @@ final class AppModel: ObservableObject {
             startAfterPairing()
         }
         Task { await probeAuthMode() }
-        NotificationCenter.default.addObserver(forName: LocalNotifier.openChat, object: nil, queue: .main) { [weak self] n in
+        PushManager.shared.visibleChatId = { [weak self] in self?.visibleChatId }
+        NotificationCenter.default.addObserver(forName: PushManager.openChat, object: nil, queue: .main) { [weak self] n in
             guard let self, let cid = n.userInfo?["chat_id"] as? String else { return }
-            Task { @MainActor in
-                if self.peopleChat(cid) != nil { self.path = [.chat(chatId: cid, projectId: peopleSlot)] }
+            let pid = (n.userInfo?["project_id"] as? String) ?? peopleSlot
+            Task { @MainActor in self.openFromNotification(chatId: cid, projectId: pid) }
+        }
+        NotificationCenter.default.addObserver(forName: PushManager.remoteReceived, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in await self?.refreshPeople(); await self?.refreshUnread() }
+        }
+    }
+
+    /// Deep link from a notification: the people chat or the project chat,
+    /// or remembered until the lists arrive.
+    func openFromNotification(chatId: String, projectId: String) {
+        if peopleChat(chatId) != nil || projectId == peopleSlot && peopleChats.contains(where: { $0.id == chatId }) {
+            path = [.chat(chatId: chatId, projectId: peopleSlot)]
+            pendingOpen = nil
+        } else if let c = chat(chatId) {
+            path = [.chat(chatId: c.id, projectId: c.projectId)]
+            pendingOpen = nil
+        } else if projectId != peopleSlot, project(projectId) != nil {
+            path = [.chat(chatId: chatId, projectId: projectId)]
+            pendingOpen = nil
+        } else {
+            pendingOpen = (chatId, projectId)
+        }
+    }
+
+    private func retryPendingOpen() {
+        guard let p = pendingOpen else { return }
+        openFromNotification(chatId: p.chatId, projectId: p.projectId)
+    }
+
+    // MARK: Push registration + badge
+
+    private func hookPush() {
+        guard let creds = credentials, !isFixture else { return }
+        let api = self.api
+        PushManager.shared.register = { token, env in
+            let version = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "") + " (" + (Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "") + ")"
+            do {
+                try await api.registerPush(deviceId: creds.deviceId, token: token, environment: env,
+                                           bundleId: Bundle.main.bundleIdentifier ?? "com.unarbos.arbos.ios", appVersion: version)
+            } catch {
+                #if DEBUG
+                print("push: register failed: \(error.localizedDescription)")
+                #endif
+                await MainActor.run { PushManager.shared.forgetRegistration() }
             }
         }
+        Task { await PushManager.shared.refreshStatus(); await PushManager.shared.sendTokenIfNeeded(force: true) }
+    }
+
+    /// `GET /me/unread` when the relay has it; otherwise the local counts.
+    func refreshUnread() async {
+        guard credentials != nil, !isFixture else { applyBadge(); return }
+        if let r = (try? await api.unread()) ?? nil {
+            unreadCounts = r.chats
+        }
+        applyBadge()
+    }
+
+    /// Everything unread: people chats by sequence, project chats by flag.
+    var unreadTotal: Int {
+        if !unreadCounts.isEmpty { return unreadCounts.values.reduce(0, +) }
+        let people = peopleChats.reduce(0) { $0 + unreadCount(for: $1) }
+        let projects = chats.values.flatMap { $0 }.filter(\.unread).count
+        return people + projects
+    }
+
+    func unreadCount(for chat: PeopleChat) -> Int {
+        if let n = unreadCounts[chat.id] { return n }
+        if chat.id == visibleChatId { return 0 }
+        let bySeq = Int(max(0, chat.headSeq - chat.readSeq))
+        return bySeq > 0 ? bySeq : (peopleUnread.contains(chat.id) ? 1 : 0)
+    }
+
+    func applyBadge() {
+        PushManager.shared.setBadge(unreadTotal)
     }
 
     // MARK: Sign in with GitHub (self-serve relay)
@@ -263,6 +349,9 @@ final class AppModel: ObservableObject {
 
     func signOut(remote: Bool = true) {
         let had = tokens
+        if remote, let creds = credentials { let api = self.api; Task { try? await api.unregisterPush(deviceId: creds.deviceId) } }
+        PushManager.shared.forgetRegistration()
+        PushManager.shared.setBadge(0)
         if remote, had != nil { Task { await api.logout() } }
         if let had { Keychain.deleteAuth(relayUrl: had.relayUrl) }
         tokens = nil
@@ -358,6 +447,7 @@ final class AppModel: ObservableObject {
 
     private func startAfterPairing() {
         link = .connecting
+        hookPush()
         Task {
             if let ids = try? await api.models(), !ids.isEmpty {
                 models = ids
@@ -371,6 +461,8 @@ final class AppModel: ObservableObject {
                 await self.refreshAccount()
                 await self.refreshPeople()
                 await self.drainPushes()
+                await self.refreshUnread()
+                self.retryPendingOpen()
                 try? await Task.sleep(nanoseconds: 15_000_000_000)
             }
         }
@@ -899,6 +991,9 @@ final class AppModel: ObservableObject {
     /// Mark a people chat read up to the relay head (cross-launch cursor).
     func markPeopleRead(_ chatId: String) {
         peopleUnread.remove(chatId)
+        if unreadCounts[chatId] != nil { unreadCounts[chatId] = 0 }
+        PushManager.shared.clearDelivered(chatId: chatId)
+        defer { applyBadge() }
         guard let chat = peopleChat(chatId), chat.headSeq > chat.readSeq || chat.unread else { return }
         if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
             peopleChats[i].readSeq = chat.headSeq
@@ -998,15 +1093,26 @@ final class AppModel: ObservableObject {
                 if let cid = p.payload["chat_id"], cid != visibleChatId {
                     peopleUnread.insert(cid)
                     let from = p.payload["from_handle"] ?? "someone"
-                    LocalNotifier.post(id: p.id, title: "@\(from)", body: "New message", chatId: cid)
+                    // The sender's picture comes from the chat's member list when we have it.
+                    let member = peopleChat(cid)?.members.first { $0.handle == from }
+                    let agent = member?.isAgent == true ? member?.project : nil
+                    let info = MessagePush.userInfo(
+                        chatId: cid, projectId: peopleSlot, title: member?.displayName ?? "@\(from)",
+                        body: p.payload["preview"] ?? p.payload["text"] ?? "New message",
+                        senderKind: agent != nil ? "agent" : "user", senderId: member?.id ?? from,
+                        senderName: member?.displayName ?? from, senderHandle: from,
+                        avatar: agent.flatMap { avatarSlug(for: $0) }, avatarColor: agent?.avatarColor ?? p.payload["from_avatar_color"],
+                        avatarUrl: member?.avatarUrl ?? p.payload["from_avatar_url"])
+                    Task { await PushManager.shared.postMessage(id: p.id, info: info) }
+                    applyBadge()
                 }
             case "people_chat_created":
                 needChats = true
-                if let by = p.payload["by_handle"] { LocalNotifier.post(id: p.id, title: "@\(by)", body: "Started a chat with you", chatId: p.payload["chat_id"] ?? "") }
+                if let by = p.payload["by_handle"] { PushManager.post(id: p.id, title: "@\(by)", body: "Started a chat with you", chatId: p.payload["chat_id"] ?? "") }
             case "people_agent_added", "people_agent_removed", "people_member_added", "people_member_removed":
                 needChats = true
             case "people_project_shared":
-                if let by = p.payload["by_handle"] { LocalNotifier.post(id: p.id, title: "@\(by)", body: "Shared a project with you", chatId: "") }
+                if let by = p.payload["by_handle"] { PushManager.post(id: p.id, title: "@\(by)", body: "Shared a project with you", chatId: "") }
                 await refreshRegistry()
             case "project_member_removed":
                 await refreshRegistry()
@@ -1241,11 +1347,14 @@ final class AppModel: ObservableObject {
     }
 
     func markRead(chatId: Id) {
+        if unreadCounts[chatId] != nil { unreadCounts[chatId] = 0 }
+        PushManager.shared.clearDelivered(chatId: chatId)
         for (pid, list) in chats {
             if let i = list.firstIndex(where: { $0.id == chatId }), list[i].unread {
                 var updated = list
                 updated[i].unread = false
                 chats[pid] = updated
+                applyBadge()
                 return
             }
         }

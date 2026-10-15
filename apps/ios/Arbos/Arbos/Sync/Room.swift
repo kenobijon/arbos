@@ -28,6 +28,15 @@ final class Room {
     private var wakeQueue: [String] = []
     private let session: URLSession
 
+    /// The chat is on screen: presence carries `focused_chat` so the relay
+    /// does not push a notification for it. Sent at once on change.
+    var focused = false {
+        didSet {
+            guard focused != oldValue else { return }
+            Task { [weak self] in await self?.sendPresence() }
+        }
+    }
+
     private static let helloDeadline: Double = 15
     private static let presenceEvery: Double = 15
     private static let backoffMin: Double = 0.25
@@ -147,7 +156,7 @@ final class Room {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: UInt64(Room.presenceEvery * 1_000_000_000))
                 guard let self, !Task.isCancelled else { return }
-                try? await self.send(Frame(.presence, header: ["device": self.deviceId(), "at": nowMs()]))
+                await self.sendPresence()
             }
         }
 
@@ -199,6 +208,12 @@ final class Room {
                 continue
             }
         }
+    }
+
+    private func sendPresence() async {
+        var header: [String: Any] = ["device": deviceId(), "at": nowMs()]
+        if focused { header["focused_chat"] = roomChat }
+        try? await send(Frame(.presence, header: header))
     }
 
     private func send(_ frame: Frame) async throws {

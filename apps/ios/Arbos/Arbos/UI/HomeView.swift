@@ -48,7 +48,8 @@ struct HomeView: View {
                                 case .people(let chat):
                                     Button { model.open(peopleChat: chat) } label: {
                                         PeopleRow(chat: chat, preview: peoplePreview(chat), time: timeLabel(ms: peopleActivity(chat)),
-                                                  unread: model.peopleUnread.contains(chat.id), me: model.user?.id)
+                                                  unread: model.peopleUnread.contains(chat.id) || model.unreadCount(for: chat) > 0,
+                                                  count: model.unreadCount(for: chat), me: model.user?.id)
                                     }
                                     .buttonStyle(.plain)
                                 }
@@ -95,6 +96,9 @@ struct HomeView: View {
         .onAppear {
             if DebugHooks.show == "newchat", DebugHooks.openProject == nil {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showNewChat = true }
+            }
+            if DebugHooks.show == "notify", DebugHooks.openProject == nil {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { model.postSampleNotifications() }
             }
             if !DebugHooks.liveDemo, let id = DebugHooks.openProject, model.path.isEmpty, let p = model.project(id) {
                 if let cid = DebugHooks.openChat, let c = model.chat(cid) { model.open(chat: c) } else { model.open(project: p) }
@@ -400,6 +404,8 @@ struct PeopleRow: View {
     let preview: String
     let time: String
     let unread: Bool
+    /// Unread messages (Grok/Telegram-style count pill); 0 → the dot only.
+    var count: Int = 0
     let me: String?
 
     private var other: ChatMember? { chat.counterpart(me: me) }
@@ -432,7 +438,12 @@ struct PeopleRow: View {
                         .font(.system(size: Theme.small))
                         .foregroundStyle(theme.muted)
                         .lineLimit(1)
-                    if unread { Circle().fill(Color(hex: "#1084FE")!).frame(width: 8, height: 8) }
+                    Spacer(minLength: 0)
+                    if count > 0 {
+                        UnreadBadge(count: count)
+                    } else if unread {
+                        Circle().fill(Color(hex: "#1084FE")!).frame(width: 8, height: 8)
+                    }
                 }
             }
         }
@@ -452,5 +463,20 @@ struct PulseDot: View {
             .onAppear {
                 withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) { on = true }
             }
+    }
+}
+
+/// Unread count pill (blue, white digits), capped at 99+.
+struct UnreadBadge: View {
+    let count: Int
+
+    var body: some View {
+        Text(count > 99 ? "99+" : "\(count)")
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, count > 9 ? 6 : 0)
+            .frame(minWidth: 20, minHeight: 20)
+            .background(Capsule().fill(Color(hex: "#1084FE")!))
+            .accessibilityLabel("\(count) unread")
     }
 }

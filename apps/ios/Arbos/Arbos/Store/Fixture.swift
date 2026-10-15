@@ -78,6 +78,16 @@ extension AppModel {
                           provider: "daytona", sandboxId: "fixture-box", spendTodayUsd: 1.6, spendCapUsd: 25,
                           workspaces: Dictionary(uniqueKeysWithValues: list.map { ($0.id, $0.id == "fx-comms" ? WorkspaceState.active : .idle) }),
                           alwaysOn: DebugHooks.alwaysOn, machineTodayUsd: 2.88, reported: true)
+        // One DM with three unread messages, for the count pill and the notification screens.
+        let meMember = ChatMember(id: "fx-me", kind: .user, member: "user:fx-me", role: "owner", handle: "you", avatarUrl: nil, name: "You", status: "member",
+                                  project: nil, ownerId: nil, ownerHandle: nil, replyPolicy: nil)
+        let unconst = ChatMember(id: "gh_32490803", kind: .user, member: "user:gh_32490803", role: "member", handle: "unconst",
+                                 avatarUrl: "https://avatars.githubusercontent.com/u/32490803?v=4", name: "Unconst", status: "member",
+                                 project: nil, ownerId: nil, ownerHandle: nil, replyPolicy: nil)
+        peopleChats = [PeopleChat(id: "fx-dm-unconst", kind: "dm", createdBy: "gh_32490803", createdAt: now - 40 * 60_000, title: "@unconst",
+                                  pending: false, members: [unconst, meMember], headSeq: 12, readSeq: 9, unread: true,
+                                  lockState: "people_only", lastActivityAt: now - 7 * 60_000, myRole: "member", muted: false)]
+        peopleUnread = ["fx-dm-unconst"]
         directory = [
             Person(id: "fx-u1", handle: "alex-rivera", avatarUrl: nil, name: "Alex Rivera", status: "member"),
             Person(id: "fx-u2", handle: "jacob", avatarUrl: nil, name: "Jacob Steeves", status: "member"),
@@ -86,6 +96,27 @@ extension AppModel {
             Person(id: "fx-u5", handle: "tobias", avatarUrl: nil, name: "Tobias Lund", status: "member"),
         ]
         link = .live
+    }
+
+    /// Two sample message notifications (an agent, a person) for screenshots.
+    func postSampleNotifications() {
+        let affine = projects.first { $0.id == "fx-affine" }
+        let agentInfo = MessagePush.userInfo(
+            chatId: "fx-affine-main", projectId: "fx-affine", title: "Affine",
+            body: "Shortlist of 6 candidates is ready — two look very strong.",
+            senderKind: "agent", senderId: "fx-affine", senderName: "Affine", senderHandle: "affine",
+            avatar: affine.flatMap { avatarSlug(for: $0) } ?? "oak", avatarColor: affine?.avatarColor ?? "green", avatarUrl: nil)
+        let personInfo = MessagePush.userInfo(
+            chatId: "fx-dm-unconst", projectId: peopleSlot, title: "Unconst",
+            body: "@main who is in the standup tomorrow?",
+            senderKind: "user", senderId: "gh_32490803", senderName: "Unconst", senderHandle: "unconst",
+            avatar: nil, avatarColor: nil, avatarUrl: "https://avatars.githubusercontent.com/u/32490803?v=4")
+        Task {
+            await PushManager.shared.postMessage(id: "sample-agent", info: agentInfo)
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            await PushManager.shared.postMessage(id: "sample-person", info: personInfo)
+            PushManager.shared.setBadge(3)
+        }
     }
 
     /// Sends in fixture mode append locally so the composer can be exercised,

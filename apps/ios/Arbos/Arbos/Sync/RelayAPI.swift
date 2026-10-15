@@ -335,6 +335,38 @@ final class RelayAPI {
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    // MARK: Push notifications
+
+    /// `POST /devices/{id}/push {platform, token, environment, bundle_id, app_version}`
+    /// registers this device's APNs token (idempotent; re-sent on every launch).
+    func registerPush(deviceId: Id, token: String, environment: String, bundleId: String, appVersion: String) async throws {
+        _ = try await request("POST", "/devices/\(deviceId)/push", body: [
+            "platform": "ios", "token": token, "environment": environment, "bundle_id": bundleId, "app_version": appVersion,
+        ])
+    }
+
+    /// `DELETE /devices/{id}/push` on sign-out so a stale token is not pushed to.
+    func unregisterPush(deviceId: Id) async throws {
+        _ = try await request("DELETE", "/devices/\(deviceId)/push")
+    }
+
+    /// `GET /me/unread` → total + per-chat counts. nil when the relay has no route yet.
+    func unread() async throws -> (total: Int, chats: [String: Int])? {
+        do {
+            guard let v = try await json("GET", "/me/unread") as? [String: Any] else { return nil }
+            var chats: [String: Int] = [:]
+            if let list = v["chats"] as? [[String: Any]] {
+                for c in list { if let id = c["chat_id"] as? String { chats[id] = (c["unread"] as? NSNumber)?.intValue ?? 0 } }
+            } else if let dict = v["chats"] as? [String: Any] {
+                for (k, n) in dict { chats[k] = (n as? NSNumber)?.intValue ?? 0 }
+            }
+            let total = (v["total"] as? NSNumber)?.intValue ?? chats.values.reduce(0, +)
+            return (total, chats)
+        } catch let e as RelayError where e.status == 404 || e.status == 405 {
+            return nil
+        }
+    }
+
     // MARK: People chats (D72)
 
     /// `GET /users?offset&limit` → the directory (members and invited people
