@@ -1040,6 +1040,7 @@ async fn send_message(
             completed_at: None,
             pending: false,
             parts,
+            hidden_parts: Vec::new(),
         };
         let _ = doc.insert_message(&msg);
         let _ = doc.push_command(

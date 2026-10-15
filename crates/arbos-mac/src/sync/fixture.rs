@@ -207,6 +207,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         completed_at: None,
                         pending: true,
                         parts,
+                        hidden_parts: Vec::new(),
                     };
                     let _ = doc.insert_message(&msg);
                     let _ = doc.push_command(
@@ -251,6 +252,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                             id: new_id(),
                             text: text.clone(),
                         }],
+                        hidden_parts: Vec::new(),
                     };
                     let _ = doc.insert_message(&msg);
                     let _ = doc.push_command(
@@ -830,6 +832,7 @@ async fn run_turn(
                 code: StatusKind::Deciding,
                 message: "Arbos is deciding…".into(),
             }],
+            hidden_parts: Vec::new(),
         };
         let ix = doc.insert_message(&msg).unwrap_or(0);
         doc.commit();
@@ -1297,6 +1300,7 @@ impl Seeder<'_> {
                 id: new_id(),
                 text: text.into(),
             }],
+            hidden_parts: Vec::new(),
         });
     }
 
@@ -1321,6 +1325,7 @@ impl Seeder<'_> {
             completed_at: Some(self.t + 9_000),
             pending: false,
             parts,
+            hidden_parts: Vec::new(),
         });
     }
 }

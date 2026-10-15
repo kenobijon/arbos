@@ -317,9 +317,41 @@ pub struct Message {
     pub pending: bool,
     #[serde(default)]
     pub parts: Vec<Part>,
+    /// Parts the box flagged `hidden: true` (tool details): Details drawer only.
+    #[serde(default)]
+    pub hidden_parts: Vec<Part>,
 }
 
 impl Message {
+    /// The latest short step label the box emitted for this turn
+    /// (`tool_start`, `subagent_working`, `deciding`, …), for the working indicator.
+    pub fn working_label(&self) -> Option<String> {
+        self.parts
+            .iter()
+            .chain(self.hidden_parts.iter())
+            .rev()
+            .find_map(|p| match p {
+                Part::Status {
+                    code:
+                        StatusKind::ToolStart
+                        | StatusKind::SubagentWorking
+                        | StatusKind::Deciding
+                        | StatusKind::Handoff,
+                    message,
+                    ..
+                } => Some(message.clone()),
+                _ => None,
+            })
+    }
+
+    /// Every tool call of this turn, visible or hidden.
+    pub fn tool_parts(&self) -> impl Iterator<Item = &Part> {
+        self.parts
+            .iter()
+            .chain(self.hidden_parts.iter())
+            .filter(|p| matches!(p, Part::Tool { .. }))
+    }
+
     pub fn is_streaming(&self) -> bool {
         self.status == MessageStatus::Streaming
     }

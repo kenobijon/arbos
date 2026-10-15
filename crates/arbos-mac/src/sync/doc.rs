@@ -87,7 +87,8 @@ impl ChatDoc {
 
     pub fn read_message(&self, ix: usize) -> Option<Message> {
         let map = message_map(&self.messages(), ix)?;
-        let json = serde_json::to_value(map.get_deep_value()).ok()?;
+        let mut json = serde_json::to_value(map.get_deep_value()).ok()?;
+        split_hidden_parts(&mut json);
         serde_json::from_value(json).ok()
     }
 
@@ -226,6 +227,28 @@ impl ChatDoc {
             }
         }
         out
+    }
+}
+
+/// Move `parts[*]` with `hidden: true` into `hiddenParts` so the transcript
+/// never sees them while the Details drawer still can.
+fn split_hidden_parts(json: &mut Value) {
+    let Some(obj) = json.as_object_mut() else {
+        return;
+    };
+    let Some(Value::Array(parts)) = obj.get_mut("parts") else {
+        return;
+    };
+    let mut hidden = Vec::new();
+    parts.retain(|p| {
+        let is_hidden = p.get("hidden").and_then(Value::as_bool).unwrap_or(false);
+        if is_hidden {
+            hidden.push(p.clone());
+        }
+        !is_hidden
+    });
+    if !hidden.is_empty() {
+        obj.insert("hiddenParts".into(), Value::Array(hidden));
     }
 }
 

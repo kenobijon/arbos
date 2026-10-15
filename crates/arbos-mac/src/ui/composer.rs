@@ -43,6 +43,7 @@ actions!(
 );
 
 pub const MAX_LINES: usize = 10;
+pub const COMPOSER_RADIUS: f32 = 18.0;
 
 pub type SubmitHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 const INPUT_LINE_HEIGHT: f32 = 20.0;
@@ -68,6 +69,8 @@ pub struct ComposerInput {
     marked_range: Option<Range<usize>>,
     layout: Option<Layout>,
     is_selecting: bool,
+    /// Vertical scroll inside the box once it reaches `MAX_LINES`.
+    scroll_y: f32,
     /// Runs deferred, after this entity's update ends, so the owner may read
     /// and update the input freely.
     pub on_submit: Option<SubmitHandler>,
@@ -84,6 +87,7 @@ impl ComposerInput {
             marked_range: None,
             layout: None,
             is_selecting: false,
+            scroll_y: 0.0,
             on_submit: None,
         }
     }
@@ -96,11 +100,22 @@ impl ComposerInput {
         self.placeholder = text.into();
     }
 
+    pub fn set_text(&mut self, text: String, cx: &mut Context<Self>) {
+        let len = text.len();
+        self.content = text;
+        self.selected_range = len..len;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        self.scroll_y = 0.0;
+        cx.notify();
+    }
+
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.content.clear();
         self.selected_range = 0..0;
         self.selection_reversed = false;
         self.marked_range = None;
+        self.scroll_y = 0.0;
         cx.notify();
     }
 
@@ -468,11 +483,12 @@ impl EntityInputHandler for ComposerInput {
         let range = self.range_from_utf16(&range_utf16);
         let start = self.position_for_index(range.start)?;
         let end = self.position_for_index(range.end).unwrap_or(start);
+        let dy = px(self.scroll_y);
         Some(Bounds::from_corners(
-            point(bounds.left() + start.x, bounds.top() + start.y),
+            point(bounds.left() + start.x, bounds.top() + start.y - dy),
             point(
                 bounds.left() + end.x,
-                bounds.top() + end.y + px(INPUT_LINE_HEIGHT),
+                bounds.top() + end.y + px(INPUT_LINE_HEIGHT) - dy,
             ),
         ))
     }
@@ -496,6 +512,7 @@ struct Prepaint {
     lines: Vec<(usize, WrappedLine)>,
     cursor: Option<PaintQuad>,
     selections: Vec<PaintQuad>,
+    scroll_y: f32,
 }
 
 impl IntoElement for InputElement {
@@ -588,18 +605,37 @@ impl Element for InputElement {
             start += para.len() + 1;
         }
 
+        // Keep the caret inside the visible box once the text is taller than
+        // MAX_LINES; everything below is painted shifted by -scroll_y.
+        let total_h: f32 = lines
+            .iter()
+            .map(|(_, l)| f32::from(l.size(lh).height))
+            .sum();
+        let visible_h = f32::from(bounds.size.height);
+        let mut scroll_y = input.scroll_y;
+        let cursor_pos = if content.is_empty() {
+            Some(point(px(0.0), px(0.0)))
+        } else {
+            position_for_index(&lines, cursor)
+        };
+        if let Some(p) = cursor_pos {
+            let cy = f32::from(p.y);
+            if cy < scroll_y {
+                scroll_y = cy;
+            } else if cy + f32::from(lh) > scroll_y + visible_h {
+                scroll_y = cy + f32::from(lh) - visible_h;
+            }
+        }
+        scroll_y = scroll_y.clamp(0.0, (total_h - visible_h).max(0.0));
+        let dy = px(scroll_y);
+
         let mut cursor_quad = None;
         let mut selections = Vec::new();
         if content.is_empty() || selected_range.is_empty() {
-            let pos = if content.is_empty() {
-                Some(point(px(0.0), px(0.0)))
-            } else {
-                position_for_index(&lines, cursor)
-            };
-            if let Some(pos) = pos {
+            if let Some(pos) = cursor_pos {
                 cursor_quad = Some(fill(
                     Bounds::new(
-                        point(bounds.left() + pos.x, bounds.top() + pos.y + px(1.0)),
+                        point(bounds.left() + pos.x, bounds.top() + pos.y - dy + px(1.0)),
                         size(px(1.5), lh - px(2.0)),
                     ),
                     theme.accent,
@@ -612,32 +648,32 @@ impl Element for InputElement {
                 if a.y == b.y {
                     selections.push(fill(
                         Bounds::from_corners(
-                            point(bounds.left() + a.x, bounds.top() + a.y),
-                            point(bounds.left() + b.x, bounds.top() + b.y + lh),
+                            point(bounds.left() + a.x, bounds.top() + a.y - dy),
+                            point(bounds.left() + b.x, bounds.top() + b.y - dy + lh),
                         ),
                         theme.accent_soft,
                     ));
                 } else {
                     selections.push(fill(
                         Bounds::from_corners(
-                            point(bounds.left() + a.x, bounds.top() + a.y),
-                            point(bounds.right(), bounds.top() + a.y + lh),
+                            point(bounds.left() + a.x, bounds.top() + a.y - dy),
+                            point(bounds.right(), bounds.top() + a.y - dy + lh),
                         ),
                         theme.accent_soft,
                     ));
                     if b.y > a.y + lh {
                         selections.push(fill(
                             Bounds::from_corners(
-                                point(bounds.left(), bounds.top() + a.y + lh),
-                                point(bounds.right(), bounds.top() + b.y),
+                                point(bounds.left(), bounds.top() + a.y - dy + lh),
+                                point(bounds.right(), bounds.top() + b.y - dy),
                             ),
                             theme.accent_soft,
                         ));
                     }
                     selections.push(fill(
                         Bounds::from_corners(
-                            point(bounds.left(), bounds.top() + b.y),
-                            point(bounds.left() + b.x, bounds.top() + b.y + lh),
+                            point(bounds.left(), bounds.top() + b.y - dy),
+                            point(bounds.left() + b.x, bounds.top() + b.y - dy + lh),
                         ),
                         theme.accent_soft,
                     ));
@@ -649,6 +685,7 @@ impl Element for InputElement {
             lines,
             cursor: cursor_quad,
             selections,
+            scroll_y,
         }
     }
 
@@ -668,30 +705,38 @@ impl Element for InputElement {
             ElementInputHandler::new(bounds, self.input.clone()),
             cx,
         );
-        for sel in prepaint.selections.drain(..) {
-            window.paint_quad(sel);
-        }
         let lh = px(INPUT_LINE_HEIGHT);
-        let mut y = bounds.top();
-        for (_, line) in &prepaint.lines {
-            let _ = line.paint(
-                point(bounds.left(), y),
-                lh,
-                TextAlign::Left,
-                None,
-                window,
-                cx,
-            );
-            y += line.size(lh).height;
-        }
-        if focus_handle.is_focused(window) {
-            if let Some(cursor) = prepaint.cursor.take() {
-                window.paint_quad(cursor);
+        let scroll_y = prepaint.scroll_y;
+        let focused = focus_handle.is_focused(window);
+        window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
+            for sel in prepaint.selections.drain(..) {
+                window.paint_quad(sel);
             }
-        }
+            let mut y = bounds.top() - px(scroll_y);
+            for (_, line) in &prepaint.lines {
+                let h = line.size(lh).height;
+                if y + h >= bounds.top() && y <= bounds.bottom() {
+                    let _ = line.paint(
+                        point(bounds.left(), y),
+                        lh,
+                        TextAlign::Left,
+                        None,
+                        window,
+                        cx,
+                    );
+                }
+                y += h;
+            }
+            if focused {
+                if let Some(cursor) = prepaint.cursor.take() {
+                    window.paint_quad(cursor);
+                }
+            }
+        });
         let lines = std::mem::take(&mut prepaint.lines);
         self.input.update(cx, |input, _| {
             input.layout = Some(Layout { lines, bounds });
+            input.scroll_y = scroll_y;
         });
     }
 }
@@ -786,6 +831,9 @@ pub struct Composer {
     state: Entity<AppState>,
     pub input: Entity<ComposerInput>,
     attachments: Vec<PathBuf>,
+    /// Which chat the input text belongs to; drafts are kept per chat.
+    draft_chat: Option<crate::model::Id>,
+    drafts: std::collections::HashMap<crate::model::Id, String>,
     open_picker: Option<Picker>,
     /// S8 shake when the user hits Cmd+W on the pinned tab; also reused for
     /// the empty-send nudge.
@@ -809,9 +857,33 @@ impl Composer {
             state,
             input,
             attachments: Vec::new(),
+            draft_chat: None,
+            drafts: std::collections::HashMap::new(),
             open_picker: None,
             nudge_at: None,
         }
+    }
+
+    /// Swap the draft when the active chat changes.
+    fn sync_draft(&mut self, cx: &mut Context<Self>) {
+        let active = self.state.read(cx).active_chat_id();
+        if active == self.draft_chat {
+            return;
+        }
+        let text = self.input.read(cx).text().to_string();
+        if let Some(prev) = self.draft_chat.take() {
+            if text.is_empty() {
+                self.drafts.remove(&prev);
+            } else {
+                self.drafts.insert(prev, text);
+            }
+        }
+        let next = active
+            .as_ref()
+            .and_then(|id| self.drafts.get(id).cloned())
+            .unwrap_or_default();
+        self.input.update(cx, |input, cx| input.set_text(next, cx));
+        self.draft_chat = active;
     }
 
     pub fn focus(this: &Entity<Self>, window: &mut Window, cx: &mut App) {
@@ -829,9 +901,6 @@ impl Composer {
 
     fn submit(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         match self.mode(cx) {
-            ComposerMode::Stop => {
-                cx.emit(ComposerEvent::Stop);
-            }
             ComposerMode::Send | ComposerMode::Answer => {
                 let text = self.input.read(cx).text().trim().to_string();
                 if text.is_empty() && self.attachments.is_empty() {
@@ -958,7 +1027,7 @@ impl Composer {
         // Opens upward from the picker row.
         div()
             .absolute()
-            .bottom(px(COMPOSER_HEIGHT + 8.0))
+            .bottom(px(COMPOSER_HEIGHT + 44.0))
             .right(px(56.0))
             .child(frosted(PANEL_RADIUS, MENU_BLUR, menu))
     }
@@ -966,6 +1035,7 @@ impl Composer {
 
 impl Render for Composer {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_draft(cx);
         let theme = Theme::of(cx).clone();
         let mode = self.mode(cx);
         let state = self.state.read(cx);
@@ -978,7 +1048,7 @@ impl Render for Composer {
         self.input.update(cx, |input, _| {
             input.set_placeholder(match mode {
                 ComposerMode::Answer => "Answer the agent…",
-                ComposerMode::Send | ComposerMode::Stop => "Do anything…",
+                ComposerMode::Send => "Do anything…",
             });
         });
 
@@ -992,7 +1062,7 @@ impl Render for Composer {
 
         let border_color = match mode {
             ComposerMode::Answer => theme.warn,
-            ComposerMode::Send | ComposerMode::Stop => {
+            ComposerMode::Send => {
                 if nudge {
                     theme.danger
                 } else {
@@ -1001,35 +1071,104 @@ impl Render for Composer {
             }
         };
 
-        let send_button = match mode {
-            ComposerMode::Stop => div()
-                .id("composer-stop")
-                .size(px(30.0))
-                .rounded_full()
-                .bg(theme.text)
+        let send_button = div()
+            .id("composer-send")
+            .size(px(30.0))
+            .rounded_full()
+            .bg(theme.text)
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .text_color(theme.bg)
+            .text_size(px(15.0))
+            .font_weight(gpui::FontWeight::BOLD)
+            .child("↑")
+            .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx)));
+
+        // Running tasks: small indicators, never a blocking banner (multitask).
+        let tasks = {
+            let state = self.state.read(cx);
+            state
+                .active_chat_id()
+                .map(|id| state.running_tasks(&id))
+                .unwrap_or_default()
+        };
+        // Turns streaming in this chat already show their working line in the
+        // transcript; the strip lists the other running work (project
+        // subagents) and offers Stop for the chat's own turns.
+        let streaming_here = tasks.iter().filter(|t| t.stoppable).count();
+        let others: Vec<&crate::app::RunningTask> = tasks.iter().filter(|t| !t.stoppable).collect();
+        let tasks_strip = if tasks.is_empty() {
+            None
+        } else {
+            crate::ui::motion::PulseClock::request(cx);
+            let phase = crate::ui::motion::PulseClock::phase(cx, 900);
+            let mut strip = div()
+                .w_full()
                 .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                .child(div().size(px(10.0)).rounded(px(2.0)).bg(theme.bg))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    cx.emit(ComposerEvent::Stop);
-                    this.open_picker = None;
-                })),
-            ComposerMode::Send | ComposerMode::Answer => div()
-                .id("composer-send")
-                .size(px(30.0))
-                .rounded_full()
-                .bg(theme.text)
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                .text_color(theme.bg)
-                .text_size(px(15.0))
-                .font_weight(gpui::FontWeight::BOLD)
-                .child("↑")
-                .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx))),
+                .flex_col()
+                .gap(px(3.0))
+                .px(px(14.0))
+                .pb(px(6.0));
+            for (i, task) in others.iter().enumerate() {
+                strip = strip.child(
+                    div()
+                        .id(ElementId::NamedInteger("running-task".into(), i as u64))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .size(px(6.0))
+                                .rounded_full()
+                                .bg(Theme::with_alpha(theme.accent, 0.35 + 0.65 * phase)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_size(px(11.5))
+                                .text_color(theme.text_muted)
+                                .child(task.label.clone()),
+                        ),
+                );
+            }
+            if streaming_here > 0 {
+                strip = strip.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(theme.text_faint)
+                                .child(if streaming_here == 1 {
+                                    "1 turn running".to_string()
+                                } else {
+                                    format!("{streaming_here} turns running")
+                                }),
+                        )
+                        .child(
+                            div()
+                                .id("tasks-stop")
+                                .text_size(px(11.5))
+                                .text_color(theme.text_faint)
+                                .cursor_pointer()
+                                .hover(|s| s.text_color(theme.danger))
+                                .child("■ Stop")
+                                .on_click(cx.listener(|_, _, _, cx| {
+                                    cx.emit(ComposerEvent::Stop);
+                                })),
+                        ),
+                );
+            }
+            Some(strip)
         };
 
         let mut pill = div()
@@ -1037,7 +1176,7 @@ impl Render for Composer {
             .w_full()
             .flex()
             .flex_col()
-            .rounded(px(COMPOSER_HEIGHT / 2.0))
+            .rounded(px(COMPOSER_RADIUS))
             .bg(theme.card())
             .border_1()
             .border_color(border_color)
@@ -1049,7 +1188,7 @@ impl Render for Composer {
                 .flex()
                 .flex_wrap()
                 .gap(px(6.0))
-                .px(px(16.0))
+                .px(px(14.0))
                 .pt(px(10.0));
             for (i, path) in self.attachments.iter().enumerate() {
                 let name_owned = path
@@ -1087,31 +1226,43 @@ impl Render for Composer {
             pill = pill.child(chips);
         }
 
-        let row = div()
+        // Text uses the full width; the controls live in their own bottom
+        // row, so growing text never moves them (Cursor composer).
+        let text_row = div()
+            .w_full()
+            .flex()
+            .px(px(14.0))
+            .pt(px(11.0))
+            .pb(px(4.0))
+            .child(self.input.clone());
+
+        let controls = div()
+            .w_full()
             .flex()
             .items_center()
-            .gap(px(10.0))
-            .min_h(px(COMPOSER_HEIGHT))
-            .pl(px(14.0))
+            .gap(px(6.0))
+            .pl(px(9.0))
             .pr(px(9.0))
-            .py(px(8.0))
+            .pb(px(8.0))
+            .pt(px(2.0))
             .child(
                 div()
                     .id("composer-attach")
-                    .size(px(26.0))
+                    .size(px(28.0))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(6.0))
+                    .rounded_full()
+                    .border_1()
+                    .border_color(theme.border_strong)
                     .text_color(theme.text_muted)
                     .text_size(px(15.0))
                     .hover(|s| s.bg(theme.surface_2))
                     .cursor_pointer()
-                    .child("⊕")
+                    .child("+")
                     .on_click(cx.listener(|this, _, _, cx| this.attach(cx))),
             )
-            .child(div().w(px(1.0)).h(px(18.0)).bg(theme.border_strong))
-            .child(self.input.clone())
+            .child(div().flex_1())
             .child(
                 div()
                     .id("composer-model")
@@ -1158,7 +1309,7 @@ impl Render for Composer {
             )
             .child(send_button);
 
-        pill = pill.child(row);
+        pill = pill.child(text_row).child(controls);
 
         if link_full {
             pill = pill.child(
@@ -1171,11 +1322,13 @@ impl Render for Composer {
             );
         }
 
-        let mut root =
-            div()
-                .relative()
-                .w_full()
-                .child(frosted(COMPOSER_HEIGHT / 2.0, PANEL_BLUR, pill));
+        let mut root = div()
+            .relative()
+            .w_full()
+            .flex()
+            .flex_col()
+            .when_some(tasks_strip, |el, strip| el.child(strip))
+            .child(frosted(COMPOSER_RADIUS, PANEL_BLUR, pill));
         if let Some(picker) = self.open_picker {
             root = root.child(self.render_picker_menu(picker, cx));
         }

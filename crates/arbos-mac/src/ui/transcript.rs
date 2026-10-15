@@ -2,7 +2,7 @@
 //! block (zeron-study §4.1–§4.4). Rows are diffed by `(id, version)` and
 //! spliced; streaming text fades in through the veil.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
@@ -12,9 +12,7 @@ use gpui::{
 };
 
 use crate::app::{AppEvent, AppState, DetailsTarget};
-use crate::model::{
-    Attachment, Id, Message, MessageStatus, Part, Role, StatusKind, ToolCall, ToolStatus,
-};
+use crate::model::{Attachment, Id, Message, MessageStatus, Part, Role, StatusKind};
 use crate::ui::cards;
 use crate::ui::frost::edge_faded;
 use crate::ui::markdown::{inline_spans, split_blocks, Block};
@@ -28,20 +26,6 @@ pub const COLUMN_MAX_WIDTH: f32 = 680.0;
 pub const ASSISTANT_MAX_WIDTH: f32 = 540.0;
 
 #[derive(Clone, Debug)]
-pub struct ToolView {
-    pub call: ToolCall,
-    /// One-line input shown on the card; from `call.input`, or from the
-    /// preceding `tool_start` status when the box left `input` empty.
-    pub input_line: String,
-    pub output_summary: String,
-    pub output_ref: Option<String>,
-    pub is_error: bool,
-    pub status: Option<ToolStatus>,
-    pub duration_ms: Option<u64>,
-    pub subagent_name: Option<String>,
-}
-
-#[derive(Clone, Debug)]
 pub enum RowKind {
     User {
         text: String,
@@ -52,38 +36,14 @@ pub enum RowKind {
         block: Block,
         live: bool,
     },
-    Reasoning {
+    /// S8: the agent asked a question.
+    AskUser {
         text: String,
-        live: bool,
     },
-    Status {
-        code: StatusKind,
-        text: String,
-        live: bool,
-    },
-    ToolGroup {
-        tools: Vec<ToolView>,
-        live: bool,
-    },
-    SubagentChip {
-        tool: ToolView,
-    },
-    Diff {
-        path: String,
-        added: u32,
-        removed: u32,
-        blob_ref: Option<String>,
-    },
-    File {
-        path: String,
-        lines: u32,
-        blob_ref: Option<String>,
-    },
-    Browser {
-        title: String,
-        url: String,
-        last_action: String,
-        live: bool,
+    /// Minimal "agent is working" line: one pulsing dot plus the short step
+    /// label the box emits as status events. Collapses when the turn ends.
+    Working {
+        label: String,
     },
     Error {
         code: String,
@@ -125,7 +85,6 @@ pub struct Transcript {
     list: ListState,
     rows: Vec<Row>,
     veils: HashMap<String, Veil>,
-    expanded: HashSet<String>,
     pinned_to_bottom: bool,
     spring: StickSpring,
     /// Set by the scroll callback; the next frame re-pins when the user
@@ -155,7 +114,6 @@ impl Transcript {
             list,
             rows: Vec::new(),
             veils: HashMap::new(),
-            expanded: HashSet::new(),
             pinned_to_bottom: true,
             spring: StickSpring::default(),
             repin_check_pending: false,
@@ -221,7 +179,7 @@ impl Transcript {
             .unwrap_or_default();
         self.chat_id = chat_id;
 
-        let new_rows = build_rows(&messages, &self.expanded);
+        let new_rows = build_rows(&messages);
 
         // Veils: observe text growth of live markdown rows.
         for row in &new_rows {
@@ -259,27 +217,6 @@ impl Transcript {
         self.rows = new_rows;
         self.list.splice(prefix..old_len, self.rows.len() - prefix);
         // While pinned the spring glides to the new end on the next frames.
-        cx.notify();
-    }
-
-    fn toggle_group(&mut self, id: &str, cx: &mut Context<Self>) {
-        if !self.expanded.remove(id) {
-            self.expanded.insert(id.to_string());
-        }
-        self.sync_force(cx);
-    }
-
-    fn sync_force(&mut self, cx: &mut Context<Self>) {
-        // Expansion changes row versions, so a normal sync picks them up.
-        let old_len = self.rows.len();
-        let state = self.state.read(cx);
-        let messages: Vec<Message> = self
-            .chat_id
-            .as_deref()
-            .map(|id| state.messages_of(id).to_vec())
-            .unwrap_or_default();
-        self.rows = build_rows(&messages, &self.expanded);
-        self.list.splice(0..old_len, self.rows.len());
         cx.notify();
     }
 
@@ -355,147 +292,12 @@ impl Transcript {
                     .child(render_block(&row.id, &block, veil.as_ref(), now, &theme))
                     .into_any_element()
             }
-            RowKind::Reasoning { text, live } => {
-                let open = self.expanded.contains(&row.id);
-                let id = row.id.clone();
-                div()
-                    .id(SharedString::from(format!("reasoning-{}", row.id)))
-                    .w_full()
-                    .py(px(4.0))
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_group(&id, cx)))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .text_size(px(12.5))
-                            .text_color(theme.text_faint)
-                            .italic()
-                            .child(if live { "Thinking…" } else { "Thought" })
-                            .child(if open { "▾" } else { "▸" }),
-                    )
-                    .when(open, |el| {
-                        el.child(
-                            div()
-                                .pl(px(10.0))
-                                .border_l_1()
-                                .border_color(theme.border)
-                                .text_size(px(12.5))
-                                .text_color(theme.text_muted)
-                                .child(text),
-                        )
-                    })
-                    .into_any_element()
+            RowKind::AskUser { text } => {
+                cards::status_row(StatusKind::AskUser, &text, false, &theme, cx).into_any_element()
             }
-            RowKind::Status { code, text, live } => {
-                if live {
-                    PulseClock::request(cx);
-                }
-                cards::status_row(code, &text, live, &theme, cx).into_any_element()
-            }
-            RowKind::ToolGroup { tools, live } => {
-                if live {
-                    PulseClock::request(cx);
-                }
-                let open = self.expanded.contains(&row.id) || live;
-                let id = row.id.clone();
-                let chat_id = self.chat_id.clone().unwrap_or_default();
-                let message_id = row.message_id.clone();
-                let state = self.state.clone();
-                cards::tool_group(
-                    &row.id,
-                    &tools,
-                    open,
-                    live,
-                    &theme,
-                    cx.listener(move |this, _, _, cx| this.toggle_group(&id, cx)),
-                    move |blob, cx| {
-                        state.update(cx, |s, cx| match blob {
-                            Some(key) => {
-                                s.fetch_blob(key.clone(), false, cx);
-                                s.open_details(DetailsTarget::Blob(key), cx);
-                            }
-                            None => s.open_details(
-                                DetailsTarget::Message {
-                                    chat_id: chat_id.clone(),
-                                    message_id: message_id.clone(),
-                                },
-                                cx,
-                            ),
-                        });
-                    },
-                    cx,
-                )
-                .into_any_element()
-            }
-            RowKind::SubagentChip { tool } => {
-                cards::subagent_chip(&tool, &theme).into_any_element()
-            }
-            RowKind::Diff {
-                path,
-                added,
-                removed,
-                blob_ref,
-            } => {
-                let state = self.state.clone();
-                cards::diff_card(&row.id, &path, added, removed, &theme, move |cx| {
-                    let key = blob_ref.clone().unwrap_or_default();
-                    state.update(cx, |s, cx| {
-                        if !key.is_empty() {
-                            s.fetch_blob(key.clone(), false, cx);
-                        }
-                        s.open_details(DetailsTarget::Blob(key), cx);
-                    });
-                })
-                .into_any_element()
-            }
-            RowKind::File {
-                path,
-                lines,
-                blob_ref,
-            } => {
-                let state = self.state.clone();
-                cards::file_card(&row.id, &path, lines, &theme, move |cx| {
-                    let key = blob_ref.clone().unwrap_or_default();
-                    state.update(cx, |s, cx| {
-                        if !key.is_empty() {
-                            s.fetch_blob(key.clone(), false, cx);
-                        }
-                        s.open_details(DetailsTarget::Blob(key), cx);
-                    });
-                })
-                .into_any_element()
-            }
-            RowKind::Browser {
-                title,
-                url,
-                last_action,
-                live,
-            } => {
-                if live {
-                    PulseClock::request(cx);
-                }
-                let state = self.state.clone();
-                cards::browser_card(
-                    &row.id,
-                    &title,
-                    &url,
-                    &last_action,
-                    live,
-                    &theme,
-                    move |cx| {
-                        state.update(cx, |s, cx| {
-                            if !s.right_panel_open {
-                                s.toggle_right_panel(cx);
-                            }
-                        });
-                    },
-                )
-                .into_any_element()
+            RowKind::Working { label } => {
+                PulseClock::request(cx);
+                cards::working_row(&label, &theme, cx).into_any_element()
             }
             RowKind::Error { code, message } => {
                 let state = self.state.clone();
@@ -640,40 +442,29 @@ fn block_text_len(block: &Block) -> usize {
     }
 }
 
-fn tool_view(part: &Part) -> Option<ToolView> {
-    match part {
-        Part::Tool {
-            call,
-            output_summary,
-            output_ref,
-            is_error,
-            status,
-            duration_ms,
-            subagent_name,
-            ..
-        } => Some(ToolView {
-            input_line: call.input_line(),
-            call: call.clone(),
-            output_summary: output_summary.clone(),
-            output_ref: output_ref.clone(),
-            is_error: *is_error,
-            status: *status,
-            duration_ms: *duration_ms,
-            subagent_name: subagent_name.clone(),
-        }),
-        Part::Text { .. }
-        | Part::Reasoning { .. }
-        | Part::Attachment { .. }
-        | Part::Error { .. }
-        | Part::Status { .. }
-        | Part::Diff { .. }
-        | Part::File { .. }
-        | Part::Browser { .. }
-        | Part::Unknown => None,
-    }
+/// A text block that is really machine output (a JSON object/array) is not
+/// prose; it belongs in the Details drawer, never in the transcript.
+fn is_json_block(block: &Block) -> bool {
+    let text = match block {
+        Block::Paragraph(t) => t.as_str(),
+        Block::Code { lang, code } if lang.is_empty() || lang.eq_ignore_ascii_case("json") => {
+            code.as_str()
+        }
+        Block::Code { .. }
+        | Block::Heading { .. }
+        | Block::Bullets(_)
+        | Block::Numbered(_)
+        | Block::Table { .. } => return false,
+    };
+    let t = text.trim();
+    (t.starts_with('{') || t.starts_with('['))
+        && serde_json::from_str::<serde_json::Value>(t).is_ok()
 }
 
-pub fn build_rows(messages: &[Message], expanded: &HashSet<String>) -> Vec<Row> {
+/// Grok-bot transcript: prose only. Tool calls, raw JSON, status events,
+/// return contracts and cards never render here (the Details drawer has
+/// them); a streaming turn shows one minimal working line instead.
+pub fn build_rows(messages: &[Message]) -> Vec<Row> {
     let mut rows = Vec::new();
     for message in messages {
         let streaming = message.is_streaming();
@@ -705,95 +496,13 @@ pub fn build_rows(messages: &[Message], expanded: &HashSet<String>) -> Vec<Row> 
                     .parts
                     .iter()
                     .rposition(|p| matches!(p, Part::Text { .. }));
-                let mut pending_tools: Vec<(String, ToolView)> = Vec::new();
-                let mut tool_starts: Vec<String> = message
-                    .parts
-                    .iter()
-                    .filter_map(|p| match p {
-                        Part::Status {
-                            code: StatusKind::ToolStart,
-                            message: text,
-                            ..
-                        } => Some(text.clone()),
-                        _ => None,
-                    })
-                    .collect();
-                let flush_tools =
-                    |pending: &mut Vec<(String, ToolView)>, rows: &mut Vec<Row>, live: bool| {
-                        if pending.is_empty() {
-                            return;
-                        }
-                        let first_id = pending[0].0.clone();
-                        let tools: Vec<ToolView> = pending.drain(..).map(|(_, t)| t).collect();
-                        let id = format!("{}#{}.tools", message.id, first_id);
-                        let open = expanded.contains(&id);
-                        let digest: Vec<(String, Option<ToolStatus>, String)> = tools
-                            .iter()
-                            .map(|t| (t.call.id.clone(), t.status, t.output_summary.clone()))
-                            .collect();
-                        rows.push(Row {
-                            version: hash_version(&(digest, open), live),
-                            id,
-                            message_id: message.id.clone(),
-                            kind: RowKind::ToolGroup { tools, live },
-                        });
-                    };
                 for (pix, part) in message.parts.iter().enumerate() {
-                    let live_part = streaming && pix + 1 == message.parts.len();
-                    match part {
-                        Part::Tool {
-                            id, subagent_name, ..
-                        } => {
-                            if let Some(mut view) = tool_view(part) {
-                                if view.input_line.is_empty() {
-                                    if let Some(ix) = tool_starts
-                                        .iter()
-                                        .position(|t| t.starts_with(&view.call.name))
-                                    {
-                                        let text = tool_starts.remove(ix);
-                                        view.input_line =
-                                            text[view.call.name.len()..].trim().to_string();
-                                    }
-                                }
-                                if subagent_name.is_some() {
-                                    flush_tools(&mut pending_tools, &mut rows, false);
-                                    let row_id = format!("{}#{}", message.id, id);
-                                    rows.push(Row {
-                                        version: hash_version(&(&view.call.id, view.status), false),
-                                        id: row_id,
-                                        message_id: message.id.clone(),
-                                        kind: RowKind::SubagentChip { tool: view },
-                                    });
-                                } else {
-                                    pending_tools.push((id.clone(), view));
-                                }
-                            }
-                            continue;
-                        }
-                        Part::Status {
-                            code: StatusKind::ToolStart,
-                            ..
-                        } if message.parts[pix + 1..].iter().any(|p| {
-                            matches!(
-                                p,
-                                Part::Tool { .. } | Part::Text { .. } | Part::Error { .. }
-                            )
-                        }) =>
-                        {
-                            // Superseded progress card: keep the fold open across it.
-                            continue;
-                        }
-                        _ => {
-                            let group_live = streaming
-                                && message.parts[pix..]
-                                    .iter()
-                                    .all(|p| matches!(p, Part::Tool { .. }));
-                            flush_tools(&mut pending_tools, &mut rows, group_live);
-                        }
-                    }
                     match part {
                         Part::Text { id, text } => {
-                            let blocks = split_blocks(text);
+                            let blocks: Vec<Block> = split_blocks(text)
+                                .into_iter()
+                                .filter(|b| !is_json_block(b))
+                                .collect();
                             let is_last_text = Some(pix) == last_text_part;
                             let n = blocks.len();
                             for (bix, block) in blocks.into_iter().enumerate() {
@@ -806,71 +515,26 @@ pub fn build_rows(messages: &[Message], expanded: &HashSet<String>) -> Vec<Row> 
                                 });
                             }
                         }
-                        Part::Reasoning { id, reasoning } => {
-                            let live = live_part;
-                            let row_id = format!("{}#{}", message.id, id);
-                            let open = expanded.contains(&row_id);
-                            rows.push(Row {
-                                version: hash_version(&(reasoning, open), live),
-                                id: row_id,
-                                message_id: message.id.clone(),
-                                kind: RowKind::Reasoning {
-                                    text: reasoning.clone(),
-                                    live,
-                                },
-                            });
-                        }
                         Part::Status {
                             id,
-                            code,
+                            code: StatusKind::AskUser,
                             message: text,
-                        } => {
-                            // "Deciding…" lives only until the first real part (S4 → S5/S6/S7).
-                            if *code == StatusKind::Deciding
-                                && (!streaming || pix + 1 < message.parts.len())
-                            {
-                                continue;
-                            }
-                            // A `tool_start` card is replaced by the tool part that follows it (S17).
-                            if *code == StatusKind::ToolStart
-                                && message.parts[pix + 1..].iter().any(|p| {
-                                    matches!(
-                                        p,
-                                        Part::Tool { .. } | Part::Text { .. } | Part::Error { .. }
-                                    )
-                                })
-                            {
-                                continue;
-                            }
-                            let live = streaming
-                                && matches!(
-                                    code,
-                                    StatusKind::Deciding
-                                        | StatusKind::SubagentWorking
-                                        | StatusKind::ToolStart
-                                );
-                            let kind = match code {
-                                StatusKind::Note | StatusKind::Handoff => {
-                                    RowKind::Note { text: text.clone() }
-                                }
-                                StatusKind::Deciding
-                                | StatusKind::SubagentWorking
-                                | StatusKind::SubagentDone
-                                | StatusKind::ToolStart
-                                | StatusKind::AskUser
-                                | StatusKind::Other => RowKind::Status {
-                                    code: *code,
-                                    text: text.clone(),
-                                    live,
-                                },
-                            };
-                            rows.push(Row {
-                                version: hash_version(&(text, *code as u8), live),
-                                id: format!("{}#{}", message.id, id),
-                                message_id: message.id.clone(),
-                                kind,
-                            });
-                        }
+                        } => rows.push(Row {
+                            version: hash_version(text, false),
+                            id: format!("{}#{}", message.id, id),
+                            message_id: message.id.clone(),
+                            kind: RowKind::AskUser { text: text.clone() },
+                        }),
+                        Part::Status {
+                            id,
+                            code: StatusKind::Note,
+                            message: text,
+                        } => rows.push(Row {
+                            version: hash_version(text, false),
+                            id: format!("{}#{}", message.id, id),
+                            message_id: message.id.clone(),
+                            kind: RowKind::Note { text: text.clone() },
+                        }),
                         Part::Error {
                             id,
                             code,
@@ -884,60 +548,28 @@ pub fn build_rows(messages: &[Message], expanded: &HashSet<String>) -> Vec<Row> 
                                 message: text.clone(),
                             },
                         }),
-                        Part::Diff {
-                            id,
-                            path,
-                            added,
-                            removed,
-                            blob_ref,
-                        } => rows.push(Row {
-                            version: hash_version(&(path, added, removed), false),
-                            id: format!("{}#{}", message.id, id),
-                            message_id: message.id.clone(),
-                            kind: RowKind::Diff {
-                                path: path.clone(),
-                                added: *added,
-                                removed: *removed,
-                                blob_ref: blob_ref.clone(),
-                            },
-                        }),
-                        Part::File {
-                            id,
-                            path,
-                            lines,
-                            blob_ref,
-                        } => rows.push(Row {
-                            version: hash_version(&(path, lines), false),
-                            id: format!("{}#{}", message.id, id),
-                            message_id: message.id.clone(),
-                            kind: RowKind::File {
-                                path: path.clone(),
-                                lines: *lines,
-                                blob_ref: blob_ref.clone(),
-                            },
-                        }),
-                        Part::Browser {
-                            id,
-                            title,
-                            url,
-                            last_action,
-                            live,
-                        } => rows.push(Row {
-                            version: hash_version(&(title, url, last_action), *live),
-                            id: format!("{}#{}", message.id, id),
-                            message_id: message.id.clone(),
-                            kind: RowKind::Browser {
-                                title: title.clone(),
-                                url: url.clone(),
-                                last_action: last_action.clone(),
-                                live: *live,
-                            },
-                        }),
-                        Part::Attachment { .. } | Part::Unknown | Part::Tool { .. } => {}
+                        // Everything the agent did, not said: Details drawer only.
+                        Part::Status { .. }
+                        | Part::Tool { .. }
+                        | Part::Reasoning { .. }
+                        | Part::Diff { .. }
+                        | Part::File { .. }
+                        | Part::Browser { .. }
+                        | Part::Attachment { .. }
+                        | Part::Unknown => {}
                     }
                 }
-                flush_tools(&mut pending_tools, &mut rows, streaming);
-                if !streaming && message.role == Role::Assistant {
+                if streaming {
+                    let label = message
+                        .working_label()
+                        .unwrap_or_else(|| "Working…".to_string());
+                    rows.push(Row {
+                        version: hash_version(&label, true),
+                        id: format!("{}#working", message.id),
+                        message_id: message.id.clone(),
+                        kind: RowKind::Working { label },
+                    });
+                } else if message.role == Role::Assistant {
                     let meta = meta_line(message);
                     if !meta.is_empty() {
                         rows.push(Row {

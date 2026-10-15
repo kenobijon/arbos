@@ -33,6 +33,9 @@ pub struct Shell {
     focus_handle: FocusHandle,
     settings_open: bool,
     shake_started_at: Option<u64>,
+    tab_scroll: gpui::ScrollHandle,
+    /// Tab index to scroll into view on the next frame (new/selected tab).
+    reveal_tab: Option<usize>,
 }
 
 impl Shell {
@@ -86,6 +89,8 @@ impl Shell {
             focus_handle: cx.focus_handle(),
             settings_open: false,
             shake_started_at: None,
+            tab_scroll: gpui::ScrollHandle::new(),
+            reveal_tab: None,
         }
     }
 
@@ -273,26 +278,33 @@ impl Shell {
             tiles = tiles.child(tile);
         }
 
+        // Bottom controls: same footprint and spacing as the tiles, centred on
+        // the same axis (§3.3).
+        let bottom_button = |id: &'static str, glyph: &'static str, size_px: f32, theme: &Theme| {
+            div()
+                .id(id)
+                .w(px(if collapsed { 36.0 } else { RAIL_TILE }))
+                .h(px(32.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(PANEL_RADIUS))
+                .text_size(px(size_px))
+                .text_color(theme.text_muted)
+                .hover(|s| s.bg(theme.surface_2).text_color(theme.text))
+                .cursor_pointer()
+                .child(glyph)
+        };
         let bottom = div()
             .flex()
             .flex_col()
             .items_center()
-            .gap(px(8.0))
-            .pb(px(14.0))
+            .gap(px(10.0))
+            .pt(px(6.0))
+            .pb(px(12.0))
             .child(
-                div()
-                    .id("rail-new-project")
-                    .size(px(28.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(6.0))
-                    .text_size(px(18.0))
-                    .text_color(theme.text_muted)
-                    .hover(|s| s.bg(theme.surface_2))
-                    .cursor_pointer()
-                    .child("+")
-                    .on_click(cx.listener(|this, _, window, cx| {
+                bottom_button("rail-new-project", "+", 20.0, &theme).on_click(cx.listener(
+                    |this, _, window, cx| {
                         let open = !this.state.read(cx).new_project_open;
                         this.state.update(cx, |s, cx| {
                             s.new_project_open = open;
@@ -302,25 +314,16 @@ impl Shell {
                             let handle = this.project_input.read(cx).focus_handle(cx);
                             window.focus(&handle, cx);
                         }
-                    })),
+                    },
+                )),
             )
             .child(
-                div()
-                    .id("rail-settings")
-                    .size(px(28.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(6.0))
-                    .text_size(px(15.0))
-                    .text_color(theme.text_muted)
-                    .hover(|s| s.bg(theme.surface_2))
-                    .cursor_pointer()
-                    .child("⚙")
-                    .on_click(cx.listener(|this, _, _, cx| {
+                bottom_button("rail-settings", "⚙", 17.0, &theme).on_click(cx.listener(
+                    |this, _, _, cx| {
                         this.settings_open = !this.settings_open;
                         cx.notify();
-                    })),
+                    },
+                )),
             );
 
         div()
@@ -370,6 +373,13 @@ impl Shell {
             PulseClock::request(cx);
         }
 
+        let tab_count = tabs.len();
+        // The strip holds only the closable tabs; the pinned tab stays put.
+        let active_ix = tabs
+            .iter()
+            .position(|(_, active, _)| *active)
+            .map(|ix| ix.saturating_sub(1));
+        let mut pinned_tab = None;
         let mut strip = div()
             .id("tab-strip")
             .flex()
@@ -377,7 +387,13 @@ impl Shell {
             .min_w_0()
             .items_center()
             .gap(px(2.0))
-            .overflow_x_scroll();
+            .overflow_x_scroll()
+            .track_scroll(&self.tab_scroll);
+        if let Some(ix) = self.reveal_tab.map(|ix| ix.saturating_sub(1)).or(active_ix) {
+            // Items in the strip: closable tabs then "+"; clamp to the last tab.
+            self.tab_scroll
+                .scroll_to_item(ix.min(tab_count.saturating_sub(2)));
+        }
         for (chat, active, streaming) in tabs {
             let id = chat.id.clone();
             let close_id = chat.id.clone();
@@ -395,12 +411,9 @@ impl Shell {
                 .items_center()
                 .gap(px(6.0))
                 .h(px(28.0))
-                .flex_shrink_0()
-                .min_w(px(if chat.is_pinned {
-                    0.0
-                } else {
-                    TAB_MIN_WIDTH.min(96.0)
-                }))
+                .when(!chat.is_pinned, |el| el.w(px(176.0)).flex_shrink(1.0))
+                .when(chat.is_pinned, |el| el.flex_shrink_0())
+                .min_w(px(if chat.is_pinned { 0.0 } else { TAB_MIN_WIDTH }))
                 .px(px(10.0))
                 .rounded(px(7.0))
                 .bg(if active {
@@ -482,8 +495,41 @@ impl Shell {
                         })),
                 );
             }
-            strip = strip.child(tab);
+            if chat.is_pinned {
+                pinned_tab = Some(tab);
+            } else {
+                strip = strip.child(tab);
+            }
         }
+        // "+" sits right after the last tab (§3.4), inside the scrolling strip.
+        strip = strip.child(
+            div()
+                .id("new-tab")
+                .flex_shrink_0()
+                .size(px(26.0))
+                .ml(px(2.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(6.0))
+                .text_size(px(18.0))
+                .text_color(theme.text_muted)
+                .hover(|s| s.bg(theme.surface_2))
+                .cursor_pointer()
+                .child("+")
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.state.update(cx, |s, cx| s.new_tab(cx));
+                    let n = this
+                        .state
+                        .read(cx)
+                        .selected_project
+                        .as_deref()
+                        .map(|p| this.state.read(cx).tabs(p).len())
+                        .unwrap_or(1);
+                    this.reveal_tab = Some(n.saturating_sub(1));
+                    Composer::focus(&this.composer, window, cx);
+                })),
+        );
 
         let icon_button = |id: &'static str, glyph: &'static str, active: bool, theme: &Theme| {
             div()
@@ -519,6 +565,7 @@ impl Shell {
                     },
                 )),
             )
+            .children(pinned_tab)
             .child(strip)
             .child(
                 icon_button("panel-toggle", "▣", panel_open, &theme).on_click(cx.listener(
@@ -526,14 +573,6 @@ impl Shell {
                         this.state.update(cx, |s, cx| s.toggle_right_panel(cx));
                     },
                 )),
-            )
-            .child(
-                icon_button("new-tab", "+", false, &theme)
-                    .text_size(px(18.0))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.state.update(cx, |s, cx| s.new_tab(cx));
-                        Composer::focus(&this.composer, window, cx);
-                    })),
             )
     }
 
@@ -998,8 +1037,7 @@ impl Shell {
                     }
                     sections.push(("Context pack · tokens".into(), tokens));
                     let pulls: Vec<(String, String)> = m
-                        .parts
-                        .iter()
+                        .tool_parts()
                         .filter_map(|p| match p {
                             crate::model::Part::Tool {
                                 call,
@@ -1017,6 +1055,20 @@ impl Shell {
                         })
                         .collect();
                     sections.push(("Pull log · tool calls".into(), pulls));
+                    let steps: Vec<(String, String)> = m
+                        .parts
+                        .iter()
+                        .chain(m.hidden_parts.iter())
+                        .filter_map(|p| match p {
+                            crate::model::Part::Status { code, message, .. } => {
+                                Some((format!("{code:?}").to_lowercase(), message.clone()))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    if !steps.is_empty() {
+                        sections.push(("Steps · status events".into(), steps));
+                    }
                     if let Some(c) = &m.return_contract {
                         sections.push(("Return contract".into(), json_rows(c)));
                     }
@@ -1604,6 +1656,7 @@ impl Render for Shell {
         root = root
             .child(frosted(0.0, PANEL_BLUR, self.render_rail(collapsed, cx)))
             .child(self.render_center(cx));
+        self.reveal_tab = None;
         if panel_open {
             root = root.child(self.render_right_panel(cx));
         }

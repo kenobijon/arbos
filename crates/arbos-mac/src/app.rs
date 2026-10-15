@@ -53,12 +53,20 @@ pub enum AppEvent {
 /// What the composer should look like for the active chat (§3.10).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ComposerMode {
-    /// Send arrow.
+    /// Send arrow. Sending is always allowed: the agent multitasks, and a
+    /// running turn shows as a small indicator with its own Stop.
     Send,
-    /// A turn is running: stop square.
-    Stop,
     /// S8: the agent asked a question.
     Answer,
+}
+
+/// One running thing shown as a small indicator above the composer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunningTask {
+    pub label: String,
+    /// True when it is a turn in this chat (Stop applies); false for a
+    /// project subagent still working elsewhere.
+    pub stoppable: bool,
 }
 
 /// Per-chat UI state kept across tab switches.
@@ -411,13 +419,44 @@ impl AppState {
     }
 
     pub fn composer_mode(&self, chat_id: &str) -> ComposerMode {
-        if self.chat_is_streaming(chat_id) {
-            ComposerMode::Stop
-        } else if self.chat_needs_answer(chat_id) {
+        if self.chat_needs_answer(chat_id) {
             ComposerMode::Answer
         } else {
             ComposerMode::Send
         }
+    }
+
+    /// Streaming turns in this chat plus project subagents still running.
+    pub fn running_tasks(&self, chat_id: &str) -> Vec<RunningTask> {
+        let mut out: Vec<RunningTask> = self
+            .messages_of(chat_id)
+            .iter()
+            .filter(|m| m.is_streaming() && m.role == Role::Assistant)
+            .map(|m| RunningTask {
+                label: m.working_label().unwrap_or_else(|| "Working…".to_string()),
+                stoppable: true,
+            })
+            .collect();
+        if let Some(doc) = self.selected_doc() {
+            for t in doc
+                .threads
+                .iter()
+                .filter(|t| matches!(t.status.as_str(), "running" | "working" | "waiting_user"))
+            {
+                let label = if t.purpose.is_empty() {
+                    t.name.clone()
+                } else {
+                    format!("{} · {}", t.name, t.purpose)
+                };
+                if !out.iter().any(|x| x.label == label) {
+                    out.push(RunningTask {
+                        label,
+                        stoppable: false,
+                    });
+                }
+            }
+        }
+        out
     }
 
     pub fn chat_ui(&self, chat_id: &str) -> ChatUi {
@@ -588,6 +627,7 @@ impl AppState {
                 completed_at: None,
                 pending: true,
                 parts,
+                hidden_parts: Vec::new(),
             });
         if answer {
             self.command(ClientCommand::Answer {
