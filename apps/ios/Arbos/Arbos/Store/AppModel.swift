@@ -46,12 +46,37 @@ final class AppModel: ObservableObject {
     }
 
     @Published private(set) var credentials: DeviceCredentials?
-    @Published private(set) var projects: [Project] = []
-    @Published private(set) var chats: [Id: [Chat]] = [:]
-    @Published private(set) var messages: [Id: [Message]] = [:]
-    @Published private(set) var caughtUp: Set<Id> = []
-    @Published private(set) var link: Link = .connecting
+    @Published var projects: [Project] = []
+    @Published var chats: [Id: [Chat]] = [:]
+    @Published var messages: [Id: [Message]] = [:]
+    @Published var caughtUp: Set<Id> = []
+    @Published var link: Link = .connecting
     @Published private(set) var models: [String] = []
+    @Published var machine: Machine = .unknown
+    @Published private(set) var machineBusy = false
+    /// Navigation: home → chat. Shared so menus anywhere can open a chat.
+    @Published var path: [Route] = []
+    /// True when the Debug fixture replaced the relay (screenshots).
+    var isFixture = false
+    /// Debug demo tours run once per process, whichever view instance starts them.
+    var demoStarted = false
+
+    enum Route: Hashable {
+        case chat(chatId: Id, projectId: Id)
+    }
+
+    func open(chat: Chat) {
+        path = [.chat(chatId: chat.id, projectId: chat.projectId)]
+    }
+
+    func open(project: Project) {
+        if let chat = mainChat(of: project.id) {
+            open(chat: chat)
+        } else {
+            Task { if let c = await newChat(projectId: project.id) { open(chat: c) } }
+        }
+    }
+    @Published private(set) var machineError: String?
     @Published var notice: Notice?
     @Published private(set) var pairingBusy = false
     @Published private(set) var pairingError: String?
@@ -80,6 +105,14 @@ final class AppModel: ObservableObject {
             creds = DeviceCredentials(relayUrl: RelayEndpoint(saved).httpUrl, deviceId: env["ARBOS_DEVICE_ID"] ?? "ios:env", deviceToken: tok)
         }
         #endif
+        #if DEBUG
+        if env["ARBOS_FIXTURE"] == "1" {
+            api = RelayAPI(endpoint: RelayEndpoint("http://fixture.invalid")) { "" }
+            credentials = DeviceCredentials(relayUrl: "http://fixture.invalid", deviceId: "ios:fixture", deviceToken: "fixture")
+            loadFixture()
+            return
+        }
+        #endif
         let endpoint = RelayEndpoint(saved)
         if !endpoint.httpUrl.isEmpty {
             UserDefaults.standard.set(endpoint.httpUrl, forKey: "relayUrl")
@@ -101,12 +134,27 @@ final class AppModel: ObservableObject {
         let endpoint = RelayEndpoint(raw)
         UserDefaults.standard.set(endpoint.httpUrl, forKey: "relayUrl")
         guard endpoint != api.endpoint else { return }
+        let previous = credentials
         unpair(forget: false)
         api = RelayAPI(endpoint: endpoint) { [weak self] in self?.credentials?.deviceToken ?? "" }
         credentials = Keychain.load(relayUrl: endpoint.httpUrl)
         if credentials != nil {
             startAfterPairing()
+        } else if let previous {
+            // A quick-tunnel URL changes while the relay (and this device's
+            // token) stays the same: try the old token on the new address
+            // before asking for a pairing code.
+            Task { await adopt(previous, at: endpoint) }
         }
+    }
+
+    private func adopt(_ old: DeviceCredentials, at endpoint: RelayEndpoint) async {
+        let probe = RelayAPI(endpoint: endpoint) { old.deviceToken }
+        guard (try? await probe.registry()) != nil else { return }
+        let creds = DeviceCredentials(relayUrl: endpoint.httpUrl, deviceId: old.deviceId, deviceToken: old.deviceToken)
+        try? Keychain.store(creds)
+        credentials = creds
+        startAfterPairing()
     }
 
     func pair(code: String) {
@@ -195,8 +243,14 @@ final class AppModel: ObservableObject {
                 }
                 newChats[p.id] = AppModel.sorted(mine)
             }
+            for i in newProjects.indices {
+                if let prev = projects.first(where: { $0.id == newProjects[i].id }) {
+                    newProjects[i].workspace = prev.workspace
+                }
+            }
             projects = newProjects.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
             chats = newChats
+            await refreshMachine()
             for p in newProjects {
                 ensureRoom(projectId: p.id, key: projectDocKey(p.id), roomChat: projectDocChatId)
             }
@@ -313,26 +367,115 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// `settings.modelNote` from the project doc (crdt-sync §6.3). The box
-    /// state comes from the relay (registry + STATUS frames) only: an asleep
-    /// box cannot rewrite its own stale `status.box = awake`.
+    /// Project doc (crdt-sync §6.3): `settings.modelNote`, plus the D70
+    /// mirrors `status.workspace {state, since}` and `status.box {state, since}`.
+    /// The machine itself comes from `GET /machine`; the doc only refines the
+    /// workspace dot between polls.
     private func applyProjectDoc(_ projectId: Id) {
         guard let doc = docs[projectDocKey(projectId)] else { return }
         let settings = doc.mapValue("settings")
         let note = settings["modelNote"] as? String ?? ""
-        if let i = projects.firstIndex(where: { $0.id == projectId }), projects[i].modelNote != note {
-            projects[i].modelNote = note
+        let status = doc.mapValue("status")
+        let workspace = WorkspaceState.from((status["workspace"] as? [String: Any])?["state"] as? String)
+        if let i = projects.firstIndex(where: { $0.id == projectId }) {
+            if projects[i].modelNote != note { projects[i].modelNote = note }
+            if workspace != .unknown, projects[i].workspace != workspace { projects[i].workspace = workspace }
         }
     }
 
     private func setProjectState(_ projectId: Id, _ state: BoxState, detail: String?) {
         guard let i = projects.firstIndex(where: { $0.id == projectId }) else { return }
         if projects[i].state == state && projects[i].stateDetail == detail { return }
+        if projects[i].state != state { projects[i].stateSince = nowMs() }
         projects[i].state = state
         projects[i].stateDetail = detail
+        // Room STATUS frames report the user's box (D70): the machine moved too.
+        if machine.reported, machine.state != state, state != .error {
+            machine.state = state
+            machine.since = nowMs()
+        }
+    }
+
+    /// `GET /machine`: state, since, spec, spend and the workspace states.
+    func refreshMachine() async {
+        do {
+            let m = try await api.machine()
+            machineError = nil
+            if m != machine { machine = m }
+            for i in projects.indices {
+                if let w = m.workspaces[projects[i].id], projects[i].workspace != w { projects[i].workspace = w }
+            }
+        } catch {
+            if (error as? RelayError)?.status == 404 {
+                machineError = "This relay has no machine API yet"
+            } else {
+                machineError = error.localizedDescription
+            }
+        }
+    }
+
+    /// Machine-level error text (relay error or the machine's own state detail).
+    var machineDetail: String? {
+        if machine.state == .error {
+            return projects.first { $0.state == .error }?.stateDetail ?? machineError
+        }
+        return nil
+    }
+
+    // MARK: Machine control (D70: one call for the whole box)
+
+    func startMachine() {
+        guard !machineBusy else { return }
+        machineBusy = true
+        machine.state = .waking
+        machine.since = nowMs()
+        Task {
+            defer { machineBusy = false }
+            do {
+                try await api.startMachine()
+            } catch {
+                notice = Notice(text: "Start failed: \(error.localizedDescription)")
+                machine.state = .error
+                machineError = error.localizedDescription
+            }
+            await refreshMachine()
+        }
+    }
+
+    func stopMachine() {
+        guard !machineBusy else { return }
+        machineBusy = true
+        Task {
+            defer { machineBusy = false }
+            do {
+                try await api.stopMachine()
+                machine.state = .stoppedByUser
+                machine.since = nowMs()
+            } catch {
+                notice = Notice(text: "Stop failed: \(error.localizedDescription)")
+            }
+            await refreshMachine()
+        }
     }
 
     // MARK: Lookups
+
+    /// Relay blob URL with the device token as a query parameter (the relay
+    /// accepts `?token=` on every route), so AVPlayer and Safari can open it.
+    func blobURL(projectId: Id, key: String) -> URL? {
+        let base = api.endpoint.httpUrl
+        guard !base.isEmpty else { return nil }
+        return URL(string: "\(base)/blob/\(projectId)/\(key)?token=\(credentials?.deviceToken ?? "")")
+    }
+
+    var authHeaders: [String: String] {
+        ["Authorization": "Bearer \(credentials?.deviceToken ?? "")"]
+    }
+
+    /// Pinned ("main") chat of a project, the one the agent list opens.
+    func mainChat(of projectId: Id) -> Chat? {
+        chats(of: projectId).first { $0.isPinned } ?? chats(of: projectId).first
+    }
 
     func project(_ id: Id) -> Project? { projects.first { $0.id == id } }
 
@@ -369,20 +512,59 @@ final class AppModel: ObservableObject {
 
     // MARK: Commands (crdt-sync §6.2: the client writes rows and commands)
 
-    func send(chatId: Id, text: String) {
-        write(chatId: chatId, text: text, command: "send")
+    /// An attachment staged in the composer, uploaded on send.
+    struct PendingAttachment: Identifiable, Equatable {
+        let id = UUID()
+        var name: String
+        var mime: String
+        var data: Data
+    }
+
+    func send(chatId: Id, text: String, attachments: [PendingAttachment] = []) {
+        if attachments.isEmpty {
+            write(chatId: chatId, text: text, command: "send", attachments: [])
+            return
+        }
+        guard let chat = chat(chatId) else { return }
+        if isFixture {
+            write(chatId: chatId, text: text, command: "send", attachments: attachments.map { Attachment(name: $0.name, mime: $0.mime, blobRef: nil) })
+            return
+        }
+        Task {
+            var uploaded: [Attachment] = []
+            for a in attachments {
+                let key = "att-\(newId().lowercased())-\(AppModel.safeName(a.name))"
+                do {
+                    _ = try await api.putBlob(projectId: chat.projectId, key: key, mime: a.mime, data: a.data)
+                    uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: key))
+                } catch {
+                    notice = Notice(text: "Attachment upload failed: \(error.localizedDescription)")
+                    uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: nil))
+                }
+            }
+            write(chatId: chatId, text: text, command: "send", attachments: uploaded)
+        }
+    }
+
+    static func safeName(_ name: String) -> String {
+        String(name.map { $0.isLetter || $0.isNumber || $0 == "." || $0 == "-" || $0 == "_" ? $0 : "_" })
     }
 
     func answer(chatId: Id, text: String) {
-        write(chatId: chatId, text: text, command: "answer")
+        write(chatId: chatId, text: text, command: "answer", attachments: [])
     }
 
-    private func write(chatId: Id, text: String, command: String) {
-        guard let doc = docs[chatId], let chat = chat(chatId) else { return }
+    private func write(chatId: Id, text: String, command: String, attachments: [Attachment]) {
+        guard let doc = docs[chatId], let chat = chat(chatId) else {
+            #if DEBUG
+            if isFixture { fixtureAppend(chatId: chatId, text: text, attachments: attachments) }
+            #endif
+            return
+        }
         let messageId = newId()
         unacked.insert(messageId)
         do {
-            try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId)
+            try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: attachments)
             try doc.pushCommand(command, payload: ["messageId": messageId], device: deviceId)
             if !chat.isPinned && chat.title == "New chat" {
                 let title = AppModel.title(from: text)
@@ -433,14 +615,18 @@ final class AppModel: ObservableObject {
 
     func wake(projectId: Id, reason: String) {
         rooms[projectDocKey(projectId)]?.wake(reason: reason)
-        setProjectState(projectId, .waking, detail: "Waking sandbox…")
+        setProjectState(projectId, .waking, detail: nil)
+        machine.state = .waking
+        machine.since = nowMs()
         Task {
             do {
                 try await api.wake(projectId: projectId)
             } catch {
                 notice = Notice(text: "Wake failed: \(error.localizedDescription)")
                 setProjectState(projectId, .error, detail: error.localizedDescription)
+                machine.state = .error
             }
+            await refreshMachine()
         }
     }
 

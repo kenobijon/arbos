@@ -130,6 +130,7 @@ final class RelayAPI {
                 icon: p["icon"] as? String ?? "Ω",
                 color: p["color"] as? String ?? "#8b7cf6",
                 state: BoxState.from(state: p["state"] as? String ?? "", box: boxField),
+                stateSince: (detail["box_since"] as? NSNumber)?.int64Value ?? (p["box_since"] as? NSNumber)?.int64Value,
                 stateDetail: nil,
                 model: talking["id"] as? String ?? "anthropic/claude-haiku-5.5",
                 effort: Effort.from(talking["effort"] as? String),
@@ -183,6 +184,47 @@ final class RelayAPI {
         _ = try await json("POST", "/projects/\(projectId)/wake", body: [String: Any]())
     }
 
+    // MARK: Machine (D70: one box per user, projects are workspaces on it)
+
+    /// `GET /machine` → the caller's one box and its workspaces.
+    func machine() async throws -> Machine {
+        guard let m = try await json("GET", "/machine") as? [String: Any] else {
+            throw RelayError(status: 0, message: "Bad /machine response")
+        }
+        let spec = m["spec"] as? [String: Any] ?? [:]
+        var workspaces: [Id: WorkspaceState] = [:]
+        for w in (m["workspaces"] as? [Any]) ?? [] {
+            if let w = w as? [String: Any], let pid = w["project_id"] as? String {
+                workspaces[pid] = WorkspaceState.from(w["state"] as? String)
+            }
+        }
+        return Machine(
+            state: BoxState.fromWire(m["state"] as? String ?? "") ?? .hibernatedLight,
+            since: (m["since"] as? NSNumber)?.int64Value,
+            spec: Machine.specLine(
+                cpu: (spec["cpu"] as? NSNumber)?.intValue,
+                memGib: (spec["mem_gib"] as? NSNumber)?.intValue,
+                diskGib: (spec["disk_gib"] as? NSNumber)?.intValue,
+                klass: spec["class"] as? String,
+                provider: m["provider"] as? String
+            ),
+            provider: m["provider"] as? String ?? "",
+            sandboxId: m["sandbox_id"] as? String,
+            spendTodayUsd: (m["spend_today_usd"] as? NSNumber)?.doubleValue ?? 0,
+            spendCapUsd: (m["spend_cap_usd"] as? NSNumber)?.doubleValue ?? 0,
+            workspaces: workspaces,
+            reported: true
+        )
+    }
+
+    func startMachine() async throws {
+        _ = try await json("POST", "/machine/start", body: [String: Any]())
+    }
+
+    func stopMachine() async throws {
+        _ = try await json("POST", "/machine/stop", body: [String: Any]())
+    }
+
     /// Model ids the relay proxy can serve, filtered like the Mac client.
     func models() async throws -> [String] {
         let v = try await json("GET", "/proxy/v1/models")
@@ -194,6 +236,24 @@ final class RelayAPI {
         var seen = Set<String>()
         ids = ids.filter { seen.insert($0).inserted }
         return ids
+    }
+
+    /// Upload an attachment to the relay blob mirror; returns the key.
+    func putBlob(projectId: Id, key: String, mime: String, data: Data) async throws -> String {
+        guard let url = URL(string: "\(endpoint.httpUrl)/blob/\(projectId)/\(key)") else {
+            throw RelayError(status: 0, message: "Bad relay URL")
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "PUT"
+        req.setValue("Bearer \(token())", forHTTPHeaderField: "Authorization")
+        req.setValue(mime, forHTTPHeaderField: "Content-Type")
+        req.httpBody = data
+        let (body, response) = try await session.data(for: req)
+        guard let http = response as? HTTPURLResponse, http.statusCode < 400 else {
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            throw RelayError(status: status, message: String(data: body, encoding: .utf8) ?? "")
+        }
+        return key
     }
 
     /// Room checkpoint (crdt-sync §7.3). Returns `(seq, bytes)`.

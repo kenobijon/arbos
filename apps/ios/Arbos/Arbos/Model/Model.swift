@@ -74,6 +74,62 @@ enum Effort: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+/// The user's one cloud computer (D70); projects are workspaces on it.
+/// Reported by `GET /machine`; the project docs mirror `status.box
+/// {state, since}` and `status.workspace {state, since}`.
+struct Machine: Equatable {
+    var state: BoxState
+    var since: Int64?
+    /// Human spec line, e.g. "Daytona · 4 vCPU · 8 GiB · 10 GiB disk · arbos-agent-0.2.0".
+    var spec: String
+    var provider: String = ""
+    var sandboxId: String?
+    var spendTodayUsd: Double = 0
+    var spendCapUsd: Double = 0
+    /// Workspace state per project id.
+    var workspaces: [Id: WorkspaceState] = [:]
+    /// False until the relay has answered `/machine` once.
+    var reported = false
+
+    static let unknown = Machine(state: .hibernatedLight, since: nil, spec: "")
+
+    var label: String {
+        switch state {
+        case .awake: return "Awake"
+        case .waking: return "Waking…"
+        case .hibernatedLight, .hibernatedDeep: return "Sleeping"
+        case .stoppedByUser: return "Stopped"
+        case .error: return "Needs attention"
+        }
+    }
+
+    static func specLine(cpu: Int?, memGib: Int?, diskGib: Int?, klass: String?, provider: String?) -> String {
+        var parts: [String] = []
+        if let provider, !provider.isEmpty { parts.append(provider.prefix(1).uppercased() + provider.dropFirst()) }
+        if let cpu { parts.append("\(cpu) vCPU") }
+        if let memGib { parts.append("\(memGib) GiB") }
+        if let diskGib { parts.append("\(diskGib) GiB disk") }
+        if let klass, !klass.isEmpty { parts.append(klass) }
+        return parts.joined(separator: " · ")
+    }
+}
+
+/// `status.workspace.state` of a project doc: the project's workspace on the machine.
+enum WorkspaceState: String, Equatable {
+    case active, idle, error
+    case unknown
+
+    /// D70 states: running | starting | stopped | error (older docs: active/idle).
+    static func from(_ raw: String?) -> WorkspaceState {
+        switch raw ?? "" {
+        case "running", "starting", "active", "awake", "busy": return .active
+        case "stopped", "idle", "asleep", "sleeping": return .idle
+        case "error", "failed": return .error
+        default: return .unknown
+        }
+    }
+}
+
 struct Project: Identifiable, Equatable {
     var id: Id
     var name: String
@@ -82,6 +138,8 @@ struct Project: Identifiable, Equatable {
     /// Hex `#rrggbb` accent for the selected tile border.
     var color: String
     var state: BoxState
+    /// Relay `box_since` (ms); lets a wake that never finished age out.
+    var stateSince: Int64?
     /// Human text for the S12/S13 banner, e.g. "Restoring from archive…".
     var stateDetail: String?
     var model: String
@@ -90,6 +148,8 @@ struct Project: Identifiable, Equatable {
     var spendCapUsd: Double
     /// `settings.modelNote` from the project doc; empty when every id is valid.
     var modelNote: String = ""
+    /// `status.workspace.state` from the project doc; `.unknown` until the box writes it.
+    var workspace: WorkspaceState = .unknown
 
     var shortModel: String { Project.shortModel(model) }
 
