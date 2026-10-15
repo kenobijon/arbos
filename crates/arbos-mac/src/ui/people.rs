@@ -909,6 +909,7 @@ pub fn members_popover(
             .child(
                 div()
                     .flex_1()
+                    .min_w_0()
                     .text_size(px(10.5))
                     .text_color(theme.text_faint)
                     .child(if space.agents.is_empty() {
