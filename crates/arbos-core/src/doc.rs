@@ -389,11 +389,44 @@ impl ChatDoc {
             part.insert("outputBytes", b).ok();
         }
         part.insert("isError", is_error).ok();
+        // Tool details belong to the Details drawer, not the transcript (demo review item 1).
+        part.insert("hidden", true).ok();
         self.doc.commit();
         Some(part_id)
     }
 
-    /// Add a `status` part (S4 "deciding", S6 subagent card, S17 progress card).
+    /// Add a part the transcript must not render (`hidden: true`): the raw subagent output
+    /// (`kind = "subagent_result"`) or any other drawer-only text. Unknown kinds render empty anyway.
+    pub fn add_hidden_part(
+        &mut self,
+        msg_id: &str,
+        kind: &str,
+        text: &str,
+        extra: &Value,
+    ) -> Option<String> {
+        let m = self.find_message(msg_id)?;
+        let parts = match m.get("parts")? {
+            ValueOrContainer::Container(Container::List(l)) => l,
+            _ => return None,
+        };
+        let part = parts.push_container(LoroMap::new()).ok()?;
+        let part_id = ulid();
+        part.insert("id", part_id.as_str()).ok();
+        part.insert("kind", kind).ok();
+        part.insert("text", text).ok();
+        part.insert("hidden", true).ok();
+        if let Some(o) = extra.as_object() {
+            for (k, v) in o {
+                part.insert(k, json_to_lv(v)).ok();
+            }
+        }
+        self.doc.commit();
+        Some(part_id)
+    }
+
+    /// Add a `status` part. Codes: `deciding`, `queued`, `working`, `step` (short label of one tool
+    /// call), `done`, `failed`, `waiting_user`, `handed_off`. These are the only progress the
+    /// transcript renders; tool parts are `hidden`.
     pub fn add_status_part(&mut self, msg_id: &str, kind: &str, text: &str) -> Option<String> {
         let m = self.find_message(msg_id)?;
         let parts = match m.get("parts")? {

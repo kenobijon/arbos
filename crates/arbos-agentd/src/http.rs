@@ -44,7 +44,7 @@ async fn history(
     let limit = q.get("limit").and_then(|s| s.parse().ok()).unwrap_or(50);
     match a
         .store
-        .t3_thread(&chat_id, None, q.get("before").map(String::as_str), limit)
+        .t3_thread_before(&chat_id, q.get("before").map(String::as_str), limit)
     {
         Ok(rows) => Json(rows).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),

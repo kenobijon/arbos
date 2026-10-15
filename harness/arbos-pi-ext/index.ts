@@ -237,10 +237,15 @@ export default function arbosPiExt(pi: ExtensionAPI) {
           };
         case "wake":
         case "new":
+          // No terminate: the model writes the one-sentence acknowledgement itself (demo review item 2).
           return {
-            content: [{ type: "text", text: `Route accepted: ${action}. Arbos is starting the subagent and will post its result in this chat.` }],
+            content: [
+              {
+                type: "text",
+                text: `Route accepted: ${action}. Arbos runs the subagent in the background and will hand you its result as a later [Arbos] message. Now write one short sentence to the user saying what you handed off, then end the turn. No list, no JSON, no questions.`,
+              },
+            ],
             details: { action },
-            terminate: true,
           };
         default: {
           const never: never = action;

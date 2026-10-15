@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, Mutex, Semaphore};
 
 use arbos_core::doc::{CommandStatus, CommandView, MessageStatus};
 use arbos_core::ids::ulid;
@@ -136,6 +136,26 @@ fn utf8_len(b: u8) -> usize {
     }
 }
 
+/// Subagents running at once per box; further spawns wait in FIFO order (demo review item 2).
+pub const SUBAGENT_MAX_CONCURRENT: usize = 4;
+
+/// Why the main pi session is being prompted.
+#[derive(Debug, Clone)]
+pub enum TurnKind {
+    /// A user message (`send` / `answer`).
+    User,
+    /// A finished subagent's result, relayed to the user in prose by the main agent.
+    SubagentResult { subagent_id: String, name: String },
+}
+
+/// What one main-agent turn produced, for the caller's follow-ups (memory pass, hand-offs).
+pub struct TurnOutcome {
+    pub assistant_msg_id: String,
+    pub route_name: &'static str,
+    pub turn: TurnState,
+    pub result: Result<()>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct TurnMetrics {
     pub ttft_ms: Option<i64>,
@@ -183,6 +203,8 @@ pub struct Agent {
     pub pi_ready: AtomicBool,
     pub ext_loaded: AtomicBool,
     turn_lock: Mutex<()>,
+    /// FIFO gate on concurrent subagent runs (`SUBAGENT_MAX_CONCURRENT`).
+    subagent_slots: Arc<Semaphore>,
     http: reqwest::Client,
     pub settings: crate::settings::Settings,
 }
@@ -228,6 +250,7 @@ impl Agent {
             pi_ready: AtomicBool::new(false),
             ext_loaded: AtomicBool::new(false),
             turn_lock: Mutex::new(()),
+            subagent_slots: Arc::new(Semaphore::new(SUBAGENT_MAX_CONCURRENT)),
             http: reqwest::Client::new(),
             settings: crate::settings::Settings::new(&cfg_for_settings),
         })
@@ -542,18 +565,6 @@ impl Agent {
                     .await;
             }
         }
-        self.ensure_chat_session(chat_id).await?;
-
-        let assistant_msg_id = ulid();
-        let text_part_id = {
-            let mut h = host.lock().await;
-            let pid =
-                h.doc
-                    .start_assistant_message(&assistant_msg_id, &user_msg_id, &self.cfg.device_id);
-            h.doc
-                .add_status_part(&assistant_msg_id, "deciding", "Arbos is deciding…");
-            pid
-        };
         // Answering an open question (S8): mark it answered; pi receives the text as the next prompt.
         let mut prompt_text = user_text.clone();
         if let Ok(Some((ask_id, _, question))) = self.store.open_ask(chat_id) {
@@ -561,123 +572,37 @@ impl Agent {
             prompt_text = format!("Answer to your question \"{question}\": {user_text}");
         }
 
-        *self.turn.lock().await = Some(TurnState {
-            chat_id: chat_id.to_owned(),
-            user_msg_id: user_msg_id.clone(),
-            assistant_msg_id: assistant_msg_id.clone(),
-            text_part_id: text_part_id.clone(),
-            started: Instant::now(),
-            route: None,
-            route_attempts: 0,
-            route_failed: false,
-            escalate: false,
-            asked: None,
-            metrics: TurnMetrics::default(),
-            streamed_text: String::new(),
-            act_transcript: Vec::new(),
-            tool_inputs: HashMap::new(),
-            reply_extractor: ReplyExtractor::default(),
-            route_call_id: None,
-            text_part_dirty: false,
-        });
-        self.turn_running.store(true, Ordering::SeqCst);
-        let keepalive = self.spawn_keepalive();
-        let result = self.run_main_turn(chat_id, host, &prompt_text).await;
-        self.turn_running.store(false, Ordering::SeqCst);
-        keepalive.abort();
+        let outcome = self
+            .drive_turn(chat_id, host, &user_msg_id, &prompt_text, TurnKind::User)
+            .await?;
+        let TurnOutcome {
+            assistant_msg_id,
+            route_name: _,
+            turn,
+            result,
+        } = outcome;
 
-        let turn = self.turn.lock().await.take();
-        let Some(turn) = turn else { return result };
-        let total_ms = turn.started.elapsed().as_millis() as i64;
-        let route_name = turn
-            .route
-            .as_ref()
-            .map(route_name)
-            .unwrap_or(if turn.route_failed { "reply" } else { "none" });
-        let (final_status, err_text) = match &result {
-            Ok(()) => (MessageStatus::Done, None),
-            Err(e) => (MessageStatus::Error, Some(e.to_string())),
-        };
+        // The model acknowledges a hand-off in one sentence (demo review item 2); only when it
+        // wrote nothing at all does agentd fill the gap so the chat never shows a bare route.
+        if matches!(
+            turn.route,
+            Some(ValidRoute::New { .. }) | Some(ValidRoute::Wake { .. })
+        ) && turn.streamed_text.trim().is_empty()
         {
             let mut h = host.lock().await;
-            if let Some(e) = &err_text {
-                h.doc.add_error_part(&assistant_msg_id, "turn_failed", e);
+            if let Some(p) = h.doc.add_text_part(&assistant_msg_id, "text") {
+                h.doc.append_text(
+                    &assistant_msg_id,
+                    &p,
+                    "Handing this to a subagent; I will post its result here.",
+                );
             }
-            h.doc.set_message_fields(
-                &assistant_msg_id,
-                &[
-                    ("decision", json!(route_name)),
-                    ("turn", json!({ "kind": route_name })),
-                    ("model", json!(self.cfg.talking_model)),
-                    ("usage", turn.metrics.usage.clone().unwrap_or(Value::Null)),
-                ],
-            );
-            h.doc.finish_message(&assistant_msg_id, final_status);
-        }
-        if !turn.streamed_text.trim().is_empty() {
-            let _ = self.store.t3_append(
-                chat_id,
-                None,
-                Some(chat_id),
-                "assistant",
-                Some("assistant"),
-                &turn.streamed_text,
-                Some(&json!({ "message_id": assistant_msg_id, "route": route_name })),
-            );
-        }
-        let mut usage_rec = turn.metrics.usage.clone().unwrap_or(json!({}));
-        if turn.metrics.route_missing {
-            usage_rec["route_missing"] = json!(true);
-        }
-        if turn.metrics.route_corrected {
-            usage_rec["route_corrected"] = json!(true);
-        }
-        let _ = self.store.record_turn(
-            chat_id,
-            &user_msg_id,
-            Some(route_name),
-            turn.metrics.ttft_ms,
-            turn.metrics.route_ms,
-            total_ms,
-            turn.metrics.tool_calls,
-            turn.escalate,
-            Some(&usage_rec),
-        );
-        if let Some(ttft) = turn.metrics.ttft_ms {
-            let _ = self
-                .post_timing("main_turn_ttft_ms", ttft, Some(route_name))
-                .await;
-        }
-        let _ = self
-            .post_timing("main_turn_total_ms", total_ms, Some(route_name))
-            .await;
-        tracing::info!(chat_id, route = route_name, ttft_ms = ?turn.metrics.ttft_ms, route_ms = ?turn.metrics.route_ms, total_ms, tool_calls = turn.metrics.tool_calls, "turn done");
-
-        // Off the reply path: memory write pass + compaction (design §6.9).
-        {
-            let me = self.clone();
-            let chat = chat_id.to_owned();
-            let user_text2 = user_text.clone();
-            let reply = turn.streamed_text.clone();
-            let msg = assistant_msg_id.clone();
-            tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(1500)).await;
-                let text = format!("User: {user_text2}\nAgent: {reply}");
-                if let Err(e) = me
-                    .memory
-                    .write_pass(&msg, &chat, "assistant", &text, &[])
-                    .await
-                {
-                    tracing::debug!(error = %e, "memory write pass");
-                }
-                if let Err(e) = me.memory.maybe_compact(&chat).await {
-                    tracing::debug!(error = %e, "compaction");
-                }
-                let _ = me.write_system_prompt();
-            });
+            tracing::info!(chat_id, "ack_fallback: model wrote no sentence after route");
         }
 
-        // Hand-offs after the main turn: new / wake / escalation.
+        self.spawn_memory_pass(chat_id, &assistant_msg_id, &user_text, &turn.streamed_text);
+
+        // Hand-offs after the main turn: new / wake / escalation. Never on the chat's critical path.
         let followup = match (&turn.route, turn.escalate) {
             (
                 Some(ValidRoute::New {
@@ -725,29 +650,308 @@ impl Agent {
             _ => None,
         };
         if let Some((existing, name, purpose, brief, harness, data_heavy, escalated)) = followup {
-            let me = self.clone();
-            let chat = chat_id.to_owned();
-            let host2 = host.clone();
-            let user_msg = user_msg_id.clone();
-            tokio::spawn(async move {
-                if let Err(e) = me
-                    .run_subagent(
-                        &chat, &host2, &user_msg, existing, &name, &purpose, &brief, harness,
-                        data_heavy, escalated,
-                    )
-                    .await
-                {
-                    tracing::warn!(error = %e, "subagent run failed");
-                    let mut h = host2.lock().await;
-                    let id = ulid();
-                    h.doc
-                        .start_assistant_message(&id, &user_msg, &me.cfg.device_id);
-                    h.doc.add_error_part(&id, "subagent_failed", &e.to_string());
-                    h.doc.finish_message(&id, MessageStatus::Error);
-                }
-            });
+            self.spawn_subagent_task(
+                chat_id,
+                host,
+                &user_msg_id,
+                existing,
+                name,
+                purpose,
+                brief,
+                harness,
+                data_heavy,
+                escalated,
+            );
         }
         result
+    }
+
+    /// Run the subagent in the background and report a start failure into the chat.
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_subagent_task(
+        self: &Arc<Self>,
+        chat_id: &str,
+        host: &SharedHost,
+        user_msg_id: &str,
+        existing: Option<String>,
+        name: String,
+        purpose: String,
+        brief: String,
+        harness: Option<Harness>,
+        data_heavy: bool,
+        escalated: bool,
+    ) {
+        let me = self.clone();
+        let chat = chat_id.to_owned();
+        let host2 = host.clone();
+        let user_msg = user_msg_id.to_owned();
+        tokio::spawn(async move {
+            if let Err(e) = me
+                .run_subagent(
+                    &chat, &host2, &user_msg, existing, &name, &purpose, &brief, harness,
+                    data_heavy, escalated,
+                )
+                .await
+            {
+                tracing::warn!(error = %e, "subagent run failed");
+                let mut h = host2.lock().await;
+                let id = ulid();
+                h.doc
+                    .start_assistant_message(&id, &user_msg, &me.cfg.device_id);
+                h.doc
+                    .add_status_part(&id, "failed", &format!("{name} · failed"));
+                h.doc.add_error_part(&id, "subagent_failed", &e.to_string());
+                h.doc.finish_message(&id, MessageStatus::Error);
+            }
+        });
+    }
+
+    /// Memory write pass + compaction, off the reply path (design §6.9).
+    fn spawn_memory_pass(self: &Arc<Self>, chat_id: &str, msg_id: &str, ask: &str, reply: &str) {
+        let me = self.clone();
+        let chat = chat_id.to_owned();
+        let text = format!("User: {ask}\nAgent: {reply}");
+        let msg = msg_id.to_owned();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            if let Err(e) = me
+                .memory
+                .write_pass(&msg, &chat, "assistant", &text, &[])
+                .await
+            {
+                tracing::debug!(error = %e, "memory write pass");
+            }
+            if let Err(e) = me.memory.maybe_compact(&chat).await {
+                tracing::debug!(error = %e, "compaction");
+            }
+            let _ = me.write_system_prompt();
+        });
+    }
+
+    /// One prompt to the main pi session, folded into a new assistant message. The caller holds
+    /// `turn_lock`. Finalizes the message (decision, usage, status), T3, and turn metrics.
+    async fn drive_turn(
+        self: &Arc<Self>,
+        chat_id: &str,
+        host: &SharedHost,
+        user_msg_id: &str,
+        prompt_text: &str,
+        kind: TurnKind,
+    ) -> Result<TurnOutcome> {
+        self.ensure_chat_session(chat_id).await?;
+
+        let assistant_msg_id = ulid();
+        let text_part_id = {
+            let mut h = host.lock().await;
+            let pid =
+                h.doc
+                    .start_assistant_message(&assistant_msg_id, user_msg_id, &self.cfg.device_id);
+            match &kind {
+                TurnKind::User => {
+                    h.doc
+                        .add_status_part(&assistant_msg_id, "deciding", "Arbos is deciding…");
+                }
+                TurnKind::SubagentResult { subagent_id, name } => {
+                    h.doc.add_status_part(
+                        &assistant_msg_id,
+                        "working",
+                        &format!("Writing up what {name} did…"),
+                    );
+                    h.doc.set_message_fields(
+                        &assistant_msg_id,
+                        &[("subagentId", json!(subagent_id))],
+                    );
+                }
+            }
+            pid
+        };
+
+        *self.turn.lock().await = Some(TurnState {
+            chat_id: chat_id.to_owned(),
+            user_msg_id: user_msg_id.to_owned(),
+            assistant_msg_id: assistant_msg_id.clone(),
+            text_part_id: text_part_id.clone(),
+            started: Instant::now(),
+            route: None,
+            route_attempts: 0,
+            route_failed: false,
+            escalate: false,
+            asked: None,
+            metrics: TurnMetrics::default(),
+            streamed_text: String::new(),
+            act_transcript: Vec::new(),
+            tool_inputs: HashMap::new(),
+            reply_extractor: ReplyExtractor::default(),
+            route_call_id: None,
+            text_part_dirty: false,
+        });
+        self.turn_running.store(true, Ordering::SeqCst);
+        let keepalive = self.spawn_keepalive();
+        let result = self.run_main_turn(chat_id, host, prompt_text).await;
+        self.turn_running.store(false, Ordering::SeqCst);
+        keepalive.abort();
+
+        let turn = self.turn.lock().await.take();
+        let Some(turn) = turn else {
+            return Err(anyhow!("turn state vanished mid-turn"));
+        };
+        let total_ms = turn.started.elapsed().as_millis() as i64;
+        let route_name = turn
+            .route
+            .as_ref()
+            .map(route_name)
+            .unwrap_or(if turn.route_failed { "reply" } else { "none" });
+        let turn_kind = match &kind {
+            TurnKind::User => route_name,
+            TurnKind::SubagentResult { .. } => "subagent_result",
+        };
+        let (final_status, err_text) = match &result {
+            Ok(()) => (MessageStatus::Done, None),
+            Err(e) => (MessageStatus::Error, Some(e.to_string())),
+        };
+        {
+            let mut h = host.lock().await;
+            if let Some(e) = &err_text {
+                h.doc.add_error_part(&assistant_msg_id, "turn_failed", e);
+            }
+            h.doc.set_message_fields(
+                &assistant_msg_id,
+                &[
+                    ("decision", json!(route_name)),
+                    ("turn", json!({ "kind": turn_kind })),
+                    ("model", json!(self.cfg.talking_model)),
+                    ("usage", turn.metrics.usage.clone().unwrap_or(Value::Null)),
+                ],
+            );
+            h.doc.finish_message(&assistant_msg_id, final_status);
+        }
+        if !turn.streamed_text.trim().is_empty() {
+            let _ = self.store.t3_append(
+                chat_id,
+                None,
+                Some(chat_id),
+                "assistant",
+                Some("assistant"),
+                &turn.streamed_text,
+                Some(&json!({ "message_id": assistant_msg_id, "route": route_name, "turn": turn_kind })),
+            );
+        }
+        let mut usage_rec = turn.metrics.usage.clone().unwrap_or(json!({}));
+        if turn.metrics.route_missing {
+            usage_rec["route_missing"] = json!(true);
+        }
+        if turn.metrics.route_corrected {
+            usage_rec["route_corrected"] = json!(true);
+        }
+        let _ = self.store.record_turn(
+            chat_id,
+            user_msg_id,
+            Some(turn_kind),
+            turn.metrics.ttft_ms,
+            turn.metrics.route_ms,
+            total_ms,
+            turn.metrics.tool_calls,
+            turn.escalate,
+            Some(&usage_rec),
+        );
+        if let Some(ttft) = turn.metrics.ttft_ms {
+            let _ = self
+                .post_timing("main_turn_ttft_ms", ttft, Some(turn_kind))
+                .await;
+        }
+        let _ = self
+            .post_timing("main_turn_total_ms", total_ms, Some(turn_kind))
+            .await;
+        tracing::info!(chat_id, route = route_name, turn = turn_kind, ttft_ms = ?turn.metrics.ttft_ms, route_ms = ?turn.metrics.route_ms, total_ms, tool_calls = turn.metrics.tool_calls, "turn done");
+        Ok(TurnOutcome {
+            assistant_msg_id,
+            route_name,
+            turn,
+            result,
+        })
+    }
+
+    /// A finished subagent never speaks to the user directly: its raw output stays hidden and the
+    /// main agent writes the update in prose, as a follow-up turn in the same chat (demo review
+    /// item 1). Waits for `turn_lock`, so it lands after whatever the user is doing right now.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_result_turn(
+        self: &Arc<Self>,
+        chat_id: &str,
+        host: &SharedHost,
+        user_msg_id: &str,
+        subagent_id: &str,
+        name: &str,
+        status: &str,
+        total_ms: i64,
+        raw: &str,
+        error: Option<&str>,
+    ) -> Result<()> {
+        let _guard = self.turn_lock.lock().await;
+        let ask = {
+            let h = host.lock().await;
+            h.doc
+                .message(user_msg_id)
+                .map(|m| m.text())
+                .unwrap_or_default()
+        };
+        let recent = self
+            .store
+            .t3_thread(chat_id, None, None, 12)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.kind == "user" || r.kind == "assistant")
+            .map(|r| {
+                format!(
+                    "- {}: {}",
+                    r.role.unwrap_or_default(),
+                    r.text
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .chars()
+                        .take(240)
+                        .collect::<String>()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let raw_trim: String = raw.chars().take(7000).collect();
+        let mut prompt = format!(
+            "[Arbos] Subagent \"{name}\" finished · status {status} · {:.0} s.\n\nThe user originally asked: {}\n",
+            total_ms as f64 / 1000.0,
+            if ask.trim().is_empty() { "(see the brief)" } else { ask.trim() },
+        );
+        if !recent.is_empty() {
+            prompt.push_str(&format!("\nRecent turns in this chat:\n{recent}\n"));
+        }
+        if let Some(e) = error {
+            prompt.push_str(&format!("\nThe run ended with an error: {e}\n"));
+        }
+        prompt.push_str(&format!(
+            "\nSubagent output (for you only; the user has not seen it):\n<<<\n{raw_trim}\n>>>\n\nRoute `reply` and tell the user in plain prose what was done, what changed (files, commits, URLs), and what is open or needs their answer. Do not paste the JSON or the output; summarize it."
+        ));
+        let kind = TurnKind::SubagentResult {
+            subagent_id: subagent_id.to_owned(),
+            name: name.to_owned(),
+        };
+        let outcome = self
+            .drive_turn(chat_id, host, user_msg_id, &prompt, kind)
+            .await?;
+        // A result turn relays; it does not start further work. Any other route is logged only.
+        if !matches!(outcome.turn.route, Some(ValidRoute::Reply { .. }) | None) {
+            tracing::warn!(
+                route = outcome.route_name,
+                "result turn routed away from reply; ignored"
+            );
+        }
+        self.spawn_memory_pass(
+            chat_id,
+            &outcome.assistant_msg_id,
+            &format!("[subagent {name} finished: {status}]"),
+            &outcome.turn.streamed_text,
+        );
+        outcome.result
     }
 
     fn spawn_keepalive(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
@@ -996,11 +1200,8 @@ impl Agent {
                 let one_line = args.to_string().chars().take(120).collect::<String>();
                 t.act_transcript.push(format!("→ {tool_name} {one_line}"));
                 let mut h = host.lock().await;
-                h.doc.add_status_part(
-                    &t.assistant_msg_id,
-                    "tool_start",
-                    &format!("{tool_name} {one_line}"),
-                );
+                h.doc
+                    .add_status_part(&t.assistant_msg_id, "step", &step_label(tool_name, args));
                 t.text_part_dirty = true;
             }
             Event::ToolExecutionEnd {
@@ -1130,6 +1331,21 @@ impl Agent {
                     &format!("route {}: {}", route_name(&r), args),
                     None,
                 );
+                if let ValidRoute::Act { plan } = &r {
+                    if let Some(host) = self.sync.host(&t.chat_id).await {
+                        let first = plan.lines().next().unwrap_or("").trim();
+                        let mut h = host.lock().await;
+                        h.doc.add_status_part(
+                            &t.assistant_msg_id,
+                            "working",
+                            if first.is_empty() {
+                                "Working on it…"
+                            } else {
+                                first
+                            },
+                        );
+                    }
+                }
                 t.route = Some(r);
                 Ok(())
             }
@@ -1181,9 +1397,36 @@ impl Agent {
         }
     }
 
-    /// Working-set section (design §6.6 item 2b): compaction summary + handles + notes, ≤ 40 lines.
+    /// Working-set section (design §6.6 item 2b): running subagents + compaction summary +
+    /// handles + notes, ≤ 40 lines.
     pub fn working_set_text(&self, chat_id: &str) -> String {
         let mut lines = Vec::new();
+        let running: Vec<_> = self
+            .store
+            .subagents()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| s.status == "running" || s.status == "queued")
+            .collect();
+        if !running.is_empty() {
+            lines.push(format!(
+                "Subagents running now ({}): their results arrive as later [Arbos] messages; do not start the same work twice.",
+                running.len()
+            ));
+            for s in running.iter().take(SUBAGENT_MAX_CONCURRENT + 2) {
+                lines.push(format!(
+                    "- {} ({}, {}): {}",
+                    s.name,
+                    s.id,
+                    s.status,
+                    if s.last_status.is_empty() {
+                        "starting"
+                    } else {
+                        s.last_status.as_str()
+                    }
+                ));
+            }
+        }
         if let Ok(Some(c)) = self.store.chat(chat_id) {
             if let Some(s) = c.compaction_summary {
                 lines.push(format!(
@@ -1290,28 +1533,18 @@ impl Agent {
             .map(|s| s.name)
             .unwrap_or_else(|| name.to_owned());
 
-        // Templated acknowledgement first (design §6.9), then the subagent's own message.
+        // The progress message carries status events and hidden parts only; the main agent writes
+        // the prose ack before this and the prose result after (demo review items 1–2).
         let msg_id = ulid();
-        let text_part = {
+        {
             let mut h = host.lock().await;
-            let pid = h
-                .doc
+            h.doc
                 .start_assistant_message(&msg_id, in_reply_to, &self.cfg.device_id);
-            let ack = if is_new {
-                format!("Starting *{sub_name}* on this ({})…", harness.as_str())
-            } else {
-                format!("Picking up *{sub_name}* where it left off…")
-            };
-            h.doc.append_text(&msg_id, &pid, &ack);
-            h.doc.add_status_part(
-                &msg_id,
-                "subagent_working",
-                &format!("Working in sandbox · {sub_name}"),
-            );
             h.doc.set_message_fields(
                 &msg_id,
                 &[
                     ("subagentId", json!(subagent_id)),
+                    ("subagentName", json!(sub_name)),
                     (
                         "turn",
                         json!({ "kind": if is_new { "spawn" } else { "wake" } }),
@@ -1320,9 +1553,44 @@ impl Agent {
                     ("model", json!(self.cfg.subagent_model)),
                 ],
             );
-            pid
-        };
+        }
+        let queued_at = Instant::now();
+        if self.subagent_slots.available_permits() == 0 {
+            let waiting = self
+                .store
+                .subagents()
+                .unwrap_or_default()
+                .iter()
+                .filter(|s| s.status == "queued")
+                .count();
+            let line = format!("{sub_name} · queued ({} ahead)", waiting);
+            let _ = self.store.set_subagent_status(&subagent_id, "queued");
+            let _ = self.store.set_subagent_last_status(&subagent_id, "queued");
+            let mut h = host.lock().await;
+            h.doc.add_status_part(&msg_id, "queued", &line);
+        }
         self.write_threads_index().await;
+        let _slot = self
+            .subagent_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| anyhow!("subagent slots closed"))?;
+        let queued_ms = queued_at.elapsed().as_millis() as i64;
+        if queued_ms > 500 {
+            let _ = self
+                .post_timing("subagent_queued_ms", queued_ms, Some(harness.as_str()))
+                .await;
+        }
+        {
+            let mut h = host.lock().await;
+            h.doc.add_status_part(
+                &msg_id,
+                "working",
+                &format!("{sub_name} · {}", harness.as_str()),
+            );
+        }
+        let _ = self.store.set_subagent_last_status(&subagent_id, "working");
         let t0 = Instant::now();
         let pack = self.build_pack(&sub_name, purpose, brief, data_heavy);
         std::fs::create_dir_all(self.cfg.state_dir.join("packs"))?;
@@ -1334,6 +1602,7 @@ impl Agent {
             &pack,
         )?;
         self.store.set_subagent_status(&subagent_id, "running")?;
+        self.write_threads_index().await;
         let _ = self.store.t3_append(
             &subagent_id,
             Some(&subagent_id),
@@ -1385,8 +1654,6 @@ impl Agent {
         let keepalive = self.spawn_keepalive();
         let mut text = String::new();
         let mut sub_tool_inputs: HashMap<String, Value> = HashMap::new();
-        let mut part_id = text_part;
-        let mut part_dirty = true;
         let mut usage_total = json!({});
         let mut first_delta: Option<i64> = None;
         let mut done_err: Option<String> = None;
@@ -1403,27 +1670,23 @@ impl Agent {
             };
             match ev {
                 AgentEvent::TextDelta(d) => {
+                    // Raw subagent prose never renders (item 1): kept for the hidden result part.
                     if first_delta.is_none() {
                         first_delta = Some(t0.elapsed().as_millis() as i64);
                     }
-                    let mut h = host.lock().await;
-                    if part_dirty {
-                        if let Some(p) = h.doc.add_text_part(&msg_id, "text") {
-                            part_id = p;
-                        }
-                        part_dirty = false;
-                    }
-                    h.doc.append_text(&msg_id, &part_id, &d);
                     text.push_str(&d);
                 }
                 AgentEvent::ReasoningDelta(_) => {}
                 AgentEvent::ToolCall { id, name, input } => {
                     sub_tool_inputs.insert(id, input.clone());
-                    let one_line = input.to_string().chars().take(120).collect::<String>();
-                    let mut h = host.lock().await;
-                    h.doc
-                        .add_status_part(&msg_id, "tool_start", &format!("{name} {one_line}"));
-                    part_dirty = true;
+                    let label = step_label(&name, &input);
+                    let _ = self
+                        .store
+                        .set_subagent_last_status(&subagent_id, &format!("step: {label}"));
+                    {
+                        let mut h = host.lock().await;
+                        h.doc.add_status_part(&msg_id, "step", &label);
+                    }
                     let _ = self.store.t3_append(
                         &subagent_id,
                         Some(&subagent_id),
@@ -1467,7 +1730,6 @@ impl Agent {
                         Some(output.len() as i64),
                         is_error,
                     );
-                    part_dirty = true;
                 }
                 AgentEvent::Usage {
                     input,
@@ -1529,16 +1791,27 @@ impl Agent {
                 "done"
             })
             .to_owned();
+        let failed = done_err.is_some() || status == "blocked";
+        let final_line = format!("{sub_name} · {status} · {:.1}s", total_ms as f64 / 1000.0);
         {
             let mut h = host.lock().await;
             if let Some(e) = &done_err {
                 h.doc.add_error_part(&msg_id, "subagent_error", e);
             }
-            h.doc.add_status_part(
+            // Raw output + contract: Details drawer only (`hidden: true`).
+            h.doc.add_hidden_part(
                 &msg_id,
-                "subagent_done",
-                &format!("{sub_name} · {status} · {:.1}s", total_ms as f64 / 1000.0),
+                "subagent_result",
+                &text,
+                &json!({
+                    "subagentId": subagent_id,
+                    "status": status,
+                    "returnContract": contract.clone().unwrap_or(Value::Null),
+                    "durationMs": total_ms,
+                }),
             );
+            h.doc
+                .add_status_part(&msg_id, if failed { "failed" } else { "done" }, &final_line);
             h.doc.set_message_fields(
                 &msg_id,
                 &[
@@ -1555,6 +1828,9 @@ impl Agent {
                 },
             );
         }
+        let _ = self
+            .store
+            .set_subagent_last_status(&subagent_id, if failed { "failed" } else { "done" });
         let _ = self.store.t3_append(
             &subagent_id,
             Some(&subagent_id),
@@ -1629,7 +1905,24 @@ impl Agent {
                 let _ = me.write_system_prompt();
             });
         }
-        Ok(())
+        drop(_slot);
+        // The user hears about it from the main agent, in prose, in this chat.
+        let result_text = match &contract {
+            Some(c) => format!("{text}\n\nParsed return contract:\n{c}"),
+            None => text.clone(),
+        };
+        self.run_result_turn(
+            chat_id,
+            host,
+            in_reply_to,
+            &subagent_id,
+            &sub_name,
+            &status,
+            total_ms,
+            &result_text,
+            done_err.as_deref(),
+        )
+        .await
     }
 
     /// Tail the subagent's session JSONL into T3 (pre-compaction entries included).
@@ -1748,6 +2041,38 @@ impl Agent {
     pub fn is_healthy(&self) -> bool {
         self.pi_ready.load(Ordering::SeqCst)
     }
+}
+
+/// Short label for a `step` status event: the command head for `bash`, the path for file tools,
+/// otherwise the tool name and its first string argument. One line, ≤ 72 chars.
+pub fn step_label(tool_name: &str, args: &Value) -> String {
+    let first_str = |keys: &[&str]| -> Option<String> {
+        keys.iter()
+            .find_map(|k| args.get(k).and_then(Value::as_str))
+            .or_else(|| {
+                args.as_object()
+                    .and_then(|o| o.values().find_map(Value::as_str))
+            })
+            .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+    };
+    let body = match tool_name {
+        "bash" | "shell" | "execute" => first_str(&["command", "cmd"]),
+        "read" | "write" | "edit" | "read_file" | "write_file" | "edit_file" | "glob" | "grep" => {
+            first_str(&["path", "file_path", "pattern"])
+        }
+        _ => first_str(&["query", "url", "name", "code"]),
+    }
+    .unwrap_or_default();
+    let label = if body.is_empty() {
+        tool_name.to_owned()
+    } else {
+        format!("{tool_name} {body}")
+    };
+    let mut out: String = label.chars().take(72).collect();
+    if out.chars().count() < label.chars().count() {
+        out.push('…');
+    }
+    out
 }
 
 pub fn route_name(r: &ValidRoute) -> &'static str {

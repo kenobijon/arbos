@@ -112,6 +112,8 @@ pub struct SubagentRow {
     pub last_turn_at: Option<i64>,
     pub harness: String,
     pub chat_id: Option<String>,
+    /// Last compact progress line (`working` / `step: …` / `done` / `failed`), for the working set.
+    pub last_status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -195,6 +197,17 @@ impl Store {
         let c = Connection::open(path)?;
         c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
         c.execute_batch(SCHEMA)?;
+        // Additive migration for stores created before demo-review item 2.
+        let has_last_status: bool = c
+            .prepare("PRAGMA table_info(subagents)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .filter_map(Result::ok)
+            .any(|n| n == "last_status");
+        if !has_last_status {
+            c.execute_batch(
+                "ALTER TABLE subagents ADD COLUMN last_status TEXT NOT NULL DEFAULT ''",
+            )?;
+        }
         Ok(Self(Arc::new(Mutex::new(c))))
     }
 
@@ -420,10 +433,11 @@ impl Store {
             last_turn_at: r.get(9)?,
             harness: r.get(10)?,
             chat_id: r.get(11)?,
+            last_status: r.get(12)?,
         })
     }
 
-    const SUBAGENT_COLS: &'static str = "id, name, purpose, summary, tags, last_seen_at, status, turns, created_at, last_turn_at, harness, chat_id";
+    const SUBAGENT_COLS: &'static str = "id, name, purpose, summary, tags, last_seen_at, status, turns, created_at, last_turn_at, harness, chat_id, last_status";
 
     pub fn subagents(&self) -> Result<Vec<SubagentRow>> {
         self.with(|c| {
@@ -456,6 +470,16 @@ impl Store {
                 "UPDATE subagents SET status = ?2, last_turn_at = CASE WHEN ?2 = 'running' THEN ?3 ELSE last_turn_at END,
                         turns = turns + CASE WHEN ?2 = 'running' THEN 1 ELSE 0 END, last_seen_at = ?3 WHERE id = ?1",
                 params![id, status, now_ms()],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn set_subagent_last_status(&self, id: &str, line: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE subagents SET last_status = ?2, last_seen_at = ?3 WHERE id = ?1",
+                params![id, line, now_ms()],
             )
             .map(|_| ())
         })
@@ -547,6 +571,28 @@ impl Store {
     }
 
     /// Verbatim turns of a thread in order; `from_id`/`to_id` bound the range, `limit` from the end when unbounded.
+    /// History paging: the `limit` entries strictly before `before` (exclusive, so pages never
+    /// repeat the cursor row), oldest first.
+    pub fn t3_thread_before(
+        &self,
+        thread_id: &str,
+        before: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<T3Row>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT id, thread_id, subagent_id, session_id, kind, role, at, text, size FROM (
+                    SELECT * FROM t3 WHERE thread_id = ?1 AND (?2 IS NULL OR id < ?2) ORDER BY id DESC LIMIT ?3
+                 ) ORDER BY id ASC",
+            )?;
+            let rows = st.query_map(params![thread_id, before, limit], |r| {
+                Ok(T3Row { id: r.get(0)?, thread_id: r.get(1)?, subagent_id: r.get(2)?, session_id: r.get(3)?, kind: r.get(4)?, role: r.get(5)?, at: r.get(6)?, text: r.get(7)?, size: r.get(8)? })
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// Inclusive id range (`from_id..=to_id`) for MCP `history_read`.
     pub fn t3_thread(
         &self,
         thread_id: &str,

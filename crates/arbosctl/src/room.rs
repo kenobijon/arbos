@@ -127,6 +127,29 @@ impl Session {
                 std::io::stdout().flush().ok();
                 self.printed.insert(m.id.clone(), total_chars);
             }
+            // Status events (`deciding`, `queued`, `working`, `step`, `done`, `failed`, …) are the only
+            // progress the transcript shows; `hidden` parts (tools, raw subagent output) are skipped.
+            let events: Vec<&serde_json::Value> = m
+                .parts
+                .iter()
+                .filter(|p| {
+                    p.get("kind").and_then(|k| k.as_str()) == Some("status")
+                        && p.get("hidden").and_then(|h| h.as_bool()) != Some(true)
+                })
+                .collect();
+            let events_key = format!("{}#events", m.id);
+            let shown_events = self.printed.get(&events_key).copied().unwrap_or(0);
+            if events.len() > shown_events {
+                for p in &events[shown_events..] {
+                    println!(
+                        "\n  [{} · {}: {}]",
+                        &m.id[m.id.len() - 6..],
+                        p.get("code").and_then(|c| c.as_str()).unwrap_or(""),
+                        p.get("message").and_then(|c| c.as_str()).unwrap_or("")
+                    );
+                }
+                self.printed.insert(events_key, events.len());
+            }
             let status_key = format!("{}#status", m.id);
             let st = m.status.clone();
             let prev = self.printed.get(&status_key).copied().unwrap_or(0);
