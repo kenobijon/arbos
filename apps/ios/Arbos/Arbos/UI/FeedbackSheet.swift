@@ -74,6 +74,14 @@ struct FeedbackSheet: View {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) { Button(sent == nil ? "Cancel" : "Done") { dismiss() } }
             }
+            .onAppear {
+                #if DEBUG
+                if let text = DebugHooks.autoFeedback, sent == nil, !sending {
+                    note = text
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { send() }
+                }
+                #endif
+            }
             .onChange(of: photoItem) { _, item in
                 guard let item else { return }
                 Task {

@@ -9,6 +9,8 @@ enum DebugHooks {
     static var autoSend: String? { value("ARBOS_AUTO_SEND") }
     static var pairCode: String? { value("ARBOS_PAIR_CODE") }
     static var fixture: Bool { value("ARBOS_FIXTURE") == "1" }
+    /// Text to put in the feedback sheet and send as soon as it opens (endpoint check).
+    static var autoFeedback: String? { value("ARBOS_AUTO_FEEDBACK") }
     /// Fixture machine reports `always_on` (D73 policy screens).
     static var alwaysOn: Bool { value("ARBOS_ALWAYS_ON") == "1" }
     /// keyboard | settings | voice | threads | model | profile — opened on the chat screen.
