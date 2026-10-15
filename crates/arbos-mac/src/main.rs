@@ -9,12 +9,13 @@ mod ui;
 mod update;
 
 use gpui::{
-    point, px, size, App, AppContext as _, Bounds, KeyBinding, TitlebarOptions, WindowBounds,
-    WindowDecorations, WindowOptions,
+    point, px, size, App, AppContext as _, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions,
+    WindowBounds, WindowDecorations, WindowOptions,
 };
 
 use crate::app::AppState;
 use crate::ui::composer;
+use crate::ui::feedback;
 use crate::ui::motion::PulseClock;
 use crate::ui::shell::{self, Shell};
 use crate::ui::theme::{reapply_window_background, Appearance, Surface, Theme};
@@ -39,6 +40,7 @@ fn main() {
         cx.set_global(Theme::with(appearance, surface));
         PulseClock::init(cx);
         bind_keys(cx);
+        set_menus(cx);
 
         let source = app::init_source(cx);
         let state = cx.new(|cx| AppState::new(source, cx));
@@ -83,6 +85,23 @@ fn main() {
     });
 }
 
+/// The menu bar: the app menu and Help → Send Feedback… (⌘⇧F), the Mac twin of
+/// TestFlight's screenshot feedback.
+fn set_menus(cx: &mut App) {
+    cx.set_menus(vec![
+        Menu {
+            name: "Arbos".into(),
+            items: vec![MenuItem::action("Quit Arbos", shell::Quit)],
+            disabled: false,
+        },
+        Menu {
+            name: "Help".into(),
+            items: vec![MenuItem::action("Send Feedback…", feedback::SendFeedback)],
+            disabled: false,
+        },
+    ]);
+}
+
 fn bind_keys(cx: &mut App) {
     let input = Some("ComposerInput");
     cx.bind_keys([
@@ -120,5 +139,7 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-b", shell::TogglePanel, None),
         KeyBinding::new("ctrl-shift-b", shell::TogglePanel, None),
         KeyBinding::new("cmd-q", shell::Quit, None),
+        KeyBinding::new("cmd-shift-f", feedback::SendFeedback, None),
+        KeyBinding::new("ctrl-shift-f", feedback::SendFeedback, None),
     ]);
 }

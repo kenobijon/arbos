@@ -12,6 +12,7 @@ mod daytona;
 mod db;
 mod db_accounts;
 mod db_people;
+mod feedback;
 mod groups;
 mod images;
 mod local;
@@ -487,6 +488,9 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/room/{project}/{chat}/stats", get(rooms::room_stats))
         .route("/blob/{project}/{key}", get(blobs::get).put(blobs::put))
+        .route("/feedback", post(feedback::submit))
+        .route("/admin/feedback", get(feedback::admin_list))
+        .route("/admin/feedback/{id}/image", get(feedback::admin_image))
         .route("/bootstrap/{file}", get(blobs::bootstrap))
         .route("/proxy/v1/models", get(proxy::openai_models))
         .route("/proxy/v1/images/generations", post(images::generations))

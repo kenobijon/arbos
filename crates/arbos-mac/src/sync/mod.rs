@@ -450,16 +450,22 @@ pub const DEFAULT_RELAY_URL: &str = "https://relay.arbos.life";
 /// source), then `defaults read sh.arbos.mac RelayURL` for self-hosters on
 /// macOS, then the compiled-in default relay.
 pub fn source_from_env() -> Box<dyn SyncSource> {
-    let url = match std::env::var("ARBOS_RELAY_URL") {
-        Ok(url) if !url.trim().is_empty() => url,
-        Ok(_) | Err(_) => {
-            relay_url_from_defaults().unwrap_or_else(|| DEFAULT_RELAY_URL.to_string())
-        }
-    };
+    let url = configured_relay_url();
     if url.trim().eq_ignore_ascii_case("fixture") {
         return Box::new(fixture::FixtureSource::new());
     }
     Box::new(relay::RelaySource::from_env(url))
+}
+
+/// The relay URL this process talks to (same order as `source_from_env`); other
+/// modules use it to find the stored credentials for one-off HTTP calls.
+pub fn configured_relay_url() -> String {
+    match std::env::var("ARBOS_RELAY_URL") {
+        Ok(url) if !url.trim().is_empty() => url,
+        Ok(_) | Err(_) => {
+            relay_url_from_defaults().unwrap_or_else(|| DEFAULT_RELAY_URL.to_string())
+        }
+    }
 }
 
 /// `defaults write sh.arbos.mac RelayURL https://relay.example` (macOS only).

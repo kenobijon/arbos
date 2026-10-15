@@ -5,6 +5,7 @@ pub mod cards;
 pub mod channels;
 pub mod composer;
 pub mod connectors;
+pub mod feedback;
 pub mod frost;
 pub mod groups;
 pub mod local;

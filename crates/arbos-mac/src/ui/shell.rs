@@ -19,6 +19,7 @@ use crate::ui::avatars;
 use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
 use crate::ui::composer::{Composer, ComposerEvent, ComposerInput};
 use crate::ui::connectors::{ConnectorsEvent, ConnectorsPanel};
+use crate::ui::feedback::{FeedbackSheet, SendFeedback};
 use crate::ui::frost::{edge_faded, frosted, rounded_clip, MENU_BLUR, PANEL_BLUR};
 use crate::ui::groups;
 use crate::ui::local::{LocalEvent, LocalPanel};
@@ -70,6 +71,8 @@ pub struct Shell {
     pub people_input: Entity<ComposerInput>,
     pub add_agent_open: bool,
     pub members_open: bool,
+    /// ⌘⇧F "Send feedback" sheet (self-contained in `ui::feedback`).
+    feedback: Entity<FeedbackSheet>,
 }
 
 impl Shell {
@@ -229,6 +232,8 @@ impl Shell {
         .detach();
         let skills = cx.new(|cx| SkillsPanel::new(state.clone(), cx));
         cx.observe(&skills, |_, _, cx| cx.notify()).detach();
+        let feedback = cx.new(|cx| FeedbackSheet::new(state.clone(), cx));
+        cx.observe(&feedback, |_, _, cx| cx.notify()).detach();
 
         Self {
             state,
@@ -255,7 +260,12 @@ impl Shell {
             people_input,
             add_agent_open: false,
             members_open: false,
+            feedback,
         }
+    }
+
+    fn send_feedback(&mut self, _: &SendFeedback, window: &mut Window, cx: &mut Context<Self>) {
+        self.feedback.update(cx, |sheet, cx| sheet.open(window, cx));
     }
 
     fn submit_pairing(&mut self, cx: &mut Context<Self>) {
@@ -592,6 +602,13 @@ impl Shell {
                 )),
             )
             .children(self.render_update_button(collapsed, cx))
+            .child(
+                bottom_button("rail-feedback", "✎", 16.0, &theme).on_click(cx.listener(
+                    |this, _, window, cx| {
+                        this.feedback.update(cx, |sheet, cx| sheet.open(window, cx));
+                    },
+                )),
+            )
             .child(
                 // Toggle on the press itself: one event per press on every
                 // platform, so a click can never open and shut in one go.
@@ -2810,6 +2827,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::toggle_rail))
             .on_action(cx.listener(Self::toggle_panel))
+            .on_action(cx.listener(Self::send_feedback))
             // Clicks on chrome must not strand keyboard focus: unless another
             // text field took it, the composer keeps it.
             .on_mouse_down(
@@ -2829,6 +2847,9 @@ impl Render for Shell {
                         return;
                     }
                     if this.routines_open && this.routines.read(cx).has_focus(window, cx) {
+                        return;
+                    }
+                    if this.feedback.read(cx).is_open() {
                         return;
                     }
                     if this.state.read(cx).pairing.is_none() {
@@ -2895,6 +2916,9 @@ impl Render for Shell {
         }
         if self.skills.read(cx).open {
             root = root.child(self.skills.clone());
+        }
+        if self.feedback.read(cx).is_open() {
+            root = root.child(self.feedback.clone());
         }
         if new_project_open {
             root = root.child(self.render_new_project(cx));
