@@ -203,6 +203,10 @@ export default function arbosPiExt(pi: ExtensionAPI) {
         if (typeof cur.reason === "string") reason = cur.reason;
       }
     }
+    if (state === "pending") {
+      // Stopped waiting: agentd turns a late decision into a follow-up turn with a re-run grant.
+      void hook("/hook/approval-abandon", { approvalId });
+    }
     audit({ kind: "approval_result", session: sessionId, tool, call_id: callId, approval_id: approvalId, state });
     switch (state) {
       case "allowed":

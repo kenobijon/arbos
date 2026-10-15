@@ -93,6 +93,18 @@ async fn approval_status(State(a): State<S>, headers: HeaderMap, Json(b): Json<V
     Json(a.approval_status(id).await).into_response()
 }
 
+async fn approval_abandon(
+    State(a): State<S>,
+    headers: HeaderMap,
+    Json(b): Json<Value>,
+) -> Response {
+    if !authed(&a, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let id = b.get("approvalId").and_then(Value::as_str).unwrap_or("");
+    Json(a.abandon_approval(id).await).into_response()
+}
+
 async fn act_limit(State(a): State<S>, headers: HeaderMap, Json(_b): Json<Value>) -> Response {
     if !authed(&a, &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
@@ -275,6 +287,7 @@ pub fn router(agent: Arc<Agent>) -> Router {
         .route("/hook/act-limit", post(act_limit))
         .route("/hook/approval", post(approval))
         .route("/hook/approval-status", post(approval_status))
+        .route("/hook/approval-abandon", post(approval_abandon))
         .route("/hook/deny", post(deny))
         .route("/hook/handle", post(handle))
         .route("/hook/handle-path", post(handle_path))

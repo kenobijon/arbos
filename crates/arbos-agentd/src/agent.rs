@@ -1465,22 +1465,39 @@ impl Agent {
         let mut act_steered = false;
         let mut act_aborted = false;
         let deadline = Duration::from_secs(15 * 60);
+        // Time the turn spends blocked on an approval card is the user's, not the agent's: it
+        // counts toward neither the act limit nor the turn deadline.
+        let mut approval_paused = Duration::ZERO;
+        let mut approval_pause_started: Option<Instant> = None;
         loop {
             let ev = tokio::select! {
                 e = events.recv() => e,
                 _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                    let waiting = self.approval_pending_for(chat_id).await;
+                    match (waiting, approval_pause_started) {
+                        (true, None) => approval_pause_started = Some(Instant::now()),
+                        (false, Some(t0)) => {
+                            approval_paused += t0.elapsed();
+                            approval_pause_started = None;
+                        }
+                        (true, Some(_)) | (false, None) => {}
+                    }
+                    if waiting {
+                        continue;
+                    }
+                    let elapsed = started.elapsed().saturating_sub(approval_paused);
                     // Act wall-clock limit (D66): steer at 60 s, abort 20 s later.
                     let is_act = matches!(self.turn.lock().await.as_ref().and_then(|t| t.route.as_ref()), Some(ValidRoute::Act { .. }));
-                    if is_act && started.elapsed() > Duration::from_secs(ACT_MAX_WALL_SECS) && !act_steered {
+                    if is_act && elapsed > Duration::from_secs(ACT_MAX_WALL_SECS) && !act_steered {
                         act_steered = true;
                         let _ = pi.call(RpcCommand::Steer { id: pi.next_id("st"), message: "Time limit reached. Stop now and summarize what you did and what is left.".into() }).await;
                         if let Some(t) = self.turn.lock().await.as_mut() { t.escalate = true; }
                     }
-                    if is_act && started.elapsed() > Duration::from_secs(ACT_MAX_WALL_SECS + 20) && !act_aborted {
+                    if is_act && elapsed > Duration::from_secs(ACT_MAX_WALL_SECS + 20) && !act_aborted {
                         act_aborted = true;
                         let _ = pi.call(RpcCommand::Abort { id: pi.next_id("ab") }).await;
                     }
-                    if started.elapsed() > deadline {
+                    if elapsed > deadline {
                         let _ = pi.call(RpcCommand::Abort { id: pi.next_id("ab") }).await;
                         return Err(anyhow!("turn exceeded 15 minutes"));
                     }

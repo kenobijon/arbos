@@ -627,6 +627,30 @@ impl Agent {
         }
     }
 
+    /// True while any card of `chat_id` is undecided (the turn's clocks pause meanwhile).
+    pub async fn approval_pending_for(&self, chat_id: &str) -> bool {
+        self.approvals
+            .pending
+            .lock()
+            .await
+            .values()
+            .any(|p| p.chat_id == chat_id)
+    }
+
+    /// `/hook/approval-abandon`: the extension stopped polling (its wait cap passed) and the
+    /// blocked call was not executed. A later decision now runs the deferred follow-up, which
+    /// grants a re-run of the same call.
+    pub async fn abandon_approval(&self, approval_id: &str) -> Value {
+        let mut pending = self.approvals.pending.lock().await;
+        match pending.get_mut(approval_id) {
+            Some(p) => {
+                p.mode = WaitMode::Deferred;
+                json!({ "ok": true })
+            }
+            None => json!({ "ok": false, "error": "not pending" }),
+        }
+    }
+
     pub async fn approval_status(&self, approval_id: &str) -> Value {
         match self.store.approval(approval_id) {
             Ok(Some(r)) => {
