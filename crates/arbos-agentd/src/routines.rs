@@ -25,6 +25,9 @@ impl Agent {
                     tracing::warn!(error = %e, "routine_run push failed");
                 }
             }
+            // F5: the library changed on the relay; refetch the index now rather than at the
+            // next 60 s tick.
+            "skills_changed" => self.refresh_skills().await,
             other => {
                 tracing::info!(kind = other, push = %payload, "push delivered");
                 let _ = self.store.t3_append(

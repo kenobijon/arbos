@@ -143,6 +143,12 @@ arbosctl routines pause|resume|delete <project> <routine>
 
 Webhook routines fire with `POST <relay>/routines/<id>/fire?secret=<secret>`; a JSON body is appended to the prompt as trigger context. In the desktop client the same lives under Settings → Routines (list, presets, pause/resume, run now, history).
 
+## Skills library (F5)
+
+A skill is a Markdown how-to with YAML frontmatter (`name`, `description`, `tags`, `when_to_use`, `version`), stored on the relay (`skills` table + FTS5) and shared across Projects. Devices: `GET/POST /skills`, `GET/PUT/DELETE /skills/{id|slug}`, `GET /skills/search?q=`. Boxes: `GET /skills/index` (lean, with a `rev`), `GET /skills/{id}`, `POST /skills` (own origin). A skill is visible to a box when it is `shared` or its `origin_project_id` is that project.
+
+agentd caches the index (refresh every 60 s, on a `skills_rev` change seen in the 3 s project poll, on the `skills_changed` push, and after `skills_save`) and, per turn, selects up to 3 skills by keyword overlap with the prompt under a 600-token budget. They enter the pi system prompt as the `arbos-skills` section (after the byte-stable prefix, as `## Relevant skills`) and the subagent pack as section 11; the chosen slugs and text are a hidden `skills` part on the turn (Mac Details drawer, `arbosctl chat dump`) and an INFO log line `skills injected into the working set`. MCP tools: `skills_list(q?)`, `skills_read(slug)`, `skills_save(...)` (audited to `.arbos/audit.jsonl`). Headless: `arbosctl skills list [--q]|show <slug>|add --name … [--file skill.md] [--shared]|delete <slug>`. Mac: Settings → Skills.
+
 ## Image
 
 `.github/workflows/image.yml` builds `image/Dockerfile` on an image tag (`image-v0.1.5`) or by hand, pushes it to GHCR, smoke-tests it, and registers the Daytona snapshot `arbos-agent-<version>` with `image/register-snapshot.sh` (secrets `DAYTONA_API_KEY`, `GHCR_READ_TOKEN`).

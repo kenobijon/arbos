@@ -161,7 +161,10 @@ async fn working_set(State(a): State<S>, headers: HeaderMap, Json(b): Json<Value
         .as_ref()
         .map(|t| t.chat_id.clone())
         .unwrap_or(sid);
-    Json(json!({ "ok": true, "text": a.working_set_text(&chat_id) })).into_response()
+    // `skills` is its own prompt section (F5): the working-set line cap must not cut it.
+    let skills = a.skills_section_text().await;
+    Json(json!({ "ok": true, "text": a.working_set_text(&chat_id), "skills": skills }))
+        .into_response()
 }
 
 async fn remember(State(a): State<S>, headers: HeaderMap, Json(b): Json<Value>) -> Response {

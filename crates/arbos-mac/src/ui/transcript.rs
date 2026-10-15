@@ -690,6 +690,7 @@ pub fn build_rows(messages: &[Message], show_details: bool) -> Vec<Row> {
                         | Part::Diff { .. }
                         | Part::File { .. }
                         | Part::Browser { .. }
+                        | Part::Skills { .. }
                         | Part::Unknown => {}
                     }
                 }

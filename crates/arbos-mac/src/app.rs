@@ -13,7 +13,8 @@ use tokio::sync::mpsc;
 
 use crate::model::{
     new_id, now_ms, BoxState, Chat, ConnectorsView, Effort, Id, Link, Message, MessageStatus, Part,
-    Project, ProjectDocView, QuestionState, Role, Routine, RoutineRun, RoutineTrigger, StatusKind,
+    Project, ProjectDocView, QuestionState, Role, Routine, RoutineRun, RoutineTrigger, Skill,
+    StatusKind,
 };
 use crate::sync::{ClientCommand, SyncEvent, SyncSource};
 use crate::ui::notify::{Gate, Notifier, NotifyEvent, NotifyKind};
@@ -81,6 +82,8 @@ pub struct AppState {
     /// Picker contents; empty = the fixture's static list.
     pub models: Vec<String>,
     pub project_docs: HashMap<Id, ProjectDocView>,
+    /// The skills library (F5), as last fetched from the source.
+    pub skills: Vec<Skill>,
     pub chats: HashMap<Id, Vec<Chat>>,
     pub messages: HashMap<Id, Vec<Message>>,
     pub chat_ui: HashMap<Id, ChatUi>,
@@ -160,6 +163,7 @@ impl AppState {
             projects: Vec::new(),
             models: Vec::new(),
             project_docs: HashMap::new(),
+            skills: Vec::new(),
             chats: HashMap::new(),
             messages: HashMap::new(),
             chat_ui: HashMap::new(),
@@ -434,6 +438,11 @@ impl AppState {
             }
             SyncEvent::RoutineRuns { routine_id, runs } => {
                 self.routine_runs.insert(routine_id, runs);
+                cx.notify();
+            }
+            SyncEvent::Skills(mut skills) => {
+                skills.sort_by_key(|s| s.name.to_lowercase());
+                self.skills = skills;
                 cx.notify();
             }
         }
@@ -1296,6 +1305,34 @@ impl AppState {
         if let Some(chat_id) = chat_id {
             self.select_tab(chat_id, cx);
         }
+    }
+
+    // ----- skills (F5) -------------------------------------------------------
+
+    pub fn refresh_skills(&mut self, cx: &mut Context<Self>) {
+        self.command(ClientCommand::SkillsRefresh);
+        cx.notify();
+    }
+
+    pub fn save_skill(&mut self, skill: Skill, cx: &mut Context<Self>) {
+        // Optimistic: the list shows the edit at once; the source's `Skills`
+        // event replaces it with the stored version.
+        match self
+            .skills
+            .iter_mut()
+            .find(|s| s.id == skill.id && !skill.id.is_empty())
+        {
+            Some(existing) => *existing = skill.clone(),
+            None => self.skills.push(skill.clone()),
+        }
+        self.command(ClientCommand::SkillSave { skill });
+        cx.notify();
+    }
+
+    pub fn delete_skill(&mut self, id: Id, cx: &mut Context<Self>) {
+        self.skills.retain(|s| s.id != id);
+        self.command(ClientCommand::SkillDelete { id });
+        cx.notify();
     }
 
     pub fn selected_doc(&self) -> Option<&ProjectDocView> {

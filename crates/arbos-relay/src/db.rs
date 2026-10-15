@@ -9,6 +9,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use arbos_core::ids::now_ms;
+use arbos_core::skill::Skill;
 
 #[derive(Clone)]
 pub struct Db(Arc<Mutex<Connection>>);
@@ -103,6 +104,13 @@ CREATE TABLE IF NOT EXISTS routine_runs (
   status TEXT NOT NULL, message_id TEXT, note TEXT
 );
 CREATE INDEX IF NOT EXISTS routine_runs_routine ON routine_runs(routine_id, started_at);
+CREATE TABLE IF NOT EXISTS skills (
+  id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+  tags TEXT NOT NULL DEFAULT '[]', when_to_use TEXT NOT NULL DEFAULT '', body TEXT NOT NULL DEFAULT '',
+  origin_project_id TEXT, shared INTEGER NOT NULL DEFAULT 0, version INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS skills_fts USING fts5(text, id UNINDEXED, tokenize = 'porter unicode61');
 "#;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1312,4 +1320,177 @@ impl Db {
             rows.collect()
         })
     }
+}
+
+impl Db {
+    // ---- skills (F5) --------------------------------------------------------------------------
+
+    const SKILL_COLS: &'static str = "id, slug, name, description, tags, when_to_use, body, origin_project_id, shared, version, created_at, updated_at";
+
+    fn row_to_skill(r: &rusqlite::Row<'_>) -> rusqlite::Result<Skill> {
+        Ok(Skill {
+            id: r.get(0)?,
+            slug: r.get(1)?,
+            name: r.get(2)?,
+            description: r.get(3)?,
+            tags: serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or_default(),
+            when_to_use: r.get(5)?,
+            body: r.get(6)?,
+            origin_project_id: r.get(7)?,
+            shared: r.get::<_, i64>(8)? != 0,
+            version: r.get(9)?,
+            created_at: r.get(10)?,
+            updated_at: r.get(11)?,
+        })
+    }
+
+    fn reindex_skill(c: &Connection, s: &Skill) -> rusqlite::Result<()> {
+        c.execute("DELETE FROM skills_fts WHERE id = ?1", params![s.id])?;
+        c.execute(
+            "INSERT INTO skills_fts(text, id) VALUES (?1, ?2)",
+            params![s.match_text(), s.id],
+        )?;
+        Ok(())
+    }
+
+    /// Insert a skill (fails on a duplicate slug).
+    pub fn insert_skill(&self, s: &Skill) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                &format!(
+                    "INSERT INTO skills({}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                    Self::SKILL_COLS
+                ),
+                params![
+                    s.id,
+                    s.slug,
+                    s.name,
+                    s.description,
+                    serde_json::to_string(&s.tags).unwrap_or_else(|_| "[]".into()),
+                    s.when_to_use,
+                    s.body,
+                    s.origin_project_id,
+                    s.shared as i64,
+                    s.version,
+                    s.created_at,
+                    s.updated_at
+                ],
+            )?;
+            Self::reindex_skill(c, s)
+        })
+    }
+
+    /// Replace the editable fields of a skill; bumps `version` and `updated_at`. Returns the new row.
+    pub fn update_skill(&self, s: &Skill) -> Result<Option<Skill>> {
+        let now = now_ms();
+        self.with(|c| {
+            let n = c.execute(
+                "UPDATE skills SET slug = ?2, name = ?3, description = ?4, tags = ?5, when_to_use = ?6, body = ?7,
+                        shared = ?8, version = version + 1, updated_at = ?9 WHERE id = ?1",
+                params![
+                    s.id, s.slug, s.name, s.description, serde_json::to_string(&s.tags).unwrap_or_else(|_| "[]".into()),
+                    s.when_to_use, s.body, s.shared as i64, now
+                ],
+            )?;
+            if n == 0 {
+                return Ok(None);
+            }
+            let row = c.query_row(
+                &format!("SELECT {} FROM skills WHERE id = ?1", Self::SKILL_COLS),
+                params![s.id],
+                Self::row_to_skill,
+            )?;
+            Self::reindex_skill(c, &row)?;
+            Ok(Some(row))
+        })
+    }
+
+    pub fn delete_skill(&self, id: &str) -> Result<bool> {
+        self.with(|c| {
+            c.execute("DELETE FROM skills_fts WHERE id = ?1", params![id])?;
+            c.execute("DELETE FROM skills WHERE id = ?1", params![id])
+                .map(|n| n > 0)
+        })
+    }
+
+    /// One skill by id or slug.
+    pub fn skill(&self, id_or_slug: &str) -> Result<Option<Skill>> {
+        self.with(|c| {
+            c.query_row(
+                &format!(
+                    "SELECT {} FROM skills WHERE id = ?1 OR slug = ?1",
+                    Self::SKILL_COLS
+                ),
+                params![id_or_slug],
+                Self::row_to_skill,
+            )
+            .optional()
+        })
+    }
+
+    /// Every skill (devices), or the shared ones plus a project's own (`visible_to = Some(project)`).
+    pub fn list_skills(&self, visible_to: Option<&str>) -> Result<Vec<Skill>> {
+        self.with(|c| {
+            let mut st = c.prepare(&format!(
+                "SELECT {} FROM skills WHERE ?1 IS NULL OR shared = 1 OR origin_project_id = ?1 ORDER BY name",
+                Self::SKILL_COLS
+            ))?;
+            let rows = st.query_map(params![visible_to], Self::row_to_skill)?;
+            rows.collect()
+        })
+    }
+
+    /// FTS5 over name/description/tags/when_to_use, best match first.
+    pub fn search_skills(
+        &self,
+        query: &str,
+        visible_to: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<Skill>> {
+        let q = fts_query(query);
+        self.with(|c| {
+            let mut st = c.prepare(&format!(
+                "SELECT {} FROM skills_fts JOIN skills s ON s.id = skills_fts.id
+                 WHERE skills_fts MATCH ?1 AND (?2 IS NULL OR s.shared = 1 OR s.origin_project_id = ?2)
+                 ORDER BY bm25(skills_fts) LIMIT ?3",
+                Self::SKILL_COLS.split(", ").map(|col| format!("s.{col}")).collect::<Vec<_>>().join(", ")
+            ))?;
+            let rows = st.query_map(params![q, visible_to, limit], Self::row_to_skill)?;
+            rows.collect()
+        })
+    }
+
+    /// Cheap change marker for the box poll: `count:max(updated_at)` over the skills a project sees.
+    pub fn skills_rev(&self, visible_to: Option<&str>) -> Result<String> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT COUNT(*), COALESCE(MAX(updated_at), 0) FROM skills WHERE ?1 IS NULL OR shared = 1 OR origin_project_id = ?1",
+                params![visible_to],
+                |r| Ok(format!("{}:{}", r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+            )
+        })
+    }
+
+    /// Project ids that have a sandbox row (targets for a `skills_changed` push).
+    pub fn sandbox_project_ids(&self) -> Result<Vec<String>> {
+        self.with(|c| {
+            let mut st = c.prepare("SELECT project_id FROM sandboxes")?;
+            let rows = st.query_map([], |r| r.get(0))?;
+            rows.collect()
+        })
+    }
+}
+
+/// Free text → a safe FTS5 query: every term quoted, any term matches (OR), prefix match on the last.
+fn fts_query(q: &str) -> String {
+    let mut terms: Vec<String> = q
+        .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
+        .filter(|t| !t.is_empty())
+        .map(|t| format!("\"{}\"", t.replace('"', "")))
+        .collect();
+    let Some(last) = terms.last_mut() else {
+        return "\"\"".to_owned();
+    };
+    last.push('*');
+    terms.join(" OR ")
 }

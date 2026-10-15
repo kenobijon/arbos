@@ -6,6 +6,7 @@ pub mod doc;
 pub mod ids;
 pub mod route;
 pub mod rpc;
+pub mod skill;
 pub mod widget;
 pub mod wire;
 

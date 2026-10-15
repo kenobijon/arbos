@@ -25,6 +25,7 @@ use crate::harness::{
 use crate::llm::{extract_return_contract, Llm};
 use crate::memory::Memory;
 use crate::rpc_child::RpcChild;
+use crate::skills::{self, SkillsIndex};
 use crate::store::Store;
 use crate::sync::{SharedHost, SyncHub};
 
@@ -340,6 +341,10 @@ pub struct TurnState {
     pub text_part_dirty: bool,
     /// Set by an out-of-band `stop`: the turn ends as it is and no hand-off follows.
     pub stopped: bool,
+    /// The text pi was prompted with; the skills selector matches against it (F5).
+    pub prompt_text: String,
+    /// Skills injected into this turn's working set (recorded once, in the Details drawer).
+    pub skills_used: Vec<String>,
 }
 
 pub struct Agent {
@@ -362,6 +367,8 @@ pub struct Agent {
     subagent_slots: Arc<Semaphore>,
     http: reqwest::Client,
     pub settings: crate::settings::Settings,
+    /// Cached skills index (F5): shared + this Project's own, bodies included.
+    pub skills: SkillsIndex,
 }
 
 impl Agent {
@@ -408,7 +415,22 @@ impl Agent {
             subagent_slots: Arc::new(Semaphore::new(SUBAGENT_MAX_CONCURRENT)),
             http: reqwest::Client::new(),
             settings: crate::settings::Settings::new(&cfg_for_settings),
+            skills: SkillsIndex::new(),
         })
+    }
+
+    /// Refetch the skills index from the relay (60 s timer, `skills_rev` change, after a save).
+    pub async fn refresh_skills(&self) {
+        match self
+            .skills
+            .refresh(&self.http, &self.cfg.relay_url, &self.cfg.box_token)
+            .await
+        {
+            Ok(n) => {
+                tracing::debug!(skills = n, rev = %self.skills.rev(), "skills index refreshed")
+            }
+            Err(e) => tracing::debug!(error = %e, "skills index refresh"),
+        }
     }
 
     /// Live model slots (registry/doc writes land here; `cfg` only holds the boot values).
@@ -1075,6 +1097,11 @@ impl Agent {
             route_call_id: None,
             text_part_dirty: false,
             stopped: false,
+            prompt_text: match &kind {
+                TurnKind::User => prompt_text.to_owned(),
+                TurnKind::SubagentResult { .. } => String::new(),
+            },
+            skills_used: Vec::new(),
         });
         self.turn_running.store(true, Ordering::SeqCst);
         let keepalive = self.spawn_keepalive();
@@ -1810,6 +1837,64 @@ impl Agent {
         lines.into_iter().take(40).collect::<Vec<_>>().join("\n")
     }
 
+    /// "Relevant skills" section for the running turn (F5): selected against the prompt text
+    /// within `SECTION_BUDGET_TOKENS`; empty when nothing matches or no turn is running. The
+    /// first call per turn records the chosen slugs on the assistant message (Details drawer).
+    pub async fn skills_section_text(&self) -> String {
+        let (chat_id, msg_id, prompt, first) = {
+            let mut tl = self.turn.lock().await;
+            let Some(t) = tl.as_mut() else {
+                return String::new();
+            };
+            if t.prompt_text.trim().is_empty() {
+                return String::new();
+            }
+            let first = t.skills_used.is_empty();
+            (
+                t.chat_id.clone(),
+                t.assistant_msg_id.clone(),
+                t.prompt_text.clone(),
+                first,
+            )
+        };
+        let index = self.skills.snapshot();
+        let (selected, text) = skills::section_for(&prompt, &index, skills::SECTION_BUDGET_TOKENS);
+        if selected.is_empty() {
+            return String::new();
+        }
+        let slugs: Vec<String> = selected.iter().map(|s| s.slug.clone()).collect();
+        if first {
+            tracing::info!(
+                chat_id,
+                skills = ?slugs,
+                tokens = arbos_core::skill::estimate_tokens(&text),
+                "skills injected into the working set"
+            );
+            if let Some(t) = self.turn.lock().await.as_mut() {
+                t.skills_used = slugs.clone();
+            }
+            if let Some(host) = self.sync.host(&chat_id).await {
+                let mut h = host.lock().await;
+                h.doc.add_hidden_part(
+                    &msg_id,
+                    "skills",
+                    &text,
+                    &json!({ "slugs": slugs, "scores": selected.iter().map(|s| s.score).collect::<Vec<_>>() }),
+                );
+            }
+            let _ = self.store.t3_append(
+                &chat_id,
+                None,
+                Some(&chat_id),
+                "skills",
+                Some("system"),
+                &format!("skills injected: {}", slugs.join(", ")),
+                None,
+            );
+        }
+        text
+    }
+
     // ---- subagents ----------------------------------------------------------------------------
 
     /// Context pack v0 (design §6.7 sections 1–4, 9, 10).
@@ -1831,7 +1916,18 @@ impl Agent {
         if data_heavy {
             s.push_str("## Data handling\n\nInputs are large. Keep data in variables or files and print slices; never paste whole files into the conversation.\n\n");
         }
-        s.push_str("## Tools\n\nMCP server `arbos`: history_search, history_read, read_thread, memory_search, memory_read (you may search and read the entire history of this Project), peek, sub_llm, remember/recall, projects_list/projects_send, ask_user (optional `widget`: choice | multi_select | text | date | form, so the user answers with a click instead of typing), connectors_list/connector_call (the user's Gmail, Calendar, Slack, GitHub, Harness Comms through the relay; write/send actions need the user's approval).\n\n");
+        // Section 11 (F5): skills matching the brief, same budget as the main agent's section.
+        let (selected, skills_text) = skills::section_for(
+            &format!("{name} {purpose} {brief}"),
+            &self.skills.snapshot(),
+            skills::SECTION_BUDGET_TOKENS,
+        );
+        if !skills_text.is_empty() {
+            tracing::info!(subagent = name, skills = ?selected.iter().map(|x| x.slug.as_str()).collect::<Vec<_>>(), "skills injected into the pack");
+            s.push_str(&skills_text);
+            s.push_str("\n\n");
+        }
+        s.push_str("## Tools\n\nMCP server `arbos`: history_search, history_read, read_thread, memory_search, memory_read (you may search and read the entire history of this Project), peek, sub_llm, remember/recall, projects_list/projects_send, ask_user (optional `widget`: choice | multi_select | text | date | form, so the user answers with a click instead of typing), connectors_list/connector_call (the user's Gmail, Calendar, Slack, GitHub, Harness Comms through the relay; write/send actions need the user's approval), skills_list/skills_read/skills_save (the skills library).\n\n");
         s.push_str("## Return contract\n\nEnd your final reply with one fenced ```json block:\n{ \"status\": \"done\" | \"blocked\" | \"partial\" | \"needs_input\", \"summary\": \"<= 5 lines\", \"artifacts\": [ { \"kind\": \"file\" | \"commit\" | \"url\" | \"command\", \"ref\": \"…\", \"note\": \"…\" } ], \"acceptance\": [ { \"criterion\": \"…\", \"met\": true, \"evidence\": \"…\" } ], \"open_items\": [], \"proposed_memory\": [ { \"kind\": \"decision\", \"scope\": \"project\", \"text\": \"…\" } ], \"questions\": [] }\n");
         s
     }

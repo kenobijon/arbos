@@ -231,7 +231,9 @@ pub async fn get_project(
         .db
         .usage_since(&p.id, start_of_day())
         .map_err(internal)?;
-    Ok(Json(json!({ "project": project_json(&state, &p).await, "chats": chats, "box": bs, "box_since": since, "spend_today": today })).into_response())
+    // The box polls this every 3 s; a changed marker tells it to refetch `/skills/index` (F5).
+    let skills_rev = state.db.skills_rev(Some(&p.id)).map_err(internal)?;
+    Ok(Json(json!({ "project": project_json(&state, &p).await, "chats": chats, "box": bs, "box_since": since, "spend_today": today, "skills_rev": skills_rev })).into_response())
 }
 
 /// A model id the proxy can serve: `vendor/name`, no spaces. Picker labels ("Claude Fable 5.1")

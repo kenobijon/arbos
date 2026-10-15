@@ -23,7 +23,7 @@ use crate::model::{
     new_id, now_ms, Attachment, BoxState, Chat, ChoiceOption, Connector, ConnectorAction,
     ConnectorProvider, ConnectorStatus, ConnectorsView, Effort, FieldKind, FormField, Id, Link,
     Message, MessageStatus, Part, Project, QuestionState, Role, Routine, RoutineRun,
-    RoutineRunStatus, RoutineTrigger, StatusKind, ToolCall, ToolStatus, TurnKind, Widget,
+    RoutineRunStatus, RoutineTrigger, Skill, StatusKind, ToolCall, ToolStatus, TurnKind, Widget,
 };
 
 pub const STREAM_FRAME_MS: u64 = arbos_core::STREAM_COMMIT_MS;
@@ -60,6 +60,7 @@ struct Shared {
     chats: Mutex<Vec<Chat>>,
     open_chat: Mutex<Option<Id>>,
     running: Mutex<HashMap<Id, Arc<AtomicBool>>>,
+    skills: Mutex<Vec<Skill>>,
     events: mpsc::UnboundedSender<SyncEvent>,
     doc_tx: mpsc::UnboundedSender<DocChanged>,
     subscriptions: Mutex<Vec<loro::Subscription>>,
@@ -94,6 +95,7 @@ impl SyncSource for FixtureSource {
                 chats: Mutex::new(seed_chats()),
                 open_chat: Mutex::new(None),
                 running: Mutex::new(HashMap::new()),
+                skills: Mutex::new(seed_skills()),
                 events: events.clone(),
                 doc_tx,
                 subscriptions: Mutex::new(Vec::new()),
@@ -117,6 +119,7 @@ impl SyncSource for FixtureSource {
             }
             emit_project_docs(&shared);
             emit_connectors(&shared);
+            emit_skills(&shared);
             let _ = events.send(SyncEvent::Link(Link::Live));
 
             loop {
@@ -553,6 +556,38 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             shared.routine_runs.lock().unwrap().remove(&routine_id);
             emit_routines(shared, &project_id);
         }
+        ClientCommand::SkillsRefresh => emit_skills(shared),
+        ClientCommand::SkillSave { mut skill } => {
+            {
+                let mut skills = shared.skills.lock().unwrap();
+                let now = now_ms() as i64;
+                skill.updated_at = now;
+                if skill.slug.is_empty() {
+                    skill.slug = arbos_core::skill::slugify(&skill.name);
+                }
+                match skills
+                    .iter_mut()
+                    .find(|s| s.id == skill.id && !skill.id.is_empty())
+                {
+                    Some(existing) => {
+                        skill.version = existing.version + 1;
+                        skill.created_at = existing.created_at;
+                        *existing = skill;
+                    }
+                    None => {
+                        skill.id = new_id();
+                        skill.version = 1;
+                        skill.created_at = now;
+                        skills.push(skill);
+                    }
+                }
+            }
+            emit_skills(shared);
+        }
+        ClientCommand::SkillDelete { id } => {
+            shared.skills.lock().unwrap().retain(|s| s.id != id);
+            emit_skills(shared);
+        }
     }
 }
 
@@ -812,6 +847,11 @@ fn run_routine_now(shared: &Arc<Shared>, project_id: &str, routine_id: &str) {
         }
         emit_routine_runs(&shared, &routine_id);
     });
+}
+
+fn emit_skills(shared: &Shared) {
+    let skills = shared.skills.lock().unwrap().clone();
+    let _ = shared.events.send(SyncEvent::Skills(skills));
 }
 
 fn add_doc(shared: &Arc<Shared>, doc: ChatDoc) {
@@ -1749,6 +1789,67 @@ fn seed_projects() -> Vec<Project> {
             spend_today_usd: 3.87,
             spend_cap_usd: 25.0,
         },
+    ]
+}
+
+fn seed_skills() -> Vec<Skill> {
+    let t = now_ms() as i64;
+    let skill = |slug: &str,
+                 name: &str,
+                 description: &str,
+                 tags: &[&str],
+                 when_to_use: &str,
+                 body: &str,
+                 origin: Option<&str>,
+                 shared: bool,
+                 ago_h: i64| Skill {
+        id: new_id(),
+        slug: slug.into(),
+        name: name.into(),
+        description: description.into(),
+        tags: tags.iter().map(|s| s.to_string()).collect(),
+        when_to_use: when_to_use.into(),
+        body: body.into(),
+        origin_project_id: origin.map(str::to_string),
+        shared,
+        version: 1,
+        created_at: t - ago_h * 3_600_000,
+        updated_at: t - ago_h * 3_600_000,
+    };
+    vec![
+        skill(
+            "gpui-list-alignment",
+            "GPUI bottom-aligned lists",
+            "How to build a chat-style list that scrolls from the bottom in GPUI.",
+            &["gpui", "rust", "ui"],
+            "Any transcript or log view that must stick to its newest row.",
+            "## Steps\n\n1. `ListState::new(0, ListAlignment::Bottom, px(320.0))`.\n2. Key rows by `{msg}#{part}.{block}` so streaming appends re-splice only the changed tail.\n3. Use `ListSizingBehavior::Auto` so the list fills the column.\n\n## Pitfalls\n\n- Never rebuild the whole list on a text append; use `splice`.\n",
+            Some(PROJECT_ARBOS),
+            true,
+            30,
+        ),
+        skill(
+            "weekly-update",
+            "Weekly team update",
+            "Template and checklist for the Monday update mail.",
+            &["comms", "writing"],
+            "When asked to draft, send, or summarise the weekly update.",
+            "## Shape\n\n- Three bullets: shipped, in flight, blocked.\n- One line per project, link to the thread.\n- Under 200 words; no adjectives.\n\n## Send\n\nRead `updates/<date>.md`, fill the template, ask before sending to more than ten people.\n",
+            Some(PROJECT_COMMS),
+            false,
+            52,
+        ),
+        skill(
+            "release-checklist",
+            "Mac beta release checklist",
+            "Everything to check before tagging a Mac beta build.",
+            &["release", "mac", "process"],
+            "Before any tag, TestFlight upload, or launch-plan question.",
+            "## Before tagging\n\n1. `cargo fmt --all --check` and `cargo clippy --workspace -- -D warnings` are clean.\n2. Fixture and relay sources both start and pair.\n3. Changelog entry written.\n\n## After\n\n- Notarise, upload, post the build link in the launch chat.\n",
+            None,
+            true,
+            6,
+        ),
     ]
 }
 

@@ -63,6 +63,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: RoutineCmd,
     },
+    /// Skills library (F5): reusable how-tos shared across Projects.
+    Skills {
+        #[command(subcommand)]
+        cmd: SkillsCmd,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -120,6 +125,44 @@ enum RoutineCmd {
         project: String,
         routine: String,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum SkillsCmd {
+    /// List skills; with --q, search (FTS over name/description/tags/when to use).
+    List {
+        #[arg(long)]
+        q: Option<String>,
+    },
+    /// Print one skill as Markdown (frontmatter + body).
+    Show { slug: String },
+    /// Add a skill from flags or from a Markdown file with frontmatter (--file).
+    Add {
+        #[arg(long)]
+        file: Option<std::path::PathBuf>,
+        #[arg(long)]
+        slug: Option<String>,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        /// Comma-separated.
+        #[arg(long)]
+        tags: Option<String>,
+        #[arg(long)]
+        when_to_use: Option<String>,
+        /// Body Markdown (when no --file).
+        #[arg(long)]
+        body: Option<String>,
+        /// Visible to every Project (default: only the origin Project, or all when none is set).
+        #[arg(long)]
+        shared: bool,
+        /// Origin project id or name.
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Delete a skill by id or slug.
+    Delete { slug: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -459,6 +502,95 @@ async fn main() -> Result<()> {
             }
         },
         Cmd::Routines { cmd } => routines(&relay, cmd, args.json).await?,
+        Cmd::Skills { cmd } => match cmd {
+            SkillsCmd::List { q } => {
+                let path = match q {
+                    Some(q) => format!("/skills/search?q={}", urlencode(&q)),
+                    None => "/skills".to_owned(),
+                };
+                let v = relay.get(&path).await?;
+                if args.json {
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                } else if let Some(a) = v.as_array() {
+                    for s in a {
+                        println!(
+                            "{:<28} v{:<3} {:<7} {:<28} {}",
+                            s["slug"].as_str().unwrap_or(""),
+                            s["version"].as_i64().unwrap_or(1),
+                            if s["shared"].as_bool().unwrap_or(false) {
+                                "shared"
+                            } else {
+                                "own"
+                            },
+                            s["name"].as_str().unwrap_or(""),
+                            s["when_to_use"].as_str().unwrap_or("")
+                        );
+                    }
+                }
+            }
+            SkillsCmd::Show { slug } => {
+                let v = relay.get(&format!("/skills/{slug}")).await?;
+                if args.json {
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                } else {
+                    print!("{}", v["markdown"].as_str().unwrap_or(""));
+                }
+            }
+            SkillsCmd::Add {
+                file,
+                slug,
+                name,
+                description,
+                tags,
+                when_to_use,
+                body,
+                shared,
+                project,
+            } => {
+                let mut b = match file {
+                    Some(f) => json!({ "markdown": std::fs::read_to_string(&f)? }),
+                    None => json!({}),
+                };
+                let set = |b: &mut Value, k: &str, v: Option<String>| {
+                    if let Some(v) = v {
+                        b[k] = json!(v);
+                    }
+                };
+                set(&mut b, "slug", slug);
+                set(&mut b, "name", name);
+                set(&mut b, "description", description);
+                set(&mut b, "when_to_use", when_to_use);
+                set(&mut b, "body", body);
+                if let Some(t) = tags {
+                    b["tags"] = json!(t
+                        .split(',')
+                        .map(|x| x.trim().to_owned())
+                        .filter(|x| !x.is_empty())
+                        .collect::<Vec<_>>());
+                }
+                if shared {
+                    b["shared"] = json!(true);
+                }
+                if let Some(p) = project {
+                    b["origin_project_id"] = json!(resolve_project(&relay, &p).await?);
+                }
+                let v = relay.post("/skills", &b).await?;
+                if args.json {
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                } else {
+                    println!(
+                        "added skill {} ({}) v{}",
+                        v["slug"].as_str().unwrap_or("?"),
+                        v["id"].as_str().unwrap_or("?"),
+                        v["version"].as_i64().unwrap_or(1)
+                    );
+                }
+            }
+            SkillsCmd::Delete { slug } => {
+                relay.delete(&format!("/skills/{slug}")).await?;
+                println!("deleted {slug}");
+            }
+        },
     }
     Ok(())
 }
@@ -618,6 +750,17 @@ fn fmt_ms(ms: Option<i64>) -> String {
         Some(t) => t.format("%Y-%m-%d %H:%M:%SZ").to_string(),
         None => "—".to_owned(),
     }
+}
+
+fn urlencode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }
 
 async fn resolve_project(relay: &Relay, id_or_name: &str) -> Result<String> {
