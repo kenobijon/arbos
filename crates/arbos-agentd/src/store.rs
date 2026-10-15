@@ -208,6 +208,15 @@ impl Store {
                 "ALTER TABLE subagents ADD COLUMN last_status TEXT NOT NULL DEFAULT ''",
             )?;
         }
+        // Additive migration: question widgets (feature F4) keep the widget JSON per ask.
+        let has_widget: bool = c
+            .prepare("PRAGMA table_info(asks)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .filter_map(Result::ok)
+            .any(|n| n == "widget");
+        if !has_widget {
+            c.execute_batch("ALTER TABLE asks ADD COLUMN widget TEXT")?;
+        }
         Ok(Self(Arc::new(Mutex::new(c))))
     }
 
@@ -893,14 +902,35 @@ impl Store {
         chat_id: Option<&str>,
         session_id: Option<&str>,
         question: &str,
+        widget: Option<&Value>,
     ) -> Result<()> {
-        self.with(|c| c.execute("INSERT INTO asks(id, chat_id, session_id, question, created_at) VALUES (?1,?2,?3,?4,?5)", params![id, chat_id, session_id, question, now_ms()]).map(|_| ()))
+        let widget = widget.map(Value::to_string);
+        self.with(|c| c.execute("INSERT INTO asks(id, chat_id, session_id, question, widget, created_at) VALUES (?1,?2,?3,?4,?5,?6)", params![id, chat_id, session_id, question, widget, now_ms()]).map(|_| ()))
     }
 
     pub fn open_ask(&self, chat_id: &str) -> Result<Option<(String, Option<String>, String)>> {
         self.with(|c| {
             c.query_row("SELECT id, session_id, question FROM asks WHERE chat_id = ?1 AND answered = 0 ORDER BY created_at DESC LIMIT 1", params![chat_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
                 .optional()
+        })
+    }
+
+    /// One ask by id: `(question, widget, answered)`.
+    pub fn ask(&self, id: &str) -> Result<Option<(String, Option<Value>, bool)>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT question, widget, answered FROM asks WHERE id = ?1",
+                params![id],
+                |r| {
+                    let widget: Option<String> = r.get(1)?;
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        widget.and_then(|w| serde_json::from_str(&w).ok()),
+                        r.get::<_, i64>(2)? != 0,
+                    ))
+                },
+            )
+            .optional()
         })
     }
 

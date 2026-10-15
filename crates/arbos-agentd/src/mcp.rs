@@ -12,6 +12,8 @@ use axum::routing::post;
 use axum::{Json, Router};
 use serde_json::{json, Value};
 
+use arbos_core::widget::WIDGET_SCHEMA_JSON;
+
 use crate::agent::Agent;
 
 type S = Arc<Agent>;
@@ -41,7 +43,8 @@ fn tools() -> Value {
         { "name": "projects_list", "description": "List the user's other Projects (name, state).", "inputSchema": { "type": "object", "properties": {} } },
         { "name": "projects_send", "description": "Send a message to another Project by name. Async: the reply lands in this Project's 'Projects ⇄' tab.",
           "inputSchema": { "type": "object", "properties": { "to": { "type": "string" }, "text": { "type": "string" }, "wait": { "type": "boolean" } }, "required": ["to","text"] } },
-        { "name": "ask_user", "description": "Ask the user one question and wait; the answer arrives as the next message.", "inputSchema": { "type": "object", "properties": { "question": { "type": "string" } }, "required": ["question"] } },
+        { "name": "ask_user", "description": "Ask the user one question and wait; the answer arrives as the next message. Pass `widget` for a typed answer (choice, multi_select, text, date, form).",
+          "inputSchema": { "type": "object", "properties": { "question": { "type": "string" }, "widget": widget_schema() }, "required": ["question"] } },
         { "name": "spawn_subagent", "description": "Hand a task to a new subagent (Prime by default). Use mid-act when the task is bigger than 8 tool calls.",
           "inputSchema": { "type": "object", "properties": { "name": { "type": "string" }, "purpose": { "type": "string" }, "brief": { "type": "string" }, "isolate": { "type": "boolean" } }, "required": ["name","purpose","brief"] } },
         { "name": "wake_subagent", "description": "Continue an existing subagent with a new brief.", "inputSchema": { "type": "object", "properties": { "id": { "type": "string" }, "brief": { "type": "string" } }, "required": ["id","brief"] } }
@@ -50,6 +53,10 @@ fn tools() -> Value {
         a.extend(crate::connectors::tool_specs());
     }
     list
+}
+
+fn widget_schema() -> Value {
+    serde_json::from_str(WIDGET_SCHEMA_JSON).unwrap_or_else(|_| json!({ "type": "object" }))
 }
 
 pub(crate) fn text_result(text: impl Into<String>) -> Value {
@@ -389,8 +396,11 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
         }
         "ask_user" => {
             let q = s("question").unwrap_or_default();
-            match a.hook_ask_user(&q, &chat_for_scratch).await {
-                Ok(()) => text_result(
+            match a
+                .hook_ask_user(&q, args.get("widget"), &chat_for_scratch)
+                .await
+            {
+                Ok(_) => text_result(
                     "Question posted. Stop here; the user's answer arrives as the next message.",
                 ),
                 Err(e) => err_result(e),

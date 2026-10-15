@@ -164,6 +164,22 @@ enum ChatCmd {
         #[arg(long, default_value_t = 600)]
         timeout: u64,
     },
+    /// Answer the agent's open question with a structured value (question widgets).
+    Answer {
+        project: String,
+        chat: String,
+        /// JSON value: "id" for choice, ["a","b"] for multi_select, "text", "2026-12-01" for
+        /// date, {"field": value} for form. A bare word is taken as a string.
+        #[arg(long = "answer-json", visible_alias = "value")]
+        answer_json: String,
+        /// Question id (default: the newest open question in the chat).
+        #[arg(long)]
+        question: Option<String>,
+        #[arg(long)]
+        stream: bool,
+        #[arg(long, default_value_t = 600)]
+        timeout: u64,
+    },
     /// Join the room at the saved cursor and print rows as they arrive (resume after a kill).
     Stream {
         project: String,
@@ -337,6 +353,28 @@ async fn main() -> Result<()> {
             } => {
                 let project = resolve_project(&relay, &project).await?;
                 room::send(&mut cfg, &project, &chat, &text, stream, timeout).await?;
+            }
+            ChatCmd::Answer {
+                project,
+                chat,
+                answer_json,
+                question,
+                stream,
+                timeout,
+            } => {
+                let project = resolve_project(&relay, &project).await?;
+                let value: Value = serde_json::from_str(&answer_json)
+                    .unwrap_or_else(|_| Value::String(answer_json.clone()));
+                room::answer(
+                    &mut cfg,
+                    &project,
+                    &chat,
+                    question.as_deref(),
+                    value,
+                    stream,
+                    timeout,
+                )
+                .await?;
             }
             ChatCmd::Stream {
                 project,
