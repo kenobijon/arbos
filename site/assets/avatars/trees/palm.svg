@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Palmer">
+<circle class="bg" cx="32" cy="32" r="32" fill="#000000"/>
+<path d="M28.23 51.01C28.1 52.66 29.34 54 31 54L37 54C38.66 54 39.8 52.67 39.54 51.03L36.41 30.7C36.19 29.21 34.78 28 33.27 28L32.73 28C31.22 28 29.91 29.22 29.79 30.72L28.23 51.01Z" class="tree_dark" fill="#ffffff"/>
+<path d="M18.66 12.02C23.52 7.93 28.96 6.41 30.81 8.61C32.66 10.81 30.21 15.9 25.34 19.98C20.48 24.07 15.04 25.59 13.19 23.39C11.34 21.19 13.79 16.1 18.66 12.02Z" class="tree" fill="#ffffff"/>
+<path d="M47.34 12.02C52.21 16.1 54.66 21.19 52.81 23.39C50.96 25.59 45.52 24.07 40.66 19.98C35.79 15.9 33.34 10.81 35.19 8.61C37.04 6.41 42.48 7.93 47.34 12.02Z" class="tree" fill="#ffffff"/>
+<path d="M17.28 20.85C23.57 19.97 28.99 21.56 29.39 24.4C29.79 27.24 25.01 30.27 18.72 31.15C12.43 32.03 7.01 30.44 6.61 27.6C6.21 24.76 10.99 21.73 17.28 20.85Z" class="tree" fill="#ffffff"/>
+<path d="M46.72 20.85C53.01 21.73 57.79 24.76 57.39 27.6C56.99 30.44 51.57 32.03 45.28 31.15C38.99 30.27 34.21 27.24 34.61 24.4C35.01 21.56 40.43 19.97 46.72 20.85Z" class="tree" fill="#ffffff"/>
+<path d="M32 1.5C34.87 1.5 37.2 6.2 37.2 12C37.2 17.8 34.87 22.5 32 22.5C29.13 22.5 26.8 17.8 26.8 12C26.8 6.2 29.13 1.5 32 1.5Z" class="tree" fill="#ffffff"/>
+<circle cx="32" cy="25" r="9.5" class="tree" fill="#ffffff"/>
+<path d="M22.84 13.62C24.2 12.49 25.81 12.18 26.45 12.94C27.09 13.7 26.51 15.24 25.16 16.38C23.8 17.51 22.19 17.82 21.55 17.06C20.91 16.3 21.49 14.76 22.84 13.62Z" class="tree_light" fill="#ffffff"/>
+<circle cx="28.52" cy="22.56" r="1.89" class="face" fill="#000000"/>
+<path d="M33.59 23.19C34.85 20.91 36.11 20.91 37.37 23.19" class="face" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M29.3 26.97C31.6 28.53 33.58 28.2 35.24 25.98" class="face" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+<circle class="ring" cx="32" cy="32" r="31" fill="none" stroke="#ffffff" stroke-opacity="0.25" stroke-width="2"/>
+</svg>

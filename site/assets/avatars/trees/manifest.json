@@ -1,0 +1,53 @@
+{
+ "source": "assets/avatars/trees/manifest.json @ main",
+ "characters": {
+  "oak": "Oakley",
+  "pine": "Pip",
+  "lollipop": "Lolli",
+  "fractal": "Frax",
+  "mushroom": "Morel",
+  "cypress": "Cy",
+  "willow": "Willa",
+  "palm": "Palmer",
+  "bonsai": "Bon",
+  "birch": "Birdie",
+  "baobab": "Bao",
+  "sapling": "Sprout",
+  "maple": "Mabel",
+  "acacia": "Ace",
+  "spruce": "Bruce",
+  "cherry": "Blossom",
+  "cactus": "Spike",
+  "sequoia": "Red",
+  "olive": "Ollie",
+  "ginkgo": "Ko"
+ },
+ "colors": [
+  "mono",
+  "red",
+  "orange",
+  "amber",
+  "green",
+  "teal",
+  "cyan",
+  "blue",
+  "indigo",
+  "violet",
+  "pink",
+  "rose",
+  "slate"
+ ],
+ "style": {
+  "background": "#000000",
+  "foreground": "#ffffff",
+  "ring": "#ffffff",
+  "ring_opacity": 0.25,
+  "ring_px": 2,
+  "viewbox": [
+   0,
+   0,
+   64,
+   64
+  ]
+ }
+}

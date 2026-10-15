@@ -20,22 +20,22 @@
   var MAX_ANIMATED = 12;
   var ROLES = ['tree', 'tree_dark', 'tree_light', 'face', 'ring', 'bg'];
 
-  // Palette: accent colours from the avatar manifest (`colors[]`), expressed in the new roles
-  // (the tree carries the colour; the disc stays neutral). Override with ArbosAvatars.configure().
+  // Palette = assets/avatars/trees/manifest.json `colors[]` (the tree carries the colour on a black disc;
+  // the ring keeps its own opacity from the art). Override with ArbosAvatars.configure({palette}).
   var PALETTE = {
-    mono:   { tree: '#ffffff', tree_dark: '#cfcfcf', tree_light: '#ffffff', face: '#0a0a0a', ring: '#ffffff', bg: '#000000' },
-    red:    { tree: '#f87171', tree_dark: '#dc4b4b', tree_light: '#fca5a5', face: '#2a1210', ring: '#f87171', bg: '#2a1210' },
-    orange: { tree: '#fb923c', tree_dark: '#e0701a', tree_light: '#fdba74', face: '#2b1708', ring: '#fb923c', bg: '#2b1708' },
-    amber:  { tree: '#fbbf24', tree_dark: '#d99c08', tree_light: '#fde68a', face: '#2a1f08', ring: '#fbbf24', bg: '#2a1f08' },
-    green:  { tree: '#4ade80', tree_dark: '#22b35a', tree_light: '#86efac', face: '#0f2a1a', ring: '#4ade80', bg: '#0f2a1a' },
-    teal:   { tree: '#2dd4bf', tree_dark: '#14a89a', tree_light: '#5eead4', face: '#0b2826', ring: '#2dd4bf', bg: '#0b2826' },
-    cyan:   { tree: '#22d3ee', tree_dark: '#08a9c4', tree_light: '#67e8f9', face: '#0b2430', ring: '#22d3ee', bg: '#0b2430' },
-    blue:   { tree: '#60a5fa', tree_dark: '#3b82f6', tree_light: '#93c5fd', face: '#0f1f3a', ring: '#60a5fa', bg: '#0f1f3a' },
-    indigo: { tree: '#818cf8', tree_dark: '#6366f1', tree_light: '#a5b4fc', face: '#171a3c', ring: '#818cf8', bg: '#171a3c' },
-    violet: { tree: '#a78bfa', tree_dark: '#8b5cf6', tree_light: '#c4b5fd', face: '#221540', ring: '#a78bfa', bg: '#221540' },
-    pink:   { tree: '#f472b6', tree_dark: '#ec4899', tree_light: '#f9a8d4', face: '#2a1230', ring: '#f472b6', bg: '#2a1230' },
-    rose:   { tree: '#fb7185', tree_dark: '#f43f5e', tree_light: '#fda4af', face: '#2c1020', ring: '#fb7185', bg: '#2c1020' },
-    slate:  { tree: '#94a3b8', tree_dark: '#64748b', tree_light: '#cbd5e1', face: '#1a1f2a', ring: '#94a3b8', bg: '#1a1f2a' }
+    mono:   { tree: '#ffffff', tree_dark: '#ffffff', tree_light: '#ffffff', face: '#000000', ring: '#ffffff', bg: '#000000' },
+    red:    { tree: '#f87171', tree_dark: '#b91c1c', tree_light: '#fecaca', face: '#0a0a0a', ring: '#ffffff', bg: '#000000' },
+    orange: { tree: '#fb923c', tree_dark: '#c2410c', tree_light: '#fed7aa', face: '#0a0a0a', ring: '#ffffff', bg: '#000000' },
+    amber:  { tree: '#fbbf24', tree_dark: '#b45309', tree_light: '#fde68a', face: '#0a0a0a', ring: '#ffffff', bg: '#000000' },
+    green:  { tree: '#4ade80', tree_dark: '#15803d', tree_light: '#bbf7d0', face: '#0a0a0a', ring: '#ffffff', bg: '#000000' },
+    teal:   { tree: '#2dd4bf', tree_dark: '#0f766e', tree_light: '#99f6e4', face: '#0a0a0a', ring: '#ffffff', bg: '#000000' },
+    cyan:   { tree: '#22d3ee', tree_dark: '#0e7490', tree_light: '#a5f3fc', face: '#0a0a0a', ring: '#ffffff', bg: '#000000' },
+    blue:   { tree: '#60a5fa', tree_dark: '#1d4ed8', tree_light: '#bfdbfe', face: '#0a0a0a', ring: '#ffffff', bg: '#000000' },
+    indigo: { tree: '#818cf8', tree_dark: '#4338ca', tree_light: '#c7d2fe', face: '#0a0a0a', ring: '#ffffff', bg: '#000000' },
+    violet: { tree: '#a78bfa', tree_dark: '#6d28d9', tree_light: '#ddd6fe', face: '#0a0a0a', ring: '#ffffff', bg: '#000000' },
+    pink:   { tree: '#f472b6', tree_dark: '#be185d', tree_light: '#fbcfe8', face: '#0a0a0a', ring: '#ffffff', bg: '#000000' },
+    rose:   { tree: '#fb7185', tree_dark: '#be123c', tree_light: '#fecdd3', face: '#0a0a0a', ring: '#ffffff', bg: '#000000' },
+    slate:  { tree: '#94a3b8', tree_dark: '#475569', tree_light: '#cbd5e1', face: '#0a0a0a', ring: '#ffffff', bg: '#000000' }
   };
 
   var reduce = window.matchMedia('(prefers-reduced-motion: reduce)');
@@ -52,14 +52,21 @@
     if (!cache[url]) cache[url] = fetch(url, { credentials: 'same-origin' }).then(function (r) { if (!r.ok) throw new Error(url + ' ' + r.status); return r.json(); });
     return cache[url];
   }
+  // Run after the page has loaded and the main thread is idle, so the player never competes with LCP.
+  function whenIdle(fn) {
+    var idle = function () { if (window.requestIdleCallback) requestIdleCallback(fn, { timeout: 1500 }); else setTimeout(fn, 50); };
+    if (document.readyState === 'complete') idle(); else window.addEventListener('load', idle, { once: true });
+  }
   function loadLib() {
     if (window.lottie) return Promise.resolve(window.lottie);
     if (!libPromise) libPromise = new Promise(function (resolve, reject) {
-      var s = document.createElement('script');
-      s.src = LIB; s.async = true;
-      s.onload = function () { window.lottie ? resolve(window.lottie) : reject(new Error('lottie missing')); };
-      s.onerror = function () { reject(new Error('lottie failed to load')); };
-      document.head.appendChild(s);
+      whenIdle(function () {
+        var s = document.createElement('script');
+        s.src = LIB; s.async = true;
+        s.onload = function () { window.lottie ? resolve(window.lottie) : reject(new Error('lottie missing')); };
+        s.onerror = function () { reject(new Error('lottie failed to load')); };
+        document.head.appendChild(s);
+      });
     });
     return libPromise;
   }
