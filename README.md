@@ -203,4 +203,4 @@ Transient-registry tags are immutable: bump the version for every rebuild. The A
 
 ## CI
 
-`.github/workflows/ci.yml` runs `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test` on Linux, and the harness typecheck.
+`.github/workflows/ci.yml` runs on pushes to `main`, `arbos-v2`, and `cursor/**` and on pull requests: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test` on Linux, the harness typecheck, shellcheck + actionlint, and a layout check that the previous repo's `release-main.yml` / `fx-*` workflows are gone. `release.yml` runs after a green CI on `main`.

@@ -316,6 +316,9 @@ jobs:
       # (D43): boxes pin an image version per Project (D44), so a push to main
       # must not move what running Projects use.
       - uses: docker/build-push-action@v6
+        env:
+          # No *.dockerbuild artifact: publish downloads the payload-* ones only.
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
         with:
           context: .
           file: image/Dockerfile
