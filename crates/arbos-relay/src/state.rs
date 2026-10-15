@@ -58,6 +58,8 @@ pub struct AppState {
     pub box_conns: Arc<Mutex<HashMap<String, (u32, i64)>>>,
     /// project_id → ms when the current wake started (for wake timing).
     pub wake_started: Arc<Mutex<HashMap<String, i64>>>,
+    /// project_id → ms of the last client row; rows pushed while a box was dying must re-wake it.
+    pub last_client_push: Arc<Mutex<HashMap<String, i64>>>,
     pub conn_seq: Arc<std::sync::atomic::AtomicU64>,
 }
 

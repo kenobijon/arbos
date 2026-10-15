@@ -475,6 +475,21 @@ impl Store {
         })
     }
 
+    /// Most recent subagent with this name (the router sometimes passes the name as `subagent_id`).
+    pub fn subagent_by_name(&self, name: &str) -> Result<Option<SubagentRow>> {
+        self.with(|c| {
+            c.query_row(
+                &format!(
+                    "SELECT {} FROM subagents WHERE name = ?1 ORDER BY COALESCE(last_turn_at, created_at) DESC LIMIT 1",
+                    Self::SUBAGENT_COLS
+                ),
+                params![name],
+                Self::row_to_subagent,
+            )
+            .optional()
+        })
+    }
+
     pub fn set_subagent_last_status(&self, id: &str, line: &str) -> Result<()> {
         self.with(|c| {
             c.execute(

@@ -202,6 +202,11 @@ async fn handle_frame(
                 });
                 if !is_box {
                     // Wake obligation: a client row for a sleeping box (crdt-sync §8.4 step 1–2).
+                    state
+                        .last_client_push
+                        .lock()
+                        .await
+                        .insert(project_id.to_owned(), arbos_core::ids::now_ms());
                     boxes::ensure_awake(state, project_id, "send").await;
                 }
             }

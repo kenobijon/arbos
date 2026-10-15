@@ -45,7 +45,7 @@ struct Args {
     #[arg(
         long,
         env = "ARBOS_DAYTONA_SNAPSHOT",
-        default_value = "arbos-agent-0.1.3"
+        default_value = "arbos-agent-0.1.4"
     )]
     daytona_snapshot: String,
     /// Inline Dockerfile (e.g. image/Dockerfile.dev-inline) built by Daytona when the snapshot does not exist.
@@ -177,6 +177,7 @@ async fn main() -> anyhow::Result<()> {
         local_children: Arc::new(Mutex::new(HashMap::new())),
         box_conns: Arc::new(Mutex::new(HashMap::new())),
         wake_started: Arc::new(Mutex::new(HashMap::new())),
+        last_client_push: Arc::new(Mutex::new(HashMap::new())),
         conn_seq: Arc::new(AtomicU64::new(0)),
     };
 

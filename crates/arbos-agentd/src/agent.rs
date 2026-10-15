@@ -728,20 +728,53 @@ impl Agent {
         tokio::spawn(async move {
             if let Err(e) = me
                 .run_subagent(
-                    &chat, &host2, &user_msg, existing, &name, &purpose, &brief, harness,
-                    data_heavy, escalated,
+                    &chat,
+                    &host2,
+                    &user_msg,
+                    existing.clone(),
+                    &name,
+                    &purpose,
+                    &brief,
+                    harness,
+                    data_heavy,
+                    escalated,
                 )
                 .await
             {
                 tracing::warn!(error = %e, "subagent run failed");
-                let mut h = host2.lock().await;
-                let id = ulid();
-                h.doc
-                    .start_assistant_message(&id, &user_msg, &me.cfg.device_id);
-                h.doc
-                    .add_status_part(&id, "failed", &format!("{name} · failed"));
-                h.doc.add_error_part(&id, "subagent_failed", &e.to_string());
-                h.doc.finish_message(&id, MessageStatus::Error);
+                let label = if name.is_empty() {
+                    existing.clone().unwrap_or_else(|| "subagent".into())
+                } else {
+                    name.clone()
+                };
+                {
+                    let mut h = host2.lock().await;
+                    let id = ulid();
+                    h.doc
+                        .start_assistant_message(&id, &user_msg, &me.cfg.device_id);
+                    h.doc
+                        .add_status_part(&id, "failed", &format!("{label} · failed"));
+                    h.doc.add_error_part(&id, "subagent_failed", &e.to_string());
+                    h.doc.finish_message(&id, MessageStatus::Error);
+                }
+                // The main agent must learn about the failure too, or its next turn still believes
+                // the hand-off is running; it also tells the user in prose.
+                if let Err(e2) = me
+                    .run_result_turn(
+                        &chat,
+                        &host2,
+                        &user_msg,
+                        existing.as_deref().unwrap_or(""),
+                        &label,
+                        "failed",
+                        0,
+                        "(the subagent did not start)",
+                        Some(&e.to_string()),
+                    )
+                    .await
+                {
+                    tracing::warn!(error = %e2, "result turn after a failed start");
+                }
             }
         });
     }
@@ -1547,16 +1580,19 @@ impl Agent {
         let (_, subagent_model) = self.live_models().await;
         let (subagent_id, harness, is_new) = match existing {
             Some(id) => {
-                let row = self
-                    .store
-                    .subagent(&id)?
-                    .ok_or_else(|| anyhow!("unknown subagent {id}"))?;
+                let row = match self.store.subagent(&id)? {
+                    Some(r) => r,
+                    None => self
+                        .store
+                        .subagent_by_name(&id)?
+                        .ok_or_else(|| anyhow!("unknown subagent {id}"))?,
+                };
                 let h = match row.harness.as_str() {
                     "pi" => Harness::Pi,
                     "claude_code" => Harness::ClaudeCode,
                     _ => Harness::Prime,
                 };
-                (id, h, false)
+                (row.id, h, false)
             }
             None => {
                 let h = pick_harness(

@@ -640,6 +640,19 @@ pub async fn sweep_box_liveness(state: &AppState) {
                 state
                     .set_box_state(&project_id, BoxState::Asleep, Some("box socket lost"))
                     .await;
+                // A client row that landed while the box was already dying (still "awake" in the
+                // grace window) has no box to take it: wake again so the command is not stranded.
+                let pushed = state
+                    .last_client_push
+                    .lock()
+                    .await
+                    .get(&project_id)
+                    .copied()
+                    .unwrap_or(0);
+                if pushed >= last - 5_000 {
+                    tracing::warn!(%project_id, "box died with client rows outstanding; waking it again");
+                    ensure_awake(state, &project_id, "rows pending after box loss").await;
+                }
             }
         }
     }
