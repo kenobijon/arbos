@@ -6,6 +6,8 @@
 #
 #   sudo scripts/runner/install-self-hosted-runner.sh \
 #       --url https://github.com/unarbos/arbos --token <registration token>
+#   gh api -X POST repos/unarbos/arbos/actions/runners/registration-token --jq .token |
+#       sudo scripts/runner/install-self-hosted-runner.sh --url https://github.com/unarbos/arbos --token -
 #
 # The registration token comes from the repo: Settings → Actions → Runners →
 # New self-hosted runner (or `gh api -X POST repos/unarbos/arbos/actions/runners/registration-token`
@@ -76,7 +78,11 @@ if $UNINSTALL; then
   exit 0
 fi
 
-: "${URL:?--url https://github.com/<owner>/<repo>}" "${TOKEN:?--token <registration token>}"
+: "${URL:?--url https://github.com/<owner>/<repo>}" "${TOKEN:?--token <registration token> (or - to read it from stdin)}"
+if [[ "$TOKEN" == "-" ]]; then
+  # Keeps the token out of `ps` and shell history on a shared machine.
+  read -r TOKEN
+fi
 
 ARCH="$(uname -m)"
 case "$ARCH" in
@@ -127,6 +133,10 @@ fi
 sudo -u "$RUNNER_USER" bash -lc 'rustup target add aarch64-apple-darwin x86_64-apple-darwin' || true
 xcode-select -p >/dev/null 2>&1 || echo "warning: no Xcode command line tools (xcode-select --install)" >&2
 
+# What `svc.sh install` would do: the service wrapper lives in bin/ and is
+# copied to the root so the daemon has a stable path.
+sudo -u "$RUNNER_USER" cp "$RUNNER_DIR/bin/runsvc.sh" "$RUNNER_DIR/runsvc.sh"
+chmod 755 "$RUNNER_DIR/runsvc.sh"
 mkdir -p "$LOG_DIR"
 chown "$RUNNER_USER" "$LOG_DIR"
 cat > "$PLIST" <<EOF
