@@ -14,18 +14,29 @@ enum Keychain {
     private static let service = "sh.arbos.ios.relay"
 
     static func load(relayUrl: String) -> DeviceCredentials? {
-        var query = baseQuery(account: relayUrl)
+        loadData(account: relayUrl).flatMap { try? JSONDecoder().decode(DeviceCredentials.self, from: $0) }
+    }
+
+    static func store(_ creds: DeviceCredentials) throws {
+        try storeData(try JSONEncoder().encode(creds), account: creds.relayUrl)
+    }
+
+    static func delete(relayUrl: String) {
+        deleteData(account: relayUrl)
+    }
+
+    static func loadData(account: String) -> Data? {
+        var query = baseQuery(account: account)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         guard status == errSecSuccess, let data = item as? Data else { return nil }
-        return try? JSONDecoder().decode(DeviceCredentials.self, from: data)
+        return data
     }
 
-    static func store(_ creds: DeviceCredentials) throws {
-        let data = try JSONEncoder().encode(creds)
-        let query = baseQuery(account: creds.relayUrl)
+    static func storeData(_ data: Data, account: String) throws {
+        let query = baseQuery(account: account)
         let attributes: [String: Any] = [
             kSecValueData as String: data,
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
@@ -41,8 +52,8 @@ enum Keychain {
         }
     }
 
-    static func delete(relayUrl: String) {
-        SecItemDelete(baseQuery(account: relayUrl) as CFDictionary)
+    static func deleteData(account: String) {
+        SecItemDelete(baseQuery(account: account) as CFDictionary)
     }
 
     private static func baseQuery(account: String) -> [String: Any] {
