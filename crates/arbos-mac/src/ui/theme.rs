@@ -146,8 +146,15 @@ impl Theme {
         cfg!(target_os = "macos")
     }
 
+    /// Window vibrancy: Glass selected and the platform can blur the window.
     pub fn is_glass(&self) -> bool {
         self.surface == Surface::Glass && Self::glass_available()
+    }
+
+    /// In-window frosted panels: Glass selected. Works on every backend the
+    /// zui fork supports (Metal, wgpu, DirectX), so Linux previews it too.
+    pub fn is_frost(&self) -> bool {
+        self.surface == Surface::Glass
     }
 
     /// The shell tint painted on the root (zeron-study §3.1 step 2).
@@ -157,14 +164,17 @@ impl Theme {
         c
     }
 
-    /// Floating cards: translucent tint on glass, flat card on matte (§3.11).
+    /// Floating cards: translucent tint on frost, flat card on matte (§3.11).
     pub fn card(&self) -> Hsla {
         let mut c = self.surface_1;
-        c.a = if self.is_glass() {
-            FROST_TINT_ALPHA
-        } else {
-            1.0
-        };
+        c.a = if self.is_frost() { FROST_TINT_ALPHA } else { 1.0 };
+        c
+    }
+
+    /// Chrome strips (rail, tab bar, side panels) over frost: thinner than cards.
+    pub fn chrome(&self) -> Hsla {
+        let mut c = self.surface_1;
+        c.a = if self.is_frost() { 0.35 } else { 1.0 };
         c
     }
 

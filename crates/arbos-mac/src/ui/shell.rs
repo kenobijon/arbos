@@ -2,6 +2,7 @@
 //! right panel (browser live view, S16) · Details drawer. Layout per
 //! `arbos-design.md` §3.2 and the mock.
 
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
@@ -11,12 +12,13 @@ use gpui::{
 
 use crate::app::{AppState, DetailsTarget};
 use crate::model::{now_ms, BoxState, Chat, Link, Project};
-use crate::ui::composer::{Composer, ComposerEvent};
+use crate::ui::composer::{Composer, ComposerEvent, ComposerInput};
+use crate::ui::frost::{MENU_BLUR, PANEL_BLUR, edge_faded, frosted, rounded_clip};
 use crate::ui::motion::{ease_out_cubic, PulseClock, COMPOSER_DROP_MS, SHAKE_MS};
 use crate::ui::theme::{
-    reapply_window_background, Appearance, Surface, Theme, COMPOSER_WIDTH, DRAWER_WIDTH,
-    PANEL_RADIUS, RAIL_TILE, RAIL_WIDTH, RAIL_WIDTH_COLLAPSED, RIGHT_PANEL_WIDTH, TAB_BAR_HEIGHT,
-    TAB_MIN_WIDTH,
+    reapply_window_background, Appearance, Surface, Theme, COMPOSER_HEIGHT, COMPOSER_WIDTH,
+    DRAWER_WIDTH, PANEL_RADIUS, RAIL_TILE, RAIL_WIDTH, RAIL_WIDTH_COLLAPSED, RIGHT_PANEL_WIDTH,
+    TAB_BAR_HEIGHT, TAB_MIN_WIDTH,
 };
 use crate::ui::transcript::{Transcript, COLUMN_MAX_WIDTH};
 
@@ -26,6 +28,8 @@ pub struct Shell {
     state: Entity<AppState>,
     transcript: Entity<Transcript>,
     composer: Entity<Composer>,
+    pairing_input: Entity<ComposerInput>,
+    project_input: Entity<ComposerInput>,
     focus_handle: FocusHandle,
     settings_open: bool,
     shake_started_at: Option<u64>,
@@ -49,14 +53,58 @@ impl Shell {
         )
         .detach();
         Composer::focus(&composer, window, cx);
+
+        let pairing_input = cx.new(ComposerInput::new);
+        {
+            let weak = cx.weak_entity();
+            pairing_input.update(cx, |input, _| {
+                input.set_placeholder("One-time pairing code");
+                input.on_submit = Some(Rc::new(move |_window, cx| {
+                    let _ = weak.update(cx, |this, cx| this.submit_pairing(cx));
+                }));
+            });
+        }
+        let project_input = cx.new(ComposerInput::new);
+        {
+            let weak = cx.weak_entity();
+            project_input.update(cx, |input, _| {
+                input.set_placeholder("Project name");
+                input.on_submit = Some(Rc::new(move |window, cx| {
+                    let _ = weak.update(cx, |this, cx| this.submit_project(window, cx));
+                }));
+            });
+        }
+        cx.observe(&pairing_input, |_, _, cx| cx.notify()).detach();
+        cx.observe(&project_input, |_, _, cx| cx.notify()).detach();
+
         Self {
             state,
             transcript,
             composer,
+            pairing_input,
+            project_input,
             focus_handle: cx.focus_handle(),
             settings_open: false,
             shake_started_at: None,
         }
+    }
+
+    fn submit_pairing(&mut self, cx: &mut Context<Self>) {
+        let code = self.pairing_input.read(cx).text().trim().to_string();
+        if code.is_empty() {
+            return;
+        }
+        self.state.update(cx, |s, cx| s.pair(code, cx));
+    }
+
+    fn submit_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self.project_input.read(cx).text().trim().to_string();
+        if name.is_empty() {
+            return;
+        }
+        self.project_input.update(cx, |input, cx| input.clear(cx));
+        self.state.update(cx, |s, cx| s.create_project(name, cx));
+        Composer::focus(&self.composer, window, cx);
     }
 
     fn close_tab(&mut self, _: &CloseTab, _: &mut Window, cx: &mut Context<Self>) {
@@ -244,10 +292,16 @@ impl Shell {
                     .hover(|s| s.bg(theme.surface_2))
                     .cursor_pointer()
                     .child("+")
-                    .on_click(cx.listener(|this, _, _, cx| {
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        let open = !this.state.read(cx).new_project_open;
                         this.state.update(cx, |s, cx| {
-                            s.open_details(DetailsTarget::Blob("new-project".into()), cx)
+                            s.new_project_open = open;
+                            cx.notify();
                         });
+                        if open {
+                            let handle = this.project_input.read(cx).focus_handle(cx);
+                            window.focus(&handle, cx);
+                        }
                     })),
             )
             .child(
@@ -276,10 +330,10 @@ impl Shell {
             .flex_shrink_0()
             .flex()
             .flex_col()
-            .bg(theme.rail_wash)
+            .bg(theme.chrome())
             .border_r_1()
             .border_color(theme.border)
-            .child(tiles)
+            .child(edge_faded(18.0, true, true, tiles))
             .child(bottom)
     }
 
@@ -732,11 +786,13 @@ impl Shell {
 
     // ----- right panel (S16) and Details drawer --------------------------------
 
-    fn render_right_panel(&self, cx: &mut Context<Self>) -> Div {
+    fn render_right_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let state = self.state.read(cx);
         let live = state.live_browser();
-        if live.is_some() {
+        let frame = state.browser_frame.clone();
+        let frames_seen = state.browser_frames_seen;
+        if frame.is_some() || live.is_some() {
             PulseClock::request(cx);
         }
         let mut panel = div()
@@ -747,7 +803,7 @@ impl Shell {
             .flex_col()
             .border_l_1()
             .border_color(theme.border)
-            .bg(theme.rail_wash);
+            .bg(theme.chrome());
         panel = panel.child(
             div()
                 .h(px(TAB_BAR_HEIGHT))
@@ -771,101 +827,78 @@ impl Shell {
                         })),
                 ),
         );
-        match live {
-            Some((title, url, action)) => {
-                let phase = PulseClock::phase(cx, 2000);
-                panel = panel.child(
+        let (title, url, action) = live.unwrap_or_default();
+        let body = match frame {
+            Some(image) => div()
+                .flex()
+                .flex_col()
+                .gap(px(10.0))
+                .p(px(12.0))
+                .child(rounded_clip(
+                    8.0,
                     div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(10.0))
-                        .p(px(12.0))
-                        .child(
-                            div()
-                                .w_full()
-                                .h(px(220.0))
-                                .rounded(px(8.0))
-                                .bg(theme.code_bg)
-                                .border_1()
-                                .border_color(theme.border)
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_size(px(11.0))
-                                .text_color(theme.text_faint)
-                                .child(format!(
-                                    "live JPEG stream · frame {}",
-                                    (phase * 60.0) as u32
-                                )),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(12.5))
-                                .text_color(theme.text)
-                                .child(title),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(theme.text_faint)
-                                .child(url),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(11.5))
-                                .text_color(theme.text_muted)
-                                .child(format!("last action: {action}")),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(theme.text_faint)
-                                .child("Watch only in v1 — the agent drives the page."),
-                        ),
-                );
-            }
-            None => {
-                panel = panel.child(
+                        .w_full()
+                        .h(px(220.0))
+                        .rounded(px(8.0))
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.code_bg)
+                        .child(gpui::img(image).w_full().h_full().object_fit(gpui::ObjectFit::Contain)),
+                ))
+                .child(div().text_size(px(12.5)).text_color(theme.text).child(if title.is_empty() { "Live".to_string() } else { title }))
+                .child(div().text_size(px(11.0)).text_color(theme.text_faint).child(url))
+                .child(
                     div()
-                        .flex_1()
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .justify_center()
-                        .gap(px(8.0))
-                        .p(px(16.0))
-                        .text_size(px(12.5))
+                        .text_size(px(11.5))
                         .text_color(theme.text_muted)
-                        .child("No browser session is running.")
-                        .child(
-                            div()
-                                .text_size(px(11.5))
-                                .text_color(theme.text_faint)
-                                .text_center()
-                                .child(
-                                    "When a subagent opens the browser, its frames stream here.",
-                                ),
-                        ),
-                );
-            }
-        }
-        panel
+                        .child(format!("frames: {frames_seen} · last action: {action}")),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme.text_faint)
+                        .child("Watch only in v1 — the agent drives the page."),
+                ),
+            None => div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(8.0))
+                .p(px(16.0))
+                .text_size(px(12.5))
+                .text_color(theme.text_muted)
+                .child(if title.is_empty() {
+                    "No browser session is running.".to_string()
+                } else {
+                    format!("Connecting to the box stream for “{title}”…")
+                })
+                .child(
+                    div()
+                        .text_size(px(11.5))
+                        .text_color(theme.text_faint)
+                        .text_center()
+                        .child("When a subagent opens the browser, agentd's /browser/stream frames show here."),
+                ),
+        };
+        frosted(0.0, PANEL_BLUR, panel.child(body))
     }
 
-    fn render_details(&self, target: &DetailsTarget, cx: &mut Context<Self>) -> Div {
+    fn render_details(&self, target: &DetailsTarget, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let state = self.state.read(cx);
         let asleep = state.box_state().map(|s| s.is_asleep()).unwrap_or(false);
-        let mut rows: Vec<(String, String)> = Vec::new();
+        let mut sections: Vec<(String, Vec<(String, String)>)> = Vec::new();
+        let mut preview: Option<String> = None;
+        let mut blob_key: Option<String> = None;
         let title = match target {
             DetailsTarget::Project(id) => {
+                let mut rows = Vec::new();
                 if let Some(p) = state.project(id) {
                     rows.push(("Project".into(), p.name.clone()));
                     rows.push(("Box state".into(), format!("{:?}", p.state)));
-                    rows.push((
-                        "Model".into(),
-                        format!("{} · {}", p.model, p.effort.label()),
-                    ));
+                    rows.push(("Model".into(), format!("{} · {}", p.model, p.effort.label())));
                     rows.push((
                         "Spend today".into(),
                         format!("${:.2} of ${:.2}", p.spend_today_usd, p.spend_cap_usd),
@@ -874,49 +907,126 @@ impl Shell {
                         rows.push(("Detail".into(), d.clone()));
                     }
                 }
+                sections.push(("Project".into(), rows));
+                if let Some(doc) = state.project_docs.get(id) {
+                    sections.push(("Box status (project doc)".into(), json_rows(&doc.status)));
+                    sections.push(("Settings (project doc)".into(), json_rows(&doc.settings)));
+                    sections.push((
+                        "Threads · T1 index".into(),
+                        doc.threads
+                            .iter()
+                            .map(|t| {
+                                (
+                                    format!("{} · {} · {}", t.name, t.status, t.harness),
+                                    if t.summary.is_empty() { t.purpose.clone() } else { t.summary.clone() },
+                                )
+                            })
+                            .collect(),
+                    ));
+                    if !doc.memory_t1.is_empty() {
+                        preview = Some(doc.memory_t1.clone());
+                    }
+                }
                 "Project details".to_string()
             }
-            DetailsTarget::Message {
-                chat_id,
-                message_id,
-            } => {
-                if let Some(m) = state
-                    .messages_of(chat_id)
-                    .iter()
-                    .find(|m| &m.id == message_id)
-                {
+            DetailsTarget::Message { chat_id, message_id } => {
+                if let Some(m) = state.messages_of(chat_id).iter().find(|m| &m.id == message_id) {
+                    let mut rows = Vec::new();
                     rows.push(("Message".into(), m.id.clone()));
                     rows.push(("Status".into(), format!("{:?}", m.status)));
-                    if let Some(t) = m.turn {
-                        rows.push(("Turn".into(), format!("{t:?}")));
-                    }
+                    rows.push((
+                        "Routing decision".into(),
+                        m.decision
+                            .clone()
+                            .or(m.turn.map(|t| format!("{t:?}").to_lowercase()))
+                            .unwrap_or_else(|| "—".into()),
+                    ));
                     if let Some(model) = &m.model {
                         rows.push(("Model".into(), model.clone()));
                     }
-                    rows.push(("Parts".into(), m.parts.len().to_string()));
+                    if let Some(s) = &m.subagent_id {
+                        rows.push(("Subagent".into(), s.clone()));
+                    }
+                    if let Some(r) = &m.in_reply_to {
+                        rows.push(("In reply to".into(), r.clone()));
+                    }
+                    sections.push(("Turn".into(), rows));
+                    let usage = m.usage.clone().unwrap_or(serde_json::Value::Null);
+                    let mut tokens = json_rows(&usage);
+                    if tokens.is_empty() {
+                        tokens.push(("Tokens".into(), "not reported yet".into()));
+                    }
+                    sections.push(("Context pack · tokens".into(), tokens));
+                    let pulls: Vec<(String, String)> = m
+                        .parts
+                        .iter()
+                        .filter_map(|p| match p {
+                            crate::model::Part::Tool { call, output_summary, output_ref, .. } => Some((
+                                format!("{} {}", call.name, call.call_input_short()),
+                                match output_ref {
+                                    Some(r) => format!("{output_summary} · blob {r}"),
+                                    None => output_summary.clone(),
+                                },
+                            )),
+                            _ => None,
+                        })
+                        .collect();
+                    sections.push(("Pull log · tool calls".into(), pulls));
+                    if let Some(c) = &m.return_contract {
+                        sections.push(("Return contract".into(), json_rows(c)));
+                    }
                 }
-                "Message details".to_string()
+                if let Some(doc) = state.selected_doc() {
+                    if !doc.threads.is_empty() {
+                        sections.push((
+                            "Threads · T1 index".into(),
+                            doc.threads
+                                .iter()
+                                .take(6)
+                                .map(|t| (format!("{} · {}", t.name, t.status), t.summary.clone()))
+                                .collect(),
+                        ));
+                    }
+                }
+                "Turn details".to_string()
             }
             DetailsTarget::Blob(key) => {
-                if key == "new-project" {
-                    rows.push(("Status".into(), "Not in this slice".into()));
-                    rows.push((
-                        "What happens".into(),
-                        "The relay creates a sandbox from the image and registers the Project (M3).".into(),
-                    ));
-                    "New project".to_string()
-                } else {
-                    rows.push(("Blob".into(), key.clone()));
-                    rows.push((
-                        "Full output".into(),
-                        if asleep {
-                            "needs the box awake".into()
+                blob_key = Some(key.clone());
+                let mut rows = vec![("Blob".into(), key.clone())];
+                match state.blobs.get(key) {
+                    Some(blob) => {
+                        rows.push(("Type".into(), blob.mime.clone()));
+                        rows.push(("Size".into(), format!("{} bytes", blob.bytes.len())));
+                        if let Some(p) = &blob.saved_to {
+                            rows.push(("Saved to".into(), p.display().to_string()));
+                        }
+                        if blob.mime.starts_with("text/")
+                            || blob.mime.contains("json")
+                            || std::str::from_utf8(&blob.bytes).is_ok()
+                        {
+                            let text = String::from_utf8_lossy(&blob.bytes);
+                            let mut head: String = text.chars().take(4_000).collect();
+                            if text.len() > head.len() {
+                                head.push_str("\n…");
+                            }
+                            preview = Some(head);
                         } else {
-                            "fetched lazily from GET /blob/… (stub)".into()
-                        },
-                    ));
-                    "Details".to_string()
+                            preview = Some("(binary — use Save to download)".into());
+                        }
+                    }
+                    None => {
+                        rows.push((
+                            "Full output".into(),
+                            if asleep {
+                                "needs the box awake; the relay mirror is tried first".into()
+                            } else {
+                                "fetching from GET /blob/…".into()
+                            },
+                        ));
+                    }
                 }
+                sections.push(("Blob".into(), rows));
+                "Details".to_string()
             }
         };
 
@@ -932,6 +1042,7 @@ impl Shell {
             .child(
                 div()
                     .h(px(TAB_BAR_HEIGHT))
+                    .flex_shrink_0()
                     .flex()
                     .items_center()
                     .justify_between()
@@ -943,75 +1054,109 @@ impl Shell {
                     .child(title)
                     .child(
                         div()
-                            .id("details-close")
-                            .text_color(theme.text_faint)
-                            .cursor_pointer()
-                            .child("×")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.state.update(cx, |s, cx| s.close_details(cx));
-                            })),
+                            .flex()
+                            .items_center()
+                            .gap(px(10.0))
+                            .when_some(blob_key.clone(), |el, key| {
+                                let key2 = key.clone();
+                                el.child(
+                                    div()
+                                        .id("details-save")
+                                        .text_size(px(12.0))
+                                        .text_color(theme.accent)
+                                        .cursor_pointer()
+                                        .child("Save")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.state.update(cx, |s, cx| s.fetch_blob(key2.clone(), true, cx));
+                                        })),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .id("details-close")
+                                    .text_color(theme.text_faint)
+                                    .cursor_pointer()
+                                    .child("×")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.state.update(cx, |s, cx| s.close_details(cx));
+                                    })),
+                            ),
                     ),
             );
-        let mut body = div().flex().flex_col().gap(px(10.0)).p(px(12.0));
-        for (k, v) in rows {
+        let mut body = div()
+            .id("details-body")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap(px(14.0))
+            .p(px(12.0));
+        for (heading, rows) in sections {
+            let mut sec = div().flex().flex_col().gap(px(8.0)).child(
+                div()
+                    .text_size(px(10.5))
+                    .text_color(theme.text_faint)
+                    .child(heading.to_uppercase()),
+            );
+            if rows.is_empty() {
+                sec = sec.child(div().text_size(px(12.0)).text_color(theme.text_faint).child("—"));
+            }
+            for (k, v) in rows {
+                sec = sec.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .child(div().text_size(px(11.0)).text_color(theme.text_muted).child(k))
+                        .child(div().text_size(px(12.5)).text_color(theme.text).child(v)),
+                );
+            }
+            body = body.child(sec);
+        }
+        if let Some(text) = preview {
             body = body.child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .child(
-                        div()
-                            .text_size(px(10.5))
-                            .text_color(theme.text_faint)
-                            .child(k),
-                    )
-                    .child(div().text_size(px(12.5)).text_color(theme.text).child(v)),
+                    .p(px(10.0))
+                    .rounded(px(8.0))
+                    .bg(theme.code_bg)
+                    .border_1()
+                    .border_color(theme.border)
+                    .font_family(theme.font_mono)
+                    .text_size(px(11.5))
+                    .line_height(px(16.0))
+                    .text_color(theme.text)
+                    .child(text),
             );
         }
         drawer = drawer.child(body);
-        drawer
+        frosted(0.0, PANEL_BLUR, drawer)
     }
 
-    fn render_settings(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn render_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let state = self.state.read(cx);
         let source = state.source_name;
         let link = state.link;
+        let device = state.device_id.clone();
         let glass_ok = Theme::glass_available();
 
-        let option = |id: &'static str,
-                      label: &'static str,
-                      selected: bool,
-                      enabled: bool,
-                      theme: &Theme| {
+        let option = |id: &'static str, label: &'static str, selected: bool, enabled: bool, theme: &Theme| {
             div()
                 .id(id)
                 .px(px(10.0))
                 .py(px(5.0))
                 .rounded(px(6.0))
                 .text_size(px(12.5))
-                .bg(if selected {
-                    theme.surface_2
-                } else {
-                    gpui::transparent_black()
-                })
-                .text_color(if enabled {
-                    theme.text
-                } else {
-                    theme.text_faint
-                })
-                .when(enabled, |el| {
-                    el.cursor_pointer().hover(|s| s.bg(theme.surface_2))
-                })
+                .bg(if selected { theme.surface_2 } else { gpui::transparent_black() })
+                .text_color(if enabled { theme.text } else { theme.text_faint })
+                .when(enabled, |el| el.cursor_pointer().hover(|s| s.bg(theme.surface_2)))
                 .child(label)
         };
 
-        div()
+        let card = div()
             .id("settings-popover")
-            .absolute()
-            .left(px(RAIL_WIDTH + 8.0))
-            .bottom(px(14.0))
-            .w(px(260.0))
+            .w(px(272.0))
             .flex()
             .flex_col()
             .gap(px(8.0))
@@ -1021,88 +1166,54 @@ impl Shell {
             .border_1()
             .border_color(theme.border_strong)
             .shadow_lg()
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(theme.text_faint)
-                    .child("APPEARANCE · SURFACE"),
-            )
+            .child(div().text_size(px(11.0)).text_color(theme.text_faint).child("APPEARANCE · SURFACE"))
             .child(
                 div()
                     .flex()
                     .gap(px(4.0))
                     .child(
-                        option(
-                            "surface-matte",
-                            "Matte",
-                            theme.surface == Surface::Matte,
-                            true,
-                            &theme,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            let a = Theme::of(cx).appearance;
-                            this.set_theme(a, Surface::Matte, cx);
-                        })),
+                        option("surface-matte", "Matte", theme.surface == Surface::Matte, true, &theme)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let a = Theme::of(cx).appearance;
+                                this.set_theme(a, Surface::Matte, cx);
+                            })),
                     )
                     .child(
-                        option(
-                            "surface-glass",
-                            "Glass",
-                            theme.surface == Surface::Glass,
-                            glass_ok,
-                            &theme,
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if glass_ok {
+                        option("surface-glass", "Glass", theme.surface == Surface::Glass, true, &theme)
+                            .on_click(cx.listener(|this, _, _, cx| {
                                 let a = Theme::of(cx).appearance;
                                 this.set_theme(a, Surface::Glass, cx);
-                            }
-                        })),
+                            })),
                     ),
             )
-            .when(!glass_ok, |el| {
-                el.child(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(theme.text_faint)
-                        .child("Glass needs macOS vibrancy; this build uses matte."),
-                )
-            })
             .child(
                 div()
                     .text_size(px(11.0))
                     .text_color(theme.text_faint)
-                    .child("APPEARANCE · MODE"),
+                    .child(if glass_ok {
+                        "Glass: window vibrancy + frosted panels (0.80 shell alpha)."
+                    } else {
+                        "Glass here: frosted panels only; window vibrancy needs macOS."
+                    }),
             )
+            .child(div().text_size(px(11.0)).text_color(theme.text_faint).child("APPEARANCE · MODE"))
             .child(
                 div()
                     .flex()
                     .gap(px(4.0))
                     .child(
-                        option(
-                            "mode-dark",
-                            "Dark",
-                            theme.appearance == Appearance::Dark,
-                            true,
-                            &theme,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            let s = Theme::of(cx).surface;
-                            this.set_theme(Appearance::Dark, s, cx);
-                        })),
+                        option("mode-dark", "Dark", theme.appearance == Appearance::Dark, true, &theme)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let s = Theme::of(cx).surface;
+                                this.set_theme(Appearance::Dark, s, cx);
+                            })),
                     )
                     .child(
-                        option(
-                            "mode-light",
-                            "Light",
-                            theme.appearance == Appearance::Light,
-                            true,
-                            &theme,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            let s = Theme::of(cx).surface;
-                            this.set_theme(Appearance::Light, s, cx);
-                        })),
+                        option("mode-light", "Light", theme.appearance == Appearance::Light, true, &theme)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let s = Theme::of(cx).surface;
+                                this.set_theme(Appearance::Light, s, cx);
+                            })),
                     ),
             )
             .child(div().h(px(1.0)).bg(theme.border))
@@ -1110,8 +1221,199 @@ impl Shell {
                 div()
                     .text_size(px(11.5))
                     .text_color(theme.text_muted)
-                    .child(format!("Source: {source} · link: {link:?}")),
+                    .child(format!(
+                        "Source: {source} · link: {link:?}{}",
+                        device.map(|d| format!(" · device {d}")).unwrap_or_default()
+                    )),
+            );
+        div()
+            .absolute()
+            .left(px(RAIL_WIDTH + 8.0))
+            .bottom(px(14.0))
+            .child(frosted(PANEL_RADIUS, MENU_BLUR, card))
+    }
+
+    /// First run against a relay: enter the one-time code the relay printed
+    /// (`arbos-relay` logs it; `POST /pair/new` mints more).
+    fn render_pairing(&self, pairing: &crate::app::Pairing, cx: &mut Context<Self>) -> Div {
+        let theme = Theme::of(cx).clone();
+        let input_row = div()
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .h(px(COMPOSER_HEIGHT))
+            .px(px(16.0))
+            .rounded(px(COMPOSER_HEIGHT / 2.0))
+            .bg(theme.card())
+            .border_1()
+            .border_color(if pairing.error.is_some() { theme.danger } else { theme.border_strong })
+            .child(self.pairing_input.clone())
+            .child(
+                div()
+                    .id("pair-submit")
+                    .px(px(12.0))
+                    .py(px(6.0))
+                    .rounded_full()
+                    .bg(theme.text)
+                    .text_color(theme.bg)
+                    .text_size(px(12.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .cursor_pointer()
+                    .child(if pairing.busy { "Pairing…" } else { "Pair" })
+                    .on_click(cx.listener(|this, _, _, cx| this.submit_pairing(cx))),
+            );
+        div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(14.0))
+            .px(px(28.0))
+            .child(div().text_size(px(22.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child("Pair this device"))
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(theme.text_muted)
+                    .text_center()
+                    .child(format!(
+                        "Relay {}. Enter the one-time code from the relay log (or `arbosctl pair-code`). The device token is kept in {}.",
+                        pairing.relay_url,
+                        if cfg!(target_os = "macos") { "your login keychain" } else { "~/.config/arbos (0600)" }
+                    )),
             )
+            .child(div().w(px(COMPOSER_WIDTH)).max_w_full().pt(px(8.0)).child(frosted(COMPOSER_HEIGHT / 2.0, PANEL_BLUR, input_row)))
+            .when_some(pairing.error.clone(), |el, err| {
+                el.child(div().text_size(px(12.0)).text_color(theme.danger).child(err))
+            })
+    }
+
+    fn render_new_project(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx).clone();
+        let card = div()
+            .w(px(300.0))
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .p(px(12.0))
+            .rounded(px(PANEL_RADIUS))
+            .bg(theme.card())
+            .border_1()
+            .border_color(theme.border_strong)
+            .shadow_lg()
+            .child(div().text_size(px(12.5)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child("New project"))
+            .child(
+                div()
+                    .text_size(px(11.5))
+                    .text_color(theme.text_muted)
+                    .child("The relay registers it and creates its sandbox from the image. Enter to create."),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .h(px(36.0))
+                    .px(px(12.0))
+                    .rounded(px(8.0))
+                    .bg(theme.surface_2)
+                    .border_1()
+                    .border_color(theme.border)
+                    .child(self.project_input.clone()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .id("new-project-cancel")
+                            .px(px(10.0))
+                            .py(px(5.0))
+                            .rounded(px(6.0))
+                            .text_size(px(12.0))
+                            .text_color(theme.text_muted)
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme.surface_2))
+                            .child("Cancel")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.state.update(cx, |s, cx| {
+                                    s.new_project_open = false;
+                                    cx.notify();
+                                });
+                                Composer::focus(&this.composer, window, cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .id("new-project-create")
+                            .px(px(10.0))
+                            .py(px(5.0))
+                            .rounded(px(6.0))
+                            .text_size(px(12.0))
+                            .bg(theme.text)
+                            .text_color(theme.bg)
+                            .cursor_pointer()
+                            .child("Create")
+                            .on_click(cx.listener(|this, _, window, cx| this.submit_project(window, cx))),
+                    ),
+            );
+        div()
+            .absolute()
+            .left(px(RAIL_WIDTH + 8.0))
+            .bottom(px(48.0))
+            .child(frosted(PANEL_RADIUS, MENU_BLUR, card))
+    }
+
+    fn render_notices(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let theme = Theme::of(cx).clone();
+        let notices = self.state.read(cx).live_notices();
+        if notices.is_empty() {
+            return None;
+        }
+        PulseClock::request(cx);
+        let mut stack = div()
+            .absolute()
+            .right(px(16.0))
+            .bottom(px(16.0))
+            .flex()
+            .flex_col()
+            .gap(px(6.0));
+        for n in notices {
+            stack = stack.child(
+                div()
+                    .max_w(px(360.0))
+                    .px(px(12.0))
+                    .py(px(8.0))
+                    .rounded(px(8.0))
+                    .bg(theme.surface_2)
+                    .border_1()
+                    .border_color(theme.border_strong)
+                    .shadow_md()
+                    .text_size(px(12.0))
+                    .text_color(theme.text)
+                    .child(n.text),
+            );
+        }
+        Some(stack)
+    }
+}
+
+fn json_rows(v: &serde_json::Value) -> Vec<(String, String)> {
+    match v {
+        serde_json::Value::Object(map) => map
+            .iter()
+            .map(|(k, v)| {
+                let text = match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Null => "—".into(),
+                    other => other.to_string(),
+                };
+                (k.clone(), text)
+            })
+            .collect(),
+        serde_json::Value::Null => Vec::new(),
+        other => vec![("value".into(), other.to_string())],
     }
 }
 
@@ -1133,6 +1435,8 @@ impl Render for Shell {
         let collapsed = state.rail_collapsed || state.window_is_narrow(width);
         let panel_open = state.right_panel_open;
         let details = state.details_open.clone();
+        let pairing = state.pairing.clone();
+        let new_project_open = state.new_project_open;
 
         let mut root = div()
             .id("shell-root")
@@ -1149,8 +1453,16 @@ impl Render for Shell {
             .bg(theme.shell())
             .text_color(theme.text)
             .font_family(theme.font_sans)
-            .text_size(px(13.0))
-            .child(self.render_rail(collapsed, cx))
+            .text_size(px(13.0));
+
+        if let Some(pairing) = pairing {
+            return root
+                .child(self.render_pairing(&pairing, cx))
+                .into_any_element();
+        }
+
+        root = root
+            .child(frosted(0.0, PANEL_BLUR, self.render_rail(collapsed, cx)))
             .child(self.render_center(cx));
         if panel_open {
             root = root.child(self.render_right_panel(cx));
@@ -1161,6 +1473,12 @@ impl Render for Shell {
         if self.settings_open {
             root = root.child(self.render_settings(cx));
         }
-        root
+        if new_project_open {
+            root = root.child(self.render_new_project(cx));
+        }
+        if let Some(notices) = self.render_notices(cx) {
+            root = root.child(notices);
+        }
+        root.into_any_element()
     }
 }

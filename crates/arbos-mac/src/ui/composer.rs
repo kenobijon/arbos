@@ -3,6 +3,7 @@
 //! send/stop. Enter sends, Shift+Enter inserts a newline.
 
 use std::ops::Range;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui::{
@@ -17,6 +18,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::app::{AppState, ComposerMode};
 use crate::model::Effort;
 use crate::sync::fixture::MODELS;
+use crate::ui::frost::{MENU_BLUR, PANEL_BLUR, frosted};
 use crate::ui::theme::{Theme, COMPOSER_HEIGHT, PANEL_RADIUS};
 
 actions!(
@@ -48,7 +50,7 @@ const INPUT_FONT_SIZE: f32 = 13.5;
 
 #[derive(Clone, Debug)]
 pub enum ComposerEvent {
-    Send(String, Vec<String>),
+    Send(String, Vec<PathBuf>),
     Stop,
 }
 
@@ -783,7 +785,7 @@ enum Picker {
 pub struct Composer {
     state: Entity<AppState>,
     pub input: Entity<ComposerInput>,
-    attachments: Vec<String>,
+    attachments: Vec<PathBuf>,
     open_picker: Option<Picker>,
     /// S8 shake when the user hits Cmd+W on the pinned tab; also reused for
     /// the empty-send nudge.
@@ -847,10 +849,21 @@ impl Composer {
     }
 
     fn attach(&mut self, cx: &mut Context<Self>) {
-        // File dialogs are platform work; the chip path is wired end to end.
-        let n = self.attachments.len() + 1;
-        self.attachments.push(format!("attachment-{n}.png"));
-        cx.notify();
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Attach".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = rx.await {
+                let _ = this.update(cx, |composer, cx| {
+                    composer.attachments.extend(paths);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 
     fn render_picker_menu(&self, picker: Picker, cx: &mut Context<Self>) -> impl IntoElement {
@@ -936,7 +949,7 @@ impl Composer {
             .absolute()
             .bottom(px(COMPOSER_HEIGHT + 8.0))
             .right(px(56.0))
-            .child(menu)
+            .child(frosted(PANEL_RADIUS, MENU_BLUR, menu))
     }
 }
 
@@ -1027,8 +1040,12 @@ impl Render for Composer {
                 .gap(px(6.0))
                 .px(px(16.0))
                 .pt(px(10.0));
-            for (i, name) in self.attachments.iter().enumerate() {
-                let name_owned = name.clone();
+            for (i, path) in self.attachments.iter().enumerate() {
+                let name_owned = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("attachment")
+                    .to_string();
                 chips = chips.child(
                     div()
                         .id(ElementId::NamedInteger("attachment".into(), i as u64))
@@ -1143,7 +1160,10 @@ impl Render for Composer {
             );
         }
 
-        let mut root = div().relative().w_full().child(pill);
+        let mut root = div()
+            .relative()
+            .w_full()
+            .child(frosted(COMPOSER_HEIGHT / 2.0, PANEL_BLUR, pill));
         if let Some(picker) = self.open_picker {
             root = root.child(self.render_picker_menu(picker, cx));
         }

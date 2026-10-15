@@ -1,102 +1,66 @@
-//! Relay-backed source: one WebSocket per chat room on `arbos-relay`
-//! (`crdt-sync.md` §7–§8). Frames come from `arbos_core::wire`; the chat doc
-//! is the same Loro schema `arbos-core::doc` writes on the box side.
-//!
-//! Registry stub: the project list and chat index come from a JSON file
-//! (`ARBOS_RELAY_SEED`) until the relay's `GET /projects` exists. The
-//! checkpoint fetch (`GET /room/…/checkpoint`) is also not wired yet: a room
-//! whose rows were trimmed below our cursor backfills from seq 0.
+//! Relay-backed source: HTTP for the registry (`/pair`, `/projects`, `/blob`)
+//! and one WebSocket per room on `arbos-relay` (`crdt-sync.md` §7–§9).
+//! Frames come from `arbos_core::wire`; the chat doc is the same Loro schema
+//! `arbos-core::doc` writes on the box side. Each project also has a project
+//! doc room (`{project}/project`) that carries `threads`, `status`,
+//! `settings` and `memory`.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, anyhow};
 use arbos_core::wire::{
-    Ack, BoxState as WireBox, ErrorHeader, Frame, FrameType, Hello, RowHeader, RowsReq,
-    State as WireState, StatusHeader, WakeHeader,
+    Ack, BoxState as WireBox, ErrorHeader, Frame, FrameType, Hello, PROJECT_DOC_CHAT_ID,
+    RowHeader, RowsReq, State as WireState, StatusHeader, WakeHeader,
 };
-use arbos_core::{wire, PROTO_VERSION};
+use arbos_core::{PROTO_VERSION, wire};
 use futures::future::BoxFuture;
 use futures::{SinkExt, StreamExt};
-use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::sync::mpsc;
-use tokio::time::{interval, sleep, timeout, Instant};
+use tokio::task::JoinHandle;
+use tokio::time::{Instant, interval, sleep, timeout};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
+use super::credentials::{self, DeviceCredentials};
 use super::doc::ChatDoc;
 use super::{ClientCommand, SyncEvent, SyncSource};
 use crate::model::{
-    new_id, now_ms, Attachment, BoxState, Chat, Id, Link, Message, MessageStatus, Part, Project,
-    Role,
+    Attachment, BoxState, Chat, Effort, Id, Link, Message, MessageStatus, Part, Project,
+    ProjectDocView, Role, ThreadInfo, new_id, now_ms,
 };
 
 const HELLO_DEADLINE: Duration = Duration::from_secs(15);
 const PRESENCE_EVERY: Duration = Duration::from_secs(15);
+const REGISTRY_POLL: Duration = Duration::from_secs(15);
 const BACKOFF_MIN: Duration = Duration::from_millis(250);
 const BACKOFF_MAX: Duration = Duration::from_secs(16);
 const BACKOFF_RESET_AFTER: Duration = Duration::from_secs(30);
 
-#[derive(Clone, Debug, Deserialize)]
-pub struct RelaySeed {
-    pub projects: Vec<Project>,
-    pub chats: Vec<Chat>,
-}
-
 pub struct RelaySource {
+    http_url: String,
     ws_url: String,
-    token: String,
-    device_id: String,
-    seed: RelaySeed,
 }
 
 impl RelaySource {
-    pub fn from_env(ws_url: String) -> Self {
-        let token = std::env::var("ARBOS_RELAY_TOKEN").unwrap_or_default();
-        let device_id =
-            std::env::var("ARBOS_DEVICE_ID").unwrap_or_else(|_| format!("mac:{}", new_id()));
-        let seed = std::env::var("ARBOS_RELAY_SEED")
-            .ok()
-            .and_then(|path| std::fs::read(path).ok())
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_else(default_seed);
-        Self {
-            ws_url,
-            token,
-            device_id,
-            seed,
-        }
-    }
-}
-
-fn default_seed() -> RelaySeed {
-    let project_id = std::env::var("ARBOS_PROJECT_ID").unwrap_or_else(|_| new_id());
-    let chat_id = std::env::var("ARBOS_CHAT_ID").unwrap_or_else(|_| new_id());
-    RelaySeed {
-        projects: vec![Project {
-            id: project_id.clone(),
-            name: "Arbos".into(),
-            icon: "Ω".into(),
-            color: "#8b7cf6".into(),
-            state: BoxState::HibernatedLight,
-            state_detail: None,
-            wake_progress: None,
-            model: "GPT-6.1-Sol".into(),
-            effort: crate::model::Effort::High,
-            spend_today_usd: 0.0,
-            spend_cap_usd: 25.0,
-        }],
-        chats: vec![Chat {
-            id: chat_id,
-            project_id,
-            title: "Arbos".into(),
-            is_pinned: true,
-            is_system: false,
-            unread: false,
-            last_message_at: now_ms(),
-        }],
+    /// Accepts `http://`, `https://`, `ws://` or `wss://`; derives the other.
+    pub fn from_env(url: String) -> Self {
+        let url = url.trim().trim_end_matches('/').to_string();
+        let (http_url, ws_url) = if let Some(rest) = url.strip_prefix("ws://") {
+            (format!("http://{rest}"), url.clone())
+        } else if let Some(rest) = url.strip_prefix("wss://") {
+            (format!("https://{rest}"), url.clone())
+        } else if let Some(rest) = url.strip_prefix("https://") {
+            (url.clone(), format!("wss://{rest}"))
+        } else if let Some(rest) = url.strip_prefix("http://") {
+            (url.clone(), format!("ws://{rest}"))
+        } else {
+            (format!("http://{url}"), format!("ws://{url}"))
+        };
+        Self { http_url, ws_url }
     }
 }
 
@@ -106,9 +70,15 @@ enum RoomCmd {
 
 struct Room {
     cmds: mpsc::UnboundedSender<RoomCmd>,
+    task: JoinHandle<()>,
 }
 
 struct Shared {
+    http: reqwest::Client,
+    http_url: String,
+    ws_url: String,
+    creds: RwLock<Option<DeviceCredentials>>,
+    /// Chat docs keyed by chat id; project docs keyed by `proj:{project_id}`.
     docs: Mutex<HashMap<Id, ChatDoc>>,
     rooms: Mutex<HashMap<Id, Room>>,
     projects: Mutex<Vec<Project>>,
@@ -117,9 +87,71 @@ struct Shared {
     unacked: Mutex<HashSet<Id>>,
     events: mpsc::UnboundedSender<SyncEvent>,
     subscriptions: Mutex<Vec<loro::Subscription>>,
-    ws_url: String,
-    token: String,
-    device_id: String,
+    browser_watch: Mutex<HashMap<Id, JoinHandle<()>>>,
+}
+
+fn project_doc_key(project_id: &str) -> String {
+    format!("proj:{project_id}")
+}
+
+impl Shared {
+    fn token(&self) -> String {
+        self.creds
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|c| c.device_token.clone())
+            .unwrap_or_default()
+    }
+
+    fn device_id(&self) -> String {
+        self.creds
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|c| c.device_id.clone())
+            .unwrap_or_else(|| "mac:unpaired".into())
+    }
+
+    fn notice(&self, text: impl Into<String>) {
+        let _ = self.events.send(SyncEvent::Notice(text.into()));
+    }
+
+    async fn get_json(&self, path: &str) -> Result<Value> {
+        let resp = self
+            .http
+            .get(format!("{}{}", self.http_url, path))
+            .bearer_auth(self.token())
+            .send()
+            .await
+            .with_context(|| format!("GET {path}"))?;
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(anyhow!("GET {path}: HTTP {status} {body}"));
+        }
+        Ok(serde_json::from_str(&body).with_context(|| format!("GET {path}: bad JSON"))?)
+    }
+
+    async fn post_json(&self, path: &str, body: Value) -> Result<Value> {
+        let resp = self
+            .http
+            .post(format!("{}{}", self.http_url, path))
+            .bearer_auth(self.token())
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("POST {path}"))?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(anyhow!("POST {path}: HTTP {status} {text}"));
+        }
+        if text.trim().is_empty() {
+            return Ok(Value::Null);
+        }
+        Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
+    }
 }
 
 impl SyncSource for RelaySource {
@@ -134,22 +166,30 @@ impl SyncSource for RelaySource {
     ) -> BoxFuture<'static, Result<()>> {
         Box::pin(async move {
             let shared = Arc::new(Shared {
+                http: reqwest::Client::builder()
+                    .timeout(Duration::from_secs(30))
+                    .build()
+                    .context("http client")?,
+                http_url: self.http_url.clone(),
+                ws_url: self.ws_url.clone(),
+                creds: RwLock::new(credentials::load(&self.http_url)),
                 docs: Mutex::new(HashMap::new()),
                 rooms: Mutex::new(HashMap::new()),
-                projects: Mutex::new(self.seed.projects.clone()),
-                chats: Mutex::new(self.seed.chats.clone()),
+                projects: Mutex::new(Vec::new()),
+                chats: Mutex::new(Vec::new()),
                 unacked: Mutex::new(HashSet::new()),
                 events: events.clone(),
                 subscriptions: Mutex::new(Vec::new()),
-                ws_url: self.ws_url,
-                token: self.token,
-                device_id: self.device_id,
+                browser_watch: Mutex::new(HashMap::new()),
             });
             let _ = events.send(SyncEvent::Link(Link::Connecting));
-            let _ = events.send(SyncEvent::Projects(self.seed.projects.clone()));
-            emit_chats(&shared);
-            for chat in &self.seed.chats {
-                open_room(&shared, &chat.project_id, &chat.id);
+
+            if shared.creds.read().unwrap().is_some() {
+                start_after_pairing(&shared);
+            } else {
+                let _ = events.send(SyncEvent::NeedsPairing {
+                    relay_url: self.http_url.clone(),
+                });
             }
 
             while let Some(cmd) = commands.recv().await {
@@ -160,19 +200,188 @@ impl SyncSource for RelaySource {
     }
 }
 
-fn emit_chats(shared: &Shared) {
-    let chats = shared.chats.lock().unwrap().clone();
-    let mut by_project: HashMap<Id, Vec<Chat>> = HashMap::new();
-    for chat in chats {
-        by_project
-            .entry(chat.project_id.clone())
-            .or_default()
-            .push(chat);
-    }
-    for (project_id, chats) in by_project {
-        let _ = shared.events.send(SyncEvent::Chats { project_id, chats });
+fn start_after_pairing(shared: &Arc<Shared>) {
+    let shared = shared.clone();
+    tokio::spawn(async move {
+        let mut poll = interval(REGISTRY_POLL);
+        loop {
+            poll.tick().await;
+            if let Err(err) = refresh_registry(&shared).await {
+                shared.notice(format!("Relay: {err:#}"));
+                let _ = shared.events.send(SyncEvent::Link(Link::Reconnecting));
+            }
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Registry (HTTP)
+// ---------------------------------------------------------------------------
+
+fn effort_from(v: &Value) -> Effort {
+    match v.as_str().unwrap_or("") {
+        "high" | "xhigh" | "max" => Effort::High,
+        "medium" => Effort::Medium,
+        _ => Effort::Low,
     }
 }
+
+fn effort_to(e: Effort) -> &'static str {
+    match e {
+        Effort::Low => "low",
+        Effort::Medium => "medium",
+        Effort::High => "high",
+    }
+}
+
+fn box_state_from(state: &str, box_state: &str) -> BoxState {
+    match state {
+        "awake" => BoxState::Awake,
+        "waking" => BoxState::Waking,
+        "hibernated_light" => BoxState::HibernatedLight,
+        "hibernated_deep" => BoxState::HibernatedDeep,
+        "stopped_by_user" => BoxState::StoppedByUser,
+        "error" => BoxState::Error,
+        _ => match box_state {
+            "awake" => BoxState::Awake,
+            "waking" => BoxState::Waking,
+            "error" => BoxState::Error,
+            _ => BoxState::HibernatedLight,
+        },
+    }
+}
+
+fn parse_chat(v: &Value) -> Option<Chat> {
+    Some(Chat {
+        id: v.get("id")?.as_str()?.to_string(),
+        project_id: v.get("project_id")?.as_str()?.to_string(),
+        title: v
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("New chat")
+            .to_string(),
+        is_pinned: v.get("is_pinned").and_then(Value::as_bool).unwrap_or(false),
+        is_system: false,
+        unread: false,
+        last_message_at: v.get("created_at").and_then(Value::as_i64).unwrap_or(0) as u64,
+    })
+}
+
+/// `GET /projects` then `GET /projects/{id}` for chats, models and spend.
+async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
+    let list = shared.get_json("/projects").await?;
+    let items = list.as_array().cloned().unwrap_or_default();
+    let mut projects: Vec<Project> = Vec::new();
+    let mut all_chats: Vec<Chat> = Vec::new();
+    for item in items {
+        let Some(id) = item.get("id").and_then(Value::as_str) else { continue };
+        let detail = shared.get_json(&format!("/projects/{id}")).await?;
+        let p = detail.get("project").cloned().unwrap_or(item.clone());
+        let models = p.get("models").cloned().unwrap_or(Value::Null);
+        let talking = models.get("talking_model").cloned().unwrap_or(Value::Null);
+        let state = box_state_from(
+            p.get("state").and_then(Value::as_str).unwrap_or(""),
+            detail
+                .get("box")
+                .or(item.get("box"))
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+        );
+        let previous = shared
+            .projects
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|x| x.id == id)
+            .cloned();
+        projects.push(Project {
+            id: id.to_string(),
+            name: p
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("Project")
+                .to_string(),
+            icon: p.get("icon").and_then(Value::as_str).unwrap_or("Ω").to_string(),
+            color: "#8b7cf6".into(),
+            state,
+            state_detail: previous.as_ref().and_then(|x| x.state_detail.clone()),
+            wake_progress: None,
+            model: talking
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| previous.as_ref().map(|x| x.model.clone()))
+                .unwrap_or_else(|| "anthropic/claude-haiku-5.5".into()),
+            effort: effort_from(talking.get("effort").unwrap_or(&Value::Null)),
+            spend_today_usd: detail
+                .get("spend_today")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0),
+            spend_cap_usd: p
+                .get("spend_cap_daily")
+                .and_then(Value::as_f64)
+                .unwrap_or(25.0),
+        });
+        let chats: Vec<Chat> = detail
+            .get("chats")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(parse_chat).collect())
+            .unwrap_or_default();
+        all_chats.extend(chats);
+    }
+
+    // Keep local-only tabs (minted, not yet created) and unread flags.
+    {
+        let mut local = shared.chats.lock().unwrap();
+        let mut merged: Vec<Chat> = Vec::new();
+        for c in &all_chats {
+            let mut c = c.clone();
+            if let Some(prev) = local.iter().find(|x| x.id == c.id) {
+                c.unread = prev.unread;
+                c.last_message_at = c.last_message_at.max(prev.last_message_at);
+            }
+            merged.push(c);
+        }
+        *local = merged;
+    }
+    *shared.projects.lock().unwrap() = projects.clone();
+    let _ = shared.events.send(SyncEvent::Projects(projects.clone()));
+    emit_chats(shared);
+    for p in &projects {
+        ensure_room(shared, &p.id, &project_doc_key(&p.id), PROJECT_DOC_CHAT_ID);
+    }
+    for c in &all_chats {
+        ensure_room(shared, &c.project_id, &c.id, &c.id);
+    }
+    Ok(())
+}
+
+fn emit_chats(shared: &Shared) {
+    let chats = shared.chats.lock().unwrap().clone();
+    let projects: Vec<Id> = shared
+        .projects
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|p| p.id.clone())
+        .collect();
+    for project_id in projects {
+        let mut mine: Vec<Chat> = chats
+            .iter()
+            .filter(|c| c.project_id == project_id)
+            .cloned()
+            .collect();
+        mine.sort_by_key(|c| (!c.is_pinned, c.last_message_at));
+        let _ = shared.events.send(SyncEvent::Chats {
+            project_id,
+            chats: mine,
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rooms (WebSocket)
+// ---------------------------------------------------------------------------
 
 fn apply_pending(shared: &Shared, message: &mut Message) {
     if message.role == Role::User {
@@ -193,64 +402,114 @@ fn emit_snapshot(shared: &Shared, chat_id: &str) {
     });
 }
 
-fn open_room(shared: &Arc<Shared>, project_id: &str, chat_id: &str) {
-    let doc = ChatDoc::empty(chat_id);
+fn emit_project_doc(shared: &Shared, project_id: &str) {
+    let docs = shared.docs.lock().unwrap();
+    let Some(doc) = docs.get(&project_doc_key(project_id)) else { return };
+    let to_json = |v: loro::LoroValue| serde_json::to_value(v).unwrap_or(Value::Null);
+    let threads_v = to_json(doc.doc.get_map("threads").get_deep_value());
+    let mut threads: Vec<ThreadInfo> = threads_v
+        .as_object()
+        .map(|m| {
+            m.iter()
+                .filter_map(|(id, v)| {
+                    let mut t: ThreadInfo = serde_json::from_value(v.clone()).ok()?;
+                    t.id = id.clone();
+                    Some(t)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    threads.sort_by_key(|t| std::cmp::Reverse(t.last_turn_at.unwrap_or(0)));
+    let memory = to_json(doc.doc.get_map("memory").get_deep_value());
+    let view = ProjectDocView {
+        threads,
+        status: to_json(doc.doc.get_map("status").get_deep_value()),
+        settings: to_json(doc.doc.get_map("settings").get_deep_value()),
+        memory_t1: memory
+            .get("t1")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+    };
+    let _ = shared.events.send(SyncEvent::ProjectDoc {
+        project_id: project_id.to_string(),
+        view,
+    });
+}
+
+/// Open a room once; `key` is the docs map key, `room_chat` the URL segment.
+fn ensure_room(shared: &Arc<Shared>, project_id: &str, key: &str, room_chat: &str) {
+    if shared.rooms.lock().unwrap().contains_key(key) {
+        return;
+    }
+    let doc = ChatDoc::empty(key);
     let (local_tx, local_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let (change_tx, change_rx) = mpsc::unbounded_channel::<super::doc::Touched>();
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<RoomCmd>();
+    let is_project_doc = room_chat == PROJECT_DOC_CHAT_ID;
 
     let sub = doc.doc.subscribe_root(Arc::new(move |event| {
         let touched = ChatDoc::touched(&event);
-        if touched.list_changed || !touched.messages.is_empty() {
+        if is_project_doc || touched.list_changed || !touched.messages.is_empty() {
             let _ = change_tx.send(touched);
         }
     }));
-    let local_sub = doc
-        .doc
-        .subscribe_local_update(Box::new(move |bytes| local_tx.send(bytes.clone()).is_ok()));
+    let local_sub = doc.doc.subscribe_local_update(Box::new(move |bytes| {
+        local_tx.send(bytes.clone()).is_ok()
+    }));
     {
         let mut subs = shared.subscriptions.lock().unwrap();
         subs.push(sub);
         subs.push(local_sub);
     }
-    shared.docs.lock().unwrap().insert(chat_id.to_string(), doc);
+    shared.docs.lock().unwrap().insert(key.to_string(), doc);
+
+    let shared2 = shared.clone();
+    let key2 = key.to_string();
+    let project2 = project_id.to_string();
+    tokio::spawn(async move {
+        forward_changes(shared2, project2, key2, is_project_doc, change_rx).await;
+    });
+
+    let shared3 = shared.clone();
+    let project = project_id.to_string();
+    let key3 = key.to_string();
+    let room_chat = room_chat.to_string();
+    let task = tokio::spawn(async move {
+        room_loop(shared3, project, key3, room_chat, local_rx, cmd_rx).await;
+    });
     shared
         .rooms
         .lock()
         .unwrap()
-        .insert(chat_id.to_string(), Room { cmds: cmd_tx });
-
-    let shared2 = shared.clone();
-    let chat = chat_id.to_string();
-    tokio::spawn(forward_changes(shared2, chat, change_rx));
-
-    let shared3 = shared.clone();
-    let project = project_id.to_string();
-    let chat = chat_id.to_string();
-    tokio::spawn(async move {
-        room_loop(shared3, project, chat, local_rx, cmd_rx).await;
-    });
+        .insert(key.to_string(), Room { cmds: cmd_tx, task });
 }
 
 async fn forward_changes(
     shared: Arc<Shared>,
-    chat_id: Id,
+    project_id: Id,
+    key: Id,
+    is_project_doc: bool,
     mut rx: mpsc::UnboundedReceiver<super::doc::Touched>,
 ) {
     while let Some(touched) = rx.recv().await {
+        if is_project_doc {
+            emit_project_doc(&shared, &project_id);
+            apply_project_doc_status(&shared, &project_id);
+            continue;
+        }
         if touched.list_changed {
-            emit_snapshot(&shared, &chat_id);
+            emit_snapshot(&shared, &key);
+            mark_activity(&shared, &key);
             continue;
         }
         let docs = shared.docs.lock().unwrap();
-        let Some(doc) = docs.get(&chat_id) else {
-            continue;
-        };
+        let Some(doc) = docs.get(&key) else { continue };
         for ix in touched.messages {
             if let Some(mut message) = doc.read_message(ix) {
                 apply_pending(&shared, &mut message);
                 let _ = shared.events.send(SyncEvent::MessageUpsert {
-                    chat_id: chat_id.clone(),
+                    chat_id: key.clone(),
                     message,
                 });
             }
@@ -258,24 +517,70 @@ async fn forward_changes(
     }
 }
 
+fn mark_activity(shared: &Shared, chat_id: &str) {
+    let mut chats = shared.chats.lock().unwrap();
+    if let Some(c) = chats.iter_mut().find(|c| c.id == chat_id) {
+        c.last_message_at = now_ms();
+    }
+}
+
+/// `status.box` in the project doc wins while the box is awake (§6.3).
+fn apply_project_doc_status(shared: &Shared, project_id: &str) {
+    let status = {
+        let docs = shared.docs.lock().unwrap();
+        let Some(doc) = docs.get(&project_doc_key(project_id)) else { return };
+        serde_json::to_value(doc.doc.get_map("status").get_deep_value()).unwrap_or(Value::Null)
+    };
+    let Some(b) = status.get("box").and_then(Value::as_str) else { return };
+    let state = match b {
+        "awake" => BoxState::Awake,
+        "waking" => BoxState::Waking,
+        "error" => BoxState::Error,
+        "asleep" => BoxState::HibernatedLight,
+        _ => return,
+    };
+    set_project_state(shared, project_id, state, None);
+}
+
+fn set_project_state(shared: &Shared, project_id: &str, state: BoxState, detail: Option<String>) {
+    {
+        let mut projects = shared.projects.lock().unwrap();
+        if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
+            if p.state == state && p.state_detail == detail {
+                return;
+            }
+            p.state = state;
+            p.state_detail = detail.clone();
+            p.wake_progress = None;
+        }
+    }
+    let _ = shared.events.send(SyncEvent::ProjectStatus {
+        project_id: project_id.to_string(),
+        state,
+        detail,
+        progress: None,
+    });
+}
+
 /// Dial, handshake, backfill, then stream — forever, with backoff (§8.6).
 async fn room_loop(
     shared: Arc<Shared>,
     project_id: Id,
-    chat_id: Id,
+    key: Id,
+    room_chat: String,
     mut local_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     mut cmd_rx: mpsc::UnboundedReceiver<RoomCmd>,
 ) {
     let mut cursor: i64 = 0;
     let mut backoff = BACKOFF_MIN;
-    // Local updates not yet acked, replayed first on every redial (§7.4).
     let mut pending: Vec<(String, Vec<u8>)> = Vec::new();
     loop {
         let connected_at = Instant::now();
         let outcome = run_session(
             &shared,
             &project_id,
-            &chat_id,
+            &key,
+            &room_chat,
             &mut cursor,
             &mut pending,
             &mut local_rx,
@@ -283,7 +588,7 @@ async fn room_loop(
         )
         .await;
         if let Err(err) = outcome {
-            eprintln!("relay room {project_id}/{chat_id}: {err:#}");
+            eprintln!("relay room {project_id}/{room_chat}: {err:#}");
         }
         let _ = shared.events.send(SyncEvent::Link(Link::Reconnecting));
         if connected_at.elapsed() > BACKOFF_RESET_AFTER {
@@ -294,22 +599,19 @@ async fn room_loop(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_session(
     shared: &Arc<Shared>,
     project_id: &str,
-    chat_id: &str,
+    key: &str,
+    room_chat: &str,
     cursor: &mut i64,
     pending: &mut Vec<(String, Vec<u8>)>,
     local_rx: &mut mpsc::UnboundedReceiver<Vec<u8>>,
     cmd_rx: &mut mpsc::UnboundedReceiver<RoomCmd>,
 ) -> Result<()> {
-    let room = wire::room_name(project_id, chat_id);
-    let url = format!(
-        "{}/room/{}?token={}",
-        shared.ws_url.trim_end_matches('/'),
-        room,
-        shared.token
-    );
+    let room = wire::room_name(project_id, room_chat);
+    let url = format!("{}/room/{}?token={}", shared.ws_url, room, shared.token());
     let (ws, _) = timeout(HELLO_DEADLINE, connect_async(&url))
         .await
         .context("dial timed out")??;
@@ -317,7 +619,7 @@ async fn run_session(
 
     let hello = Hello {
         cursor: *cursor,
-        device: shared.device_id.clone(),
+        device: shared.device_id(),
         room: room.clone(),
         proto: PROTO_VERSION,
     };
@@ -345,28 +647,35 @@ async fn run_session(
     .context("STATE did not arrive")??
     .context("socket closed before STATE")?;
     let (state, frontier) = state;
-    emit_box_status(shared, project_id, state.box_state, None);
+    set_project_state(shared, project_id, map_box(state.box_state), None);
 
+    // Checkpoint-on-connect (§7.3): fetch when our replica does not contain
+    // the checkpoint frontier, or when our cursor is below it.
     let contained = {
         let docs = shared.docs.lock().unwrap();
-        match (docs.get(chat_id), arbos_core::doc::decode_vv(&frontier)) {
+        match (docs.get(key), arbos_core::doc::decode_vv(&frontier)) {
             (Some(doc), Some(vv)) => doc.doc.oplog_vv().includes_vv(&vv),
             (Some(_), None) | (None, _) => false,
         }
     };
-    let after = if contained || state.checkpoint_seq == 0 {
-        (*cursor).max(state.checkpoint_seq)
-    } else {
-        eprintln!(
-            "relay room {room}: checkpoint {} not contained; checkpoint fetch is not wired, backfilling from 0",
-            state.checkpoint_seq
-        );
-        0
-    };
+    if state.checkpoint_seq > 0 && (!contained || *cursor < state.checkpoint_seq) {
+        match fetch_checkpoint(shared, &room).await {
+            Ok((seq, bytes)) => {
+                let docs = shared.docs.lock().unwrap();
+                if let Some(doc) = docs.get(key) {
+                    match doc.doc.import(&bytes) {
+                        Ok(_) => *cursor = (*cursor).max(seq.max(state.checkpoint_seq)),
+                        Err(err) => eprintln!("relay room {room}: checkpoint import failed: {err}"),
+                    }
+                }
+            }
+            Err(err) => eprintln!("relay room {room}: checkpoint fetch failed: {err:#}"),
+        }
+    }
     tx.send(binary(Frame::new(
         FrameType::RowsReq,
         serde_json::to_value(RowsReq {
-            after,
+            after: *cursor,
             exclude_own: true,
         })?,
         Vec::new(),
@@ -393,7 +702,7 @@ async fn run_session(
                     FrameType::Row => {
                         let header: RowHeader = serde_json::from_value(frame.header)?;
                         let docs = shared.docs.lock().unwrap();
-                        if let Some(doc) = docs.get(chat_id) {
+                        if let Some(doc) = docs.get(key) {
                             if let Err(err) = doc.doc.import(&frame.payload) {
                                 eprintln!("relay room {room}: import seq {} failed: {err}", header.seq);
                             }
@@ -401,23 +710,27 @@ async fn run_session(
                         *cursor = (*cursor).max(header.seq);
                     }
                     FrameType::RowsDone => {
-                        let head_seq = frame.header.get("headSeq").and_then(|v| v.as_i64()).unwrap_or(*cursor);
+                        let head_seq = frame.header.get("headSeq").and_then(Value::as_i64).unwrap_or(*cursor);
                         *cursor = (*cursor).max(head_seq);
                         let _ = shared.events.send(SyncEvent::Link(Link::Live));
-                        emit_snapshot(shared, chat_id);
+                        if room_chat == PROJECT_DOC_CHAT_ID {
+                            emit_project_doc(shared, project_id);
+                        } else {
+                            emit_snapshot(shared, key);
+                        }
                     }
                     FrameType::Ack => {
                         let header: Ack = serde_json::from_value(frame.header)?;
                         pending.retain(|(id, _)| *id != header.batch_id);
                         *cursor = (*cursor).max(header.seq);
-                        let acked: Vec<Id> = shared.unacked.lock().unwrap().drain().collect();
-                        if !acked.is_empty() {
-                            emit_snapshot(shared, chat_id);
+                        let had: Vec<Id> = shared.unacked.lock().unwrap().drain().collect();
+                        if !had.is_empty() && room_chat != PROJECT_DOC_CHAT_ID {
+                            emit_snapshot(shared, key);
                         }
                     }
                     FrameType::Status => {
                         let header: StatusHeader = serde_json::from_value(frame.header)?;
-                        emit_box_status(shared, project_id, header.box_state, header.detail);
+                        set_project_state(shared, project_id, map_box(header.box_state), header.detail);
                     }
                     FrameType::Error => {
                         let header: ErrorHeader = serde_json::from_value(frame.header)?;
@@ -432,9 +745,7 @@ async fn run_session(
                         }
                     }
                     FrameType::ProbeOk | FrameType::Presence | FrameType::State => {}
-                    FrameType::Hello | FrameType::RowsReq | FrameType::Push | FrameType::Probe | FrameType::Wake => {
-                        // Client→server frames echoed back are ignored.
-                    }
+                    FrameType::Hello | FrameType::RowsReq | FrameType::Push | FrameType::Probe | FrameType::Wake => {}
                 }
             }
             bytes = local_rx.recv() => {
@@ -466,7 +777,7 @@ async fn run_session(
             _ = presence.tick() => {
                 tx.send(binary(Frame::new(
                     FrameType::Presence,
-                    json!({ "device": shared.device_id, "at": now_ms() }),
+                    json!({ "device": shared.device_id(), "at": now_ms() }),
                     Vec::new(),
                 ))).await?;
             }
@@ -474,43 +785,42 @@ async fn run_session(
     }
 }
 
+async fn fetch_checkpoint(shared: &Shared, room: &str) -> Result<(i64, Vec<u8>)> {
+    let resp = shared
+        .http
+        .get(format!("{}/room/{}/checkpoint", shared.http_url, room))
+        .bearer_auth(shared.token())
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("HTTP {}", resp.status());
+    }
+    let seq = resp
+        .headers()
+        .get("x-arbos-checkpoint-seq")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0);
+    let bytes = resp.bytes().await?.to_vec();
+    Ok((seq, bytes))
+}
+
 fn binary(frame: Frame) -> WsMessage {
     WsMessage::Binary(frame.encode())
 }
 
-fn emit_box_status(shared: &Shared, project_id: &str, state: WireBox, detail: Option<String>) {
-    let mapped = match state {
+fn map_box(state: WireBox) -> BoxState {
+    match state {
         WireBox::Awake => BoxState::Awake,
         WireBox::Waking => BoxState::Waking,
         WireBox::Asleep => BoxState::HibernatedLight,
         WireBox::Error => BoxState::Error,
-    };
-    {
-        let mut projects = shared.projects.lock().unwrap();
-        if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
-            p.state = mapped;
-            p.state_detail = detail.clone();
-            p.wake_progress = None;
-        }
     }
-    let _ = shared.events.send(SyncEvent::ProjectStatus {
-        project_id: project_id.to_string(),
-        state: mapped,
-        detail,
-        progress: None,
-    });
 }
 
-fn project_asleep(shared: &Shared, project_id: &str) -> bool {
-    shared
-        .projects
-        .lock()
-        .unwrap()
-        .iter()
-        .find(|p| p.id == project_id)
-        .map(|p| p.state.is_asleep())
-        .unwrap_or(false)
-}
+// ---------------------------------------------------------------------------
+// Commands
+// ---------------------------------------------------------------------------
 
 fn project_of(shared: &Shared, chat_id: &str) -> Option<Id> {
     shared
@@ -522,83 +832,218 @@ fn project_of(shared: &Shared, chat_id: &str) -> Option<Id> {
         .map(|c| c.project_id.clone())
 }
 
-fn send_wake(shared: &Shared, project_id: &str, reason: &'static str) {
-    let chat_ids: Vec<Id> = shared
-        .chats
+fn project_asleep(shared: &Shared, project_id: &str) -> bool {
+    shared
+        .projects
         .lock()
         .unwrap()
         .iter()
-        .filter(|c| c.project_id == project_id)
-        .map(|c| c.id.clone())
-        .collect();
-    let rooms = shared.rooms.lock().unwrap();
-    if let Some(room) = chat_ids.iter().find_map(|id| rooms.get(id)) {
-        let _ = room.cmds.send(RoomCmd::Wake(reason));
+        .find(|p| p.id == project_id)
+        .map(|p| p.state.is_asleep() || p.state == BoxState::Error)
+        .unwrap_or(false)
+}
+
+fn send_wake(shared: &Arc<Shared>, project_id: &str, reason: &'static str) {
+    {
+        let rooms = shared.rooms.lock().unwrap();
+        if let Some(room) = rooms.get(&project_doc_key(project_id)) {
+            let _ = room.cmds.send(RoomCmd::Wake(reason));
+        }
+    }
+    let shared = shared.clone();
+    let project_id = project_id.to_string();
+    tokio::spawn(async move {
+        set_project_state(&shared, &project_id, BoxState::Waking, Some("Waking sandbox…".into()));
+        if let Err(err) = shared
+            .post_json(&format!("/projects/{project_id}/wake"), json!({}))
+            .await
+        {
+            shared.notice(format!("Wake failed: {err:#}"));
+            set_project_state(&shared, &project_id, BoxState::Error, Some(format!("{err:#}")));
+        }
+    });
+}
+
+fn mime_for(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "pdf" => "application/pdf",
+        "md" | "txt" | "rs" | "toml" | "json" | "ts" | "py" => "text/plain",
+        _ => "application/octet-stream",
     }
 }
 
-fn write_user_message(
-    shared: &Shared,
-    chat_id: &str,
-    message_id: &str,
-    text: &str,
-    attachments: &[String],
-    command: &str,
+fn safe_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Upload attachments as blobs, then write the user row and its `send`
+/// command in one commit (crdt-sync §6.2).
+async fn send_message(
+    shared: Arc<Shared>,
+    chat_id: Id,
+    message_id: Id,
+    text: String,
+    attachments: Vec<PathBuf>,
+    command: &'static str,
 ) {
-    shared
-        .unacked
-        .lock()
-        .unwrap()
-        .insert(message_id.to_string());
-    let docs = shared.docs.lock().unwrap();
-    let Some(doc) = docs.get(chat_id) else { return };
-    let mut parts: Vec<Part> = attachments
-        .iter()
-        .map(|name| Part::Attachment {
+    let project_id = project_of(&shared, &chat_id).unwrap_or_default();
+    let mut parts: Vec<Part> = Vec::new();
+    for path in attachments {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("attachment")
+            .to_string();
+        let key = format!("att-{}-{}", new_id().to_lowercase(), safe_name(&name));
+        let mime = mime_for(&path);
+        let blob_ref = match tokio::fs::read(&path).await {
+            Ok(bytes) => {
+                let put = shared
+                    .http
+                    .put(format!("{}/blob/{}/{}", shared.http_url, project_id, key))
+                    .bearer_auth(shared.token())
+                    .header("content-type", mime)
+                    .body(bytes)
+                    .send()
+                    .await;
+                match put {
+                    Ok(r) if r.status().is_success() => Some(key),
+                    Ok(r) => {
+                        shared.notice(format!("Attachment upload failed: HTTP {}", r.status()));
+                        None
+                    }
+                    Err(err) => {
+                        shared.notice(format!("Attachment upload failed: {err}"));
+                        None
+                    }
+                }
+            }
+            Err(err) => {
+                shared.notice(format!("Could not read {}: {err}", path.display()));
+                None
+            }
+        };
+        parts.push(Part::Attachment {
             id: new_id(),
             attachment: Attachment {
-                name: name.clone(),
-                mime: "application/octet-stream".into(),
-                blob_ref: None,
+                name,
+                mime: mime.into(),
+                blob_ref,
             },
-        })
-        .collect();
+        });
+    }
     parts.push(Part::Text {
         id: new_id(),
-        text: text.to_string(),
+        text: text.clone(),
     });
-    let msg = Message {
-        id: message_id.to_string(),
-        chat_id: chat_id.to_string(),
-        role: Role::User,
-        sender: "user".into(),
-        status: MessageStatus::Done,
-        turn: None,
-        model: None,
-        effort: None,
-        created_at: now_ms(),
-        completed_at: None,
-        pending: false,
-        parts,
-    };
-    let _ = doc.insert_message(&msg);
-    let _ = doc.push_command(
-        command,
-        json!({ "messageId": message_id }),
-        &shared.device_id,
-    );
-    doc.commit();
+    shared.unacked.lock().unwrap().insert(message_id.clone());
+    {
+        let docs = shared.docs.lock().unwrap();
+        let Some(doc) = docs.get(&chat_id) else { return };
+        let msg = Message {
+            id: message_id.clone(),
+            chat_id: chat_id.clone(),
+            role: Role::User,
+            sender: "user".into(),
+            status: MessageStatus::Done,
+            turn: None,
+            decision: None,
+            subagent_id: None,
+            in_reply_to: None,
+            usage: None,
+            return_contract: None,
+            waiting_user: false,
+            model: None,
+            effort: None,
+            created_at: now_ms(),
+            completed_at: None,
+            pending: false,
+            parts,
+        };
+        let _ = doc.insert_message(&msg);
+        let _ = doc.push_command(
+            command,
+            json!({ "messageId": message_id }),
+            &shared.device_id(),
+        );
+        doc.commit();
+    }
+    mark_activity(&shared, &chat_id);
+    if project_asleep(&shared, &project_id) {
+        send_wake(&shared, &project_id, "send");
+    }
 }
 
 fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
     match cmd {
-        ClientCommand::OpenChat { chat_id } => {
+        ClientCommand::Pair { code } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let name = hostname();
+                match shared
+                    .post_json("/pair", json!({ "code": code.trim(), "name": name }))
+                    .await
+                {
+                    Ok(v) => {
+                        let creds = DeviceCredentials {
+                            relay_url: shared.http_url.clone(),
+                            device_id: v
+                                .get("device_id")
+                                .and_then(Value::as_str)
+                                .unwrap_or("device")
+                                .to_string(),
+                            device_token: v
+                                .get("device_token")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_string(),
+                        };
+                        if creds.device_token.is_empty() {
+                            let _ = shared
+                                .events
+                                .send(SyncEvent::PairingFailed("relay returned no token".into()));
+                            return;
+                        }
+                        if let Err(err) = credentials::store(&creds) {
+                            shared.notice(format!("Token saved in memory only: {err:#}"));
+                        }
+                        *shared.creds.write().unwrap() = Some(creds.clone());
+                        let _ = shared.events.send(SyncEvent::Paired {
+                            device_id: creds.device_id,
+                        });
+                        start_after_pairing(&shared);
+                    }
+                    Err(err) => {
+                        let _ = shared
+                            .events
+                            .send(SyncEvent::PairingFailed(format!("{err:#}")));
+                    }
+                }
+            });
+        }
+        ClientCommand::OpenChat { chat_id } | ClientCommand::MarkRead { chat_id } => {
             let mut chats = shared.chats.lock().unwrap();
             if let Some(c) = chats.iter_mut().find(|c| c.id == chat_id) {
                 c.unread = false;
             }
-            drop(chats);
-            emit_chats(shared);
         }
         ClientCommand::Send {
             chat_id,
@@ -606,22 +1051,33 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             text,
             attachments,
         } => {
-            write_user_message(shared, &chat_id, &message_id, &text, &attachments, "send");
-            if let Some(project_id) = project_of(shared, &chat_id) {
-                if project_asleep(shared, &project_id) {
-                    send_wake(shared, &project_id, "send");
-                }
-            }
+            tokio::spawn(send_message(
+                shared.clone(),
+                chat_id,
+                message_id,
+                text,
+                attachments,
+                "send",
+            ));
         }
         ClientCommand::Answer {
             chat_id,
             message_id,
             text,
-        } => write_user_message(shared, &chat_id, &message_id, &text, &[], "answer"),
+        } => {
+            tokio::spawn(send_message(
+                shared.clone(),
+                chat_id,
+                message_id,
+                text,
+                Vec::new(),
+                "answer",
+            ));
+        }
         ClientCommand::Stop { chat_id } => {
             let docs = shared.docs.lock().unwrap();
             if let Some(doc) = docs.get(&chat_id) {
-                let _ = doc.push_command("stop", json!({}), &shared.device_id);
+                let _ = doc.push_command("stop", json!({}), &shared.device_id());
                 doc.commit();
             }
         }
@@ -634,46 +1090,49 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 let _ = doc.push_command(
                     "retry",
                     json!({ "messageId": message_id }),
-                    &shared.device_id,
+                    &shared.device_id(),
                 );
                 doc.commit();
             }
         }
         ClientCommand::NewChat {
             project_id,
-            chat_id,
+            chat_id: local_id,
         } => {
-            shared.chats.lock().unwrap().push(Chat {
-                id: chat_id.clone(),
-                project_id: project_id.clone(),
-                title: "New chat".into(),
-                is_pinned: false,
-                is_system: false,
-                unread: false,
-                last_message_at: now_ms(),
-            });
-            emit_chats(shared);
-            open_room(shared, &project_id, &chat_id);
-            let _ = shared.events.send(SyncEvent::ChatSnapshot {
-                chat_id,
-                messages: Vec::new(),
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                match shared
+                    .post_json(
+                        &format!("/projects/{project_id}/chats"),
+                        json!({ "title": "New chat" }),
+                    )
+                    .await
+                {
+                    Ok(v) => {
+                        let Some(chat) = v.get("chat").and_then(parse_chat) else {
+                            shared.notice("Relay returned no chat");
+                            return;
+                        };
+                        shared.chats.lock().unwrap().push(chat.clone());
+                        ensure_room(&shared, &project_id, &chat.id, &chat.id);
+                        let _ = shared.events.send(SyncEvent::ChatCreated {
+                            project_id: project_id.clone(),
+                            local_id,
+                            chat,
+                        });
+                    }
+                    Err(err) => shared.notice(format!("New chat failed: {err:#}")),
+                }
             });
         }
         ClientCommand::CloseChat { chat_id } => {
+            // The relay has no delete yet; the tab closes locally and the
+            // room stays subscribed so unread state keeps working.
             shared
                 .chats
                 .lock()
                 .unwrap()
                 .retain(|c| c.id != chat_id || c.is_pinned);
-            shared.rooms.lock().unwrap().remove(&chat_id);
-            emit_chats(shared);
-        }
-        ClientCommand::MarkRead { chat_id } => {
-            let mut chats = shared.chats.lock().unwrap();
-            if let Some(c) = chats.iter_mut().find(|c| c.id == chat_id) {
-                c.unread = false;
-            }
-            drop(chats);
             emit_chats(shared);
         }
         ClientCommand::SetModel {
@@ -681,7 +1140,21 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             model,
             effort,
         } => {
-            // Project-doc `settings` write lands with the project-doc room; local echo for now.
+            // Project doc `settings` (crdt-sync §6.3): the box reads it.
+            {
+                let docs = shared.docs.lock().unwrap();
+                if let Some(doc) = docs.get(&project_doc_key(&project_id)) {
+                    let settings = doc.doc.get_map("settings");
+                    let _ = settings.insert("agentModel", model.as_str());
+                    let _ = settings.insert("agentEffort", effort_to(effort));
+                    let models: loro::LoroValue = serde_json::from_value(json!({
+                        "talking_model": { "id": model, "effort": effort_to(effort) }
+                    }))
+                    .unwrap_or(loro::LoroValue::Null);
+                    let _ = settings.insert("models", models);
+                    doc.commit();
+                }
+            }
             let mut projects = shared.projects.lock().unwrap();
             if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
                 p.model = model;
@@ -691,6 +1164,174 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             drop(projects);
             let _ = shared.events.send(SyncEvent::Projects(snapshot));
         }
+        ClientCommand::CreateProject { name } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let provider = std::env::var("ARBOS_BOX_PROVIDER").ok();
+                let mut body = json!({ "name": name });
+                if let Some(p) = provider {
+                    body["provider"] = json!(p);
+                }
+                match shared.post_json("/projects", body).await {
+                    Ok(_) => {
+                        if let Err(err) = refresh_registry(&shared).await {
+                            shared.notice(format!("Relay: {err:#}"));
+                        }
+                    }
+                    Err(err) => shared.notice(format!("New project failed: {err:#}")),
+                }
+            });
+        }
         ClientCommand::Wake { project_id } => send_wake(shared, &project_id, "open"),
+        ClientCommand::FetchBlob {
+            project_id,
+            key,
+            save,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let resp = shared
+                    .http
+                    .get(format!("{}/blob/{}/{}", shared.http_url, project_id, key))
+                    .bearer_auth(shared.token())
+                    .send()
+                    .await;
+                match resp {
+                    Ok(r) if r.status().is_success() => {
+                        let mime = r
+                            .headers()
+                            .get("content-type")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("application/octet-stream")
+                            .to_string();
+                        let bytes = r.bytes().await.map(|b| b.to_vec()).unwrap_or_default();
+                        let saved_to = if save {
+                            let path = credentials::downloads_dir().join(safe_name(&key));
+                            match tokio::fs::write(&path, &bytes).await {
+                                Ok(()) => Some(path),
+                                Err(err) => {
+                                    shared.notice(format!("Could not save: {err}"));
+                                    None
+                                }
+                            }
+                        } else {
+                            None
+                        };
+                        let _ = shared.events.send(SyncEvent::Blob {
+                            project_id,
+                            key,
+                            mime,
+                            bytes: Arc::new(bytes),
+                            saved_to,
+                        });
+                    }
+                    Ok(r) => shared.notice(format!("Blob {key}: HTTP {}", r.status())),
+                    Err(err) => shared.notice(format!("Blob {key}: {err}")),
+                }
+            });
+        }
+        ClientCommand::WatchBrowser { project_id, on } => {
+            let mut watches = shared.browser_watch.lock().unwrap();
+            if let Some(task) = watches.remove(&project_id) {
+                task.abort();
+            }
+            if on {
+                let shared2 = shared.clone();
+                let pid = project_id.clone();
+                watches.insert(
+                    project_id,
+                    tokio::spawn(async move {
+                        if let Err(err) = watch_browser(shared2.clone(), pid).await {
+                            shared2.notice(format!("Browser stream: {err:#}"));
+                        }
+                    }),
+                );
+            }
+        }
+    }
+}
+
+/// S16: the box's `/browser/stream` (agentd proxies agent-browser's JPEG
+/// WebSocket). The URL comes from `GET /projects/{id}/status`
+/// (`provider.box_url`), or `ARBOS_BROWSER_STREAM_URL` for a direct dial.
+async fn watch_browser(shared: Arc<Shared>, project_id: Id) -> Result<()> {
+    let url = match std::env::var("ARBOS_BROWSER_STREAM_URL") {
+        Ok(u) if !u.is_empty() => u,
+        _ => {
+            let status = shared
+                .get_json(&format!("/projects/{project_id}/status"))
+                .await?;
+            let box_url = status
+                .get("provider")
+                .and_then(|p| p.get("box_url"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("box has no URL yet (asleep?)"))?
+                .trim_end_matches('/')
+                .to_string();
+            let ws = box_url
+                .replacen("https://", "wss://", 1)
+                .replacen("http://", "ws://", 1);
+            format!("{ws}/browser/stream")
+        }
+    };
+    let (ws, _) = timeout(HELLO_DEADLINE, connect_async(&url))
+        .await
+        .context("browser stream dial timed out")??;
+    let (_tx, mut rx) = ws.split();
+    while let Some(msg) = rx.next().await {
+        let jpeg: Option<Vec<u8>> = match msg? {
+            WsMessage::Binary(b) => Some(b.to_vec()),
+            WsMessage::Text(t) => {
+                // agent-browser frames: {"type":"frame","data":"<base64 jpeg>"}
+                let v: Value = serde_json::from_str(t.as_str()).unwrap_or(Value::Null);
+                v.get("data")
+                    .and_then(Value::as_str)
+                    .and_then(|d| base64_decode(d.rsplit(',').next().unwrap_or(d)))
+            }
+            WsMessage::Close(_) => break,
+            WsMessage::Ping(_) | WsMessage::Pong(_) | WsMessage::Frame(_) => None,
+        };
+        if let Some(jpeg) = jpeg {
+            let _ = shared.events.send(SyncEvent::BrowserFrame {
+                project_id: project_id.clone(),
+                jpeg: Arc::new(jpeg),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = Vec::with_capacity(s.len() * 3 / 4);
+    let mut buf = 0u32;
+    let mut bits = 0u32;
+    for c in s.bytes() {
+        if c == b'=' || c == b'\n' || c == b'\r' {
+            continue;
+        }
+        let v = TABLE.iter().position(|&t| t == c)? as u32;
+        buf = (buf << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((buf >> bits) & 0xff) as u8);
+        }
+    }
+    Some(out)
+}
+
+fn hostname() -> String {
+    std::fs::read_to_string("/etc/hostname")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .unwrap_or_else(|| "arbos-mac".into())
+}
+
+impl Drop for Room {
+    fn drop(&mut self) {
+        self.task.abort();
     }
 }

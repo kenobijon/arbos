@@ -16,6 +16,7 @@ use crate::model::{
     Attachment, Id, Message, MessageStatus, Part, Role, StatusKind, ToolCall, ToolStatus,
 };
 use crate::ui::cards;
+use crate::ui::frost::edge_faded;
 use crate::ui::markdown::{inline_spans, split_blocks, Block};
 use crate::ui::motion::PulseClock;
 use crate::ui::theme::{Theme, BUBBLE_RADIUS};
@@ -99,6 +100,18 @@ pub struct Row {
     pub kind: RowKind,
 }
 
+/// Stick-to-bottom velocity spring (zeron-study §4.3). Each frame it moves a
+/// fraction of the remaining distance to the end, damped, so streamed text
+/// glides instead of jumping; a user wheel-up breaks the pin.
+#[derive(Default)]
+struct StickSpring {
+    velocity: f32,
+}
+
+const SPRING_STIFFNESS: f32 = 0.22;
+const SPRING_DAMPING: f32 = 0.55;
+pub const STICK_THRESHOLD_PX: f32 = 70.0;
+
 pub struct Transcript {
     state: Entity<AppState>,
     chat_id: Option<Id>,
@@ -107,6 +120,7 @@ pub struct Transcript {
     veils: HashMap<String, Veil>,
     expanded: HashSet<String>,
     pinned_to_bottom: bool,
+    spring: StickSpring,
 }
 
 impl Transcript {
@@ -133,14 +147,46 @@ impl Transcript {
             veils: HashMap::new(),
             expanded: HashSet::new(),
             pinned_to_bottom: true,
+            spring: StickSpring::default(),
         }
     }
 
     fn handle_scroll(&mut self, event: &ListScrollEvent) {
-        // The user scrolled away from the tail; re-pin when they return.
+        // A user scroll breaks the pin; it re-engages within 70 px of the end.
         if event.is_scrolled {
-            let at_end = event.visible_range.end >= event.count;
-            self.pinned_to_bottom = at_end;
+            let max = f32::from(self.list.max_offset_for_scrollbar().y);
+            let cur = -f32::from(self.list.scroll_px_offset_for_scrollbar().y);
+            let remaining = max - cur;
+            let near_end = remaining <= STICK_THRESHOLD_PX || event.visible_range.end >= event.count;
+            self.pinned_to_bottom = near_end;
+            if !near_end {
+                self.spring.velocity = 0.0;
+            }
+        }
+    }
+
+    /// One spring step per frame while pinned and not yet at the end.
+    fn step_spring(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
+        if !self.pinned_to_bottom {
+            return;
+        }
+        let max = f32::from(self.list.max_offset_for_scrollbar().y);
+        let cur = -f32::from(self.list.scroll_px_offset_for_scrollbar().y);
+        let remaining = max - cur;
+        if remaining.abs() < 0.5 && self.spring.velocity.abs() < 0.5 {
+            self.spring.velocity = 0.0;
+            return;
+        }
+        self.spring.velocity =
+            self.spring.velocity * (1.0 - SPRING_DAMPING) + remaining * SPRING_STIFFNESS;
+        let step = if self.spring.velocity.abs() > remaining.abs() {
+            remaining
+        } else {
+            self.spring.velocity
+        };
+        if step.abs() >= 0.25 {
+            self.list.scroll_by(px(step));
+            window.request_animation_frame();
         }
     }
 
@@ -191,9 +237,7 @@ impl Transcript {
         let old_len = self.rows.len();
         self.rows = new_rows;
         self.list.splice(prefix..old_len, self.rows.len() - prefix);
-        if self.pinned_to_bottom {
-            self.list.scroll_to_end();
-        }
+        // While pinned the spring glides to the new end on the next frames.
         cx.notify();
     }
 
@@ -349,17 +393,18 @@ impl Transcript {
                     &theme,
                     cx.listener(move |this, _, _, cx| this.toggle_group(&id, cx)),
                     move |blob, cx| {
-                        state.update(cx, |s, cx| {
-                            s.open_details(
-                                match blob {
-                                    Some(b) => DetailsTarget::Blob(b),
-                                    None => DetailsTarget::Message {
-                                        chat_id: chat_id.clone(),
-                                        message_id: message_id.clone(),
-                                    },
+                        state.update(cx, |s, cx| match blob {
+                            Some(key) => {
+                                s.fetch_blob(key.clone(), false, cx);
+                                s.open_details(DetailsTarget::Blob(key), cx);
+                            }
+                            None => s.open_details(
+                                DetailsTarget::Message {
+                                    chat_id: chat_id.clone(),
+                                    message_id: message_id.clone(),
                                 },
                                 cx,
-                            )
+                            ),
                         });
                     },
                     cx,
@@ -377,8 +422,13 @@ impl Transcript {
             } => {
                 let state = self.state.clone();
                 cards::diff_card(&row.id, &path, added, removed, &theme, move |cx| {
-                    let target = DetailsTarget::Blob(blob_ref.clone().unwrap_or_default());
-                    state.update(cx, |s, cx| s.open_details(target, cx));
+                    let key = blob_ref.clone().unwrap_or_default();
+                    state.update(cx, |s, cx| {
+                        if !key.is_empty() {
+                            s.fetch_blob(key.clone(), false, cx);
+                        }
+                        s.open_details(DetailsTarget::Blob(key), cx);
+                    });
                 })
                 .into_any_element()
             }
@@ -389,8 +439,13 @@ impl Transcript {
             } => {
                 let state = self.state.clone();
                 cards::file_card(&row.id, &path, lines, &theme, move |cx| {
-                    let target = DetailsTarget::Blob(blob_ref.clone().unwrap_or_default());
-                    state.update(cx, |s, cx| s.open_details(target, cx));
+                    let key = blob_ref.clone().unwrap_or_default();
+                    state.update(cx, |s, cx| {
+                        if !key.is_empty() {
+                            s.fetch_blob(key.clone(), false, cx);
+                        }
+                        s.open_details(DetailsTarget::Blob(key), cx);
+                    });
                 })
                 .into_any_element()
             }
@@ -454,10 +509,14 @@ fn relative_width(fraction: f32) -> gpui::DefiniteLength {
 }
 
 impl Render for Transcript {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .size_full()
-            .child(list(self.list.clone(), cx.processor(Self::render_row)).size_full())
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.step_spring(window, cx);
+        div().size_full().child(edge_faded(
+            24.0,
+            true,
+            false,
+            list(self.list.clone(), cx.processor(Self::render_row)).size_full(),
+        ))
     }
 }
 
@@ -628,10 +687,23 @@ pub fn build_rows(messages: &[Message], expanded: &HashSet<String>) -> Vec<Row> 
                             code,
                             message: text,
                         } => {
+                            // A `tool_start` card is replaced by the tool part that follows it (S17).
+                            if *code == StatusKind::ToolStart
+                                && message.parts[pix + 1..].iter().any(|p| {
+                                    matches!(
+                                        p,
+                                        Part::Tool { .. } | Part::Text { .. } | Part::Error { .. }
+                                    )
+                                })
+                            {
+                                continue;
+                            }
                             let live = streaming
                                 && matches!(
                                     code,
-                                    StatusKind::Deciding | StatusKind::SubagentWorking
+                                    StatusKind::Deciding
+                                        | StatusKind::SubagentWorking
+                                        | StatusKind::ToolStart
                                 );
                             let kind = match code {
                                 StatusKind::Note | StatusKind::Handoff => {
@@ -639,6 +711,8 @@ pub fn build_rows(messages: &[Message], expanded: &HashSet<String>) -> Vec<Row> 
                                 }
                                 StatusKind::Deciding
                                 | StatusKind::SubagentWorking
+                                | StatusKind::SubagentDone
+                                | StatusKind::ToolStart
                                 | StatusKind::AskUser
                                 | StatusKind::Other => RowKind::Status {
                                     code: *code,

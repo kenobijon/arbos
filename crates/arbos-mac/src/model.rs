@@ -103,6 +103,23 @@ pub enum TurnKind {
     Act,
     Spawn,
     Wake,
+    #[serde(other)]
+    Other,
+}
+
+/// `turn` is written by the box as `{ "kind": "reply" }` and by older
+/// fixtures as a bare string; accept both.
+fn de_turn<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<TurnKind>, D::Error> {
+    let v = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(match v {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(s)) => serde_json::from_value(serde_json::Value::String(s)).ok(),
+        Some(serde_json::Value::Object(map)) => map
+            .get("kind")
+            .cloned()
+            .and_then(|k| serde_json::from_value(k).ok()),
+        Some(_) => None,
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -123,6 +140,16 @@ pub struct ToolCall {
 }
 
 impl ToolCall {
+    /// `input_line` cut to ~60 chars for dense lists.
+    pub fn call_input_short(&self) -> String {
+        let line = self.input_line();
+        let mut out: String = line.chars().take(60).collect();
+        if line.chars().count() > 60 {
+            out.push('…');
+        }
+        out
+    }
+
     /// One-line input for the card.
     pub fn input_line(&self) -> String {
         match &self.input {
@@ -231,12 +258,18 @@ pub enum Part {
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StatusKind {
     Deciding,
     SubagentWorking,
+    /// Box: "{name} · {status} · {secs}s" when a subagent finishes.
+    SubagentDone,
+    /// Box: "{tool} {one-line input}" when an act tool starts (S17).
+    ToolStart,
+    #[serde(alias = "waiting_user")]
     AskUser,
+    #[serde(alias = "handed_off")]
     Handoff,
     Note,
     #[serde(other)]
@@ -253,8 +286,22 @@ pub struct Message {
     #[serde(default)]
     pub sender: String,
     pub status: MessageStatus,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_turn")]
     pub turn: Option<TurnKind>,
+    /// Routing outcome on the assistant message: reply | act | spawn | wake.
+    #[serde(default)]
+    pub decision: Option<String>,
+    #[serde(default)]
+    pub subagent_id: Option<String>,
+    #[serde(default)]
+    pub in_reply_to: Option<String>,
+    /// Token usage as the box reports it (shape varies by harness).
+    #[serde(default)]
+    pub usage: Option<serde_json::Value>,
+    #[serde(default)]
+    pub return_contract: Option<serde_json::Value>,
+    #[serde(default)]
+    pub waiting_user: bool,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
@@ -297,6 +344,35 @@ impl Message {
             })
             .sum()
     }
+}
+
+/// One entry of the project doc `threads` map (T1 index, `crdt-sync.md` §6.3).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadInfo {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub purpose: String,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub harness: String,
+    #[serde(default)]
+    pub last_turn_at: Option<i64>,
+}
+
+/// The parts of the project doc the client renders.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct ProjectDocView {
+    pub threads: Vec<ThreadInfo>,
+    pub status: serde_json::Value,
+    pub settings: serde_json::Value,
+    pub memory_t1: String,
 }
 
 /// Connection to the relay, S14.

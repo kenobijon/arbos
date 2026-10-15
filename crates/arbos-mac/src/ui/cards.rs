@@ -60,7 +60,26 @@ pub fn status_row(code: StatusKind, text: &str, live: bool, theme: &Theme, cx: &
                     .italic()
                     .child(text.to_string()),
             ),
-        StatusKind::SubagentWorking => card_shell(theme).py(px(4.0)).child(
+        StatusKind::ToolStart => div()
+            .w_full()
+            .py(px(3.0))
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .px(px(12.0))
+            .rounded(px(PANEL_RADIUS))
+            .bg(theme.card())
+            .border_1()
+            .border_color(theme.border)
+            .h(px(32.0))
+            .child(spinner(theme, cx))
+            .child(
+                div()
+                    .text_size(px(12.5))
+                    .text_color(theme.text)
+                    .child(text.to_string()),
+            ),
+        StatusKind::SubagentWorking | StatusKind::SubagentDone => card_shell(theme).py(px(4.0)).child(
             div()
                 .flex()
                 .items_center()

@@ -15,6 +15,8 @@ use serde_json::json;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 
+use crate::model::{ProjectDocView, ThreadInfo};
+
 use super::doc::ChatDoc;
 use super::{ClientCommand, SyncEvent, SyncSource};
 use crate::model::{
@@ -104,6 +106,7 @@ impl SyncSource for FixtureSource {
                     });
                 }
             }
+            emit_project_docs(&shared);
             let _ = events.send(SyncEvent::Link(Link::Live));
 
             loop {
@@ -164,10 +167,14 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     let asleep = project_state(shared, &project_id).is_asleep();
                     let mut parts: Vec<Part> = attachments
                         .iter()
-                        .map(|name| Part::Attachment {
+                        .map(|path| Part::Attachment {
                             id: new_id(),
                             attachment: Attachment {
-                                name: name.clone(),
+                                name: path
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("attachment")
+                                    .to_string(),
                                 mime: "application/octet-stream".into(),
                                 blob_ref: None,
                             },
@@ -188,6 +195,12 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                             MessageStatus::Done
                         },
                         turn: None,
+                        decision: None,
+                        subagent_id: None,
+                        in_reply_to: None,
+                        usage: None,
+                        return_contract: None,
+                        waiting_user: false,
                         model: None,
                         effort: None,
                         created_at: now_ms(),
@@ -223,6 +236,12 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         sender: "user".into(),
                         status: MessageStatus::Done,
                         turn: None,
+                        decision: None,
+                        subagent_id: None,
+                        in_reply_to: None,
+                        usage: None,
+                        return_contract: None,
+                        waiting_user: false,
                         model: None,
                         effort: None,
                         created_at: now_ms(),
@@ -327,6 +346,73 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 wake_project(&shared, &project_id).await;
             });
         }
+        ClientCommand::Pair { .. } => {
+            let _ = shared.events.send(SyncEvent::Paired {
+                device_id: DEVICE.into(),
+            });
+        }
+        ClientCommand::CreateProject { name } => {
+            let id = new_id();
+            let icon = name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_else(|| "Ω".into());
+            shared.projects.lock().unwrap().push(Project {
+                id: id.clone(),
+                name: name.clone(),
+                icon,
+                color: "#8b7cf6".into(),
+                state: BoxState::Awake,
+                state_detail: None,
+                wake_progress: None,
+                model: MODELS[0].into(),
+                effort: Effort::High,
+                spend_today_usd: 0.0,
+                spend_cap_usd: 25.0,
+            });
+            let chat_id = new_id();
+            shared.chats.lock().unwrap().push(Chat {
+                id: chat_id.clone(),
+                project_id: id.clone(),
+                title: name,
+                is_pinned: true,
+                is_system: false,
+                unread: false,
+                last_message_at: now_ms(),
+            });
+            add_doc(shared, ChatDoc::new(&chat_id, &id));
+            emit_projects(shared);
+            emit_chats(shared);
+            let _ = shared.events.send(SyncEvent::ChatSnapshot {
+                chat_id,
+                messages: Vec::new(),
+            });
+        }
+        ClientCommand::FetchBlob {
+            project_id,
+            key,
+            save,
+        } => {
+            let body = format!(
+                "# {key}\n\nFixture blob for project {project_id}.\n\nThe relay source downloads the real bytes from GET /blob/{{project}}/{{key}}.\n"
+            );
+            let saved_to = if save {
+                let path = super::credentials::downloads_dir().join(key.replace('/', "_"));
+                std::fs::write(&path, &body).ok().map(|_| path)
+            } else {
+                None
+            };
+            let _ = shared.events.send(SyncEvent::Blob {
+                project_id,
+                key,
+                mime: "text/markdown".into(),
+                bytes: Arc::new(body.into_bytes()),
+                saved_to,
+            });
+        }
+        ClientCommand::WatchBrowser { on: true, .. } => {
+            let _ = shared
+                .events
+                .send(SyncEvent::Notice("Fixture has no browser stream; the relay source shows the box's JPEG frames here.".into()));
+        }
+        ClientCommand::WatchBrowser { on: false, .. } => {}
     }
 }
 
@@ -406,6 +492,32 @@ fn set_project_state(
 fn emit_projects(shared: &Shared) {
     let projects = shared.projects.lock().unwrap().clone();
     let _ = shared.events.send(SyncEvent::Projects(projects));
+}
+
+fn emit_project_docs(shared: &Shared) {
+    let t = now_ms() as i64;
+    let thread = |id: &str, name: &str, purpose: &str, summary: &str, status: &str, ago_min: i64| ThreadInfo {
+        id: id.into(),
+        name: name.into(),
+        purpose: purpose.into(),
+        summary: summary.into(),
+        status: status.into(),
+        harness: "prime".into(),
+        last_turn_at: Some(t - ago_min * 60_000),
+    };
+    let arbos = ProjectDocView {
+        threads: vec![
+            thread("01J9THREADRAIL", "rail-layout", "Match the rail tiles to the mock", "Tiles 72 px, gap 10 px; cargo check clean.", "idle", 40),
+            thread("01J9THREADDOCS", "docs-lookup", "Check GPUI list() alignment", "ListAlignment::Bottom confirmed; notes in docs/research/gpui.md.", "retired", 38),
+        ],
+        status: json!({ "box": "awake", "runningTurns": 0, "spendTodayUsd": 3.87 }),
+        settings: json!({ "agentModel": MODELS[0], "agentEffort": "high" }),
+        memory_t1: "- The UI is a messenger: rail left, chat center, nothing else at rest.\n- Jacob prefers conservative defaults chosen without asking.".into(),
+    };
+    let _ = shared.events.send(SyncEvent::ProjectDoc {
+        project_id: PROJECT_ARBOS.into(),
+        view: arbos,
+    });
 }
 
 fn emit_chats(shared: &Shared) {
@@ -694,6 +806,12 @@ async fn run_turn(
             sender: "agent".into(),
             status: MessageStatus::Streaming,
             turn: None,
+            decision: None,
+            subagent_id: None,
+            in_reply_to: None,
+            usage: None,
+            return_contract: None,
+            waiting_user: false,
             model: Some(model.clone()),
             effort: Some(effort),
             created_at: now_ms(),
@@ -1156,6 +1274,12 @@ impl Seeder<'_> {
             sender: "user".into(),
             status: MessageStatus::Done,
             turn: None,
+            decision: None,
+            subagent_id: None,
+            in_reply_to: None,
+            usage: None,
+            return_contract: None,
+            waiting_user: false,
             model: None,
             effort: None,
             created_at: self.t,
@@ -1177,6 +1301,12 @@ impl Seeder<'_> {
             sender: "agent".into(),
             status,
             turn: Some(turn),
+            decision: None,
+            subagent_id: None,
+            in_reply_to: None,
+            usage: None,
+            return_contract: None,
+            waiting_user: false,
             model: Some(MODELS[0].into()),
             effort: Some(Effort::High),
             created_at: self.t,

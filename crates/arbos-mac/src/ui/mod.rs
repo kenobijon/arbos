@@ -1,5 +1,6 @@
 pub mod cards;
 pub mod composer;
+pub mod frost;
 pub mod markdown;
 pub mod motion;
 pub mod shell;

@@ -4,16 +4,44 @@
 //! GPUI elements.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
 
-use gpui::{App, Context, EventEmitter, Task};
+use gpui::{App, Context, EventEmitter, RenderImage, Task};
 use gpui_tokio::Tokio;
 use tokio::sync::mpsc;
 
 use crate::model::{
-    new_id, now_ms, BoxState, Chat, Effort, Id, Link, Message, MessageStatus, Part, Project, Role,
-    StatusKind,
+    BoxState, Chat, Effort, Id, Link, Message, MessageStatus, Part, Project, ProjectDocView, Role,
+    StatusKind, new_id, now_ms,
 };
 use crate::sync::{ClientCommand, SyncEvent, SyncSource};
+
+/// Pairing screen state (crdt-sync §10.1).
+#[derive(Clone, Debug)]
+pub struct Pairing {
+    pub relay_url: String,
+    pub busy: bool,
+    pub error: Option<String>,
+}
+
+/// A downloaded blob shown in the Details drawer.
+#[derive(Clone, Debug)]
+pub struct BlobView {
+    pub key: String,
+    pub mime: String,
+    pub bytes: Arc<Vec<u8>>,
+    pub saved_to: Option<PathBuf>,
+}
+
+/// Transient bottom-right message.
+#[derive(Clone, Debug)]
+pub struct Notice {
+    pub text: String,
+    pub at: u64,
+}
+
+pub const NOTICE_TTL_MS: u64 = 6_000;
 
 #[derive(Clone, Debug)]
 pub enum AppEvent {
@@ -45,16 +73,24 @@ pub struct ChatUi {
 
 pub struct AppState {
     pub source_name: &'static str,
+    pub pairing: Option<Pairing>,
+    pub device_id: Option<String>,
     pub projects: Vec<Project>,
+    pub project_docs: HashMap<Id, ProjectDocView>,
     pub chats: HashMap<Id, Vec<Chat>>,
     pub messages: HashMap<Id, Vec<Message>>,
     pub chat_ui: HashMap<Id, ChatUi>,
+    pub blobs: HashMap<String, BlobView>,
+    pub browser_frame: Option<Arc<RenderImage>>,
+    pub browser_frames_seen: u64,
+    pub notices: Vec<Notice>,
     pub selected_project: Option<Id>,
     pub active_tab: HashMap<Id, Id>,
     pub link: Link,
     pub rail_collapsed: bool,
     pub right_panel_open: bool,
     pub details_open: Option<DetailsTarget>,
+    pub new_project_open: bool,
     commands: mpsc::UnboundedSender<ClientCommand>,
     _pump: Task<()>,
 }
@@ -93,16 +129,24 @@ impl AppState {
 
         Self {
             source_name,
+            pairing: None,
+            device_id: None,
             projects: Vec::new(),
+            project_docs: HashMap::new(),
             chats: HashMap::new(),
             messages: HashMap::new(),
             chat_ui: HashMap::new(),
+            blobs: HashMap::new(),
+            browser_frame: None,
+            browser_frames_seen: 0,
+            notices: Vec::new(),
             selected_project: None,
             active_tab: HashMap::new(),
             link: Link::Connecting,
             rail_collapsed: false,
             right_panel_open: false,
             details_open: None,
+            new_project_open: false,
             commands: command_tx,
             _pump: pump,
         }
@@ -110,6 +154,88 @@ impl AppState {
 
     fn apply(&mut self, event: SyncEvent, cx: &mut Context<Self>) {
         match event {
+            SyncEvent::NeedsPairing { relay_url } => {
+                self.pairing = Some(Pairing {
+                    relay_url,
+                    busy: false,
+                    error: None,
+                });
+                cx.notify();
+            }
+            SyncEvent::Paired { device_id } => {
+                self.pairing = None;
+                self.device_id = Some(device_id);
+                cx.notify();
+            }
+            SyncEvent::PairingFailed(err) => {
+                if let Some(p) = &mut self.pairing {
+                    p.busy = false;
+                    p.error = Some(err);
+                }
+                cx.notify();
+            }
+            SyncEvent::ChatCreated {
+                project_id,
+                local_id,
+                chat,
+            } => {
+                let tabs = self.chats.entry(project_id.clone()).or_default();
+                match tabs.iter_mut().find(|c| c.id == local_id) {
+                    Some(slot) => *slot = chat.clone(),
+                    None => tabs.push(chat.clone()),
+                }
+                if let Some(msgs) = self.messages.remove(&local_id) {
+                    self.messages.insert(chat.id.clone(), msgs);
+                }
+                if let Some(ui) = self.chat_ui.remove(&local_id) {
+                    self.chat_ui.insert(chat.id.clone(), ui);
+                }
+                if self.active_tab.get(&project_id) == Some(&local_id) {
+                    self.active_tab.insert(project_id, chat.id.clone());
+                    self.command(ClientCommand::OpenChat {
+                        chat_id: chat.id.clone(),
+                    });
+                }
+                cx.emit(AppEvent::TranscriptChanged { chat_id: chat.id });
+                cx.notify();
+            }
+            SyncEvent::ProjectDoc { project_id, view } => {
+                self.project_docs.insert(project_id, view);
+                cx.notify();
+            }
+            SyncEvent::Blob {
+                key,
+                mime,
+                bytes,
+                saved_to,
+                ..
+            } => {
+                if let Some(path) = &saved_to {
+                    self.push_notice(format!("Saved to {}", path.display()));
+                }
+                self.blobs.insert(
+                    key.clone(),
+                    BlobView {
+                        key: key.clone(),
+                        mime,
+                        bytes,
+                        saved_to,
+                    },
+                );
+                self.details_open = Some(DetailsTarget::Blob(key));
+                cx.notify();
+            }
+            SyncEvent::BrowserFrame { jpeg, .. } => {
+                if let Some(image) = decode_jpeg(&jpeg) {
+                    self.browser_frame = Some(Arc::new(image));
+                    self.browser_frames_seen += 1;
+                    cx.notify();
+                }
+            }
+            SyncEvent::Notice(text) => {
+                self.push_notice(text);
+                cx.notify();
+            }
             SyncEvent::Projects(projects) => {
                 self.projects = projects;
                 if self.selected_project.is_none() {
@@ -372,7 +498,7 @@ impl AppState {
         true
     }
 
-    pub fn send(&mut self, text: String, attachments: Vec<String>, cx: &mut Context<Self>) {
+    pub fn send(&mut self, text: String, attachments: Vec<PathBuf>, cx: &mut Context<Self>) {
         let Some(chat_id) = self.active_chat_id() else {
             return;
         };
@@ -389,10 +515,14 @@ impl AppState {
         // same id replaces it (§3.6).
         let mut parts: Vec<Part> = attachments
             .iter()
-            .map(|name| Part::Attachment {
+            .map(|path| Part::Attachment {
                 id: new_id(),
                 attachment: crate::model::Attachment {
-                    name: name.clone(),
+                    name: path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("attachment")
+                        .to_string(),
                     mime: "application/octet-stream".into(),
                     blob_ref: None,
                 },
@@ -412,6 +542,12 @@ impl AppState {
                 sender: "user".into(),
                 status: MessageStatus::Queued,
                 turn: None,
+                decision: None,
+                subagent_id: None,
+                in_reply_to: None,
+                usage: None,
+                return_contract: None,
+                waiting_user: false,
                 model: None,
                 effort: None,
                 created_at: now_ms(),
@@ -496,6 +632,8 @@ impl AppState {
 
     pub fn toggle_right_panel(&mut self, cx: &mut Context<Self>) {
         self.right_panel_open = !self.right_panel_open;
+        let on = self.right_panel_open;
+        self.watch_browser(on, cx);
         cx.notify();
     }
 
@@ -507,6 +645,66 @@ impl AppState {
     pub fn close_details(&mut self, cx: &mut Context<Self>) {
         self.details_open = None;
         cx.notify();
+    }
+
+    pub fn push_notice(&mut self, text: impl Into<String>) {
+        let now = now_ms();
+        self.notices
+            .retain(|n| now.saturating_sub(n.at) < NOTICE_TTL_MS);
+        self.notices.push(Notice {
+            text: text.into(),
+            at: now,
+        });
+    }
+
+    pub fn live_notices(&self) -> Vec<Notice> {
+        let now = now_ms();
+        self.notices
+            .iter()
+            .filter(|n| now.saturating_sub(n.at) < NOTICE_TTL_MS)
+            .cloned()
+            .collect()
+    }
+
+    pub fn pair(&mut self, code: String, cx: &mut Context<Self>) {
+        if let Some(p) = &mut self.pairing {
+            p.busy = true;
+            p.error = None;
+        }
+        self.command(ClientCommand::Pair { code });
+        cx.notify();
+    }
+
+    pub fn create_project(&mut self, name: String, cx: &mut Context<Self>) {
+        self.new_project_open = false;
+        self.command(ClientCommand::CreateProject { name });
+        self.push_notice("Creating project…");
+        cx.notify();
+    }
+
+    pub fn fetch_blob(&mut self, key: String, save: bool, cx: &mut Context<Self>) {
+        let Some(project_id) = self.selected_project.clone() else { return };
+        self.command(ClientCommand::FetchBlob {
+            project_id,
+            key,
+            save,
+        });
+        cx.notify();
+    }
+
+    pub fn watch_browser(&mut self, on: bool, cx: &mut Context<Self>) {
+        let Some(project_id) = self.selected_project.clone() else { return };
+        if !on {
+            self.browser_frame = None;
+        }
+        self.command(ClientCommand::WatchBrowser { project_id, on });
+        cx.notify();
+    }
+
+    pub fn selected_doc(&self) -> Option<&ProjectDocView> {
+        self.selected_project
+            .as_deref()
+            .and_then(|id| self.project_docs.get(id))
     }
 
     /// The live browser card of the selected project, if any (S16).
@@ -534,6 +732,18 @@ impl AppState {
     pub fn box_state(&self) -> Option<BoxState> {
         self.selected().map(|p| p.state)
     }
+}
+
+/// JPEG → BGRA frame for GPUI (`RenderImage` is BGRA).
+fn decode_jpeg(bytes: &[u8]) -> Option<RenderImage> {
+    let img = image::load_from_memory(bytes).ok()?.into_rgba8();
+    let (w, h) = img.dimensions();
+    let mut raw = img.into_raw();
+    for px in raw.chunks_exact_mut(4) {
+        px.swap(0, 2);
+    }
+    let buffer = image::RgbaImage::from_raw(w, h, raw)?;
+    Some(RenderImage::new(vec![image::Frame::new(buffer)]))
 }
 
 fn same_shape(a: &Message, b: &Message) -> bool {
