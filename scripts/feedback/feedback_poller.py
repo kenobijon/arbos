@@ -813,14 +813,17 @@ class Loop:
         # Priority testers go first, but a tester item that has waited FEEDBACK_TESTER_MAX_WAIT_MIN
         # joins the front of the line by age, so a long priority burst cannot starve everyone else.
         def rank(fid: str) -> tuple[int, str]:
+            # 0 = operator-boosted (`prioritize`), 1 = priority tier or aged tester item, 2 = the rest.
             st = self.store.state(fid)
             created = st.get("created", "")
             try:
                 waited = (utcnow() - parse_iso(created)).total_seconds() / 60 if created else 0
             except ValueError:
                 waited = 0
+            if st.get("boost"):
+                return (0, created)
             first = st.get("tier") == "priority" or waited > self.cfg.tester_max_wait_min
-            return (0 if first else 1, created)
+            return (1 if first else 2, created)
 
         order = sorted(self.store.items(), key=rank)
         for fid in order:
@@ -1291,6 +1294,7 @@ def main(argv: list[str]) -> int:
                 print(f"{fid}: unknown")
                 continue
             st["tier"] = "priority"
+            st["boost"] = True
             st.pop("deferred_reason", None)
             store.save_state(fid, st)
             store.event(fid, "prioritized", by="operator")
