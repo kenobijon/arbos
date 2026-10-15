@@ -455,6 +455,13 @@ enum AdminCmd {
     },
     /// Delete a test user (only `test_…` users; their projects and box must be gone first).
     DeleteTestUser { user: String },
+    /// Recreate a user's box from the current default snapshot, carrying /work (the old sandbox
+    /// is kept 7 days). Progress: `GET /machine` → upgrade.phase.
+    UpgradeBox {
+        user: String,
+        #[arg(long)]
+        force: bool,
+    },
     /// Global kill switch: `on [--reason …]` makes the relay read-only, `off` clears it,
     /// `status` shows it with today's relay-wide spend.
     Killswitch {
@@ -828,6 +835,15 @@ async fn main() -> Result<()> {
                 AdminCmd::DeleteTestUser { user } => {
                     admin.delete(&format!("/admin/users/{user}")).await?;
                     println!("deleted {user}");
+                }
+                AdminCmd::UpgradeBox { user, force } => {
+                    let v = admin
+                        .post(
+                            &format!("/admin/users/{user}/box/upgrade?force={force}"),
+                            &serde_json::json!({}),
+                        )
+                        .await?;
+                    println!("{}", serde_json::to_string_pretty(&v)?);
                 }
                 AdminCmd::Killswitch { action, reason } => {
                     let v = match action.as_str() {

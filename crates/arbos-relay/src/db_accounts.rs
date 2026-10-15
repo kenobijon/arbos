@@ -35,6 +35,10 @@ CREATE TABLE IF NOT EXISTS credit_ledger (
 );
 CREATE INDEX IF NOT EXISTS credit_ledger_user_at ON credit_ledger(user_id, at);
 CREATE INDEX IF NOT EXISTS credit_ledger_at ON credit_ledger(at);
+CREATE TABLE IF NOT EXISTS box_history (
+  sandbox_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, snapshot TEXT, replaced_at INTEGER NOT NULL,
+  delete_after INTEGER NOT NULL, deleted_at INTEGER
+);
 CREATE TABLE IF NOT EXISTS machine_meter (
   user_id TEXT PRIMARY KEY, last_tick_at INTEGER NOT NULL, last_state TEXT NOT NULL
 );
@@ -676,6 +680,46 @@ impl Db {
 
     pub fn set_kill_switch(&self, ks: &KillSwitch) -> Result<()> {
         self.meta_set(KILL_SWITCH_KEY, &serde_json::to_string(ks)?)
+    }
+
+    // ---- box history (old sandboxes kept as fallback after an upgrade) -------------------------
+
+    pub fn insert_box_history(
+        &self,
+        user_id: &str,
+        sandbox_id: &str,
+        snapshot: Option<&str>,
+        delete_after: i64,
+    ) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO box_history(sandbox_id, user_id, snapshot, replaced_at, delete_after) VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(sandbox_id) DO UPDATE SET delete_after = excluded.delete_after, deleted_at = NULL",
+                params![sandbox_id, user_id, snapshot, now_ms(), delete_after],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// `(user_id, sandbox_id)` of old sandboxes past their fallback window.
+    pub fn box_history_due(&self) -> Result<Vec<(String, String)>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT user_id, sandbox_id FROM box_history WHERE deleted_at IS NULL AND delete_after <= ?1",
+            )?;
+            let rows = st.query_map(params![now_ms()], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect()
+        })
+    }
+
+    pub fn mark_box_history_deleted(&self, sandbox_id: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE box_history SET deleted_at = ?2 WHERE sandbox_id = ?1",
+                params![sandbox_id, now_ms()],
+            )
+            .map(|_| ())
+        })
     }
 
     // ---- machine metering ---------------------------------------------------------------------

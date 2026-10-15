@@ -23,6 +23,7 @@ mod signin;
 mod skills;
 mod smoke;
 mod state;
+mod upgrade;
 mod vault;
 
 use std::collections::HashMap;
@@ -255,6 +256,7 @@ async fn main() -> anyhow::Result<()> {
         local_conns: Arc::new(Mutex::new(HashMap::new())),
         jwt_key: Arc::new(jwt_key),
         download_cache: Arc::new(Mutex::new(None)),
+        upgrading: Arc::new(Mutex::new(HashMap::new())),
     };
     tracing::info!(auth_mode = auth_mode.as_str(), public_url = %state.cfg.public_url, "sign-in");
     if state.cfg.connectors_mock {
@@ -288,6 +290,7 @@ async fn main() -> anyhow::Result<()> {
     routines::spawn_scheduler(state.clone()).await;
     channels::spawn_pollers(state.clone()).await;
     credits::spawn_meter(state.clone()).await;
+    upgrade::spawn_history_sweeper(state.clone()).await;
 
     let app = Router::new()
         .route("/healthz", get(api::healthz))
@@ -385,6 +388,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/machine/start", post(api::machine_start))
         .route("/machine/stop", post(api::machine_stop))
         .route("/machine/migrate", post(api::machine_migrate))
+        .route("/machine/upgrade", post(upgrade::machine_upgrade))
+        .route(
+            "/admin/users/{id}/box/upgrade",
+            post(upgrade::admin_upgrade),
+        )
         .route(
             "/admin/users/{id}/box",
             axum::routing::put(api::admin_set_user_box),

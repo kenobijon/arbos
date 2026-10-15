@@ -119,6 +119,17 @@ pub struct AppState {
     pub jwt_key: Arc<[u8; 32]>,
     /// `(fetched_at_ms, dmg_url)` for `GET /download/mac`.
     pub download_cache: Arc<Mutex<Option<(i64, String)>>>,
+    /// user_id → box upgrade in progress (`POST /machine/upgrade`).
+    pub upgrading: Arc<Mutex<HashMap<String, UpgradeStatus>>>,
+}
+
+/// One running box upgrade.
+#[derive(Debug, Clone)]
+pub struct UpgradeStatus {
+    pub phase: String,
+    pub since: i64,
+    pub from_snapshot: Option<String>,
+    pub to_snapshot: String,
 }
 
 impl AppState {
@@ -323,6 +334,7 @@ pub(crate) mod test_support {
             relay_key: Arc::new(RelayKey::derive("test-key")),
             jwt_key: Arc::new(RelayKey::derive("test-key").subkey("jwt")),
             download_cache: Arc::new(Mutex::new(None)),
+            upgrading: Arc::new(Mutex::new(HashMap::new())),
             stale_bounces: Arc::new(Mutex::new(HashMap::new())),
             local_conns: Arc::new(Mutex::new(HashMap::new())),
         }

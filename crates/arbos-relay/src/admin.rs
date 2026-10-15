@@ -51,6 +51,9 @@ pub async fn list_users(State(state): State<AppState>, principal: Principal) -> 
             "state": bs,
             "since": since,
             "sandbox_id": sb.as_ref().and_then(|s| s.sandbox_id.clone()),
+            "snapshot": sb.as_ref().and_then(|s| s.snapshot.clone()),
+            "image_outdated": sb.as_ref().is_some_and(|s| crate::upgrade::image_outdated(&state, s)),
+            "upgrade": crate::upgrade::status_json(&state, &u.id).await,
         });
         out.push(v);
     }

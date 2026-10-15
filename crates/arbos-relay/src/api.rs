@@ -609,6 +609,14 @@ pub async fn machine(State(state): State<AppState>, principal: Principal) -> Api
         "spend_cap_usd": state.db.user_spend_cap(&user_id).map_err(internal)?,
         "workspaces": workspaces,
         "migrated_from": sb.as_ref().map(|s| s.migrated_from.clone()).unwrap_or_default(),
+        // Image: the snapshot this box was made from vs the relay's current default. An outdated
+        // box lacks newer agent features until `POST /machine/upgrade` recreates it.
+        "image": {
+            "current": sb.as_ref().and_then(|s| s.snapshot.clone()),
+            "default": state.cfg.daytona_snapshot,
+        },
+        "image_outdated": sb.as_ref().is_some_and(|s| crate::upgrade::image_outdated(&state, s)),
+        "upgrade": crate::upgrade::status_json(&state, &user_id).await,
     }))
     .into_response())
 }
