@@ -114,7 +114,7 @@ impl FeedbackSheet {
         }
         self.open = true;
         let note = self.note.read(cx).focus_handle(cx);
-        window.focus(&note);
+        window.focus(&note, cx);
         cx.notify();
     }
 

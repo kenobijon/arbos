@@ -10,7 +10,8 @@
 #                                   GitHub token. Pulled from the 1Password vault "Arbos" with `op` when
 #                                   OP_SERVICE_ACCOUNT_TOKEN is in the environment (or in /etc/arbos/op.env),
 #                                   else taken from the caller's environment, else kept from the old file.
-#   /etc/arbos/feedback-allowlist.txt  one tester email per line; only these testers trigger a fix
+#   /etc/arbos/feedback-priority.txt   emails / @handles that go first and skip the per-tester cap (Jacob)
+#   /etc/arbos/feedback-blocklist.txt  emails / @handles whose feedback is dropped (abuse)
 #   /var/lib/arbos-feedback/        state: cursor.json, launches.json, log.jsonl, <id>/ per item, inbox/
 #   arbos-feedback-poller.{service,timer}   one tick every 2 minutes as user arbos-feedback
 #   /etc/arbos/feedback.disabled    kill file: create it to stop the loop, delete it to resume
@@ -19,14 +20,17 @@
 #   ASC_KEY_ID [ZV82D3ZWRT]  ASC_ISSUER_ID [4623d589-1653-444a-b497-93116044e272]  ASC_APP_ID [6812503407]
 #   ASC_KEY_P8_B64 (base64 of the .p8; vault: item "Appe Cert Apple Developer", file AuthKey_<id>.p8)
 #   CURSOR_API_KEY (vault: "New New Cursor")   GITHUB_TOKEN (vault: "Arbos GitHub PAT (workflow)")
-#   GITHUB_REPO [unarbos/arbos]  FEEDBACK_ALLOWLIST [jake@bittensor.com]  FEEDBACK_AGENT_MODEL []
-#   FEEDBACK_MIN_INTERVAL_S [600]  FEEDBACK_MAX_PER_DAY [6]
+#   ARBOS_RELAY_URL [https://relay.arbos.life] + ARBOS_RELAY_ADMIN_TOKEN (vault: relay admin token) — Mac sheet intake
+#   OPENROUTER_API_KEY (vault: OpenRouter) + FEEDBACK_SCREEN_MODEL [openai/gpt-4o-mini] — malicious-intent screen
+#   GITHUB_REPO [unarbos/arbos]  FEEDBACK_PRIORITY [jake@bittensor.com,@unconst]  FEEDBACK_AGENT_MODEL []
+#   FEEDBACK_MIN_INTERVAL_S [300]  FEEDBACK_MAX_PER_DAY [20]  FEEDBACK_TESTER_MAX_PER_DAY [3]  FEEDBACK_DEDUPE_DAYS [7]
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 INSTALL_DIR=/opt/arbos-feedback
 ENV_FILE=/etc/arbos/feedback.env
-ALLOW_FILE=/etc/arbos/feedback-allowlist.txt
+PRIORITY_FILE=/etc/arbos/feedback-priority.txt
+BLOCK_FILE=/etc/arbos/feedback-blocklist.txt
 STATE_DIR=/var/lib/arbos-feedback
 SVC_USER=arbos-feedback
 SINCE=""
@@ -66,6 +70,7 @@ opread() { op read "$1" 2>/dev/null || true; }
 : "${ASC_ISSUER_ID:=4623d589-1653-444a-b497-93116044e272}"
 : "${ASC_APP_ID:=6812503407}"
 : "${GITHUB_REPO:=unarbos/arbos}"
+: "${ARBOS_RELAY_URL:=https://relay.arbos.life}"
 if command -v op >/dev/null 2>&1 && [[ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; then
   if [[ -z "${ASC_KEY_P8_B64:-}" ]]; then
     p8=$(opread "op://Arbos/phsrnmu3qfpqx6lbumafjo3uom/AuthKey_${ASC_KEY_ID}.p8")
@@ -73,10 +78,12 @@ if command -v op >/dev/null 2>&1 && [[ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; th
   fi
   : "${CURSOR_API_KEY:=$(opread 'op://Arbos/eagoyh7fpynfmzx4xm2agtqaim/notesPlain' | tr -d '[:space:]')}"
   : "${GITHUB_TOKEN:=$(opread 'op://Arbos/gefompyaklwbv2iuyyb4z5rvbm/credential' | tr -d '[:space:]')}"
+  : "${ARBOS_RELAY_ADMIN_TOKEN:=$(opread 'op://Arbos/pjwsl7tjrhcbzbqos2masde2u4/credential' | tr -d '[:space:]')}"
+  : "${OPENROUTER_API_KEY:=$(opread 'op://Arbos/xbirrctuljw2m6aieoway2szom/credential' | tr -d '[:space:]')}"
 fi
 if [[ -f "$ENV_FILE" ]]; then
   keep() { local k=$1; [[ -n "${!k:-}" ]] || printf -v "$k" '%s' "$(sed -n "s/^$k=//p" "$ENV_FILE" | head -1)"; }
-  for k in ASC_KEY_P8_B64 CURSOR_API_KEY GITHUB_TOKEN FEEDBACK_ALLOWLIST FEEDBACK_AGENT_MODEL FEEDBACK_MIN_INTERVAL_S FEEDBACK_MAX_PER_DAY; do keep "$k"; done
+  for k in ASC_KEY_P8_B64 CURSOR_API_KEY GITHUB_TOKEN ARBOS_RELAY_ADMIN_TOKEN OPENROUTER_API_KEY FEEDBACK_PRIORITY FEEDBACK_AGENT_MODEL FEEDBACK_SCREEN_MODEL FEEDBACK_MIN_INTERVAL_S FEEDBACK_MAX_PER_DAY FEEDBACK_TESTER_MAX_PER_DAY FEEDBACK_DEDUPE_DAYS; do keep "$k"; done
 fi
 missing=()
 [[ -n "${ASC_KEY_P8_B64:-}" ]] || missing+=(ASC_KEY_P8_B64)
@@ -97,19 +104,32 @@ CURSOR_API_KEY=$CURSOR_API_KEY
 FEEDBACK_AGENT_MODEL=${FEEDBACK_AGENT_MODEL:-}
 GITHUB_TOKEN=$GITHUB_TOKEN
 GITHUB_REPO=$GITHUB_REPO
-FEEDBACK_ALLOWLIST=${FEEDBACK_ALLOWLIST:-jake@bittensor.com}
-FEEDBACK_ALLOWLIST_FILE=$ALLOW_FILE
+ARBOS_RELAY_URL=$ARBOS_RELAY_URL
+ARBOS_RELAY_ADMIN_TOKEN=${ARBOS_RELAY_ADMIN_TOKEN:-}
+OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+FEEDBACK_SCREEN_MODEL=${FEEDBACK_SCREEN_MODEL:-openai/gpt-4o-mini}
+FEEDBACK_PRIORITY=${FEEDBACK_PRIORITY:-jake@bittensor.com,@unconst}
+FEEDBACK_PRIORITY_FILE=$PRIORITY_FILE
+FEEDBACK_BLOCKLIST_FILE=$BLOCK_FILE
 FEEDBACK_STATE_DIR=$STATE_DIR
 FEEDBACK_KILL_FILE=/etc/arbos/feedback.disabled
-FEEDBACK_MIN_INTERVAL_S=${FEEDBACK_MIN_INTERVAL_S:-600}
-FEEDBACK_MAX_PER_DAY=${FEEDBACK_MAX_PER_DAY:-6}
+FEEDBACK_MIN_INTERVAL_S=${FEEDBACK_MIN_INTERVAL_S:-300}
+FEEDBACK_MAX_PER_DAY=${FEEDBACK_MAX_PER_DAY:-20}
+FEEDBACK_TESTER_MAX_PER_DAY=${FEEDBACK_TESTER_MAX_PER_DAY:-3}
+FEEDBACK_DEDUPE_DAYS=${FEEDBACK_DEDUPE_DAYS:-7}
 EOF
 chmod 0600 "$ENV_FILE"
 umask 022
-if [[ ! -f "$ALLOW_FILE" ]]; then
-  printf '# Testers whose TestFlight screenshot feedback triggers an automatic fix. One email per line.\njake@bittensor.com\n' > "$ALLOW_FILE"
+if [[ -f /etc/arbos/feedback-allowlist.txt && ! -f "$PRIORITY_FILE" ]]; then
+  mv /etc/arbos/feedback-allowlist.txt "$PRIORITY_FILE"
 fi
-chmod 0644 "$ALLOW_FILE"
+if [[ ! -f "$PRIORITY_FILE" ]]; then
+  printf '# Priority testers (first in the queue, no per-tester cap): one email or @github-handle per line.\njake@bittensor.com\n@unconst\n' > "$PRIORITY_FILE"
+fi
+if [[ ! -f "$BLOCK_FILE" ]]; then
+  printf '# Blocked testers (feedback dropped, logged): one email or @github-handle per line.\n' > "$BLOCK_FILE"
+fi
+chmod 0644 "$PRIORITY_FILE" "$BLOCK_FILE"
 
 say "cursor"
 if [[ -n "$SINCE" ]]; then
