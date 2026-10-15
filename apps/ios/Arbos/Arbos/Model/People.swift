@@ -122,13 +122,22 @@ struct PushItem: Identifiable, Equatable {
     var id: String
     var kind: String
     var payload: [String: String]
+    /// `people_message` carries `sender {kind, id, name, handle, avatar, avatar_color, avatar_url}` (§7c).
+    var sender: [String: String] = [:]
     var createdAt: Int64
 
     static func parse(_ raw: Any) -> PushItem? {
         guard let d = raw as? [String: Any], let id = d["id"] as? String, let kind = d["kind"] as? String else { return nil }
         var payload: [String: String] = [:]
-        for (k, v) in (d["payload"] as? [String: Any]) ?? [:] { payload[k] = "\(v)" }
-        return PushItem(id: id, kind: kind, payload: payload, createdAt: (d["created_at"] as? NSNumber)?.int64Value ?? 0)
+        var sender: [String: String] = [:]
+        for (k, v) in (d["payload"] as? [String: Any]) ?? [:] {
+            if k == "sender", let s = v as? [String: Any] {
+                for (sk, sv) in s { if let str = sv as? String { sender[sk] = str } }
+            } else {
+                payload[k] = "\(v)"
+            }
+        }
+        return PushItem(id: id, kind: kind, payload: payload, sender: sender, createdAt: (d["created_at"] as? NSNumber)?.int64Value ?? 0)
     }
 }
 

@@ -357,10 +357,12 @@ final class RelayAPI {
 
     /// `POST /devices/{id}/push {platform, token, environment, bundle_id, app_version}`
     /// registers this device's APNs token (idempotent; re-sent on every launch).
-    func registerPush(deviceId: Id, token: String, environment: String, bundleId: String, appVersion: String) async throws {
-        _ = try await request("POST", "/devices/\(deviceId)/push", body: [
+    /// Returns the relay's `push` flag: false until it has an APNs key.
+    func registerPush(deviceId: Id, token: String, environment: String, bundleId: String, appVersion: String) async throws -> Bool {
+        let v = try await json("POST", "/devices/\(deviceId)/push", body: [
             "platform": "ios", "token": token, "environment": environment, "bundle_id": bundleId, "app_version": appVersion,
         ])
+        return ((v as? [String: Any])?["push"] as? NSNumber)?.boolValue ?? true
     }
 
     /// `DELETE /devices/{id}/push` on sign-out so a stale token is not pushed to.
@@ -442,6 +444,18 @@ final class RelayAPI {
 
     func markRead(chatId: String, seq: Int64) async throws {
         _ = try await request("PUT", "/chats/\(chatId)/read", body: ["seq": seq])
+    }
+
+    /// Announce a message we just wrote so recipients get a real preview
+    /// (§7c): people chats `POST /chats/{id}/notify`, project chats
+    /// `POST /projects/{pid}/chats/{cid}/notify`. Deduped by the relay.
+    func notifyMessage(chatId: String, projectId: Id?, messageId: String, text: String) async throws {
+        let body: [String: Any] = ["message_id": messageId, "text": String(text.prefix(140))]
+        if let projectId, projectId != peopleSlot {
+            _ = try await request("POST", "/projects/\(projectId)/chats/\(chatId)/notify", body: body)
+        } else {
+            _ = try await request("POST", "/chats/\(chatId)/notify", body: body)
+        }
     }
 
     func leaveChat(_ id: String) async throws { _ = try await request("POST", "/chats/\(id)/leave", body: [String: Any]()) }

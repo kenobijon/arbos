@@ -22,6 +22,8 @@ final class PushManager: NSObject, ObservableObject, UNUserNotificationCenterDel
     @Published private(set) var status: UNAuthorizationStatus = .notDetermined
     /// Hex APNs token from the system; re-registered on every launch.
     @Published private(set) var apnsToken: String?
+    /// The relay's answer to the registration: false until it holds an APNs key.
+    @Published var relayPushEnabled: Bool?
     /// Who to send the token to; set by AppModel once signed in.
     var register: ((String, String) async -> Void)?
     /// The chat currently on screen; banners for it are swallowed.

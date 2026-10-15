@@ -240,8 +240,9 @@ final class AppModel: ObservableObject {
         PushManager.shared.register = { token, env in
             let version = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "") + " (" + (Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "") + ")"
             do {
-                try await api.registerPush(deviceId: creds.deviceId, token: token, environment: env,
-                                           bundleId: Bundle.main.bundleIdentifier ?? "com.unarbos.arbos.ios", appVersion: version)
+                let enabled = try await api.registerPush(deviceId: creds.deviceId, token: token, environment: env,
+                                                         bundleId: Bundle.main.bundleIdentifier ?? "com.unarbos.arbos.ios", appVersion: version)
+                await MainActor.run { PushManager.shared.relayPushEnabled = enabled }
             } catch {
                 #if DEBUG
                 print("push: register failed: \(error.localizedDescription)")
@@ -973,6 +974,7 @@ final class AppModel: ObservableObject {
                 return
             }
             doc.commit()
+            announce(chatId: chatId, projectId: nil, messageId: messageId, text: text)
             if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i].lastActivityAt = nowMs() }
             peopleChats.sort { $0.lastActivityAt > $1.lastActivityAt }
         }
@@ -1138,17 +1140,19 @@ final class AppModel: ObservableObject {
             case "people_message":
                 if let cid = p.payload["chat_id"], cid != visibleChatId {
                     peopleUnread.insert(cid)
-                    let from = p.payload["from_handle"] ?? "someone"
-                    // The sender's picture comes from the chat's member list when we have it.
+                    let from = p.sender["handle"] ?? p.payload["from_handle"] ?? "someone"
+                    // §7c sender{} first; the chat's member list fills any gap.
                     let member = peopleChat(cid)?.members.first { $0.handle == from }
                     let agent = member?.isAgent == true ? member?.project : nil
+                    let kind = p.sender["kind"] ?? (agent != nil ? "agent" : "user")
                     let info = MessagePush.userInfo(
-                        chatId: cid, projectId: peopleSlot, title: member?.displayName ?? "@\(from)",
+                        chatId: cid, projectId: peopleSlot, title: p.sender["name"] ?? member?.displayName ?? "@\(from)",
                         body: p.payload["preview"] ?? p.payload["text"] ?? "New message",
-                        senderKind: agent != nil ? "agent" : "user", senderId: member?.id ?? from,
-                        senderName: member?.displayName ?? from, senderHandle: from,
-                        avatar: agent.flatMap { avatarSlug(for: $0) }, avatarColor: agent?.avatarColor ?? p.payload["from_avatar_color"],
-                        avatarUrl: member?.avatarUrl ?? p.payload["from_avatar_url"])
+                        senderKind: kind, senderId: p.sender["id"] ?? member?.id ?? from,
+                        senderName: p.sender["name"] ?? member?.displayName ?? from, senderHandle: from,
+                        avatar: p.sender["avatar"] ?? agent.flatMap { avatarSlug(for: $0) },
+                        avatarColor: p.sender["avatar_color"] ?? agent?.avatarColor,
+                        avatarUrl: p.sender["avatar_url"] ?? member?.avatarUrl)
                     Task { await PushManager.shared.postMessage(id: p.id, info: info) }
                     applyBadge()
                 }
@@ -1303,9 +1307,18 @@ final class AppModel: ObservableObject {
         }
         doc.commit()
         markActivity(chatId: chatId)
+        if command == "send" { announce(chatId: chatId, projectId: chat.projectId, messageId: messageId, text: text) }
         if let p = project(chat.projectId), p.state.isAsleep || p.state == .error {
             wake(projectId: p.id, reason: "send")
         }
+    }
+
+    /// §7c: tell the relay about the row we just pushed so other members'
+    /// phones get a real preview instead of "New message". Best effort.
+    private func announce(chatId: Id, projectId: Id?, messageId: String, text: String) {
+        guard !isFixture else { return }
+        let api = self.api
+        Task { try? await api.notifyMessage(chatId: chatId, projectId: projectId, messageId: messageId, text: text) }
     }
 
     func stop(chatId: Id) {
@@ -1393,15 +1406,26 @@ final class AppModel: ObservableObject {
     }
 
     func markRead(chatId: Id) {
+        let hadRemote = (unreadCounts[chatId] ?? 0) > 0
         if unreadCounts[chatId] != nil { unreadCounts[chatId] = 0 }
         PushManager.shared.clearDelivered(chatId: chatId)
+        var hadLocal = false
         for (pid, list) in chats {
             if let i = list.firstIndex(where: { $0.id == chatId }), list[i].unread {
                 var updated = list
                 updated[i].unread = false
                 chats[pid] = updated
-                applyBadge()
-                return
+                hadLocal = true
+            }
+        }
+        if hadRemote || hadLocal {
+            applyBadge()
+            // §7c: PUT /chats/{id}/read takes project chat ids too; the relay
+            // clears the user's events for it and badges their other devices.
+            if !isFixture, chat(chatId) != nil {
+                let api = self.api
+                let seq = Int64(messages(of: chatId).count)
+                Task { try? await api.markRead(chatId: chatId, seq: seq) }
             }
         }
     }

@@ -208,7 +208,8 @@ struct ChatView: View {
         }
         .onAppear {
             model.markRead(chatId: chatId)
-            if isPeople { model.visibleChatId = chatId; model.markPeopleRead(chatId) }
+            model.visibleChatId = chatId
+            if isPeople { model.markPeopleRead(chatId) }
             if let show = DebugHooks.show {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
                     switch show {
