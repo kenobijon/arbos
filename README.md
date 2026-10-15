@@ -103,6 +103,14 @@ First run against a relay shows the pairing screen: enter the one-time code the 
 
 macOS packaging: `scripts/bundle-mac.sh` builds a universal `dist/Arbos.app` + DMG and signs/notarizes when `ARBOS_SIGN_IDENTITY` / `ARBOS_NOTARY_PROFILE` are set (skipped otherwise). `scripts/demo-mac.sh` launches the app in Glass, runs a scripted turn and records with `screencapture -v`.
 
+## Connectors
+
+The relay brokers Gmail/Calendar, Slack, GitHub and Harness Comms for the boxes (D2/D28/D40): provider tokens are stored AES-256-GCM-encrypted in the relay DB (key from `ARBOS_RELAY_KEY`, else generated once into the `meta` table) and never enter a box. The agent calls `connectors_list` / `connector_call` over MCP; agentd forwards to `POST /connectors/call`, which attaches the bearer upstream and redacts `access_token` / `refresh_token` / `Authorization` from every reply. Write and send actions go through an approval card first (`ARBOS_APPROVAL_STUB=auto|expire|reject` until the approvals feature lands).
+
+- Device endpoints: `GET /connectors`, `GET /connectors/catalog`, `POST /connectors/{provider}/connect` (`{"token": ...}` for GitHub PATs / Harness Comms keys, otherwise returns an OAuth `authUrl`), `GET /connectors/oauth/callback`, `DELETE /connectors/{id}`, `GET /connectors/outbox`.
+- OAuth apps: `ARBOS_GOOGLE_CLIENT_ID/SECRET`, `ARBOS_SLACK_CLIENT_ID/SECRET`, `ARBOS_GITHUB_CLIENT_ID/SECRET`; redirect is `{public_url}/connectors/oauth/callback` (`ARBOS_OAUTH_REDIRECT_URL` overrides). `ARBOS_HARNESS_COMMS_URL` is the default base URL for the Harness Comms connector.
+- `ARBOS_CONNECTORS_MOCK=1`: every action returns canned data, OAuth completes against the relay's own callback, and sends land in `connector_outbox` instead of leaving the machine. The Mac fixture source shows the same panel under Settings → Connectors.
+
 ## Image
 
 `.github/workflows/image.yml` builds `image/Dockerfile` on an image tag (`image-v0.1.4`) or by hand, pushes it to GHCR, smoke-tests it, and registers the Daytona snapshot `arbos-agent-<version>` with `image/register-snapshot.sh` (secrets `DAYTONA_API_KEY`, `GHCR_READ_TOKEN`).
