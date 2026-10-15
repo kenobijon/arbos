@@ -384,7 +384,7 @@ struct ChatView: View {
             // an empty field starts voice chat. Stop lives in the … menu.
             Button(action: canSend ? send : { showVoice = true }) {
                 Circle()
-                    .fill(.white)
+                    .fill(theme.primary)
                     .frame(width: Theme.voiceButton, height: Theme.voiceButton)
                     .overlay(
                         Image(systemName: canSend ? "arrow.up" : "waveform")
@@ -435,8 +435,8 @@ struct ChatView: View {
                     sentOnce = true
                 }
             } label: {
-                Circle().fill(.white).frame(width: Theme.voiceButton, height: Theme.voiceButton)
-                    .overlay(Image(systemName: "arrow.up").font(.system(size: 16, weight: .bold)).foregroundStyle(.black))
+                Circle().fill(theme.primary).frame(width: Theme.voiceButton, height: Theme.voiceButton)
+                    .overlay(Image(systemName: "arrow.up").font(.system(size: 16, weight: .bold)).foregroundStyle(theme.onPrimary))
             }
             .buttonStyle(.plain)
             .padding(.trailing, 3)

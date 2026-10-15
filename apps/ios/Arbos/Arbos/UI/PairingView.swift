@@ -64,10 +64,10 @@ struct PairingView: View {
                     Button(action: submit) {
                         Text(model.pairingBusy ? "Pairing…" : "Pair this iPhone")
                             .font(.system(size: Theme.body, weight: .semibold))
-                            .foregroundStyle(.black)
+                            .foregroundStyle(theme.onPrimary)
                             .frame(maxWidth: .infinity)
                             .frame(height: 50)
-                            .background(Capsule().fill(.white))
+                            .background(Capsule().fill(theme.primary))
                     }
                     .buttonStyle(.plain)
                     .disabled(!canSubmit)

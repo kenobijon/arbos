@@ -485,8 +485,8 @@ struct VoiceMemoBubble: View {
                     player.toggle(url: url, headers: model.authHeaders)
                 }
             } label: {
-                Circle().fill(.white).frame(width: 32, height: 32)
-                    .overlay(Image(systemName: player.playing ? "pause.fill" : "play.fill").font(.system(size: 13, weight: .bold)).foregroundStyle(.black).offset(x: player.playing ? 0 : 1))
+                Circle().fill(theme.primary).frame(width: 32, height: 32)
+                    .overlay(Image(systemName: player.playing ? "pause.fill" : "play.fill").font(.system(size: 13, weight: .bold)).foregroundStyle(theme.onPrimary).offset(x: player.playing ? 0 : 1))
             }
             .buttonStyle(.plain)
             HStack(spacing: 2) {

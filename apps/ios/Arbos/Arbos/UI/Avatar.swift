@@ -21,12 +21,15 @@ struct BlobAvatar: View {
     var size: CGFloat = Theme.avatar
     /// Machine/online dot (bottom-right), nil hides it.
     var dot: Color? = nil
+    /// Ring around the dot: the surface the avatar sits on.
+    var ring: Color = Color(hex: "#141414")!
 
     init(project: Project, theme: Theme, size: CGFloat = Theme.avatar, dot: Color? = nil) {
         self.color = theme.projectColor(project.color)
         self.shape = BlobShape.pick(for: project.id)
         self.size = size
         self.dot = dot
+        self.ring = theme.bg
     }
 
     init(color: Color, shape: BlobShape, size: CGFloat = Theme.avatar, dot: Color? = nil) {
@@ -47,7 +50,7 @@ struct BlobAvatar: View {
                 Circle()
                     .fill(dot)
                     .frame(width: size * 0.36, height: size * 0.36)
-                    .overlay(Circle().strokeBorder(Color(hex: "#141414")!, lineWidth: max(1.5, size * 0.06)))
+                    .overlay(Circle().strokeBorder(ring, lineWidth: max(1.5, size * 0.06)))
                     .offset(x: size * 0.08, y: size * 0.08)
             }
         }

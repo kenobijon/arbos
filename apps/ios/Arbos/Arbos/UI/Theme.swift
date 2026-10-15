@@ -99,6 +99,9 @@ struct Theme {
 
     /// Text colour on a user bubble (white on dark grey, white on black).
     var userText: Color { .white }
+    /// Primary filled control (send/voice button, main CTA): white on dark, black on light.
+    var primary: Color { isDark ? .white : Color(hex: "#111111")! }
+    var onPrimary: Color { isDark ? .black : .white }
 
     /// Grok's bot palette; a project's hex colour snaps to the nearest one.
     static let palette: [Color] = [
