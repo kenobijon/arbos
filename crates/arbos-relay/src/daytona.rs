@@ -398,22 +398,50 @@ impl Daytona {
     }
 
     // ---- toolbox (runner-injected HTTP API inside the sandbox; sandbox-image.md §1) -----------
+    //
+    // The toolbox is reached through the proxy host (`GET /sandbox/{id}/toolbox-proxy-url`, today
+    // `https://proxy.app.daytona.io/toolbox`) as `{proxy}/{sandboxId}/<toolbox path>` with the same
+    // API key. The `/api/toolbox/...` form in the OpenAPI document returns 404 (verified 2026-10-15).
 
-    /// `POST /toolbox/{sandboxId}/toolbox/files/upload?path=` — used by `--local-box=daytona-toolbox` to
-    /// place `arbos-agentd` in a sandbox built from an inline Dockerfile.
+    async fn toolbox_base(&self, id: &str) -> String {
+        let fallback = "https://proxy.app.daytona.io/toolbox".to_owned();
+        let url = match self
+            .send::<Value>(
+                self.req(
+                    reqwest::Method::GET,
+                    &format!("/sandbox/{id}/toolbox-proxy-url"),
+                ),
+                "toolbox proxy url",
+            )
+            .await
+        {
+            Ok(v) => v
+                .get("url")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or(fallback),
+            Err(_) => fallback,
+        };
+        format!("{}/{id}", url.trim_end_matches('/'))
+    }
+
+    /// `POST {proxy}/{sandboxId}/files/upload?path=` — write one file into a started sandbox (parent
+    /// directories are created). Used to hand the box the current relay URL at every wake.
     pub async fn toolbox_upload(&self, id: &str, path: &str, bytes: Vec<u8>) -> Result<()> {
         let part = reqwest::multipart::Part::bytes(bytes).file_name("file");
         let form = reqwest::multipart::Form::new().part("file", part);
-        let resp = self
-            .req(
-                reqwest::Method::POST,
-                &format!("/toolbox/{id}/toolbox/files/upload"),
-            )
+        let base = self.toolbox_base(id).await;
+        let mut r = self
+            .http
+            .post(format!("{base}/files/upload"))
+            .bearer_auth(&self.key)
             .query(&[("path", path)])
             .multipart(form)
-            .send()
-            .await
-            .context("toolbox upload")?;
+            .timeout(Duration::from_secs(30));
+        if let Some(org) = &self.org {
+            r = r.header("X-Daytona-Organization-ID", org);
+        }
+        let resp = r.send().await.context("toolbox upload")?;
         if !resp.status().is_success() {
             return Err(anyhow!(
                 "toolbox upload: HTTP {} {}",
@@ -424,17 +452,19 @@ impl Daytona {
         Ok(())
     }
 
-    /// `POST /toolbox/{sandboxId}/toolbox/process/execute`.
+    /// `POST {proxy}/{sandboxId}/process/execute`.
     pub async fn toolbox_exec(&self, id: &str, command: &str, timeout_s: u64) -> Result<Value> {
-        self.send(
-            self.req(
-                reqwest::Method::POST,
-                &format!("/toolbox/{id}/toolbox/process/execute"),
-            )
-            .json(&json!({ "command": command, "timeout": timeout_s })),
-            "toolbox exec",
-        )
-        .await
+        let base = self.toolbox_base(id).await;
+        let mut r = self
+            .http
+            .post(format!("{base}/process/execute"))
+            .bearer_auth(&self.key)
+            .json(&json!({ "command": command, "timeout": timeout_s }))
+            .timeout(Duration::from_secs(timeout_s + 30));
+        if let Some(org) = &self.org {
+            r = r.header("X-Daytona-Organization-ID", org);
+        }
+        self.send(r, "toolbox exec").await
     }
 
     /// `POST /toolbox/{sandboxId}/toolbox/process/session` then `.../session/{sessionId}/exec` with `runAsync`.
@@ -444,18 +474,22 @@ impl Daytona {
         session: &str,
         command: &str,
     ) -> Result<Value> {
-        let _ = self
-            .req(
-                reqwest::Method::POST,
-                &format!("/toolbox/{id}/toolbox/process/session"),
-            )
+        let base = self.toolbox_base(id).await;
+        let auth = |r: reqwest::RequestBuilder| {
+            let r = r.bearer_auth(&self.key);
+            match &self.org {
+                Some(org) => r.header("X-Daytona-Organization-ID", org),
+                None => r,
+            }
+        };
+        let _ = auth(self.http.post(format!("{base}/process/session")))
             .json(&json!({ "sessionId": session }))
             .send()
             .await;
         self.send(
-            self.req(
-                reqwest::Method::POST,
-                &format!("/toolbox/{id}/toolbox/process/session/{session}/exec"),
+            auth(
+                self.http
+                    .post(format!("{base}/process/session/{session}/exec")),
             )
             .json(&json!({ "command": command, "runAsync": true })),
             "toolbox session exec",

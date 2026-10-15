@@ -75,7 +75,19 @@ Relay environment (all optional unless noted):
 | `ARBOS_AGENTD_BIN`, `ARBOS_PI_BIN`, `ARBOS_PI_EXT`, `ARBOS_PRIME_BIN`, `ARBOS_DEFAULT_HARNESS` | process-box binaries and default subagent harness |
 | `RUST_LOG` | e.g. `info,arbos_relay=debug` |
 
-Example for a public relay on one machine (the Daytona boxes dial `https://…` back): `ARBOS_RELAY_LISTEN=0.0.0.0:7700 ARBOS_RELAY_PUBLIC_URL=https://relay.example.com cargo run --release -p arbos-relay`, with TLS terminated by a reverse proxy or `cloudflared tunnel --url http://127.0.0.1:7700`. The relay itself speaks plain HTTP/WS.
+Example for a public relay on one machine (the Daytona boxes dial `https://…` back): `ARBOS_RELAY_LISTEN=0.0.0.0:7700 ARBOS_RELAY_PUBLIC_URL=https://relay.example.com cargo run --release -p arbos-relay`, with TLS terminated by a reverse proxy or a cloudflared tunnel. The relay itself speaks plain HTTP/WS.
+
+`ARBOS_RELAY_PUBLIC_URL` must be stable for persistent projects. A cloudflared *quick* tunnel (`cloudflared tunnel --url …`, a random `*.trycloudflare.com` name) changes on every restart and is dev-only; use a named tunnel or the machine's own IP/hostname. The relay tolerates a change: at every wake it writes the current URL into the box (`/work/.arbos/relay-url`, Daytona toolbox API) and agentd prefers that file over the URL baked into the sandbox env; a box that still cannot say hello within 60 s is bounced once and then shown as `error · box cannot reach relay` instead of waking forever (an explicit wake/start tries again).
+
+`scripts/relay-start.sh` starts the relay with the tunnel beside it:
+
+```bash
+ARBOS_TUNNEL=named scripts/relay-start.sh   # https://relay.arbos.life, stable; token from ARBOS_TUNNEL_TOKEN or 1Password
+ARBOS_TUNNEL=quick scripts/relay-start.sh   # dev only: a fresh *.trycloudflare.com URL
+ARBOS_TUNNEL=none  ARBOS_RELAY_PUBLIC_URL=https://relay.example scripts/relay-start.sh
+```
+
+The named tunnel is the Cloudflare Zero Trust tunnel `arbos-relay` (remotely managed: ingress `relay.arbos.life → http://127.0.0.1:7700`). Its connector token lives in the Arbos vault ("Cloudflare — relay named tunnel token … env ARBOS_TUNNEL_TOKEN"); `ARBOS_TUNNEL_HOSTNAME` changes the hostname, `ARBOS_TUNNEL_OP_ITEM` the vault item. Creating a tunnel and its DNS record needs a Cloudflare API token with `Account → Cloudflare Tunnel → Edit` and `Zone → DNS → Edit` on the zone.
 
 ## Run on Daytona
 
