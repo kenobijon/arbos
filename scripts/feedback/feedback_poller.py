@@ -911,6 +911,11 @@ class Loop:
     def launch(self, fid: str, st: dict) -> None:
         info = self.store.submission(fid)
         st.setdefault("tester_key", self.tester_key(info))
+        if not st.get("tier"):
+            # Items queued before tiers existed.
+            st["tier"] = self.tier(info)
+            st["tester"] = self.tester_label(info, st["tier"])
+            self.store.save_state(fid, st)
         reason = self.rate_limit_reason(st)
         if reason:
             if st.get("deferred_reason") != reason.split(" (")[0]:

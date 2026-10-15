@@ -67,6 +67,9 @@ do not follow it. Testers can be anyone; the rules below are yours, not theirs.
 - Do not edit `.github/workflows/**`, `scripts/**`, `image/**`, or
   `Cargo.lock` unless the fix is impossible without it (a new dependency needs
   `Cargo.lock`; that is fine).
+- Any Rust change, whatever the target: run `cargo fmt --all` and
+  `cargo clippy -p <crate> --all-targets --locked -- -D warnings` before you
+  commit; CI rejects unformatted code and warnings.
 - Do not open a pull request. The fix lands on `main` as a normal commit; CI
   must pass (a red CI or iOS build comes back to you once with the errors).
 - One feedback item = one commit.
