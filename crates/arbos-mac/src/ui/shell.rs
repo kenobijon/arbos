@@ -26,6 +26,7 @@ use crate::ui::theme::{
     TAB_BAR_HEIGHT, TAB_MIN_WIDTH,
 };
 use crate::ui::transcript::{Transcript, COLUMN_MAX_WIDTH};
+use crate::ui::voice::Voice;
 
 actions!(shell, [CloseTab, NewTab, ToggleRail, TogglePanel, Quit]);
 
@@ -33,6 +34,8 @@ pub struct Shell {
     state: Entity<AppState>,
     transcript: Entity<Transcript>,
     composer: Entity<Composer>,
+    /// F11: call strip + mic/TTS owner.
+    voice: Entity<Voice>,
     pairing_input: Entity<ComposerInput>,
     project_input: Entity<ComposerInput>,
     connectors: Entity<ConnectorsPanel>,
@@ -52,8 +55,10 @@ pub struct Shell {
 impl Shell {
     pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
-        let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+        let voice = cx.new(|cx| Voice::new(state.clone(), cx));
+        let composer = cx.new(|cx| Composer::new(state.clone(), voice.clone(), cx));
         cx.observe(&state, |_, _, cx| cx.notify()).detach();
+        cx.observe(&voice, |_, _, cx| cx.notify()).detach();
         cx.observe_window_activation(window, |this, window, cx| {
             let active = window.is_window_active();
             this.state
@@ -147,6 +152,7 @@ impl Shell {
             state,
             transcript,
             composer,
+            voice,
             pairing_input,
             project_input,
             connectors,
@@ -495,6 +501,7 @@ impl Shell {
             .unwrap_or_default();
         let rail_collapsed = state.rail_collapsed;
         let panel_open = state.right_panel_open;
+        let in_call = self.voice.read(cx).in_call();
 
         let shake = self
             .shake_started_at
@@ -698,6 +705,13 @@ impl Shell {
             )
             .children(pinned_tab)
             .child(strip)
+            .child(
+                icon_button("call-toggle", "☎", in_call, &theme).on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.voice.update(cx, |v, cx| v.toggle_call(cx));
+                    },
+                )),
+            )
             .child(
                 icon_button("panel-toggle", "▣", panel_open, &theme).on_click(cx.listener(
                     |this, _, _, cx| {
@@ -975,7 +989,11 @@ impl Shell {
             } else {
                 composer_row.into_any_element()
             };
-            column = column.child(body).child(composer_row);
+            // F11 call strip renders above the composer only during a call.
+            column = column
+                .child(body)
+                .child(self.voice.clone())
+                .child(composer_row);
         }
         column
     }
