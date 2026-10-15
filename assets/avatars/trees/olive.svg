@@ -1,15 +1,16 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Ollie">
 <circle class="bg" cx="32" cy="32" r="32" fill="#000000"/>
-<path d="M31 54C27.34 47.16 27 40.16 30 33" class="tree" fill="none" stroke="#ffffff" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>
-<path d="M31 45L39 35" class="tree" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-<circle cx="22" cy="26" r="8.5" class="tree" fill="#ffffff"/>
-<circle cx="42" cy="22" r="9" class="tree" fill="#ffffff"/>
+<path d="M31 54C27.34 47.5 27 40.83 30 34" class="tree_dark" fill="none" stroke="#ffffff" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M31 46L40 36" class="tree_dark" fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="21" cy="26" r="8.5" class="tree" fill="#ffffff"/>
+<circle cx="43" cy="22" r="9" class="tree" fill="#ffffff"/>
 <circle cx="33" cy="30" r="9.5" class="tree" fill="#ffffff"/>
-<circle cx="30" cy="16" r="7" class="tree" fill="#ffffff"/>
-<circle cx="47" cy="32" r="5.5" class="tree" fill="#ffffff"/>
-<circle cx="17" cy="17" r="4" class="tree" fill="#ffffff"/>
-<circle cx="30.32" cy="25.48" r="1.9" class="face" fill="#000000"/>
-<circle cx="37.68" cy="25.48" r="1.9" class="face" fill="#000000"/>
-<path d="M30.58 29.47C32.86 32.51 35.14 32.51 37.42 29.47" class="face" fill="none" stroke="#000000" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
-<circle class="ring" cx="32" cy="32" r="31" fill="none" stroke="#ffffff" stroke-width="2"/>
+<circle cx="29" cy="16" r="7.5" class="tree" fill="#ffffff"/>
+<circle cx="47" cy="32" r="6" class="tree" fill="#ffffff"/>
+<circle cx="15" cy="18" r="4.5" class="tree" fill="#ffffff"/>
+<path d="M25 9.27C26.67 8.3 28.48 8.29 29.03 9.25C29.58 10.21 28.67 11.77 27 12.73C25.33 13.7 23.52 13.71 22.97 12.75C22.42 11.79 23.33 10.23 25 9.27Z" class="tree_light" fill="#ffffff"/>
+<circle cx="30.13" cy="25.4" r="2.1" class="face" fill="#000000"/>
+<circle cx="37.87" cy="25.4" r="2.1" class="face" fill="#000000"/>
+<path d="M30.4 29.6C32.8 32.8 35.2 32.8 37.6 29.6" class="face" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<circle class="ring" cx="32" cy="32" r="31" fill="none" stroke="#ffffff" stroke-opacity="0.25" stroke-width="2"/>
 </svg>

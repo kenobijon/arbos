@@ -6,12 +6,14 @@
     "SVG/PNG: 64x64 viewBox, black #000 disc with a 2 px white #fff ring, white tree, black face; transparent outside the disc.",
     "Lottie: 60 fps, shapes only, no expressions, no raster, no masks; `idle` and `working` loop seamlessly, `reply` plays once.",
     "Frame strips: horizontal row of square frames sampled from the Lottie at 30 fps; `1x` = 28 px, `2x` = 56 px, `rail` = 72 px, `rail@2x` = 144 px; transparent outside the disc.",
-    "Tree strips (`frames[state].tree`): same frames, but only the tree as a white mask on transparent with the face cut out; the app draws its own tinted disc + ring behind and may multiply the mask by `tree`.",
-    "Colors: one scheme for every entry in `colors` \u2014 deep tinted `bg` disc, accent `ring`, white `tree`, `face` = `bg` (cut-out look). `mono` is the default. Order of `colors` is a contract with the relay (hashed like `characters`); append only."
+    "Tree strips (`frames[state].tree`): same frames, only the tree on transparent, drawn in grey LEVELS (tree 255, tree_light 220, tree_dark 170, face 0) so the app can map level -> hue at draw time; it draws the black disc + ring itself.",
+    "Colors: the tree carries the color on a neutral black disc. `tree` = canopy, `tree_dark` = trunk/shade, `tree_light` = highlight, `face` = near-black eyes/mouth. `mono` (white tree) is the default. Order of `colors` is a contract with the relay (hashed like `characters`); append only."
   ],
   "style": {
     "background": "#000000",
     "foreground": "#ffffff",
+    "ring": "#ffffff",
+    "ring_opacity": 0.25,
     "ring_px": 2,
     "viewbox": [
       0,
@@ -26,104 +28,143 @@
       "name": "Mono",
       "bg": "#000000",
       "ring": "#ffffff",
+      "ring_opacity": 0.25,
       "tree": "#ffffff",
+      "tree_dark": "#ffffff",
+      "tree_light": "#ffffff",
       "face": "#000000"
     },
     {
       "slug": "red",
       "name": "Red",
-      "bg": "#2a1210",
-      "ring": "#f87171",
-      "tree": "#ffffff",
-      "face": "#2a1210"
+      "bg": "#000000",
+      "ring": "#ffffff",
+      "ring_opacity": 0.25,
+      "tree": "#f87171",
+      "tree_dark": "#b91c1c",
+      "tree_light": "#fecaca",
+      "face": "#0a0a0a"
     },
     {
       "slug": "orange",
       "name": "Orange",
-      "bg": "#2b1708",
-      "ring": "#fb923c",
-      "tree": "#ffffff",
-      "face": "#2b1708"
+      "bg": "#000000",
+      "ring": "#ffffff",
+      "ring_opacity": 0.25,
+      "tree": "#fb923c",
+      "tree_dark": "#c2410c",
+      "tree_light": "#fed7aa",
+      "face": "#0a0a0a"
     },
     {
       "slug": "amber",
       "name": "Amber",
-      "bg": "#2a1f08",
-      "ring": "#fbbf24",
-      "tree": "#ffffff",
-      "face": "#2a1f08"
+      "bg": "#000000",
+      "ring": "#ffffff",
+      "ring_opacity": 0.25,
+      "tree": "#fbbf24",
+      "tree_dark": "#b45309",
+      "tree_light": "#fde68a",
+      "face": "#0a0a0a"
     },
     {
       "slug": "green",
       "name": "Green",
-      "bg": "#0f2a1a",
-      "ring": "#4ade80",
-      "tree": "#ffffff",
-      "face": "#0f2a1a"
+      "bg": "#000000",
+      "ring": "#ffffff",
+      "ring_opacity": 0.25,
+      "tree": "#4ade80",
+      "tree_dark": "#15803d",
+      "tree_light": "#bbf7d0",
+      "face": "#0a0a0a"
     },
     {
       "slug": "teal",
       "name": "Teal",
-      "bg": "#0b2826",
-      "ring": "#2dd4bf",
-      "tree": "#ffffff",
-      "face": "#0b2826"
+      "bg": "#000000",
+      "ring": "#ffffff",
+      "ring_opacity": 0.25,
+      "tree": "#2dd4bf",
+      "tree_dark": "#0f766e",
+      "tree_light": "#99f6e4",
+      "face": "#0a0a0a"
     },
     {
       "slug": "cyan",
       "name": "Cyan",
-      "bg": "#0b2430",
-      "ring": "#22d3ee",
-      "tree": "#ffffff",
-      "face": "#0b2430"
+      "bg": "#000000",
+      "ring": "#ffffff",
+      "ring_opacity": 0.25,
+      "tree": "#22d3ee",
+      "tree_dark": "#0e7490",
+      "tree_light": "#a5f3fc",
+      "face": "#0a0a0a"
     },
     {
       "slug": "blue",
       "name": "Blue",
-      "bg": "#0f1f3a",
-      "ring": "#60a5fa",
-      "tree": "#ffffff",
-      "face": "#0f1f3a"
+      "bg": "#000000",
+      "ring": "#ffffff",
+      "ring_opacity": 0.25,
+      "tree": "#60a5fa",
+      "tree_dark": "#1d4ed8",
+      "tree_light": "#bfdbfe",
+      "face": "#0a0a0a"
     },
     {
       "slug": "indigo",
       "name": "Indigo",
-      "bg": "#171a3c",
-      "ring": "#818cf8",
-      "tree": "#ffffff",
-      "face": "#171a3c"
+      "bg": "#000000",
+      "ring": "#ffffff",
+      "ring_opacity": 0.25,
+      "tree": "#818cf8",
+      "tree_dark": "#4338ca",
+      "tree_light": "#c7d2fe",
+      "face": "#0a0a0a"
     },
     {
       "slug": "violet",
       "name": "Violet",
-      "bg": "#221540",
-      "ring": "#a78bfa",
-      "tree": "#ffffff",
-      "face": "#221540"
+      "bg": "#000000",
+      "ring": "#ffffff",
+      "ring_opacity": 0.25,
+      "tree": "#a78bfa",
+      "tree_dark": "#6d28d9",
+      "tree_light": "#ddd6fe",
+      "face": "#0a0a0a"
     },
     {
       "slug": "pink",
       "name": "Pink",
-      "bg": "#2a1230",
-      "ring": "#f472b6",
-      "tree": "#ffffff",
-      "face": "#2a1230"
+      "bg": "#000000",
+      "ring": "#ffffff",
+      "ring_opacity": 0.25,
+      "tree": "#f472b6",
+      "tree_dark": "#be185d",
+      "tree_light": "#fbcfe8",
+      "face": "#0a0a0a"
     },
     {
       "slug": "rose",
       "name": "Rose",
-      "bg": "#2c1020",
-      "ring": "#fb7185",
-      "tree": "#ffffff",
-      "face": "#2c1020"
+      "bg": "#000000",
+      "ring": "#ffffff",
+      "ring_opacity": 0.25,
+      "tree": "#fb7185",
+      "tree_dark": "#be123c",
+      "tree_light": "#fecdd3",
+      "face": "#0a0a0a"
     },
     {
       "slug": "slate",
       "name": "Slate",
-      "bg": "#1a1f2a",
-      "ring": "#94a3b8",
-      "tree": "#ffffff",
-      "face": "#1a1f2a"
+      "bg": "#000000",
+      "ring": "#ffffff",
+      "ring_opacity": 0.25,
+      "tree": "#94a3b8",
+      "tree_dark": "#475569",
+      "tree_light": "#cbd5e1",
+      "face": "#0a0a0a"
     }
   ],
   "default_color": "mono",
@@ -132,23 +173,33 @@
       "bg",
       "ring",
       "tree",
+      "tree_dark",
+      "tree_light",
       "face"
     ],
-    "svg": "Elements carry class=\"bg|ring|tree|face\"; set fill (and stroke for ring and stroke-based face/tree parts) per class.",
+    "svg": "Elements carry class=\"bg|ring|tree|tree_dark|tree_light|face\"; set fill (and stroke on stroke-based parts) per class. The ring keeps stroke-opacity.",
     "lottie_layers": {
-      "bg": "disc",
-      "ring": "outline",
-      "tree": "the animated tree"
+      "bg": "black disc",
+      "ring": "faint outline",
+      "tree": "the animated tree; its fills/strokes are named tree, tree_dark, tree_light, face"
     },
     "lottie_keypaths": {
       "bg": "bg.**.bg.Color",
       "ring": "ring.**.ring.Color",
       "tree": "tree.**.tree.Color",
+      "tree_dark": "tree.**.tree_dark.Color",
+      "tree_light": "tree.**.tree_light.Color",
       "face": "tree.**.face.Color"
     },
-    "lottie_ios": "animationView.setValueProvider(ColorValueProvider(color.lottieColorValue), keypath: AnimationKeypath(keypath: \"tree.**.face.Color\")) \u2014 one call per role; `**` spans the group nesting.",
+    "lottie_ios": "animationView.setValueProvider(ColorValueProvider(color.lottieColorValue), keypath: AnimationKeypath(keypath: \"tree.**.tree_dark.Color\")) \u2014 one call per role; `**` spans the group nesting. For mono nothing needs setting.",
     "lottie_web": "Before loadAnimation, walk animationData.layers[*].shapes recursively and set `c.k` (RGBA 0-1) on every `fl`/`st` item whose `nm` is the role.",
-    "frame_strips": "The white-on-black strips are the `mono` look only. For a color, draw a disc in `bg` with a 2 px `ring` stroke, then the `tree` mask strip on top (multiply by `tree` if it is not white)."
+    "frame_strips": "The white-on-black strips are the `mono` look. For a color, draw the black disc + ring, then the `-tree` strip mapped by grey level: 255 -> tree, 220 -> tree_light, 170 -> tree_dark, 0 -> face (use nearest level for antialiased pixels; keep the pixel alpha).",
+    "levels": {
+      "tree": 255,
+      "tree_light": 220,
+      "tree_dark": 170,
+      "face": 0
+    }
   },
   "default_size": 56,
   "usage": {
@@ -157,7 +208,7 @@
     "working": "Loop while a run is active; switch back to idle when it ends (both loops share frame 0, so cut on a loop boundary).",
     "reply": "Play once when a reply lands, then return to idle. It starts and ends on the idle pose.",
     "frame_strips": "Frame k of a strip is the square at x = k * size. Advance at `fps`; loop idle/working, play reply once. The widest strip (rail@2x, 90 frames) is 12960 px wide.",
-    "tree_strips": "`frames[state].tree` = white mask strips at 56 (`2x`) and 72 (`rail`) px with the face cut out. Draw the tinted disc + ring, then the mask. See `recolor`.",
+    "tree_strips": "`frames[state].tree` = grey-level strips at 56 (`2x`) and 72 (`rail`) px of the tree alone on transparent. Draw the black disc + ring, then map levels to the color's hues. See `recolor.levels`.",
     "color": "Per-agent color = one entry of `colors`; default `mono`. Apply the same entry to the still, the Lotties and the strips.",
     "pick": "Default avatar for a project = characters[fnv1a64(project_id) % characters.length]."
   },

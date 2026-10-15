@@ -1,13 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Red">
 <circle class="bg" cx="32" cy="32" r="32" fill="#000000"/>
-<path d="M26.11 44.45C26.32 43.65 27.17 43 28 43L36 43C36.83 43 37.68 43.65 37.89 44.45L40.11 52.55C40.32 53.35 39.83 54 39 54L25 54C24.17 54 23.68 53.35 23.89 52.55L26.11 44.45Z" class="tree" fill="#ffffff"/>
-<path d="M32 4L37 13C33.67 14.87 30.33 14.87 27 13L32 4Z" class="tree" fill="#ffffff"/>
-<path d="M32 9L39.5 20C34.5 22.27 29.5 22.27 24.5 20L32 9Z" class="tree" fill="#ffffff"/>
-<path d="M32 15L42 28C35.33 30.67 28.67 30.67 22 28L32 15Z" class="tree" fill="#ffffff"/>
-<path d="M32 22L44.5 37C36.17 39.93 27.83 39.93 19.5 37L32 22Z" class="tree" fill="#ffffff"/>
-<path d="M32 29L46.5 45C36.83 48.2 27.17 48.2 17.5 45L32 29Z" class="tree" fill="#ffffff"/>
-<path d="M27.29 34.23C28.48 32.08 29.67 32.08 30.86 34.23" class="face" fill="none" stroke="#000000" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
-<path d="M33.14 34.23C34.33 32.08 35.52 32.08 36.71 34.23" class="face" fill="none" stroke="#000000" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
-<path d="M29.79 37.38C31.26 39.08 32.74 39.08 34.21 37.38" class="face" fill="none" stroke="#000000" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
-<circle class="ring" cx="32" cy="32" r="31" fill="none" stroke="#ffffff" stroke-width="2"/>
+<path d="M24.96 45.95C25.26 44.32 26.84 43 28.5 43L35.5 43C37.16 43 38.74 44.32 39.04 45.95L39.96 51.05C40.26 52.68 39.16 54 37.5 54L26.5 54C24.84 54 23.74 52.68 24.04 51.05L24.96 45.95Z" class="tree_dark" fill="#ffffff"/>
+<path d="M29.27 6.73C30.78 5.22 33.22 5.22 34.73 6.73L35.27 7.27C36.78 8.78 38.55 11.64 39.22 13.66L40.42 17.26C41.29 19.88 42.54 24.17 43.21 26.85L43.88 29.5C44.5 31.99 45.41 36.04 45.91 38.55L46.09 39.45C46.59 41.96 44.92 44 42.36 44L21.64 44C19.08 44 17.41 41.96 17.91 39.45L18.09 38.55C18.59 36.04 19.5 31.99 20.12 29.5L20.79 26.85C21.46 24.17 22.71 19.88 23.58 17.26L24.78 13.66C25.45 11.64 27.22 8.78 28.73 7.27L29.27 6.73Z" class="tree" fill="#ffffff"/>
+<path d="M29.16 10.65C30.34 10.97 30.77 13.17 30.13 15.57C29.48 17.97 28.01 19.66 26.84 19.35C25.66 19.03 25.23 16.83 25.87 14.43C26.52 12.03 27.99 10.34 29.16 10.65Z" class="tree_light" fill="#ffffff"/>
+<path d="M26.24 31.1C27.64 28.57 29.04 28.57 30.45 31.1" class="face" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M33.55 31.1C34.95 28.57 36.36 28.57 37.76 31.1" class="face" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M29.4 34.8C31.13 36.8 32.87 36.8 34.6 34.8" class="face" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<circle class="ring" cx="32" cy="32" r="31" fill="none" stroke="#ffffff" stroke-opacity="0.25" stroke-width="2"/>
 </svg>

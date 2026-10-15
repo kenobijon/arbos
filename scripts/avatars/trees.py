@@ -1,8 +1,12 @@
 """Geometry of the 20 tree characters and their faces (64x64 space).
 
-A Tree is: white canopy shapes, white trunk shapes (plus any black detail),
-a face anchor, a pivot for the canopy "breathing" scale, and three points
-near the canopy where the `working` sparkles appear.
+Chunky mascot style: thick stubby trunks, plump puffy canopies, soft rounded
+silhouettes. Ink keys: w = tree base (canopy), d = tree dark (trunk, shade),
+l = tree light (highlight), k = face. In mono every tree ink is white.
+
+A Tree is: canopy shapes (drawn bottom to top, highlights last), trunk shapes
+(drawn under the canopy), a face anchor, and a pivot for the canopy
+"breathing" scale.
 """
 
 import math
@@ -12,12 +16,10 @@ from shapes import (
     Circle,
     Rect,
     blob,
-    cone,
     curve,
     ellipse,
     half_disc,
     line,
-    polygon,
     round_poly,
 )
 
@@ -42,11 +44,11 @@ class Tree:
     trunk: list
     face: Face
     canopy_pivot: tuple
-    canopy_black: list = field(default_factory=list)  # black detail drawn over the canopy
+    canopy_black: list = field(default_factory=list)  # face-ink detail drawn over the canopy
 
 
 # ---------- faces ----------
-# Faces are 2-3 strokes/dots, black on the white canopy. Eyes are always a
+# Faces are 2-3 strokes/dots in face ink on the canopy. Eyes are always a
 # separate group (blink / look-around); mouths come as a default and a
 # "reply" variant (big open smile) that the animation swaps in.
 
@@ -55,7 +57,7 @@ def face_parts(kind: str, f: Face):
     s, cx, cy = f.scale, f.cx, f.cy
     dx = 4.3 * s * f.gap
     ey = cy - 1.6 * s
-    r = 2.0 * s
+    r = 2.1 * s
     w = max(1.6, 2.0 * s)
     lx, rx = cx - dx, cx + dx
 
@@ -113,255 +115,293 @@ def face_parts(kind: str, f: Face):
     }
 
 
+# ---------- building blocks ----------
+
+
+def stub(cx, top, bottom, w, flare=1.5, r=3.0, ink="d"):
+    """Thick stubby trunk: a rounded trapezoid that flares a little at the base."""
+    return round_poly(
+        [(cx - w / 2, top), (cx + w / 2, top), (cx + w / 2 + flare, bottom), (cx - w / 2 - flare, bottom)],
+        r,
+        fill=ink,
+    )
+
+
+def shine(cx, cy, rx=4.5, ry=3.0, rot=-30):
+    """Highlight blob (tree_light), usually upper-left on the canopy."""
+    return ellipse(cx, cy, rx, ry, rot, fill="l")
+
+
+def tier(tip, half_width, base_y, r=3.5):
+    """Plump rounded triangle for conifers."""
+    tx, ty = tip
+    return round_poly([(tx, ty), (tx + half_width, base_y), (tx - half_width, base_y)], r)
+
+
 # ---------- trees ----------
 
 
 def oak():
     canopy = [
-        Circle(32, 19, 12),
-        Circle(21, 27, 10.5),
-        Circle(43, 27, 10.5),
-        Circle(32, 29, 13),
+        Circle(32, 18, 12.5),
+        Circle(18.5, 27, 10),
+        Circle(45.5, 27, 10),
+        Circle(25, 34, 9.5),
+        Circle(39, 34, 9.5),
+        shine(24, 13),
     ]
-    trunk = [round_poly([(28.5, 36), (35.5, 36), (37.5, 54), (26.5, 54)], 1.5)]
-    return Tree(canopy, trunk, Face(32, 28), (32, 40))
+    trunk = [stub(32, 40, 54, 11)]
+    return Tree(canopy, trunk, Face(32, 27, 1.05), (32, 43))
 
 
 def pine():
     canopy = [
-        cone((32, 7), 9, 20),
-        cone((32, 13), 13, 30),
-        cone((32, 21), 17, 41),
+        tier((32, 6), 11, 22),
+        tier((32, 13), 16, 33),
+        tier((32, 22), 20, 43),
+        shine(28, 16, 2.4, 4, 25),
     ]
-    trunk = [Rect(29.5, 40, 5, 14, 1.5)]
-    return Tree(canopy, trunk, Face(32, 34, 0.9, 0.85), (32, 41))
+    trunk = [stub(32, 42, 54, 10)]
+    return Tree(canopy, trunk, Face(32, 34, 1.0, 0.9), (32, 43))
 
 
 def lollipop():
-    canopy = [Circle(32, 24, 16)]
-    trunk = [Rect(30.5, 38, 3, 16, 1.5)]
-    return Tree(canopy, trunk, Face(32, 25), (32, 40))
+    canopy = [Circle(32, 25, 17), shine(24, 15, 5, 3.5, -35)]
+    trunk = [stub(32, 40, 54, 10)]
+    return Tree(canopy, trunk, Face(32, 26, 1.1), (32, 42))
 
 
 def fractal():
     canopy = [
-        # branch strokes first; the circles sit on top
-        line([(32, 40), (32, 30)], "w", 3),
-        line([(32, 30), (20, 22)], "w", 2.4),
-        line([(32, 30), (44, 22)], "w", 2.4),
-        line([(20, 22), (13, 15)], "w", 1.8),
-        line([(20, 22), (24, 11)], "w", 1.8),
-        line([(44, 22), (51, 15)], "w", 1.8),
-        line([(44, 22), (40, 11)], "w", 1.8),
-        Circle(32, 29, 9.5),
-        Circle(20, 22, 5),
-        Circle(44, 22, 5),
-        Circle(13, 15, 3),
-        Circle(24, 11, 3),
-        Circle(51, 15, 3),
-        Circle(40, 11, 3),
+        Circle(32, 20, 11),
+        Circle(18, 26, 8),
+        Circle(46, 26, 8),
+        Circle(11, 19, 4.5),
+        Circle(19, 13, 4.5),
+        Circle(53, 19, 4.5),
+        Circle(45, 13, 4.5),
+        Circle(27, 7, 4),
+        Circle(37, 7, 4),
+        shine(27, 13, 3, 2, -30),
     ]
-    trunk = [Rect(30, 38, 4, 16, 1.5)]
-    return Tree(canopy, trunk, Face(32, 29, 0.85), (32, 40))
+    trunk = [
+        stub(32, 36, 54, 10),
+        line([(32, 38), (19, 28)], "d", 6),
+        line([(32, 38), (45, 28)], "d", 6),
+        line([(32, 38), (32, 24)], "d", 7),
+    ]
+    return Tree(canopy, trunk, Face(32, 21, 1.0), (32, 40))
 
 
 def mushroom():
     canopy = [
-        blob([(32, 10), (47, 17), (51, 29), (32, 31), (13, 29), (17, 17)], 0.9),
+        blob([(32, 8), (47, 13), (53, 27), (44, 32), (20, 32), (11, 27), (17, 13)], 0.9),
+        Circle(20, 21, 3, fill="l"),
+        Circle(41, 13, 2.6, fill="l"),
+        Circle(46, 24, 2.2, fill="l"),
     ]
-    trunk = [round_poly([(26, 31), (38, 31), (37, 54), (27, 54)], 3)]
-    return Tree(canopy, trunk, Face(32, 21, 0.95), (32, 31))
+    trunk = [round_poly([(25.5, 30), (38.5, 30), (39.5, 54), (24.5, 54)], 5, fill="d")]
+    return Tree(canopy, trunk, Face(32, 22, 1.0), (32, 32))
 
 
 def cypress():
     canopy = [
-        blob([(32, 5), (41, 24), (39, 40), (32, 45), (25, 40), (23, 24)], 1.1),
+        blob([(32, 5), (43, 16), (45.5, 30), (41, 43), (32, 46), (23, 43), (18.5, 30), (21, 16)], 0.95),
+        shine(27, 17, 2.4, 5, 15),
     ]
-    trunk = [Rect(30, 44, 4, 10, 1.5)]
-    return Tree(canopy, trunk, Face(32, 28, 0.9, 0.75), (32, 45))
+    trunk = [stub(32, 44, 54, 9)]
+    return Tree(canopy, trunk, Face(32, 28, 1.0, 0.8), (32, 46))
 
 
 def willow():
     canopy = [
-        ellipse(32, 19, 18, 11.5),
-        curve((15.5, 22), (12.5, 36), -1.2, "w", 1.9),
-        curve((19.5, 27), (18, 42), -1.0, "w", 1.9),
-        curve((24, 29.5), (23, 46), -0.6, "w", 1.9),
-        curve((40, 29.5), (41, 46), 0.6, "w", 1.9),
-        curve((44.5, 27), (46, 42), 1.0, "w", 1.9),
-        curve((48.5, 22), (51.5, 36), 1.2, "w", 1.9),
+        ellipse(32, 20, 18, 12.5),
+        ellipse(15.5, 29, 4, 8.5),
+        ellipse(23, 32, 4, 9.5),
+        ellipse(41, 32, 4, 9.5),
+        ellipse(48.5, 29, 4, 8.5),
+        shine(23, 12, 5, 3, -30),
     ]
-    trunk = [Rect(29.5, 29, 5, 25, 1.5)]
-    return Tree(canopy, trunk, Face(32, 19, 0.95), (32, 31))
+    trunk = [stub(32, 30, 54, 10)]
+    return Tree(canopy, trunk, Face(32, 20, 1.05), (32, 32))
 
 
 def palm():
-    fronds = [
-        ellipse(21, 17, 12, 4, -42),
-        ellipse(43, 17, 12, 4, 42),
-        ellipse(17.5, 27, 11, 3.8, -8),
-        ellipse(46.5, 27, 11, 3.8, 8),
-        ellipse(32, 12, 3.8, 10, 0),
+    canopy = [
+        ellipse(22, 16, 11.5, 5.2, -40),
+        ellipse(44, 16, 11.5, 5.2, 40),
+        ellipse(18, 26, 11.5, 5.2, -8),
+        ellipse(46, 26, 11.5, 5.2, 8),
+        ellipse(32, 12, 5.2, 10.5, 0),
+        Circle(32, 25, 9.5),
+        shine(24, 15, 3.2, 1.8, -40),
     ]
-    canopy = fronds + [Circle(32, 25, 8.5)]
-    trunk = [curve((33, 54), (32, 30), 2.5, "w", 4.5)]
-    return Tree(canopy, trunk, Face(32, 25, 0.85, 0.9), (32, 32))
+    trunk = [round_poly([(28, 54), (40, 54), (36, 28), (30, 28)], 3, fill="d")]
+    return Tree(canopy, trunk, Face(32, 24, 0.9, 0.9), (32, 34))
 
 
 def bonsai():
     canopy = [
-        curve((31, 46), (36, 30), 3, "w", 3.6),
-        line([(34, 36), (24, 33)], "w", 2.4),
-        ellipse(21, 32, 8.5, 4.6),
-        ellipse(37, 26, 13, 7.2),
-        ellipse(29, 15, 7, 4.2),
-        line([(36, 22), (30, 17)], "w", 2.2),
+        ellipse(37, 27, 13, 8),
+        ellipse(20, 33, 9, 5.5),
+        ellipse(28, 16, 8, 5),
+        shine(31, 22, 3.5, 2, -25),
     ]
-    trunk = [round_poly([(21, 45), (43, 45), (40, 54), (24, 54)], 1.5)]
-    return Tree(canopy, trunk, Face(38, 26, 0.85, 0.9), (32, 46))
+    trunk = [
+        round_poly([(19, 45), (45, 45), (42, 54), (22, 54)], 2.5, fill="d"),
+        curve((31, 46), (36, 32), 3, "d", 7),
+        line([(33, 39), (23, 34)], "d", 4),
+        line([(35, 25), (29, 18)], "d", 3.5),
+    ]
+    return Tree(canopy, trunk, Face(38, 27, 0.95, 0.9), (32, 46))
 
 
 def birch():
-    canopy = [ellipse(32, 23, 11, 16)]
+    canopy = [ellipse(32, 22, 13, 17), shine(26, 11, 4, 3, -30)]
     trunk = [
-        Rect(30, 38, 4, 16, 1.5),
-        Rect(30, 42, 2, 1.6, 0, fill="k"),
-        Rect(32, 46.5, 2, 1.6, 0, fill="k"),
-        Rect(30, 51, 2, 1.6, 0, fill="k"),
+        stub(32, 36, 54, 9, ink="l"),
+        Rect(28, 41, 4, 2, 1, fill="d"),
+        Rect(32, 46, 4, 2, 1, fill="d"),
+        Rect(28, 51, 4, 2, 1, fill="d"),
     ]
-    return Tree(canopy, trunk, Face(32, 24, 0.95, 0.85), (32, 39))
+    return Tree(canopy, trunk, Face(32, 24, 1.05, 0.85), (32, 39))
 
 
 def baobab():
     canopy = [
-        ellipse(32, 23, 16, 5.5),
-        line([(26, 25), (22, 17)], "w", 2.4),
-        line([(32, 25), (32, 15)], "w", 2.6),
-        line([(38, 25), (43, 17)], "w", 2.4),
+        ellipse(32, 19, 18, 6),
+        Circle(20, 18, 5.5),
+        Circle(44, 18, 5.5),
+        Circle(32, 14, 6.5),
+        shine(24, 13, 3.5, 2, -20),
     ]
-    trunk = [round_poly([(20, 54), (44, 54), (39, 26), (25, 26)], 3)]
-    return Tree(canopy, trunk, Face(32, 40, 0.95, 0.9), (32, 28))
+    trunk = [round_poly([(19, 54), (45, 54), (40, 24), (24, 24)], 6, fill="w")]
+    return Tree(canopy, trunk, Face(32, 40, 1.0, 0.9), (32, 24))
 
 
 def sapling():
     canopy = [
-        Circle(32, 29, 9.5),
+        Circle(32, 28, 10),
+        Circle(24, 33, 7),
+        Circle(40, 33, 7),
+        shine(27, 22, 3, 2, -30),
     ]
     trunk = [
-        line([(32, 54), (32, 37)], "w", 2.6),
-        ellipse(37.5, 43.5, 5.2, 2.4, 35),
-        half_disc(32, 54, 9, 3, lower=False),
+        half_disc(32, 54, 10, 3.5, lower=False, fill="d"),
+        stub(32, 38, 54, 7, 1),
     ]
-    return Tree(canopy, trunk, Face(32, 29, 0.8), (32, 39))
+    return Tree(canopy, trunk, Face(32, 29, 0.9), (32, 40))
 
 
 def maple():
     pts = []
-    cx, cy = 32, 26
+    cx, cy = 32, 25
     for k in range(10):
         a = math.radians(-90 + k * 36)
-        rad = 19 if k % 2 == 0 else 11.5
+        rad = 20 if k % 2 == 0 else 13
         pts.append((cx + rad * math.cos(a), cy + rad * math.sin(a)))
-    canopy = [round_poly(pts, 2.2)]
-    trunk = [Rect(29.5, 38, 5, 16, 1.5)]
-    return Tree(canopy, trunk, Face(32, 27, 0.95), (32, 42))
+    canopy = [round_poly(pts, 4), shine(26, 15, 3.5, 2.5, -35)]
+    trunk = [stub(32, 40, 54, 10)]
+    return Tree(canopy, trunk, Face(32, 27, 1.05), (32, 43))
 
 
 def acacia():
     canopy = [
-        half_disc(32, 20, 20, 12, lower=True),
-        Rect(12, 18, 40, 3.5, 1.75),
+        round_poly([(10, 20), (54, 20), (48, 32), (16, 32)], 6),
+        ellipse(32, 20, 22, 5),
+        shine(20, 21, 4, 2, -10),
     ]
     trunk = [
-        line([(32, 54), (32, 30)], "w", 3.4),
-        line([(32, 40), (24, 30)], "w", 2.4),
-        line([(32, 40), (41, 30)], "w", 2.4),
+        stub(32, 30, 54, 9),
+        line([(32, 40), (22, 30)], "d", 6),
+        line([(32, 40), (42, 30)], "d", 6),
     ]
-    return Tree(canopy, trunk, Face(32, 25, 0.8, 1.1), (32, 32))
+    return Tree(canopy, trunk, Face(32, 25, 0.85, 1.1), (32, 32))
 
 
 def spruce():
     canopy = [
-        cone((32, 5), 7, 16, 1.2),
-        cone((32, 10), 10.5, 24, 1.5),
-        cone((32, 16), 14, 33, 1.8),
-        cone((32, 23), 17.5, 43, 2.0),
+        tier((32, 5), 8, 17, 3),
+        tier((32, 10), 12, 25, 3),
+        tier((32, 17), 16, 34, 3),
+        tier((32, 25), 19, 44, 3),
+        shine(29, 12, 2, 3.5, 20),
     ]
-    trunk = [Rect(29.5, 42, 5, 12, 1.5)]
-    return Tree(canopy, trunk, Face(32, 34, 0.9, 0.85), (32, 43))
+    trunk = [stub(32, 43, 54, 9)]
+    return Tree(canopy, trunk, Face(32, 35, 0.9, 0.85), (32, 44))
 
 
 def cherry():
     canopy = [
-        Circle(32, 19, 9),
-        Circle(22, 24, 8),
-        Circle(42, 24, 8),
-        Circle(32, 26, 9),
-        curve((19, 30), (16, 42), -1.2, "w", 1.8),
-        curve((26, 34), (24, 45), -0.8, "w", 1.8),
-        curve((38, 34), (40, 45), 0.8, "w", 1.8),
-        curve((45, 30), (48, 42), 1.2, "w", 1.8),
-        Circle(16, 42, 2),
-        Circle(24, 45, 2),
-        Circle(40, 45, 2),
-        Circle(48, 42, 2),
+        Circle(32, 17, 11),
+        Circle(19, 25, 9.5),
+        Circle(45, 25, 9.5),
+        Circle(25, 32, 8),
+        Circle(39, 32, 8),
+        ellipse(20, 36, 3.5, 6.5),
+        ellipse(44, 36, 3.5, 6.5),
+        Circle(21, 19, 2, fill="l"),
+        Circle(44, 17, 2, fill="l"),
+        Circle(30, 10, 2, fill="l"),
+        Circle(48, 30, 1.8, fill="l"),
+        Circle(16, 32, 1.8, fill="l"),
     ]
-    trunk = [Rect(30, 34, 4, 20, 1.5)]
-    return Tree(canopy, trunk, Face(32, 24, 0.9), (32, 36))
+    trunk = [stub(32, 38, 54, 10)]
+    return Tree(canopy, trunk, Face(32, 26, 1.05), (32, 40))
 
 
 def cactus():
     canopy = [
-        Rect(26.5, 12, 11, 42, 5.5),
-        Rect(14, 22, 6, 15, 3),
-        Rect(14, 31, 15, 6, 3),
-        Rect(44, 17, 6, 17, 3),
-        Rect(35, 28, 15, 6, 3),
+        Rect(25.5, 12, 13, 42, 6.5),
+        Rect(13, 22, 7, 16, 3.5),
+        Rect(13, 31, 15, 7, 3.5),
+        Rect(44, 17, 7, 18, 3.5),
+        Rect(36, 28, 15, 7, 3.5),
+        Circle(32, 12.5, 3, fill="l"),
     ]
-    trunk = []
-    return Tree(canopy, trunk, Face(32, 26, 0.9, 0.8), (32, 54))
+    trunk = [half_disc(32, 54, 13, 3.5, lower=False, fill="d")]
+    return Tree(canopy, trunk, Face(32, 27, 1.0, 0.8), (32, 54))
 
 
 def sequoia():
     canopy = [
-        cone((32, 4), 5, 13, 1.4),
-        cone((32, 9), 7.5, 20, 1.7),
-        cone((32, 15), 10, 28, 2.0),
-        cone((32, 22), 12.5, 37, 2.2),
-        cone((32, 29), 14.5, 45, 2.4),
+        round_poly([(32, 4), (38, 10), (42, 22), (45, 34), (47, 44), (17, 44), (19, 34), (22, 22), (26, 10)], 5),
+        shine(28, 15, 2.2, 4.5, 15),
     ]
-    trunk = [round_poly([(26.5, 43), (37.5, 43), (40.5, 54), (23.5, 54)], 1.5)]
-    return Tree(canopy, trunk, Face(32, 35, 0.85, 0.8), (32, 45))
+    trunk = [stub(32, 43, 54, 13, 2)]
+    return Tree(canopy, trunk, Face(32, 32, 1.0, 0.85), (32, 45))
 
 
 def olive():
     canopy = [
-        Circle(22, 26, 8.5),
-        Circle(42, 22, 9),
+        Circle(21, 26, 8.5),
+        Circle(43, 22, 9),
         Circle(33, 30, 9.5),
-        Circle(30, 16, 7),
-        Circle(47, 32, 5.5),
-        Circle(17, 17, 4),
+        Circle(29, 16, 7.5),
+        Circle(47, 32, 6),
+        Circle(15, 18, 4.5),
+        shine(26, 11, 3.5, 2, -30),
     ]
     trunk = [
-        curve((31, 54), (30, 33), -2.5, "w", 4.5),
-        line([(31, 45), (39, 35)], "w", 3),
+        curve((31, 54), (30, 34), -2.5, "d", 8),
+        line([(31, 46), (40, 36)], "d", 5),
     ]
-    return Tree(canopy, trunk, Face(34, 27, 0.95, 0.9), (32, 38))
+    return Tree(canopy, trunk, Face(34, 27, 1.0, 0.9), (32, 38))
 
 
 def ginkgo():
     canopy = [
         blob(
-            [(32, 38), (21, 31), (10, 20), (12.5, 13), (22, 10), (32, 10), (42, 10), (51.5, 13), (54, 20), (43, 31)],
+            [(32, 38), (20, 31), (9, 21), (12, 12), (22, 8.5), (32, 10), (42, 8.5), (52, 12), (55, 21), (44, 31)],
             0.6,
         ),
+        shine(22, 14, 3.5, 2.2, -30),
     ]
-    trunk = [Rect(30.5, 37, 3, 17, 1.5)]
+    trunk = [stub(32, 37, 54, 8)]
     return Tree(
         canopy,
         trunk,
-        Face(32, 25, 0.9),
+        Face(32, 25, 1.0),
         (32, 38),
         canopy_black=[
             line([(32, 38), (32, 31.5)], "k", 1.4),
