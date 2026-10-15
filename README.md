@@ -73,6 +73,7 @@ Relay environment (all optional unless noted):
 | `ARBOS_RELAY_ADMIN_TOKEN` | token for `POST /pair/new`; generated and logged when unset |
 | `OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | provider keys for the model proxy (never reach a box) |
 | `ARBOS_OPENAI_BASE`, `ARBOS_ANTHROPIC_BASE` | upstreams, default OpenRouter |
+| `ARBOS_OPENAI_IMAGES_BASE`, `ARBOS_IMAGE_MOCK` | image generation upstream (default `https://api.openai.com/v1`, needs `OPENAI_API_KEY`); `ARBOS_IMAGE_MOCK=1` returns a labelled placeholder PNG instead |
 | `DAYTONA_API_KEY`, `DAYTONA_API_URL`, `DAYTONA_ORG_ID` | Daytona access; without a key new projects get `process` boxes |
 | `ARBOS_DAYTONA_SNAPSHOT` | snapshot for new boxes, default `arbos-agent-0.1.7` |
 | `ARBOS_DAYTONA_DOCKERFILE`, `ARBOS_BOOTSTRAP_DIR` | dev-image path (see below) |
@@ -194,6 +195,17 @@ arbos-local run                                         # reconnects with backof
 ```
 
 Device endpoints: `GET /local/devices`, `PATCH /local/devices/{id} {"allow_reads": bool}`, `DELETE /local/devices/{id}` (forgets the helper and revokes its token). Config lives in `~/.config/arbos/arbos-local.json` (`ARBOS_LOCAL_CONFIG` overrides); `ARBOS_LOCAL_HOSTNAME` overrides the advertised hostname.
+
+## Files and images
+
+The agent produces documents and media in the box (the project folder's `out/`, with python-pptx, python-docx, openpyxl, reportlab, Pillow and ffmpeg from the image's venv) and hands them over with the `deliver_file(path, title?, kind?)` MCP tool: agentd uploads the file to the relay blob store and appends an `attachment` part `{ name, mime, ref, bytes, kind, title }` to the reply (D38; the bytes never enter the chat doc). `generate_image(prompt, size?, quality?)` goes through the relay's `POST /proxy/v1/images/generations` (OpenAI `gpt-image-1`, metered per project like the model proxy, `ARBOS_IMAGE_MODEL` overrides the model) and delivers the PNG the same way. The desktop client shows each attachment as a card (icon by kind, title, size, inline preview for images) with Download → `~/Downloads/<name>`, then reveals it in Finder (`xdg-open` on Linux).
+
+```bash
+scripts/box-media-deps.sh ./.arbos-local          # process box: venv under the data dir, prints the ARBOS_MEDIA_VENV export
+arbosctl blob get <project> <ref> --out deck.pptx  # fetch a delivered file by its attachment ref
+```
+
+`ARBOS_MEDIA_VENV` points agentd at the python with the document libraries (the image sets `/opt/prime-venv`; without it the system `python3` is used). The Prime skill `arbos_deliver_file` wraps both tools for subagents.
 
 ## Image
 
