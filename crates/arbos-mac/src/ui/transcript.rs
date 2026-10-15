@@ -128,6 +128,9 @@ pub struct Transcript {
     expanded: HashSet<String>,
     pinned_to_bottom: bool,
     spring: StickSpring,
+    /// Set by the scroll callback; the next frame re-pins when the user
+    /// stopped within `STICK_THRESHOLD_PX` of the end.
+    repin_check_pending: bool,
 }
 
 impl Transcript {
@@ -155,26 +158,36 @@ impl Transcript {
             expanded: HashSet::new(),
             pinned_to_bottom: true,
             spring: StickSpring::default(),
+            repin_check_pending: false,
         }
     }
 
+    /// Runs inside the list's own scroll callback while `ListState` is
+    /// mutably borrowed, so it must not touch the list. Record the intent
+    /// and let the next frame (`step_spring`) read pixel offsets.
     fn handle_scroll(&mut self, event: &ListScrollEvent) {
-        // A user scroll breaks the pin; it re-engages within 70 px of the end.
         if event.is_scrolled {
-            let max = f32::from(self.list.max_offset_for_scrollbar().y);
-            let cur = -f32::from(self.list.scroll_px_offset_for_scrollbar().y);
-            let remaining = max - cur;
-            let near_end =
-                remaining <= STICK_THRESHOLD_PX || event.visible_range.end >= event.count;
-            self.pinned_to_bottom = near_end;
-            if !near_end {
+            let at_end = event.visible_range.end >= event.count;
+            if at_end {
+                self.pinned_to_bottom = true;
+            } else {
+                self.pinned_to_bottom = false;
                 self.spring.velocity = 0.0;
+                self.repin_check_pending = true;
             }
         }
     }
 
     /// One spring step per frame while pinned and not yet at the end.
     fn step_spring(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
+        if self.repin_check_pending {
+            self.repin_check_pending = false;
+            let max = f32::from(self.list.max_offset_for_scrollbar().y);
+            let cur = -f32::from(self.list.scroll_px_offset_for_scrollbar().y);
+            if max - cur <= STICK_THRESHOLD_PX {
+                self.pinned_to_bottom = true;
+            }
+        }
         if !self.pinned_to_bottom {
             return;
         }
