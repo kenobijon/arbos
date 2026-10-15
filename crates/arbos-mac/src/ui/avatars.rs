@@ -62,7 +62,8 @@ struct Manifest {
     /// mono + accents: `{ slug, name, bg, ring, tree, face }` hex colours.
     #[serde(default)]
     colors: Vec<ManifestColor>,
-    /// The colour a project without `avatar_color` shows (default "mono").
+    /// The manifest fallback palette (null since D74: a project without
+    /// `avatar_color` shows [`default_color_for`], a coloured pick).
     #[serde(default)]
     default_color: Option<String>,
 }
@@ -105,12 +106,15 @@ pub struct Palette {
     pub tree_dark: [u8; 3],
     pub tree_light: [u8; 3],
     pub face: [u8; 3],
-    /// The manifest's `default_color`: drawn from the shipped disc strips as is.
+    /// The manifest's `default_color` entry (the fallback when nothing is known).
     pub is_default: bool,
 }
 
 /// Grayscale level → palette hue, in level order (see [`Palette`]).
 const LEVELS: [u8; 4] = [0, 170, 220, 255];
+
+/// The one colour that is selectable but never a default (D74).
+pub const MONO: &str = "mono";
 
 impl Palette {
     /// Black disc, white ring and tree: the look without any manifest colours.
@@ -149,8 +153,10 @@ impl Palette {
         out
     }
 
+    /// The white-on-black look: drawn from the shipped disc strips as is. Only
+    /// the `mono` entry itself — the manifest default is no longer mono (D74).
     pub fn is_mono(&self) -> bool {
-        self.is_default
+        self.id.eq_ignore_ascii_case(MONO)
     }
 
     pub fn bg_hsla(&self) -> Hsla {
@@ -239,20 +245,23 @@ fn palettes() -> &'static [Palette] {
         if out.is_empty() {
             out.push(Palette::mono());
         }
-        // The default comes first so `palettes()[0]` is always the fallback.
-        match out.iter().position(|p| p.is_default) {
-            Some(i) if i != 0 => {
-                let d = out.remove(i);
-                out.insert(0, d);
-            }
-            Some(_) => {}
-            None => out[0].is_default = true,
+        // Manifest order is a contract (the relay hashes over `colors[]`
+        // without mono); do not reorder. Exactly one entry is the fallback.
+        if !out.iter().any(|p| p.is_default) {
+            out[0].is_default = true;
         }
         out
     })
 }
 
-/// Every colour, for the picker (manifest order; the first is the default).
+/// The fallback palette (manifest `default_color`, else the first entry):
+/// what a tree shows when nothing at all is known about its colour.
+fn fallback_palette() -> &'static Palette {
+    let all = palettes();
+    all.iter().find(|p| p.is_default).unwrap_or(&all[0])
+}
+
+/// Every colour, for the picker (manifest order; `mono` is selectable, never a default).
 pub fn colors() -> &'static [Palette] {
     palettes()
 }
@@ -262,11 +271,29 @@ pub fn colors_available() -> bool {
     palettes().len() > 1 && embedded::STRIPS.iter().any(|(_, _, _, _, tree, _)| *tree)
 }
 
+/// The colour a project without `avatar_color` shows — the relay's
+/// `default_color_for` (`avatar.rs`): `coloured[fnv1a64(id + ":color") % n]`
+/// over the manifest colours without `mono`, so the Mac, the iPhone and the
+/// relay agree without a round trip (D74: a default is never mono). `None`
+/// only when the manifest ships no colours at all.
+pub fn default_color_for(project_id: &str) -> Option<String> {
+    let coloured: Vec<&Palette> = palettes().iter().filter(|p| !p.is_mono()).collect();
+    if coloured.is_empty() || !colors_available() {
+        return None;
+    }
+    let i = (fnv1a64(&format!("{project_id}:color")) % coloured.len() as u64) as usize;
+    Some(coloured[i].id.clone())
+}
+
 /// The palette for a project's `avatar_color`: a manifest id, else a raw hex
-/// accent (tree + ring in that colour on the mono disc), else mono.
+/// accent (tree + ring in that colour on the mono disc), else the fallback.
+/// Callers that know the project pass a colour (the relay always sends one;
+/// `sync` fills [`default_color_for`] when it does not), so `None` here is
+/// only the no-information case.
 pub fn palette_for(color: Option<&str>) -> Palette {
+    let base = fallback_palette();
     let Some(c) = color.map(str::trim).filter(|c| !c.is_empty()) else {
-        return palettes()[0].clone();
+        return base.clone();
     };
     if let Some(p) = palettes().iter().find(|p| p.id.eq_ignore_ascii_case(c)) {
         return p.clone();
@@ -275,16 +302,16 @@ pub fn palette_for(color: Option<&str>) -> Palette {
         Some(rgb) => Palette {
             id: c.to_string(),
             name: c.to_string(),
-            bg: palettes()[0].bg,
-            ring: palettes()[0].ring,
-            ring_alpha: palettes()[0].ring_alpha,
+            bg: base.bg,
+            ring: base.ring,
+            ring_alpha: base.ring_alpha,
             tree: rgb,
             tree_dark: scale_rgb(rgb, 170),
             tree_light: scale_rgb(rgb, 220),
-            face: palettes()[0].face,
+            face: base.face,
             is_default: false,
         },
-        None => palettes()[0].clone(),
+        None => base.clone(),
     }
 }
 
@@ -595,7 +622,7 @@ pub fn reply_duration_ms(slug: &str) -> u64 {
 
 /// The avatar element: the animated character when assets exist, otherwise
 /// the project's glyph in its colour circle (the pre-avatar look). A coloured
-/// avatar (`avatar_color`; `None` = mono) is a GPUI disc (`bg`, neutral
+/// avatar (`avatar_color`; `None` = the fallback palette) is a GPUI disc (`bg`, neutral
 /// black) with a thin ring under the level-mapped tree; mono draws the
 /// shipped strip as is.
 #[allow(clippy::too_many_arguments)]

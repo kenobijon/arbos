@@ -2764,7 +2764,7 @@ fn seed_projects() -> Vec<Project> {
             shared: false,
             owner_handle: None,
             avatar: None,
-            avatar_color: None,
+            avatar_color: Some("amber".into()),
         },
     ]
 }
@@ -3671,7 +3671,7 @@ fn seed_people_projects() -> Vec<Project> {
             shared: true,
             owner_handle: Some("sam".into()),
             avatar: None,
-            avatar_color: None,
+            avatar_color: Some("cyan".into()),
         },
     ]
 }
@@ -3967,8 +3967,8 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                         owner_id: ME_ID.into(),
                         owner_handle: ME_HANDLE.into(),
                         reply_policy: ReplyPolicy::Mention,
-                        avatar: None,
-                        avatar_color: None,
+                        avatar: p.avatar.clone(),
+                        avatar_color: p.avatar_color.clone(),
                     })
             };
             if let Some(agent) = agent {
@@ -4067,8 +4067,8 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                                 owner_id: ME_ID.into(),
                                 owner_handle: ME_HANDLE.into(),
                                 reply_policy: ReplyPolicy::EveryMessage,
-                                avatar: None,
-                                avatar_color: None,
+                                avatar: p.avatar.clone(),
+                                avatar_color: p.avatar_color.clone(),
                             })
                     };
                     if let Some(agent) = agent {

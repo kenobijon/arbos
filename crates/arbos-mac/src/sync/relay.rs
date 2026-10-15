@@ -739,7 +739,8 @@ fn people_space_from(shared: &Shared, v: &Value) -> Option<(Project, Chat)> {
                     .or_else(|| m.get("avatar_color"))
                     .and_then(Value::as_str)
                     .filter(|a| !a.is_empty())
-                    .map(str::to_string),
+                    .map(str::to_string)
+                    .or_else(|| crate::ui::avatars::default_color_for(pid)),
             });
         }
     }
@@ -1026,7 +1027,9 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
                 .and_then(Value::as_str)
                 .filter(|a| !a.is_empty())
                 .map(str::to_string)
-                .or_else(|| previous.as_ref().and_then(|x| x.avatar_color.clone())),
+                .or_else(|| previous.as_ref().and_then(|x| x.avatar_color.clone()))
+                // A relay that sends no colour still gets a coloured tree (D74).
+                .or_else(|| crate::ui::avatars::default_color_for(id)),
         });
         let chats: Vec<Chat> = detail
             .get("chats")
