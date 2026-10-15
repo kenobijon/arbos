@@ -593,7 +593,7 @@ class Loop:
         doc = http_json("GET", f"{self.cfg.relay_url}/admin/feedback?since={since_ms}&limit=50", headers=hdrs)
         newest = since_ms
         for item in doc.get("items", []):
-            fid = f"mac-{item['id']}"
+            fid = f"app-{item['id']}"
             newest = max(newest, int(item["created_at"]))
             if self.store.item_dir(fid).exists():
                 continue
@@ -609,11 +609,14 @@ class Loop:
             (d / f"screenshot-1.{ext}").write_bytes(body)
             created = dt.datetime.fromtimestamp(int(item["created_at"]) / 1000, dt.timezone.utc)
             handle = (item.get("user_login") or "").strip().lower()
+            on_iphone = (item.get("platform") or "mac").lower() in ("ios", "iphone")
             info = {
-                "id": fid, "source": "mac", "created": iso(created), "comment": item.get("note") or "",
+                "id": fid, "source": "app", "created": iso(created), "comment": item.get("note") or "",
                 "email": None, "handle": handle or None, "user_id": item.get("user_id"),
-                "device": "Mac", "os": item.get("os"), "device_platform": "MAC_OS", "device_family": "MAC",
-                "app_platform": item.get("platform"), "bundle": "sh.arbos.mac", "build": item.get("app_version"),
+                "device": "iPhone" if on_iphone else "Mac", "os": item.get("os"),
+                "device_platform": "IOS" if on_iphone else "MAC_OS", "device_family": "IPHONE" if on_iphone else "MAC",
+                "app_platform": item.get("platform"), "bundle": "com.unarbos.arbos.ios" if on_iphone else "sh.arbos.mac",
+                "build": item.get("app_version"),
                 "build_id": None, "locale": None, "screen_points": None,
                 "screenshots": [{"file": f"screenshot-1.{ext}", "width": item.get("width"), "height": item.get("height")}],
                 "project_id": item.get("project_id"), "raw": item,
@@ -794,7 +797,9 @@ class Loop:
     def pick_target(info: dict) -> str:
         if info.get("forced_target") in ("ios", "mac"):
             return info["forced_target"]
-        if info.get("source") == "mac":
+        if info.get("source") in ("mac", "app"):
+            if (info.get("device_platform") or "") == "IOS":
+                return "mac" if re.search(r"\b(mac|macos|desktop)\b", info.get("comment") or "", re.I) else "ios"
             return "ios" if re.search(r"\b(iphone|ios|phone app)\b", info.get("comment") or "", re.I) else "mac"
         if (info.get("device_platform") or "").upper() == "MAC_OS" or (info.get("app_platform") or "").upper() == "MAC_OS":
             return "mac"
@@ -906,7 +911,8 @@ class Loop:
     def build_prompt(self, fid: str, info: dict, st: dict, issue_url: str) -> str:
         t = self.target_info(st["target"])
         dims = ", ".join(f"{s.get('width')}x{s.get('height')}" for s in info.get("screenshots", []) if s.get("width"))
-        src = {"testflight": "TestFlight screenshot feedback", "mac": "the Mac app's Send feedback sheet"}.get(
+        src = {"testflight": "TestFlight screenshot feedback", "mac": "the Mac app's Send feedback sheet",
+               "app": f"the {info.get('device') or 'app'} app's in-app Send feedback sheet"}.get(
             info["source"], "synthetic item placed in the poller inbox")
         repl = {
             "FEEDBACK_ID": fid, "COMMENT": info["comment"].strip() or "(no comment)", "SOURCE": src,
@@ -957,7 +963,8 @@ class Loop:
         self.gh.ensure_label("needs-human", "D93F0B", "The automatic fix did not land")
         self.gh.ensure_label("flagged", "B60205", "Feedback screened as obviously malicious; no automatic fix")
         verdict, why = self.screen_intent(info)
-        source_label = {"testflight": "TestFlight", "mac": "Mac app (Send feedback)", "inbox": "synthetic (poller inbox)"}.get(
+        in_app = f"{info.get('device') or 'app'} app (Send feedback)"
+        source_label = {"testflight": "TestFlight", "mac": in_app, "app": in_app, "inbox": "synthetic (poller inbox)"}.get(
             info["source"], info["source"])
         body_lines = [
             f"**Comment:** {info['comment'].strip() or '(none)'}",
