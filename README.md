@@ -225,6 +225,14 @@ arbosctl group show|add|remove Alpha <chat> [projects]
 
 In the desktop client a group tab shows the participants' glyphs stacked in its title, each Project's message carries a sender chip, and "+ project" in the tab header adds a Project to the open group or starts a new group with it.
 
+## Vault
+
+The vault holds logins, API keys and secrets the agent may *use* but never *see* (§4.7, D28). Values are AES-256-GCM-encrypted with the same `ARBOS_RELAY_KEY` as connector tokens and are write-only over the device API; the agent only ever handles the placeholder `arbos-secret://<item>/<field>`. Every use is a request the owner approves (Settings → Vault, or `POST /vault/requests/{id}/decide`): `header`/`body` uses are honoured by `POST /egress`, which substitutes placeholders only in requests to one of the item's `allowed_hosts` (exact or `*.example.com`, never in URLs) and replaces the value with `[REDACTED:vault]` on the way back; `env` uses surface as `ARBOS_SECRET_<NAME>` in the child-agent environment (mirrored to Daytona Secrets when a Daytona key is configured); `browser_fill` lets agentd drive agent-browser itself, holding the values for at most 30 s and redacting them from audit and history (D19).
+
+- Device endpoints: `GET/POST /vault/items`, `PUT/DELETE /vault/items/{id}`, `GET /vault/requests`, `POST /vault/requests/{id}/decide` (`{"approve": true|false}`). Box endpoints: `POST /vault/request`, `GET /vault/requests/{id}`, `POST /vault/requests/{id}/values` (approved `browser_fill` only, 10 min window), `POST /egress`.
+- MCP tools: `vault_list`, `vault_request`, `egress`, `browser_fill`. `vault_request` posts one approval card (risk `credential`) whose payload carries the relay request id; approving it in the chat forwards the decision to the relay row, which stays the authority, and a decision made in Settings → Vault settles the card.  `ARBOS_VAULT_WAIT_S` (default 180) bounds how long a tool call waits for a decision.
+- `ARBOS_VAULT_MOCK=1`: seeds `demo-login` and `demo-api-key` with `allowed_hosts=[127.0.0.1, localhost]` and serves `ANY /vault/mock/echo` as a local egress target that reflects headers and body; `browser_fill` simulates the form submit when agent-browser is not installed. The Mac fixture source shows the same panel under Settings → Vault.
+
 ## Image
 
 `.github/workflows/image.yml` builds `image/Dockerfile` on an image tag (`image-v0.1.7`) or by hand, pushes it to GHCR, smoke-tests it, and registers the Daytona snapshot `arbos-agent-<version>` with `image/register-snapshot.sh` (secrets `DAYTONA_API_KEY`, `GHCR_READ_TOKEN`).
