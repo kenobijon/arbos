@@ -171,6 +171,32 @@ impl ChatDoc {
         Ok(())
     }
 
+    /// Box-side write (the fixture plays the box): flip the `question` part with `question_id`
+    /// to `answered` and record the value. Returns the message index it lives in.
+    pub fn answer_question(&self, question_id: &str, value: &Value) -> Option<usize> {
+        let list = self.messages();
+        for ix in 0..list.len() {
+            let Some(parts) = parts_list(&list, ix) else {
+                continue;
+            };
+            for pix in 0..parts.len() {
+                let Some(map) = container_map(parts.get(pix)) else {
+                    continue;
+                };
+                let hit = matches!(map.get("questionId"), Some(ValueOrContainer::Value(LoroValue::String(s))) if s.as_str() == question_id);
+                if !hit {
+                    continue;
+                }
+                let _ = insert_json(&map, "answer", value.clone(), true);
+                let _ = map.insert("state", "answered");
+                let _ = map.insert("answeredAt", now_ms() as i64);
+                let _ = self.set_field(ix, "waitingUser", Value::Bool(false));
+                return Some(ix);
+            }
+        }
+        None
+    }
+
     pub fn set_part_field(&self, ix: usize, pix: usize, key: &str, value: Value) -> Result<()> {
         let parts = parts_list(&self.messages(), ix).context("message has no parts list")?;
         let map = container_map(parts.get(pix)).context("part index out of range")?;

@@ -972,6 +972,7 @@ fn safe_name(name: &str) -> String {
 
 /// Upload attachments as blobs, then write the user row and its `send`
 /// command in one commit (crdt-sync §6.2).
+#[allow(clippy::too_many_arguments)]
 async fn send_message(
     shared: Arc<Shared>,
     chat_id: Id,
@@ -979,6 +980,7 @@ async fn send_message(
     text: String,
     attachments: Vec<PathBuf>,
     command: &'static str,
+    answer: Option<(String, serde_json::Value)>,
 ) {
     let project_id = project_of(&shared, &chat_id).unwrap_or_default();
     let mut parts: Vec<Part> = Vec::new();
@@ -1060,11 +1062,13 @@ async fn send_message(
             hidden_parts: Vec::new(),
         };
         let _ = doc.insert_message(&msg);
-        let _ = doc.push_command(
-            command,
-            json!({ "messageId": message_id }),
-            &shared.device_id(),
-        );
+        let payload = match &answer {
+            Some((qid, value)) => {
+                json!({ "messageId": message_id, "questionId": qid, "value": value, "text": text })
+            }
+            None => json!({ "messageId": message_id }),
+        };
+        let _ = doc.push_command(command, payload, &shared.device_id());
         let untitled = shared
             .chats
             .lock()
@@ -1158,13 +1162,17 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 text,
                 attachments,
                 "send",
+                None,
             ));
         }
         ClientCommand::Answer {
             chat_id,
             message_id,
             text,
+            question_id,
+            value,
         } => {
+            let answer = question_id.map(|qid| (qid, value.unwrap_or(json!(null))));
             tokio::spawn(send_message(
                 shared.clone(),
                 chat_id,
@@ -1172,6 +1180,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 text,
                 Vec::new(),
                 "answer",
+                answer,
             ));
         }
         ClientCommand::Stop { chat_id } => {

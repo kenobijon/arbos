@@ -15,6 +15,7 @@ use crate::ui::composer;
 use crate::ui::motion::PulseClock;
 use crate::ui::shell::{self, Shell};
 use crate::ui::theme::{reapply_window_background, Appearance, Surface, Theme};
+use crate::ui::widgets;
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
@@ -98,6 +99,12 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-c", composer::Copy, input),
         KeyBinding::new("cmd-x", composer::Cut, input),
         KeyBinding::new("ctrl-x", composer::Cut, input),
+        KeyBinding::new("enter", widgets::SubmitAnswer, Some("QuestionCard")),
+        KeyBinding::new("down", widgets::NextOption, Some("QuestionCard")),
+        KeyBinding::new("right", widgets::NextOption, Some("QuestionCard")),
+        KeyBinding::new("up", widgets::PrevOption, Some("QuestionCard")),
+        KeyBinding::new("left", widgets::PrevOption, Some("QuestionCard")),
+        KeyBinding::new("space", widgets::ToggleOption, Some("QuestionCard")),
         KeyBinding::new("cmd-w", shell::CloseTab, None),
         KeyBinding::new("ctrl-w", shell::CloseTab, None),
         KeyBinding::new("cmd-t", shell::NewTab, None),

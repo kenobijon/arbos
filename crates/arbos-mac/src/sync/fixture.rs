@@ -20,10 +20,10 @@ use crate::model::{ProjectDocView, ThreadInfo};
 use super::doc::ChatDoc;
 use super::{ClientCommand, SyncEvent, SyncSource};
 use crate::model::{
-    new_id, now_ms, Attachment, BoxState, Chat, Connector, ConnectorAction, ConnectorProvider,
-    ConnectorStatus, ConnectorsView, Effort, Id, Link, Message, MessageStatus, Part, Project, Role,
-    Routine, RoutineRun, RoutineRunStatus, RoutineTrigger, StatusKind, ToolCall, ToolStatus,
-    TurnKind,
+    new_id, now_ms, Attachment, BoxState, Chat, ChoiceOption, Connector, ConnectorAction,
+    ConnectorProvider, ConnectorStatus, ConnectorsView, Effort, FieldKind, FormField, Id, Link,
+    Message, MessageStatus, Part, Project, QuestionState, Role, Routine, RoutineRun,
+    RoutineRunStatus, RoutineTrigger, StatusKind, ToolCall, ToolStatus, TurnKind, Widget,
 };
 
 pub const STREAM_FRAME_MS: u64 = arbos_core::STREAM_COMMIT_MS;
@@ -36,6 +36,7 @@ pub const PROJECT_COMMS: &str = "01J9COMMS00000000000000000";
 pub const CHAT_ARBOS_MAIN: &str = "01J9CHAT0ARBOS000000000000";
 pub const CHAT_ARBOS_RESEARCH: &str = "01J9CHAT0RESEARCH000000000";
 pub const CHAT_ARBOS_LAUNCH: &str = "01J9CHAT0LAUNCH00000000000";
+pub const CHAT_ARBOS_WIDGETS: &str = "01J9CHAT0WIDGETS0000000000";
 pub const CHAT_AFFINE_MAIN: &str = "01J9CHAT0AFFINE00000000000";
 pub const CHAT_COMMS_MAIN: &str = "01J9CHAT0COMMS000000000000";
 
@@ -236,11 +237,16 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             chat_id,
             message_id,
             text,
+            question_id,
+            value,
         } => {
             let project_id = project_of(shared, &chat_id);
             {
                 let docs = shared.docs.lock().unwrap();
                 if let Some(doc) = docs.get(&chat_id) {
+                    if let Some(qid) = &question_id {
+                        let _ = doc.answer_question(qid, value.as_ref().unwrap_or(&json!(null)));
+                    }
                     let msg = Message {
                         id: message_id.clone(),
                         chat_id: chat_id.clone(),
@@ -270,7 +276,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     let _ = doc.insert_message(&msg);
                     let _ = doc.push_command(
                         "answer",
-                        json!({ "messageId": message_id, "text": text }),
+                        json!({ "messageId": message_id, "text": text, "questionId": question_id, "value": value }),
                         DEVICE,
                     );
                     doc.commit();
@@ -1069,7 +1075,8 @@ enum Script {
         url: &'static str,
         summary: &'static [&'static str],
     },
-    Ask(&'static str, &'static str),
+    /// `ask_user`: lead sentence, question, optional typed widget (design §10).
+    Ask(&'static str, &'static str, Option<Widget>),
     Fail(&'static str, &'static str),
 }
 
@@ -1131,16 +1138,46 @@ const ASK_LEAD: &str = "I can do that. One thing first:";
 const ASK_QUESTION: &str =
     "Which date should I plan toward: the 1 December private beta, or the January public launch?";
 
+const REPLY_ANSWERED: &[&str] =
+    &["Noted. I will go with that and come back when there is something to look at."];
+
 fn pick_script(text: &str, force_reply: bool) -> Script {
     let t = text.to_lowercase();
     if force_reply {
-        return Script::Reply(REPLY_DEFAULT);
+        return Script::Reply(REPLY_ANSWERED);
     }
     if t.contains("fail") || t.contains("error") || t.contains("timeout") {
         return Script::Fail("sandbox_timeout", "Sandbox did not answer in 60 s");
     }
+    if t.contains("which") || t.contains("choose") || t.contains("pick one") {
+        return Script::Ask(
+            ASK_LEAD,
+            "Which build should the beta ship from?",
+            Some(widget_choice()),
+        );
+    }
+    if t.contains("select") || t.contains("several") || t.contains("platforms") {
+        return Script::Ask(
+            ASK_LEAD,
+            "Which platforms are in the first wave?",
+            Some(widget_multi()),
+        );
+    }
+    if t.contains("when") || t.contains("date") {
+        return Script::Ask(ASK_LEAD, "When does the beta open?", Some(widget_date()));
+    }
+    if t.contains("form") || t.contains("details") {
+        return Script::Ask(ASK_LEAD, "Release details", Some(widget_form()));
+    }
+    if t.contains("name") || t.contains("call it") {
+        return Script::Ask(
+            ASK_LEAD,
+            "What should this release be called?",
+            Some(widget_text()),
+        );
+    }
     if t.contains("ask") || t.contains("launch") || t.contains("deadline") {
-        return Script::Ask(ASK_LEAD, ASK_QUESTION);
+        return Script::Ask(ASK_LEAD, ASK_QUESTION, None);
     }
     if t.contains("browse") || t.contains("docs") || t.contains("open ") || t.contains("website") {
         return Script::Browse {
@@ -1236,7 +1273,7 @@ async fn run_turn(
 
     let script = pick_script(text, force_reply);
     let turn = match &script {
-        Script::Reply(_) | Script::Ask(_, _) | Script::Fail(_, _) => TurnKind::Reply,
+        Script::Reply(_) | Script::Ask(_, _, _) | Script::Fail(_, _) => TurnKind::Reply,
         Script::Act { .. } => TurnKind::Act,
         Script::Browse { .. } => TurnKind::Spawn,
     };
@@ -1440,14 +1477,17 @@ async fn run_turn(
                 stream_blocks(shared, chat_id, ix, pix, summary, &stop).await
             }
         }
-        Script::Ask(lead, question) => {
+        Script::Ask(lead, question, widget) => {
             with_doc(shared, chat_id, |doc| {
                 let _ = doc.replace_part(ix, 0, &empty_text());
                 doc.commit();
             });
             let done = stream_blocks(shared, chat_id, ix, 0, &[lead], &stop).await;
             if done {
+                let widget = widget.clone();
                 with_doc(shared, chat_id, |doc| {
+                    let _ = doc.push_part(ix, &question_part(question, widget, None));
+                    // Legacy status row, as agentd still writes it next to the question part.
                     let _ = doc.push_part(
                         ix,
                         &Part::Status {
@@ -1489,6 +1529,92 @@ async fn run_turn(
         mark_unread_if_hidden(shared, chat_id);
     } else {
         finish_cancelled(shared, chat_id, ix);
+    }
+}
+
+fn opt(id: &str, label: &str) -> ChoiceOption {
+    ChoiceOption {
+        id: id.into(),
+        label: label.into(),
+    }
+}
+
+fn widget_choice() -> Widget {
+    Widget::Choice {
+        options: vec![
+            opt("main", "main"),
+            opt("release-1.2", "release-1.2"),
+            opt("nightly", "nightly"),
+        ],
+    }
+}
+
+fn widget_multi() -> Widget {
+    Widget::MultiSelect {
+        options: vec![
+            opt("macos", "macOS"),
+            opt("ios", "iOS"),
+            opt("web", "Web"),
+            opt("windows", "Windows"),
+        ],
+    }
+}
+
+fn widget_text() -> Widget {
+    Widget::Text {
+        placeholder: Some("e.g. Juniper".into()),
+        multiline: false,
+    }
+}
+
+fn widget_date() -> Widget {
+    Widget::Date {
+        min: Some("2026-10-15".into()),
+        max: Some("2027-03-31".into()),
+    }
+}
+
+fn widget_form() -> Widget {
+    let field = |id: &str, label: &str, kind: FieldKind, required: bool| FormField {
+        id: id.into(),
+        label: label.into(),
+        kind,
+        options: Vec::new(),
+        required,
+    };
+    Widget::Form {
+        fields: vec![
+            field("version", "Version", FieldKind::Text, true),
+            FormField {
+                options: vec![opt("beta", "Beta"), opt("stable", "Stable")],
+                ..field("channel", "Channel", FieldKind::Choice, true)
+            },
+            field("seats", "Seats", FieldKind::Number, false),
+            field("freeze", "Code freeze", FieldKind::Date, false),
+            field("notify", "Email testers", FieldKind::Bool, false),
+        ],
+    }
+}
+
+/// A `question` part as agentd writes it; `answer` makes it an answered card.
+fn question_part(
+    question: &str,
+    widget: Option<Widget>,
+    answer: Option<serde_json::Value>,
+) -> Part {
+    let answered = answer.is_some();
+    Part::Question {
+        id: new_id(),
+        question_id: new_id(),
+        question: question.into(),
+        widget,
+        answer,
+        state: if answered {
+            QuestionState::Answered
+        } else {
+            QuestionState::Open
+        },
+        answered_at: answered.then(now_ms),
     }
 }
 
@@ -1653,6 +1779,7 @@ fn seed_chats() -> Vec<Chat> {
             false,
             95,
         ),
+        chat(CHAT_ARBOS_WIDGETS, PROJECT_ARBOS, "Beta release", false, 12),
         chat(CHAT_AFFINE_MAIN, PROJECT_AFFINE, "Affine", true, 60 * 26),
         chat(CHAT_COMMS_MAIN, PROJECT_COMMS, "Comms", true, 60 * 5),
     ]
@@ -1983,6 +2110,77 @@ fn seed_docs(shared: &Arc<Shared>) {
         launch.commit();
     }
     add_doc(shared, launch);
+
+    // Every widget type once (design §10): one answered choice, then five open cards.
+    let widgets = ChatDoc::new(CHAT_ARBOS_WIDGETS, PROJECT_ARBOS);
+    {
+        let mut s = Seeder {
+            doc: &widgets,
+            t: base + 2_400_000,
+        };
+        s.user("Let's get the beta out this month.");
+        s.assistant(
+            TurnKind::Reply,
+            MessageStatus::Done,
+            vec![
+                text("Happy to. One thing first:"),
+                question_part(
+                    "Dark or light theme for the first screenshots?",
+                    Some(Widget::Choice {
+                        options: vec![opt("dark", "Dark"), opt("light", "Light")],
+                    }),
+                    Some(json!("dark")),
+                ),
+            ],
+        );
+        s.user("Answer: Dark");
+        s.assistant(
+            TurnKind::Reply,
+            MessageStatus::Done,
+            vec![
+                text("Dark it is. A few more things so I can set everything up:"),
+                question_part(
+                    "Which build should the beta ship from?",
+                    Some(widget_choice()),
+                    None,
+                ),
+            ],
+        );
+        s.assistant(
+            TurnKind::Reply,
+            MessageStatus::Done,
+            vec![question_part(
+                "Which platforms are in the first wave?",
+                Some(widget_multi()),
+                None,
+            )],
+        );
+        s.assistant(
+            TurnKind::Reply,
+            MessageStatus::Done,
+            vec![question_part(
+                "What should this release be called?",
+                Some(widget_text()),
+                None,
+            )],
+        );
+        s.assistant(
+            TurnKind::Reply,
+            MessageStatus::Done,
+            vec![question_part(
+                "When does the beta open?",
+                Some(widget_date()),
+                None,
+            )],
+        );
+        s.assistant(
+            TurnKind::Reply,
+            MessageStatus::Done,
+            vec![question_part("Release details", Some(widget_form()), None)],
+        );
+        widgets.commit();
+    }
+    add_doc(shared, widgets);
 
     let affine = ChatDoc::new(CHAT_AFFINE_MAIN, PROJECT_AFFINE);
     {

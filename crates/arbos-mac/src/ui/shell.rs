@@ -48,6 +48,12 @@ impl Shell {
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
         cx.observe(&state, |_, _, cx| cx.notify()).detach();
+        cx.observe_window_activation(window, |this, window, cx| {
+            let active = window.is_window_active();
+            this.state
+                .update(cx, |s, cx| s.set_window_active(active, cx));
+        })
+        .detach();
         cx.subscribe(
             &composer,
             |this, _, event: &ComposerEvent, cx| match event {
@@ -1319,6 +1325,7 @@ impl Shell {
         let link = state.link;
         let device = state.device_id.clone();
         let show_details = state.show_details;
+        let notify_on = state.notifier.enabled;
         let glass_ok = Theme::glass_available();
 
         let option = |id: &'static str,
@@ -1514,6 +1521,38 @@ impl Shell {
                             this.routines.update(cx, |p, cx| p.open(cx));
                             cx.notify();
                         })),
+                )
+                .child(div().h(px(1.0)).bg(theme.border))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme.text_faint)
+                        .child("NOTIFICATIONS"),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(4.0))
+                        .child(option("notify-on", "On", notify_on, true, &theme).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.state
+                                    .update(cx, |s, cx| s.set_notifications_enabled(true, cx));
+                            }),
+                        ))
+                        .child(
+                            option("notify-off", "Off", !notify_on, true, &theme).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.state
+                                        .update(cx, |s, cx| s.set_notifications_enabled(false, cx));
+                                }),
+                            ),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme.text_faint)
+                        .child("One per project per minute, only while you are not looking."),
                 )
                 .child(div().h(px(1.0)).bg(theme.border))
                 .child(

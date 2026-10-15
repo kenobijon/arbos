@@ -13,6 +13,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use arbos_core::doc::{decode_vv, encode_vv, ChatDoc};
 use arbos_core::ids::ulid;
+use arbos_core::widget::Widget;
 use arbos_core::wire::{self, Frame, FrameType};
 
 use crate::client::Config;
@@ -133,14 +134,27 @@ impl Session {
                 .parts
                 .iter()
                 .filter(|p| {
-                    p.get("kind").and_then(|k| k.as_str()) == Some("status")
-                        && p.get("hidden").and_then(|h| h.as_bool()) != Some(true)
+                    matches!(
+                        p.get("kind").and_then(|k| k.as_str()),
+                        Some("status") | Some("question")
+                    ) && p.get("hidden").and_then(|h| h.as_bool()) != Some(true)
                 })
                 .collect();
             let events_key = format!("{}#events", m.id);
             let shown_events = self.printed.get(&events_key).copied().unwrap_or(0);
             if events.len() > shown_events {
                 for p in &events[shown_events..] {
+                    if p.get("kind").and_then(|k| k.as_str()) == Some("question") {
+                        println!(
+                            "\n  [{} · question {} · widget {}]",
+                            &m.id[m.id.len() - 6..],
+                            p.get("questionId").and_then(|c| c.as_str()).unwrap_or(""),
+                            p.get("widget")
+                                .map(|w| w.to_string())
+                                .unwrap_or_else(|| "none".into())
+                        );
+                        continue;
+                    }
                     println!(
                         "\n  [{} · {}: {}]",
                         &m.id[m.id.len() - 6..],
@@ -219,6 +233,8 @@ enum Mode {
     Send {
         text: String,
         stream: bool,
+        /// `answer` instead of `send`: `(question id or "" for the newest open one, value)`.
+        answer: Option<(String, serde_json::Value)>,
     },
     /// Append a `stop` command (out-of-band abort of the running turn) and exit on its ack.
     Stop,
@@ -376,12 +392,40 @@ async fn run(
                         .await?;
                         eprintln!("[sent stop]");
                     }
-                    Mode::Send { text, stream: _ } => {
+                    Mode::Send {
+                        text,
+                        stream: _,
+                        answer,
+                    } => {
                         s.print_new();
                         let msg_id = ulid();
-                        let base = s.doc.oplog_vv();
-                        let _ = &base;
-                        s.doc.append_user_message(&msg_id, text, &s.device);
+                        match answer {
+                            Some((qid, value)) => {
+                                let (qid, question, widget) = match s.doc.open_question() {
+                                    Some((open_id, q, w)) if qid.is_empty() || *qid == open_id => {
+                                        (open_id, q, w)
+                                    }
+                                    _ if !qid.is_empty() => (qid.clone(), String::new(), None),
+                                    _ => return Err(anyhow!("no open question in this chat")),
+                                };
+                                let rendered = match Widget::parse(widget.as_ref()) {
+                                    Ok(Some(w)) => w.answer_text(value),
+                                    Ok(None) | Err(_) => format!(
+                                        "Answer: {}",
+                                        value
+                                            .as_str()
+                                            .map(str::to_owned)
+                                            .unwrap_or(value.to_string())
+                                    ),
+                                };
+                                eprintln!("[answering {qid} ({question:?}): {rendered}]");
+                                s.doc
+                                    .append_user_answer(&msg_id, &rendered, &qid, value, &s.device);
+                            }
+                            None => {
+                                s.doc.append_user_message(&msg_id, text, &s.device);
+                            }
+                        }
                         let bytes = s.doc.export_updates_since(&s.acked_vv);
                         let batch = ulid();
                         pending_push = Some((batch.clone(), s.doc.oplog_vv()));
@@ -504,6 +548,32 @@ pub async fn send(
         Mode::Send {
             text: text.to_owned(),
             stream,
+            answer: None,
+        },
+        Duration::from_secs(timeout_s),
+    )
+    .await
+}
+
+/// Answer the open `question` part (or the one with `question_id`) with a structured value;
+/// the text the model reads is rendered here with the question's widget.
+pub async fn answer(
+    cfg: &mut Config,
+    project: &str,
+    chat: &str,
+    question_id: Option<&str>,
+    value: serde_json::Value,
+    stream: bool,
+    timeout_s: u64,
+) -> Result<()> {
+    run(
+        cfg,
+        project,
+        chat,
+        Mode::Send {
+            text: String::new(),
+            stream,
+            answer: Some((question_id.unwrap_or("").to_owned(), value)),
         },
         Duration::from_secs(timeout_s),
     )

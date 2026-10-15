@@ -19,6 +19,8 @@ use crate::ui::markdown::{inline_spans, split_blocks, Block};
 use crate::ui::motion::PulseClock;
 use crate::ui::theme::{Theme, BUBBLE_RADIUS};
 use crate::ui::veil::Veil;
+use crate::ui::widgets::QuestionCard;
+use serde_json::Value;
 
 const OVERDRAW_PX: f32 = 320.0;
 pub const COLUMN_MAX_WIDTH: f32 = 680.0;
@@ -47,6 +49,10 @@ pub enum RowKind {
         text: String,
     },
     /// Error: one line, red glyph, Retry.
+    /// A typed question widget (design §10): rendered by a [`QuestionCard`] view.
+    Question {
+        question_id: String,
+    },
     Error {
         code: String,
         message: String,
@@ -90,6 +96,8 @@ pub struct Transcript {
     list: ListState,
     rows: Vec<Row>,
     veils: HashMap<String, Veil>,
+    /// One stateful card per typed question, keyed by question id; dropped with its row.
+    cards: HashMap<String, Entity<QuestionCard>>,
     pinned_to_bottom: bool,
     spring: StickSpring,
     /// Set by the scroll callback; the next frame re-pins when the user
@@ -119,6 +127,7 @@ impl Transcript {
             list,
             rows: Vec::new(),
             veils: HashMap::new(),
+            cards: HashMap::new(),
             pinned_to_bottom: true,
             spring: StickSpring::default(),
             repin_check_pending: false,
@@ -212,6 +221,11 @@ impl Transcript {
         }
         self.veils
             .retain(|id, _| new_rows.iter().any(|r| r.id == *id));
+        self.cards.retain(|qid, _| {
+            new_rows
+                .iter()
+                .any(|r| matches!(&r.kind, RowKind::Question { question_id } if question_id == qid))
+        });
 
         if chat_changed {
             self.rows = new_rows;
@@ -360,6 +374,43 @@ impl Transcript {
             }
             RowKind::AskUser { text } => {
                 cards::status_row(StatusKind::AskUser, &text, false, &theme, cx).into_any_element()
+            }
+            RowKind::Question { question_id } => {
+                let Some(chat_id) = self.chat_id.clone() else {
+                    return div().into_any_element();
+                };
+                let widget = self
+                    .state
+                    .read(cx)
+                    .messages_of(&chat_id)
+                    .iter()
+                    .find_map(|m| {
+                        m.parts.iter().find_map(|p| match p {
+                            Part::Question {
+                                question_id: qid,
+                                widget: Some(w),
+                                ..
+                            } if *qid == question_id => Some(w.clone()),
+                            _ => None,
+                        })
+                    });
+                let Some(widget) = widget else {
+                    return div().into_any_element();
+                };
+                let state = self.state.clone();
+                let card = self
+                    .cards
+                    .entry(question_id.clone())
+                    .or_insert_with(|| {
+                        cx.new(|cx| QuestionCard::new(state, chat_id, question_id, &widget, cx))
+                    })
+                    .clone();
+                div()
+                    .w_full()
+                    .flex()
+                    .justify_start()
+                    .child(card)
+                    .into_any_element()
             }
             RowKind::Error { code, message } => {
                 let state = self.state.clone();
@@ -570,16 +621,46 @@ pub fn build_rows(messages: &[Message], show_details: bool) -> Vec<Row> {
                                 attachment: attachment.clone(),
                             },
                         }),
+                        // Legacy `waiting_user` row: only when no `question` part carries it.
                         Part::Status {
                             id,
                             code: StatusKind::AskUser,
                             message: text,
-                        } => rows.push(Row {
+                        } if !message.has_question_part() => rows.push(Row {
                             version: hash_version(text, false),
                             id: format!("{}#{}", message.id, id),
                             message_id: message.id.clone(),
                             kind: RowKind::AskUser { text: text.clone() },
                         }),
+                        Part::Question {
+                            id,
+                            question_id,
+                            question,
+                            widget,
+                            answer,
+                            state,
+                            ..
+                        } => match widget {
+                            Some(_) => rows.push(Row {
+                                version: hash_version(
+                                    &(question, answer.as_ref().map(Value::to_string), *state),
+                                    false,
+                                ),
+                                id: format!("{}#{}", message.id, id),
+                                message_id: message.id.clone(),
+                                kind: RowKind::Question {
+                                    question_id: question_id.clone(),
+                                },
+                            }),
+                            None => rows.push(Row {
+                                version: hash_version(&(question, *state), false),
+                                id: format!("{}#{}", message.id, id),
+                                message_id: message.id.clone(),
+                                kind: RowKind::AskUser {
+                                    text: question.clone(),
+                                },
+                            }),
+                        },
                         Part::Status {
                             code: StatusKind::Queued,
                             ..

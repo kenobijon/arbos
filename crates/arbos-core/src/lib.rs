@@ -6,6 +6,7 @@ pub mod doc;
 pub mod ids;
 pub mod route;
 pub mod rpc;
+pub mod widget;
 pub mod wire;
 
 /// Protocol version carried in `HELLO` (crdt-sync §7.2) and in the agentd ↔ relay handshake (D44).

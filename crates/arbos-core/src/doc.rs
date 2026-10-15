@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::ids::{now_ms, ulid};
+use crate::widget::QuestionState;
 
 pub const SCHEMA_VERSION: i64 = 1;
 
@@ -260,6 +261,42 @@ impl ChatDoc {
         self.doc.commit();
     }
 
+    /// Client write: the user's answer to a `question` part as a user message (rendered text)
+    /// plus an `answer` command carrying the structured value, in one commit.
+    pub fn append_user_answer(
+        &self,
+        msg_id: &str,
+        text: &str,
+        question_id: &str,
+        value: &Value,
+        device_id: &str,
+    ) -> String {
+        let msgs = self.messages_list();
+        let m = msgs.push_container(LoroMap::new()).expect("push message");
+        m.insert("id", msg_id).ok();
+        m.insert("role", "user").ok();
+        m.insert("sender", "user").ok();
+        m.insert("createdAt", now_ms()).ok();
+        m.insert("deviceId", device_id).ok();
+        m.insert("status", MessageStatus::Done.as_str()).ok();
+        m.insert("answersQuestionId", question_id).ok();
+        let parts = m.insert_container("parts", LoroList::new()).expect("parts");
+        let part = parts.push_container(LoroMap::new()).expect("part");
+        part.insert("id", ulid()).ok();
+        part.insert("kind", "text").ok();
+        let t = part
+            .insert_container("text", LoroText::new())
+            .expect("text");
+        t.insert(0, text).ok();
+        let cmd_id = self.append_command(
+            "answer",
+            serde_json::json!({ "messageId": msg_id, "questionId": question_id, "value": value, "text": text }),
+            device_id,
+        );
+        self.doc.commit();
+        cmd_id
+    }
+
     pub fn append_command(&self, kind: &str, payload: Value, device_id: &str) -> String {
         let cmds = self.commands_list();
         let c = cmds.push_container(LoroMap::new()).expect("push command");
@@ -478,6 +515,88 @@ impl ChatDoc {
         part.insert("message", text).ok();
         self.doc.commit();
         Some(part_id)
+    }
+
+    /// Add a `question` part (design §10 widgets): `{ kind: "question", questionId, question,
+    /// widget?, state: "open" }`. `widget` is `None` for a plain text question (S8 composer).
+    pub fn add_question_part(
+        &mut self,
+        msg_id: &str,
+        question_id: &str,
+        question: &str,
+        widget: Option<&Value>,
+    ) -> Option<String> {
+        let m = self.find_message(msg_id)?;
+        let parts = match m.get("parts")? {
+            ValueOrContainer::Container(Container::List(l)) => l,
+            _ => return None,
+        };
+        let part = parts.push_container(LoroMap::new()).ok()?;
+        let part_id = ulid();
+        part.insert("id", part_id.as_str()).ok();
+        part.insert("kind", "question").ok();
+        part.insert("questionId", question_id).ok();
+        part.insert("question", question).ok();
+        if let Some(w) = widget {
+            part.insert("widget", json_to_lv(w)).ok();
+        }
+        part.insert("state", QuestionState::Open.as_str()).ok();
+        self.doc.commit();
+        Some(part_id)
+    }
+
+    /// Mark the `question` part with `questionId` answered and record the value. Returns false
+    /// when no such part exists in this doc.
+    pub fn answer_question_part(&mut self, question_id: &str, value: &Value) -> bool {
+        let msgs = self.messages_list();
+        for i in 0..msgs.len() {
+            let Some(ValueOrContainer::Container(Container::Map(m))) = msgs.get(i) else {
+                continue;
+            };
+            let Some(ValueOrContainer::Container(Container::List(parts))) = m.get("parts") else {
+                continue;
+            };
+            for p in 0..parts.len() {
+                let Some(ValueOrContainer::Container(Container::Map(part))) = parts.get(p) else {
+                    continue;
+                };
+                let is_match = matches!(part.get("questionId"), Some(ValueOrContainer::Value(LoroValue::String(s))) if s.as_str() == question_id);
+                if !is_match {
+                    continue;
+                }
+                part.insert("answer", json_to_lv(value)).ok();
+                part.insert("state", QuestionState::Answered.as_str()).ok();
+                part.insert("answeredAt", now_ms()).ok();
+                m.insert("waitingUser", false).ok();
+                self.doc.commit();
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The newest `question` part still `open`, as `(questionId, question, widget)`.
+    pub fn open_question(&self) -> Option<(String, String, Option<Value>)> {
+        let msgs = self.messages();
+        for m in msgs.iter().rev() {
+            for p in m.parts.iter().rev() {
+                if p.get("kind").and_then(Value::as_str) != Some("question") {
+                    continue;
+                }
+                if p.get("state").and_then(Value::as_str) != Some("open") {
+                    continue;
+                }
+                let qid = p.get("questionId").and_then(Value::as_str)?.to_owned();
+                let q = p
+                    .get("question")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned();
+                let w = p.get("widget").filter(|w| !w.is_null()).cloned();
+                return Some((qid, q, w));
+            }
+        }
+        None
     }
 
     pub fn add_error_part(&mut self, msg_id: &str, code: &str, text: &str) -> Option<String> {

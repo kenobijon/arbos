@@ -15,6 +15,7 @@ use arbos_core::doc::{CommandStatus, CommandView, MessageStatus};
 use arbos_core::ids::ulid;
 use arbos_core::route::{pick_harness, validate, Harness, ValidRoute};
 use arbos_core::rpc::{AssistantEvent, Command as RpcCommand, Event};
+use arbos_core::widget::Widget;
 use arbos_core::{ACT_MAX_WALL_SECS, TOOL_OUTPUT_SUMMARY_MAX};
 
 use crate::config::Config;
@@ -709,6 +710,56 @@ impl Agent {
         Ok(())
     }
 
+    /// For an `answer` command with `{ questionId, value }`: `(question, rendered text)`. The
+    /// widget comes from the ask row (falling back to the doc part); the value is rendered once,
+    /// here, so the model, T3 and the bubble all read the same words. Also flips the part to
+    /// `answered` and the ask row to answered.
+    async fn resolve_structured_answer(
+        &self,
+        host: &SharedHost,
+        cmd: &CommandView,
+    ) -> Option<(String, String)> {
+        if cmd.kind != "answer" {
+            return None;
+        }
+        let question_id = cmd.payload.get("questionId").and_then(Value::as_str)?;
+        let value = cmd.payload.get("value").cloned().unwrap_or(Value::Null);
+        let (question, widget_json) = match self.store.ask(question_id) {
+            Ok(Some((q, w, _))) => (q, w),
+            Ok(None) | Err(_) => {
+                let h = host.lock().await;
+                let (_, q, w) = h
+                    .doc
+                    .open_question()
+                    .filter(|(id, _, _)| id == question_id)?;
+                (q, w)
+            }
+        };
+        let rendered = match Widget::parse(widget_json.as_ref()) {
+            Ok(Some(w)) => w.answer_text(&value),
+            Ok(None) | Err(_) => {
+                let text = cmd
+                    .payload
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| {
+                        value
+                            .as_str()
+                            .map(str::to_owned)
+                            .unwrap_or(value.to_string())
+                    });
+                format!("Answer: {text}")
+            }
+        };
+        let _ = self.store.answer_ask(question_id);
+        {
+            let mut h = host.lock().await;
+            h.doc.answer_question_part(question_id, &value);
+        }
+        Some((question, rendered))
+    }
+
     async fn handle_send(
         self: &Arc<Self>,
         chat_id: &str,
@@ -722,13 +773,21 @@ impl Agent {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_owned();
-        let user_text = {
+        // A structured answer (`answer { questionId, value }`): render the value to text with the
+        // widget the question was asked with, and mark the part answered before the turn runs.
+        let structured = self.resolve_structured_answer(host, cmd).await;
+        let mut user_text = {
             let h = host.lock().await;
             h.doc
                 .message(&user_msg_id)
                 .map(|m| m.text())
                 .unwrap_or_default()
         };
+        if user_text.trim().is_empty() {
+            if let Some((_, rendered)) = &structured {
+                user_text = rendered.clone();
+            }
+        }
         if user_text.trim().is_empty() {
             return Err(anyhow!("send: message {user_msg_id} not found or empty"));
         }
@@ -759,7 +818,9 @@ impl Agent {
         }
         // Answering an open question (S8): mark it answered; pi receives the text as the next prompt.
         let mut prompt_text = user_text.clone();
-        if let Ok(Some((ask_id, _, question))) = self.store.open_ask(chat_id) {
+        if let Some((question, rendered)) = &structured {
+            prompt_text = format!("Answer to your question \"{question}\":\n{rendered}");
+        } else if let Ok(Some((ask_id, _, question))) = self.store.open_ask(chat_id) {
             let _ = self.store.answer_ask(&ask_id);
             prompt_text = format!("Answer to your question \"{question}\": {user_text}");
         }
@@ -1632,19 +1693,43 @@ impl Agent {
         }
     }
 
-    pub async fn hook_ask_user(&self, question: &str, session_id: &str) -> Result<()> {
+    /// `ask_user(question, widget?)` from any harness seam. Writes the `question` part (with the
+    /// typed widget when one was given) plus the legacy `waiting_user` status part, and records
+    /// the ask so the `answer` command can render the value for the model. Returns the question id.
+    pub async fn hook_ask_user(
+        &self,
+        question: &str,
+        widget: Option<&Value>,
+        session_id: &str,
+    ) -> Result<String> {
+        let widget = match Widget::parse(widget) {
+            Ok(w) => w,
+            Err(e) => {
+                // An invalid widget degrades to a plain question rather than losing the turn.
+                tracing::warn!(error = %e, "ask_user widget rejected; asking as plain text");
+                None
+            }
+        };
+        let widget_json = widget.as_ref().and_then(|w| serde_json::to_value(w).ok());
         let mut tl = self.turn.lock().await;
         let chat_id = tl
             .as_ref()
             .map(|t| t.chat_id.clone())
             .unwrap_or_else(|| session_id.to_owned());
         let id = ulid();
-        self.store
-            .insert_ask(&id, Some(&chat_id), Some(session_id), question)?;
+        self.store.insert_ask(
+            &id,
+            Some(&chat_id),
+            Some(session_id),
+            question,
+            widget_json.as_ref(),
+        )?;
         if let Some(t) = tl.as_mut() {
             t.asked = Some(question.to_owned());
             if let Some(host) = self.sync.host(&t.chat_id).await {
                 let mut h = host.lock().await;
+                h.doc
+                    .add_question_part(&t.assistant_msg_id, &id, question, widget_json.as_ref());
                 h.doc
                     .add_status_part(&t.assistant_msg_id, "waiting_user", question);
                 h.doc
@@ -1658,9 +1743,12 @@ impl Agent {
             "ask_user",
             Some("assistant"),
             question,
-            None,
+            widget_json
+                .as_ref()
+                .map(|w| json!({ "question_id": id, "widget": w }))
+                .as_ref(),
         );
-        Ok(())
+        Ok(id)
     }
 
     pub async fn hook_act_limit(&self) {
@@ -1743,7 +1831,7 @@ impl Agent {
         if data_heavy {
             s.push_str("## Data handling\n\nInputs are large. Keep data in variables or files and print slices; never paste whole files into the conversation.\n\n");
         }
-        s.push_str("## Tools\n\nMCP server `arbos`: history_search, history_read, read_thread, memory_search, memory_read (you may search and read the entire history of this Project), peek, sub_llm, remember/recall, projects_list/projects_send, ask_user, connectors_list/connector_call (the user's Gmail, Calendar, Slack, GitHub, Harness Comms through the relay; write/send actions need the user's approval).\n\n");
+        s.push_str("## Tools\n\nMCP server `arbos`: history_search, history_read, read_thread, memory_search, memory_read (you may search and read the entire history of this Project), peek, sub_llm, remember/recall, projects_list/projects_send, ask_user (optional `widget`: choice | multi_select | text | date | form, so the user answers with a click instead of typing), connectors_list/connector_call (the user's Gmail, Calendar, Slack, GitHub, Harness Comms through the relay; write/send actions need the user's approval).\n\n");
         s.push_str("## Return contract\n\nEnd your final reply with one fenced ```json block:\n{ \"status\": \"done\" | \"blocked\" | \"partial\" | \"needs_input\", \"summary\": \"<= 5 lines\", \"artifacts\": [ { \"kind\": \"file\" | \"commit\" | \"url\" | \"command\", \"ref\": \"…\", \"note\": \"…\" } ], \"acceptance\": [ { \"criterion\": \"…\", \"met\": true, \"evidence\": \"…\" } ], \"open_items\": [], \"proposed_memory\": [ { \"kind\": \"decision\", \"scope\": \"project\", \"text\": \"…\" } ], \"questions\": [] }\n");
         s
     }
@@ -2011,13 +2099,16 @@ impl Agent {
                     usage_total = json!({ "input": input, "output": output, "cacheRead": cache_read, "cacheWrite": cache_write, "cost": cost_usd });
                 }
                 AgentEvent::InputRequested { question } => {
+                    let qid = ulid();
                     let _ = self.store.insert_ask(
-                        &ulid(),
+                        &qid,
                         Some(chat_id),
                         Some(&subagent_id),
                         &question,
+                        None,
                     );
                     let mut h = host.lock().await;
+                    h.doc.add_question_part(&msg_id, &qid, &question, None);
                     h.doc.add_status_part(&msg_id, "waiting_user", &question);
                 }
                 AgentEvent::CompactionStarted => {}
@@ -2123,9 +2214,9 @@ impl Agent {
             }
             if let Some(qs) = c.get("questions").and_then(Value::as_array) {
                 for q in qs.iter().filter_map(Value::as_str) {
-                    let _ = self
-                        .store
-                        .insert_ask(&ulid(), Some(chat_id), Some(&subagent_id), q);
+                    let _ =
+                        self.store
+                            .insert_ask(&ulid(), Some(chat_id), Some(&subagent_id), q, None);
                 }
             }
         }

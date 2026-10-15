@@ -423,7 +423,7 @@ async fn boot() -> Result<()> {
                             .and_then(Value::as_str)
                             .unwrap_or("")
                             .to_owned();
-                        let _ = agent2.hook_ask_user(&q, &sid).await;
+                        let _ = agent2.hook_ask_user(&q, v.get("widget"), &sid).await;
                     }
                     let _ = std::fs::rename(&p, p.with_extension("done"));
                 }

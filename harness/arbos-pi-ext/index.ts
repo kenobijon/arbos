@@ -3,7 +3,7 @@
  * pi fallback subagent). Design D64/D65/D66, arbos-design.md §4.4.1.
  *
  * 1. `tool_call` hook: deny-list veto + audit append BEFORE execution, act-turn call counting.
- * 2. `ask_user` tool → agentd raises InputRequested (S8).
+ * 2. `ask_user(question, widget?)` tool → agentd raises InputRequested (S8) or a typed question card.
  * 3. `route` custom tool, validated by agentd (one retry, then `reply`).
  * 4. `tool_result` offload (> 4,000 chars → blob + handle), `peek`, working-set section.
  *
@@ -19,6 +19,7 @@ import { Type } from "typebox";
 
 import { DENY_RULES, matchDeny } from "./deny.ts";
 import { ROUTE_PARAMS, type RouteArgs } from "./route-schema.ts";
+import { describeWidget, WIDGET_PARAM } from "./widget-schema.ts";
 
 const STATE_DIR = process.env.ARBOS_STATE_DIR ?? join(process.env.HOME ?? "/tmp", ".arbos");
 const AUDIT_PATH = process.env.ARBOS_AUDIT_PATH ?? join(STATE_DIR, "audit.jsonl");
@@ -259,21 +260,26 @@ export default function arbosPiExt(pi: ExtensionAPI) {
   pi.registerTool({
     name: "ask_user",
     label: "Ask user",
-    description: "Ask the user one question and stop; the answer arrives as the next message.",
-    promptSnippet: "ask_user: ask the user one question and wait",
-    parameters: Type.Object({ question: Type.String({ description: "The question, one or two sentences" }) }),
+    description:
+      "Ask the user one question and stop; the answer arrives as the next message. Pass `widget` when a typed answer is better than free text: choice (one of options), multi_select (several), text (placeholder, multiline), date (min/max yyyy-mm-dd), form (<= 8 fields of type text|number|choice|date|bool).",
+    promptSnippet: "ask_user: ask the user one question and wait; optional widget = choice | multi_select | text | date | form",
+    parameters: Type.Object({
+      question: Type.String({ description: "The question, one or two sentences" }),
+      widget: Type.Optional(WIDGET_PARAM),
+    }),
     exposure: "model-only",
     executionMode: "sequential",
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const res = await hook("/hook/ask_user", { session_id: sessionId, question: params.question });
+      const widget = params.widget ?? null;
+      const res = await hook("/hook/ask_user", { session_id: sessionId, question: params.question, widget });
       if (res?.ok) {
-        return { content: [{ type: "text", text: "Question posted. Stop here; the user's answer arrives as the next message." }], details: { question: params.question }, terminate: true };
+        return { content: [{ type: "text", text: "Question posted. Stop here; the user's answer arrives as the next message." }], details: { question: params.question, widget }, terminate: true };
       }
       if (ctx.hasUI) {
-        const answer = await ctx.ui.input("Agent question", params.question);
-        return { content: [{ type: "text", text: answer ? `User answered: ${answer}` : "User gave no answer." }], details: { question: params.question, answer } };
+        const answer = await ctx.ui.input("Agent question", describeWidget(params.question, widget));
+        return { content: [{ type: "text", text: answer ? `User answered: ${answer}` : "User gave no answer." }], details: { question: params.question, widget, answer } };
       }
-      return { content: [{ type: "text", text: "No user is reachable; proceed with your best assumption and say what you assumed." }], details: { question: params.question } };
+      return { content: [{ type: "text", text: "No user is reachable; proceed with your best assumption and say what you assumed." }], details: { question: params.question, widget } };
     },
   });
 

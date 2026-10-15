@@ -52,11 +52,14 @@ cargo run -p arbosctl -- chat open demo                        # prints a chat i
 cargo run -p arbosctl -- chat send demo <chat> "hello" --stream
 cargo run -p arbosctl -- chat stream demo <chat> --until-done  # resumes by cursor after a kill
 cargo run -p arbosctl -- chat stop demo <chat>                 # aborts the running turn at once
+cargo run -p arbosctl -- chat answer demo <chat> --answer-json '"nightly"' --stream   # answer the open ask_user question
 cargo run -p arbosctl -- box stop demo && cargo run -p arbosctl -- box start demo
 cargo run -p arbosctl -- timings demo                          # boot, wake, TTFT, subagent timings
 ```
 
 `arbosctl` keeps its device token and per-chat replicas under `~/.config/arbos/` (`ARBOSCTL_CONFIG` overrides). All commands: `cargo run -p arbosctl -- --help`.
+
+Questions and widgets: `ask_user(question, widget?)` is the one way an agent asks the user something. Without a widget the question is plain and the composer answers it. With a widget (`choice`, `multi_select`, `text`, `date`, `form` with up to 8 fields) the chat gets a `question` part the clients render as a card; the answer goes back as an `answer` command `{questionId, value}` and agentd renders it to text for the model (`Answer: nightly`, or one bullet per form field). `arbosctl chat answer … --answer-json <json>` answers the newest open question from a terminal (`--question <id>` picks one). All three harness seams (agentd MCP/hook, the pi extension, the Prime `arbos_ask_user` skill) take the same widget shape.
 
 What a chat shows: the user only ever sees prose from the main agent, written like a colleague in chat (what got done and the outcome, never how the tools were called; agentd also strips leading "Called N tools"/"Running …" lines and ```json blocks before text enters the doc). A hand-off (`new`/`wake`) is one plain sentence from the model, then a progress message with status events only (`working`, then `done`/`failed`), then a prose result turn (`turn.kind = "subagent_result"`) written by the main agent from the subagent's output. Status codes are `working`, `done`, `failed`, `stopped`, `waiting_user`; tool calls and raw subagent output are parts with `hidden: true` (Details drawer, not the transcript) and in T3. Up to 4 subagents run per box at once; more wait in FIFO order, and the chat stays responsive meanwhile.
 
@@ -112,6 +115,8 @@ ARBOS_RELAY_URL=ws://127.0.0.1:7700 ARBOS_RELAY_TOKEN=... cargo run -p arbos-mac
 ```
 
 First run against a relay shows the pairing screen: enter the one-time code the relay logged. The device token goes to the login keychain on macOS (`security`), or `~/.config/arbos/` (0600) elsewhere; `ARBOS_RELAY_TOKEN` overrides. Matte is the default theme; Glass = macOS vibrancy + in-window frosted panels (the frost also renders on Linux). `ARBOS_SURFACE=glass` starts in Glass.
+
+Widget cards answer with the mouse or the keyboard (arrows move, space toggles, Enter submits); the fixture's "Beta release" chat under Arbos shows every widget type. System notifications (macOS `osascript`, Linux `notify-send`) fire for turn finished, needs input, approval requested, wake failed, spend cap reached, cross-project message and routine ran — at most one per project per minute (later ones fold into "N updates in <Project>"), never while that project is streaming, and only while the window is unfocused or the chat is not on screen. Settings has an On/Off switch; `ARBOS_NOTIFY_ALWAYS=1` ignores the focus gate (demos), `ARBOS_NOTIFY_DRY_RUN=1` logs instead of delivering.
 
 macOS packaging: `scripts/bundle-mac.sh` builds a universal `dist/Arbos.app` + DMG and signs/notarizes when `ARBOS_SIGN_IDENTITY` / `ARBOS_NOTARY_PROFILE` are set (skipped otherwise). `scripts/demo-mac.sh` launches the app in Glass, runs a scripted turn and records with `screencapture -v`.
 
