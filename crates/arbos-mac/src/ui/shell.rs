@@ -2118,17 +2118,26 @@ impl Shell {
     /// pairing-code entry only appears when the relay runs in paircode mode.
     fn render_pairing(&self, pairing: &crate::app::Pairing, cx: &mut Context<Self>) -> Div {
         let theme = Theme::of(cx).clone();
+        let mark_image = self.state.read(cx).mark.clone();
         let mark = div()
-            .size(px(64.0))
-            .rounded(px(18.0))
-            .bg(theme.accent)
+            .size(px(72.0))
             .flex()
             .items_center()
             .justify_center()
-            .text_size(px(34.0))
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(theme.bg)
-            .child("Ω");
+            .map(|el| match mark_image {
+                Some(image) => el.child(
+                    gpui::img(image)
+                        .size(px(72.0))
+                        .object_fit(gpui::ObjectFit::Contain),
+                ),
+                None => el
+                    .rounded(px(18.0))
+                    .bg(theme.text)
+                    .text_size(px(34.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.bg)
+                    .child("Y"),
+            });
         let screen = div()
             .flex_1()
             .flex()
