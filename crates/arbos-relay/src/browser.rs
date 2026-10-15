@@ -35,10 +35,11 @@ pub async fn browser_stream(
         return (StatusCode::CONFLICT, "box has no url yet").into_response();
     };
     let upstream = format!(
-        "{}/browser/stream",
+        "{}/w/{}/browser/stream",
         box_url
             .replacen("https://", "wss://", 1)
-            .replacen("http://", "ws://", 1)
+            .replacen("http://", "ws://", 1),
+        project.id
     );
     let token = sb.preview_token.clone();
     ws.max_message_size(32 * 1024 * 1024)

@@ -117,44 +117,41 @@ async fn t3_search(
     }
 }
 
-/// S16: proxy agent-browser's JPEG stream (`ws://127.0.0.1:9223`) on `/browser/stream`.
+/// S16: proxy a workspace's agent-browser JPEG stream (`ws://127.0.0.1:<9223+n>`) on
+/// `/w/{project}/browser/stream`; the bare `/browser/stream` is the first workspace (legacy).
+async fn browser_stream_ws(
+    ws: WebSocketUpgrade,
+    State(b): State<B>,
+    Path(project): Path<String>,
+) -> Response {
+    let Some(w) = b.get(&project).await else {
+        return (StatusCode::NOT_FOUND, "no such workspace").into_response();
+    };
+    let url = format!("ws://127.0.0.1:{}", w.cfg.browser_stream_port);
+    ws.on_upgrade(move |socket| async move {
+        if let Err(e) = pipe_browser(socket, &url).await {
+            tracing::debug!(error = %e, project, "browser stream closed");
+        }
+    })
+}
+
 async fn browser_stream(ws: WebSocketUpgrade, State(b): State<B>) -> Response {
-    let _ = b;
-    ws.on_upgrade(|socket| async move {
-        if let Err(e) = pipe_browser(socket).await {
+    let url = match std::env::var("ARBOS_BROWSER_STREAM_URL") {
+        Ok(u) => u,
+        Err(_) => match b.list().await.first() {
+            Some(w) => format!("ws://127.0.0.1:{}", w.cfg.browser_stream_port),
+            None => "ws://127.0.0.1:9223".to_owned(),
+        },
+    };
+    ws.on_upgrade(move |socket| async move {
+        if let Err(e) = pipe_browser(socket, &url).await {
             tracing::debug!(error = %e, "browser stream closed");
         }
     })
 }
 
-/// agent-browser binds its stream to `AGENT_BROWSER_STREAM_PORT` (9223 in the image); when that is
-/// unset the port is OS-assigned and `agent-browser stream status` reports it.
-async fn browser_stream_url() -> String {
-    if let Ok(u) = std::env::var("ARBOS_BROWSER_STREAM_URL") {
-        return u;
-    }
-    if let Ok(out) = tokio::process::Command::new("agent-browser")
-        .args(["stream", "status"])
-        .output()
-        .await
-    {
-        let text = String::from_utf8_lossy(&out.stdout);
-        if let Some(idx) = text.find("ws://") {
-            return text[idx..]
-                .chars()
-                .take_while(|c| !c.is_whitespace())
-                .collect();
-        }
-    }
-    format!(
-        "ws://127.0.0.1:{}",
-        std::env::var("AGENT_BROWSER_STREAM_PORT").unwrap_or_else(|_| "9223".into())
-    )
-}
-
-async fn pipe_browser(client: WebSocket) -> anyhow::Result<()> {
-    let upstream_url = browser_stream_url().await;
-    let (upstream, _) = tokio_tungstenite::connect_async(&upstream_url).await?;
+async fn pipe_browser(client: WebSocket, upstream_url: &str) -> anyhow::Result<()> {
+    let (upstream, _) = tokio_tungstenite::connect_async(upstream_url).await?;
     let (mut up_tx, mut up_rx) = upstream.split();
     let (mut cl_tx, mut cl_rx) = client.split();
     let to_client = async {
@@ -238,6 +235,7 @@ pub fn box_router(sup: Arc<Supervisor>) -> Router {
         .route("/w/{project}/history/{chat_id}", get(history))
         .route("/w/{project}/t3/search", get(t3_search))
         .route("/history/{chat_id}", get(history_legacy))
+        .route("/w/{project}/browser/stream", get(browser_stream_ws))
         .route("/browser/stream", get(browser_stream))
         .with_state(sup)
 }
