@@ -266,18 +266,18 @@ The vault holds logins, API keys and secrets the agent may *use* but never *see*
 
 ## Image
 
-`.github/workflows/image.yml` builds `image/Dockerfile` on an image tag (`image-v0.1.9`) or by hand, pushes it to GHCR, smoke-tests it, and registers the Daytona snapshot `arbos-agent-<version>` with `image/register-snapshot.sh` (secrets `DAYTONA_API_KEY`, `GHCR_READ_TOKEN`).
+`.github/workflows/image.yml` builds `image/Dockerfile` on an image tag (`image-v0.1.10`) or by hand (`workflow_dispatch` with a version), pushes it to GHCR as `ghcr.io/unarbos/arbos/arbos-agent:<version>` (public, so Daytona pulls it without credentials), smoke-tests it, and registers the Daytona snapshot `arbos-agent-<version>` with `image/register-snapshot.sh` (needs the `DAYTONA_API_KEY` repository secret; until it is set, run the script by hand with the GHCR image, as for 0.1.10). The relay needs an image rebuild whenever `arbos-agentd` changes: the binary is baked into the image, boxes do not update it at boot.
 
-Without CI (unpublished repo) the same build runs on any Docker host, including a Daytona Docker-in-Docker sandbox (`FROM docker:27-dind`, start `dockerd-entrypoint.sh`, upload the build context over SSH), then goes to Daytona's transient registry:
+Without CI the same build runs on any Docker host, including a Daytona Docker-in-Docker sandbox (`FROM docker:27-dind`, start `dockerd`, upload the build context over SSH), then goes to Daytona's transient registry:
 
 ```bash
 # static agentd for the image
 CC_x86_64_unknown_linux_musl=musl-gcc cargo build --release -p arbos-agentd --target x86_64-unknown-linux-musl
 mkdir -p dist && cp target/x86_64-unknown-linux-musl/release/arbos-agentd dist/
-docker build --platform linux/amd64 -f image/Dockerfile -t arbos-agent:0.1.9 .
-# temporary push credentials: GET $DAYTONA_API_URL/docker-registry/registry-push-access?snapshotName=arbos-agent-0.1.10
-docker tag arbos-agent:0.1.9 ghcr.io/unarbos/arbos/arbos-agent:0.1.10 && docker push cr.app.daytona.io/<project>/arbos-agent:0.1.9
-image/register-snapshot.sh arbos-agent-0.1.10 ghcr.io/unarbos/arbos/arbos-agent:0.1.10
+docker build --platform linux/amd64 -f image/Dockerfile -t arbos-agent:<v> .
+# temporary push credentials: GET $DAYTONA_API_URL/docker-registry/registry-push-access?snapshotName=arbos-agent-<v>
+docker tag arbos-agent:<v> cr.app.daytona.io/<project>/arbos-agent:<v> && docker push cr.app.daytona.io/<project>/arbos-agent:<v>
+image/register-snapshot.sh arbos-agent-<v> cr.app.daytona.io/<project>/arbos-agent:<v> 4 8 10
 ```
 
 Transient-registry tags are immutable: bump the version for every rebuild. The Arbos layers are last in the Dockerfile, so a code change rebuilds in seconds against the cached toolchain layers.
