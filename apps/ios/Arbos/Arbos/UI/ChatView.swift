@@ -20,6 +20,8 @@ struct ChatView: View {
     @State private var showModelPicker = false
     @State private var showThreads = false
     @State private var showVoice = false
+    /// When `showVoice` opens, present video-call chrome instead of voice-only.
+    @State private var callVideo = false
     @State private var showSettings = false
     @State private var sentOnce = false
     @State private var transcribing = false
@@ -140,9 +142,21 @@ struct ChatView: View {
         .sheet(isPresented: $showProfile) {
             AgentProfileView(projectId: projectId).environmentObject(model).environment(\.theme, theme)
         }
-        .fullScreenCover(isPresented: $showVoice, onDismiss: demoDismissed) {
+        .fullScreenCover(isPresented: $showVoice, onDismiss: {
+            callVideo = false
+            demoDismissed()
+        }) {
             if let project {
-                VoiceModeView(project: project).environmentObject(model).environment(\.theme, theme)
+                VoiceModeView(project: project, video: callVideo)
+                    .environmentObject(model).environment(\.theme, theme)
+            } else if isPeople {
+                VoiceModeView(
+                    peerName: counterpart?.displayName ?? people?.title ?? "Chat",
+                    peerHandle: counterpart?.handle ?? "",
+                    peerAvatarUrl: counterpart?.avatarUrl,
+                    video: callVideo
+                )
+                .environmentObject(model).environment(\.theme, theme)
             }
         }
         .task {
@@ -322,6 +336,18 @@ struct ChatView: View {
             }
             Spacer()
             if isPeople {
+                Button {
+                    callVideo = true
+                    showVoice = true
+                } label: {
+                    GlassCircle {
+                        Image(systemName: "video.fill")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(theme.text)
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Video call")
                 Button { showMembers = true } label: {
                     GlassCircle {
                         Image(systemName: "person.badge.plus")
@@ -334,6 +360,14 @@ struct ChatView: View {
             }
             Menu {
                 if isPeople {
+                    Button {
+                        callVideo = true
+                        showVoice = true
+                    } label: { Label("Video call", systemImage: "video") }
+                    Button {
+                        callVideo = false
+                        showVoice = true
+                    } label: { Label("Voice call", systemImage: "phone") }
                     Button { showMembers = true } label: { Label("Members & agents", systemImage: "person.2") }
                     if let c = counterpart {
                         Button(role: .destructive) { model.block(c) } label: { Label("Block @\(c.handle)", systemImage: "hand.raised") }
@@ -344,6 +378,10 @@ struct ChatView: View {
                         Task { if let c = await model.newChat(projectId: projectId) { model.open(chat: c) } }
                     } label: { Label("New chat", systemImage: "square.and.pencil") }
                     Button { showModelPicker = true } label: { Label("Model · \(project?.shortModel ?? "")", systemImage: "cpu") }
+                    Button {
+                        callVideo = true
+                        showVoice = true
+                    } label: { Label("Video call", systemImage: "video") }
                     Button { showShare = true } label: { Label(project?.shared == true ? "Members" : "Share project…", systemImage: "person.2.badge.plus") }
                     if streaming {
                         Button(role: .destructive) { stop() } label: { Label("Stop \(name)", systemImage: "stop.circle") }
@@ -634,6 +672,7 @@ struct ChatView: View {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showFiles = true }
                     } onVoice: {
                         showAttach = false
+                        callVideo = false
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showVoice = true }
                     }
                     .environment(\.theme, theme)
@@ -705,7 +744,7 @@ struct ChatView: View {
             }
             // Grok keeps the composer usable while the bot works: text sends,
             // an empty field starts voice chat. Stop lives in the … menu.
-            Button(action: canSend ? send : { showVoice = true }) {
+            Button(action: canSend ? send : { callVideo = false; showVoice = true }) {
                 Circle()
                     .fill(theme.primary)
                     .frame(width: Theme.voiceButton, height: Theme.voiceButton)
