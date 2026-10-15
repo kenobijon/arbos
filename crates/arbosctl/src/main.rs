@@ -462,6 +462,8 @@ enum AdminCmd {
         #[arg(long)]
         force: bool,
     },
+    /// Re-adopt a retained sandbox for a user whose box row lost its sandbox (failed upgrade).
+    RepairBox { user: String },
     /// Global kill switch: `on [--reason …]` makes the relay read-only, `off` clears it,
     /// `status` shows it with today's relay-wide spend.
     Killswitch {
@@ -840,6 +842,15 @@ async fn main() -> Result<()> {
                     let v = admin
                         .post(
                             &format!("/admin/users/{user}/box/upgrade?force={force}"),
+                            &serde_json::json!({}),
+                        )
+                        .await?;
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                AdminCmd::RepairBox { user } => {
+                    let v = admin
+                        .post(
+                            &format!("/admin/users/{user}/box/repair"),
                             &serde_json::json!({}),
                         )
                         .await?;

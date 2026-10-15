@@ -139,13 +139,14 @@ async fn resolve_relay_url() -> String {
             if ok {
                 if file_url.as_deref() != Some(u.as_str()) {
                     // agentd runs as root; the relay's next push arrives as the sandbox user, so
-                    // the directory and the file must stay writable for it.
+                    // the directory and the file must stay writable for it — and the directory
+                    // must not be sticky, or that user could not replace a root-written file.
                     use std::os::unix::fs::PermissionsExt;
                     if let Some(dir) = file.parent() {
                         if std::fs::create_dir_all(dir).is_ok() {
                             let _ = std::fs::set_permissions(
                                 dir,
-                                std::fs::Permissions::from_mode(0o1777),
+                                std::fs::Permissions::from_mode(0o777),
                             );
                         }
                     }

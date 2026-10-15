@@ -119,12 +119,16 @@ pub async fn create_box(
                 ),
                 _ => None,
             };
+            // Unique per sandbox: a retained old sandbox (upgrade fallback) keeps its name, and
+            // Daytona refuses a duplicate with 409.
+            let suffix = arbos_core::ids::ulid().to_ascii_lowercase();
             let mut body = CreateSandbox {
                 name: Some(format!(
-                    "arbos-{}",
+                    "arbos-{}-{}",
                     user_id
                         .to_ascii_lowercase()
-                        .replace(|c: char| !c.is_ascii_alphanumeric(), "-")
+                        .replace(|c: char| !c.is_ascii_alphanumeric(), "-"),
+                    &suffix[suffix.len().saturating_sub(6)..]
                 )),
                 snapshot: if inline.is_none() {
                     Some(snapshot_name.clone())
@@ -590,28 +594,41 @@ pub fn load_local_tokens(state: &AppState, user_id: &str) -> Result<Option<(Stri
 /// A client needs the box: queue a wake obligation unless it is already awake or waking.
 /// The sandbox env bakes `ARBOS_RELAY_URL` at create time; the relay's public URL can change
 /// (quick tunnels do on every restart). After every start the current URL goes into the box as
-/// `/home/daytona/.arbos/relay-url`, which agentd prefers over its env at boot. The toolbox
-/// uploads as the `daytona` user, so the file must live where that user can write: `/work` is
-/// root-owned 711 since the D70 isolation (the old `/work/.arbos/relay-url` failed with
-/// "permission denied" on every wake).
+/// `/home/daytona/.arbos/relay-url` (and the legacy `/work/.arbos/relay-url` when that directory
+/// exists), which agentd prefers over its env at boot. Written with `sudo` through the toolbox
+/// shell: the plain toolbox upload runs as the sandbox user and failed with "permission denied"
+/// both under the root-owned `/work` (D70) and against a root-written file in a sticky directory.
 pub const RELAY_URL_FILE: &str = "/home/daytona/.arbos/relay-url";
 
 async fn push_relay_url(state: &AppState, dt: &crate::daytona::Daytona, sandbox_id: &str) {
     let url = state.cfg.public_url.trim_end_matches('/').to_owned();
+    // Written through a root shell rather than the toolbox upload: the upload runs as the
+    // sandbox user and cannot replace a file agentd (root) wrote. The file ends up owned by the
+    // sandbox user, world-readable, in a non-sticky directory, so either side can rewrite it.
+    let dir = std::path::Path::new(RELAY_URL_FILE)
+        .parent()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "/home/daytona/.arbos".to_owned());
+    let legacy_dir = "/work/.arbos";
+    let cmd = format!(
+        "sudo -n sh -c 'mkdir -p {dir} && printf \"%s\\n\" \"{url}\" > {file} && chown daytona:daytona {dir} {file} 2>/dev/null; chmod 0777 {dir}; chmod 0666 {file}; \
+         if [ -d {legacy_dir} ]; then printf \"%s\\n\" \"{url}\" > {legacy_dir}/relay-url 2>/dev/null && chmod 0666 {legacy_dir}/relay-url 2>/dev/null; fi; echo ok'",
+        file = RELAY_URL_FILE,
+    );
     for attempt in 1..=4u32 {
-        match dt
-            .toolbox_upload(sandbox_id, RELAY_URL_FILE, format!("{url}\n").into_bytes())
-            .await
-        {
-            Ok(()) => {
+        match dt.toolbox_exec(sandbox_id, &cmd, 30).await {
+            Ok(out) if out.get("exitCode").and_then(Value::as_i64).unwrap_or(1) == 0 => {
                 tracing::info!(sandbox_id, %url, attempt, "relay url pushed into the box");
                 return;
             }
+            Ok(out) => {
+                tracing::warn!(sandbox_id, attempt, result = ?out.get("result"), "relay url push failed");
+            }
             Err(e) => {
                 tracing::warn!(sandbox_id, attempt, error = %e, "relay url push failed");
-                tokio::time::sleep(Duration::from_millis(1500 * attempt as u64)).await;
             }
         }
+        tokio::time::sleep(Duration::from_millis(1500 * attempt as u64)).await;
     }
 }
 

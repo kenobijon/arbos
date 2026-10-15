@@ -60,6 +60,7 @@ pub fn migrate_accounts(c: &Connection) {
         "ALTER TABLE devices ADD COLUMN kind TEXT NOT NULL DEFAULT 'paircode'",
         "ALTER TABLE users ADD COLUMN test INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE boxes ADD COLUMN held_stopped INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE box_history ADD COLUMN row_json TEXT",
     ] {
         let _ = c.execute(stmt, []);
     }
@@ -152,6 +153,14 @@ impl std::fmt::Display for DebitRefused {
             DebitRefused::ReadOnly { reason } => write!(f, "read-only: {reason}"),
         }
     }
+}
+
+/// An old sandbox kept after an upgrade, with the `boxes` row it had.
+#[derive(Debug, Clone)]
+pub struct RetainedBox {
+    pub sandbox_id: String,
+    pub snapshot: Option<String>,
+    pub row: Option<crate::db::Sandbox>,
 }
 
 /// Kill switch record kept in `meta` under `kill_switch`.
@@ -770,20 +779,47 @@ impl Db {
 
     // ---- box history (old sandboxes kept as fallback after an upgrade) -------------------------
 
-    pub fn insert_box_history(
-        &self,
-        user_id: &str,
-        sandbox_id: &str,
-        snapshot: Option<&str>,
-        delete_after: i64,
-    ) -> Result<()> {
+    /// Keep an old sandbox as a fallback after an upgrade; `row_json` is the full `boxes` row at
+    /// that time (token hash, mcp token, device id, urls) so it can be re-adopted.
+    pub fn insert_box_history(&self, row: &crate::db::Sandbox, delete_after: i64) -> Result<()> {
+        let sandbox_id = row.sandbox_id.clone().unwrap_or_default();
         self.with(|c| {
             c.execute(
-                "INSERT INTO box_history(sandbox_id, user_id, snapshot, replaced_at, delete_after) VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(sandbox_id) DO UPDATE SET delete_after = excluded.delete_after, deleted_at = NULL",
-                params![sandbox_id, user_id, snapshot, now_ms(), delete_after],
+                "INSERT INTO box_history(sandbox_id, user_id, snapshot, replaced_at, delete_after, row_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(sandbox_id) DO UPDATE SET delete_after = excluded.delete_after, deleted_at = NULL, row_json = excluded.row_json",
+                params![sandbox_id, row.user_id, row.snapshot, now_ms(), delete_after, serde_json::to_string(row).unwrap_or_default()],
             )
             .map(|_| ())
+        })
+    }
+
+    /// Forget a history entry (the upgrade that made it was rolled back).
+    pub fn remove_box_history(&self, sandbox_id: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "DELETE FROM box_history WHERE sandbox_id = ?1",
+                params![sandbox_id],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// The newest retained sandbox of a user that has not been deleted: `(sandbox_id, snapshot, row)`.
+    pub fn latest_box_history(&self, user_id: &str) -> Result<Option<RetainedBox>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT sandbox_id, snapshot, row_json FROM box_history WHERE user_id = ?1 AND deleted_at IS NULL ORDER BY replaced_at DESC LIMIT 1",
+                params![user_id],
+                |r| {
+                    let row: Option<String> = r.get(2)?;
+                    Ok(RetainedBox {
+                        sandbox_id: r.get(0)?,
+                        snapshot: r.get(1)?,
+                        row: row.and_then(|j| serde_json::from_str(&j).ok()),
+                    })
+                },
+            )
+            .optional()
         })
     }
 

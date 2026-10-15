@@ -418,6 +418,7 @@ async fn main() -> anyhow::Result<()> {
             "/admin/users/{id}/box/upgrade",
             post(upgrade::admin_upgrade),
         )
+        .route("/admin/users/{id}/box/repair", post(upgrade::admin_repair))
         .route(
             "/admin/users/{id}/box",
             axum::routing::put(api::admin_set_user_box),
