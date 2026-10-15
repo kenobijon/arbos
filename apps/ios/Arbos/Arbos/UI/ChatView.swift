@@ -267,10 +267,8 @@ struct ChatView: View {
         ZStack {
             if theme.isGlass {
                 Rectangle().fill(.ultraThinMaterial)
-                theme.bg.opacity(0.78)
-            } else {
-                theme.bg
             }
+            theme.bg.opacity(theme.isGlass ? 0.78 : 1)
         }
         .frame(height: isPeople ? 156 : 118)
         .mask(LinearGradient(colors: [.black, .black, .clear], startPoint: .top, endPoint: .bottom))

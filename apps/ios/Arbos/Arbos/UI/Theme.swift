@@ -170,10 +170,8 @@ struct GlassCircle<Content: View>: View {
         ZStack {
             if theme.isGlass {
                 Circle().fill(.ultraThinMaterial)
-                Circle().fill(theme.field.opacity(0.85))
-            } else {
-                Circle().fill(theme.field)
             }
+            Circle().fill(theme.field.opacity(theme.isGlass ? 0.85 : 1))
             Circle().strokeBorder(theme.fieldBorder, lineWidth: 1)
             content()
         }
@@ -192,10 +190,8 @@ struct GlassPill<Content: View>: View {
                 ZStack {
                     if theme.isGlass {
                         Capsule().fill(.ultraThinMaterial)
-                        Capsule().fill(theme.field.opacity(0.85))
-                    } else {
-                        Capsule().fill(theme.field)
                     }
+                    Capsule().fill(theme.field.opacity(theme.isGlass ? 0.85 : 1))
                     Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1)
                 }
             }
