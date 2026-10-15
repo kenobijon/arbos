@@ -723,6 +723,8 @@ mod tests {
             box_idle_grace_ms: 0,
             connectors_mock: true,
             channels_mock: true,
+            openai_images_base: String::new(),
+            image_mock: false,
         };
         AppState {
             db,
