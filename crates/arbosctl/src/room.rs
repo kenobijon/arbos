@@ -8,7 +8,7 @@ use anyhow::{anyhow, Result};
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use tokio_tungstenite::tungstenite::Message;
 
 use arbos_core::doc::{decode_vv, encode_vv, ChatDoc};
@@ -164,6 +164,39 @@ impl Session {
                 }
                 self.printed.insert(events_key, events.len());
             }
+            // Approval cards (feature `approve`): print on arrival and again on each state change.
+            for p in m
+                .parts
+                .iter()
+                .filter(|p| p.get("kind").and_then(|k| k.as_str()) == Some("approval"))
+            {
+                let aid = p.get("approvalId").and_then(|v| v.as_str()).unwrap_or("");
+                let state = p.get("state").and_then(|v| v.as_str()).unwrap_or("pending");
+                let state_code = match state {
+                    "pending" => 1,
+                    "approved" => 2,
+                    "rejected" => 3,
+                    "expired" => 4,
+                    _ => 5,
+                };
+                let key = format!("{aid}#approval");
+                if self.printed.get(&key).copied().unwrap_or(0) != state_code {
+                    println!(
+                        "\n  [{} · approval {} · {} · {}]\n    {}\n    id {}{}",
+                        &m.id[m.id.len() - 6..],
+                        state,
+                        p.get("risk").and_then(|v| v.as_str()).unwrap_or(""),
+                        p.get("title").and_then(|v| v.as_str()).unwrap_or(""),
+                        p.get("summary").and_then(|v| v.as_str()).unwrap_or(""),
+                        aid,
+                        p.get("decidedBy")
+                            .and_then(|v| v.as_str())
+                            .map(|d| format!(" · by {d}"))
+                            .unwrap_or_default()
+                    );
+                    self.printed.insert(key, state_code);
+                }
+            }
             let status_key = format!("{}#status", m.id);
             let st = m.status.clone();
             let prev = self.printed.get(&status_key).copied().unwrap_or(0);
@@ -236,8 +269,11 @@ enum Mode {
         /// `answer` instead of `send`: `(question id or "" for the newest open one, value)`.
         answer: Option<(String, serde_json::Value)>,
     },
-    /// Append a `stop` command (out-of-band abort of the running turn) and exit on its ack.
-    Stop,
+    /// Append one out-of-band command (`stop`, `approve`, `reject`) and exit on its ack.
+    Command {
+        kind: String,
+        payload: Value,
+    },
 }
 
 async fn run(
@@ -376,8 +412,9 @@ async fn run(
                             break;
                         }
                     }
-                    Mode::Stop => {
-                        s.doc.append_command("stop", json!({}), &s.device);
+                    Mode::Command { kind, payload } => {
+                        s.print_new();
+                        s.doc.append_command(kind, payload.clone(), &s.device);
                         let bytes = s.doc.export_updates_since(&s.acked_vv);
                         let batch = ulid();
                         pending_push = Some((batch.clone(), s.doc.oplog_vv()));
@@ -390,7 +427,7 @@ async fn run(
                             .encode(),
                         ))
                         .await?;
-                        eprintln!("[sent stop]");
+                        eprintln!("[sent {kind}]");
                     }
                     Mode::Send {
                         text,
@@ -463,7 +500,10 @@ async fn run(
                         pending_push = None;
                         s.persist()?;
                         eprintln!("[ack seq={} dup={}]", ack.seq, ack.dup);
-                        if matches!(mode, Mode::Send { stream: false, .. } | Mode::Stop) {
+                        if matches!(
+                            mode,
+                            Mode::Send { stream: false, .. } | Mode::Command { .. }
+                        ) {
                             break;
                         }
                     }
@@ -598,7 +638,50 @@ pub async fn stream(
 }
 
 pub async fn stop(cfg: &mut Config, project: &str, chat: &str) -> Result<()> {
-    run(cfg, project, chat, Mode::Stop, Duration::from_secs(30)).await
+    command(cfg, project, chat, "stop", json!({})).await
+}
+
+/// `approve` / `reject` for an approval card (feature `approve`); the box applies the decision.
+pub async fn decide(
+    cfg: &mut Config,
+    project: &str,
+    chat: &str,
+    approve: bool,
+    approval_id: &str,
+    reason: Option<&str>,
+) -> Result<()> {
+    let mut payload = json!({ "approvalId": approval_id });
+    if let Some(r) = reason.filter(|r| !r.trim().is_empty()) {
+        payload["reason"] = json!(r);
+    }
+    command(
+        cfg,
+        project,
+        chat,
+        if approve { "approve" } else { "reject" },
+        payload,
+    )
+    .await
+}
+
+async fn command(
+    cfg: &mut Config,
+    project: &str,
+    chat: &str,
+    kind: &str,
+    payload: Value,
+) -> Result<()> {
+    run(
+        cfg,
+        project,
+        chat,
+        Mode::Command {
+            kind: kind.to_owned(),
+            payload,
+        },
+        Duration::from_secs(30),
+    )
+    .await
 }
 
 pub async fn dump(cfg: &mut Config, project: &str, chat: &str) -> Result<()> {
