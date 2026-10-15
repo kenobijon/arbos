@@ -78,10 +78,19 @@
     var n = parseInt(h, 16);
     return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255, 1];
   }
-  function resolveTint(spec) {
-    if (!spec) return null;
-    if (spec.charAt(0) === '{') { try { return JSON.parse(spec); } catch (e) { return null; } }
-    return PALETTE[spec] || null;
+  // D74: an agent is always a coloured tree. No data-color → a stable colour from the slug
+  // (FNV-1a over slug + ':color', the apps' rule), never mono; data-color="mono" stays explicit.
+  function defaultTint(slug) {
+    var keys = Object.keys(PALETTE).filter(function (k) { return k !== 'mono'; });
+    if (!keys.length) return null;
+    var h = 0xcbf29ce4, s = (slug || '') + ':color';
+    for (var i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+    return PALETTE[keys[h % keys.length]];
+  }
+  function resolveTint(spec, slug) {
+    if (!spec) return defaultTint(slug);
+    if (spec.charAt(0) === '{') { try { return JSON.parse(spec); } catch (e) { return defaultTint(slug); } }
+    return PALETTE[spec] || defaultTint(slug);
   }
 
   // Walk every shape list (layers, groups, precomp assets) and recolour fl/st items by `nm`.
@@ -130,7 +139,7 @@
   function Avatar(el) {
     this.el = el;
     this.slug = el.getAttribute('data-avatar');
-    this.tint = resolveTint(el.getAttribute('data-color'));
+    this.tint = resolveTint(el.getAttribute('data-color'), this.slug);
     this.state = el.getAttribute('data-state') === 'working' ? 'working' : 'idle';
     this.anim = null;
     this.visible = false;
