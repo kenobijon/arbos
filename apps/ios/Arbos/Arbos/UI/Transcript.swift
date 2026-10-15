@@ -570,6 +570,11 @@ struct VoiceMemoBubble: View {
         .padding(.horizontal, Theme.bubbleHPad)
         .padding(.vertical, Theme.bubbleVPad)
         .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(fromUser ? theme.bubbleUser : theme.bubbleAssistant))
+        .onAppear {
+            if let ref = blobRef, let url = model.blobURL(projectId: projectId, key: ref) {
+                player.loadDuration(url: url, headers: model.authHeaders)
+            }
+        }
     }
 }
 
@@ -580,10 +585,29 @@ final class MemoPlayer: ObservableObject {
     @Published var durationLabel = "0:00"
     private var player: AVPlayer?
     private var timeObserver: Any?
+    private var totalSeconds: Double = 0
+
+    /// Resolve the memo length as soon as the bubble appears (not only on play).
+    func loadDuration(url: URL, headers: [String: String]) {
+        guard totalSeconds <= 0 else { return }
+        let asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
+        Task {
+            guard let duration = try? await asset.load(.duration) else { return }
+            let d = duration.seconds
+            guard d.isFinite, d > 0 else { return }
+            totalSeconds = d
+            if !playing { durationLabel = Self.format(d) }
+        }
+    }
 
     func toggle(url: URL, headers: [String: String]) {
         if let player {
-            if playing { player.pause(); playing = false } else { player.play(); playing = true }
+            if playing {
+                player.pause(); playing = false
+                if totalSeconds > 0 { durationLabel = Self.format(totalSeconds) }
+            } else {
+                player.play(); playing = true
+            }
             return
         }
         let asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
@@ -592,13 +616,24 @@ final class MemoPlayer: ObservableObject {
         player = p
         timeObserver = p.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.25, preferredTimescale: 600), queue: .main) { [weak self] t in
             guard let self, let d = p.currentItem?.duration.seconds, d.isFinite, d > 0 else { return }
+            self.totalSeconds = d
             self.progress = t.seconds / d
             let remaining = Int(max(0, d - t.seconds))
             self.durationLabel = String(format: "%d:%02d", remaining / 60, remaining % 60)
-            if t.seconds >= d - 0.05 { self.playing = false; p.seek(to: .zero); self.progress = 0 }
+            if t.seconds >= d - 0.05 {
+                self.playing = false
+                p.seek(to: .zero)
+                self.progress = 0
+                self.durationLabel = Self.format(d)
+            }
         }
         p.play()
         playing = true
+    }
+
+    private static func format(_ seconds: Double) -> String {
+        let s = Int(seconds.rounded())
+        return String(format: "%d:%02d", s / 60, s % 60)
     }
 }
 
