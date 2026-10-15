@@ -534,8 +534,8 @@ pub fn sine_wav(seconds: f64, hz: f64) -> Vec<u8> {
     out
 }
 
-fn audio_project(principal: &Principal, headers: &HeaderMap) -> String {
-    project_of(principal)
+fn audio_project(state: &AppState, principal: &Principal, headers: &HeaderMap) -> String {
+    project_of(state, principal, headers)
         .or_else(|| {
             headers
                 .get("x-arbos-project")
@@ -574,7 +574,7 @@ pub async fn audio_transcriptions(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let project_id = audio_project(&principal, &headers);
+    let project_id = audio_project(&state, &principal, &headers);
     if let Some(r) = audio_spend_cap(&state, &project_id) {
         return r;
     }
@@ -673,7 +673,7 @@ pub async fn audio_speech(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let project_id = audio_project(&principal, &headers);
+    let project_id = audio_project(&state, &principal, &headers);
     if let Some(r) = audio_spend_cap(&state, &project_id) {
         return r;
     }
