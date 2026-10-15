@@ -830,6 +830,92 @@ pub async fn sweep_box_liveness(state: &AppState) {
     }
 }
 
+/// Move a deleted project's `/work/<id>` to `/work/.archive/<id>` on the user's box (Daytona
+/// through the toolbox shell, local providers on disk). Best effort: the purge removes whatever
+/// is left seven days later.
+pub async fn archive_workspace_dir(state: &AppState, user_id: &str, project_id: &str) {
+    let Ok(Some(sb)) = state.db.user_box(user_id) else {
+        return;
+    };
+    match (
+        Provider::parse(&sb.provider),
+        &state.daytona,
+        &sb.sandbox_id,
+    ) {
+        (Some(Provider::Daytona), Some(dt), Some(id)) => {
+            // Give the box's poll a moment to stop the workspace first.
+            tokio::time::sleep(Duration::from_secs(20)).await;
+            let cmd = format!(
+                "sudo -n sh -c 'mkdir -p /work/.archive && if [ -d /work/{p} ]; then mv /work/{p} /work/.archive/{p}; fi; echo ok'",
+                p = project_id
+            );
+            match dt.toolbox_exec(id, &cmd, 120).await {
+                Ok(_) => {
+                    tracing::info!(%user_id, project_id, "workspace folder archived on the box")
+                }
+                Err(e) => tracing::warn!(%user_id, project_id, error = %e, "workspace archive"),
+            }
+        }
+        (Some(Provider::Process), _, _) | (Some(Provider::Docker), _, _) => {
+            let base = state.cfg.data_dir.join("boxes").join(user_id).join("work");
+            let src = base.join(project_id);
+            if src.exists() {
+                let dst = base.join(".archive").join(project_id);
+                let _ = std::fs::create_dir_all(dst.parent().unwrap_or(&base));
+                let _ = std::fs::rename(&src, &dst);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Hourly: projects soft-deleted more than seven days ago lose their rows, rooms, blobs, and the
+/// archived folder on the box.
+pub async fn spawn_project_purge(state: AppState) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(3600));
+        loop {
+            tick.tick().await;
+            let cutoff = now_ms() - 7 * 24 * 3_600_000;
+            for (project_id, user_id) in
+                state.db.projects_deleted_before(cutoff).unwrap_or_default()
+            {
+                if let Ok(Some(sb)) = state.db.user_box(&user_id) {
+                    if let (Some(dt), Some(id)) = (&state.daytona, &sb.sandbox_id) {
+                        if sb.provider == "daytona" {
+                            let _ = dt
+                                .toolbox_exec(
+                                    id,
+                                    &format!("sudo -n rm -rf /work/.archive/{project_id}; echo ok"),
+                                    120,
+                                )
+                                .await;
+                        }
+                    } else {
+                        let _ = std::fs::remove_dir_all(
+                            state
+                                .cfg
+                                .data_dir
+                                .join("boxes")
+                                .join(&user_id)
+                                .join("work")
+                                .join(".archive")
+                                .join(&project_id),
+                        );
+                    }
+                }
+                let _ = std::fs::remove_dir_all(state.cfg.data_dir.join("blobs").join(&project_id));
+                match state.db.purge_project(&project_id) {
+                    Ok(rooms) => {
+                        tracing::info!(project_id, rooms = rooms.len(), "deleted project purged")
+                    }
+                    Err(e) => tracing::warn!(project_id, error = %e, "project purge"),
+                }
+            }
+        }
+    });
+}
+
 /// Always-on (Jacob, 2026-10-15): every signed-in user's machine runs all the time. At boot and
 /// every minute, any box that is not awake or waking — and that its user did not stop by hand —
 /// is woken; a member without a box yet gets one. Manual Stop (`held_stopped`) and the kill

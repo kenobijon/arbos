@@ -322,6 +322,10 @@ enum ProjectCmd {
     Status {
         project: String,
     },
+    /// Soft-delete a project you own (workspace archived on the box; purged after 7 days).
+    Delete {
+        project: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -464,6 +468,9 @@ enum AdminCmd {
     },
     /// Re-adopt a retained sandbox for a user whose box row lost its sandbox (failed upgrade).
     RepairBox { user: String },
+    /// Stop and delete a user's sandbox and clear the box row (a signed-in user gets a fresh box
+    /// within a minute; a test user stays without one).
+    DeleteBox { user: String },
     /// Global kill switch: `on [--reason …]` makes the relay read-only, `off` clears it,
     /// `status` shows it with today's relay-wide spend.
     Killswitch {
@@ -562,6 +569,10 @@ async fn main() -> Result<()> {
                         );
                     }
                 }
+            }
+            ProjectCmd::Delete { project } => {
+                relay.delete(&format!("/projects/{project}")).await?;
+                println!("deleted {project} (archived on the box; purged in 7 days)");
             }
             ProjectCmd::Status { project } => {
                 let v = relay.get(&format!("/projects/{project}/status")).await?;
@@ -854,6 +865,10 @@ async fn main() -> Result<()> {
                             &serde_json::json!({}),
                         )
                         .await?;
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                AdminCmd::DeleteBox { user } => {
+                    let v = admin.delete(&format!("/admin/users/{user}/box")).await?;
                     println!("{}", serde_json::to_string_pretty(&v)?);
                 }
                 AdminCmd::Killswitch { action, reason } => {

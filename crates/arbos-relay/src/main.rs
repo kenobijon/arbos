@@ -301,6 +301,7 @@ async fn main() -> anyhow::Result<()> {
     credits::spawn_meter(state.clone()).await;
     boxes::spawn_always_on(state.clone()).await;
     upgrade::spawn_history_sweeper(state.clone()).await;
+    boxes::spawn_project_purge(state.clone()).await;
 
     let app = Router::new()
         .route("/healthz", get(api::healthz))
@@ -375,7 +376,9 @@ async fn main() -> anyhow::Result<()> {
         )
         .route(
             "/projects/{id}",
-            get(api::get_project).patch(api::patch_project),
+            get(api::get_project)
+                .patch(api::patch_project)
+                .delete(api::delete_project),
         )
         .route(
             "/projects/{id}/chats/{chat}",
@@ -423,7 +426,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/users/{id}/box/repair", post(upgrade::admin_repair))
         .route(
             "/admin/users/{id}/box",
-            axum::routing::put(api::admin_set_user_box),
+            axum::routing::put(api::admin_set_user_box).delete(api::admin_delete_user_box),
         )
         .route("/admin/users", get(admin::list_users))
         .route("/admin/users/test", post(admin::create_test_user))

@@ -739,6 +739,82 @@ pub async fn machine_stop(
     Ok(Json(json!({ "state": bs, "since": since, "held": true })).into_response())
 }
 
+/// `DELETE /projects/{id}` — owner only. Soft delete: the project leaves every list and the box
+/// drops the workspace on its next poll; the relay then moves `/work/<id>` to `/work/.archive/`
+/// on the box. Rows, chats, rooms, blobs and the archived folder are purged after seven days.
+pub async fn delete_project(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+) -> ApiResult {
+    let p = state
+        .db
+        .project(&id)
+        .map_err(internal)?
+        .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
+    if !state.owns(&principal, &p.id) || principal.is_box() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "only the owner can delete a project".into(),
+        ));
+    }
+    if !state.db.soft_delete_project(&p.id).map_err(internal)? {
+        return Err((StatusCode::NOT_FOUND, "no such project".to_owned()));
+    }
+    let _ = state.db.record_audit(
+        "relay-admin",
+        "project_deleted",
+        &json!({ "ts": now_ms(), "project_id": p.id, "user_id": p.user_id, "by": principal.device_name() }),
+    );
+    // Archive the workspace folder on the box (best effort; the purge removes it later).
+    let state2 = state.clone();
+    let pid = p.id.clone();
+    let owner = p.user_id.clone();
+    tokio::spawn(async move {
+        boxes::archive_workspace_dir(&state2, &owner, &pid).await;
+    });
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// `DELETE /admin/users/{id}/box` — stop and delete the user's sandbox and clear the row. A
+/// signed-in (non-test) user gets a fresh box from the always-on sweep within a minute; test
+/// users stay without one, so they can be deleted.
+pub async fn admin_delete_user_box(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+) -> ApiResult {
+    if !matches!(principal, Principal::Admin) {
+        return Err((StatusCode::FORBIDDEN, "admin only".into()));
+    }
+    let Some(sb) = state.db.user_box(&id).map_err(internal)? else {
+        return Err((StatusCode::NOT_FOUND, "no box for that user".into()));
+    };
+    let mut deleted_sandbox = None;
+    if let (Some(dt), Some(sid)) = (&state.daytona, &sb.sandbox_id) {
+        if sb.provider == "daytona" {
+            let _ = dt.stop(sid, true).await;
+            match dt.delete(sid).await {
+                Ok(_) => deleted_sandbox = Some(sid.clone()),
+                Err(e) if e.to_string().contains("404") => deleted_sandbox = Some(sid.clone()),
+                Err(e) => return Err((StatusCode::BAD_GATEWAY, format!("delete sandbox: {e}"))),
+            }
+        }
+    }
+    if sb.provider != "daytona" {
+        let _ = boxes::stop_box(&state, &id, true).await;
+    }
+    state.db.delete_box_row(&id).map_err(internal)?;
+    state.box_states.write().await.remove(&id);
+    state.box_conns.lock().await.remove(&id);
+    let _ = state.db.record_audit(
+        "relay-admin",
+        "box_deleted",
+        &json!({ "ts": now_ms(), "user_id": id, "sandbox": deleted_sandbox }),
+    );
+    Ok(Json(json!({ "user_id": id, "deleted_sandbox": deleted_sandbox })).into_response())
+}
+
 /// `POST /machine/restart`: stop and start the caller's box in one call (no `held`; the
 /// always-on sweep would re-wake it anyway). 202 with the state right after the start was kicked.
 pub async fn machine_restart(State(state): State<AppState>, principal: Principal) -> ApiResult {

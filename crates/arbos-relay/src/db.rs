@@ -426,6 +426,7 @@ impl Db {
         );
         let _ = c.execute("ALTER TABLE chats ADD COLUMN closed_at INTEGER", []);
         let _ = c.execute("ALTER TABLE projects ADD COLUMN avatar TEXT", []);
+        let _ = c.execute("ALTER TABLE projects ADD COLUMN deleted_at INTEGER", []);
         // One box per user: devices and projects belong to a user; legacy sandboxes record where
         // their /work went.
         let _ = c.execute(
@@ -504,12 +505,13 @@ impl Db {
                    color TEXT NOT NULL DEFAULT '#8b7cf6',
                    user_id TEXT NOT NULL DEFAULT 'u_default',
                    workspace_state TEXT NOT NULL DEFAULT 'stopped',
-                   avatar TEXT
+                   avatar TEXT,
+                   deleted_at INTEGER
                  );
                  INSERT INTO projects_new(id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily,
-                                          project_token_hash, color, user_id, workspace_state, avatar)
+                                          project_token_hash, color, user_id, workspace_state, avatar, deleted_at)
                    SELECT id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily,
-                          project_token_hash, color, user_id, workspace_state, avatar FROM projects;
+                          project_token_hash, color, user_id, workspace_state, avatar, deleted_at FROM projects;
                  DROP TABLE projects;
                  ALTER TABLE projects_new RENAME TO projects;
                  COMMIT;",
@@ -650,7 +652,7 @@ impl Db {
         self.with(|c| {
             c.query_row(
                 &format!(
-                    "SELECT {} FROM projects WHERE id = ?1 OR name = ?1 ORDER BY (id = ?1) DESC, last_active_at DESC LIMIT 1",
+                    "SELECT {} FROM projects WHERE (id = ?1 OR name = ?1) AND deleted_at IS NULL ORDER BY (id = ?1) DESC, last_active_at DESC LIMIT 1",
                     Self::PROJECT_COLS
                 ),
                 params![id_or_name],
@@ -664,7 +666,7 @@ impl Db {
         self.with(|c| {
             c.query_row(
                 &format!(
-                    "SELECT {} FROM projects WHERE user_id = ?1 AND name = ?2",
+                    "SELECT {} FROM projects WHERE user_id = ?1 AND name = ?2 AND deleted_at IS NULL",
                     Self::PROJECT_COLS
                 ),
                 params![user_id, name],
@@ -674,10 +676,84 @@ impl Db {
         })
     }
 
+    /// Soft delete (D55 spirit: nothing is lost for seven days). The project leaves every list
+    /// at once; the row, chats, rooms, and blobs go in `purge_deleted_projects`.
+    pub fn soft_delete_project(&self, id: &str) -> Result<bool> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE projects SET deleted_at = ?2 WHERE id = ?1 AND deleted_at IS NULL",
+                params![id, now_ms()],
+            )
+            .map(|n| n > 0)
+        })
+    }
+
+    /// `(id, user_id)` of projects soft-deleted before `before_ms`.
+    pub fn projects_deleted_before(&self, before_ms: i64) -> Result<Vec<(String, String)>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT id, user_id FROM projects WHERE deleted_at IS NOT NULL AND deleted_at < ?1",
+            )?;
+            let rows = st.query_map(params![before_ms], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect()
+        })
+    }
+
+    /// Remove a project and everything keyed to it (chats, rooms, blob index, pushes, usage,
+    /// routines, audit, people-chat agent memberships, project members).
+    pub fn purge_project(&self, id: &str) -> Result<Vec<String>> {
+        self.with(|c| {
+            let mut st = c.prepare("SELECT id FROM chats WHERE project_id = ?1")?;
+            let chats: Vec<String> = st
+                .query_map(params![id], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            let mut rooms: Vec<String> = chats.iter().map(|ch| format!("{id}/{ch}")).collect();
+            rooms.push(format!("{id}/project"));
+            for room in &rooms {
+                c.execute("DELETE FROM rows WHERE room = ?1", params![room])?;
+                c.execute("DELETE FROM checkpoints WHERE room = ?1", params![room])?;
+                c.execute("DELETE FROM room_seq WHERE room = ?1", params![room])?;
+            }
+            for table in [
+                "chats",
+                "blobs",
+                "usage",
+                "push_queue",
+                "timings",
+                "routines",
+                "audit",
+                "wake_jobs",
+                "sandboxes",
+            ] {
+                let _ = c.execute(
+                    &format!("DELETE FROM {table} WHERE project_id = ?1"),
+                    params![id],
+                );
+            }
+            let _ = c.execute(
+                "DELETE FROM people_members WHERE member = ?1",
+                params![format!("agent:{id}")],
+            );
+            let _ = c.execute(
+                "DELETE FROM project_members WHERE project_id = ?1",
+                params![id],
+            );
+            c.execute("DELETE FROM projects WHERE id = ?1", params![id])?;
+            Ok(rooms)
+        })
+    }
+
+    pub fn delete_box_row(&self, user_id: &str) -> Result<bool> {
+        self.with(|c| {
+            c.execute("DELETE FROM boxes WHERE user_id = ?1", params![user_id])
+                .map(|n| n > 0)
+        })
+    }
+
     pub fn list_projects(&self) -> Result<Vec<Project>> {
         self.with(|c| {
             let mut st = c.prepare(&format!(
-                "SELECT {} FROM projects ORDER BY last_active_at DESC",
+                "SELECT {} FROM projects WHERE deleted_at IS NULL ORDER BY last_active_at DESC",
                 Self::PROJECT_COLS
             ))?;
             let rows = st.query_map([], Self::row_to_project)?;
@@ -1020,7 +1096,7 @@ impl Db {
     pub fn projects_of_user(&self, user_id: &str) -> Result<Vec<Project>> {
         self.with(|c| {
             let mut st = c.prepare(&format!(
-                "SELECT {} FROM projects WHERE user_id = ?1 ORDER BY last_active_at DESC",
+                "SELECT {} FROM projects WHERE user_id = ?1 AND deleted_at IS NULL ORDER BY last_active_at DESC",
                 Self::PROJECT_COLS
             ))?;
             let rows = st.query_map(params![user_id], Self::row_to_project)?;
