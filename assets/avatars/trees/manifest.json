@@ -1,0 +1,1020 @@
+{
+  "schema_version": 1,
+  "notes": [
+    "Order of `characters` is a contract: the relay picks slugs[fnv1a64(project_id) % n]. Append only.",
+    "`ready: false` means the art is a placeholder and the files may not exist yet.",
+    "SVG/PNG: 64x64 viewBox, black #000 disc with a 2 px white #fff ring, white tree, black face; transparent outside the disc.",
+    "Lottie: 60 fps, shapes only, no expressions, no raster, no masks; `idle` and `working` loop seamlessly, `reply` plays once.",
+    "Frame strips: horizontal row of square frames sampled from the Lottie at 30 fps; `1x` = 28 px, `2x` = 56 px, `rail` = 72 px, `rail@2x` = 144 px; transparent outside the disc."
+  ],
+  "style": {
+    "background": "#000000",
+    "foreground": "#ffffff",
+    "ring_px": 2,
+    "viewbox": [
+      0,
+      0,
+      64,
+      64
+    ]
+  },
+  "default_size": 56,
+  "png_sizes": [
+    56,
+    112,
+    224,
+    512
+  ],
+  "states": {
+    "idle": {
+      "fps": 60,
+      "frames": 180,
+      "duration_ms": 3000,
+      "loop": true
+    },
+    "working": {
+      "fps": 60,
+      "frames": 180,
+      "duration_ms": 3000,
+      "loop": true
+    },
+    "reply": {
+      "fps": 60,
+      "frames": 60,
+      "duration_ms": 1000,
+      "loop": false
+    }
+  },
+  "frame_strips": {
+    "fps": 30,
+    "layout": "horizontal",
+    "sizes": {
+      "1x": 28,
+      "2x": 56,
+      "rail": 72,
+      "rail@2x": 144
+    }
+  },
+  "characters": [
+    {
+      "slug": "oak",
+      "name": "Oakley",
+      "personality": "steady",
+      "default_face": "calm",
+      "ready": false,
+      "svg": "assets/avatars/trees/oak.svg",
+      "png": {
+        "56": "assets/avatars/trees/png/oak-56.png",
+        "112": "assets/avatars/trees/png/oak-112.png",
+        "224": "assets/avatars/trees/png/oak-224.png",
+        "512": "assets/avatars/trees/png/oak-512.png"
+      },
+      "lottie": {
+        "idle": "assets/avatars/trees/lottie/oak/idle.json",
+        "working": "assets/avatars/trees/lottie/oak/working.json",
+        "reply": "assets/avatars/trees/lottie/oak/reply.json"
+      },
+      "frames": {
+        "idle": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/oak-idle.png",
+          "2x": "assets/avatars/trees/frames/oak-idle@2x.png",
+          "rail": "assets/avatars/trees/frames/oak-idle-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/oak-idle-rail@2x.png"
+        },
+        "working": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/oak-working.png",
+          "2x": "assets/avatars/trees/frames/oak-working@2x.png",
+          "rail": "assets/avatars/trees/frames/oak-working-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/oak-working-rail@2x.png"
+        },
+        "reply": {
+          "frames": 30,
+          "fps": 30,
+          "loop": false,
+          "1x": "assets/avatars/trees/frames/oak-reply.png",
+          "2x": "assets/avatars/trees/frames/oak-reply@2x.png",
+          "rail": "assets/avatars/trees/frames/oak-reply-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/oak-reply-rail@2x.png"
+        }
+      }
+    },
+    {
+      "slug": "pine",
+      "name": "Pip",
+      "personality": "focused",
+      "default_face": "focused",
+      "ready": false,
+      "svg": "assets/avatars/trees/pine.svg",
+      "png": {
+        "56": "assets/avatars/trees/png/pine-56.png",
+        "112": "assets/avatars/trees/png/pine-112.png",
+        "224": "assets/avatars/trees/png/pine-224.png",
+        "512": "assets/avatars/trees/png/pine-512.png"
+      },
+      "lottie": {
+        "idle": "assets/avatars/trees/lottie/pine/idle.json",
+        "working": "assets/avatars/trees/lottie/pine/working.json",
+        "reply": "assets/avatars/trees/lottie/pine/reply.json"
+      },
+      "frames": {
+        "idle": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/pine-idle.png",
+          "2x": "assets/avatars/trees/frames/pine-idle@2x.png",
+          "rail": "assets/avatars/trees/frames/pine-idle-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/pine-idle-rail@2x.png"
+        },
+        "working": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/pine-working.png",
+          "2x": "assets/avatars/trees/frames/pine-working@2x.png",
+          "rail": "assets/avatars/trees/frames/pine-working-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/pine-working-rail@2x.png"
+        },
+        "reply": {
+          "frames": 30,
+          "fps": 30,
+          "loop": false,
+          "1x": "assets/avatars/trees/frames/pine-reply.png",
+          "2x": "assets/avatars/trees/frames/pine-reply@2x.png",
+          "rail": "assets/avatars/trees/frames/pine-reply-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/pine-reply-rail@2x.png"
+        }
+      }
+    },
+    {
+      "slug": "lollipop",
+      "name": "Lolli",
+      "personality": "cheerful",
+      "default_face": "happy",
+      "ready": false,
+      "svg": "assets/avatars/trees/lollipop.svg",
+      "png": {
+        "56": "assets/avatars/trees/png/lollipop-56.png",
+        "112": "assets/avatars/trees/png/lollipop-112.png",
+        "224": "assets/avatars/trees/png/lollipop-224.png",
+        "512": "assets/avatars/trees/png/lollipop-512.png"
+      },
+      "lottie": {
+        "idle": "assets/avatars/trees/lottie/lollipop/idle.json",
+        "working": "assets/avatars/trees/lottie/lollipop/working.json",
+        "reply": "assets/avatars/trees/lottie/lollipop/reply.json"
+      },
+      "frames": {
+        "idle": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/lollipop-idle.png",
+          "2x": "assets/avatars/trees/frames/lollipop-idle@2x.png",
+          "rail": "assets/avatars/trees/frames/lollipop-idle-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/lollipop-idle-rail@2x.png"
+        },
+        "working": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/lollipop-working.png",
+          "2x": "assets/avatars/trees/frames/lollipop-working@2x.png",
+          "rail": "assets/avatars/trees/frames/lollipop-working-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/lollipop-working-rail@2x.png"
+        },
+        "reply": {
+          "frames": 30,
+          "fps": 30,
+          "loop": false,
+          "1x": "assets/avatars/trees/frames/lollipop-reply.png",
+          "2x": "assets/avatars/trees/frames/lollipop-reply@2x.png",
+          "rail": "assets/avatars/trees/frames/lollipop-reply-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/lollipop-reply-rail@2x.png"
+        }
+      }
+    },
+    {
+      "slug": "fractal",
+      "name": "Frax",
+      "personality": "curious",
+      "default_face": "surprised",
+      "ready": false,
+      "svg": "assets/avatars/trees/fractal.svg",
+      "png": {
+        "56": "assets/avatars/trees/png/fractal-56.png",
+        "112": "assets/avatars/trees/png/fractal-112.png",
+        "224": "assets/avatars/trees/png/fractal-224.png",
+        "512": "assets/avatars/trees/png/fractal-512.png"
+      },
+      "lottie": {
+        "idle": "assets/avatars/trees/lottie/fractal/idle.json",
+        "working": "assets/avatars/trees/lottie/fractal/working.json",
+        "reply": "assets/avatars/trees/lottie/fractal/reply.json"
+      },
+      "frames": {
+        "idle": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/fractal-idle.png",
+          "2x": "assets/avatars/trees/frames/fractal-idle@2x.png",
+          "rail": "assets/avatars/trees/frames/fractal-idle-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/fractal-idle-rail@2x.png"
+        },
+        "working": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/fractal-working.png",
+          "2x": "assets/avatars/trees/frames/fractal-working@2x.png",
+          "rail": "assets/avatars/trees/frames/fractal-working-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/fractal-working-rail@2x.png"
+        },
+        "reply": {
+          "frames": 30,
+          "fps": 30,
+          "loop": false,
+          "1x": "assets/avatars/trees/frames/fractal-reply.png",
+          "2x": "assets/avatars/trees/frames/fractal-reply@2x.png",
+          "rail": "assets/avatars/trees/frames/fractal-reply-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/fractal-reply-rail@2x.png"
+        }
+      }
+    },
+    {
+      "slug": "mushroom",
+      "name": "Morel",
+      "personality": "playful",
+      "default_face": "winking",
+      "ready": false,
+      "svg": "assets/avatars/trees/mushroom.svg",
+      "png": {
+        "56": "assets/avatars/trees/png/mushroom-56.png",
+        "112": "assets/avatars/trees/png/mushroom-112.png",
+        "224": "assets/avatars/trees/png/mushroom-224.png",
+        "512": "assets/avatars/trees/png/mushroom-512.png"
+      },
+      "lottie": {
+        "idle": "assets/avatars/trees/lottie/mushroom/idle.json",
+        "working": "assets/avatars/trees/lottie/mushroom/working.json",
+        "reply": "assets/avatars/trees/lottie/mushroom/reply.json"
+      },
+      "frames": {
+        "idle": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/mushroom-idle.png",
+          "2x": "assets/avatars/trees/frames/mushroom-idle@2x.png",
+          "rail": "assets/avatars/trees/frames/mushroom-idle-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/mushroom-idle-rail@2x.png"
+        },
+        "working": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/mushroom-working.png",
+          "2x": "assets/avatars/trees/frames/mushroom-working@2x.png",
+          "rail": "assets/avatars/trees/frames/mushroom-working-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/mushroom-working-rail@2x.png"
+        },
+        "reply": {
+          "frames": 30,
+          "fps": 30,
+          "loop": false,
+          "1x": "assets/avatars/trees/frames/mushroom-reply.png",
+          "2x": "assets/avatars/trees/frames/mushroom-reply@2x.png",
+          "rail": "assets/avatars/trees/frames/mushroom-reply-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/mushroom-reply-rail@2x.png"
+        }
+      }
+    },
+    {
+      "slug": "cypress",
+      "name": "Cy",
+      "personality": "determined",
+      "default_face": "determined",
+      "ready": false,
+      "svg": "assets/avatars/trees/cypress.svg",
+      "png": {
+        "56": "assets/avatars/trees/png/cypress-56.png",
+        "112": "assets/avatars/trees/png/cypress-112.png",
+        "224": "assets/avatars/trees/png/cypress-224.png",
+        "512": "assets/avatars/trees/png/cypress-512.png"
+      },
+      "lottie": {
+        "idle": "assets/avatars/trees/lottie/cypress/idle.json",
+        "working": "assets/avatars/trees/lottie/cypress/working.json",
+        "reply": "assets/avatars/trees/lottie/cypress/reply.json"
+      },
+      "frames": {
+        "idle": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/cypress-idle.png",
+          "2x": "assets/avatars/trees/frames/cypress-idle@2x.png",
+          "rail": "assets/avatars/trees/frames/cypress-idle-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/cypress-idle-rail@2x.png"
+        },
+        "working": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/cypress-working.png",
+          "2x": "assets/avatars/trees/frames/cypress-working@2x.png",
+          "rail": "assets/avatars/trees/frames/cypress-working-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/cypress-working-rail@2x.png"
+        },
+        "reply": {
+          "frames": 30,
+          "fps": 30,
+          "loop": false,
+          "1x": "assets/avatars/trees/frames/cypress-reply.png",
+          "2x": "assets/avatars/trees/frames/cypress-reply@2x.png",
+          "rail": "assets/avatars/trees/frames/cypress-reply-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/cypress-reply-rail@2x.png"
+        }
+      }
+    },
+    {
+      "slug": "willow",
+      "name": "Willa",
+      "personality": "gentle",
+      "default_face": "calm",
+      "ready": false,
+      "svg": "assets/avatars/trees/willow.svg",
+      "png": {
+        "56": "assets/avatars/trees/png/willow-56.png",
+        "112": "assets/avatars/trees/png/willow-112.png",
+        "224": "assets/avatars/trees/png/willow-224.png",
+        "512": "assets/avatars/trees/png/willow-512.png"
+      },
+      "lottie": {
+        "idle": "assets/avatars/trees/lottie/willow/idle.json",
+        "working": "assets/avatars/trees/lottie/willow/working.json",
+        "reply": "assets/avatars/trees/lottie/willow/reply.json"
+      },
+      "frames": {
+        "idle": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/willow-idle.png",
+          "2x": "assets/avatars/trees/frames/willow-idle@2x.png",
+          "rail": "assets/avatars/trees/frames/willow-idle-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/willow-idle-rail@2x.png"
+        },
+        "working": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/willow-working.png",
+          "2x": "assets/avatars/trees/frames/willow-working@2x.png",
+          "rail": "assets/avatars/trees/frames/willow-working-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/willow-working-rail@2x.png"
+        },
+        "reply": {
+          "frames": 30,
+          "fps": 30,
+          "loop": false,
+          "1x": "assets/avatars/trees/frames/willow-reply.png",
+          "2x": "assets/avatars/trees/frames/willow-reply@2x.png",
+          "rail": "assets/avatars/trees/frames/willow-reply-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/willow-reply-rail@2x.png"
+        }
+      }
+    },
+    {
+      "slug": "palm",
+      "name": "Palmer",
+      "personality": "laid-back",
+      "default_face": "winking",
+      "ready": false,
+      "svg": "assets/avatars/trees/palm.svg",
+      "png": {
+        "56": "assets/avatars/trees/png/palm-56.png",
+        "112": "assets/avatars/trees/png/palm-112.png",
+        "224": "assets/avatars/trees/png/palm-224.png",
+        "512": "assets/avatars/trees/png/palm-512.png"
+      },
+      "lottie": {
+        "idle": "assets/avatars/trees/lottie/palm/idle.json",
+        "working": "assets/avatars/trees/lottie/palm/working.json",
+        "reply": "assets/avatars/trees/lottie/palm/reply.json"
+      },
+      "frames": {
+        "idle": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/palm-idle.png",
+          "2x": "assets/avatars/trees/frames/palm-idle@2x.png",
+          "rail": "assets/avatars/trees/frames/palm-idle-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/palm-idle-rail@2x.png"
+        },
+        "working": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/palm-working.png",
+          "2x": "assets/avatars/trees/frames/palm-working@2x.png",
+          "rail": "assets/avatars/trees/frames/palm-working-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/palm-working-rail@2x.png"
+        },
+        "reply": {
+          "frames": 30,
+          "fps": 30,
+          "loop": false,
+          "1x": "assets/avatars/trees/frames/palm-reply.png",
+          "2x": "assets/avatars/trees/frames/palm-reply@2x.png",
+          "rail": "assets/avatars/trees/frames/palm-reply-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/palm-reply-rail@2x.png"
+        }
+      }
+    },
+    {
+      "slug": "bonsai",
+      "name": "Bon",
+      "personality": "patient",
+      "default_face": "calm",
+      "ready": false,
+      "svg": "assets/avatars/trees/bonsai.svg",
+      "png": {
+        "56": "assets/avatars/trees/png/bonsai-56.png",
+        "112": "assets/avatars/trees/png/bonsai-112.png",
+        "224": "assets/avatars/trees/png/bonsai-224.png",
+        "512": "assets/avatars/trees/png/bonsai-512.png"
+      },
+      "lottie": {
+        "idle": "assets/avatars/trees/lottie/bonsai/idle.json",
+        "working": "assets/avatars/trees/lottie/bonsai/working.json",
+        "reply": "assets/avatars/trees/lottie/bonsai/reply.json"
+      },
+      "frames": {
+        "idle": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/bonsai-idle.png",
+          "2x": "assets/avatars/trees/frames/bonsai-idle@2x.png",
+          "rail": "assets/avatars/trees/frames/bonsai-idle-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/bonsai-idle-rail@2x.png"
+        },
+        "working": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/bonsai-working.png",
+          "2x": "assets/avatars/trees/frames/bonsai-working@2x.png",
+          "rail": "assets/avatars/trees/frames/bonsai-working-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/bonsai-working-rail@2x.png"
+        },
+        "reply": {
+          "frames": 30,
+          "fps": 30,
+          "loop": false,
+          "1x": "assets/avatars/trees/frames/bonsai-reply.png",
+          "2x": "assets/avatars/trees/frames/bonsai-reply@2x.png",
+          "rail": "assets/avatars/trees/frames/bonsai-reply-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/bonsai-reply-rail@2x.png"
+        }
+      }
+    },
+    {
+      "slug": "birch",
+      "name": "Birdie",
+      "personality": "bright",
+      "default_face": "happy",
+      "ready": false,
+      "svg": "assets/avatars/trees/birch.svg",
+      "png": {
+        "56": "assets/avatars/trees/png/birch-56.png",
+        "112": "assets/avatars/trees/png/birch-112.png",
+        "224": "assets/avatars/trees/png/birch-224.png",
+        "512": "assets/avatars/trees/png/birch-512.png"
+      },
+      "lottie": {
+        "idle": "assets/avatars/trees/lottie/birch/idle.json",
+        "working": "assets/avatars/trees/lottie/birch/working.json",
+        "reply": "assets/avatars/trees/lottie/birch/reply.json"
+      },
+      "frames": {
+        "idle": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/birch-idle.png",
+          "2x": "assets/avatars/trees/frames/birch-idle@2x.png",
+          "rail": "assets/avatars/trees/frames/birch-idle-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/birch-idle-rail@2x.png"
+        },
+        "working": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/birch-working.png",
+          "2x": "assets/avatars/trees/frames/birch-working@2x.png",
+          "rail": "assets/avatars/trees/frames/birch-working-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/birch-working-rail@2x.png"
+        },
+        "reply": {
+          "frames": 30,
+          "fps": 30,
+          "loop": false,
+          "1x": "assets/avatars/trees/frames/birch-reply.png",
+          "2x": "assets/avatars/trees/frames/birch-reply@2x.png",
+          "rail": "assets/avatars/trees/frames/birch-reply-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/birch-reply-rail@2x.png"
+        }
+      }
+    },
+    {
+      "slug": "baobab",
+      "name": "Bao",
+      "personality": "wise",
+      "default_face": "calm",
+      "ready": false,
+      "svg": "assets/avatars/trees/baobab.svg",
+      "png": {
+        "56": "assets/avatars/trees/png/baobab-56.png",
+        "112": "assets/avatars/trees/png/baobab-112.png",
+        "224": "assets/avatars/trees/png/baobab-224.png",
+        "512": "assets/avatars/trees/png/baobab-512.png"
+      },
+      "lottie": {
+        "idle": "assets/avatars/trees/lottie/baobab/idle.json",
+        "working": "assets/avatars/trees/lottie/baobab/working.json",
+        "reply": "assets/avatars/trees/lottie/baobab/reply.json"
+      },
+      "frames": {
+        "idle": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/baobab-idle.png",
+          "2x": "assets/avatars/trees/frames/baobab-idle@2x.png",
+          "rail": "assets/avatars/trees/frames/baobab-idle-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/baobab-idle-rail@2x.png"
+        },
+        "working": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/baobab-working.png",
+          "2x": "assets/avatars/trees/frames/baobab-working@2x.png",
+          "rail": "assets/avatars/trees/frames/baobab-working-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/baobab-working-rail@2x.png"
+        },
+        "reply": {
+          "frames": 30,
+          "fps": 30,
+          "loop": false,
+          "1x": "assets/avatars/trees/frames/baobab-reply.png",
+          "2x": "assets/avatars/trees/frames/baobab-reply@2x.png",
+          "rail": "assets/avatars/trees/frames/baobab-reply-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/baobab-reply-rail@2x.png"
+        }
+      }
+    },
+    {
+      "slug": "sapling",
+      "name": "Sprout",
+      "personality": "eager",
+      "default_face": "surprised",
+      "ready": false,
+      "svg": "assets/avatars/trees/sapling.svg",
+      "png": {
+        "56": "assets/avatars/trees/png/sapling-56.png",
+        "112": "assets/avatars/trees/png/sapling-112.png",
+        "224": "assets/avatars/trees/png/sapling-224.png",
+        "512": "assets/avatars/trees/png/sapling-512.png"
+      },
+      "lottie": {
+        "idle": "assets/avatars/trees/lottie/sapling/idle.json",
+        "working": "assets/avatars/trees/lottie/sapling/working.json",
+        "reply": "assets/avatars/trees/lottie/sapling/reply.json"
+      },
+      "frames": {
+        "idle": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/sapling-idle.png",
+          "2x": "assets/avatars/trees/frames/sapling-idle@2x.png",
+          "rail": "assets/avatars/trees/frames/sapling-idle-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/sapling-idle-rail@2x.png"
+        },
+        "working": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/sapling-working.png",
+          "2x": "assets/avatars/trees/frames/sapling-working@2x.png",
+          "rail": "assets/avatars/trees/frames/sapling-working-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/sapling-working-rail@2x.png"
+        },
+        "reply": {
+          "frames": 30,
+          "fps": 30,
+          "loop": false,
+          "1x": "assets/avatars/trees/frames/sapling-reply.png",
+          "2x": "assets/avatars/trees/frames/sapling-reply@2x.png",
+          "rail": "assets/avatars/trees/frames/sapling-reply-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/sapling-reply-rail@2x.png"
+        }
+      }
+    },
+    {
+      "slug": "maple",
+      "name": "Mabel",
+      "personality": "warm",
+      "default_face": "happy",
+      "ready": false,
+      "svg": "assets/avatars/trees/maple.svg",
+      "png": {
+        "56": "assets/avatars/trees/png/maple-56.png",
+        "112": "assets/avatars/trees/png/maple-112.png",
+        "224": "assets/avatars/trees/png/maple-224.png",
+        "512": "assets/avatars/trees/png/maple-512.png"
+      },
+      "lottie": {
+        "idle": "assets/avatars/trees/lottie/maple/idle.json",
+        "working": "assets/avatars/trees/lottie/maple/working.json",
+        "reply": "assets/avatars/trees/lottie/maple/reply.json"
+      },
+      "frames": {
+        "idle": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/maple-idle.png",
+          "2x": "assets/avatars/trees/frames/maple-idle@2x.png",
+          "rail": "assets/avatars/trees/frames/maple-idle-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/maple-idle-rail@2x.png"
+        },
+        "working": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/maple-working.png",
+          "2x": "assets/avatars/trees/frames/maple-working@2x.png",
+          "rail": "assets/avatars/trees/frames/maple-working-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/maple-working-rail@2x.png"
+        },
+        "reply": {
+          "frames": 30,
+          "fps": 30,
+          "loop": false,
+          "1x": "assets/avatars/trees/frames/maple-reply.png",
+          "2x": "assets/avatars/trees/frames/maple-reply@2x.png",
+          "rail": "assets/avatars/trees/frames/maple-reply-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/maple-reply-rail@2x.png"
+        }
+      }
+    },
+    {
+      "slug": "acacia",
+      "name": "Ace",
+      "personality": "sharp",
+      "default_face": "focused",
+      "ready": false,
+      "svg": "assets/avatars/trees/acacia.svg",
+      "png": {
+        "56": "assets/avatars/trees/png/acacia-56.png",
+        "112": "assets/avatars/trees/png/acacia-112.png",
+        "224": "assets/avatars/trees/png/acacia-224.png",
+        "512": "assets/avatars/trees/png/acacia-512.png"
+      },
+      "lottie": {
+        "idle": "assets/avatars/trees/lottie/acacia/idle.json",
+        "working": "assets/avatars/trees/lottie/acacia/working.json",
+        "reply": "assets/avatars/trees/lottie/acacia/reply.json"
+      },
+      "frames": {
+        "idle": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/acacia-idle.png",
+          "2x": "assets/avatars/trees/frames/acacia-idle@2x.png",
+          "rail": "assets/avatars/trees/frames/acacia-idle-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/acacia-idle-rail@2x.png"
+        },
+        "working": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/acacia-working.png",
+          "2x": "assets/avatars/trees/frames/acacia-working@2x.png",
+          "rail": "assets/avatars/trees/frames/acacia-working-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/acacia-working-rail@2x.png"
+        },
+        "reply": {
+          "frames": 30,
+          "fps": 30,
+          "loop": false,
+          "1x": "assets/avatars/trees/frames/acacia-reply.png",
+          "2x": "assets/avatars/trees/frames/acacia-reply@2x.png",
+          "rail": "assets/avatars/trees/frames/acacia-reply-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/acacia-reply-rail@2x.png"
+        }
+      }
+    },
+    {
+      "slug": "spruce",
+      "name": "Bruce",
+      "personality": "dependable",
+      "default_face": "determined",
+      "ready": false,
+      "svg": "assets/avatars/trees/spruce.svg",
+      "png": {
+        "56": "assets/avatars/trees/png/spruce-56.png",
+        "112": "assets/avatars/trees/png/spruce-112.png",
+        "224": "assets/avatars/trees/png/spruce-224.png",
+        "512": "assets/avatars/trees/png/spruce-512.png"
+      },
+      "lottie": {
+        "idle": "assets/avatars/trees/lottie/spruce/idle.json",
+        "working": "assets/avatars/trees/lottie/spruce/working.json",
+        "reply": "assets/avatars/trees/lottie/spruce/reply.json"
+      },
+      "frames": {
+        "idle": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/spruce-idle.png",
+          "2x": "assets/avatars/trees/frames/spruce-idle@2x.png",
+          "rail": "assets/avatars/trees/frames/spruce-idle-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/spruce-idle-rail@2x.png"
+        },
+        "working": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/spruce-working.png",
+          "2x": "assets/avatars/trees/frames/spruce-working@2x.png",
+          "rail": "assets/avatars/trees/frames/spruce-working-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/spruce-working-rail@2x.png"
+        },
+        "reply": {
+          "frames": 30,
+          "fps": 30,
+          "loop": false,
+          "1x": "assets/avatars/trees/frames/spruce-reply.png",
+          "2x": "assets/avatars/trees/frames/spruce-reply@2x.png",
+          "rail": "assets/avatars/trees/frames/spruce-reply-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/spruce-reply-rail@2x.png"
+        }
+      }
+    },
+    {
+      "slug": "cherry",
+      "name": "Blossom",
+      "personality": "dreamy",
+      "default_face": "winking",
+      "ready": false,
+      "svg": "assets/avatars/trees/cherry.svg",
+      "png": {
+        "56": "assets/avatars/trees/png/cherry-56.png",
+        "112": "assets/avatars/trees/png/cherry-112.png",
+        "224": "assets/avatars/trees/png/cherry-224.png",
+        "512": "assets/avatars/trees/png/cherry-512.png"
+      },
+      "lottie": {
+        "idle": "assets/avatars/trees/lottie/cherry/idle.json",
+        "working": "assets/avatars/trees/lottie/cherry/working.json",
+        "reply": "assets/avatars/trees/lottie/cherry/reply.json"
+      },
+      "frames": {
+        "idle": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/cherry-idle.png",
+          "2x": "assets/avatars/trees/frames/cherry-idle@2x.png",
+          "rail": "assets/avatars/trees/frames/cherry-idle-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/cherry-idle-rail@2x.png"
+        },
+        "working": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/cherry-working.png",
+          "2x": "assets/avatars/trees/frames/cherry-working@2x.png",
+          "rail": "assets/avatars/trees/frames/cherry-working-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/cherry-working-rail@2x.png"
+        },
+        "reply": {
+          "frames": 30,
+          "fps": 30,
+          "loop": false,
+          "1x": "assets/avatars/trees/frames/cherry-reply.png",
+          "2x": "assets/avatars/trees/frames/cherry-reply@2x.png",
+          "rail": "assets/avatars/trees/frames/cherry-reply-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/cherry-reply-rail@2x.png"
+        }
+      }
+    },
+    {
+      "slug": "cactus",
+      "name": "Spike",
+      "personality": "tough",
+      "default_face": "determined",
+      "ready": false,
+      "svg": "assets/avatars/trees/cactus.svg",
+      "png": {
+        "56": "assets/avatars/trees/png/cactus-56.png",
+        "112": "assets/avatars/trees/png/cactus-112.png",
+        "224": "assets/avatars/trees/png/cactus-224.png",
+        "512": "assets/avatars/trees/png/cactus-512.png"
+      },
+      "lottie": {
+        "idle": "assets/avatars/trees/lottie/cactus/idle.json",
+        "working": "assets/avatars/trees/lottie/cactus/working.json",
+        "reply": "assets/avatars/trees/lottie/cactus/reply.json"
+      },
+      "frames": {
+        "idle": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/cactus-idle.png",
+          "2x": "assets/avatars/trees/frames/cactus-idle@2x.png",
+          "rail": "assets/avatars/trees/frames/cactus-idle-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/cactus-idle-rail@2x.png"
+        },
+        "working": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/cactus-working.png",
+          "2x": "assets/avatars/trees/frames/cactus-working@2x.png",
+          "rail": "assets/avatars/trees/frames/cactus-working-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/cactus-working-rail@2x.png"
+        },
+        "reply": {
+          "frames": 30,
+          "fps": 30,
+          "loop": false,
+          "1x": "assets/avatars/trees/frames/cactus-reply.png",
+          "2x": "assets/avatars/trees/frames/cactus-reply@2x.png",
+          "rail": "assets/avatars/trees/frames/cactus-reply-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/cactus-reply-rail@2x.png"
+        }
+      }
+    },
+    {
+      "slug": "sequoia",
+      "name": "Red",
+      "personality": "grounded",
+      "default_face": "calm",
+      "ready": false,
+      "svg": "assets/avatars/trees/sequoia.svg",
+      "png": {
+        "56": "assets/avatars/trees/png/sequoia-56.png",
+        "112": "assets/avatars/trees/png/sequoia-112.png",
+        "224": "assets/avatars/trees/png/sequoia-224.png",
+        "512": "assets/avatars/trees/png/sequoia-512.png"
+      },
+      "lottie": {
+        "idle": "assets/avatars/trees/lottie/sequoia/idle.json",
+        "working": "assets/avatars/trees/lottie/sequoia/working.json",
+        "reply": "assets/avatars/trees/lottie/sequoia/reply.json"
+      },
+      "frames": {
+        "idle": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/sequoia-idle.png",
+          "2x": "assets/avatars/trees/frames/sequoia-idle@2x.png",
+          "rail": "assets/avatars/trees/frames/sequoia-idle-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/sequoia-idle-rail@2x.png"
+        },
+        "working": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/sequoia-working.png",
+          "2x": "assets/avatars/trees/frames/sequoia-working@2x.png",
+          "rail": "assets/avatars/trees/frames/sequoia-working-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/sequoia-working-rail@2x.png"
+        },
+        "reply": {
+          "frames": 30,
+          "fps": 30,
+          "loop": false,
+          "1x": "assets/avatars/trees/frames/sequoia-reply.png",
+          "2x": "assets/avatars/trees/frames/sequoia-reply@2x.png",
+          "rail": "assets/avatars/trees/frames/sequoia-reply-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/sequoia-reply-rail@2x.png"
+        }
+      }
+    },
+    {
+      "slug": "olive",
+      "name": "Ollie",
+      "personality": "peaceful",
+      "default_face": "happy",
+      "ready": false,
+      "svg": "assets/avatars/trees/olive.svg",
+      "png": {
+        "56": "assets/avatars/trees/png/olive-56.png",
+        "112": "assets/avatars/trees/png/olive-112.png",
+        "224": "assets/avatars/trees/png/olive-224.png",
+        "512": "assets/avatars/trees/png/olive-512.png"
+      },
+      "lottie": {
+        "idle": "assets/avatars/trees/lottie/olive/idle.json",
+        "working": "assets/avatars/trees/lottie/olive/working.json",
+        "reply": "assets/avatars/trees/lottie/olive/reply.json"
+      },
+      "frames": {
+        "idle": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/olive-idle.png",
+          "2x": "assets/avatars/trees/frames/olive-idle@2x.png",
+          "rail": "assets/avatars/trees/frames/olive-idle-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/olive-idle-rail@2x.png"
+        },
+        "working": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/olive-working.png",
+          "2x": "assets/avatars/trees/frames/olive-working@2x.png",
+          "rail": "assets/avatars/trees/frames/olive-working-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/olive-working-rail@2x.png"
+        },
+        "reply": {
+          "frames": 30,
+          "fps": 30,
+          "loop": false,
+          "1x": "assets/avatars/trees/frames/olive-reply.png",
+          "2x": "assets/avatars/trees/frames/olive-reply@2x.png",
+          "rail": "assets/avatars/trees/frames/olive-reply-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/olive-reply-rail@2x.png"
+        }
+      }
+    },
+    {
+      "slug": "ginkgo",
+      "name": "Ko",
+      "personality": "thoughtful",
+      "default_face": "focused",
+      "ready": false,
+      "svg": "assets/avatars/trees/ginkgo.svg",
+      "png": {
+        "56": "assets/avatars/trees/png/ginkgo-56.png",
+        "112": "assets/avatars/trees/png/ginkgo-112.png",
+        "224": "assets/avatars/trees/png/ginkgo-224.png",
+        "512": "assets/avatars/trees/png/ginkgo-512.png"
+      },
+      "lottie": {
+        "idle": "assets/avatars/trees/lottie/ginkgo/idle.json",
+        "working": "assets/avatars/trees/lottie/ginkgo/working.json",
+        "reply": "assets/avatars/trees/lottie/ginkgo/reply.json"
+      },
+      "frames": {
+        "idle": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/ginkgo-idle.png",
+          "2x": "assets/avatars/trees/frames/ginkgo-idle@2x.png",
+          "rail": "assets/avatars/trees/frames/ginkgo-idle-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/ginkgo-idle-rail@2x.png"
+        },
+        "working": {
+          "frames": 90,
+          "fps": 30,
+          "loop": true,
+          "1x": "assets/avatars/trees/frames/ginkgo-working.png",
+          "2x": "assets/avatars/trees/frames/ginkgo-working@2x.png",
+          "rail": "assets/avatars/trees/frames/ginkgo-working-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/ginkgo-working-rail@2x.png"
+        },
+        "reply": {
+          "frames": 30,
+          "fps": 30,
+          "loop": false,
+          "1x": "assets/avatars/trees/frames/ginkgo-reply.png",
+          "2x": "assets/avatars/trees/frames/ginkgo-reply@2x.png",
+          "rail": "assets/avatars/trees/frames/ginkgo-reply-rail.png",
+          "rail@2x": "assets/avatars/trees/frames/ginkgo-reply-rail@2x.png"
+        }
+      }
+    }
+  ]
+}
