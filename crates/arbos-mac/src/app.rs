@@ -528,6 +528,16 @@ impl AppState {
                 ui.drop_started_at = Some(now_ms());
             }
         }
+        // Title from the first message (§3.4); the source also queues a
+        // `retitle` command for the box.
+        if let Some(chat) = self
+            .chats
+            .values_mut()
+            .flat_map(|v| v.iter_mut())
+            .find(|c| c.id == chat_id && !c.is_pinned && c.title == "New chat")
+        {
+            chat.title = title_from(&text);
+        }
         // Optimistic echo: the row shows at once; the source's frame with the
         // same id replaces it (§3.6).
         let mut parts: Vec<Part> = attachments
@@ -753,6 +763,19 @@ impl AppState {
 
     pub fn box_state(&self) -> Option<BoxState> {
         self.selected().map(|p| p.state)
+    }
+}
+
+pub fn title_from(text: &str) -> String {
+    let line = text.lines().next().unwrap_or("").trim();
+    let mut out: String = line.chars().take(34).collect();
+    if line.chars().count() > 34 {
+        out.push('…');
+    }
+    if out.is_empty() {
+        "New chat".into()
+    } else {
+        out
     }
 }
 

@@ -207,7 +207,16 @@ fn start_after_pairing(shared: &Arc<Shared>) {
         loop {
             poll.tick().await;
             if let Err(err) = refresh_registry(&shared).await {
-                shared.notice(format!("Relay: {err:#}"));
+                let text = format!("{err:#}");
+                if text.contains("HTTP 401") {
+                    // Token revoked or relay re-initialised: pair again.
+                    *shared.creds.write().unwrap() = None;
+                    let _ = shared.events.send(SyncEvent::NeedsPairing {
+                        relay_url: shared.http_url.clone(),
+                    });
+                    return;
+                }
+                shared.notice(format!("Relay: {text}"));
                 let _ = shared.events.send(SyncEvent::Link(Link::Reconnecting));
             }
         }
@@ -345,6 +354,9 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
             if let Some(prev) = local.iter().find(|x| x.id == c.id) {
                 c.unread = prev.unread;
                 c.last_message_at = c.last_message_at.max(prev.last_message_at);
+                if c.title == "New chat" && prev.title != "New chat" {
+                    c.title = prev.title.clone();
+                }
             }
             merged.push(c);
         }
@@ -1008,6 +1020,25 @@ async fn send_message(
             json!({ "messageId": message_id }),
             &shared.device_id(),
         );
+        let untitled = shared
+            .chats
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c.id == chat_id && !c.is_pinned && c.title == "New chat");
+        if untitled {
+            let title = crate::app::title_from(&text);
+            let _ = doc.push_command("retitle", json!({ "title": title }), &shared.device_id());
+            if let Some(c) = shared
+                .chats
+                .lock()
+                .unwrap()
+                .iter_mut()
+                .find(|c| c.id == chat_id)
+            {
+                c.title = title;
+            }
+        }
         doc.commit();
     }
     mark_activity(&shared, &chat_id);

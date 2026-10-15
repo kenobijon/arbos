@@ -1508,21 +1508,36 @@ impl Shell {
     }
 }
 
+/// Flatten a JSON object one level ("cost.total") for the drawer.
 fn json_rows(v: &serde_json::Value) -> Vec<(String, String)> {
+    fn scalar(v: &serde_json::Value) -> String {
+        match v {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Null => "—".into(),
+            serde_json::Value::Number(n) => match n.as_f64() {
+                Some(f) if f.fract() != 0.0 => format!("{f:.6}").trim_end_matches('0').to_string(),
+                _ => n.to_string(),
+            },
+            other => other.to_string(),
+        }
+    }
     match v {
-        serde_json::Value::Object(map) => map
-            .iter()
-            .map(|(k, v)| {
-                let text = match v {
-                    serde_json::Value::String(s) => s.clone(),
-                    serde_json::Value::Null => "—".into(),
-                    other => other.to_string(),
-                };
-                (k.clone(), text)
-            })
-            .collect(),
+        serde_json::Value::Object(map) => {
+            let mut rows = Vec::new();
+            for (k, v) in map {
+                match v {
+                    serde_json::Value::Object(inner) => {
+                        for (ik, iv) in inner {
+                            rows.push((format!("{k}.{ik}"), scalar(iv)));
+                        }
+                    }
+                    other => rows.push((k.clone(), scalar(other))),
+                }
+            }
+            rows
+        }
         serde_json::Value::Null => Vec::new(),
-        other => vec![("value".into(), other.to_string())],
+        other => vec![("value".into(), scalar(other))],
     }
 }
 
@@ -1555,6 +1570,22 @@ impl Render for Shell {
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::toggle_rail))
             .on_action(cx.listener(Self::toggle_panel))
+            // Clicks on chrome must not strand keyboard focus: unless another
+            // text field took it, the composer keeps it.
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    let pairing = this.pairing_input.read(cx).focus_handle(cx);
+                    let project = this.project_input.read(cx).focus_handle(cx);
+                    let shown = this.state.read(cx).new_project_open;
+                    if pairing.is_focused(window) || (shown && project.is_focused(window)) {
+                        return;
+                    }
+                    if this.state.read(cx).pairing.is_none() {
+                        Composer::focus(&this.composer, window, cx);
+                    }
+                }),
+            )
             .relative()
             .flex()
             .flex_row()

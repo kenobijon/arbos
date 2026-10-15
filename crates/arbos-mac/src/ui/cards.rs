@@ -169,7 +169,8 @@ pub fn tool_group(
     let total_ms: u64 = tools.iter().filter_map(|t| t.duration_ms).sum();
     let summary = if tools.len() == 1 {
         let t = &tools[0];
-        format!("{} {}", t.call.name, t.input_line)
+        let input: String = t.input_line.chars().take(90).collect();
+        format!("{} {}", t.call.name, input)
     } else if running {
         format!("Running {} tools…", tools.len())
     } else {
@@ -205,6 +206,8 @@ pub fn tool_group(
                 .text_size(px(12.5))
                 .text_color(theme.text)
                 .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
                 .child(summary),
         )
         .when(total_ms > 0 && !running, |el| {

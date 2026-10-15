@@ -757,6 +757,19 @@ pub fn build_rows(messages: &[Message], expanded: &HashSet<String>) -> Vec<Row> 
                             }
                             continue;
                         }
+                        Part::Status {
+                            code: StatusKind::ToolStart,
+                            ..
+                        } if message.parts[pix + 1..].iter().any(|p| {
+                            matches!(
+                                p,
+                                Part::Tool { .. } | Part::Text { .. } | Part::Error { .. }
+                            )
+                        }) =>
+                        {
+                            // Superseded progress card: keep the fold open across it.
+                            continue;
+                        }
                         _ => {
                             let group_live = streaming
                                 && message.parts[pix..]
