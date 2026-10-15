@@ -1,26 +1,44 @@
 # Arbos
 
-Arbos is a messenger-style Mac app for talking to AI agents. Each Project has one project agent and its own cloud sandbox ("box"). This repository is the monorepo (design decision D33): the relay, the box daemon, the headless client, the pi extension, and the sandbox image.
+Arbos is a messenger for working with AI agents. You talk to a project agent in a chat — on the Mac, on the iPhone, or from a terminal — and it does the work on your own cloud computer: it answers, acts in a few tool calls, or hands bigger jobs to subagents that run in the background and report back in prose. Every user has **one** Daytona computer; every project is a workspace on it with its own folder, agent sessions, memory and history. Provider keys never leave the relay.
 
-## Layout
+## What is in this repository
 
 | Path | What |
 | --- | --- |
-| `crates/arbos-core` | Shared Rust types: ids, binary room frames, the Loro chat-doc schema, the `route` schema and validator, the pi/Prime RPC codec. No I/O. |
-| `crates/arbos-relay` | The one service outside the boxes: project registry (SQLite), device pairing, sync rooms (opaque log + checkpoints), blob store, model proxy (OpenAI- and Anthropic-compatible passthrough with per-project metering and a daily spend cap), Daytona module (typed from the live OpenAPI), wake jobs, push queue. |
-| `crates/arbos-agentd` | The box entrypoint: Loro doc host (a peer of the relay room, 120 ms commits, resume by cursor), SQLite+FTS5 history and memory tables, project MCP server on localhost, the pi main-agent driver (`route` tool validated with one retry, act limits 8 calls / 60 s with escalation), the `HarnessAdapter` registry (`PrimeAdapter` default, `PiAdapter`, `ClaudeCodeAdapter`), compaction and the memory write pass off the reply path. |
-| `crates/arbosctl` | Headless client: pair, create project, open chat, send, stream, resume by cursor, stop/start box, usage, timings. |
-| `crates/arbos-mac` | The GPUI desktop client (zeronsh/zui fork): project rail, tabs, Cursor-style chat, composer; `FixtureSource` (local Loro docs, scripted agent) and `RelaySource` (WebSocket to relay rooms). Builds on macOS and Linux. |
-| `harness/arbos-pi-ext` | The pi extension (TypeScript, loaded by pi through jiti): `tool_call` deny+audit hook, act-call counting, `ask_user`, `route`, output offload to handles (> 4,000 chars), `peek`, `remember`/`recall`, working-set section. |
-| `image/` | `Dockerfile` (the full `arbos-agent` image: pi + Prime + Claude Code + agent-browser/Chrome), `Dockerfile.dev-inline` (pi-only dev image built by Daytona's declarative builder), the D64 hook scripts (`arbos-shell`, Claude `PreToolUse`), Prime skills, pi seed config. |
+| `crates/arbos-mac` | The Mac app (GPUI): project rail, tabs, chat transcript, composer with voice and attachments, approval cards, Settings (Machine, Connectors, Vault, Routines, Skills, Channels, This Mac), machine status, in-app updates. Also builds on Linux. |
+| `apps/ios/Arbos` | The iPhone app (SwiftUI): the same chats over the relay (Loro replica per room), home with machine status, attach sheet, voice memos, TestFlight via fastlane. |
+| `crates/arbos-relay` | The one service outside the boxes: device pairing, project registry and sync rooms (SQLite), per-user machine lifecycle on Daytona (wake, keep-alive, stop, stale-box detection, migration), model proxy with per-project metering and spend caps, blob store, connectors/vault broker, routines, channels, group chats, `arbos-local` forwarding. |
+| `crates/arbos-agentd` | The box daemon: one process per machine supervising one workspace per project — Loro doc host, SQLite+FTS5 history and memory, project MCP server, the pi main-agent driver, the subagent harness registry, per-workspace Unix user + cgroup isolation. |
+| `crates/arbosctl` | Headless client for the relay: pair, projects, chats (send/stream/stop/answer), machine start/stop/status, migration, usage, timings, groups, blobs. |
+| `crates/arbos-local` | Helper that runs on your own Mac so an agent can run a command or read a file there, behind approval cards. |
+| `crates/arbos-update` | Appcast + Ed25519 payload signatures + version order shared by the release pipeline and the app's Update button. |
+| `crates/arbos-core` | Shared types: ids, binary room frames, the Loro chat-doc schema, the `route` schema, the pi/Prime RPC codec. |
+| `harness/arbos-pi-ext` | The pi extension (TypeScript): `route`, `ask_user`, deny+audit hook, act-call limits, output offload to handles, working set. |
+| `image/` | The `arbos-agent` sandbox image (pi + Prime + Claude Code + agent-browser/Chrome), hook scripts, Prime skills, pi seed; `register-snapshot.sh`. |
+| `scripts/` | `bundle-mac.sh` (DMG, signing, notarization), `release/` (publish, local release), `runner/` (self-hosted Mac runner), `relay-start.sh` (relay + Cloudflare tunnel), `landing/`. |
+| `docs/` | Design notes and decisions. |
 
-## Prerequisites
+## How it works
+
+- **Relay** (`arbos-relay`): the only internet-facing piece. Devices pair once with a one-time code (D35) and talk to it over HTTPS/WebSocket; boxes dial back to its public URL. It owns the chat rooms (opaque Loro row log + checkpoints), wakes machines on demand, forwards model calls with metering, and keeps every secret: provider keys, connector tokens, the vault.
+- **One machine per user** (D70): a Daytona sandbox from the `arbos-agent` snapshot, **4 vCPU / 8 GiB / 10 GiB** (the Daytona per-sandbox maximum; about $0.33 per active hour, $0.013 per stopped day, $0 archived). It starts on the first message and auto-stops when idle. Each project is a workspace on it: `/work/<project>` owned by its own Unix user at mode 700, its own pi session, subagents, SQLite memory/history, blob dir, browser profile and cgroup slice. `GET /machine` shows state, spec, spend and workspace states; `POST /machine/start|stop` drives it. Older per-project sandboxes are copied in with `arbosctl migrate-to-user-box`.
+- **Harness**: the main agent is **pi** (one RPC session per chat) with the `arbos-pi-ext` extension; every turn starts with a `route` call (`reply`, `act` with ≤ 8 tool calls, `new`/`wake` a subagent). Subagents run through the harness registry — **Prime Agent** by default (Python kernel), **pi**, or **Claude Code** — in the workspace, up to 4 per workspace and 8 per machine, and report back as a prose turn written by the main agent. Users only ever see prose; tool detail lives in the Details drawer and the history index.
+- **Clients**: the Mac app and the iPhone app are peers of the same Loro docs; `arbosctl` does everything from a terminal. Approvals, questions with widgets, attachments, voice, group chats, routines, connectors, skills and the vault are described below.
+
+## Install
+
+- **Mac**: download the latest DMG from the [edge release](https://github.com/unarbos/arbos/releases/tag/edge) or a stable `v*` release; the app updates itself (Update button in the rail).
+- **iPhone**: TestFlight (`com.unarbos.arbos.ios`), uploaded from every push to `main`.
+- **Relay**: build from source (below) or take the static `arbos-relay` from a release; run it with a stable public URL (`scripts/relay-start.sh`).
+
+## Prerequisites (building from source)
 
 - Rust stable (`rust-toolchain.toml` pins the channel; `rustup` installs it).
 - Node 22.19+ (pi needs zstd in `zlib`; 22.14 is too old) and pnpm 9 for `harness/`.
 - `pi` 1.2.0 (`npm i -g @earendil-works/pi-coding-agent@1.2.0`) for a local box; `prime-agent` 0.10.0 plus its kernel venv (see `image/Dockerfile`) for Prime subagents. Without Prime, set `ARBOS_DEFAULT_HARNESS=pi`.
-- Secrets, only on the relay host: `OPENROUTER_API_KEY` (or `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) for the model proxy and `DAYTONA_API_KEY` for real boxes. The box never sees them (D2).
-- For `arbos-mac` on Linux: `libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb-xkb-dev libasound2-dev libssl-dev libgl1-mesa-dev libfontconfig-dev` (and `mesa-vulkan-drivers` to run without a GPU).
+- Secrets, only on the relay host: `OPENROUTER_API_KEY` (or `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) for the model proxy and `DAYTONA_API_KEY` for real machines. A box never sees them (D2).
+- For `arbos-mac` on Linux: `libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb-xkb-dev libasound2-dev libssl-dev libgl1-mesa-dev libfontconfig-dev` (and `mesa-vulkan-drivers` to run without a GPU). The iPhone app needs Xcode 16+ and fastlane.
 
 ## Build and check
 
@@ -32,7 +50,7 @@ cd harness && pnpm install && pnpm -r typecheck
 
 ## Run locally (no Daytona, no Docker): the `process` box
 
-The relay can run `arbos-agentd` as a child process on the same host. Every tool, the pi main agent, and the subagents run for real; only the sandbox boundary is missing.
+The relay can run `arbos-agentd` as a child process on the same host (one process = the user's machine, one workspace per project under `.arbos-local/relay/boxes/u_default/work/<project>`). Every tool, the pi main agent, and the subagents run for real; only the sandbox boundary and the per-workspace users are missing.
 
 ```bash
 # 1. relay (prints a one-time pairing code on first start)
@@ -44,8 +62,9 @@ cargo run -p arbos-relay -- --listen 127.0.0.1:7700 --data ./.arbos-local/relay
 # 2. pair this machine
 cargo run -p arbosctl -- pair <code>
 
-# 3. a project with a local box
+# 3. a project (the first one creates the user's machine; later ones are workspaces on it)
 cargo run -p arbosctl -- project create --name demo --local-box
+cargo run -p arbosctl -- machine status
 
 # 4. chat
 cargo run -p arbosctl -- chat open demo                        # prints a chat id
@@ -53,7 +72,7 @@ cargo run -p arbosctl -- chat send demo <chat> "hello" --stream
 cargo run -p arbosctl -- chat stream demo <chat> --until-done  # resumes by cursor after a kill
 cargo run -p arbosctl -- chat stop demo <chat>                 # aborts the running turn at once
 cargo run -p arbosctl -- chat answer demo <chat> --answer-json '"nightly"' --stream   # answer the open ask_user question
-cargo run -p arbosctl -- box stop demo && cargo run -p arbosctl -- box start demo
+cargo run -p arbosctl -- machine stop && cargo run -p arbosctl -- machine start
 cargo run -p arbosctl -- timings demo                          # boot, wake, TTFT, subagent timings
 ```
 
@@ -61,7 +80,7 @@ cargo run -p arbosctl -- timings demo                          # boot, wake, TTF
 
 Questions and widgets: `ask_user(question, widget?)` is the one way an agent asks the user something. Without a widget the question is plain and the composer answers it. With a widget (`choice`, `multi_select`, `text`, `date`, `form` with up to 8 fields) the chat gets a `question` part the clients render as a card; the answer goes back as an `answer` command `{questionId, value}` and agentd renders it to text for the model (`Answer: nightly`, or one bullet per form field). `arbosctl chat answer … --answer-json <json>` answers the newest open question from a terminal (`--question <id>` picks one). All three harness seams (agentd MCP/hook, the pi extension, the Prime `arbos_ask_user` skill) take the same widget shape.
 
-What a chat shows: the user only ever sees prose from the main agent, written like a colleague in chat (what got done and the outcome, never how the tools were called; agentd also strips leading "Called N tools"/"Running …" lines and ```json blocks before text enters the doc). A hand-off (`new`/`wake`) is one plain sentence from the model, then a progress message with status events only (`working`, then `done`/`failed`), then a prose result turn (`turn.kind = "subagent_result"`) written by the main agent from the subagent's output. Status codes are `working`, `done`, `failed`, `stopped`, `waiting_user`; tool calls and raw subagent output are parts with `hidden: true` (Details drawer, not the transcript) and in T3. Up to 4 subagents run per box at once; more wait in FIFO order, and the chat stays responsive meanwhile.
+What a chat shows: the user only ever sees prose from the main agent, written like a colleague in chat (what got done and the outcome, never how the tools were called; agentd also strips leading "Called N tools"/"Running …" lines and ```json blocks before text enters the doc). A hand-off (`new`/`wake`) is one plain sentence from the model, then a progress message with status events only (`working`, then `done`/`failed`), then a prose result turn (`turn.kind = "subagent_result"`) written by the main agent from the subagent's output. Status codes are `working`, `done`, `failed`, `stopped`, `waiting_user`; tool calls and raw subagent output are parts with `hidden: true` (Details drawer, not the transcript) and in T3. Up to 4 subagents run per workspace and 8 per machine at once; more wait in FIFO order, and the chat stays responsive meanwhile.
 
 Relay environment (all optional unless noted):
 
@@ -134,15 +153,15 @@ macOS packaging: `scripts/bundle-mac.sh` builds a universal `dist/Arbos.app`, th
 
 ## Releases and in-app updates
 
-Every green push to `main` becomes an installable build, with no human picking a version (`.github/workflows/release.yml`, D42–D44):
+Every green push to `main` becomes an installable build; nobody picks a version by hand (`.github/workflows/release.yml`, D42–D44). The workspace version in `Cargo.toml` is **0.3.0**; it sorts above every build the previous Arbos shipped (Mac releases up to `v0.2.112` and the rolling `edge`), so an installed older app sees the new builds as updates.
 
-- **edge** (push to `main`): version `0.1.0.<commit count>`, release `edge-0.1.0.<n>` (pre-release) with `Arbos-…-macos-universal.dmg`, the updater tarball, static `arbos-relay`/`arbos-agentd`/`arbosctl` for Linux, and `appcast.xml`. The rolling release `edge` holds the feed the app polls: `https://github.com/unarbos/arbos/releases/download/edge/appcast.xml`.
-- **stable** (tag `v0.1.0`): release `v0.1.0` marked latest; feed `https://github.com/unarbos/arbos/releases/latest/download/appcast.xml`.
+- **edge** (push to `main`): version `0.3.0.<commit count>`, release `edge-0.3.0.<n>` (pre-release) with `Arbos-…-macos-universal.dmg`, the updater tarball, static `arbos-relay`/`arbos-agentd`/`arbosctl` for Linux, and `appcast.xml`. The rolling release `edge` holds the feed the app polls: `https://github.com/unarbos/arbos/releases/download/edge/appcast.xml`.
+- **stable** (tag `v0.3.0`): release `v0.3.0` marked latest; feed `https://github.com/unarbos/arbos/releases/latest/download/appcast.xml`. The tag must match the `Cargo.toml` version.
 - The Mac job runs on the self-hosted EC2 Mac (label `arbos-mac`, repository variable `ARBOS_MAC_RUNNER`; `scripts/runner/install-self-hosted-runner.sh`) or on `macos-15`. It signs with the Developer ID certificate, notarizes with an App Store Connect API key, and staples.
 - Payloads are signed with an Ed25519 key in Sparkle's `sparkle:edSignature` encoding (`crates/arbos-update`, CLI `arbos-updatectl`). The public half is committed in `crates/arbos-update/update-key.pub` and compiled into the app; the private half lives in the 1Password vault "Arbos" and is read in CI with `OP_SERVICE_ACCOUNT_TOKEN`. The publish job verifies the appcast against the compiled-in key before anything is uploaded.
-- The app polls the feed 5 s after launch and then hourly. When a newer build exists an **Update** button appears in the rail above the settings gear; one click downloads, verifies the signature, swaps `Arbos.app` in place, and relaunches. `ARBOS_UPDATE_CHANNEL=stable|edge`, `ARBOS_UPDATE_FEED=<url>`, `ARBOS_UPDATE_INTERVAL_SECS`, and `ARBOS_UPDATE_DISABLE=1` override the defaults.
+- The app polls the feed 5 s after launch and then hourly. When a newer build exists (numeric comparison per dotted component, `crates/arbos-update/src/version.rs`) an **Update** button appears in the rail above the settings gear; one click downloads, verifies the signature, swaps `Arbos.app` in place, and relaunches. `ARBOS_UPDATE_CHANNEL=stable|edge`, `ARBOS_UPDATE_FEED=<url>`, `ARBOS_UPDATE_INTERVAL_SECS`, and `ARBOS_UPDATE_DISABLE=1` override the defaults.
 - By hand, from a Mac with `op` access: `scripts/release/local-release.sh [--dry-run] [--channel stable]` does the whole release (`scripts/release/publish-release.sh` is the shared publish step).
-- iOS: `.github/workflows/ios.yml` archives `apps/ios/Arbos` and uploads to TestFlight on pushes to `main` that touch `apps/ios/`.
+- **iPhone**: `.github/workflows/ios.yml` archives `apps/ios/Arbos` on every push and uploads to TestFlight on pushes to `main` (fastlane `beta` lane, App Store Connect API key). `MARKETING_VERSION` is 1.0.0; the build number is the UTC time `YYYYMMDDHHMM` (passed as `CURRENT_PROJECT_VERSION`), so it always rises above every earlier TestFlight build.
 
 ## Voice
 
@@ -265,3 +284,7 @@ Transient-registry tags are immutable: bump the version for every rebuild. The A
 ## CI
 
 `.github/workflows/ci.yml` runs on pushes to `main`, `arbos-v2`, and `cursor/**` and on pull requests: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test` on Linux, the harness typecheck, shellcheck + actionlint, and a layout check that the previous repo's `release-main.yml` / `fx-*` workflows are gone. `release.yml` runs after a green CI on `main`.
+
+## History
+
+This tree replaced the previous Arbos on 2026-10-15 (`main` was force-pushed to the `arbos-v2` integration branch). The earlier `main` — the zeron-based desktop app, the fx harness and the phase-6 phone — is kept as branch `backup/main-2026-10-15`; the generation before that (the first mobile app, voice server, deploy scripts) is branch and tag `legacy-2026-10`. Their releases (`v0.1.x`, `v0.2.x`, the old `edge`) stay on GitHub; the appcast feeds now point at the 0.3.0 builds.
