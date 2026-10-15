@@ -670,14 +670,16 @@ final class AppModel: ObservableObject {
         return (try? await api.searchUsers(q)) ?? []
     }
 
-    /// The relay has no directory endpoint yet, only prefix search, so the
-    /// directory is the union of one-letter searches (36 calls, cached 10 min),
-    /// keeping people who are on Arbos (member/invited) and dropping the
-    /// GitHub literal-login hits.
+    /// `GET /users` (members and invited people except me), cached 10 min.
+    /// Older relays without the route: the union of one-letter searches.
     func loadDirectory(force: Bool = false) async {
         guard credentials != nil, !isFixture else { return }
         if !force, nowMs() - directoryLoadedAt < 600_000, !directory.isEmpty { return }
         directoryLoadedAt = nowMs()
+        if let list = try? await api.users() {
+            directory = list.filter { $0.id != user?.id }
+            return
+        }
         var seen: [String: Person] = [:]
         await withTaskGroup(of: [Person].self) { group in
             for ch in "abcdefghijklmnopqrstuvwxyz0123456789" {
@@ -700,7 +702,7 @@ final class AppModel: ObservableObject {
             return true
         } catch {
             let e = error as? RelayError
-            notice = Notice(text: (e?.status == 404 || e?.status == 405) ? "Groups are not on this relay yet — DMs work today." : "Could not create the group: \(error.localizedDescription)")
+            notice = Notice(text: (e?.status == 404 || e?.status == 405 || e?.status == 501) ? "Groups are not on this relay yet — DMs work today." : "Could not create the group: \(error.localizedDescription)")
             return false
         }
     }

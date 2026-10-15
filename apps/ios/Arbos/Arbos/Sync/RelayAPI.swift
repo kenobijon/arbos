@@ -335,6 +335,20 @@ final class RelayAPI {
 
     // MARK: People chats (D72)
 
+    /// `GET /users?offset&limit` → the directory (members and invited people
+    /// except me), alphabetical, paged by `next_offset`.
+    func users() async throws -> [Person] {
+        var out: [Person] = []
+        var offset = 0
+        while true {
+            guard let page = try await json("GET", "/users?offset=\(offset)&limit=500") as? [String: Any] else { break }
+            out += ((page["users"] as? [Any]) ?? []).compactMap(Person.parse)
+            guard let next = (page["next_offset"] as? NSNumber)?.intValue, next > offset else { break }
+            offset = next
+        }
+        return out
+    }
+
     func searchUsers(_ q: String) async throws -> [Person] {
         let query = q.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "@"))
         guard !query.isEmpty, let enc = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return [] }
