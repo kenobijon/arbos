@@ -10,10 +10,12 @@ mod credits;
 mod daytona;
 mod db;
 mod db_accounts;
+mod db_people;
 mod groups;
 mod images;
 mod local;
 mod migrate;
+mod people;
 mod proxy;
 mod rooms;
 mod routines;
@@ -297,6 +299,22 @@ async fn main() -> anyhow::Result<()> {
         .route("/auth/refresh", post(signin::refresh))
         .route("/auth/logout", post(signin::logout))
         .route("/me", get(signin::me))
+        .route("/me/pushes", get(people::me_pushes))
+        .route("/users/search", get(people::users_search))
+        .route("/chats", get(people::chats_list))
+        .route("/chats/dm", post(people::dm_create))
+        .route(
+            "/chats/{id}",
+            get(people::chat_get).delete(people::chat_delete),
+        )
+        .route("/chats/{id}/read", axum::routing::put(people::chat_read))
+        .route("/chats/{id}/hide", post(people::chat_hide))
+        .route("/chats/{id}/leave", post(people::chat_leave))
+        .route(
+            "/blocks",
+            get(people::blocks_list).post(people::block_create),
+        )
+        .route("/blocks/{user_id}", delete(people::block_delete))
         .route("/download/mac", get(signin::download_mac))
         .route("/devices", get(api::list_devices))
         .route("/devices/{id}", delete(api::revoke_device))

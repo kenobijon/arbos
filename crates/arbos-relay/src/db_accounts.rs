@@ -212,23 +212,28 @@ impl Db {
         let created = self.with(|c| {
             let existing: Option<String> = c
                 .query_row(
-                    "SELECT id FROM users WHERE github_id = ?1",
+                    "SELECT status FROM users WHERE github_id = ?1",
                     params![gh.id],
                     |r| r.get(0),
                 )
                 .optional()?;
-            match existing {
-                Some(_) => {
+            match existing.as_deref() {
+                Some(status) => {
+                    // An `invited` placeholder (someone opened a DM with this login before it
+                    // ever signed in) becomes a member now: first sign-in, with the welcome grant.
+                    let first = status == "invited";
                     c.execute(
-                        "UPDATE users SET login = ?2, avatar_url = ?3, name = ?4, last_login_at = ?5 WHERE github_id = ?1",
-                        params![gh.id, gh.login, gh.avatar_url, gh.name, now],
+                        "UPDATE users SET login = ?2, avatar_url = ?3, name = ?4, last_login_at = ?5, status = 'member',
+                            spend_cap_usd = CASE WHEN status = 'invited' THEN ?6 ELSE spend_cap_usd END
+                         WHERE github_id = ?1",
+                        params![gh.id, gh.login, gh.avatar_url, gh.name, now, default_daily_cap_usd],
                     )?;
-                    Ok(false)
+                    Ok(first)
                 }
                 None => {
                     c.execute(
-                        "INSERT INTO users(id, snapshot, spend_cap_usd, created_at, github_id, login, avatar_url, name, last_login_at)
-                         VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6, ?7, ?3)",
+                        "INSERT INTO users(id, snapshot, spend_cap_usd, created_at, github_id, login, avatar_url, name, last_login_at, status)
+                         VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6, ?7, ?3, 'member')",
                         params![id, default_daily_cap_usd, now, gh.id, gh.login, gh.avatar_url, gh.name],
                     )?;
                     Ok(true)

@@ -17,6 +17,7 @@ use arbos_core::wire::{self, Frame, FrameType, PROJECT_DOC_CHAT_ID};
 
 use crate::auth::Principal;
 use crate::boxes;
+use crate::people;
 use crate::state::{AppState, RoomBroadcast};
 
 const ROWS_BATCH: i64 = 256;
@@ -27,20 +28,32 @@ pub async fn ws_room(
     principal: Principal,
     Path((project_id, chat_id)): Path<(String, String)>,
 ) -> Response {
-    if !state.allows(&principal, &project_id) {
+    // People chats live under the reserved project slot `people`; their ACL is membership.
+    if !state.allows(&principal, &acl_key(&project_id, &chat_id)) {
         return (StatusCode::FORBIDDEN, "not your project").into_response();
     }
-    if state.db.project(&project_id).ok().flatten().is_none() {
-        return (StatusCode::NOT_FOUND, "no such project").into_response();
-    }
-    if chat_id != PROJECT_DOC_CHAT_ID
-        && !state.db.chat_exists(&project_id, &chat_id).unwrap_or(false)
-    {
-        return (StatusCode::NOT_FOUND, "no such chat").into_response();
+    if project_id != people::PEOPLE_PROJECT {
+        if state.db.project(&project_id).ok().flatten().is_none() {
+            return (StatusCode::NOT_FOUND, "no such project").into_response();
+        }
+        if chat_id != PROJECT_DOC_CHAT_ID
+            && !state.db.chat_exists(&project_id, &chat_id).unwrap_or(false)
+        {
+            return (StatusCode::NOT_FOUND, "no such chat").into_response();
+        }
     }
     let room_name = wire::room_name(&project_id, &chat_id);
     ws.max_message_size(wire::ROW_MAX + 8192)
         .on_upgrade(move |socket| run(socket, state, principal, project_id, room_name))
+}
+
+/// What `AppState::allows` checks for a room: the project id, or `people:<chat>` for a people chat.
+fn acl_key(project_id: &str, chat_id: &str) -> String {
+    if project_id == people::PEOPLE_PROJECT {
+        format!("{}{chat_id}", people::PEOPLE_ACL_PREFIX)
+    } else {
+        project_id.to_owned()
+    }
 }
 
 fn frame(ty: FrameType, header: serde_json::Value, payload: Bytes) -> Message {
@@ -104,7 +117,7 @@ async fn run(
                         continue;
                     }
                 };
-                if let Err(e) = handle_frame(&state, &room, &project_id, &room_name, conn_id, &mut device, is_box, f, &mut sink).await {
+                if let Err(e) = handle_frame(&state, &room, &project_id, &room_name, conn_id, &mut device, &principal, f, &mut sink).await {
                     tracing::warn!(%room_name, error = %e, "room frame error");
                     let _ = sink.send(error_frame("internal", &e.to_string())).await;
                 }
@@ -138,10 +151,11 @@ async fn handle_frame(
     room_name: &str,
     conn_id: u64,
     device: &mut String,
-    is_box: bool,
+    principal: &Principal,
     f: Frame,
     sink: &mut futures::stream::SplitSink<WebSocket, Message>,
 ) -> anyhow::Result<()> {
+    let is_box = principal.is_box();
     match f.ty {
         FrameType::Hello => {
             let h: wire::Hello = serde_json::from_value(f.header)?;
@@ -193,6 +207,12 @@ async fn handle_frame(
                 sink.send(error_frame("too_large", "row exceeds 1 MiB"))
                     .await?;
                 return Ok(());
+            }
+            if let Some(chat_id) = room_name.strip_prefix(&format!("{}/", people::PEOPLE_PROJECT)) {
+                if let Err(r) = people::on_room_push(state, principal, chat_id) {
+                    sink.send(error_frame(r.code(), r.message())).await?;
+                    return Ok(());
+                }
             }
             let (seq, dup) = state
                 .db
@@ -302,7 +322,7 @@ pub async fn get_checkpoint(
     principal: Principal,
     Path((project_id, chat_id)): Path<(String, String)>,
 ) -> Response {
-    if !state.allows(&principal, &project_id) {
+    if !state.allows(&principal, &acl_key(&project_id, &chat_id)) {
         return StatusCode::FORBIDDEN.into_response();
     }
     let room_name = wire::room_name(&project_id, &chat_id);
@@ -324,7 +344,7 @@ pub async fn post_checkpoint(
     headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !state.allows(&principal, &project_id)
+    if !state.allows(&principal, &acl_key(&project_id, &chat_id))
         || !matches!(principal, Principal::Box { .. } | Principal::Admin)
     {
         return (StatusCode::FORBIDDEN, "box only").into_response();
@@ -355,7 +375,7 @@ pub async fn room_stats(
     principal: Principal,
     Path((project_id, chat_id)): Path<(String, String)>,
 ) -> Response {
-    if !state.allows(&principal, &project_id) {
+    if !state.allows(&principal, &acl_key(&project_id, &chat_id)) {
         return StatusCode::FORBIDDEN.into_response();
     }
     let room_name = wire::room_name(&project_id, &chat_id);

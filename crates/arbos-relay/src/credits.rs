@@ -268,77 +268,16 @@ mod tests {
     //! The invariants the design names: tokens are bound to a device, one machine per account,
     //! the ledger never goes negative without the admin override, the kill switch blocks debits.
 
-    use std::collections::HashMap;
-    use std::sync::atomic::AtomicU64;
-    use std::sync::Arc;
-
-    use tokio::sync::{Mutex, RwLock};
-
     use arbos_core::ids::ulid;
 
     use super::*;
     use crate::auth::{resolve_checked, Refused};
     use crate::connectors::crypto::RelayKey;
-    use crate::db::{Db, Sandbox};
+    use crate::db::Sandbox;
     use crate::db_accounts::GithubIdentity;
     use crate::signin::{issue_tokens, mint_access};
-    use crate::state::Config;
 
-    fn test_state(auth_mode: AuthMode) -> AppState {
-        let dir = std::env::temp_dir().join(format!("arbos-credits-test-{}", ulid()));
-        let db = Db::open(&dir.join("relay.db")).expect("db");
-        let cfg = Config {
-            public_url: "http://127.0.0.1:7707".into(),
-            data_dir: dir,
-            admin_token: Some("adm_test".into()),
-            openrouter_key: None,
-            anthropic_key: None,
-            openai_key: None,
-            openai_base: String::new(),
-            anthropic_base: String::new(),
-            daytona_snapshot: String::new(),
-            daytona_dockerfile: None,
-            bootstrap_dir: None,
-            agentd_bin: "arbos-agentd".into(),
-            local_box_image: String::new(),
-            box_idle_grace_ms: 0,
-            connectors_mock: true,
-            channels_mock: true,
-            openai_images_base: String::new(),
-            image_mock: false,
-            voice_mock: true,
-            openai_audio_base: String::new(),
-            vault_mock: false,
-            auth_mode,
-            github_client_id: Some("id".into()),
-            github_client_secret: Some("secret".into()),
-            auth_redirects: Vec::new(),
-            default_grant_usd: 100.0,
-            default_daily_cap_usd: 20.0,
-            global_daily_cap_usd: 500.0,
-            machine_usd_per_hour: 0.332,
-            machine_stopped_usd_per_day: 0.013,
-            releases_repo: "unarbos/arbos".into(),
-        };
-        AppState {
-            db,
-            cfg: Arc::new(cfg),
-            http: reqwest::Client::new(),
-            daytona: None,
-            rooms: Arc::new(RwLock::new(HashMap::new())),
-            box_states: Arc::new(RwLock::new(HashMap::new())),
-            local_children: Arc::new(Mutex::new(HashMap::new())),
-            box_conns: Arc::new(Mutex::new(HashMap::new())),
-            wake_started: Arc::new(Mutex::new(HashMap::new())),
-            last_client_push: Arc::new(Mutex::new(HashMap::new())),
-            conn_seq: Arc::new(AtomicU64::new(0)),
-            relay_key: Arc::new(RelayKey::derive("test-key")),
-            jwt_key: Arc::new(RelayKey::derive("test-key").subkey("jwt")),
-            download_cache: Arc::new(Mutex::new(None)),
-            stale_bounces: Arc::new(Mutex::new(HashMap::new())),
-            local_conns: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
+    use crate::state::test_support::test_state;
 
     fn sign_up(state: &AppState, github_id: i64, device_name: &str) -> (String, String) {
         let (user, created) = state

@@ -454,6 +454,8 @@ impl Db {
         )?;
         crate::db_accounts::migrate_accounts(&c);
         c.execute_batch(crate::db_accounts::ACCOUNTS_SCHEMA)?;
+        crate::db_people::migrate_people(&c);
+        c.execute_batch(crate::db_people::PEOPLE_SCHEMA)?;
         Ok(Self(Arc::new(Mutex::new(c))))
     }
 
