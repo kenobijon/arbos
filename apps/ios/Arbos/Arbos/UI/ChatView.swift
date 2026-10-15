@@ -84,6 +84,10 @@ struct ChatView: View {
             let slug = member.isAgent ? mentionSlug(member.project?.name ?? member.handle) : member.handle
             return "Message @\(slug)"
         }
+        // No chip pick: match the header name ("Message Kenobi"), not "@handle".
+        if let people {
+            return "Message \(counterpart?.displayName ?? people.title)"
+        }
         return "Message \(name)"
     }
 
@@ -425,7 +429,9 @@ struct ChatView: View {
                     }
                     if !model.caughtUp.contains(chatId) && messages.isEmpty && !model.isFixture {
                         HStack { Spacer(); ProgressView().tint(theme.muted); Spacer() }.padding(.top, 60)
-                    } else if rows.isEmpty {
+                    } else if rows.isEmpty, !isPeople {
+                        // People chats stay blank (iMessage-style); the agent empty
+                        // copy would say "Ask @handle anything…" which is wrong here.
                         emptyHint
                     }
                     ForEach(Array(rows.enumerated()), id: \.element.id) { i, row in
@@ -549,9 +555,11 @@ struct ChatView: View {
     /// Tap a chip to talk to that person or agent without typing `@` — the composer
     /// prompt and the next send follow the selection.
     private func memberChips(_ people: PeopleChat) -> some View {
-        ScrollView(.horizontal, showsIndicators: false) {
+        // Skip me — you don't address yourself; keeps a 1:1 DM to one chip + Agent.
+        let others = people.members.filter { $0.id != model.user?.id }
+        return ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
-                ForEach(people.members) { m in
+                ForEach(others) { m in
                     let selected = effectiveTalkTo == m.member
                     Button {
                         talkTo = talkTo == m.member ? nil : m.member
@@ -589,8 +597,10 @@ struct ChatView: View {
                 }
                 .buttonStyle(.plain)
             }
-            .padding(.vertical, 2)
+            // Room for avatar + padding so a horizontal ScrollView does not clip chips.
+            .padding(.vertical, 4)
         }
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     private var workingLine: some View {

@@ -43,36 +43,34 @@ enum Transcript {
         var rows: [Row] = []
         var lastAt: Int64 = 0
         for message in messages {
-            // Date separators when the gap is over an hour (Grok: "Today 8:00 AM").
-            if message.createdAt > 0 && (lastAt == 0 || message.createdAt - lastAt > 3_600_000) {
-                rows.append(Row(id: "\(message.id)#date", messageId: message.id, role: .system,
-                                kind: .system(icon: nil, text: dateLabel(message.createdAt), avatarProject: nil)))
-            }
-            if message.createdAt > 0 { lastAt = message.createdAt }
+            // Build this message's visible rows first. Date separators only land when
+            // something actually renders — otherwise an empty/hidden-only message leaves
+            // a lone "Today 5:45 PM" in a blank chat.
+            var chunk: [Row] = []
             let streaming = message.isStreaming
             switch message.role {
             case .user:
                 for part in message.parts {
                     if case .attachment(let id, let a) = part {
-                        rows.append(attachmentRow(id: "\(message.id)#\(id)", message: message, a: a, projectId: projectId, fromUser: true))
+                        chunk.append(attachmentRow(id: "\(message.id)#\(id)", message: message, a: a, projectId: projectId, fromUser: true))
                     }
                 }
                 let text = message.plainText
                 if !text.isEmpty {
                     let mine = !people || me == nil || message.sender == me || message.sender == "user"
                     if mine {
-                        rows.append(Row(id: "\(message.id)#user", messageId: message.id, role: .user,
-                                        kind: .user(text: text, pending: message.pending)))
+                        chunk.append(Row(id: "\(message.id)#user", messageId: message.id, role: .user,
+                                         kind: .user(text: text, pending: message.pending)))
                     } else {
-                        rows.append(Row(id: "\(message.id)#other", messageId: message.id, role: .project,
-                                        kind: .other(text: text, handle: message.senderHandle ?? "someone", avatar: message.senderAvatar)))
+                        chunk.append(Row(id: "\(message.id)#other", messageId: message.id, role: .project,
+                                         kind: .other(text: text, handle: message.senderHandle ?? "someone", avatar: message.senderAvatar)))
                     }
                 }
             case .assistant, .system, .project:
                 // Hand-off ack: Grok shows "Messaged ◉ <bot>" as a system line.
                 if message.turn == .new, let name = message.subagentName ?? subagentNames[message.subagentId ?? ""] {
-                    rows.append(Row(id: "\(message.id)#handoff", messageId: message.id, role: .system,
-                                    kind: .system(icon: nil, text: "Messaged \u{FFFC}\(name)", avatarProject: projectId)))
+                    chunk.append(Row(id: "\(message.id)#handoff", messageId: message.id, role: .system,
+                                     kind: .system(icon: nil, text: "Messaged \u{FFFC}\(name)", avatarProject: projectId)))
                 }
                 let lastTextPart = message.parts.lastIndex { $0.textValue != nil }
                 for (pix, part) in message.parts.enumerated() {
@@ -85,29 +83,37 @@ enum Transcript {
                         if people, let h = message.senderHandle {
                             caption = message.ownerHandle.map { "\(h) · owned by @\($0)" } ?? h
                         }
-                        rows.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
-                                        kind: .assistant(blocks: blocks, live: live, caption: pix == message.parts.firstIndex { $0.textValue != nil } ? caption : nil)))
+                        chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
+                                         kind: .assistant(blocks: blocks, live: live, caption: pix == message.parts.firstIndex { $0.textValue != nil } ? caption : nil)))
                     case .status(let id, .askUser, let text):
-                        rows.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant, kind: .question(text: text)))
+                        chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant, kind: .question(text: text)))
                     case .status(let id, .handoff, let text):
-                        rows.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .system,
-                                        kind: .system(icon: nil, text: handoffText(text), avatarProject: nil)))
+                        chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .system,
+                                         kind: .system(icon: nil, text: handoffText(text), avatarProject: nil)))
                     case .status(let id, .stopped, _):
-                        rows.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .system,
-                                        kind: .system(icon: "stop.circle", text: "Stopped", avatarProject: nil)))
+                        chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .system,
+                                         kind: .system(icon: "stop.circle", text: "Stopped", avatarProject: nil)))
                     case .attachment(let id, let a):
-                        rows.append(attachmentRow(id: "\(message.id)#\(id)", message: message, a: a, projectId: projectId, fromUser: false))
+                        chunk.append(attachmentRow(id: "\(message.id)#\(id)", message: message, a: a, projectId: projectId, fromUser: false))
                     case .error(let id, let code, let text):
-                        rows.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant, kind: .error(code: code, message: text)))
+                        chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant, kind: .error(code: code, message: text)))
                     case .status, .tool, .subagentResult, .reasoning, .unknown:
                         break
                     }
                 }
                 if message.status == .error && !message.hasErrorPart {
-                    rows.append(Row(id: "\(message.id)#failed", messageId: message.id, role: .assistant,
-                                    kind: .error(code: "turn_failed", message: "The agent could not finish this turn.")))
+                    chunk.append(Row(id: "\(message.id)#failed", messageId: message.id, role: .assistant,
+                                     kind: .error(code: "turn_failed", message: "The agent could not finish this turn.")))
                 }
             }
+            guard !chunk.isEmpty else { continue }
+            // Date separators when the gap is over an hour (Grok: "Today 8:00 AM").
+            if message.createdAt > 0 && (lastAt == 0 || message.createdAt - lastAt > 3_600_000) {
+                rows.append(Row(id: "\(message.id)#date", messageId: message.id, role: .system,
+                                kind: .system(icon: nil, text: dateLabel(message.createdAt), avatarProject: nil)))
+            }
+            if message.createdAt > 0 { lastAt = message.createdAt }
+            rows.append(contentsOf: chunk)
         }
         return rows
     }
