@@ -165,12 +165,34 @@ curl -fsS "http://$LISTEN/healthz" >/dev/null && echo "relay healthz ok on $LIST
 # ---- 5. site + Caddy -------------------------------------------------------------------------------
 say "site + caddy"
 install -d -o "$WWW_USER" -g "$WWW_USER" "$WWW_DIR"
-if [[ -d "$WWW_DIR/site" && ! -e "$WWW_DIR/site.pre-selfserve" ]]; then
+if [[ -d "$WWW_DIR/site" && ! -e "$WWW_DIR/site.pre-selfserve" && ! -f /var/lib/arbos-site/deployed-sha ]]; then
   mv "$WWW_DIR/site" "$WWW_DIR/site.pre-selfserve"; echo "kept previous site at $WWW_DIR/site.pre-selfserve"
 fi
-rm -rf "$WWW_DIR/site.new"; cp -a "$REPO_DIR/site" "$WWW_DIR/site.new"
-rm -rf "$WWW_DIR/site"; mv "$WWW_DIR/site.new" "$WWW_DIR/site"
-chown -R "$WWW_USER:$WWW_USER" "$WWW_DIR/site"
+# The site itself is deployed from the repo's main by arbos-site-sync (timer below); seed it once
+# from this checkout so a fresh server has a page before the first sync.
+if [[ ! -d "$WWW_DIR/site" ]]; then
+  cp -a "$REPO_DIR/site" "$WWW_DIR/site"; chown -R "$WWW_USER:$WWW_USER" "$WWW_DIR/site"
+fi
+install -m 0755 "$REPO_DIR/scripts/deploy/site-sync.sh" /usr/local/bin/arbos-site-sync
+cat > /etc/systemd/system/arbos-site-sync.service <<'UNIT'
+[Unit]
+Description=Deploy site/ from github.com/unarbos/arbos main into the arbos.life web root
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/arbos-site-sync
+UNIT
+cat > /etc/systemd/system/arbos-site-sync.timer <<'UNIT'
+[Unit]
+Description=Sync the arbos.life site from the repo every 5 minutes
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+[Install]
+WantedBy=timers.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now arbos-site-sync.timer >/dev/null
+/usr/local/bin/arbos-site-sync || echo "WARNING: site sync failed; the seeded site stays"
 install -m 0755 "$REPO_DIR/scripts/deploy/refresh-mac-download.sh" /usr/local/bin/arbos-refresh-mac-download
 /usr/local/bin/arbos-refresh-mac-download --no-reload || true
 if [[ -f "$WWW_DIR/Caddyfile" ]] && ! cmp -s "$REPO_DIR/scripts/deploy/Caddyfile" "$WWW_DIR/Caddyfile"; then
@@ -229,5 +251,5 @@ systemctl enable --now arbos-oauth-secret-watch.timer >/dev/null
 
 say "done"
 echo "relay: $PUBLIC_URL (listening on $LISTEN, data $DATA_DIR, env $ENV_FILE)"
-echo "site:  https://arbos.life  (files $WWW_DIR/site)"
+echo "site:  https://arbos.life  (files $WWW_DIR/site, synced from origin/main site/ by arbos-site-sync.timer)"
 echo "mac download: $PUBLIC_URL/download/mac  →  $(sed -n 's/.*redir [^ ]* \(https[^ ]*\).*/\1/p' /etc/arbos/download.caddy 2>/dev/null | head -1)"
