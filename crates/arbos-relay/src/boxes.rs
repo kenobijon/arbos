@@ -597,7 +597,7 @@ async fn push_relay_url(state: &AppState, dt: &crate::daytona::Daytona, sandbox_
 pub const HELLO_DEADLINE_MS: i64 = 60_000;
 /// Reasons that count as the user asking again (they reset a `box cannot reach relay` error).
 fn explicit_wake(reason: &str) -> bool {
-    matches!(reason, "wake" | "start" | "open")
+    matches!(reason, "wake" | "start" | "open" | "api")
 }
 
 pub async fn ensure_awake(state: &AppState, project_id: &str, reason: &str) {
