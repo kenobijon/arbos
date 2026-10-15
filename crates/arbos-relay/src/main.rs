@@ -9,6 +9,7 @@ mod db;
 mod proxy;
 mod rooms;
 mod routines;
+mod skills;
 mod smoke;
 mod state;
 
@@ -252,6 +253,13 @@ async fn main() -> anyhow::Result<()> {
             post(routines::report_run),
         )
         .route("/routines/{rid}/fire", post(routines::webhook_fire))
+        .route("/skills", get(skills::list).post(skills::create))
+        .route("/skills/search", get(skills::list))
+        .route("/skills/index", get(skills::index))
+        .route(
+            "/skills/{id}",
+            get(skills::get).put(skills::update).delete(skills::delete),
+        )
         .route("/room/{project}/{chat}", get(rooms::ws_room))
         .route(
             "/room/{project}/{chat}/checkpoint",
