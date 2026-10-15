@@ -59,8 +59,15 @@ if [[ -n "$FROM_SOURCE" ]]; then
     export PATH="$HOME/.cargo/bin:$PATH"
     command -v rustup >/dev/null 2>&1 || curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable >/dev/null
     cd "'"$BUILD_DIR"'"
-    if [[ -d repo/.git ]]; then git -C repo fetch -q origin "'"$FROM_SOURCE"'"; else git clone -q https://github.com/unarbos/arbos.git repo && git -C repo fetch -q origin "'"$FROM_SOURCE"'"; fi
-    git -C repo checkout -q --detach FETCH_HEAD
+    [[ -d repo/.git ]] || git clone -q https://github.com/unarbos/arbos.git repo
+    # GitHub only serves fetch-by-SHA for full 40-char ids, so fetch everything and resolve locally
+    # (works for branch names, tags, full and abbreviated commit ids).
+    git -C repo fetch -q --tags origin "+refs/heads/*:refs/remotes/origin/*"
+    REF="'"$FROM_SOURCE"'"
+    COMMIT=$(git -C repo rev-parse -q --verify "origin/$REF^{commit}" 2>/dev/null \
+          || git -C repo rev-parse -q --verify "$REF^{commit}" 2>/dev/null) \
+      || { echo "cannot resolve $REF in unarbos/arbos" >&2; exit 1; }
+    git -C repo checkout -q --detach "$COMMIT"
     echo "building $(git -C repo log --oneline -1)"
     cd repo && cargo build --release -p arbos-relay -p arbosctl 2>&1 | tail -3
   '
