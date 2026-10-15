@@ -150,6 +150,9 @@ struct Project: Identifiable, Equatable {
     var modelNote: String = ""
     /// `status.workspace.state` from the project doc; `.unknown` until the box writes it.
     var workspace: WorkspaceState = .unknown
+    /// D72 step 3: a project someone else shared with me.
+    var shared: Bool = false
+    var ownerHandle: String? = nil
 
     var shortModel: String { Project.shortModel(model) }
 
@@ -259,6 +262,14 @@ struct Message: Identifiable, Equatable {
     var parts: [Part]
     /// Count of parts the box flagged `hidden: true` (tool details).
     var hiddenCount: Int
+    // People chats (D72): who wrote it, who an agent answered, what was mentioned.
+    var senderHandle: String? = nil
+    var senderName: String? = nil
+    var senderAvatar: String? = nil
+    var ownerHandle: String? = nil
+    var askedByHandle: String? = nil
+    var mentions: [String] = []
+    var replyTo: String? = nil
 
     var isStreaming: Bool { status == .streaming }
 
@@ -339,7 +350,14 @@ enum DocJSON {
             completedAt: int(m["completedAt"]),
             pending: false,
             parts: parts,
-            hiddenCount: hidden
+            hiddenCount: hidden,
+            senderHandle: str(m["senderHandle"]),
+            senderName: str(m["senderName"]),
+            senderAvatar: str(m["senderAvatar"]),
+            ownerHandle: str(m["ownerHandle"]),
+            askedByHandle: str(m["askedByHandle"]),
+            mentions: (m["mentions"] as? [Any])?.compactMap { $0 as? String } ?? [],
+            replyTo: str(m["replyTo"])
         )
     }
 

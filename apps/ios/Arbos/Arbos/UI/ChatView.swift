@@ -33,12 +33,28 @@ struct ChatView: View {
     @StateObject private var recorder = MemoRecorder()
     @FocusState private var composerFocused: Bool
 
+    @State private var showMembers = false
+    @State private var showShare = false
+    @State private var replyTo: Message?
+    @State private var mentionQuery: String?
+
     private var project: Project? { model.project(projectId) }
     private var chat: Chat? { model.chat(chatId) }
+    private var people: PeopleChat? { model.peopleChat(chatId) }
+    private var isPeople: Bool { people != nil }
+    private var counterpart: ChatMember? { people?.counterpart(me: model.user?.id) }
     private var messages: [Message] { model.messages(of: chatId) }
     private var needsAnswer: Bool { model.chatNeedsAnswer(chatId) }
     private var streaming: Bool { model.isStreaming(chatId) }
-    private var name: String { project?.name ?? "Arbos" }
+    private var name: String {
+        if let people { return counterpart.map { "@\($0.handle)" } ?? people.title }
+        return project?.name ?? "Arbos"
+    }
+    /// Who is working: the streaming agent's handle in a people chat.
+    private var workingName: String {
+        if isPeople, let m = messages.last(where: { $0.role == .assistant && $0.isStreaming }), let h = m.senderHandle { return h }
+        return name
+    }
 
     var body: some View {
         GeometryReader { geo in
@@ -46,7 +62,10 @@ struct ChatView: View {
                 theme.bg.ignoresSafeArea()
                 transcript(width: geo.size.width)
                 headerBlur
-                header
+                VStack(spacing: 8) {
+                    header
+                    if let people { memberChips(people).padding(.horizontal, 16) }
+                }
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -73,6 +92,14 @@ struct ChatView: View {
         }
         .sheet(isPresented: $showSettings) {
             SettingsView().environmentObject(model).environment(\.theme, theme)
+        }
+        .sheet(isPresented: $showMembers) {
+            MembersSheet(chatId: chatId).environmentObject(model).environment(\.theme, theme)
+        }
+        .sheet(isPresented: $showShare) {
+            if let project {
+                ProjectMembersSheet(project: project).environmentObject(model).environment(\.theme, theme)
+            }
         }
         .fullScreenCover(isPresented: $showVoice, onDismiss: demoDismissed) {
             if let project {
@@ -128,6 +155,7 @@ struct ChatView: View {
         }
         .onAppear {
             model.markRead(chatId: chatId)
+            if isPeople { model.visibleChatId = chatId; model.markPeopleRead(chatId) }
             if let show = DebugHooks.show {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
                     switch show {
@@ -146,9 +174,11 @@ struct ChatView: View {
                 }
             }
         }
+        .onDisappear { if model.visibleChatId == chatId { model.visibleChatId = nil } }
         .onChange(of: messages, initial: true) { _, new in
-            rows = Transcript.rows(new, projectId: projectId)
+            rows = Transcript.rows(new, projectId: isPeople ? "\(peopleSlot):\(chatId)" : projectId, me: model.myUserId, people: isPeople)
             model.markRead(chatId: chatId)
+            if isPeople { model.markPeopleRead(chatId) }
         }
         .onChange(of: model.caughtUp.contains(chatId), initial: true) { _, ready in
             if ready, !sentOnce, !DebugHooks.liveDemo, let text = DebugHooks.autoSend, DebugHooks.openChat == chatId {
@@ -198,7 +228,7 @@ struct ChatView: View {
             Rectangle().fill(.ultraThinMaterial)
             theme.bg.opacity(0.78)
         }
-        .frame(height: 118)
+        .frame(height: isPeople ? 156 : 118)
         .mask(LinearGradient(colors: [.black, .black, .clear], startPoint: .top, endPoint: .bottom))
         .ignoresSafeArea(edges: .top)
         .allowsHitTesting(false)
@@ -217,27 +247,61 @@ struct ChatView: View {
             Spacer()
             GlassPill {
                 HStack(spacing: 8) {
-                    if let project {
-                        BlobAvatar(project: project, theme: theme, size: Theme.avatar, dot: machineDotColor(model.machine.state, theme: theme))
+                    if let people {
+                        PersonAvatar(url: counterpart?.avatarUrl, handle: counterpart?.handle ?? "?", size: Theme.avatar)
+                        VStack(alignment: .leading, spacing: 0) {
+                            Text(counterpart?.displayName ?? people.title)
+                                .font(.system(size: Theme.body, weight: .semibold))
+                                .foregroundStyle(theme.text)
+                                .lineLimit(1)
+                            if people.pending {
+                                Text("Invited · opens when they sign in").font(.system(size: 10)).foregroundStyle(theme.muted)
+                            } else if !people.agents.isEmpty {
+                                Text("\(people.agents.count) agent\(people.agents.count == 1 ? "" : "s")").font(.system(size: 10)).foregroundStyle(theme.muted)
+                            }
+                        }
+                    } else {
+                        if let project {
+                            BlobAvatar(project: project, theme: theme, size: Theme.avatar, dot: machineDotColor(model.machine.state, theme: theme))
+                        }
+                        Text(name)
+                            .font(.system(size: Theme.body, weight: .semibold))
+                            .foregroundStyle(theme.text)
+                            .lineLimit(1)
                     }
-                    Text(name)
-                        .font(.system(size: Theme.body, weight: .semibold))
-                        .foregroundStyle(theme.text)
-                        .lineLimit(1)
                 }
                 .padding(.leading, 10)
                 .padding(.trailing, 16)
                 .frame(height: Theme.control)
             }
             Spacer()
+            if isPeople {
+                Button { showMembers = true } label: {
+                    GlassCircle {
+                        Image(systemName: "person.badge.plus")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(theme.text)
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Members and agents")
+            }
             Menu {
-                Button { showThreads = true } label: { Label("Chats", systemImage: "bubble.left.and.bubble.right") }
-                Button {
-                    Task { if let c = await model.newChat(projectId: projectId) { model.open(chat: c) } }
-                } label: { Label("New chat", systemImage: "square.and.pencil") }
-                Button { showModelPicker = true } label: { Label("Model · \(project?.shortModel ?? "")", systemImage: "cpu") }
-                if streaming {
-                    Button(role: .destructive) { stop() } label: { Label("Stop \(name)", systemImage: "stop.circle") }
+                if isPeople {
+                    Button { showMembers = true } label: { Label("Members & agents", systemImage: "person.2") }
+                    if let c = counterpart {
+                        Button(role: .destructive) { model.block(c) } label: { Label("Block @\(c.handle)", systemImage: "hand.raised") }
+                    }
+                } else {
+                    Button { showThreads = true } label: { Label("Chats", systemImage: "bubble.left.and.bubble.right") }
+                    Button {
+                        Task { if let c = await model.newChat(projectId: projectId) { model.open(chat: c) } }
+                    } label: { Label("New chat", systemImage: "square.and.pencil") }
+                    Button { showModelPicker = true } label: { Label("Model · \(project?.shortModel ?? "")", systemImage: "cpu") }
+                    Button { showShare = true } label: { Label(project?.shared == true ? "Members" : "Share project…", systemImage: "person.2.badge.plus") }
+                    if streaming {
+                        Button(role: .destructive) { stop() } label: { Label("Stop \(name)", systemImage: "stop.circle") }
+                    }
                 }
                 Divider()
                 Button { showSettings = true } label: { Label("Settings", systemImage: "gearshape") }
@@ -260,7 +324,7 @@ struct ChatView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    Color.clear.frame(height: 64).onAppear { scroller = proxy }
+                    Color.clear.frame(height: isPeople ? 104 : 64).onAppear { scroller = proxy }
                     if let banner = machineBannerText {
                         HStack(spacing: 6) {
                             if model.machine.state == .waking { ProgressView().controlSize(.mini).tint(theme.muted) }
@@ -280,6 +344,15 @@ struct ChatView: View {
                         RowView(row: row, chatId: chatId, width: width)
                             .padding(.top, gap(before: i))
                             .id(row.id)
+                            .contextMenu {
+                                if isPeople, let m = messages.first(where: { $0.id == row.messageId }) {
+                                    Button { replyTo = m; composerFocused = true } label: { Label("Reply", systemImage: "arrowshape.turn.up.left") }
+                                    if m.role == .assistant, let h = m.senderHandle {
+                                        Button { draft = "@\(h) " + draft; composerFocused = true } label: { Label("Mention @\(h)", systemImage: "at") }
+                                    }
+                                }
+                                Button { UIPasteboard.general.string = m_text(row) } label: { Label("Copy", systemImage: "doc.on.doc") }
+                            }
                     }
                     if streaming {
                         workingLine.padding(.top, 20)
@@ -319,6 +392,10 @@ struct ChatView: View {
         }
     }
 
+    private func m_text(_ row: Row) -> String {
+        messages.first { $0.id == row.messageId }?.plainText ?? ""
+    }
+
     /// Spacing: 8 pt between bubbles of one sender, 24 pt around sender changes
     /// and system lines (measured on the references).
     private func gap(before i: Int) -> CGFloat {
@@ -355,24 +432,81 @@ struct ChatView: View {
         .padding(.bottom, 40)
     }
 
+    /// Avatars + handles of everyone in a people chat; agents show their owner.
+    private func memberChips(_ people: PeopleChat) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(people.members) { m in
+                    HStack(spacing: 6) {
+                        if m.isAgent, let p = m.project {
+                            BlobAvatar(project: p, theme: theme, size: 18)
+                        } else {
+                            PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 18)
+                        }
+                        Text(m.isAgent ? "@\(mentionSlug(m.project?.name ?? m.handle))" : "@\(m.handle)")
+                            .font(.system(size: Theme.tiny, weight: .medium))
+                            .foregroundStyle(theme.text)
+                        if m.isAgent, let o = m.ownerHandle {
+                            Text("· @\(o)").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                        }
+                    }
+                    .padding(.leading, 6).padding(.trailing, 10).padding(.vertical, 5)
+                    .background(Capsule().fill(theme.bubbleAssistant))
+                }
+                Button { showMembers = true } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "plus").font(.system(size: 11, weight: .bold))
+                        Text("Agent").font(.system(size: Theme.tiny, weight: .medium))
+                    }
+                    .foregroundStyle(theme.text)
+                    .padding(.horizontal, 10).padding(.vertical, 6)
+                    .background(Capsule().fill(theme.field))
+                    .overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.vertical, 2)
+        }
+    }
+
     private var workingLine: some View {
         HStack(spacing: 10) {
-            if let project {
+            if isPeople, let m = messages.last(where: { $0.role == .assistant && $0.isStreaming }),
+               let agent = people?.agents.first(where: { mentionSlug($0.project?.name ?? "") == m.senderHandle || $0.handle == m.senderHandle }),
+               let p = agent.project {
+                BlobAvatar(project: p, theme: theme, size: 26)
+            } else if let project {
                 BlobAvatar(project: project, theme: theme, size: 26)
             }
-            Text("\(name) is working")
+            Text("\(workingName) is working")
                 .font(.system(size: Theme.small))
                 .foregroundStyle(theme.muted)
             Spacer(minLength: 0)
         }
         .padding(.leading, 12)
-        .accessibilityLabel("\(name) is working")
+        .accessibilityLabel("\(workingName) is working")
     }
 
     // MARK: Composer
 
     private var composer: some View {
         VStack(spacing: 8) {
+            if let q = mentionQuery, isPeople, let people {
+                mentionList(people, query: q)
+            }
+            if let r = replyTo {
+                HStack(spacing: 8) {
+                    Image(systemName: "arrowshape.turn.up.left").font(.system(size: 12)).foregroundStyle(theme.muted)
+                    Text("Replying to @\(r.senderHandle ?? (r.role == .assistant ? "agent" : "you"))").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                    Text(r.plainText).font(.system(size: Theme.tiny)).foregroundStyle(theme.text).lineLimit(1)
+                    Spacer()
+                    Button { replyTo = nil } label: { Image(systemName: "xmark").font(.system(size: 11, weight: .bold)).foregroundStyle(theme.muted) }
+                        .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 14).padding(.vertical, 8)
+                .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(theme.bubbleAssistant))
+                .padding(.leading, Theme.plusButton + 12)
+            }
             if !pending.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
@@ -454,7 +588,7 @@ struct ChatView: View {
 
     private var textField: some View {
         HStack(spacing: 8) {
-            TextField("", text: $draft, prompt: Text(needsAnswer ? "Answer \(name)" : "Ask \(name)").foregroundStyle(theme.placeholder), axis: .vertical)
+            TextField("", text: $draft, prompt: Text(isPeople ? "Message \(name)" : (needsAnswer ? "Answer \(name)" : "Ask \(name)")).foregroundStyle(theme.placeholder), axis: .vertical)
                 .lineLimit(1...8)
                 .font(.system(size: Theme.body))
                 .foregroundStyle(theme.text)
@@ -462,6 +596,14 @@ struct ChatView: View {
                 .focused($composerFocused)
                 .padding(.leading, 16)
                 .padding(.vertical, 10)
+                .onChange(of: draft) { _, d in
+                    // `@` completion: the token the caret is in (approximated by the last token).
+                    guard isPeople, let last = d.split(separator: " ", omittingEmptySubsequences: false).last, last.hasPrefix("@"), !d.hasSuffix(" ") else {
+                        mentionQuery = nil
+                        return
+                    }
+                    mentionQuery = String(last.dropFirst()).lowercased()
+                }
             if draft.isEmpty {
                 // Hold to record a voice memo (Grok: "Start dictation" / voice memo).
                 Image(systemName: "mic")
@@ -547,9 +689,54 @@ struct ChatView: View {
         !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pending.isEmpty
     }
 
+    /// Members whose handle/slug starts with the typed `@` prefix; agents first.
+    private func mentionList(_ people: PeopleChat, query: String) -> some View {
+        let agents = people.agents.filter { query.isEmpty || mentionSlug($0.project?.name ?? $0.handle).hasPrefix(query) }
+        let humans = people.humans.filter { $0.id != model.user?.id && (query.isEmpty || $0.handle.lowercased().hasPrefix(query)) }
+        let items = agents + humans
+        return Group {
+            if !items.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(items) { m in
+                            Button { completeMention(m) } label: {
+                                HStack(spacing: 6) {
+                                    if m.isAgent, let p = m.project { BlobAvatar(project: p, theme: theme, size: 20) } else { PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 20) }
+                                    Text("@\(m.isAgent ? mentionSlug(m.project?.name ?? m.handle) : m.handle)")
+                                        .font(.system(size: Theme.small, weight: .medium)).foregroundStyle(theme.text)
+                                }
+                                .padding(.leading, 6).padding(.trailing, 12).padding(.vertical, 7)
+                                .background(Capsule().fill(theme.bubbleAssistant))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.leading, Theme.plusButton + 12)
+                }
+            }
+        }
+    }
+
+    private func completeMention(_ m: ChatMember) {
+        let slug = m.isAgent ? mentionSlug(m.project?.name ?? m.handle) : m.handle
+        var parts = draft.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
+        if let last = parts.last, last.hasPrefix("@") { parts[parts.count - 1] = "@\(slug)" } else { parts.append("@\(slug)") }
+        draft = parts.joined(separator: " ") + " "
+        mentionQuery = nil
+    }
+
     private func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !pending.isEmpty else { return }
+        if isPeople {
+            model.sendPeople(chatId: chatId, text: text, replyTo: replyTo?.id, attachments: pending)
+            pending.removeAll()
+            draft = ""
+            replyTo = nil
+            mentionQuery = nil
+            sentOnce = true
+            return
+        }
         if needsAnswer && pending.isEmpty {
             model.answer(chatId: chatId, text: text)
         } else {

@@ -9,8 +9,7 @@ struct HomeView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     @State private var showSettings = false
-    @State private var showNewProject = false
-    @State private var newProjectName = ""
+    @State private var showNewChat = false
     @State private var searching = false
     @State private var query = ""
     @FocusState private var searchFocused: Bool
@@ -28,7 +27,7 @@ struct HomeView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         Color.clear.frame(height: 66)
-                        if model.projects.isEmpty {
+                        if model.projects.isEmpty && model.peopleChats.isEmpty {
                             emptyState
                         } else {
                             if query.isEmpty {
@@ -38,13 +37,22 @@ struct HomeView: View {
                                 }
                                 favorites
                             }
-                            ForEach(projects) { project in
-                                Button { model.open(project: project) } label: {
-                                    AgentRow(project: project, preview: preview(project), time: timeLabel(project),
-                                             streaming: model.isStreaming(project: project.id),
-                                             unread: model.chats(of: project.id).contains { $0.unread })
+                            ForEach(homeRows) { row in
+                                switch row {
+                                case .project(let project):
+                                    Button { model.open(project: project) } label: {
+                                        AgentRow(project: project, preview: preview(project), time: timeLabel(project),
+                                                 streaming: model.isStreaming(project: project.id),
+                                                 unread: model.chats(of: project.id).contains { $0.unread })
+                                    }
+                                    .buttonStyle(.plain)
+                                case .people(let chat):
+                                    Button { model.open(peopleChat: chat) } label: {
+                                        PeopleRow(chat: chat, preview: peoplePreview(chat), time: timeLabel(ms: peopleActivity(chat)),
+                                                  unread: model.peopleUnread.contains(chat.id), me: model.user?.id)
+                                    }
+                                    .buttonStyle(.plain)
                                 }
-                                .buttonStyle(.plain)
                             }
                         }
                     }
@@ -70,16 +78,8 @@ struct HomeView: View {
             .sheet(isPresented: $showSettings) {
                 SettingsView().environmentObject(model).environment(\.theme, theme)
             }
-            .alert("New project", isPresented: $showNewProject) {
-                TextField("Name", text: $newProjectName)
-                Button("Create") {
-                    let name = newProjectName.trimmingCharacters(in: .whitespaces)
-                    if !name.isEmpty { model.createProject(name: name) }
-                    newProjectName = ""
-                }
-                Button("Cancel", role: .cancel) { newProjectName = "" }
-            } message: {
-                Text("The relay registers it as a workspace on your machine.")
+            .sheet(isPresented: $showNewChat) {
+                NewChatSheet().environmentObject(model).environment(\.theme, theme)
             }
         }
         .task {
@@ -101,6 +101,11 @@ struct HomeView: View {
         .onChange(of: model.projects.count) { _, _ in
             if !DebugHooks.liveDemo, let id = DebugHooks.openProject, model.path.isEmpty, let p = model.project(id) {
                 if let cid = DebugHooks.openChat, let c = model.chat(cid) { model.open(chat: c) } else { model.open(project: p) }
+            }
+        }
+        .onChange(of: model.peopleChats.count) { _, _ in
+            if DebugHooks.openProject == peopleSlot, model.path.isEmpty, let cid = DebugHooks.openChat, let c = model.peopleChat(cid) {
+                model.open(peopleChat: c)
             }
         }
     }
@@ -160,7 +165,7 @@ struct HomeView: View {
                     }
                 }
                 .buttonStyle(.plain)
-                Button { showNewProject = true } label: {
+                Button { showNewChat = true } label: {
                     GlassCircle {
                         Image(systemName: "plus")
                             .font(.system(size: 19, weight: .regular))
@@ -256,6 +261,41 @@ struct HomeView: View {
 
     // MARK: Row data
 
+    enum HomeRow: Identifiable {
+        case project(Project)
+        case people(PeopleChat)
+        var id: String {
+            switch self {
+            case .project(let p): return "p:" + p.id
+            case .people(let c): return "c:" + c.id
+            }
+        }
+        var activity: Int64 { 0 }
+    }
+
+    /// Projects and DMs in one list, newest activity first.
+    private var homeRows: [HomeRow] {
+        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        var rows: [(Int64, HomeRow)] = projects.map { (lastActivity($0), .project($0)) }
+        for c in model.peopleChats where q.isEmpty || c.title.lowercased().contains(q) || c.humans.contains { $0.handle.lowercased().contains(q) } {
+            rows.append((peopleActivity(c), .people(c)))
+        }
+        return rows.sorted { $0.0 > $1.0 }.map(\.1)
+    }
+
+    private func peopleActivity(_ c: PeopleChat) -> Int64 {
+        max(c.lastActivityAt, model.messages(of: c.id).last?.createdAt ?? 0)
+    }
+
+    private func peoplePreview(_ c: PeopleChat) -> String {
+        guard let m = model.messages(of: c.id).last(where: { !$0.plainText.isEmpty }) else {
+            return c.pending ? "Invited · opens when they sign in" : "Say hi"
+        }
+        let line = m.plainText.split(separator: "\n").first.map(String.init) ?? ""
+        let who = m.sender == model.myUserId ? "You" : (m.senderHandle.map { "@\($0)" } ?? "")
+        return (who.isEmpty ? "" : who + ": ") + HomeView.plain(line)
+    }
+
     /// Newest message with prose across the project's chats.
     private func latest(_ p: Project) -> Message? {
         var best: Message? = nil
@@ -287,8 +327,9 @@ struct HomeView: View {
         return t.trimmingCharacters(in: .whitespaces)
     }
 
-    private func timeLabel(_ p: Project) -> String {
-        let ms = lastActivity(p)
+    private func timeLabel(_ p: Project) -> String { timeLabel(ms: lastActivity(p)) }
+
+    private func timeLabel(ms: Int64) -> String {
         guard ms > 0 else { return "" }
         let date = Date(timeIntervalSince1970: Double(ms) / 1000)
         let cal = Calendar.current
@@ -372,6 +413,54 @@ struct AgentRow: View {
                     } else if unread {
                         Circle().fill(Color(hex: "#1084FE")!).frame(width: 8, height: 8)
                     }
+                }
+            }
+        }
+        .padding(.vertical, 12)
+        .contentShape(Rectangle())
+    }
+}
+
+/// A DM in the home list: round avatar (vs the agents' blobs), name + @handle.
+struct PeopleRow: View {
+    @Environment(\.theme) private var theme
+    let chat: PeopleChat
+    let preview: String
+    let time: String
+    let unread: Bool
+    let me: String?
+
+    private var other: ChatMember? { chat.counterpart(me: me) }
+
+    var body: some View {
+        HStack(spacing: 14) {
+            ZStack(alignment: .bottomTrailing) {
+                PersonAvatar(url: other?.avatarUrl, handle: other?.handle ?? "?", size: 46)
+                if let a = chat.agents.first?.project {
+                    BlobAvatar(project: a, theme: theme, size: 18)
+                        .overlay(Circle().strokeBorder(theme.bg, lineWidth: 2))
+                        .offset(x: 3, y: 3)
+                }
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(other?.displayName ?? chat.title)
+                        .font(.system(size: Theme.body, weight: .semibold))
+                        .foregroundStyle(theme.text)
+                        .lineLimit(1)
+                    Text("@\(other?.handle ?? chat.title)")
+                        .font(.system(size: Theme.tiny))
+                        .foregroundStyle(theme.muted)
+                        .lineLimit(1)
+                    Spacer()
+                    Text(time).font(.system(size: Theme.small)).foregroundStyle(theme.muted)
+                }
+                HStack(spacing: 6) {
+                    Text(preview)
+                        .font(.system(size: Theme.small))
+                        .foregroundStyle(theme.muted)
+                        .lineLimit(1)
+                    if unread { Circle().fill(Color(hex: "#1084FE")!).frame(width: 8, height: 8) }
                 }
             }
         }

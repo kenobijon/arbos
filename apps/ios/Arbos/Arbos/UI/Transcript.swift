@@ -18,7 +18,9 @@ enum Block: Equatable, Hashable {
 
 enum RowKind: Equatable {
     case user(text: String, pending: Bool)
-    case assistant(blocks: [Block], live: Bool)
+    /// Another person's message in a people chat: left bubble with handle + avatar.
+    case other(text: String, handle: String, avatar: String?)
+    case assistant(blocks: [Block], live: Bool, caption: String?)
     /// Centred muted line: hand-offs ("Messaged ◉ Affine"), stops, dates.
     case system(icon: String?, text: String, avatarProject: Id?)
     case question(text: String)
@@ -36,7 +38,8 @@ struct Row: Identifiable, Equatable {
 }
 
 enum Transcript {
-    static func rows(_ messages: [Message], projectId: Id, subagentNames: [String: String] = [:]) -> [Row] {
+    /// `me` = my `user:<id>` in a people chat; nil in project chats (every user row is mine).
+    static func rows(_ messages: [Message], projectId: Id, subagentNames: [String: String] = [:], me: String? = nil, people: Bool = false) -> [Row] {
         var rows: [Row] = []
         var lastAt: Int64 = 0
         for message in messages {
@@ -56,8 +59,14 @@ enum Transcript {
                 }
                 let text = message.plainText
                 if !text.isEmpty {
-                    rows.append(Row(id: "\(message.id)#user", messageId: message.id, role: .user,
-                                    kind: .user(text: text, pending: message.pending)))
+                    let mine = !people || me == nil || message.sender == me || message.sender == "user"
+                    if mine {
+                        rows.append(Row(id: "\(message.id)#user", messageId: message.id, role: .user,
+                                        kind: .user(text: text, pending: message.pending)))
+                    } else {
+                        rows.append(Row(id: "\(message.id)#other", messageId: message.id, role: .project,
+                                        kind: .other(text: text, handle: message.senderHandle ?? "someone", avatar: message.senderAvatar)))
+                    }
                 }
             case .assistant, .system, .project:
                 // Hand-off ack: Grok shows "Messaged ◉ <bot>" as a system line.
@@ -72,8 +81,12 @@ enum Transcript {
                         let blocks = Markdown.blocks(text).filter { !Markdown.isJSON($0) }
                         if blocks.isEmpty { continue }
                         let live = streaming && pix == lastTextPart
+                        var caption: String? = nil
+                        if people, let h = message.senderHandle {
+                            caption = message.ownerHandle.map { "\(h) · owned by @\($0)" } ?? h
+                        }
                         rows.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
-                                        kind: .assistant(blocks: blocks, live: live)))
+                                        kind: .assistant(blocks: blocks, live: live, caption: pix == message.parts.firstIndex { $0.textValue != nil } ? caption : nil)))
                     case .status(let id, .askUser, let text):
                         rows.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant, kind: .question(text: text)))
                     case .status(let id, .handoff, let text):
@@ -256,9 +269,34 @@ struct RowView: View {
                     .frame(maxWidth: maxBubble, alignment: .trailing)
                     .opacity(pending ? 0.6 : 1)
             }
-        case .assistant(let blocks, let live):
+        case .other(let text, let handle, let avatar):
+            HStack(alignment: .bottom, spacing: 8) {
+                PersonAvatar(url: avatar, handle: handle, size: 26)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("@\(handle)")
+                        .font(.system(size: Theme.tiny, weight: .medium))
+                        .foregroundStyle(theme.muted)
+                        .padding(.leading, 4)
+                    Text(Markdown.inline(text))
+                        .font(.system(size: Theme.body))
+                        .lineSpacing(Theme.bodyLineSpacing)
+                        .foregroundStyle(theme.text)
+                        .textSelection(.enabled)
+                        .padding(.horizontal, Theme.bubbleHPad)
+                        .padding(.vertical, Theme.bubbleVPad)
+                        .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
+                }
+                .frame(maxWidth: maxBubble - 34, alignment: .leading)
+                Spacer(minLength: 0)
+            }
+        case .assistant(let blocks, let live, let caption):
             HStack {
                 VStack(alignment: .leading, spacing: 8) {
+                    if let caption {
+                        Text(caption)
+                            .font(.system(size: Theme.tiny, weight: .medium))
+                            .foregroundStyle(theme.muted)
+                    }
                     ForEach(Array(blocks.enumerated()), id: \.offset) { i, block in
                         BlockView(block: block, live: live && i == blocks.count - 1)
                     }
@@ -433,6 +471,33 @@ struct BlockView: View {
             }
             .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.bg.opacity(0.6)))
         }
+    }
+}
+
+/// Round avatar for a person (GitHub picture, initials fallback).
+struct PersonAvatar: View {
+    @Environment(\.theme) private var theme
+    let url: String?
+    let handle: String
+    var size: CGFloat = 40
+
+    var body: some View {
+        ZStack {
+            Circle().fill(Color(hex: "#2A2A2A")!)
+            if let url, let u = URL(string: url) {
+                AsyncImage(url: u) { img in img.resizable().scaledToFill() } placeholder: { initials }
+            } else {
+                initials
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(Circle())
+    }
+
+    private var initials: some View {
+        Text(String(handle.prefix(1)).uppercased())
+            .font(.system(size: size * 0.42, weight: .semibold))
+            .foregroundStyle(theme.text)
     }
 }
 

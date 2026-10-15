@@ -134,7 +134,9 @@ final class Room {
             }
         }
 
-        try await send(Frame(.rowsReq, header: ["after": cursor, "excludeOwn": true]))
+        // Own rows are requested too: without a local store they are the only
+        // copy of what this device wrote (a people chat has no box to re-publish them).
+        try await send(Frame(.rowsReq, header: ["after": cursor, "excludeOwn": false]))
         for (batchId, bytes) in pending {
             try await send(Frame(.push, header: ["batchId": batchId], payload: bytes))
         }
@@ -175,7 +177,7 @@ final class Room {
             case .error:
                 let code = frame.string("code") ?? ""
                 if code == "lagging" {
-                    try await send(Frame(.rowsReq, header: ["after": cursor, "excludeOwn": true]))
+                    try await send(Frame(.rowsReq, header: ["after": cursor, "excludeOwn": false]))
                 } else {
                     throw RelayError(status: 0, message: "relay error \(code): \(frame.string("message") ?? "")")
                 }

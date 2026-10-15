@@ -10,9 +10,11 @@
 		A1F6426F79178DB9A90C8EA2 /* ArbosApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1FA6D4B127AF19E74875062 /* ArbosApp.swift */; };
 		A15DA44CF0E636E3D9860250 /* DebugHooks.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B0A3D2AD3FE3145729342F /* DebugHooks.swift */; };
 		A1B8B46004801036DC4B4D97 /* Model.swift in Sources */ = {isa = PBXBuildFile; fileRef = A155587775513DEC1F23B656 /* Model.swift */; };
+		A1CC16E81F61477B9DF5FFFA /* People.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BD81E89EEA5A629B0BB56E /* People.swift */; };
 		A1627BBC9C62B0C159B656E4 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A19CCD11486CB5CFFBAC839C /* Assets.xcassets */; };
 		A1B2553F3B08E424A698DF1E /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A126D30B5C9C2AC07F0C6219 /* AppModel.swift */; };
 		A1939D054CD4E942D13E4671 /* Fixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1232E203897346ADA0EBC81 /* Fixture.swift */; };
+		A1A35C501D7FF2CEE043942F /* LocalNotifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10B379E74C95AC8C244FE76 /* LocalNotifier.swift */; };
 		A1964D83BAA8DD77C86A56D0 /* Auth.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1321B9CC7F973446BD6A976 /* Auth.swift */; };
 		A11264651E1B169D16B1114D /* ChatDoc.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1996265542C4ED02CC38120 /* ChatDoc.swift */; };
 		A1F8337A17E3652D621D25E1 /* Frame.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CDA192373B6FA79DDB37A1 /* Frame.swift */; };
@@ -23,6 +25,7 @@
 		A18F59FA9AE462F8486DB31A /* ChatListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DFDB106DEC76C607F1D977 /* ChatListView.swift */; };
 		A1ED1D7F2332871010811C4F /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10D68BEDFFBE789DB809322 /* ChatView.swift */; };
 		A1EB7879568E9B5B57FE11F9 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A188D2AE0851F11A90EAC4E6 /* HomeView.swift */; };
+		A105145283376DDCA7A9EC39 /* PeopleSheets.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11A9C028DBAC54E927EBE8E /* PeopleSheets.swift */; };
 		A191F823020EA9BF622DC86F /* Recorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DC3E1CA07FA5092F1C1055 /* Recorder.swift */; };
 		A113297F2A9C3E4B738265A9 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DA7AA499A09D206795478F /* SettingsView.swift */; };
 		A1A1AFC1950307E92773C31D /* SignInView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1663DB81AC930654B7D6C58 /* SignInView.swift */; };
@@ -36,9 +39,11 @@
 		A1FA6D4B127AF19E74875062 /* ArbosApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArbosApp.swift; sourceTree = "<group>"; };
 		A1B0A3D2AD3FE3145729342F /* DebugHooks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugHooks.swift; sourceTree = "<group>"; };
 		A155587775513DEC1F23B656 /* Model.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Model.swift; sourceTree = "<group>"; };
+		A1BD81E89EEA5A629B0BB56E /* People.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = People.swift; sourceTree = "<group>"; };
 		A19CCD11486CB5CFFBAC839C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A126D30B5C9C2AC07F0C6219 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		A1232E203897346ADA0EBC81 /* Fixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Fixture.swift; sourceTree = "<group>"; };
+		A10B379E74C95AC8C244FE76 /* LocalNotifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalNotifier.swift; sourceTree = "<group>"; };
 		A1321B9CC7F973446BD6A976 /* Auth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Auth.swift; sourceTree = "<group>"; };
 		A1996265542C4ED02CC38120 /* ChatDoc.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatDoc.swift; sourceTree = "<group>"; };
 		A1CDA192373B6FA79DDB37A1 /* Frame.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Frame.swift; sourceTree = "<group>"; };
@@ -49,6 +54,7 @@
 		A1DFDB106DEC76C607F1D977 /* ChatListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatListView.swift; sourceTree = "<group>"; };
 		A10D68BEDFFBE789DB809322 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
 		A188D2AE0851F11A90EAC4E6 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
+		A11A9C028DBAC54E927EBE8E /* PeopleSheets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PeopleSheets.swift; sourceTree = "<group>"; };
 		A1DC3E1CA07FA5092F1C1055 /* Recorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Recorder.swift; sourceTree = "<group>"; };
 		A1DA7AA499A09D206795478F /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		A1663DB81AC930654B7D6C58 /* SignInView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignInView.swift; sourceTree = "<group>"; };
@@ -112,6 +118,7 @@
 			isa = PBXGroup;
 			children = (
 				A155587775513DEC1F23B656,
+				A1BD81E89EEA5A629B0BB56E,
 			);
 			path = Model;
 			sourceTree = "<group>";
@@ -129,6 +136,7 @@
 			children = (
 				A126D30B5C9C2AC07F0C6219,
 				A1232E203897346ADA0EBC81,
+				A10B379E74C95AC8C244FE76,
 			);
 			path = Store;
 			sourceTree = "<group>";
@@ -153,6 +161,7 @@
 				A1DFDB106DEC76C607F1D977,
 				A10D68BEDFFBE789DB809322,
 				A188D2AE0851F11A90EAC4E6,
+				A11A9C028DBAC54E927EBE8E,
 				A1DC3E1CA07FA5092F1C1055,
 				A1DA7AA499A09D206795478F,
 				A1663DB81AC930654B7D6C58,
@@ -240,8 +249,10 @@
 				A1F6426F79178DB9A90C8EA2 /* ArbosApp.swift in Sources */,
 				A15DA44CF0E636E3D9860250 /* DebugHooks.swift in Sources */,
 				A1B8B46004801036DC4B4D97 /* Model.swift in Sources */,
+				A1CC16E81F61477B9DF5FFFA /* People.swift in Sources */,
 				A1B2553F3B08E424A698DF1E /* AppModel.swift in Sources */,
 				A1939D054CD4E942D13E4671 /* Fixture.swift in Sources */,
+				A1A35C501D7FF2CEE043942F /* LocalNotifier.swift in Sources */,
 				A1964D83BAA8DD77C86A56D0 /* Auth.swift in Sources */,
 				A11264651E1B169D16B1114D /* ChatDoc.swift in Sources */,
 				A1F8337A17E3652D621D25E1 /* Frame.swift in Sources */,
@@ -252,6 +263,7 @@
 				A18F59FA9AE462F8486DB31A /* ChatListView.swift in Sources */,
 				A1ED1D7F2332871010811C4F /* ChatView.swift in Sources */,
 				A1EB7879568E9B5B57FE11F9 /* HomeView.swift in Sources */,
+				A105145283376DDCA7A9EC39 /* PeopleSheets.swift in Sources */,
 				A191F823020EA9BF622DC86F /* Recorder.swift in Sources */,
 				A113297F2A9C3E4B738265A9 /* SettingsView.swift in Sources */,
 				A1A1AFC1950307E92773C31D /* SignInView.swift in Sources */,

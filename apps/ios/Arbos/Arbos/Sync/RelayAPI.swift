@@ -164,7 +164,9 @@ final class RelayAPI {
                 spendTodayUsd: (detail["spend_today"] as? NSNumber)?.doubleValue
                     ?? (p["spend_today_usd"] as? NSNumber)?.doubleValue ?? 0,
                 spendCapUsd: (p["spend_cap_usd"] as? NSNumber)?.doubleValue
-                    ?? (p["spend_cap_daily"] as? NSNumber)?.doubleValue ?? 25
+                    ?? (p["spend_cap_daily"] as? NSNumber)?.doubleValue ?? 25,
+                shared: p["shared"] as? Bool ?? false,
+                ownerHandle: p["owner_handle"] as? String
             )
             let chats = ((detail["chats"] as? [Any]) ?? []).compactMap(RelayAPI.parseChat)
             out.append(RegistryProject(project: project, chats: chats))
@@ -281,6 +283,84 @@ final class RelayAPI {
             throw RelayError(status: status, message: String(data: body, encoding: .utf8) ?? "")
         }
         return key
+    }
+
+    // MARK: People chats (D72)
+
+    func searchUsers(_ q: String) async throws -> [Person] {
+        let query = q.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "@"))
+        guard !query.isEmpty, let enc = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return [] }
+        return ((try await json("GET", "/users/search?q=\(enc)")) as? [Any] ?? []).compactMap(Person.parse)
+    }
+
+    func openDM(handle: String) async throws -> PeopleChat {
+        let v = try await json("POST", "/chats/dm", body: ["handle": handle.trimmingCharacters(in: CharacterSet(charactersIn: "@ "))])
+        guard let chat = PeopleChat.parse(v) else { throw RelayError(status: 0, message: "The relay returned no chat") }
+        return chat
+    }
+
+    func peopleChats() async throws -> [PeopleChat] {
+        ((try await json("GET", "/chats")) as? [Any] ?? []).compactMap(PeopleChat.parse)
+    }
+
+    func peopleChat(_ id: String) async throws -> PeopleChat {
+        guard let chat = PeopleChat.parse(try await json("GET", "/chats/\(id)")) else { throw RelayError(status: 0, message: "Bad chat") }
+        return chat
+    }
+
+    func markRead(chatId: String, seq: Int64) async throws {
+        _ = try await request("PUT", "/chats/\(chatId)/read", body: ["seq": seq])
+    }
+
+    func leaveChat(_ id: String) async throws { _ = try await request("POST", "/chats/\(id)/leave", body: [String: Any]()) }
+    func hideChat(_ id: String) async throws { _ = try await request("POST", "/chats/\(id)/hide", body: [String: Any]()) }
+    func deleteChat(_ id: String) async throws { _ = try await request("DELETE", "/chats/\(id)") }
+
+    func addAgent(chatId: String, projectId: Id) async throws -> PeopleChat {
+        let v = try await json("POST", "/chats/\(chatId)/agents", body: ["project_id": projectId])
+        if let chat = PeopleChat.parse(v) { return chat }
+        return try await peopleChat(chatId)
+    }
+
+    func removeAgent(chatId: String, projectId: Id) async throws {
+        _ = try await request("DELETE", "/chats/\(chatId)/agents/\(projectId)")
+    }
+
+    func setReplyPolicy(chatId: String, projectId: Id, policy: String) async throws {
+        _ = try await request("PUT", "/chats/\(chatId)/agents/\(projectId)/settings", body: ["reply_policy": policy])
+    }
+
+    func removeMember(chatId: String, userId: String) async throws {
+        _ = try await request("DELETE", "/chats/\(chatId)/members/\(userId)")
+    }
+
+    func block(handle: String) async throws { _ = try await request("POST", "/blocks", body: ["handle": handle]) }
+    func unblock(userId: String) async throws { _ = try await request("DELETE", "/blocks/\(userId)") }
+    func blocks() async throws -> [Person] {
+        ((try await json("GET", "/blocks")) as? [Any] ?? []).compactMap { raw -> Person? in
+            guard let d = raw as? [String: Any], let id = d["id"] as? String else { return nil }
+            return Person(id: id, handle: d["handle"] as? String ?? "", avatarUrl: d["avatar_url"] as? String, name: nil, status: "blocked")
+        }
+    }
+
+    func pushes() async throws -> [PushItem] {
+        ((try await json("GET", "/me/pushes")) as? [Any] ?? []).compactMap(PushItem.parse)
+    }
+
+    // Projects together (step 3)
+    func projectMembers(_ projectId: Id) async throws -> [ProjectMember] {
+        let v = try await json("GET", "/projects/\(projectId)/members")
+        let list = (v as? [Any]) ?? ((v as? [String: Any])?["members"] as? [Any]) ?? []
+        return list.compactMap(ProjectMember.parse)
+    }
+
+    func addProjectMember(_ projectId: Id, handle: String) async throws -> [ProjectMember] {
+        let v = try await json("POST", "/projects/\(projectId)/members", body: ["handle": handle.trimmingCharacters(in: CharacterSet(charactersIn: "@ "))])
+        return (((v as? [String: Any])?["members"] as? [Any]) ?? []).compactMap(ProjectMember.parse)
+    }
+
+    func removeProjectMember(_ projectId: Id, userId: String) async throws {
+        _ = try await request("DELETE", "/projects/\(projectId)/members/\(userId)")
     }
 
     /// Room checkpoint (crdt-sync §7.3). Returns `(seq, bytes)`.

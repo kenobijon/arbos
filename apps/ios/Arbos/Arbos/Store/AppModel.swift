@@ -53,6 +53,14 @@ final class AppModel: ObservableObject {
     @Published private(set) var user: AuthUser?
     @Published private(set) var credits: Credits?
     @Published private(set) var approvals: [PendingDevice] = []
+    /// People chats (D72): DMs I am a member of, newest activity first.
+    @Published private(set) var peopleChats: [PeopleChat] = []
+    /// Chat ids with unread rows (per device, from head_seq > read_seq and pushes).
+    @Published private(set) var peopleUnread: Set<String> = []
+    @Published private(set) var blocked: [Person] = []
+    /// The people chat currently on screen; pushes for it never notify.
+    var visibleChatId: String?
+    private var notifiedPushIds: Set<String> = []
     @Published private(set) var authMode: AuthMode = .github
     @Published private(set) var signingIn = false
     @Published private(set) var signInError: String?
@@ -142,6 +150,12 @@ final class AppModel: ObservableObject {
             startAfterPairing()
         }
         Task { await probeAuthMode() }
+        NotificationCenter.default.addObserver(forName: LocalNotifier.openChat, object: nil, queue: .main) { [weak self] n in
+            guard let self, let cid = n.userInfo?["chat_id"] as? String else { return }
+            Task { @MainActor in
+                if self.peopleChat(cid) != nil { self.path = [.chat(chatId: cid, projectId: peopleSlot)] }
+            }
+        }
     }
 
     // MARK: Sign in with GitHub (self-serve relay)
@@ -207,7 +221,7 @@ final class AppModel: ObservableObject {
 
     /// `/me` + pending approvals; runs with every registry poll.
     func refreshAccount() async {
-        guard tokens != nil else { return }
+        guard credentials != nil, !isFixture else { return }
         if tokens?.isExpiringSoon == true { _ = await refreshTokens() }
         if let (who, cr, _) = try? await api.me() {
             user = who
@@ -316,6 +330,8 @@ final class AppModel: ObservableObject {
         messages = [:]
         caughtUp = []
         unacked = []
+        peopleChats = []
+        peopleUnread = []
         if forget, let creds = credentials {
             Keychain.delete(relayUrl: creds.relayUrl)
         }
@@ -336,6 +352,8 @@ final class AppModel: ObservableObject {
                 guard let self else { return }
                 await self.refreshRegistry()
                 await self.refreshAccount()
+                await self.refreshPeople()
+                await self.drainPushes()
                 try? await Task.sleep(nanoseconds: 15_000_000_000)
             }
         }
@@ -582,6 +600,221 @@ final class AppModel: ObservableObject {
             }
             await refreshMachine()
         }
+    }
+
+    // MARK: People chats (D72)
+
+    var myUserId: String? { user.map { "user:\($0.id)" } }
+
+    func peopleChat(_ id: String) -> PeopleChat? { peopleChats.first { $0.id == id } }
+
+    func isPeopleChat(_ id: String) -> Bool { peopleChat(id) != nil }
+
+    func refreshPeople() async {
+        guard credentials != nil, !isFixture else { return }
+        do {
+            let list = try await api.peopleChats()
+            peopleChats = list
+            for c in list where c.unread { peopleUnread.insert(c.id) }
+            for c in list where !c.unread && visibleChatId != c.id { peopleUnread.remove(c.id) }
+            for c in list { ensureRoom(projectId: peopleSlot, key: c.id, roomChat: c.id) }
+        } catch {
+            // Relays without people chats (older) answer 404; stay quiet.
+        }
+    }
+
+    /// Search handles (prefix) for the new-chat sheet.
+    func searchPeople(_ q: String) async -> [Person] {
+        (try? await api.searchUsers(q)) ?? []
+    }
+
+    /// Open (or create) the DM with a handle and navigate to it.
+    func openDM(handle: String) async -> PeopleChat? {
+        do {
+            let chat = try await api.openDM(handle: handle)
+            if !peopleChats.contains(where: { $0.id == chat.id }) { peopleChats.insert(chat, at: 0) }
+            ensureRoom(projectId: peopleSlot, key: chat.id, roomChat: chat.id)
+            path = [.chat(chatId: chat.id, projectId: peopleSlot)]
+            return chat
+        } catch {
+            notice = Notice(text: (error as? RelayError)?.type == "not_available" ? "You can't message this person." : "Could not open the chat: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    func open(peopleChat chat: PeopleChat) {
+        path = [.chat(chatId: chat.id, projectId: peopleSlot)]
+    }
+
+    /// Send into a people chat: author fields + mentions resolved from `@slug`s.
+    func sendPeople(chatId: String, text: String, replyTo: String?, attachments: [PendingAttachment] = []) {
+        guard let doc = docs[chatId], let chat = peopleChat(chatId), let me = user else { return }
+        let mentions = AppModel.mentions(in: text, members: chat.members)
+        let author = ChatDoc.Author(sender: "user:\(me.id)", handle: me.login, name: me.name, avatar: me.avatarUrl)
+        let messageId = newId()
+        unacked.insert(messageId)
+        Task {
+            var uploaded: [Attachment] = []
+            for a in attachments {
+                let key = "att-\(newId().lowercased())-\(AppModel.safeName(a.name))"
+                do {
+                    _ = try await api.putBlob(projectId: "\(peopleSlot):\(chatId)", key: key, mime: a.mime, data: a.data)
+                    uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: key))
+                } catch {
+                    notice = Notice(text: "Attachment upload failed: \(error.localizedDescription)")
+                }
+            }
+            do {
+                try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: uploaded,
+                                          author: author, mentions: mentions, replyTo: replyTo)
+                try doc.pushCommand("send", payload: ["messageId": messageId], device: deviceId)
+            } catch {
+                notice = Notice(text: "Could not write the message: \(error.localizedDescription)")
+                return
+            }
+            doc.commit()
+            if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i].lastActivityAt = nowMs() }
+            peopleChats.sort { $0.lastActivityAt > $1.lastActivityAt }
+        }
+    }
+
+    /// `@slug` tokens that name a member: agents by their mention slug, people by handle.
+    static func mentions(in text: String, members: [ChatMember]) -> [String] {
+        var out: [String] = []
+        let tokens = text.split(whereSeparator: { $0.isWhitespace })
+        for t in tokens where t.hasPrefix("@") {
+            let slug = t.dropFirst().trimmingCharacters(in: CharacterSet(charactersIn: ".,!?:;")).lowercased()
+            if slug == "arbos", members.filter(\.isAgent).count == 1, let a = members.first(where: \.isAgent) {
+                if !out.contains(a.member) { out.append(a.member) }
+                continue
+            }
+            if let m = members.first(where: { $0.handle.lowercased() == slug || ($0.isAgent && mentionSlug($0.project?.name ?? "") == slug) }) {
+                if !out.contains(m.member) { out.append(m.member) }
+            }
+        }
+        return out
+    }
+
+    /// Mark a people chat read up to the relay head (cross-launch cursor).
+    func markPeopleRead(_ chatId: String) {
+        peopleUnread.remove(chatId)
+        guard let chat = peopleChat(chatId), chat.headSeq > chat.readSeq || chat.unread else { return }
+        if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
+            peopleChats[i].readSeq = chat.headSeq
+            peopleChats[i].unread = false
+        }
+        Task { try? await api.markRead(chatId: chatId, seq: chat.headSeq) }
+    }
+
+    func addAgent(chatId: String, projectId: Id) {
+        Task {
+            do {
+                let chat = try await api.addAgent(chatId: chatId, projectId: projectId)
+                if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i] = chat }
+            } catch {
+                notice = Notice(text: (error as? RelayError)?.type == "own_project_only" ? "You can only add your own agents." : "Add agent failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    func removeAgent(chatId: String, projectId: Id) {
+        Task {
+            do {
+                try await api.removeAgent(chatId: chatId, projectId: projectId)
+                if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
+                    peopleChats[i].members.removeAll { $0.isAgent && $0.id == projectId }
+                }
+            } catch { notice = Notice(text: "Remove agent failed: \(error.localizedDescription)") }
+        }
+    }
+
+    func setReplyPolicy(chatId: String, projectId: Id, policy: String) {
+        if let i = peopleChats.firstIndex(where: { $0.id == chatId }),
+           let j = peopleChats[i].members.firstIndex(where: { $0.isAgent && $0.id == projectId }) {
+            peopleChats[i].members[j].replyPolicy = policy
+        }
+        Task { try? await api.setReplyPolicy(chatId: chatId, projectId: projectId, policy: policy) }
+    }
+
+    func leavePeopleChat(_ chatId: String) {
+        peopleChats.removeAll { $0.id == chatId }
+        rooms[chatId]?.stop(); rooms[chatId] = nil; docs[chatId] = nil; messages[chatId] = nil
+        path = []
+        Task { try? await api.leaveChat(chatId) }
+    }
+
+    func deletePeopleChat(_ chatId: String) {
+        peopleChats.removeAll { $0.id == chatId }
+        rooms[chatId]?.stop(); rooms[chatId] = nil; docs[chatId] = nil; messages[chatId] = nil
+        path = []
+        Task {
+            do { try await api.deleteChat(chatId) } catch { notice = Notice(text: "Delete failed: \(error.localizedDescription)") }
+        }
+    }
+
+    func block(_ member: ChatMember) {
+        Task {
+            do { try await api.block(handle: member.handle); blocked = (try? await api.blocks()) ?? blocked }
+            catch { notice = Notice(text: "Block failed: \(error.localizedDescription)") }
+        }
+    }
+
+    func unblock(_ person: Person) {
+        blocked.removeAll { $0.id == person.id }
+        Task { try? await api.unblock(userId: person.id) }
+    }
+
+    func refreshBlocks() async {
+        if let list = try? await api.blocks() { blocked = list }
+    }
+
+    // Projects together (step 3)
+    func projectMembers(_ projectId: Id) async -> [ProjectMember] {
+        (try? await api.projectMembers(projectId)) ?? []
+    }
+
+    func inviteToProject(_ projectId: Id, handle: String) async -> [ProjectMember]? {
+        do { return try await api.addProjectMember(projectId, handle: handle) }
+        catch {
+            notice = Notice(text: (error as? RelayError)?.type == "already_member" ? "@\(handle) is already a member." : "Invite failed: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    func removeProjectMember(_ projectId: Id, userId: String) async {
+        do { try await api.removeProjectMember(projectId, userId: userId) }
+        catch { notice = Notice(text: "Remove failed: \(error.localizedDescription)") }
+    }
+
+    /// `/me/pushes`: unread flags, chat list refreshes and local notifications.
+    func drainPushes() async {
+        guard credentials != nil, !isFixture, let items = try? await api.pushes(), !items.isEmpty else { return }
+        var needChats = false
+        for p in items where !notifiedPushIds.contains(p.id) {
+            notifiedPushIds.insert(p.id)
+            switch p.kind {
+            case "people_message":
+                if let cid = p.payload["chat_id"], cid != visibleChatId {
+                    peopleUnread.insert(cid)
+                    let from = p.payload["from_handle"] ?? "someone"
+                    LocalNotifier.post(id: p.id, title: "@\(from)", body: "New message", chatId: cid)
+                }
+            case "people_chat_created":
+                needChats = true
+                if let by = p.payload["by_handle"] { LocalNotifier.post(id: p.id, title: "@\(by)", body: "Started a chat with you", chatId: p.payload["chat_id"] ?? "") }
+            case "people_agent_added", "people_agent_removed", "people_member_added", "people_member_removed":
+                needChats = true
+            case "people_project_shared":
+                if let by = p.payload["by_handle"] { LocalNotifier.post(id: p.id, title: "@\(by)", body: "Shared a project with you", chatId: "") }
+                await refreshRegistry()
+            case "project_member_removed":
+                await refreshRegistry()
+            default:
+                break
+            }
+        }
+        if needChats { await refreshPeople() }
+        if notifiedPushIds.count > 2000 { notifiedPushIds.removeAll() }
     }
 
     // MARK: Lookups

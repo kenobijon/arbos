@@ -66,13 +66,31 @@ final class ChatDoc {
     // MARK: Writing (client side only: user rows + commands, §4.3)
 
     /// Append a user message as nested containers. Does not commit.
-    func insertUserMessage(id: Id, text: String, deviceId: String, attachments: [Attachment] = []) throws {
+    struct Author {
+        var sender: String
+        var handle: String?
+        var name: String?
+        var avatar: String?
+    }
+
+    func insertUserMessage(id: Id, text: String, deviceId: String, attachments: [Attachment] = [],
+                           author: Author? = nil, mentions: [String] = [], replyTo: String? = nil) throws {
         let list = messages
         let map = try list.insertContainer(pos: list.len(), child: LoroMap())
         try map.insert(key: "id", v: id)
         try map.insert(key: "chatId", v: key)
         try map.insert(key: "role", v: "user")
-        try map.insert(key: "sender", v: "user")
+        try map.insert(key: "sender", v: author?.sender ?? "user")
+        if let author {
+            if let h = author.handle { try map.insert(key: "senderHandle", v: h) }
+            if let n = author.name { try map.insert(key: "senderName", v: n) }
+            if let a = author.avatar { try map.insert(key: "senderAvatar", v: a) }
+        }
+        if !mentions.isEmpty {
+            let ml = try map.insertContainer(key: "mentions", child: LoroList())
+            for m in mentions { try ml.push(v: m) }
+        }
+        if let replyTo { try map.insert(key: "replyTo", v: replyTo) }
         try map.insert(key: "status", v: "done")
         try map.insert(key: "deviceId", v: deviceId)
         try map.insert(key: "createdAt", v: nowMs())
