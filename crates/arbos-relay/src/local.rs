@@ -223,7 +223,7 @@ pub async fn list(State(state): State<AppState>, _principal: Principal) -> ApiRe
         .map(|d| {
             let connected = online.contains_key(&d.device_id);
             json!({
-                "device_id": d.device_id, "name": d.name, "os": d.os, "home": d.home,
+                "device_id": d.device_id, "name": d.name, "hostname": d.hostname, "os": d.os, "home": d.home,
                 "connected": connected, "last_seen": d.last_seen, "first_seen": d.first_seen,
                 "allow_reads": d.allow_reads,
             })

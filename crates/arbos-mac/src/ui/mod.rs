@@ -4,6 +4,7 @@ pub mod channels;
 pub mod composer;
 pub mod connectors;
 pub mod frost;
+pub mod local;
 pub mod markdown;
 pub mod motion;
 pub mod notify;

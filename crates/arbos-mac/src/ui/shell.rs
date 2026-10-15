@@ -16,6 +16,7 @@ use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
 use crate::ui::composer::{Composer, ComposerEvent, ComposerInput};
 use crate::ui::connectors::{ConnectorsEvent, ConnectorsPanel};
 use crate::ui::frost::{edge_faded, frosted, rounded_clip, MENU_BLUR, PANEL_BLUR};
+use crate::ui::local::{LocalEvent, LocalPanel};
 use crate::ui::motion::{ease_out_cubic, PulseClock, COMPOSER_DROP_MS, SHAKE_MS};
 use crate::ui::routines::{RoutinesEvent, RoutinesPanel};
 use crate::ui::skills::SkillsPanel;
@@ -36,6 +37,7 @@ pub struct Shell {
     project_input: Entity<ComposerInput>,
     connectors: Entity<ConnectorsPanel>,
     skills: Entity<SkillsPanel>,
+    local: Entity<LocalPanel>,
     focus_handle: FocusHandle,
     settings_open: bool,
     routines: Entity<RoutinesPanel>,
@@ -106,6 +108,15 @@ impl Shell {
             },
         )
         .detach();
+        let local = cx.new(|cx| LocalPanel::new(state.clone(), cx));
+        cx.observe(&local, |_, _, cx| cx.notify()).detach();
+        cx.subscribe(&local, |this, _, event: &LocalEvent, cx| match event {
+            LocalEvent::Back => {
+                this.settings_open = true;
+                cx.notify();
+            }
+        })
+        .detach();
         let routines = cx.new(|cx| RoutinesPanel::new(state.clone(), cx));
         cx.subscribe(
             &routines,
@@ -140,6 +151,7 @@ impl Shell {
             project_input,
             connectors,
             skills,
+            local,
             focus_handle: cx.focus_handle(),
             settings_open: false,
             routines,
@@ -1721,6 +1733,26 @@ impl Shell {
                         cx.notify();
                     })),
             )
+            .child(
+                div()
+                    .id("settings-local")
+                    .flex()
+                    .items_center()
+                    .px(px(10.0))
+                    .py(px(6.0))
+                    .rounded(px(6.0))
+                    .text_size(px(12.5))
+                    .text_color(theme.text)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.surface_2))
+                    .child(div().flex_1().child("This Mac"))
+                    .child(div().text_color(theme.text_faint).child("›"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.settings_open = false;
+                        this.local.update(cx, |p, cx| p.show(cx));
+                        cx.notify();
+                    })),
+            )
             .child(div().h(px(1.0)).bg(theme.border))
             .child(
                 div()
@@ -2108,6 +2140,9 @@ impl Render for Shell {
         }
         if self.connectors.read(cx).is_open() {
             root = root.child(self.connectors.clone());
+        }
+        if self.local.read(cx).is_open() {
+            root = root.child(self.local.clone());
         }
         if self.routines_open {
             root = root.child(self.routines.clone());

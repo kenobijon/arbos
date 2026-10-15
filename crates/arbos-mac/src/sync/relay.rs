@@ -30,8 +30,9 @@ use super::doc::ChatDoc;
 use super::{ClientCommand, SyncEvent, SyncSource};
 use crate::model::{
     new_id, now_ms, Attachment, BoxState, ChannelBinding, ChannelPairing, ChannelPlatform,
-    ChannelsView, Chat, Connector, ConnectorProvider, ConnectorsView, Effort, Id, Link, Message,
-    MessageStatus, Part, Project, ProjectDocView, Role, Routine, RoutineRun, Skill, ThreadInfo,
+    ChannelsView, Chat, Connector, ConnectorProvider, ConnectorsView, Effort, Id, Link,
+    LocalDevice, LocalView, Message, MessageStatus, Part, Project, ProjectDocView, Role, Routine,
+    RoutineRun, Skill, ThreadInfo,
 };
 
 const HELLO_DEADLINE: Duration = Duration::from_secs(15);
@@ -1533,6 +1534,45 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             let shared = shared.clone();
             tokio::spawn(async move { refresh_routines(&shared, &project_id).await });
         }
+        ClientCommand::LocalRefresh => {
+            let shared = shared.clone();
+            tokio::spawn(async move { refresh_local(&shared).await });
+        }
+        ClientCommand::LocalSetAllowReads { device_id, allow } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let resp = shared
+                    .http
+                    .patch(format!("{}/local/devices/{}", shared.http_url, device_id))
+                    .bearer_auth(shared.token())
+                    .json(&json!({ "allow_reads": allow }))
+                    .send()
+                    .await;
+                match resp {
+                    Ok(r) if r.status().is_success() => {}
+                    Ok(r) => shared.notice(format!("This Mac: HTTP {}", r.status())),
+                    Err(err) => shared.notice(format!("This Mac: {err}")),
+                }
+                refresh_local(&shared).await;
+            });
+        }
+        ClientCommand::LocalForget { device_id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let resp = shared
+                    .http
+                    .delete(format!("{}/local/devices/{}", shared.http_url, device_id))
+                    .bearer_auth(shared.token())
+                    .send()
+                    .await;
+                match resp {
+                    Ok(r) if r.status().is_success() => {}
+                    Ok(r) => shared.notice(format!("Forget helper: HTTP {}", r.status())),
+                    Err(err) => shared.notice(format!("Forget helper: {err}")),
+                }
+                refresh_local(&shared).await;
+            });
+        }
         ClientCommand::RoutineCreate {
             project_id,
             name,
@@ -1794,6 +1834,32 @@ async fn refresh_routine_runs(shared: &Arc<Shared>, project_id: &str, routine_id
         }
         Err(err) => shared.notice(format!("Routine runs: {err:#}")),
     }
+}
+
+/// Settings → This Mac: `GET /local/devices` (F9).
+async fn refresh_local(shared: &Arc<Shared>) {
+    let list = match shared.get_json("/local/devices").await {
+        Ok(v) => v,
+        Err(err) => {
+            if !format!("{err:#}").contains("HTTP 404") {
+                shared.notice(format!("This Mac: {err:#}"));
+            }
+            return;
+        }
+    };
+    let devices: Vec<LocalDevice> = list["items"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|d| serde_json::from_value(d.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    let _ = shared.events.send(SyncEvent::LocalDevices(LocalView {
+        devices,
+        relay_url: shared.http_url.clone(),
+        loaded: true,
+    }));
 }
 
 /// Settings → Connectors: `GET /connectors/catalog` + `GET /connectors` → one view (F1).
