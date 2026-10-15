@@ -119,17 +119,49 @@ impl ComposerInput {
         cx.notify();
     }
 
-    pub fn line_count(&self) -> usize {
-        self.layout
-            .as_ref()
-            .map(|l| {
-                l.lines
-                    .iter()
-                    .map(|(_, line)| line.wrap_boundaries().len() + 1)
-                    .sum::<usize>()
-                    .max(1)
-            })
-            .unwrap_or(1)
+    /// Wrapped line count of the *current* text at the last laid-out width.
+    /// Measured fresh here (not taken from the previous paint) so a single
+    /// large insert — a paste — grows the box on the very next layout.
+    pub fn line_count(&self, window: &Window, cx: &App) -> usize {
+        let Some(width) = self.layout.as_ref().map(|l| l.bounds.size.width) else {
+            return 1;
+        };
+        if self.content.is_empty() {
+            return 1;
+        }
+        let theme = Theme::of(cx);
+        let mut font = window.text_style().font();
+        font.family = theme.font_sans.into();
+        let run = TextRun {
+            len: 0,
+            font,
+            color: theme.text,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let mut total = 0usize;
+        for para in self.content.split('\n') {
+            let runs = vec![TextRun {
+                len: para.len(),
+                ..run.clone()
+            }];
+            let wrapped = window
+                .text_system()
+                .shape_text(
+                    SharedString::from(para.to_string()),
+                    px(INPUT_FONT_SIZE),
+                    &runs,
+                    Some(width),
+                    None,
+                )
+                .ok()
+                .and_then(|mut v| v.pop())
+                .map(|l| l.wrap_boundaries().len() + 1)
+                .unwrap_or(1);
+            total += wrapped;
+        }
+        total.max(1)
     }
 
     fn send(&mut self, _: &Send, window: &mut Window, cx: &mut Context<Self>) {
@@ -541,7 +573,7 @@ impl Element for InputElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let lines = self.input.read(cx).line_count().min(MAX_LINES);
+        let lines = self.input.read(cx).line_count(window, cx).min(MAX_LINES);
         let mut style = Style::default();
         style.size.width = relative(1.).into();
         style.size.height = px(INPUT_LINE_HEIGHT * lines as f32).into();
@@ -734,9 +766,27 @@ impl Element for InputElement {
             }
         });
         let lines = std::mem::take(&mut prepaint.lines);
-        self.input.update(cx, |input, _| {
+        let measured: usize = lines
+            .iter()
+            .map(|(_, l)| l.wrap_boundaries().len() + 1)
+            .sum::<usize>()
+            .max(1);
+        let laid_out = (f32::from(bounds.size.height) / INPUT_LINE_HEIGHT).round() as usize;
+        let width_changed = self
+            .input
+            .read(cx)
+            .layout
+            .as_ref()
+            .map(|l| l.bounds.size.width != bounds.size.width)
+            .unwrap_or(true);
+        self.input.update(cx, |input, cx| {
             input.layout = Some(Layout { lines, bounds });
             input.scroll_y = scroll_y;
+            // First layout after a width change or a big insert: re-layout
+            // once more with the measured height.
+            if width_changed || measured.min(MAX_LINES) != laid_out.max(1) {
+                cx.notify();
+            }
         });
     }
 }

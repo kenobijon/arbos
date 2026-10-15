@@ -124,16 +124,28 @@ impl Transcript {
     /// mutably borrowed, so it must not touch the list. Record the intent
     /// and let the next frame (`step_spring`) read pixel offsets.
     fn handle_scroll(&mut self, event: &ListScrollEvent) {
-        if event.is_scrolled {
-            let at_end = event.visible_range.end >= event.count;
-            if at_end {
-                self.pinned_to_bottom = true;
-            } else {
-                self.pinned_to_bottom = false;
-                self.spring.velocity = 0.0;
-                self.repin_check_pending = true;
-            }
+        // `is_scrolled == false` means the bottom-aligned list snapped to its
+        // end: the user is back at the tail. Direction is handled by the
+        // wheel listener; this callback never re-pins on its own otherwise.
+        if !event.is_scrolled {
+            self.pinned_to_bottom = true;
+            self.spring.velocity = 0.0;
         }
+    }
+
+    /// Wheel/trackpad over the transcript: scrolling up (positive delta,
+    /// toward older messages) breaks the pin at once; scrolling down asks the
+    /// next frame to re-pin when within `STICK_THRESHOLD_PX` of the end.
+    fn on_wheel(&mut self, event: &gpui::ScrollWheelEvent, cx: &mut Context<Self>) {
+        let dy = f32::from(event.delta.pixel_delta(px(20.0)).y);
+        if dy > 0.0 {
+            self.pinned_to_bottom = false;
+            self.spring.velocity = 0.0;
+            self.repin_check_pending = false;
+        } else if dy < 0.0 {
+            self.repin_check_pending = true;
+        }
+        cx.notify();
     }
 
     /// One spring step per frame while pinned and not yet at the end.
@@ -364,12 +376,15 @@ fn relative_width(fraction: f32) -> gpui::DefiniteLength {
 impl Render for Transcript {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.step_spring(window, cx);
-        div().size_full().child(edge_faded(
-            24.0,
-            true,
-            false,
-            list(self.list.clone(), cx.processor(Self::render_row)).size_full(),
-        ))
+        div()
+            .size_full()
+            .on_scroll_wheel(cx.listener(|this, event, _, cx| this.on_wheel(event, cx)))
+            .child(edge_faded(
+                24.0,
+                true,
+                false,
+                list(self.list.clone(), cx.processor(Self::render_row)).size_full(),
+            ))
     }
 }
 
