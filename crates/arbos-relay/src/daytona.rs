@@ -102,20 +102,29 @@ pub struct Sandbox {
 /// `components.schemas.CreateSandbox` (the fields we set).
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct CreateSandbox {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<String>,
     pub env: serde_json::Map<String, Value>,
     pub labels: serde_json::Map<String, Value>,
+    /// Resources are only sent for inline builds; a snapshot carries its own (Daytona rejects both).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub disk: Option<u32>,
-    #[serde(rename = "autoStopInterval")]
+    #[serde(rename = "autoStopInterval", skip_serializing_if = "Option::is_none")]
     pub auto_stop_interval: Option<i64>,
-    #[serde(rename = "autoArchiveInterval")]
+    #[serde(
+        rename = "autoArchiveInterval",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub auto_archive_interval: Option<i64>,
-    #[serde(rename = "autoDeleteInterval")]
+    #[serde(rename = "autoDeleteInterval", skip_serializing_if = "Option::is_none")]
     pub auto_delete_interval: Option<i64>,
-    #[serde(rename = "ttlMinutes")]
+    #[serde(rename = "ttlMinutes", skip_serializing_if = "Option::is_none")]
     pub ttl_minutes: Option<i64>,
     /// Each entry maps ENV_VAR → vault secret name (placeholder secrets, D28).
     pub secrets: Vec<serde_json::Map<String, Value>>,

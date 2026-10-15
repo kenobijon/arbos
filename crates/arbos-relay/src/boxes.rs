@@ -137,10 +137,10 @@ pub async fn create_box(
                 } else {
                     None
                 },
+                cpu: inline.as_ref().map(|_| 2),
+                memory: inline.as_ref().map(|_| 4),
+                disk: inline.as_ref().map(|_| 10),
                 build_info: inline.map(|d| json!({ "dockerfileContent": d })),
-                cpu: Some(2),
-                memory: Some(4),
-                disk: Some(10),
                 auto_stop_interval: Some(30),
                 auto_archive_interval: Some(7 * 24 * 60),
                 auto_delete_interval: Some(-1),
@@ -381,9 +381,17 @@ pub async fn start_box(state: &AppState, project_id: &str) -> Result<()> {
             let t0 = Instant::now();
             let cur = dt.get(&id).await?;
             let from = cur.state;
-            if cur.state != SandboxState::Started {
-                dt.start(&id).await?;
+            if cur.state == SandboxState::Started {
+                // The sandbox runs but agentd is gone (Daytona's daemon does not restart a dead
+                // entrypoint): bounce it so the entrypoint session starts again.
+                tracing::warn!(%project_id, "sandbox is started but the box is silent; restarting it");
+                dt.stop(&id, true).await?;
+                dt.wait_for(&id, Duration::from_secs(120), |s| {
+                    s.state == SandboxState::Stopped
+                })
+                .await?;
             }
+            dt.start(&id).await?;
             let s = dt
                 .wait_for(&id, Duration::from_secs(180), |s| {
                     s.state == SandboxState::Started

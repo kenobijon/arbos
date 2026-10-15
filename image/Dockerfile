@@ -118,6 +118,7 @@ ENV HOME=/home/daytona \
     AGENT_BROWSER_EXECUTABLE_PATH=/opt/chrome/chrome \
     AGENT_BROWSER_PROFILE=/work/.arbos/browser \
     AGENT_BROWSER_ARGS="--no-sandbox,--disable-dev-shm-usage" \
+    AGENT_BROWSER_STREAM_PORT=9223 \
     AGENT_BROWSER_SCREENSHOT_DIR=/work/.arbos/shots \
     AI_AGENT_SANDBOX=daytona
 

@@ -72,9 +72,33 @@ async fn browser_stream(ws: WebSocketUpgrade, State(a): State<S>) -> Response {
     })
 }
 
+/// agent-browser binds its stream to `AGENT_BROWSER_STREAM_PORT` (9223 in the image); when that is
+/// unset the port is OS-assigned and `agent-browser stream status` reports it.
+async fn browser_stream_url() -> String {
+    if let Ok(u) = std::env::var("ARBOS_BROWSER_STREAM_URL") {
+        return u;
+    }
+    if let Ok(out) = tokio::process::Command::new("agent-browser")
+        .args(["stream", "status"])
+        .output()
+        .await
+    {
+        let text = String::from_utf8_lossy(&out.stdout);
+        if let Some(idx) = text.find("ws://") {
+            return text[idx..]
+                .chars()
+                .take_while(|c| !c.is_whitespace())
+                .collect();
+        }
+    }
+    format!(
+        "ws://127.0.0.1:{}",
+        std::env::var("AGENT_BROWSER_STREAM_PORT").unwrap_or_else(|_| "9223".into())
+    )
+}
+
 async fn pipe_browser(client: WebSocket) -> anyhow::Result<()> {
-    let upstream_url =
-        std::env::var("ARBOS_BROWSER_STREAM_URL").unwrap_or_else(|_| "ws://127.0.0.1:9223".into());
+    let upstream_url = browser_stream_url().await;
     let (upstream, _) = tokio_tungstenite::connect_async(&upstream_url).await?;
     let (mut up_tx, mut up_rx) = upstream.split();
     let (mut cl_tx, mut cl_rx) = client.split();

@@ -320,11 +320,27 @@ impl PrimeAdapter {
                 format!("{}/v1", self.cfg.proxy_base()),
             ),
             ("ARBOS_TALKING_MODEL".into(), self.cfg.talking_model.clone()),
-            // D2: the proxy is an OpenAI-compatible provider; the box token is the only credential.
-            ("OPENAI_API_KEY".into(), self.cfg.box_token.clone()),
+            // D2: Prime's `openrouter` provider is pointed at the loopback stub by models.json in the prime
+            // dir; the box token is the only credential it ever sees.
+            ("OPENROUTER_API_KEY".into(), self.cfg.box_token.clone()),
             (
-                "OPENAI_BASE_URL".into(),
-                format!("{}/v1", self.cfg.proxy_base()),
+                "HOME".into(),
+                std::env::var("HOME").unwrap_or_else(|_| "/home/daytona".into()),
+            ),
+            (
+                "PRIME_AGENT_KERNEL_VENV".into(),
+                std::env::var("PRIME_AGENT_KERNEL_VENV")
+                    .unwrap_or_else(|_| "/opt/prime-venv".into()),
+            ),
+            (
+                "PRIME_AGENT_KERNEL_PYTHON".into(),
+                std::env::var("PRIME_AGENT_KERNEL_PYTHON")
+                    .unwrap_or_else(|_| "/opt/prime-venv/bin/python".into()),
+            ),
+            (
+                "PRIME_AGENT_BASH_SHELL".into(),
+                std::env::var("PRIME_AGENT_BASH_SHELL")
+                    .unwrap_or_else(|_| "/usr/local/lib/arbos/arbos-shell".into()),
             ),
         ]
     }
@@ -834,12 +850,14 @@ impl ClaudeCodeAdapter {
             "--mcp-config".into(),
             "/etc/arbos/claude-mcp.json".into(),
         ];
+        // Claude Code insists on a UUID session id; derive one from the subagent ULID (same 128 bits).
+        let claude_id = claude_session_uuid(session_id);
         if resume {
-            args.extend(["--resume".into(), session_id.to_owned()]);
+            args.extend(["--resume".into(), claude_id]);
         } else {
             args.extend([
                 "--session-id".into(),
-                session_id.to_owned(),
+                claude_id,
                 "--append-system-prompt".into(),
                 system_prompt.to_owned(),
             ]);
@@ -1109,6 +1127,26 @@ impl HarnessAdapter for ClaudeCodeAdapter {
             .map(|c| c.contains_key(session_id))
             .unwrap_or(false)
     }
+}
+
+/// A ULID's 128 bits in UUID text form (Claude Code only accepts UUIDs as session ids).
+pub fn claude_session_uuid(id: &str) -> String {
+    let bits: u128 = ulid::Ulid::from_string(id)
+        .map(u128::from)
+        .unwrap_or_else(|_| {
+            use sha2::Digest;
+            let h = sha2::Sha256::digest(id.as_bytes());
+            u128::from_be_bytes(h[..16].try_into().expect("16 bytes"))
+        });
+    let hex = format!("{bits:032x}");
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
 }
 
 // ---- shared JSONL helpers ----------------------------------------------------------------------

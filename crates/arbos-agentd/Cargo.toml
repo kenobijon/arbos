@@ -33,3 +33,4 @@ async-trait.workspace = true
 nix.workspace = true
 regex-lite.workspace = true
 base64.workspace = true
+ulid.workspace = true
