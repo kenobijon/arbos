@@ -22,6 +22,7 @@ struct ChatView: View {
     @State private var showVoice = false
     @State private var showSettings = false
     @State private var sentOnce = false
+    @State private var transcribing = false
     @State private var pending: [AppModel.PendingAttachment] = []
     @State private var photoItem: PhotosPickerItem?
     @State private var showPhotos = false
@@ -590,7 +591,7 @@ struct ChatView: View {
 
     private var textField: some View {
         HStack(spacing: 8) {
-            TextField("", text: $draft, prompt: Text(isPeople ? "Message \(name)" : (needsAnswer ? "Answer \(name)" : "Ask \(name)")).foregroundStyle(theme.placeholder), axis: .vertical)
+            TextField("", text: $draft, prompt: Text(transcribing ? "Transcribing…" : (isPeople ? "Message \(name)" : (needsAnswer ? "Answer \(name)" : "Ask \(name)"))).foregroundStyle(theme.placeholder), axis: .vertical)
                 .lineLimit(1...8)
                 .font(.system(size: Theme.body))
                 .foregroundStyle(theme.text)
@@ -669,11 +670,7 @@ struct ChatView: View {
                 .foregroundStyle(theme.text)
             Button {
                 if let memo = recorder.stop() {
-                    model.send(chatId: chatId, text: draft.trimmingCharacters(in: .whitespacesAndNewlines),
-                               attachments: pending + [.init(name: memo.name, mime: "audio/m4a", data: memo.data)])
-                    pending.removeAll()
-                    draft = ""
-                    sentOnce = true
+                    sendMemo(.init(name: memo.name, mime: "audio/m4a", data: memo.data))
                 }
             } label: {
                 Circle().fill(theme.primary).frame(width: Theme.voiceButton, height: Theme.voiceButton)
@@ -725,6 +722,29 @@ struct ChatView: View {
         if let last = parts.last, last.hasPrefix("@") { parts[parts.count - 1] = "@\(slug)" } else { parts.append("@\(slug)") }
         draft = parts.joined(separator: " ") + " "
         mentionQuery = nil
+    }
+
+    /// A voice memo goes out as its transcript (typed text first, if any) with the
+    /// audio attached, so the agent reads it instead of receiving a file it cannot hear.
+    private func sendMemo(_ memo: AppModel.PendingAttachment) {
+        let typed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let extras = pending
+        let reply = replyTo?.id
+        pending.removeAll()
+        draft = ""
+        replyTo = nil
+        sentOnce = true
+        transcribing = true
+        Task {
+            let transcript = await model.transcribe(projectId: project?.id, memo: memo)
+            transcribing = false
+            let text = [typed, transcript ?? ""].filter { !$0.isEmpty }.joined(separator: "\n\n")
+            if isPeople {
+                model.sendPeople(chatId: chatId, text: text, replyTo: reply, attachments: extras + [memo])
+            } else {
+                model.send(chatId: chatId, text: text, attachments: extras + [memo])
+            }
+        }
     }
 
     private func send() {

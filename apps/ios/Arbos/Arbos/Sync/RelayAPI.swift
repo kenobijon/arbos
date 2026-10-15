@@ -285,6 +285,36 @@ final class RelayAPI {
         return key
     }
 
+    /// `POST /proxy/v1/audio/transcriptions` (multipart `file` + `model`) → the memo's text.
+    /// The relay meters it on `projectId` (`X-Arbos-Project`).
+    func transcribe(projectId: Id?, data: Data, filename: String, mime: String) async throws -> String {
+        guard let url = URL(string: "\(endpoint.httpUrl)/proxy/v1/audio/transcriptions") else {
+            throw RelayError(status: 0, message: "Bad relay URL")
+        }
+        let boundary = "arbos-\(UUID().uuidString)"
+        var body = Data()
+        body.append(Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nwhisper-1\r\n".utf8))
+        body.append(Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"\(filename)\"\r\nContent-Type: \(mime)\r\n\r\n".utf8))
+        body.append(data)
+        body.append(Data("\r\n--\(boundary)--\r\n".utf8))
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 60
+        req.setValue("Bearer \(token())", forHTTPHeaderField: "Authorization")
+        req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        if let projectId { req.setValue(projectId, forHTTPHeaderField: "X-Arbos-Project") }
+        req.httpBody = body
+        let (reply, response) = try await session.data(for: req)
+        guard let http = response as? HTTPURLResponse, http.statusCode < 400 else {
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            throw RelayError(status: status, message: String(data: reply, encoding: .utf8) ?? "")
+        }
+        guard let obj = try? JSONSerialization.jsonObject(with: reply) as? [String: Any], let text = obj["text"] as? String else {
+            throw RelayError(status: http.statusCode, message: "No transcript in the reply")
+        }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     // MARK: People chats (D72)
 
     func searchUsers(_ q: String) async throws -> [Person] {

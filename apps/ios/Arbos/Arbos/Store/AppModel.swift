@@ -905,6 +905,20 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Voice memo → text through the relay, so the agent reads what was said (the audio
+    /// still travels as an attachment). `nil` when the relay cannot transcribe; the user
+    /// sees why and the memo is sent as audio only.
+    func transcribe(projectId: Id?, memo: PendingAttachment) async -> String? {
+        if isFixture { return nil }
+        do {
+            let text = try await api.transcribe(projectId: projectId, data: memo.data, filename: memo.name, mime: memo.mime)
+            return text.isEmpty ? nil : text
+        } catch {
+            notice = Notice(text: "Could not transcribe the memo: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
     static func safeName(_ name: String) -> String {
         String(name.map { $0.isLetter || $0.isNumber || $0 == "." || $0 == "-" || $0 == "_" ? $0 : "_" })
     }
