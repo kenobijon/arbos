@@ -103,6 +103,8 @@ struct Shared {
     room_seq: Mutex<HashMap<Id, i64>>,
     /// Avatars already fetched (by URL).
     avatars_done: Mutex<HashSet<String>>,
+    /// `/me` user when the stored credentials carry none (env token, legacy adv_).
+    me: Mutex<Option<credentials::AccountUser>>,
 }
 
 fn project_doc_key(project_id: &str) -> String {
@@ -191,24 +193,36 @@ impl Shared {
         Ok(creds)
     }
 
-    fn me_id(&self) -> String {
+    fn me_user(&self) -> Option<credentials::AccountUser> {
         self.creds
             .read()
             .unwrap()
             .as_ref()
-            .and_then(|c| c.user.as_ref())
-            .map(|u| u.id.clone())
-            .unwrap_or_default()
+            .and_then(|c| c.user.clone())
+            .or_else(|| self.me.lock().unwrap().clone())
+    }
+
+    fn me_id(&self) -> String {
+        self.me_user().map(|u| u.id).unwrap_or_default()
     }
 
     fn me_handle(&self) -> String {
-        self.creds
-            .read()
-            .unwrap()
-            .as_ref()
-            .and_then(|c| c.user.as_ref())
-            .map(|u| u.login.clone())
-            .unwrap_or_default()
+        self.me_user().map(|u| u.login).unwrap_or_default()
+    }
+
+    /// Make sure we know who we are before reading chat members (`/me` once).
+    async fn ensure_me(self: &Arc<Self>) {
+        if self.me_user().is_some() {
+            return;
+        }
+        if let Ok(v) = self.get_json("/me").await {
+            if let Some(user) = v
+                .get("user")
+                .and_then(|u| serde_json::from_value(u.clone()).ok())
+            {
+                *self.me.lock().unwrap() = Some(user);
+            }
+        }
     }
 
     fn is_people(&self, chat_id: &str) -> bool {
@@ -385,6 +399,7 @@ impl SyncSource for RelaySource {
                 people: Mutex::new(HashSet::new()),
                 room_seq: Mutex::new(HashMap::new()),
                 avatars_done: Mutex::new(HashSet::new()),
+                me: Mutex::new(None),
             });
             let _ = events.send(SyncEvent::Link(Link::Connecting));
 
@@ -444,6 +459,9 @@ async fn refresh_me(shared: &Arc<Shared>) {
         return;
     };
     let user = v.get("user").cloned().unwrap_or(Value::Null);
+    if let Ok(u) = serde_json::from_value::<credentials::AccountUser>(user.clone()) {
+        *shared.me.lock().unwrap() = Some(u);
+    }
     let credits = v.get("credits").cloned().unwrap_or(Value::Null);
     let str_of = |v: &Value, k: &str| {
         v.get(k)
@@ -863,6 +881,7 @@ fn parse_chat(v: &Value) -> Option<Chat> {
 
 /// `GET /projects` then `GET /projects/{id}` for chats, models and spend.
 async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
+    shared.ensure_me().await;
     let list = shared.get_json("/projects").await?;
     let items = list.as_array().cloned().unwrap_or_default();
     let mut projects: Vec<Project> = Vec::new();
@@ -966,23 +985,6 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
         all_chats.extend(chats);
     }
 
-    // Keep local-only tabs (minted, not yet created) and unread flags.
-    {
-        let mut local = shared.chats.lock().unwrap();
-        let mut merged: Vec<Chat> = Vec::new();
-        for c in &all_chats {
-            let mut c = c.clone();
-            if let Some(prev) = local.iter().find(|x| x.id == c.id) {
-                c.unread = prev.unread;
-                c.last_message_at = c.last_message_at.max(prev.last_message_at);
-                if c.title == "New chat" && prev.title != "New chat" {
-                    c.title = prev.title.clone();
-                }
-            }
-            merged.push(c);
-        }
-        *local = merged;
-    }
     // People chats (D72) share the rail: one space + one pinned chat each.
     let people_ids: Vec<Id> = projects
         .iter()
@@ -1021,6 +1023,23 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
         }
     }
     let _ = people_ids;
+    // Keep local-only tabs (minted, not yet created) and unread flags.
+    {
+        let mut local = shared.chats.lock().unwrap();
+        let mut merged: Vec<Chat> = Vec::new();
+        for c in &all_chats {
+            let mut c = c.clone();
+            if let Some(prev) = local.iter().find(|x| x.id == c.id) {
+                c.unread = prev.unread;
+                c.last_message_at = c.last_message_at.max(prev.last_message_at);
+                if c.title == "New chat" && prev.title != "New chat" {
+                    c.title = prev.title.clone();
+                }
+            }
+            merged.push(c);
+        }
+        *local = merged;
+    }
     *shared.projects.lock().unwrap() = projects.clone();
     let _ = shared.events.send(SyncEvent::Projects(projects.clone()));
     emit_chats(shared);
@@ -1931,12 +1950,7 @@ async fn send_message(
             return;
         };
         let in_people = shared.is_people(&chat_id);
-        let me = shared
-            .creds
-            .read()
-            .unwrap()
-            .as_ref()
-            .and_then(|c| c.user.clone());
+        let me = shared.me_user();
         let mentions = if in_people {
             mentions_for(&shared, &chat_id, &text)
         } else {
