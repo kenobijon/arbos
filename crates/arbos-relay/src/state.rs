@@ -32,6 +32,8 @@ pub struct Config {
     pub box_idle_grace_ms: i64,
     /// `ARBOS_CONNECTORS_MOCK=1`: connectors answer with canned data (F1).
     pub connectors_mock: bool,
+    /// `ARBOS_CHANNELS_MOCK=1`: channel sends land in `channel_outbox`; `/channels/mock/inbound` is open (F7).
+    pub channels_mock: bool,
 }
 
 /// One frame to fan out to the other sockets in a room.

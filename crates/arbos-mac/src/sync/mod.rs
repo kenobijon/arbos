@@ -19,8 +19,8 @@ use futures::future::BoxFuture;
 use tokio::sync::mpsc;
 
 use crate::model::{
-    BoxState, Chat, ConnectorsView, Effort, Id, Link, Message, Project, ProjectDocView, Routine,
-    RoutineRun, RoutineTrigger, Skill,
+    BoxState, ChannelsView, Chat, ConnectorsView, Effort, Id, Link, Message, Project,
+    ProjectDocView, Routine, RoutineRun, RoutineTrigger, Skill,
 };
 
 /// Something the source learned; the UI applies it to its mirror.
@@ -108,6 +108,8 @@ pub enum SyncEvent {
     },
     /// The skills library (F5), whole, after a fetch or a write.
     Skills(Vec<Skill>),
+    /// Settings → Channels: platform states, bound chats, active pairing code (F7).
+    Channels(ChannelsView),
 }
 
 /// Something the user did; the source writes it into the doc / outbox.
@@ -219,6 +221,16 @@ pub enum ClientCommand {
         skill: Skill,
     },
     SkillDelete {
+        id: Id,
+    },
+    /// Settings → Channels opened or asked for a refresh.
+    RefreshChannels,
+    /// Mint a pairing code for a project (its pinned chat unless `chat_id`).
+    ChannelPairNew {
+        project_id: Id,
+        chat_id: Option<Id>,
+    },
+    ChannelUnbind {
         id: Id,
     },
 }

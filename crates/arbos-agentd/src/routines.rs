@@ -28,6 +28,11 @@ impl Agent {
             // F5: the library changed on the relay; refetch the index now rather than at the
             // next 60 s tick.
             "skills_changed" => self.refresh_skills().await,
+            "channel_message" => {
+                if let Err(e) = self.handle_channel_message(payload).await {
+                    tracing::warn!(error = %e, "channel_message push failed");
+                }
+            }
             other => {
                 tracing::info!(kind = other, push = %payload, "push delivered");
                 let _ = self.store.t3_append(

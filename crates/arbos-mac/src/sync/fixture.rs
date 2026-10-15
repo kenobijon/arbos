@@ -20,7 +20,8 @@ use crate::model::{ProjectDocView, ThreadInfo};
 use super::doc::ChatDoc;
 use super::{ClientCommand, SyncEvent, SyncSource};
 use crate::model::{
-    new_id, now_ms, Attachment, BoxState, Chat, ChoiceOption, Connector, ConnectorAction,
+    new_id, now_ms, Attachment, BoxState, ChannelBinding, ChannelPairing, ChannelPlatform,
+    ChannelPlatformState, ChannelsView, Chat, ChoiceOption, Connector, ConnectorAction,
     ConnectorProvider, ConnectorStatus, ConnectorsView, Effort, FieldKind, FormField, Id, Link,
     Message, MessageStatus, Part, Project, QuestionState, Role, Routine, RoutineRun,
     RoutineRunStatus, RoutineTrigger, Skill, StatusKind, ToolCall, ToolStatus, TurnKind, Widget,
@@ -65,6 +66,7 @@ struct Shared {
     doc_tx: mpsc::UnboundedSender<DocChanged>,
     subscriptions: Mutex<Vec<loro::Subscription>>,
     connectors: Mutex<ConnectorsView>,
+    channels: Mutex<ChannelsView>,
     routines: Mutex<Vec<Routine>>,
     routine_runs: Mutex<HashMap<Id, Vec<RoutineRun>>>,
 }
@@ -100,6 +102,7 @@ impl SyncSource for FixtureSource {
                 doc_tx,
                 subscriptions: Mutex::new(Vec::new()),
                 connectors: Mutex::new(seed_connectors()),
+                channels: Mutex::new(seed_channels()),
                 routines: Mutex::new(seed_routines()),
                 routine_runs: Mutex::new(seed_routine_runs()),
             });
@@ -120,6 +123,7 @@ impl SyncSource for FixtureSource {
             emit_project_docs(&shared);
             emit_connectors(&shared);
             emit_skills(&shared);
+            emit_channels(&shared);
             let _ = events.send(SyncEvent::Link(Link::Live));
 
             loop {
@@ -588,6 +592,120 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             shared.skills.lock().unwrap().retain(|s| s.id != id);
             emit_skills(shared);
         }
+        ClientCommand::RefreshChannels => emit_channels(shared),
+        ClientCommand::ChannelPairNew {
+            project_id,
+            chat_id,
+        } => {
+            // Mock relay: mint a code now; "the user" pairs a Telegram chat with it after a moment.
+            let code = format!("{:06}", now_ms() % 1_000_000);
+            {
+                let mut view = shared.channels.lock().unwrap();
+                view.pairing = Some(ChannelPairing {
+                    code: code.clone(),
+                    project_id: project_id.clone(),
+                    chat_id: chat_id.clone().unwrap_or_else(|| CHAT_COMMS_MAIN.into()),
+                    expires_at: now_ms() + 10 * 60 * 1000,
+                });
+            }
+            emit_channels(shared);
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                sleep(Duration::from_secs(6)).await;
+                {
+                    let mut view = shared.channels.lock().unwrap();
+                    if view.pairing.as_ref().map(|p| p.code.as_str()) != Some(code.as_str()) {
+                        return;
+                    }
+                    view.pairing = None;
+                    view.bindings.insert(
+                        0,
+                        ChannelBinding {
+                            id: new_id(),
+                            platform: "telegram".into(),
+                            external_chat_id: "8812".into(),
+                            external_user_id: "8812".into(),
+                            project_id: project_id.clone(),
+                            chat_id: chat_id.unwrap_or_else(|| CHAT_COMMS_MAIN.into()),
+                            label: "Telegram · DM · Jacob".into(),
+                            bound_at: now_ms(),
+                        },
+                    );
+                }
+                emit_channels(&shared);
+                let _ = shared.events.send(SyncEvent::Notice(
+                    "Telegram · DM · Jacob paired with /pair (fixture).".into(),
+                ));
+            });
+        }
+        ClientCommand::ChannelUnbind { id } => {
+            shared
+                .channels
+                .lock()
+                .unwrap()
+                .bindings
+                .retain(|b| b.id != id);
+            emit_channels(shared);
+        }
+    }
+}
+
+fn emit_channels(shared: &Shared) {
+    let view = shared.channels.lock().unwrap().clone();
+    let _ = shared.events.send(SyncEvent::Channels(view));
+}
+
+/// Settings → Channels demo: Beeper configured through Harness Comms, Slack in mock mode, the
+/// others missing credentials; one WhatsApp chat already bound to Comms.
+fn seed_channels() -> ChannelsView {
+    let platform =
+        |platform: &str, label: &str, state: ChannelPlatformState, detail: &str| ChannelPlatform {
+            platform: platform.into(),
+            label: label.into(),
+            state,
+            detail: detail.into(),
+            inbound: String::new(),
+        };
+    ChannelsView {
+        mock: false,
+        platforms: vec![
+            platform(
+                "slack",
+                "Slack",
+                ChannelPlatformState::Mock,
+                "ARBOS_CHANNELS_MOCK=1 · inbound via POST /channels/mock/inbound",
+            ),
+            platform(
+                "telegram",
+                "Telegram",
+                ChannelPlatformState::Missing,
+                "missing ARBOS_TELEGRAM_BOT_TOKEN",
+            ),
+            platform(
+                "whatsapp",
+                "WhatsApp (Cloud API)",
+                ChannelPlatformState::Configured,
+                "Cloud API webhook + messages",
+            ),
+            platform(
+                "beeper",
+                "Beeper (Harness Comms)",
+                ChannelPlatformState::Configured,
+                "via Harness Comms · https://comms.example.trycloudflare.com",
+            ),
+        ],
+        bindings: vec![ChannelBinding {
+            id: new_id(),
+            platform: "whatsapp".into(),
+            external_chat_id: "15555550123".into(),
+            external_user_id: "15555550123".into(),
+            project_id: PROJECT_COMMS.into(),
+            chat_id: CHAT_COMMS_MAIN.into(),
+            label: "WhatsApp · Jacob".into(),
+            bound_at: now_ms().saturating_sub(3 * 86_400_000),
+        }],
+        pairing: None,
+        loaded: true,
     }
 }
 

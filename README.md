@@ -149,6 +149,16 @@ A skill is a Markdown how-to with YAML frontmatter (`name`, `description`, `tags
 
 agentd caches the index (refresh every 60 s, on a `skills_rev` change seen in the 3 s project poll, on the `skills_changed` push, and after `skills_save`) and, per turn, selects up to 3 skills by keyword overlap with the prompt under a 600-token budget. They enter the pi system prompt as the `arbos-skills` section (after the byte-stable prefix, as `## Relevant skills`) and the subagent pack as section 11; the chosen slugs and text are a hidden `skills` part on the turn (Mac Details drawer, `arbosctl chat dump`) and an INFO log line `skills injected into the working set`. MCP tools: `skills_list(q?)`, `skills_read(slug)`, `skills_save(...)` (audited to `.arbos/audit.jsonl`). Headless: `arbosctl skills list [--q]|show <slug>|add --name … [--file skill.md] [--shared]|delete <slug>`. Mac: Settings → Skills.
 
+## Channels
+
+External chats talk to an agent through the relay (§4.5 Flow 4–5, D35): an inbound message from a *bound* chat becomes a user message in the bound Arbos chat (`sender: channel:<platform>:<user>`), runs a normal turn, and the final prose goes back over the same channel via `POST /projects/{id}/channels/reply`. A chat is bound by minting a code in Settings → Channels (or `arbosctl channels pair <project>`, 10 min TTL, one use) and sending `/pair <code>` from that chat. Senders without a binding get exactly one hint reply and never reach a box; the binding is per `(platform, chat, user)`, so other members of a group chat are ignored.
+
+- Slack: `ARBOS_SLACK_SIGNING_SECRET` + `ARBOS_SLACK_BOT_TOKEN`; Events API URL `{public_url}/channels/slack/events` (URL verification handled, signature checked with a 5 min skew).
+- Telegram: `ARBOS_TELEGRAM_BOT_TOKEN`; webhook `{public_url}/channels/telegram/webhook/{ARBOS_TELEGRAM_WEBHOOK_SECRET}` or `ARBOS_TELEGRAM_POLL=1` for long polling.
+- WhatsApp Cloud API: `ARBOS_WHATSAPP_TOKEN`, `ARBOS_WHATSAPP_PHONE_ID`, `ARBOS_WHATSAPP_VERIFY_TOKEN` (optional `ARBOS_WHATSAPP_APP_SECRET` for `X-Hub-Signature-256`); webhook `GET/POST {public_url}/channels/whatsapp/webhook`.
+- Beeper: reuses the Harness Comms connector token — the relay polls `POST /v1/messages/poll` (cursor kept in `meta`, `ARBOS_BEEPER_POLL_S`, default 30 s) and sends through `POST /v1/requests` with idempotent request ids. Only messages the user sent themself (`sender.is_self`) can pair or receive the hint, so the relay never writes to someone else's contact.
+- Endpoints: `GET /channels` (platform state + bindings + active code), `POST /channels/pair/new`, `GET/DELETE /channels/bindings[/{id}]`, `GET /channels/mock/outbox`. `ARBOS_CHANNELS_MOCK=1` turns every platform into a mock: `POST /channels/mock/inbound` injects a message and replies land in `channel_outbox` instead of leaving the machine (`arbosctl channels inbound|outbox|list|unbind`).
+
 ## Image
 
 `.github/workflows/image.yml` builds `image/Dockerfile` on an image tag (`image-v0.1.5`) or by hand, pushes it to GHCR, smoke-tests it, and registers the Daytona snapshot `arbos-agent-<version>` with `image/register-snapshot.sh` (secrets `DAYTONA_API_KEY`, `GHCR_READ_TOKEN`).

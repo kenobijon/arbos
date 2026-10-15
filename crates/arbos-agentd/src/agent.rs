@@ -652,7 +652,7 @@ impl Agent {
     // ---- commands -----------------------------------------------------------------------------
 
     /// Mark-before-execute, then `done`/`failed` in the doc. The result is also returned for
-    /// callers that report it elsewhere (routine runs); the command loop ignores it.
+    /// callers that report it elsewhere (routine runs, channel replies); the command loop ignores it.
     pub async fn handle_command(self: &Arc<Self>, chat_id: &str, cmd: CommandView) -> Result<()> {
         let Some(host) = self.sync.host(chat_id).await else {
             return Err(anyhow!("no room for chat {chat_id}"));
@@ -798,12 +798,11 @@ impl Agent {
         // A structured answer (`answer { questionId, value }`): render the value to text with the
         // widget the question was asked with, and mark the part answered before the turn runs.
         let structured = self.resolve_structured_answer(host, cmd).await;
-        let mut user_text = {
+        let (mut user_text, channel_note) = {
             let h = host.lock().await;
-            h.doc
-                .message(&user_msg_id)
-                .map(|m| m.text())
-                .unwrap_or_default()
+            let m = h.doc.message(&user_msg_id);
+            let text = m.as_ref().map(|m| m.text()).unwrap_or_default();
+            (text, m.as_ref().and_then(crate::channels::prompt_note))
         };
         if user_text.trim().is_empty() {
             if let Some((_, rendered)) = &structured {
@@ -845,6 +844,11 @@ impl Agent {
         } else if let Ok(Some((ask_id, _, question))) = self.store.open_ask(chat_id) {
             let _ = self.store.answer_ask(&ask_id);
             prompt_text = format!("Answer to your question \"{question}\": {user_text}");
+        }
+        // A message that arrived through a channel (F7): the model learns where it came from and
+        // that the reply is read as plain chat text.
+        if let Some(note) = channel_note {
+            prompt_text = format!("{note}\n\n{prompt_text}");
         }
 
         let outcome = self

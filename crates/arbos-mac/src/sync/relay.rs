@@ -29,9 +29,9 @@ use super::credentials::{self, DeviceCredentials};
 use super::doc::ChatDoc;
 use super::{ClientCommand, SyncEvent, SyncSource};
 use crate::model::{
-    new_id, now_ms, Attachment, BoxState, Chat, Connector, ConnectorProvider, ConnectorsView,
-    Effort, Id, Link, Message, MessageStatus, Part, Project, ProjectDocView, Role, Routine,
-    RoutineRun, Skill, ThreadInfo,
+    new_id, now_ms, Attachment, BoxState, ChannelBinding, ChannelPairing, ChannelPlatform,
+    ChannelsView, Chat, Connector, ConnectorProvider, ConnectorsView, Effort, Id, Link, Message,
+    MessageStatus, Part, Project, ProjectDocView, Role, Routine, RoutineRun, Skill, ThreadInfo,
 };
 
 const HELLO_DEADLINE: Duration = Duration::from_secs(15);
@@ -1657,7 +1657,79 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 refresh_skills(&shared).await;
             });
         }
+        ClientCommand::RefreshChannels => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                refresh_channels(&shared).await;
+            });
+        }
+        ClientCommand::ChannelPairNew {
+            project_id,
+            chat_id,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                match shared
+                    .post_json(
+                        "/channels/pair/new",
+                        json!({ "projectId": project_id, "chatId": chat_id }),
+                    )
+                    .await
+                {
+                    Ok(_) => refresh_channels(&shared).await,
+                    Err(err) => shared.notice(format!("Pairing code: {err:#}")),
+                }
+            });
+        }
+        ClientCommand::ChannelUnbind { id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let resp = shared
+                    .http
+                    .delete(format!("{}/channels/bindings/{}", shared.http_url, id))
+                    .bearer_auth(shared.token())
+                    .send()
+                    .await;
+                match resp {
+                    Ok(r) if r.status().is_success() => {}
+                    Ok(r) => shared.notice(format!("Unbind: HTTP {}", r.status())),
+                    Err(err) => shared.notice(format!("Unbind: {err}")),
+                }
+                refresh_channels(&shared).await;
+            });
+        }
     }
+}
+
+/// Settings → Channels: `GET /channels` → one view (F7).
+async fn refresh_channels(shared: &Arc<Shared>) {
+    let v = match shared.get_json("/channels").await {
+        Ok(v) => v,
+        Err(err) => {
+            // Older relays have no channels; stay quiet unless it is a real failure.
+            if !format!("{err:#}").contains("HTTP 404") {
+                shared.notice(format!("Channels: {err:#}"));
+            }
+            return;
+        }
+    };
+    let list = |key: &str| -> Vec<Value> { v[key].as_array().cloned().unwrap_or_default() };
+    let platforms: Vec<ChannelPlatform> = list("platforms")
+        .into_iter()
+        .filter_map(|p| serde_json::from_value(p).ok())
+        .collect();
+    let bindings: Vec<ChannelBinding> = list("bindings")
+        .into_iter()
+        .filter_map(|b| serde_json::from_value(b).ok())
+        .collect();
+    let pairing: Option<ChannelPairing> = serde_json::from_value(v["pairing"].clone()).ok();
+    let _ = shared.events.send(SyncEvent::Channels(ChannelsView {
+        mock: v["mock"].as_bool().unwrap_or(false),
+        platforms,
+        bindings,
+        pairing,
+        loaded: true,
+    }));
 }
 
 async fn refresh_routines(shared: &Arc<Shared>, project_id: &str) {

@@ -1,4 +1,5 @@
 mod agent;
+mod channels;
 mod config;
 mod connectors;
 mod harness;

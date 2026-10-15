@@ -12,9 +12,9 @@ use gpui_tokio::Tokio;
 use tokio::sync::mpsc;
 
 use crate::model::{
-    new_id, now_ms, BoxState, Chat, ConnectorsView, Effort, Id, Link, Message, MessageStatus, Part,
-    Project, ProjectDocView, QuestionState, Role, Routine, RoutineRun, RoutineTrigger, Skill,
-    StatusKind,
+    new_id, now_ms, BoxState, ChannelsView, Chat, ConnectorsView, Effort, Id, Link, Message,
+    MessageStatus, Part, Project, ProjectDocView, QuestionState, Role, Routine, RoutineRun,
+    RoutineTrigger, Skill, StatusKind,
 };
 use crate::sync::{ClientCommand, SyncEvent, SyncSource};
 use crate::ui::notify::{Gate, Notifier, NotifyEvent, NotifyKind};
@@ -109,6 +109,8 @@ pub struct AppState {
     /// System notifications (D49); the Shell flips `window_active`.
     pub notifier: Notifier,
     pub window_active: bool,
+    /// Settings → Channels (F7).
+    pub channels: ChannelsView,
     awaiting_new_project: bool,
     commands: mpsc::UnboundedSender<ClientCommand>,
     _pump: Task<()>,
@@ -184,6 +186,7 @@ impl AppState {
             routine_runs: HashMap::new(),
             notifier: Notifier::new(),
             window_active: true,
+            channels: ChannelsView::default(),
             awaiting_new_project: false,
             commands: command_tx,
             _pump: pump,
@@ -443,6 +446,10 @@ impl AppState {
             SyncEvent::Skills(mut skills) => {
                 skills.sort_by_key(|s| s.name.to_lowercase());
                 self.skills = skills;
+                cx.notify();
+            }
+            SyncEvent::Channels(view) => {
+                self.channels = view;
                 cx.notify();
             }
         }
@@ -1332,6 +1339,33 @@ impl AppState {
     pub fn delete_skill(&mut self, id: Id, cx: &mut Context<Self>) {
         self.skills.retain(|s| s.id != id);
         self.command(ClientCommand::SkillDelete { id });
+        cx.notify();
+    }
+
+    // ----- channels (F7) ---------------------------------------------------
+
+    pub fn refresh_channels(&mut self, cx: &mut Context<Self>) {
+        self.command(ClientCommand::RefreshChannels);
+        cx.notify();
+    }
+
+    /// Mint a pairing code for the selected project (its pinned chat).
+    pub fn new_channel_pairing(&mut self, cx: &mut Context<Self>) {
+        let Some(project_id) = self.selected_project.clone() else {
+            self.push_notice("Select a project first.");
+            cx.notify();
+            return;
+        };
+        self.command(ClientCommand::ChannelPairNew {
+            project_id,
+            chat_id: None,
+        });
+        cx.notify();
+    }
+
+    pub fn unbind_channel(&mut self, id: Id, cx: &mut Context<Self>) {
+        self.channels.bindings.retain(|b| b.id != id);
+        self.command(ClientCommand::ChannelUnbind { id });
         cx.notify();
     }
 
