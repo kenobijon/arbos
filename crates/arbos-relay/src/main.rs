@@ -161,6 +161,11 @@ async fn main() -> anyhow::Result<()> {
         box_idle_grace_ms: 30_000,
         connectors_mock: std::env::var("ARBOS_CONNECTORS_MOCK").is_ok_and(|v| v == "1"),
         channels_mock: std::env::var("ARBOS_CHANNELS_MOCK").is_ok_and(|v| v == "1"),
+        voice_mock: std::env::var("ARBOS_VOICE_MOCK").is_ok_and(|v| v == "1"),
+        openai_audio_base: std::env::var("ARBOS_OPENAI_AUDIO_BASE")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "https://api.openai.com/v1".to_owned()),
     };
     let relay_key = Arc::new(connectors::crypto::RelayKey::load(&db)?);
     let daytona = daytona_key.map(|k| {
@@ -197,6 +202,11 @@ async fn main() -> anyhow::Result<()> {
     }
     if state.cfg.channels_mock {
         tracing::info!("ARBOS_CHANNELS_MOCK=1: channel sends land in channel_outbox; POST /channels/mock/inbound injects messages");
+    }
+    if state.cfg.voice_mock {
+        tracing::info!(
+            "ARBOS_VOICE_MOCK=1: /proxy/v1/audio/* return a mock transcript and a 1 s sine WAV"
+        );
     }
 
     if db.device_count()? == 0 {
@@ -302,6 +312,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/blob/{project}/{key}", get(blobs::get).put(blobs::put))
         .route("/bootstrap/{file}", get(blobs::bootstrap))
         .route("/proxy/v1/models", get(proxy::openai_models))
+        .route(
+            "/proxy/v1/audio/transcriptions",
+            post(proxy::audio_transcriptions),
+        )
+        .route("/proxy/v1/audio/speech", post(proxy::audio_speech))
         .route("/proxy/v1/{*tail}", post(proxy::openai))
         .route("/proxy/anthropic/{*tail}", post(proxy::anthropic))
         .route("/connectors", get(connectors::list))

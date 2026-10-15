@@ -34,6 +34,11 @@ pub struct Config {
     pub connectors_mock: bool,
     /// `ARBOS_CHANNELS_MOCK=1`: channel sends land in `channel_outbox`; `/channels/mock/inbound` is open (F7).
     pub channels_mock: bool,
+    /// `ARBOS_VOICE_MOCK=1`: `/proxy/v1/audio/*` answer locally (F11).
+    pub voice_mock: bool,
+    /// OpenAI-compatible base for audio (STT/TTS); api.openai.com by default
+    /// because OpenRouter carries no audio endpoints.
+    pub openai_audio_base: String,
 }
 
 /// One frame to fan out to the other sockets in a room.
