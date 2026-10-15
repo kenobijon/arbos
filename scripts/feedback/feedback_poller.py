@@ -43,7 +43,7 @@ Config comes from the environment (systemd EnvironmentFile=/etc/arbos/feedback.e
 
 Only the standard library plus `cryptography` (for the ES256 App Store Connect token).
 
-CLI:  feedback_poller.py [run] | status | set-cursor <ISO-8601> | inject <image> "<comment>" [ios|mac] | requeue <id>…
+CLI:  feedback_poller.py [run] | status | set-cursor <ISO-8601> | inject <image> "<comment>" [ios|mac] | requeue <id>… | prioritize <id>…
 """
 
 from __future__ import annotations
@@ -1281,6 +1281,20 @@ def main(argv: list[str]) -> int:
             store.save_state(fid, st)
             store.event(fid, "requeued", tier=tier, tester=st["tester"])
             print(f"{fid}: queued ({tier}, {st['tester']})")
+        return 0
+    if cmd == "prioritize":
+        # Operator override: move an item to the priority tier (front of the queue, no per-tester cap).
+        store = Store(cfg)
+        for fid in argv[2:]:
+            st = store.state(fid)
+            if not st:
+                print(f"{fid}: unknown")
+                continue
+            st["tier"] = "priority"
+            st.pop("deferred_reason", None)
+            store.save_state(fid, st)
+            store.event(fid, "prioritized", by="operator")
+            print(f"{fid}: priority")
         return 0
     if cmd == "set-cursor":
         store = Store(cfg)
