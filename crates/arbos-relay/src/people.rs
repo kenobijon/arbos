@@ -1033,24 +1033,17 @@ pub async fn member_add(
         );
     }
     let humans = human_user_ids(&cm);
-    if state
-        .db
-        .blocked_by_any(&other_id, &humans)
-        .unwrap_or(false)
-    {
+    if state.db.blocked_by_any(&other_id, &humans).unwrap_or(false) {
         return api_error(
             StatusCode::FORBIDDEN,
             "not_available",
             "this person is not available",
         );
     }
-    if let Err(e) = state.db.add_member(
-        &id,
-        &format!("user:{other_id}"),
-        "member",
-        &me,
-        &json!({}),
-    ) {
+    if let Err(e) = state
+        .db
+        .add_member(&id, &format!("user:{other_id}"), "member", &me, &json!({}))
+    {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
     }
     if cm.chat.kind == "dm" {
