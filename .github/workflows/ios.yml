@@ -34,9 +34,11 @@ on:
 permissions:
   contents: read
 
+# A newer push cancels an older run on a branch, never on main: every push to
+# main is a TestFlight build the feedback loop (scripts/feedback) waits for.
 concurrency:
   group: ios-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   phone:
@@ -53,6 +55,12 @@ jobs:
       - name: Build number
         id: build
         run: echo "number=$(date -u +%Y%m%d%H%M)" >> "$GITHUB_OUTPUT"
+      - name: Swift package cache
+        uses: actions/cache@v4
+        with:
+          path: apps/ios/Arbos/build/spm
+          key: spm-${{ runner.os }}-${{ hashFiles('apps/ios/Arbos/Arbos.xcodeproj/project.pbxproj', 'apps/ios/Arbos/Arbos.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+          restore-keys: spm-${{ runner.os }}-
       - name: Select Xcode
         run: |
           set -euo pipefail
@@ -66,6 +74,7 @@ jobs:
           AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
           ARBOS_APPLE_TEAM_ID: ${{ secrets.ARBOS_APPLE_TEAM_ID }}
           BUILD_NUMBER: ${{ steps.build.outputs.number }}
+          ARBOS_SPM_DIR: ${{ github.workspace }}/apps/ios/Arbos/build/spm
         run: |
           set -euo pipefail
           set +x

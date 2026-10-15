@@ -40,6 +40,13 @@ def out_dir
   dir
 end
 
+# Swift packages are cloned under ARBOS_SPM_DIR when it is set (ios.yml caches
+# that directory between runs), else wherever Xcode keeps them.
+def spm_flags
+  dir = ENV["ARBOS_SPM_DIR"]
+  dir.to_s.empty? ? "" : "-clonedSourcePackagesDirPath '#{dir}' "
+end
+
 # Runs an xcodebuild `command` (which starts in the fastlane directory). The
 # whole output goes to build/xcodebuild-<name>.log; the console gets the
 # `error:` lines and the verdict. `pipefail` keeps xcodebuild's exit status
@@ -63,7 +70,7 @@ platform :ios do
   lane :sim do
     xcodebuild_logged("sim",
       "cd .. && xcodebuild build -project #{PROJECT} -scheme #{SCHEME} -configuration Debug " \
-      "-destination 'platform=iOS Simulator,name=iPhone 17' -derivedDataPath '#{out_dir}/dd' " \
+      "-destination 'platform=iOS Simulator,name=iPhone 17' -derivedDataPath '#{out_dir}/dd' #{spm_flags}" \
       "CODE_SIGNING_ALLOWED=NO")
   end
 
@@ -74,7 +81,7 @@ platform :ios do
     log = xcodebuild_logged("archive",
       "cd .. && xcodebuild -project #{PROJECT} -scheme #{SCHEME} " \
       "-configuration Release -destination 'generic/platform=iOS' " \
-      "-archivePath '#{archive_path}' archive " \
+      "#{spm_flags}-archivePath '#{archive_path}' archive " \
       "CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO " \
       "CURRENT_PROJECT_VERSION=#{number}")
     UI.user_error!("archive has no binary (see #{log})") unless File.executable?("#{archive_path}/Products/Applications/Arbos.app/Arbos")
