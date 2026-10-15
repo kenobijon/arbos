@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Bon">
+<circle cx="32" cy="32" r="31" fill="#000000" stroke="#ffffff" stroke-width="2"/>
+<path d="M21.47 46.42C21.21 45.64 21.67 45 22.5 45L41.5 45C42.33 45 42.79 45.64 42.53 46.42L40.47 52.58C40.21 53.36 39.33 54 38.5 54L25.5 54C24.67 54 23.79 53.36 23.53 52.58L21.47 46.42Z" fill="#ffffff"/>
+<path d="M31 46C36.48 41.86 38.15 36.53 36 30" fill="none" stroke="#ffffff" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M34 36L24 33" fill="none" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M21 27.4C25.69 27.4 29.5 29.46 29.5 32C29.5 34.54 25.69 36.6 21 36.6C16.31 36.6 12.5 34.54 12.5 32C12.5 29.46 16.31 27.4 21 27.4Z" fill="#ffffff"/>
+<path d="M37 18.8C44.18 18.8 50 22.02 50 26C50 29.98 44.18 33.2 37 33.2C29.82 33.2 24 29.98 24 26C24 22.02 29.82 18.8 37 18.8Z" fill="#ffffff"/>
+<path d="M29 10.8C32.87 10.8 36 12.68 36 15C36 17.32 32.87 19.2 29 19.2C25.13 19.2 22 17.32 22 15C22 12.68 25.13 10.8 29 10.8Z" fill="#ffffff"/>
+<path d="M36 22L30 17" fill="none" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M32.93 25.23C34.12 23.08 35.31 23.08 36.5 25.23" fill="none" stroke="#000000" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M39.5 25.23C40.69 23.08 41.88 23.08 43.07 25.23" fill="none" stroke="#000000" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M35.79 28.38C37.26 30.08 38.74 30.08 40.21 28.38" fill="none" stroke="#000000" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

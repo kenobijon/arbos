@@ -445,7 +445,7 @@
       "name": "Bon",
       "personality": "patient",
       "default_face": "calm",
-      "ready": false,
+      "ready": true,
       "svg": "assets/avatars/trees/bonsai.svg",
       "png": {
         "56": "assets/avatars/trees/png/bonsai-56.png",
@@ -493,7 +493,7 @@
       "name": "Birdie",
       "personality": "bright",
       "default_face": "happy",
-      "ready": false,
+      "ready": true,
       "svg": "assets/avatars/trees/birch.svg",
       "png": {
         "56": "assets/avatars/trees/png/birch-56.png",
@@ -541,7 +541,7 @@
       "name": "Bao",
       "personality": "wise",
       "default_face": "calm",
-      "ready": false,
+      "ready": true,
       "svg": "assets/avatars/trees/baobab.svg",
       "png": {
         "56": "assets/avatars/trees/png/baobab-56.png",
@@ -589,7 +589,7 @@
       "name": "Sprout",
       "personality": "eager",
       "default_face": "surprised",
-      "ready": false,
+      "ready": true,
       "svg": "assets/avatars/trees/sapling.svg",
       "png": {
         "56": "assets/avatars/trees/png/sapling-56.png",
@@ -637,7 +637,7 @@
       "name": "Mabel",
       "personality": "warm",
       "default_face": "happy",
-      "ready": false,
+      "ready": true,
       "svg": "assets/avatars/trees/maple.svg",
       "png": {
         "56": "assets/avatars/trees/png/maple-56.png",
@@ -685,7 +685,7 @@
       "name": "Ace",
       "personality": "sharp",
       "default_face": "focused",
-      "ready": false,
+      "ready": true,
       "svg": "assets/avatars/trees/acacia.svg",
       "png": {
         "56": "assets/avatars/trees/png/acacia-56.png",
@@ -733,7 +733,7 @@
       "name": "Bruce",
       "personality": "dependable",
       "default_face": "determined",
-      "ready": false,
+      "ready": true,
       "svg": "assets/avatars/trees/spruce.svg",
       "png": {
         "56": "assets/avatars/trees/png/spruce-56.png",
@@ -781,7 +781,7 @@
       "name": "Blossom",
       "personality": "dreamy",
       "default_face": "winking",
-      "ready": false,
+      "ready": true,
       "svg": "assets/avatars/trees/cherry.svg",
       "png": {
         "56": "assets/avatars/trees/png/cherry-56.png",
@@ -829,7 +829,7 @@
       "name": "Spike",
       "personality": "tough",
       "default_face": "determined",
-      "ready": false,
+      "ready": true,
       "svg": "assets/avatars/trees/cactus.svg",
       "png": {
         "56": "assets/avatars/trees/png/cactus-56.png",
@@ -877,7 +877,7 @@
       "name": "Red",
       "personality": "grounded",
       "default_face": "calm",
-      "ready": false,
+      "ready": true,
       "svg": "assets/avatars/trees/sequoia.svg",
       "png": {
         "56": "assets/avatars/trees/png/sequoia-56.png",
@@ -925,7 +925,7 @@
       "name": "Ollie",
       "personality": "peaceful",
       "default_face": "happy",
-      "ready": false,
+      "ready": true,
       "svg": "assets/avatars/trees/olive.svg",
       "png": {
         "56": "assets/avatars/trees/png/olive-56.png",
@@ -973,7 +973,7 @@
       "name": "Ko",
       "personality": "thoughtful",
       "default_face": "focused",
-      "ready": false,
+      "ready": true,
       "svg": "assets/avatars/trees/ginkgo.svg",
       "png": {
         "56": "assets/avatars/trees/png/ginkgo-56.png",
