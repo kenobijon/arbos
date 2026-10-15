@@ -33,13 +33,18 @@ async fn healthz(State(b): State<B>) -> Response {
         items.push(json!({
             "project": w.project_id,
             "ok": ok,
+            "user": w.cfg.run_as.as_ref().map(|r| r.user.clone()),
             "pi": w.agent.pi_ready.load(std::sync::atomic::Ordering::SeqCst),
             "extension": w.agent.ext_loaded.load(std::sync::atomic::Ordering::SeqCst),
             "mcp_port": w.cfg.mcp_port,
             "started_at": w.started_at,
         }));
     }
-    let body = json!({ "ok": all_ok, "user": b.cfg.user_id, "device": b.cfg.device_id, "version": env!("CARGO_PKG_VERSION"), "booted_at": b.booted_at, "workspaces": items });
+    let body = json!({
+        "ok": all_ok, "user": b.cfg.user_id, "device": b.cfg.device_id, "version": env!("CARGO_PKG_VERSION"), "booted_at": b.booted_at,
+        "isolation": { "enforced": b.isolation.enabled, "cross_read_blocked": *b.cross_read_blocked.read().await },
+        "workspaces": items,
+    });
     (
         if all_ok {
             StatusCode::OK

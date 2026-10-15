@@ -7,6 +7,8 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
+use crate::isolation::RunAs;
+
 fn env_or(k: &str, d: &str) -> String {
     std::env::var(k)
         .ok()
@@ -146,6 +148,7 @@ impl BoxConfig {
             device_id: self.device_id.clone(),
             state_dir,
             work_dir,
+            run_as: None,
         }
     }
 }
@@ -172,6 +175,8 @@ pub struct Config {
     pub claude_bin: String,
     pub pi_ext_path: PathBuf,
     pub device_id: String,
+    /// The Unix identity this workspace's children run as (`None` = agentd's own, local boxes).
+    pub run_as: Option<RunAs>,
 }
 
 impl Config {

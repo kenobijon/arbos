@@ -372,6 +372,7 @@ impl PrimeAdapter {
             &self.envs(session_id),
             cwd,
             &log,
+            self.cfg.run_as.as_ref(),
         )
         .await
     }
@@ -642,6 +643,7 @@ impl PiAdapter {
             &Self::envs(&self.cfg, session_id, "subagent"),
             cwd,
             &log,
+            self.cfg.run_as.as_ref(),
         )
         .await
     }
@@ -887,7 +889,17 @@ impl ClaudeCodeAdapter {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::from(std::fs::File::create(&log)?));
+        if let Some(ra) = &self.cfg.run_as {
+            cmd.uid(ra.uid).gid(ra.gid);
+            for (k, v) in crate::isolation::Isolation::env(ra) {
+                cmd.env(k, v);
+            }
+            let _ = std::os::unix::fs::chown(&log, Some(ra.uid), Some(ra.gid));
+        }
         let mut child = cmd.spawn()?;
+        if let (Some(ra), Some(pid)) = (&self.cfg.run_as, child.id()) {
+            crate::isolation::Isolation::attach(ra, pid);
+        }
         let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
         let (tx, _) = broadcast::channel(4096);

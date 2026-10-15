@@ -480,6 +480,10 @@ impl Agent {
         let path = dir.join(format!("{ts}_{chat_id}.jsonl"));
         let header = json!({ "type": "session", "version": 3, "id": chat_id, "timestamp": chrono::Utc::now().to_rfc3339(), "cwd": self.cfg.work_dir });
         std::fs::write(&path, format!("{header}\n"))?;
+        // pi appends to this file as the workspace user; agentd (root) created it.
+        if let Some(ra) = &self.cfg.run_as {
+            let _ = std::os::unix::fs::chown(&path, Some(ra.uid), Some(ra.gid));
+        }
         self.store
             .set_chat_session_path(chat_id, &path.display().to_string())?;
         Ok(path)
@@ -507,6 +511,7 @@ impl Agent {
             &PiAdapter::envs(&self.cfg, initial_chat, "main"),
             &self.cfg.work_dir,
             &log,
+            self.cfg.run_as.as_ref(),
         )
         .await?;
         let state = child
@@ -592,6 +597,7 @@ impl Agent {
             &PiAdapter::envs(&self.cfg, chat_id, "main"),
             &self.cfg.work_dir,
             &log,
+            self.cfg.run_as.as_ref(),
         )
         .await?;
         child

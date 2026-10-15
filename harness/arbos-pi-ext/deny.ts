@@ -24,7 +24,7 @@ export const DENY_RULES: DenyRule[] = [
   {
     name: "arbos-state-tamper",
     why: "agentd's own state and audit log are not writable by the model",
-    pattern: /(^|\s|['"])\/work\/\.arbos\/(agentd|audit\.jsonl)/,
+    pattern: /(^|\s|['"])\/work(\/[^/\s]+)?\/\.arbos\/(agentd|audit\.jsonl)/,
   },
 ];
 

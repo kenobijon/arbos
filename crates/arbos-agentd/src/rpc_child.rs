@@ -33,12 +33,16 @@ impl RpcChild {
         envs: &[(String, String)],
         cwd: &std::path::Path,
         log_path: &std::path::Path,
+        run_as: Option<&crate::isolation::RunAs>,
     ) -> Result<Arc<Self>> {
         let log = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(log_path)
             .with_context(|| format!("open {}", log_path.display()))?;
+        if let Some(ra) = run_as {
+            let _ = std::os::unix::fs::chown(log_path, Some(ra.uid), Some(ra.gid));
+        }
         let mut cmd = Command::new(program);
         cmd.args(args)
             .current_dir(cwd)
@@ -49,9 +53,19 @@ impl RpcChild {
         for (k, v) in envs {
             cmd.env(k, v);
         }
+        if let Some(ra) = run_as {
+            // The workspace's own user: no sudo, no other workspace's files (D70 hardening).
+            cmd.uid(ra.uid).gid(ra.gid);
+            for (k, v) in crate::isolation::Isolation::env(ra) {
+                cmd.env(k, v);
+            }
+        }
         let mut child = cmd
             .spawn()
             .with_context(|| format!("spawn {program} ({name})"))?;
+        if let (Some(ra), Some(pid)) = (run_as, child.id()) {
+            crate::isolation::Isolation::attach(ra, pid);
+        }
         let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
         let (events, _) = broadcast::channel(4096);

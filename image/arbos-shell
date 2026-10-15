@@ -29,7 +29,7 @@ if [ -n "$cmd" ]; then
   if printf '%s' "$cmd" | grep -Eq '/(admin|v1/admin|pair/new|devices)(/|\?|[[:space:]]|$)'; then
     deny relay-admin "relay admin endpoints are not reachable with a box token"
   fi
-  if printf '%s' "$cmd" | grep -Eq '(^|[[:space:]]|["'"'"'])/work/\.arbos/(agentd|audit\.jsonl)'; then
+  if printf '%s' "$cmd" | grep -Eq '(^|[[:space:]]|["'"'"'])/work(/[^/[:space:]]+)?/\.arbos/(agentd|audit\.jsonl)'; then
     deny arbos-state-tamper "agentd state and the audit log are not writable by the model"
   fi
   mkdir -p "$(dirname "$AUDIT")" 2>/dev/null

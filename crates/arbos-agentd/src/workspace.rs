@@ -15,6 +15,7 @@ use arbos_core::wire::PROJECT_DOC_CHAT_ID;
 
 use crate::agent::Agent;
 use crate::config::{BoxConfig, Config};
+use crate::isolation::Isolation;
 use crate::store::Store;
 use crate::sync::{Incoming, SyncHub};
 use crate::{hooks, http, mcp};
@@ -39,6 +40,9 @@ pub struct Supervisor {
     pub held: RwLock<std::collections::HashSet<String>>,
     pub box_slots: Arc<Semaphore>,
     pub booted_at: i64,
+    pub isolation: Isolation,
+    /// Result of the cross-workspace read check (`None` until two workspaces exist).
+    pub cross_read_blocked: RwLock<Option<bool>>,
     http: reqwest::Client,
     /// Next loopback port block; ports of removed workspaces are not reused within one boot.
     next_index: std::sync::atomic::AtomicU16,
@@ -46,7 +50,10 @@ pub struct Supervisor {
 
 impl Supervisor {
     pub fn new(cfg: BoxConfig) -> Arc<Self> {
+        let isolation = Isolation::detect(cfg.local_box);
         Arc::new(Self {
+            isolation,
+            cross_read_blocked: RwLock::new(None),
             cfg,
             workspaces: RwLock::new(HashMap::new()),
             held: RwLock::new(std::collections::HashSet::new()),
@@ -114,9 +121,18 @@ impl Supervisor {
             .next_index
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let t0 = Instant::now();
-        let cfg = Arc::new(self.cfg.workspace(project, index));
+        let mut cfg = self.cfg.workspace(project, index);
         tracing::info!(project = %project_id, dir = %cfg.work_dir.display(), mcp = cfg.mcp_port, "starting workspace");
         seed_state(&cfg)?;
+        if self.isolation.enabled {
+            let ra = self
+                .isolation
+                .prepare(&project_id, &cfg.work_dir, &cfg.state_dir)
+                .with_context(|| format!("isolation for {project_id}"))?;
+            tracing::info!(project = %project_id, user = %ra.user, uid = ra.uid, cgroup = ?ra.cgroup, "workspace identity");
+            cfg.run_as = Some(ra);
+        }
+        let cfg = Arc::new(cfg);
         let store = Store::open(&cfg.state_dir.join("agentd").join("agentd.db"))?;
         let (tx, rx) = mpsc::channel::<Incoming>(1024);
         let sync = SyncHub::new(cfg.clone(), store.clone(), tx);
@@ -286,7 +302,29 @@ impl Supervisor {
             .await
             .insert(project_id.clone(), ws.clone());
         tracing::info!(project = %project_id, ms = t0.elapsed().as_millis() as i64, "workspace running");
+        self.check_isolation().await;
         Ok(ws)
+    }
+
+    /// Invariant (D70): with two or more workspaces, A's user cannot read B's folder. Re-run as
+    /// workspaces come and go; the result shows in `/healthz`.
+    pub async fn check_isolation(&self) {
+        if !self.isolation.enabled {
+            return;
+        }
+        let ws = self.list().await;
+        let Some(a) = ws.first() else { return };
+        let Some(b) = ws.get(1) else { return };
+        let Some(ra) = &a.cfg.run_as else { return };
+        match Isolation::cross_read_blocked(ra, &b.cfg.work_dir) {
+            Ok(blocked) => {
+                if !blocked {
+                    tracing::error!(a = %a.project_id, b = %b.project_id, "ISOLATION BREACH: workspace A can read workspace B");
+                }
+                *self.cross_read_blocked.write().await = Some(blocked);
+            }
+            Err(e) => tracing::warn!(error = %e, "isolation check failed to run"),
+        }
     }
 
     /// Tell the relay (and the project doc) a workspace's state.

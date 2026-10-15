@@ -24,7 +24,7 @@ if printf '%s' "$hay" | grep -Eq '/(admin|v1/admin|pair/new|devices)(/|\?|[[:spa
 fi
 case "$tool" in
   Bash|Write|Edit|MultiEdit)
-    if printf '%s' "$hay" | grep -Eq '(^|[[:space:]]|["'"'"'])/work/\.arbos/(agentd|audit\.jsonl)'; then
+    if printf '%s' "$hay" | grep -Eq '(^|[[:space:]]|["'"'"'])/work(/[^/[:space:]]+)?/\.arbos/(agentd|audit\.jsonl)'; then
       block arbos-state-tamper "agentd state and the audit log are not writable by the model"
     fi ;;
 esac
