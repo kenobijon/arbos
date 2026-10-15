@@ -83,6 +83,17 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Verify every enclosure of the newest item in an appcast file against
+    /// the payload files in `--dir`, with the compiled-in public key. The
+    /// release pipeline runs this so a key mismatch never leaves the runner.
+    VerifyAppcast {
+        #[arg(long)]
+        appcast: PathBuf,
+        #[arg(long)]
+        dir: PathBuf,
+        #[arg(long)]
+        public_file: Option<PathBuf>,
+    },
     /// Fetch a feed and print the item that would install, as JSON.
     Check {
         #[arg(long, default_value = arbos_update::DEFAULT_FEED_URL)]
@@ -251,6 +262,49 @@ async fn main() -> anyhow::Result<()> {
             std::fs::write(&out, feed.to_xml())
                 .with_context(|| format!("writing {}", out.display()))?;
             eprintln!("{} items -> {}", feed.items.len(), out.display());
+        }
+        Cmd::VerifyAppcast {
+            appcast,
+            dir,
+            public_file,
+        } => {
+            let key = load_public(public_file)?;
+            let text = std::fs::read_to_string(&appcast)
+                .with_context(|| format!("reading {}", appcast.display()))?;
+            let feed = Appcast::parse(&text)?;
+            let newest = feed
+                .items
+                .iter()
+                .max_by_key(|i| i.parsed_version())
+                .context("appcast has no items")?;
+            let mut checked = 0;
+            for enc in &newest.enclosures {
+                let name = enc.url.rsplit('/').next().unwrap_or_default();
+                let path = dir.join(name);
+                if !path.is_file() {
+                    bail!(
+                        "{}: enclosure {name} is not in {}",
+                        newest.version,
+                        dir.display()
+                    );
+                }
+                let bytes = std::fs::read(&path)?;
+                if bytes.len() as u64 != enc.length {
+                    bail!(
+                        "{name}: {} bytes on disk, appcast says {}",
+                        bytes.len(),
+                        enc.length
+                    );
+                }
+                key.verify(&bytes, &enc.ed_signature).with_context(|| {
+                    format!("{name}: signature does not verify against the compiled-in key")
+                })?;
+                println!("ok: {name} ({} bytes, {})", bytes.len(), enc.os);
+                checked += 1;
+            }
+            if checked == 0 {
+                bail!("{}: no enclosures to verify", newest.version);
+            }
         }
         Cmd::Check { feed, current, os } => match client::check(&feed, &current, &os).await? {
             Some(available) => {

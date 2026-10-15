@@ -1,18 +1,62 @@
-name: ci
+name: CI
+
+# Linux gate for the workspace (D43). `Release` runs after this succeeds on
+# main (workflow_run), so a red commit never ships. Feature branches get CI
+# on push, without a pull request.
 
 on:
   push:
-    branches: [main]
+    branches: [main, arbos-v2, "cursor/**"]
   pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
 jobs:
+  layout:
+    name: Layout
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tree is the monorepo, and the old pipeline is gone
+        run: |
+          set -euo pipefail
+          test -f Cargo.toml
+          test -f crates/arbos-mac/Cargo.toml
+          test -f crates/arbos-update/update-key.pub
+          grep -q '^ed25519 ' crates/arbos-update/update-key.pub
+          test -f scripts/bundle-mac.sh
+          test -f scripts/release/publish-release.sh
+          test -f image/Dockerfile
+          # Release main / fx-* published `edge` from the previous tree; with
+          # the monorepo landed they must not exist, or two pipelines would
+          # write the same release.
+          test ! -e .github/workflows/release-main.yml
+          test ! -e .github/workflows/fx-binary-size.yml
+          test ! -e .github/workflows/fx-startup.yml
+          test ! -e app
+          test ! -e fx
+      - name: Workflow and shell lint
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y -q shellcheck >/dev/null
+          shellcheck -S warning scripts/*.sh scripts/release/*.sh scripts/runner/*.sh image/*.sh
+          curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash | bash -s -- latest /tmp >/dev/null
+          /tmp/actionlint -color
+
   rust:
     name: rust (fmt, clippy, test)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -27,7 +71,8 @@ jobs:
 
   harness:
     name: harness (arbos-pi-ext typecheck + build)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -46,8 +91,9 @@ jobs:
         working-directory: harness
 
   image:
-    name: image (dockerfile lint + build check)
-    runs-on: ubuntu-latest
+    name: image (dockerfile lint)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     needs: [rust, harness]
     if: github.event_name == 'push'
     steps:

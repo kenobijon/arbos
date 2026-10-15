@@ -1,0 +1,126 @@
+name: iOS
+
+# The phone app (apps/ios/Arbos) to TestFlight on every push to main that
+# touches it, and on demand. Archive without signing, then exportArchive with
+# App Store Connect automatic signing and the API key — the same flow as the
+# fastlane `beta` lane in apps/ios/Arbos/fastlane, which this calls when it
+# is there, and runs inline otherwise.
+#
+# Secrets: AC_API_KEY_P8, AC_API_KEY_ID, AC_API_ISSUER_ID (the App Store
+# Connect key named "Arbos IOS", id ZV82D3ZWRT — the "arbos ci" key cannot
+# cloud-sign), ARBOS_APPLE_TEAM_ID (25SCF3Q2AK). An upload failure fails the
+# job: a silent TestFlight miss is worse than a red check.
+#
+# Build number: UTC YYYYMMDDHHMM. It always rises, and it is above the builds
+# already on TestFlight (202610150502 at the time of writing).
+
+on:
+  push:
+    branches: [main, arbos-v2, "cursor/**"]
+    paths:
+      - "apps/ios/**"
+      - ".github/workflows/ios.yml"
+  workflow_dispatch:
+    inputs:
+      upload:
+        description: "Upload to TestFlight (off = archive only)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  phone:
+    name: Build and upload the phone app
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      PROJECT: apps/ios/Arbos/Arbos.xcodeproj
+      SCHEME: Arbos
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build number
+        id: build
+        run: echo "number=$(date -u +%Y%m%d%H%M)" >> "$GITHUB_OUTPUT"
+      - name: Select Xcode
+        run: |
+          set -euo pipefail
+          newest="$(find /Applications -maxdepth 1 -name 'Xcode_*.app' | sort -V | tail -1)"
+          if [[ -n "$newest" ]]; then sudo xcode-select -s "$newest"; fi
+          xcodebuild -version
+      - name: Archive
+        env:
+          BUILD_NUMBER: ${{ steps.build.outputs.number }}
+        run: |
+          set -euo pipefail
+          test -d "$PROJECT" || { echo "::error title=No iOS project::$PROJECT is not in this tree."; exit 1; }
+          xcodebuild -project "$PROJECT" -scheme "$SCHEME" \
+            -configuration Release -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/Arbos.xcarchive" \
+            -resolvePackageDependencies
+          xcodebuild -project "$PROJECT" -scheme "$SCHEME" \
+            -configuration Release -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/Arbos.xcarchive" archive \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            CURRENT_PROJECT_VERSION="$BUILD_NUMBER"
+          test -x "$RUNNER_TEMP/Arbos.xcarchive/Products/Applications/Arbos.app/Arbos"
+      - name: Upload to TestFlight
+        if: github.event_name != 'workflow_dispatch' || inputs.upload
+        env:
+          AC_API_KEY_P8: ${{ secrets.AC_API_KEY_P8 }}
+          AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
+          AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
+          ARBOS_APPLE_TEAM_ID: ${{ secrets.ARBOS_APPLE_TEAM_ID }}
+          BUILD_NUMBER: ${{ steps.build.outputs.number }}
+        run: |
+          set -euo pipefail
+          set +x
+          missing=0
+          for name in AC_API_KEY_P8 AC_API_KEY_ID AC_API_ISSUER_ID ARBOS_APPLE_TEAM_ID; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error title=Apple secret missing::$name is not set."
+              missing=1
+            fi
+          done
+          [[ "$missing" -eq 0 ]] || exit 1
+          if [[ "$AC_API_KEY_ID" != "ZV82D3ZWRT" ]]; then
+            echo "::warning title=Unexpected App Store Connect key::AC_API_KEY_ID is $AC_API_KEY_ID; the key that can cloud-sign the phone app is \"Arbos IOS\" (ZV82D3ZWRT)."
+          fi
+          umask 077
+          key_path="$RUNNER_TEMP/AuthKey_$AC_API_KEY_ID.p8"
+          if printf '%s' "$AC_API_KEY_P8" | grep -q -- '-----BEGIN'; then
+            printf '%s\n' "$AC_API_KEY_P8" > "$key_path"
+          else
+            printf '%s' "$AC_API_KEY_P8" | base64 --decode > "$key_path"
+          fi
+          trap 'rm -f "$key_path"' EXIT
+          if [[ -f apps/ios/Arbos/fastlane/Fastfile ]] && command -v fastlane >/dev/null 2>&1; then
+            echo "==> fastlane beta"
+            (cd apps/ios/Arbos && \
+              ASC_KEY_PATH="$key_path" ASC_KEY_ID="$AC_API_KEY_ID" ASC_ISSUER_ID="$AC_API_ISSUER_ID" \
+              TEAM_ID="$ARBOS_APPLE_TEAM_ID" BUILD_NUMBER="$BUILD_NUMBER" \
+              ARCHIVE_PATH="$RUNNER_TEMP/Arbos.xcarchive" \
+              fastlane beta)
+          else
+            echo "==> xcodebuild -exportArchive (app-store-connect, upload)"
+            options="$RUNNER_TEMP/ExportOptions.plist"
+            plutil -create xml1 "$options"
+            plutil -insert method -string app-store-connect "$options"
+            plutil -insert destination -string upload "$options"
+            plutil -insert signingStyle -string automatic "$options"
+            plutil -insert teamID -string "$ARBOS_APPLE_TEAM_ID" "$options"
+            xcodebuild -exportArchive \
+              -archivePath "$RUNNER_TEMP/Arbos.xcarchive" \
+              -exportPath "$RUNNER_TEMP/TestFlightExport" \
+              -exportOptionsPlist "$options" \
+              -allowProvisioningUpdates \
+              -authenticationKeyPath "$key_path" \
+              -authenticationKeyID "$AC_API_KEY_ID" \
+              -authenticationKeyIssuerID "$AC_API_ISSUER_ID"
+          fi
+          echo "TestFlight upload finished: build $BUILD_NUMBER" >> "$GITHUB_STEP_SUMMARY"
