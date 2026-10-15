@@ -136,7 +136,7 @@ fi
 # keep values already in the env file when nothing new was supplied
 if [[ -f "$ENV_FILE" ]]; then
   keep() { local k=$1; [[ -n "${!k:-}" ]] || printf -v "$k" '%s' "$(sed -n "s/^$k=//p" "$ENV_FILE" | head -1)"; }
-  for k in OPENROUTER_API_KEY OPENAI_API_KEY DAYTONA_API_KEY ARBOS_RELAY_ADMIN_TOKEN ARBOS_RELAY_KEY ARBOS_JWT_KEY ARBOS_GITHUB_CLIENT_ID ARBOS_GITHUB_CLIENT_SECRET; do keep "$k"; done
+  for k in OPENROUTER_API_KEY OPENAI_API_KEY DAYTONA_API_KEY ARBOS_RELAY_ADMIN_TOKEN ARBOS_RELAY_KEY ARBOS_JWT_KEY ARBOS_GITHUB_CLIENT_ID ARBOS_GITHUB_CLIENT_SECRET ARBOS_DAYTONA_SNAPSHOT; do keep "$k"; done
 fi
 [[ -n "${DAYTONA_API_KEY:-}" ]] || echo "WARNING: DAYTONA_API_KEY is empty — new projects will get process boxes"
 [[ -n "${OPENROUTER_API_KEY:-}${OPENAI_API_KEY:-}" ]] || echo "WARNING: no model provider key"
@@ -164,6 +164,10 @@ ARBOS_GITHUB_OAUTH_CLIENT_SECRET=${ARBOS_GITHUB_CLIENT_SECRET:-}
 ARBOS_OAUTH_REDIRECT_URL=$PUBLIC_URL/auth/github/callback
 RUST_LOG=info,arbos_relay=info
 EOF
+# Daytona snapshot for NEW boxes (the relay's compiled-in default otherwise). Never written empty:
+# clap takes an empty env value literally. Export ARBOS_DAYTONA_SNAPSHOT for one run to set it; it
+# is kept on later runs.
+[[ -z "${ARBOS_DAYTONA_SNAPSHOT:-}" ]] || echo "ARBOS_DAYTONA_SNAPSHOT=$ARBOS_DAYTONA_SNAPSHOT" >> "$ENV_FILE"
 chmod 0600 "$ENV_FILE"; chown root:root "$ENV_FILE"
 umask 022
 
