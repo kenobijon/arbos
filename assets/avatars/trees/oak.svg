@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Oakley">
+<circle cx="32" cy="32" r="31" fill="#000000" stroke="#ffffff" stroke-width="2"/>
+<path d="M28.33 37.49C28.43 36.67 29.17 36 30 36L34 36C34.83 36 35.57 36.67 35.67 37.49L37.33 52.51C37.43 53.33 36.83 54 36 54L28 54C27.17 54 26.57 53.33 26.67 52.51L28.33 37.49Z" fill="#ffffff"/>
+<circle cx="32" cy="19" r="12" fill="#ffffff"/>
+<circle cx="21" cy="27" r="10.5" fill="#ffffff"/>
+<circle cx="43" cy="27" r="10.5" fill="#ffffff"/>
+<circle cx="32" cy="29" r="13" fill="#ffffff"/>
+<path d="M25.6 27.1C27 24.57 28.4 24.57 29.8 27.1" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M34.2 27.1C35.6 24.57 37 24.57 38.4 27.1" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M29.4 30.8C31.13 32.8 32.87 32.8 34.6 30.8" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
