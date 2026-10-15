@@ -29,11 +29,11 @@ use super::credentials::{self, DeviceCredentials};
 use super::doc::ChatDoc;
 use super::{ClientCommand, SyncEvent, SyncSource};
 use crate::model::{
-    new_id, now_ms, Attachment, AttachmentKind, BoxState, ChannelBinding, ChannelPairing,
-    ChannelPlatform, ChannelsView, Chat, Connector, ConnectorProvider, ConnectorsView, Effort, Id,
-    Link, LocalDevice, LocalView, Machine, MachineState, Message, MessageStatus, Part, Project,
-    ProjectDocView, Role, Routine, RoutineRun, Skill, ThreadInfo, VaultItem, VaultRequest,
-    VaultView,
+    new_id, now_ms, AccountView, Attachment, AttachmentKind, BoxState, ChannelBinding,
+    ChannelPairing, ChannelPlatform, ChannelsView, Chat, Connector, ConnectorProvider,
+    ConnectorsView, Effort, Id, Link, LocalDevice, LocalView, Machine, MachineState, Message,
+    MessageStatus, Part, Project, ProjectDocView, Role, Routine, RoutineRun, Skill, ThreadInfo,
+    VaultItem, VaultRequest, VaultView,
 };
 
 const HELLO_DEADLINE: Duration = Duration::from_secs(15);
@@ -94,6 +94,7 @@ struct Shared {
     subscriptions: Mutex<Vec<loro::Subscription>>,
     browser_watch: Mutex<HashMap<Id, JoinHandle<()>>>,
     machine: Mutex<Machine>,
+    refresh_lock: tokio::sync::Mutex<()>,
 }
 
 fn project_doc_key(project_id: &str) -> String {
@@ -106,8 +107,94 @@ impl Shared {
             .read()
             .unwrap()
             .as_ref()
-            .map(|c| c.device_token.clone())
+            .map(|c| c.access_token.clone())
             .unwrap_or_default()
+    }
+
+    /// `POST /auth/refresh` with the stored refresh token; the relay rotates
+    /// it, so this is serialised and never retried with a used token. A 401
+    /// here means the device was revoked: back to the sign-in screen.
+    async fn refresh_tokens(self: &Arc<Self>) -> Result<()> {
+        let _guard = self.refresh_lock.lock().await;
+        let Some(refresh) = self
+            .creds
+            .read()
+            .unwrap()
+            .as_ref()
+            .and_then(|c| c.refresh_token.clone())
+        else {
+            return Err(anyhow!("no refresh token"));
+        };
+        let resp = self
+            .http
+            .post(format!("{}/auth/refresh", self.http_url))
+            .json(&json!({ "refresh_token": refresh }))
+            .send()
+            .await
+            .context("POST /auth/refresh")?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if status.as_u16() == 401 {
+            self.sign_out_locally();
+            return Err(anyhow!("refresh rejected: {text}"));
+        }
+        if !status.is_success() {
+            return Err(anyhow!("POST /auth/refresh: HTTP {status} {text}"));
+        }
+        let v: Value = serde_json::from_str(&text).context("refresh: bad JSON")?;
+        self.apply_token_response(&v)?;
+        Ok(())
+    }
+
+    /// Store the body of `/auth/token` or `/auth/refresh`.
+    fn apply_token_response(&self, v: &Value) -> Result<DeviceCredentials> {
+        let access = v
+            .get("access_token")
+            .and_then(Value::as_str)
+            .filter(|t| !t.is_empty())
+            .ok_or_else(|| anyhow!("relay returned no access token"))?;
+        let expires_in = v.get("expires_in").and_then(Value::as_u64).unwrap_or(3600);
+        let previous = self.creds.read().unwrap().clone();
+        let user = v
+            .get("user")
+            .and_then(|u| serde_json::from_value(u.clone()).ok())
+            .or_else(|| previous.as_ref().and_then(|c| c.user.clone()));
+        let creds = DeviceCredentials {
+            relay_url: self.http_url.clone(),
+            device_id: v
+                .get("device_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| previous.as_ref().map(|c| c.device_id.clone()))
+                .unwrap_or_else(|| "device".into()),
+            access_token: access.to_string(),
+            refresh_token: v
+                .get("refresh_token")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| previous.and_then(|c| c.refresh_token)),
+            expires_at: now_ms() + expires_in * 1000,
+            user,
+        };
+        if let Err(err) = credentials::store(&creds) {
+            self.notice(format!("Token saved in memory only: {err:#}"));
+        }
+        *self.creds.write().unwrap() = Some(creds.clone());
+        Ok(creds)
+    }
+
+    /// Forget the tokens and show the sign-in screen.
+    fn sign_out_locally(&self) {
+        credentials::clear(&self.http_url);
+        *self.creds.write().unwrap() = None;
+        let _ = self.events.send(SyncEvent::Account(None));
+        let _ = self.events.send(SyncEvent::NeedsPairing {
+            relay_url: self.http_url.clone(),
+        });
+    }
+
+    fn is_token_expired(status: reqwest::StatusCode, body: &str) -> bool {
+        status.as_u16() == 401 && body.contains("token_expired")
     }
 
     fn device_id(&self) -> String {
@@ -123,57 +210,81 @@ impl Shared {
         let _ = self.events.send(SyncEvent::Notice(text.into()));
     }
 
-    async fn get_json(&self, path: &str) -> Result<Value> {
-        let resp = self
-            .http
-            .get(format!("{}{}", self.http_url, path))
-            .bearer_auth(self.token())
-            .send()
-            .await
-            .with_context(|| format!("GET {path}"))?;
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        if !status.is_success() {
-            return Err(anyhow!("GET {path}: HTTP {status} {body}"));
+    async fn get_json(self: &Arc<Self>, path: &str) -> Result<Value> {
+        let mut refreshed = false;
+        loop {
+            let resp = self
+                .http
+                .get(format!("{}{}", self.http_url, path))
+                .bearer_auth(self.token())
+                .send()
+                .await
+                .with_context(|| format!("GET {path}"))?;
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            if Self::is_token_expired(status, &body) && !refreshed {
+                refreshed = true;
+                self.refresh_tokens().await?;
+                continue;
+            }
+            if !status.is_success() {
+                return Err(anyhow!("GET {path}: HTTP {status} {body}"));
+            }
+            return serde_json::from_str(&body).with_context(|| format!("GET {path}: bad JSON"));
         }
-        serde_json::from_str(&body).with_context(|| format!("GET {path}: bad JSON"))
     }
 
-    async fn post_json(&self, path: &str, body: Value) -> Result<Value> {
-        let resp = self
-            .http
-            .post(format!("{}{}", self.http_url, path))
-            .bearer_auth(self.token())
-            .json(&body)
-            .send()
-            .await
-            .with_context(|| format!("POST {path}"))?;
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        if !status.is_success() {
-            return Err(anyhow!("POST {path}: HTTP {status} {text}"));
+    async fn post_json(self: &Arc<Self>, path: &str, body: Value) -> Result<Value> {
+        let mut refreshed = false;
+        loop {
+            let resp = self
+                .http
+                .post(format!("{}{}", self.http_url, path))
+                .bearer_auth(self.token())
+                .json(&body)
+                .send()
+                .await
+                .with_context(|| format!("POST {path}"))?;
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            if Self::is_token_expired(status, &text) && !refreshed {
+                refreshed = true;
+                self.refresh_tokens().await?;
+                continue;
+            }
+            if !status.is_success() {
+                return Err(anyhow!("POST {path}: HTTP {status} {text}"));
+            }
+            if text.trim().is_empty() {
+                return Ok(Value::Null);
+            }
+            return Ok(serde_json::from_str(&text).unwrap_or(Value::Null));
         }
-        if text.trim().is_empty() {
-            return Ok(Value::Null);
-        }
-        Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
     }
 
-    async fn patch_json(&self, path: &str, body: Value) -> Result<Value> {
-        let resp = self
-            .http
-            .patch(format!("{}{}", self.http_url, path))
-            .bearer_auth(self.token())
-            .json(&body)
-            .send()
-            .await
-            .with_context(|| format!("PATCH {path}"))?;
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        if !status.is_success() {
-            return Err(anyhow!("PATCH {path}: HTTP {status} {text}"));
+    async fn patch_json(self: &Arc<Self>, path: &str, body: Value) -> Result<Value> {
+        let mut refreshed = false;
+        loop {
+            let resp = self
+                .http
+                .patch(format!("{}{}", self.http_url, path))
+                .bearer_auth(self.token())
+                .json(&body)
+                .send()
+                .await
+                .with_context(|| format!("PATCH {path}"))?;
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            if Self::is_token_expired(status, &text) && !refreshed {
+                refreshed = true;
+                self.refresh_tokens().await?;
+                continue;
+            }
+            if !status.is_success() {
+                return Err(anyhow!("PATCH {path}: HTTP {status} {text}"));
+            }
+            return Ok(serde_json::from_str(&text).unwrap_or(Value::Null));
         }
-        Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
     }
 }
 
@@ -205,6 +316,7 @@ impl SyncSource for RelaySource {
                 subscriptions: Mutex::new(Vec::new()),
                 browser_watch: Mutex::new(HashMap::new()),
                 machine: Mutex::new(Machine::default()),
+                refresh_lock: tokio::sync::Mutex::new(()),
             });
             let _ = events.send(SyncEvent::Link(Link::Connecting));
 
@@ -242,7 +354,97 @@ async fn refresh_skills(shared: &Arc<Shared>) {
     }
 }
 
+/// `GET /me` → `SyncEvent::Account`.
+async fn refresh_me(shared: &Arc<Shared>) {
+    let Ok(v) = shared.get_json("/me").await else {
+        // Pair-code relays have no /me; the stored user (if any) stands.
+        let user = shared
+            .creds
+            .read()
+            .unwrap()
+            .as_ref()
+            .and_then(|c| c.user.clone());
+        if let Some(user) = user {
+            let _ = shared.events.send(SyncEvent::Account(Some(AccountView {
+                login: user.login,
+                name: user.name,
+                avatar_url: user.avatar_url,
+                ..AccountView::default()
+            })));
+        }
+        return;
+    };
+    let user = v.get("user").cloned().unwrap_or(Value::Null);
+    let credits = v.get("credits").cloned().unwrap_or(Value::Null);
+    let str_of = |v: &Value, k: &str| {
+        v.get(k)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let view = AccountView {
+        login: str_of(&user, "login"),
+        name: str_of(&user, "name"),
+        avatar_url: str_of(&user, "avatar_url"),
+        device_name: v
+            .pointer("/device/name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        balance_usd: credits
+            .get("balance_usd")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0),
+        spent_today_usd: credits
+            .get("spent_today_usd")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0),
+        daily_cap_usd: credits.get("daily_cap_usd").and_then(Value::as_f64),
+    };
+    let _ = shared.events.send(SyncEvent::Account(Some(view)));
+    if let Some(m) = v.get("machine").and_then(Value::as_object) {
+        if m.get("exists").and_then(Value::as_bool) != Some(false) {
+            if let Some(word) = m.get("state").and_then(Value::as_str) {
+                let since = m.get("since").and_then(Value::as_u64).filter(|v| *v > 0);
+                set_machine(shared, machine_state_from_word(word), since, None);
+            }
+        }
+    }
+}
+
+/// Keep the JWT fresh: the relay wants a refresh when less than five minutes
+/// remain; check twice a minute.
+fn start_token_refresher(shared: &Arc<Shared>) {
+    let shared = shared.clone();
+    tokio::spawn(async move {
+        let mut tick = interval(Duration::from_secs(30));
+        loop {
+            tick.tick().await;
+            let due = shared
+                .creds
+                .read()
+                .unwrap()
+                .as_ref()
+                .map(|c| c.needs_refresh())
+                .unwrap_or(false);
+            if due {
+                if let Err(err) = shared.refresh_tokens().await {
+                    shared.notice(format!("Session refresh: {err:#}"));
+                }
+            }
+            if shared.creds.read().unwrap().is_none() {
+                return;
+            }
+        }
+    });
+}
+
 fn start_after_pairing(shared: &Arc<Shared>) {
+    start_token_refresher(shared);
+    {
+        let shared = shared.clone();
+        tokio::spawn(async move { refresh_me(&shared).await });
+    }
     let skills_shared = shared.clone();
     tokio::spawn(async move { refresh_skills(&skills_shared).await });
     let models_shared = shared.clone();
@@ -1594,6 +1796,17 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .await
                 {
                     Ok(v) => {
+                        let token = v
+                            .get("device_token")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
+                        if token.is_empty() {
+                            let _ = shared
+                                .events
+                                .send(SyncEvent::PairingFailed("relay returned no token".into()));
+                            return;
+                        }
                         let creds = DeviceCredentials {
                             relay_url: shared.http_url.clone(),
                             device_id: v
@@ -1601,18 +1814,11 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                                 .and_then(Value::as_str)
                                 .unwrap_or("device")
                                 .to_string(),
-                            device_token: v
-                                .get("device_token")
-                                .and_then(Value::as_str)
-                                .unwrap_or("")
-                                .to_string(),
+                            access_token: token,
+                            refresh_token: None,
+                            expires_at: 0,
+                            user: None,
                         };
-                        if creds.device_token.is_empty() {
-                            let _ = shared
-                                .events
-                                .send(SyncEvent::PairingFailed("relay returned no token".into()));
-                            return;
-                        }
                         if let Err(err) = credentials::store(&creds) {
                             shared.notice(format!("Token saved in memory only: {err:#}"));
                         }
@@ -1628,6 +1834,64 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                             .send(SyncEvent::PairingFailed(format!("{err:#}")));
                     }
                 }
+            });
+        }
+        ClientCommand::SignIn { grant_code } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let resp = shared
+                    .http
+                    .post(format!("{}/auth/token", shared.http_url))
+                    .json(&json!({ "grant_code": grant_code }))
+                    .send()
+                    .await;
+                let outcome: Result<DeviceCredentials> = async {
+                    let resp = resp.context("POST /auth/token")?;
+                    let status = resp.status();
+                    let text = resp.text().await.unwrap_or_default();
+                    if !status.is_success() {
+                        let message = serde_json::from_str::<Value>(&text)
+                            .ok()
+                            .and_then(|v| {
+                                v.pointer("/error/message")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_owned)
+                            })
+                            .unwrap_or(text);
+                        return Err(anyhow!("{message}"));
+                    }
+                    let v: Value = serde_json::from_str(&text).context("/auth/token: bad JSON")?;
+                    shared.apply_token_response(&v)
+                }
+                .await;
+                match outcome {
+                    Ok(creds) => {
+                        if let Some(user) = creds.user.clone() {
+                            let _ = shared.events.send(SyncEvent::Account(Some(AccountView {
+                                login: user.login,
+                                name: user.name,
+                                avatar_url: user.avatar_url,
+                                ..AccountView::default()
+                            })));
+                        }
+                        let _ = shared.events.send(SyncEvent::Paired {
+                            device_id: creds.device_id,
+                        });
+                        start_after_pairing(&shared);
+                    }
+                    Err(err) => {
+                        let _ = shared
+                            .events
+                            .send(SyncEvent::PairingFailed(format!("{err:#}")));
+                    }
+                }
+            });
+        }
+        ClientCommand::SignOut => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let _ = shared.post_json("/auth/logout", json!({})).await;
+                shared.sign_out_locally();
             });
         }
         ClientCommand::OpenChat { chat_id } | ClientCommand::MarkRead { chat_id } => {
