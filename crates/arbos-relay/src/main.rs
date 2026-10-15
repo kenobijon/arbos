@@ -1,6 +1,7 @@
 mod admin;
 mod api;
 mod auth;
+mod avatar;
 mod blobs;
 mod boxes;
 mod browser;
@@ -224,6 +225,7 @@ async fn main() -> anyhow::Result<()> {
         },
         machine_usd_per_hour: env_f64("ARBOS_MACHINE_USD_PER_HOUR", 0.332),
         machine_stopped_usd_per_day: env_f64("ARBOS_MACHINE_STOPPED_USD_PER_DAY", 0.013),
+        avatar_slugs: avatar::slugs_from_env(),
         site_url: env_nonempty("ARBOS_SITE_URL").unwrap_or_else(|| "https://arbos.life".to_owned()),
         releases_repo: env_nonempty("ARBOS_RELEASES_REPO")
             .unwrap_or_else(|| "unarbos/arbos".to_owned()),

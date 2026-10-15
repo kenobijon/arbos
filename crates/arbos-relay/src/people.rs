@@ -212,7 +212,12 @@ fn member_json(state: &AppState, m: &Membership) -> Value {
     if let Some(pid) = m.project_id() {
         if let Ok(Some(p)) = state.db.project(pid) {
             v["handle"] = json!(agent_slug(&p.name));
-            v["project"] = json!({ "id": p.id, "name": p.name, "icon": p.icon, "color": p.color });
+            let avatar = p
+                .avatar
+                .clone()
+                .unwrap_or_else(|| crate::avatar::default_for(&p.id, &state.cfg.avatar_slugs));
+            v["avatar"] = json!(avatar);
+            v["project"] = json!({ "id": p.id, "name": p.name, "icon": p.icon, "color": p.color, "avatar": avatar });
             v["owner"] = json!(p.user_id);
             v["owner_handle"] = state
                 .db
@@ -1989,6 +1994,7 @@ pub(crate) mod tests_support {
             color: "#000".into(),
             user_id: owner.to_owned(),
             workspace_state: "stopped".into(),
+            avatar: None,
         };
         state.db.insert_project(&project).expect("project");
         state

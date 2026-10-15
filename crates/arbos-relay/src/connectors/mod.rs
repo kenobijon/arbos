@@ -805,6 +805,10 @@ mod tests {
             machine_stopped_usd_per_day: 0.013,
             releases_repo: "unarbos/arbos".into(),
             site_url: "https://arbos.life".into(),
+            avatar_slugs: crate::avatar::DEFAULT_SLUGS
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect(),
         };
         AppState {
             db,
@@ -890,6 +894,7 @@ mod tests {
             color: "#000".into(),
             user_id: "u_default".into(),
             workspace_state: "stopped".into(),
+            avatar: None,
         };
         let env = crate::boxes::box_env(
             &state,

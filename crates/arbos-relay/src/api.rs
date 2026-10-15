@@ -132,6 +132,9 @@ pub struct CreateProjectBody {
     /// `daytona` (default when a key exists), `process`, or `docker`.
     #[serde(default)]
     pub provider: Option<String>,
+    /// Tree avatar slug; default = the deterministic pick for the new id.
+    #[serde(default)]
+    pub avatar: Option<String>,
 }
 
 fn default_models() -> Value {
@@ -175,8 +178,14 @@ pub async fn create_project(
         None => Provider::Process,
     };
     let now = now_ms();
+    let id = ulid();
+    let avatar = match b.avatar.as_deref().map(str::trim) {
+        Some(a) if crate::avatar::valid_slug(a) => a.to_owned(),
+        Some(_) => return Err((StatusCode::BAD_REQUEST, "avatar must be a slug".into())),
+        None => crate::avatar::default_for(&id, &state.cfg.avatar_slugs),
+    };
     let project = Project {
-        id: ulid(),
+        id,
         name: name.clone(),
         icon: b.icon.unwrap_or_else(|| monogram(&name)),
         instructions: b.instructions.unwrap_or_default(),
@@ -188,6 +197,7 @@ pub async fn create_project(
         color: b.color.clone().unwrap_or_else(|| "#8b7cf6".into()),
         user_id: principal.user_id().unwrap_or("u_default").to_owned(),
         workspace_state: "stopped".into(),
+        avatar: Some(avatar),
     };
     state
         .db
@@ -323,6 +333,16 @@ pub struct PatchProjectBody {
     pub models: Option<Value>,
     #[serde(default)]
     pub spend_cap_daily: Option<f64>,
+    /// Tree avatar slug; `null` resets to the deterministic default.
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub avatar: Option<Option<String>>,
+}
+
+fn deserialize_double_option<'de, D>(d: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(d).map(Some)
 }
 
 /// `PATCH /projects/{id}`: settings writes (SetModel, rename, icon, instructions, cap). Devices and the
@@ -370,6 +390,20 @@ pub async fn patch_project(
         }
         merged
     });
+    let avatar_patch: Option<Option<String>> = match &b.avatar {
+        None => None,
+        Some(None) => Some(Some(crate::avatar::default_for(
+            &p.id,
+            &state.cfg.avatar_slugs,
+        ))),
+        Some(Some(a)) => {
+            let a = a.trim();
+            if !crate::avatar::valid_slug(a) {
+                return Err((StatusCode::BAD_REQUEST, "avatar must be a slug".into()));
+            }
+            Some(Some(a.to_owned()))
+        }
+    };
     state
         .db
         .update_project(
@@ -380,6 +414,7 @@ pub async fn patch_project(
             b.instructions.as_deref(),
             models.as_ref(),
             b.spend_cap_daily,
+            avatar_patch.as_ref().map(|a| a.as_deref()),
         )
         .map_err(internal)?;
     let p = state
@@ -505,6 +540,7 @@ pub(crate) async fn project_json(state: &AppState, p: &Project) -> Value {
         .unwrap_or(0.0);
     json!({
         "id": p.id, "name": p.name, "icon": p.icon, "color": p.color, "instructions": p.instructions,
+        "avatar": p.avatar.clone().unwrap_or_else(|| crate::avatar::default_for(&p.id, &state.cfg.avatar_slugs)),
         "state": p.state, "box": bs, "box_since": since,
         "models": p.models,
         "spend_today_usd": today, "spend_cap_usd": p.spend_cap_daily,
@@ -1021,6 +1057,10 @@ pub async fn box_projects(State(state): State<AppState>, principal: Principal) -
     for p in &projects {
         let chats = state.db.list_chats(&p.id).map_err(internal)?;
         let mut project = serde_json::to_value(p).unwrap_or(Value::Null);
+        project["avatar"] = json!(p
+            .avatar
+            .clone()
+            .unwrap_or_else(|| crate::avatar::default_for(&p.id, &state.cfg.avatar_slugs)));
         project["skills_rev"] = json!(state.db.skills_rev(Some(&p.id)).map_err(internal)?);
         let people_chats = crate::people::people_chats_of_project(&state, &p.id, user_id);
         out.push(json!({ "project": project, "chats": chats, "people_chats": people_chats }));

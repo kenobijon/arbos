@@ -440,9 +440,16 @@ impl Agent {
     pub fn people_reply_fields(&self, chat_id: &str) -> Option<ReplyAttribution> {
         let info = self.people.info(chat_id)?;
         let asker = self.people.asker(chat_id)?;
+        let avatar = info
+            .members
+            .iter()
+            .find(|m| m["member"].as_str() == Some(&format!("agent:{}", self.cfg.project_id)))
+            .and_then(|m| m["avatar"].as_str())
+            .map(str::to_owned);
         let fields = vec![
             ("sender", json!(format!("agent:{}", self.cfg.project_id))),
             ("senderHandle", json!(info.slug)),
+            ("senderAvatar", json!(avatar)),
             ("ownerHandle", json!(info.owner_handle())),
             ("askedBy", json!(format!("user:{}", asker.user_id))),
             ("askedByHandle", json!(asker.handle)),

@@ -186,6 +186,10 @@ pub struct Project {
     pub user_id: String,
     /// Workspace state on the user box as last reported: `running` | `stopped`.
     pub workspace_state: String,
+    /// Tree avatar slug (the manifest the apps ship); `None` on rows made before avatars, which
+    /// read as the deterministic default for the id (`crate::avatar::default_for`).
+    #[serde(default)]
+    pub avatar: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -421,6 +425,7 @@ impl Db {
             [],
         );
         let _ = c.execute("ALTER TABLE chats ADD COLUMN closed_at INTEGER", []);
+        let _ = c.execute("ALTER TABLE projects ADD COLUMN avatar TEXT", []);
         // One box per user: devices and projects belong to a user; legacy sandboxes record where
         // their /work went.
         let _ = c.execute(
@@ -551,9 +556,9 @@ impl Db {
     pub fn insert_project(&self, p: &Project) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO projects(id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color, user_id, workspace_state)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-                params![p.id, p.name, p.icon, p.instructions, p.models.to_string(), p.state, p.created_at, p.last_active_at, p.spend_cap_daily, p.color, p.user_id, p.workspace_state],
+                "INSERT INTO projects(id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color, user_id, workspace_state, avatar)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![p.id, p.name, p.icon, p.instructions, p.models.to_string(), p.state, p.created_at, p.last_active_at, p.spend_cap_daily, p.color, p.user_id, p.workspace_state, p.avatar],
             )
             .map(|_| ())
         })
@@ -573,11 +578,12 @@ impl Db {
             color: r.get(9)?,
             user_id: r.get(10)?,
             workspace_state: r.get(11)?,
+            avatar: r.get(12)?,
         })
     }
 
     const PROJECT_COLS: &'static str =
-        "id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color, user_id, workspace_state";
+        "id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color, user_id, workspace_state, avatar";
 
     pub fn project(&self, id_or_name: &str) -> Result<Option<Project>> {
         self.with(|c| {
@@ -615,6 +621,7 @@ impl Db {
         instructions: Option<&str>,
         models: Option<&serde_json::Value>,
         spend_cap_daily: Option<f64>,
+        avatar: Option<Option<&str>>,
     ) -> Result<()> {
         self.with(|c| {
             c.execute(
@@ -622,8 +629,14 @@ impl Db {
                         instructions = COALESCE(?5, instructions), models = COALESCE(?6, models), spend_cap_daily = COALESCE(?7, spend_cap_daily)
                  WHERE id = ?1",
                 params![id, name, icon, color, instructions, models.map(|m| m.to_string()), spend_cap_daily],
-            )
-            .map(|_| ())
+            )?;
+            if let Some(a) = avatar {
+                c.execute(
+                    "UPDATE projects SET avatar = ?2 WHERE id = ?1",
+                    params![id, a],
+                )?;
+            }
+            Ok(())
         })
     }
 
