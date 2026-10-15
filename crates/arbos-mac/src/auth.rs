@@ -190,7 +190,7 @@ mod platform {
 
     pub async fn run(start_url: String, _redirect: Redirect, cx: &mut AsyncApp) -> Result<SignIn> {
         let (tx, rx) = futures::channel::oneshot::channel::<Result<String>>();
-        cx.update(|_| session::start(&start_url, tx))?;
+        cx.update(|_| session::start(&start_url, tx));
         let url = futures::select! {
             r = rx.fuse() => r.map_err(|_| anyhow!("sign-in window closed"))??,
             _ = cx.background_executor().timer(SIGN_IN_TIMEOUT).fuse() => {
