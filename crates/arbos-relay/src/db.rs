@@ -134,6 +134,11 @@ CREATE TABLE IF NOT EXISTS audit (
   at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS audit_project ON audit(project_id, at);
+CREATE TABLE IF NOT EXISTS local_devices (
+  device_id TEXT PRIMARY KEY, name TEXT NOT NULL, os TEXT NOT NULL DEFAULT '', home TEXT NOT NULL DEFAULT '',
+  connected INTEGER NOT NULL DEFAULT 0, last_seen INTEGER, first_seen INTEGER NOT NULL,
+  allow_reads INTEGER NOT NULL DEFAULT 0
+);
 "#;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -293,6 +298,20 @@ pub struct UsageTotals {
     pub cache_write: i64,
     pub usd: f64,
     pub calls: i64,
+}
+
+/// One `arbos-local` helper that connected at least once (`local_devices`, F9).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalDevice {
+    pub device_id: String,
+    pub name: String,
+    pub os: String,
+    pub home: String,
+    pub connected: bool,
+    pub last_seen: Option<i64>,
+    pub first_seen: i64,
+    /// `read_file` / `list_dir` skip the approval card (still audited) when set.
+    pub allow_reads: bool,
 }
 
 impl Db {
@@ -1385,6 +1404,108 @@ impl Db {
                 }))
             })?;
             rows.collect()
+        })
+    }
+
+    // ---- local helpers (F9) -------------------------------------------------------------------
+
+    const LOCAL_COLS: &'static str =
+        "device_id, name, os, home, connected, last_seen, first_seen, allow_reads";
+
+    fn row_to_local(r: &rusqlite::Row<'_>) -> rusqlite::Result<LocalDevice> {
+        Ok(LocalDevice {
+            device_id: r.get(0)?,
+            name: r.get(1)?,
+            os: r.get(2)?,
+            home: r.get(3)?,
+            connected: r.get::<_, i64>(4)? != 0,
+            last_seen: r.get(5)?,
+            first_seen: r.get(6)?,
+            allow_reads: r.get::<_, i64>(7)? != 0,
+        })
+    }
+
+    /// A helper said hello: create or refresh its row and mark it connected.
+    pub fn local_device_hello(
+        &self,
+        device_id: &str,
+        name: &str,
+        os: &str,
+        home: &str,
+    ) -> Result<()> {
+        let now = now_ms();
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO local_devices(device_id, name, os, home, connected, last_seen, first_seen)
+                 VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5)
+                 ON CONFLICT(device_id) DO UPDATE SET name = excluded.name, os = excluded.os, home = excluded.home,
+                    connected = 1, last_seen = excluded.last_seen",
+                params![device_id, name, os, home, now],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn local_device_seen(&self, device_id: &str, connected: bool) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE local_devices SET connected = ?2, last_seen = ?3 WHERE device_id = ?1",
+                params![device_id, connected as i64, now_ms()],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// Relay restart: nothing is connected until a helper says hello again.
+    pub fn local_devices_reset(&self) -> Result<()> {
+        self.with(|c| {
+            c.execute("UPDATE local_devices SET connected = 0", [])
+                .map(|_| ())
+        })
+    }
+
+    pub fn local_devices(&self) -> Result<Vec<LocalDevice>> {
+        self.with(|c| {
+            let mut st = c.prepare(&format!(
+                "SELECT {} FROM local_devices ORDER BY first_seen",
+                Self::LOCAL_COLS
+            ))?;
+            let rows = st.query_map([], Self::row_to_local)?;
+            rows.collect()
+        })
+    }
+
+    pub fn local_device(&self, device_id: &str) -> Result<Option<LocalDevice>> {
+        self.with(|c| {
+            c.query_row(
+                &format!(
+                    "SELECT {} FROM local_devices WHERE device_id = ?1",
+                    Self::LOCAL_COLS
+                ),
+                params![device_id],
+                Self::row_to_local,
+            )
+            .optional()
+        })
+    }
+
+    pub fn local_device_set_allow_reads(&self, device_id: &str, allow: bool) -> Result<bool> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE local_devices SET allow_reads = ?2 WHERE device_id = ?1",
+                params![device_id, allow as i64],
+            )
+            .map(|n| n > 0)
+        })
+    }
+
+    pub fn local_device_delete(&self, device_id: &str) -> Result<bool> {
+        self.with(|c| {
+            c.execute(
+                "DELETE FROM local_devices WHERE device_id = ?1",
+                params![device_id],
+            )
+            .map(|n| n > 0)
         })
     }
 }
