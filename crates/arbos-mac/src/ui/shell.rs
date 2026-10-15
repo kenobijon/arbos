@@ -1120,6 +1120,56 @@ impl Shell {
                     if let Some(name) = &m.subagent_name {
                         sections.push(("Subagent".into(), vec![("Name".into(), name.clone())]));
                     }
+                    // S18: one audit row per card, requested → decided (feature `approve`).
+                    let approvals: Vec<(String, String)> = m
+                        .parts
+                        .iter()
+                        .chain(m.hidden_parts.iter())
+                        .filter_map(|p| match p {
+                            crate::model::Part::Approval {
+                                approval_id,
+                                title,
+                                risk,
+                                state,
+                                decided_by,
+                                decided_at,
+                                reason,
+                                ..
+                            } => {
+                                let mut detail = format!(
+                                    "approval_requested · {} · {} · {}",
+                                    risk.label(),
+                                    title,
+                                    approval_id
+                                );
+                                if *state != crate::model::ApprovalState::Pending {
+                                    detail.push_str(&format!(
+                                        "\napproval_decided · {}{}{}",
+                                        state.label().to_lowercase(),
+                                        decided_by
+                                            .as_deref()
+                                            .map(|d| format!(" · by {d}"))
+                                            .unwrap_or_default(),
+                                        reason
+                                            .as_deref()
+                                            .filter(|r| !r.trim().is_empty())
+                                            .map(|r| format!(" · {r}"))
+                                            .unwrap_or_default()
+                                    ));
+                                    if let Some(at) = decided_at {
+                                        let mins =
+                                            crate::model::now_ms().saturating_sub(*at) / 60_000;
+                                        detail.push_str(&format!(" · {mins} min ago"));
+                                    }
+                                }
+                                Some((state.label().to_string(), detail))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    if !approvals.is_empty() {
+                        sections.push(("Approvals · audit".into(), approvals));
+                    }
                     if let Some(c) = &m.return_contract {
                         sections.push(("Return contract".into(), json_rows(c)));
                     }

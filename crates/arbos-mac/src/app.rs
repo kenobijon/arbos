@@ -63,6 +63,8 @@ pub enum ComposerMode {
     Send,
     /// S8: the agent asked a question.
     Answer,
+    /// S18: an approval card is pending; the composer waits for Approve/Reject.
+    Approve,
 }
 
 /// Per-chat UI state kept across tab switches.
@@ -536,9 +538,21 @@ impl AppState {
         })
     }
 
+    /// S18: the newest assistant message carries an approval card nobody has decided yet.
+    pub fn chat_needs_approval(&self, chat_id: &str) -> bool {
+        match self.messages_of(chat_id).last() {
+            Some(m) if m.role == Role::Assistant && !m.is_streaming() => {
+                m.pending_approvals().next().is_some()
+            }
+            Some(_) | None => false,
+        }
+    }
+
     pub fn composer_mode(&self, chat_id: &str) -> ComposerMode {
         if self.chat_needs_answer(chat_id) {
             ComposerMode::Answer
+        } else if self.chat_needs_approval(chat_id) {
+            ComposerMode::Approve
         } else {
             ComposerMode::Send
         }
@@ -708,6 +722,7 @@ impl AppState {
                 usage: None,
                 return_contract: None,
                 waiting_user: false,
+                waiting_approval: false,
                 model: None,
                 effort: None,
                 created_at: now_ms(),
@@ -798,6 +813,7 @@ impl AppState {
                 usage: None,
                 return_contract: None,
                 waiting_user: false,
+                waiting_approval: false,
                 model: None,
                 effort: None,
                 routine_name: None,
@@ -862,6 +878,31 @@ impl AppState {
         self.command(ClientCommand::Retry {
             chat_id,
             message_id,
+        });
+        cx.notify();
+    }
+
+    /// S18: approve an approval card; the box dispatches and flips the card's state.
+    pub fn approve(&mut self, chat_id: Id, approval_id: String, cx: &mut Context<Self>) {
+        self.command(ClientCommand::Approve {
+            chat_id,
+            approval_id,
+        });
+        cx.notify();
+    }
+
+    /// S18: reject an approval card; nothing is dispatched.
+    pub fn reject(
+        &mut self,
+        chat_id: Id,
+        approval_id: String,
+        reason: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.command(ClientCommand::Reject {
+            chat_id,
+            approval_id,
+            reason,
         });
         cx.notify();
     }

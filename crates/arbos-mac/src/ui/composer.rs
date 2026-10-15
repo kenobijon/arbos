@@ -975,7 +975,9 @@ impl Composer {
 
     fn submit(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         match self.mode(cx) {
-            ComposerMode::Send | ComposerMode::Answer => {
+            // S18: typing while a card is pending still sends (the agent multitasks); the
+            // yellow frame and placeholder only point at the card.
+            ComposerMode::Send | ComposerMode::Answer | ComposerMode::Approve => {
                 let text = self.input.read(cx).text().trim().to_string();
                 if text.is_empty() && self.attachments.is_empty() {
                     self.nudge_at = Some(crate::model::now_ms());
@@ -1122,6 +1124,7 @@ impl Render for Composer {
         self.input.update(cx, |input, _| {
             input.set_placeholder(match mode {
                 ComposerMode::Answer => "Answer the agent…",
+                ComposerMode::Approve => "Approve or reject the card above",
                 ComposerMode::Send => "Do anything…",
             });
         });
@@ -1135,7 +1138,7 @@ impl Render for Composer {
         }
 
         let border_color = match mode {
-            ComposerMode::Answer => theme.warn,
+            ComposerMode::Answer | ComposerMode::Approve => theme.warn,
             ComposerMode::Send => {
                 if nudge {
                     theme.danger
@@ -1193,7 +1196,10 @@ impl Render for Composer {
             .bg(theme.card())
             .border_1()
             .border_color(border_color)
-            .when(mode == ComposerMode::Answer, |el| el.border_t_2())
+            .when(
+                matches!(mode, ComposerMode::Answer | ComposerMode::Approve),
+                |el| el.border_t_2(),
+            )
             .shadow_sm();
 
         if !self.attachments.is_empty() {

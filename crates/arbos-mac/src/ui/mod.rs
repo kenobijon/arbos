@@ -1,3 +1,4 @@
+pub mod approve;
 pub mod cards;
 pub mod composer;
 pub mod connectors;

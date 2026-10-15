@@ -301,6 +301,29 @@ pub enum Part {
         #[serde(default)]
         slugs: Vec<String>,
     },
+    /// S18 draft-and-approve card (feature `approve`; shape owned by `arbos_core::approval`).
+    Approval {
+        id: Id,
+        approval_id: String,
+        #[serde(default)]
+        title: String,
+        #[serde(default)]
+        summary: String,
+        #[serde(default)]
+        risk: ApprovalRisk,
+        #[serde(default)]
+        payload: serde_json::Value,
+        #[serde(default)]
+        state: ApprovalState,
+        #[serde(default)]
+        expires_at: Option<u64>,
+        #[serde(default)]
+        decided_at: Option<u64>,
+        #[serde(default)]
+        decided_by: Option<String>,
+        #[serde(default)]
+        reason: Option<String>,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -318,6 +341,53 @@ fn de_widget<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Widget>, D
 
 /// One skill of the library (F5); the relay's `Skill` shape, reused as the client view.
 pub type Skill = arbos_core::skill::Skill;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalRisk {
+    Send,
+    Destructive,
+    Money,
+    Credential,
+    Computer,
+    #[default]
+    #[serde(other)]
+    Other,
+}
+
+impl ApprovalRisk {
+    pub fn label(self) -> &'static str {
+        match self {
+            ApprovalRisk::Send => "send",
+            ApprovalRisk::Destructive => "destructive",
+            ApprovalRisk::Money => "money",
+            ApprovalRisk::Credential => "credential",
+            ApprovalRisk::Computer => "computer",
+            ApprovalRisk::Other => "other",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalState {
+    #[default]
+    Pending,
+    Approved,
+    Rejected,
+    Expired,
+}
+
+impl ApprovalState {
+    pub fn label(self) -> &'static str {
+        match self {
+            ApprovalState::Pending => "Pending",
+            ApprovalState::Approved => "Approved",
+            ApprovalState::Rejected => "Rejected",
+            ApprovalState::Expired => "Expired",
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -340,6 +410,8 @@ pub enum StatusKind {
     AskUser,
     #[serde(alias = "handed_off")]
     Handoff,
+    /// S18: an approval card is pending; the composer shows the yellow waiting state.
+    WaitingApproval,
     /// Fixture-only thin note.
     Note,
     #[serde(other)]
@@ -377,6 +449,9 @@ pub struct Message {
     pub return_contract: Option<serde_json::Value>,
     #[serde(default)]
     pub waiting_user: bool,
+    /// At least one approval card of this message is still pending (S18).
+    #[serde(default)]
+    pub waiting_approval: bool,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
@@ -415,6 +490,19 @@ impl Message {
                 p,
                 Part::Question {
                     state: QuestionState::Open,
+                    ..
+                }
+            )
+        })
+    }
+
+    /// Approval cards still waiting for a decision (S18).
+    pub fn pending_approvals(&self) -> impl Iterator<Item = &Part> {
+        self.parts.iter().filter(|p| {
+            matches!(
+                p,
+                Part::Approval {
+                    state: ApprovalState::Pending,
                     ..
                 }
             )

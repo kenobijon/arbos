@@ -1073,6 +1073,7 @@ async fn send_message(
             usage: None,
             return_contract: None,
             waiting_user: false,
+            waiting_approval: false,
             model: None,
             effort: None,
             created_at: now_ms(),
@@ -1207,6 +1208,35 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             let docs = shared.docs.lock().unwrap();
             if let Some(doc) = docs.get(&chat_id) {
                 let _ = doc.push_command("stop", json!({}), &shared.device_id());
+                doc.commit();
+            }
+        }
+        ClientCommand::Approve {
+            chat_id,
+            approval_id,
+        } => {
+            let docs = shared.docs.lock().unwrap();
+            if let Some(doc) = docs.get(&chat_id) {
+                let _ = doc.push_command(
+                    "approve",
+                    json!({ "approvalId": approval_id }),
+                    &shared.device_id(),
+                );
+                doc.commit();
+            }
+        }
+        ClientCommand::Reject {
+            chat_id,
+            approval_id,
+            reason,
+        } => {
+            let docs = shared.docs.lock().unwrap();
+            if let Some(doc) = docs.get(&chat_id) {
+                let mut payload = json!({ "approvalId": approval_id });
+                if let Some(r) = reason.filter(|r| !r.trim().is_empty()) {
+                    payload["reason"] = json!(r);
+                }
+                let _ = doc.push_command("reject", payload, &shared.device_id());
                 doc.commit();
             }
         }
