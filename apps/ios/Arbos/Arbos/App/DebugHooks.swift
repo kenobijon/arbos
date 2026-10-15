@@ -8,6 +8,9 @@ enum DebugHooks {
     static var openChat: Id? { value("ARBOS_OPEN_CHAT") }
     static var autoSend: String? { value("ARBOS_AUTO_SEND") }
     static var pairCode: String? { value("ARBOS_PAIR_CODE") }
+    static var fixture: Bool { value("ARBOS_FIXTURE") == "1" }
+    /// keyboard | settings | voice | threads | model — opened on the chat screen.
+    static var show: String? { value("ARBOS_SHOW") }
 
     private static func value(_ key: String) -> String? {
         #if DEBUG
