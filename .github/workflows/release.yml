@@ -215,6 +215,8 @@ jobs:
         id: build
         env:
           ARBOS_BUILD: ${{ needs.plan.outputs.build }}
+          # Compiled into the app as its default update feed (user override: ARBOS_UPDATE_CHANNEL).
+          ARBOS_DEFAULT_UPDATE_CHANNEL: ${{ needs.plan.outputs.channel }}
           ARBOS_TARGETS: ${{ inputs.targets || vars.ARBOS_MAC_TARGETS }}
           NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
           NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}

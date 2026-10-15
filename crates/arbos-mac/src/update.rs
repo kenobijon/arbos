@@ -33,9 +33,17 @@ pub fn feed_url() -> String {
             return url;
         }
     }
-    match std::env::var("ARBOS_UPDATE_CHANNEL").as_deref() {
-        Ok("stable") => STABLE_FEED_URL.to_string(),
-        Ok(_) | Err(_) => EDGE_FEED_URL.to_string(),
+    // The user's choice first; else the channel this build was made for (release.yml sets
+    // ARBOS_DEFAULT_UPDATE_CHANNEL=stable for `v*` tag builds, edge for pushes to main), else edge.
+    let built_for = option_env!("ARBOS_DEFAULT_UPDATE_CHANNEL").unwrap_or("edge");
+    match std::env::var("ARBOS_UPDATE_CHANNEL")
+        .ok()
+        .filter(|c| !c.is_empty())
+        .as_deref()
+        .unwrap_or(built_for)
+    {
+        "stable" => STABLE_FEED_URL.to_string(),
+        _ => EDGE_FEED_URL.to_string(),
     }
 }
 

@@ -53,6 +53,7 @@ TARBALL="$DIST/$APP_NAME-$VERSION-macos-$ARCH_LABEL.tar.gz"
 
 echo "==> building $BIN $VERSION for: $TARGETS"
 export ARBOS_BUILD="$BUILD"   # compiled in: update::current_version()
+export ARBOS_DEFAULT_UPDATE_CHANNEL="${ARBOS_DEFAULT_UPDATE_CHANNEL:-edge}"   # compiled in: update::feed_url()
 BINS=()
 for t in $TARGETS; do
   rustup target add "$t" >/dev/null

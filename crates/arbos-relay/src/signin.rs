@@ -680,8 +680,10 @@ pub async fn me(State(state): State<AppState>, principal: Principal) -> Response
     .into_response()
 }
 
-/// `GET /download/mac` → 302 to the newest edge DMG (one stable link for the landing page).
-/// The version comes from the rolling `edge` release's `latest.txt`, cached for five minutes.
+/// `GET /download/mac` → 302 to the newest **stable** DMG (the `latest` release's `latest.txt`
+/// names the version; the asset is `Arbos-<v>-macos-universal.dmg` on `v<v>`), falling back to
+/// the newest edge DMG when no stable release exists. `ARBOS_DOWNLOAD_CHANNEL=edge` forces
+/// edge. Cached for five minutes.
 pub async fn download_mac(State(state): State<AppState>) -> Response {
     let repo = state.cfg.releases_repo.trim_matches('/');
     let now = now_ms();
@@ -690,24 +692,47 @@ pub async fn download_mac(State(state): State<AppState>) -> Response {
             return found(&url);
         }
     }
-    let latest_url = format!("https://github.com/{repo}/releases/download/edge/latest.txt");
-    let version = match state.http.get(&latest_url).send().await {
-        Ok(r) if r.status().is_success() => r.text().await.unwrap_or_default().trim().to_owned(),
-        Ok(r) => {
-            tracing::warn!(status = %r.status(), "latest.txt fetch failed");
-            String::new()
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "latest.txt fetch failed");
-            String::new()
+    let fetch_version = |url: String| {
+        let http = state.http.clone();
+        async move {
+            match http.get(&url).send().await {
+                Ok(r) if r.status().is_success() => {
+                    let v = r.text().await.unwrap_or_default().trim().to_owned();
+                    (!v.is_empty() && v.chars().all(|c| c.is_ascii_digit() || c == '.'))
+                        .then_some(v)
+                }
+                _ => None,
+            }
         }
     };
-    if version.is_empty() || !version.chars().all(|c| c.is_ascii_digit() || c == '.') {
-        return found(&format!("https://github.com/{repo}/releases"));
+    let prefer_edge = std::env::var("ARBOS_DOWNLOAD_CHANNEL").is_ok_and(|c| c.trim() == "edge");
+    let mut url = None;
+    if !prefer_edge {
+        if let Some(v) = fetch_version(format!(
+            "https://github.com/{repo}/releases/latest/download/latest.txt"
+        ))
+        .await
+        {
+            url = Some(format!(
+                "https://github.com/{repo}/releases/download/v{v}/Arbos-{v}-macos-universal.dmg"
+            ));
+        }
     }
-    let url = format!(
-        "https://github.com/{repo}/releases/download/edge-{version}/Arbos-{version}-macos-universal.dmg"
-    );
+    if url.is_none() {
+        if let Some(v) = fetch_version(format!(
+            "https://github.com/{repo}/releases/download/edge/latest.txt"
+        ))
+        .await
+        {
+            url = Some(format!(
+                "https://github.com/{repo}/releases/download/edge-{v}/Arbos-{v}-macos-universal.dmg"
+            ));
+        }
+    }
+    let Some(url) = url else {
+        tracing::warn!("no release version could be read; sending the releases page");
+        return found(&format!("https://github.com/{repo}/releases"));
+    };
     *state.download_cache.lock().await = Some((now, url.clone()));
     found(&url)
 }

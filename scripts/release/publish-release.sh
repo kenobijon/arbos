@@ -178,5 +178,31 @@ elif [[ -n "$FEED_TAG" ]]; then
       done
   fi
 fi
+# A promoted stable build also joins the edge feed: installs on the edge channel are offered it
+# (it sorts above every 0.x.y.<build> of the previous base version) until a newer edge exists.
+if [[ "$CHANNEL" == "stable" && "$PROMOTE" != false ]]; then
+  echo "==> stable $VERSION joins the edge feed"
+  EDGE_PREV="$DIST/.edge-appcast.xml"
+  rm -f "$EDGE_PREV"
+  if ! $DRY_RUN; then
+    gh release download edge --repo "$REPO" --pattern appcast.xml --output "$EDGE_PREV" 2>/dev/null || true
+  fi
+  EDGE_PREV_ARG=()
+  if [[ -f "$EDGE_PREV" ]]; then EDGE_PREV_ARG=(--previous "$EDGE_PREV"); fi
+  "$UPDATECTL" appcast --version "$VERSION" --link "$RELEASE_URL" --title "Arbos (edge)" \
+    "${NOTES_ARG[@]}" "${KEY_ARG[@]}" "${ENCLOSURES[@]}" "${EDGE_PREV_ARG[@]}" --out appcast-edge.xml
+  rm -f "$EDGE_PREV"
+  "$UPDATECTL" verify-appcast --appcast appcast-edge.xml --dir .
+  mkdir -p edge-feed && cp appcast-edge.xml edge-feed/appcast.xml
+  if ! $DRY_RUN; then
+    if gh release view edge --repo "$REPO" >/dev/null 2>&1; then
+      gh_run release upload edge --repo "$REPO" --clobber edge-feed/appcast.xml
+    else
+      echo "    (no edge feed release yet; nothing to update)"
+    fi
+  fi
+  rm -rf edge-feed appcast-edge.xml
+fi
+
 rm -f "$BODY"
 echo "published $TAG -> $RELEASE_URL"
