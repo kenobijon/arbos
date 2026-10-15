@@ -1000,6 +1000,7 @@ async fn send_message(
     message_id: Id,
     text: String,
     attachments: Vec<PathBuf>,
+    voice_wav: Option<Arc<Vec<u8>>>,
     command: &'static str,
     answer: Option<(String, serde_json::Value)>,
 ) {
@@ -1046,8 +1047,12 @@ async fn send_message(
                 name,
                 mime: mime.into(),
                 blob_ref,
+                kind: None,
             },
         });
+    }
+    if let Some(wav) = voice_wav {
+        parts.push(upload_voice_memo(&shared, &project_id, wav).await);
     }
     parts.push(Part::Text {
         id: new_id(),
@@ -1118,8 +1123,210 @@ async fn send_message(
     }
 }
 
+// ----- voice (F11) ----------------------------------------------------------
+
+/// `PUT /blob/{project}/voice-<ulid>.wav`, then the `attachment` part that keeps the memo.
+async fn upload_voice_memo(shared: &Shared, project_id: &str, wav: Arc<Vec<u8>>) -> Part {
+    let key = format!("voice-{}.wav", new_id().to_lowercase());
+    let put = shared
+        .http
+        .put(format!("{}/blob/{}/{}", shared.http_url, project_id, key))
+        .bearer_auth(shared.token())
+        .header("content-type", "audio/wav")
+        .body(wav.as_ref().clone())
+        .send()
+        .await;
+    let blob_ref = match put {
+        Ok(r) if r.status().is_success() => Some(key),
+        Ok(r) => {
+            shared.notice(format!("Voice memo upload failed: HTTP {}", r.status()));
+            None
+        }
+        Err(err) => {
+            shared.notice(format!("Voice memo upload failed: {err}"));
+            None
+        }
+    };
+    Part::Attachment {
+        id: new_id(),
+        attachment: Attachment {
+            name: "voice-memo.wav".into(),
+            mime: "audio/wav".into(),
+            blob_ref,
+            kind: Some("audio".into()),
+        },
+    }
+}
+
+const STT_MODEL: &str = "gpt-4o-mini-transcribe";
+const TTS_MODEL: &str = "gpt-4o-mini-tts";
+const TTS_VOICE: &str = "coral";
+/// OpenAI caps `input` at 4096 characters; longer replies are read up to the last sentence end.
+const TTS_MAX_CHARS: usize = 4000;
+
+/// `POST /proxy/v1/audio/transcriptions` (multipart; the relay adds the provider key, D2).
+async fn transcribe(shared: Arc<Shared>, project_id: Id, request_id: u64, wav: Arc<Vec<u8>>) {
+    let file = reqwest::multipart::Part::bytes(wav.as_ref().clone())
+        .file_name("memo.wav")
+        .mime_str("audio/wav")
+        .unwrap_or_else(|_| reqwest::multipart::Part::bytes(wav.as_ref().clone()));
+    let form = reqwest::multipart::Form::new()
+        .text("model", STT_MODEL)
+        .text("response_format", "json")
+        .part("file", file);
+    let resp = shared
+        .http
+        .post(format!("{}/proxy/v1/audio/transcriptions", shared.http_url))
+        .bearer_auth(shared.token())
+        .header("x-arbos-project", &project_id)
+        .multipart(form)
+        .send()
+        .await;
+    let event = match resp {
+        Ok(r) => {
+            let mock = r.headers().contains_key("x-arbos-voice-mock");
+            let status = r.status();
+            let body = r.text().await.unwrap_or_default();
+            if status.is_success() {
+                let text = serde_json::from_str::<Value>(&body)
+                    .ok()
+                    .and_then(|v| v.get("text").and_then(Value::as_str).map(str::to_owned))
+                    .unwrap_or_default();
+                SyncEvent::Transcript {
+                    request_id,
+                    text,
+                    error: None,
+                    mock,
+                }
+            } else {
+                SyncEvent::Transcript {
+                    request_id,
+                    text: String::new(),
+                    error: Some(format!(
+                        "HTTP {status}: {}",
+                        body.chars().take(200).collect::<String>()
+                    )),
+                    mock,
+                }
+            }
+        }
+        Err(err) => SyncEvent::Transcript {
+            request_id,
+            text: String::new(),
+            error: Some(err.to_string()),
+            mock: false,
+        },
+    };
+    let _ = shared.events.send(event);
+}
+
+/// Cut `text` for TTS: at most `TTS_MAX_CHARS`, ending on a sentence when possible.
+pub fn tts_input(text: &str) -> String {
+    if text.chars().count() <= TTS_MAX_CHARS {
+        return text.to_owned();
+    }
+    let cut: String = text.chars().take(TTS_MAX_CHARS).collect();
+    match cut.rfind(['.', '!', '?', '\n']) {
+        Some(ix) if ix > TTS_MAX_CHARS / 2 => cut[..=ix].to_owned(),
+        Some(_) | None => cut,
+    }
+}
+
+/// `POST /proxy/v1/audio/speech` → WAV bytes.
+async fn speak(shared: Arc<Shared>, project_id: Id, request_id: u64, text: String) {
+    let body = json!({
+        "model": TTS_MODEL,
+        "voice": TTS_VOICE,
+        "input": tts_input(&text),
+        "response_format": "wav",
+    });
+    let resp = shared
+        .http
+        .post(format!("{}/proxy/v1/audio/speech", shared.http_url))
+        .bearer_auth(shared.token())
+        .header("x-arbos-project", &project_id)
+        .json(&body)
+        .send()
+        .await;
+    let event = match resp {
+        Ok(r) => {
+            let mock = r.headers().contains_key("x-arbos-voice-mock");
+            let status = r.status();
+            let mime = r
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("audio/wav")
+                .to_owned();
+            let bytes = r.bytes().await.map(|b| b.to_vec()).unwrap_or_default();
+            if status.is_success() {
+                SyncEvent::Speech {
+                    request_id,
+                    bytes: Arc::new(bytes),
+                    mime,
+                    error: None,
+                    mock,
+                }
+            } else {
+                SyncEvent::Speech {
+                    request_id,
+                    bytes: Arc::new(Vec::new()),
+                    mime,
+                    error: Some(format!(
+                        "HTTP {status}: {}",
+                        String::from_utf8_lossy(&bytes)
+                            .chars()
+                            .take(200)
+                            .collect::<String>()
+                    )),
+                    mock,
+                }
+            }
+        }
+        Err(err) => SyncEvent::Speech {
+            request_id,
+            bytes: Arc::new(Vec::new()),
+            mime: String::new(),
+            error: Some(err.to_string()),
+            mock: false,
+        },
+    };
+    let _ = shared.events.send(event);
+}
+
 fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
     match cmd {
+        ClientCommand::SendVoice {
+            chat_id,
+            message_id,
+            text,
+            wav,
+        } => {
+            tokio::spawn(send_message(
+                shared.clone(),
+                chat_id,
+                message_id,
+                text,
+                Vec::new(),
+                Some(wav),
+                "send",
+                None,
+            ));
+        }
+        ClientCommand::Transcribe {
+            project_id,
+            request_id,
+            wav,
+        } => {
+            tokio::spawn(transcribe(shared.clone(), project_id, request_id, wav));
+        }
+        ClientCommand::Speak {
+            project_id,
+            request_id,
+            text,
+        } => {
+            tokio::spawn(speak(shared.clone(), project_id, request_id, text));
+        }
         ClientCommand::Pair { code } => {
             let shared = shared.clone();
             tokio::spawn(async move {
@@ -1183,6 +1390,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 message_id,
                 text,
                 attachments,
+                None,
                 "send",
                 None,
             ));
@@ -1201,6 +1409,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 message_id,
                 text,
                 Vec::new(),
+                None,
                 "answer",
                 answer,
             ));

@@ -2,7 +2,7 @@
 //! block (zeron-study §4.1–§4.4). Rows are diffed by `(id, version)` and
 //! spliced; streaming text fades in through the veil.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
@@ -73,6 +73,18 @@ pub enum RowKind {
     },
     /// Debug-only "Show details" disclosure under a finished reply.
     Details,
+    /// F11: small speaker under a reply; click speaks it (again).
+    Speaker {
+        /// The speech is already cached (instant replay) vs. will be synthesised.
+        cached: bool,
+    },
+}
+
+/// Which replies get a speaker row (F11).
+#[derive(Clone, Copy)]
+pub struct SpeechRows<'a> {
+    pub spoken: &'a HashSet<Id>,
+    pub voice_mode: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -124,6 +136,9 @@ impl Transcript {
                     this.sync(cx);
                 }
             }
+            AppEvent::VoiceTranscript { .. }
+            | AppEvent::VoiceSpeech { .. }
+            | AppEvent::ReplaySpeech { .. } => {}
         })
         .detach();
         Self {
@@ -211,7 +226,11 @@ impl Transcript {
         self.chat_id = chat_id;
 
         let show_details = state.show_details;
-        let new_rows = build_rows(&messages, show_details);
+        let speech = SpeechRows {
+            spoken: &state.spoken,
+            voice_mode: state.voice_mode,
+        };
+        let new_rows = build_rows(&messages, show_details, speech);
 
         // Veils: observe text growth of live markdown rows.
         for row in &new_rows {
@@ -290,6 +309,12 @@ impl Transcript {
                 if !attachments.is_empty() {
                     let mut chips = div().flex().flex_wrap().gap(px(6.0));
                     for a in attachments {
+                        // A voice memo chip (F11) is marked with a note glyph.
+                        let label = if a.is_audio() {
+                            format!("♪ {}", a.name)
+                        } else {
+                            a.name
+                        };
                         chips = chips.child(
                             div()
                                 .px(px(8.0))
@@ -298,7 +323,7 @@ impl Transcript {
                                 .bg(theme.surface_2)
                                 .text_size(px(11.0))
                                 .text_color(theme.text_muted)
-                                .child(a.name),
+                                .child(label),
                         );
                     }
                     bubble = bubble.child(chips);
@@ -483,6 +508,27 @@ impl Transcript {
                     })
                     .into_any_element()
             }
+            RowKind::Speaker { cached } => {
+                let state = self.state.clone();
+                let message_id = row.message_id.clone();
+                div()
+                    .id(SharedString::from(row.id.clone()))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .w(px(96.0))
+                    .pb(px(6.0))
+                    .text_size(px(11.0))
+                    .text_color(theme.text_faint)
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(theme.text_muted))
+                    .child(div().text_size(px(12.0)).child("▶"))
+                    .child(if cached { "Replay" } else { "Speak" })
+                    .on_click(move |_, _, cx| {
+                        state.update(cx, |s, cx| s.replay_speech(message_id.clone(), cx));
+                    })
+                    .into_any_element()
+            }
         };
         div()
             .w_full()
@@ -572,11 +618,14 @@ fn is_json_block(block: &Block) -> bool {
 /// questions, errors. Everything the agent did (tool calls, status events,
 /// JSON, usage) is hidden; the Details drawer has it. One indicator per chat
 /// pulses under the last message while anything runs.
-pub fn build_rows(messages: &[Message], show_details: bool) -> Vec<Row> {
+pub fn build_rows(messages: &[Message], show_details: bool, speech: SpeechRows<'_>) -> Vec<Row> {
     let mut rows = Vec::new();
     let mut running = false;
     let mut queued = false;
-    for message in messages {
+    let last_reply = messages
+        .iter()
+        .rposition(|m| m.role == Role::Assistant && !m.is_streaming());
+    for (mix, message) in messages.iter().enumerate() {
         let streaming = message.is_streaming();
         match message.role {
             Role::User => {
@@ -774,6 +823,21 @@ pub fn build_rows(messages: &[Message], show_details: bool) -> Vec<Row> {
                         id: format!("{}#glyph", message.id),
                         message_id: message.id.clone(),
                         kind: RowKind::Glyph { glyph },
+                    });
+                }
+                // Speaker (F11): every reply whose speech is cached, plus the
+                // newest finished reply while voice mode is on.
+                let cached = speech.spoken.contains(&message.id);
+                if !streaming
+                    && message.role == Role::Assistant
+                    && had_prose
+                    && (cached || (speech.voice_mode && last_reply == Some(mix)))
+                {
+                    rows.push(Row {
+                        version: hash_version(&cached, false),
+                        id: format!("{}#speaker", message.id),
+                        message_id: message.id.clone(),
+                        kind: RowKind::Speaker { cached },
                     });
                 }
                 if show_details && !streaming && message.role == Role::Assistant && had_prose {

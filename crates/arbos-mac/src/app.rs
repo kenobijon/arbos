@@ -3,7 +3,7 @@
 //! (zeron-study §4.4 step 4). It owns the sync channel; nothing here touches
 //! GPUI elements.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -54,6 +54,23 @@ pub enum AppEvent {
     TranscriptText { chat_id: Id },
     /// Anything else in a chat changed.
     TranscriptChanged { chat_id: Id },
+    /// F11: speech-to-text finished for a `transcribe` request.
+    VoiceTranscript {
+        request_id: u64,
+        text: String,
+        error: Option<String>,
+        mock: bool,
+    },
+    /// F11: text-to-speech finished for a `speak` request.
+    VoiceSpeech {
+        request_id: u64,
+        bytes: Arc<Vec<u8>>,
+        mime: String,
+        error: Option<String>,
+        mock: bool,
+    },
+    /// F11: the speaker icon on a reply was clicked.
+    ReplaySpeech { message_id: Id },
 }
 
 /// What the composer should look like for the active chat (§3.10).
@@ -118,6 +135,10 @@ pub struct AppState {
     pub update: UpdateState,
     /// Settings → This Mac (F9).
     pub local: LocalView,
+    /// F11: replies are spoken and a mic transcript sends at once.
+    pub voice_mode: bool,
+    /// F11: assistant messages whose speech is cached (speaker icon replays).
+    pub spoken: HashSet<Id>,
     awaiting_new_project: bool,
     commands: mpsc::UnboundedSender<ClientCommand>,
     update_commands: mpsc::UnboundedSender<UpdateCommand>,
@@ -215,6 +236,8 @@ impl AppState {
             channels: ChannelsView::default(),
             update: update_state,
             local: LocalView::default(),
+            voice_mode: false,
+            spoken: HashSet::new(),
             awaiting_new_project: false,
             commands: command_tx,
             update_commands: update_command_tx,
@@ -433,8 +456,7 @@ impl AppState {
                 }
                 // A project this device just created becomes the selection.
                 if self.awaiting_new_project {
-                    let known: std::collections::HashSet<Id> =
-                        self.projects.iter().map(|p| p.id.clone()).collect();
+                    let known: HashSet<Id> = self.projects.iter().map(|p| p.id.clone()).collect();
                     if let Some(fresh) = projects.iter().find(|p| !known.contains(&p.id)) {
                         self.awaiting_new_project = false;
                         let id = fresh.id.clone();
@@ -583,6 +605,34 @@ impl AppState {
             SyncEvent::LocalDevices(view) => {
                 self.local = view;
                 cx.notify();
+            }
+            SyncEvent::Transcript {
+                request_id,
+                text,
+                error,
+                mock,
+            } => {
+                cx.emit(AppEvent::VoiceTranscript {
+                    request_id,
+                    text,
+                    error,
+                    mock,
+                });
+            }
+            SyncEvent::Speech {
+                request_id,
+                bytes,
+                mime,
+                error,
+                mock,
+            } => {
+                cx.emit(AppEvent::VoiceSpeech {
+                    request_id,
+                    bytes,
+                    mime,
+                    error,
+                    mock,
+                });
             }
         }
     }
@@ -798,6 +848,21 @@ impl AppState {
     }
 
     pub fn send(&mut self, text: String, attachments: Vec<PathBuf>, cx: &mut Context<Self>) {
+        self.send_with(text, attachments, None, cx);
+    }
+
+    /// F11: a spoken message; `wav` is kept on the row as an `audio` attachment.
+    pub fn send_voice(&mut self, text: String, wav: Arc<Vec<u8>>, cx: &mut Context<Self>) {
+        self.send_with(text, Vec::new(), Some(wav), cx);
+    }
+
+    fn send_with(
+        &mut self,
+        text: String,
+        attachments: Vec<PathBuf>,
+        voice_wav: Option<Arc<Vec<u8>>>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(chat_id) = self.active_chat_id() else {
             return;
         };
@@ -834,9 +899,21 @@ impl AppState {
                         .to_string(),
                     mime: "application/octet-stream".into(),
                     blob_ref: None,
+                    kind: None,
                 },
             })
             .collect();
+        if voice_wav.is_some() {
+            parts.push(Part::Attachment {
+                id: new_id(),
+                attachment: crate::model::Attachment {
+                    name: "voice-memo.wav".into(),
+                    mime: "audio/wav".into(),
+                    blob_ref: None,
+                    kind: Some("audio".into()),
+                },
+            });
+        }
         parts.push(Part::Text {
             id: new_id(),
             text: text.clone(),
@@ -883,6 +960,13 @@ impl AppState {
                 question_id,
                 value,
             });
+        } else if let Some(wav) = voice_wav {
+            self.command(ClientCommand::SendVoice {
+                chat_id: chat_id.clone(),
+                message_id,
+                text,
+                wav,
+            });
         } else {
             self.command(ClientCommand::Send {
                 chat_id: chat_id.clone(),
@@ -893,6 +977,60 @@ impl AppState {
         }
         cx.emit(AppEvent::TranscriptChanged { chat_id });
         cx.notify();
+    }
+
+    // ----- voice (F11) -----------------------------------------------------
+
+    pub fn set_voice_mode(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.voice_mode != on {
+            self.voice_mode = on;
+            if let Some(chat_id) = self.active_chat_id() {
+                cx.emit(AppEvent::TranscriptChanged { chat_id });
+            }
+            cx.notify();
+        }
+    }
+
+    /// Speech-to-text of a 16 kHz mono WAV through the relay proxy; the answer
+    /// arrives as [`AppEvent::VoiceTranscript`] with the same `request_id`.
+    pub fn transcribe(&mut self, request_id: u64, wav: Arc<Vec<u8>>) {
+        let project_id = self.selected_project.clone().unwrap_or_default();
+        self.command(ClientCommand::Transcribe {
+            project_id,
+            request_id,
+            wav,
+        });
+    }
+
+    /// Text-to-speech through the relay proxy; answered by [`AppEvent::VoiceSpeech`].
+    pub fn speak(&mut self, request_id: u64, text: String) {
+        let project_id = self.selected_project.clone().unwrap_or_default();
+        self.command(ClientCommand::Speak {
+            project_id,
+            request_id,
+            text,
+        });
+    }
+
+    /// The reply's speech is cached: show the speaker icon under it.
+    pub fn mark_spoken(&mut self, message_id: Id, cx: &mut Context<Self>) {
+        if self.spoken.insert(message_id.clone()) {
+            if let Some(chat_id) = self.chat_of_message(&message_id) {
+                cx.emit(AppEvent::TranscriptChanged { chat_id });
+            }
+            cx.notify();
+        }
+    }
+
+    pub fn replay_speech(&mut self, message_id: Id, cx: &mut Context<Self>) {
+        cx.emit(AppEvent::ReplaySpeech { message_id });
+    }
+
+    fn chat_of_message(&self, message_id: &str) -> Option<Id> {
+        self.messages
+            .iter()
+            .find(|(_, list)| list.iter().any(|m| m.id == message_id))
+            .map(|(chat_id, _)| chat_id.clone())
     }
 
     /// Answer a typed widget card: the rendered text becomes the user's bubble at once

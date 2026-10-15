@@ -184,6 +184,16 @@ pub struct Attachment {
     pub mime: String,
     #[serde(rename = "ref", default)]
     pub blob_ref: Option<String>,
+    /// `image | video | slides | doc | sheet | pdf | audio | file`; `None` for older rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+}
+
+impl Attachment {
+    /// A voice memo (`kind: "audio"`, F11).
+    pub fn is_audio(&self) -> bool {
+        self.kind.as_deref() == Some("audio") || self.mime.starts_with("audio/")
+    }
 }
 
 /// One row of `messages[].parts` (`crdt-sync.md` §6.2). Unknown kinds decode
