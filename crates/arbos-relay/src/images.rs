@@ -205,7 +205,7 @@ pub fn mock_png(prompt: &str, size: &str) -> Vec<u8> {
         x0,
         h.saturating_sub(2 * margin + 7 * scale),
         scale,
-        &format!("{w}X{h} ARBOS_IMAGE_MOCK=1"),
+        &format!("{w}X{h} - ARBOS MOCK"),
     );
     let mut out = Cursor::new(Vec::new());
     let _ = img.write_to(&mut out, image::ImageFormat::Png);
