@@ -804,6 +804,7 @@ mod tests {
             machine_usd_per_hour: 0.332,
             machine_stopped_usd_per_day: 0.013,
             releases_repo: "unarbos/arbos".into(),
+            site_url: "https://arbos.life".into(),
         };
         AppState {
             db,

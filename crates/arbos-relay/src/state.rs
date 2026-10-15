@@ -68,6 +68,9 @@ pub struct Config {
     pub machine_stopped_usd_per_day: f64,
     /// `owner/repo` whose `edge` release feeds `GET /download/mac` (`ARBOS_RELEASES_REPO`).
     pub releases_repo: String,
+    /// Public site that fronts invite links (`ARBOS_SITE_URL`, default `https://arbos.life`):
+    /// `<site>/i/<code>` is served by the relay's `GET /i/{code}`.
+    pub site_url: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -325,6 +328,7 @@ pub(crate) mod test_support {
             machine_usd_per_hour: 0.332,
             machine_stopped_usd_per_day: 0.013,
             releases_repo: "unarbos/arbos".into(),
+            site_url: "https://arbos.life".into(),
         };
         AppState {
             db,

@@ -224,6 +224,7 @@ async fn main() -> anyhow::Result<()> {
         },
         machine_usd_per_hour: env_f64("ARBOS_MACHINE_USD_PER_HOUR", 0.332),
         machine_stopped_usd_per_day: env_f64("ARBOS_MACHINE_STOPPED_USD_PER_DAY", 0.013),
+        site_url: env_nonempty("ARBOS_SITE_URL").unwrap_or_else(|| "https://arbos.life".to_owned()),
         releases_repo: env_nonempty("ARBOS_RELEASES_REPO")
             .unwrap_or_else(|| "unarbos/arbos".to_owned()),
     };
@@ -347,6 +348,12 @@ async fn main() -> anyhow::Result<()> {
             get(people::blocks_list).post(people::block_create),
         )
         .route("/blocks/{user_id}", delete(people::block_delete))
+        .route(
+            "/invites",
+            get(people::invites_list).post(people::invite_create),
+        )
+        .route("/invites/{code}", delete(people::invite_revoke))
+        .route("/i/{code}", get(people::invite_landing))
         .route("/download/mac", get(signin::download_mac))
         .route("/devices", get(api::list_devices))
         .route("/devices/{id}", delete(api::revoke_device))

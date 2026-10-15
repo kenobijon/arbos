@@ -18,7 +18,7 @@ use arbos_core::ids::{now_ms, ulid};
 use arbos_core::wire;
 
 use crate::auth::Principal;
-use crate::db_people::{ChatWithMembers, Membership, PeopleChat};
+use crate::db_people::{ChatWithMembers, Invite, Membership, PeopleChat};
 use crate::signin::api_error;
 use crate::state::AppState;
 
@@ -1160,6 +1160,264 @@ pub async fn project_member_remove(
         None,
     );
     StatusCode::NO_CONTENT.into_response()
+}
+
+// ---- invite links (people who are not on Arbos yet) -----------------------------------------
+
+const INVITE_TTL_MS: i64 = 30 * 24 * 3_600_000;
+
+fn invite_code() -> String {
+    const ALPHABET: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
+    let mut raw = [0u8; 10];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut raw);
+    raw.iter()
+        .map(|b| ALPHABET[(*b as usize) % ALPHABET.len()] as char)
+        .collect()
+}
+
+fn invite_json(state: &AppState, inv: &Invite) -> Value {
+    let mut v = serde_json::to_value(inv).unwrap_or_default();
+    v["url"] = json!(format!(
+        "{}/i/{}",
+        state.cfg.site_url.trim_end_matches('/'),
+        inv.code
+    ));
+    v["inviter_handle"] = json!(handle_of(state, &inv.inviter_user_id));
+    v["handle"] = json!(inv.github_login);
+    if inv.target_kind == "project" {
+        if let Ok(Some(p)) = state.db.project(&inv.target_id) {
+            v["project"] = json!({ "id": p.id, "name": p.name, "icon": p.icon, "color": p.color });
+        }
+    }
+    v
+}
+
+#[derive(Deserialize)]
+pub struct InviteBody {
+    pub handle: String,
+    /// The DM to land in (default: the DM with that person, opened now if needed).
+    #[serde(default)]
+    pub chat_id: Option<String>,
+    /// A project to share instead (the person becomes a member on sign-in; the DM is not made).
+    #[serde(default)]
+    pub project_id: Option<String>,
+}
+
+/// `POST /invites {"handle", "chat_id"? | "project_id"?}` — a link for someone who has not
+/// signed in yet. The person becomes an `invited` placeholder bound to their GitHub id; the DM
+/// (or project membership) exists for them already, so the link only has to get them to sign in
+/// as that login. 30 days; the same open invite is returned when asked again.
+pub async fn invite_create(
+    State(state): State<AppState>,
+    principal: Principal,
+    Json(b): Json<InviteBody>,
+) -> Response {
+    let me = match user_of(&principal) {
+        Ok(u) => u,
+        Err(r) => return *r,
+    };
+    let Some(handle) = normalize_handle(&b.handle) else {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "bad_handle",
+            "that is not a GitHub login",
+        );
+    };
+    let Some(other) = find_person(&state, &handle).await else {
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no GitHub account with that login",
+        );
+    };
+    let other_id = other["id"].as_str().unwrap_or_default().to_owned();
+    let login = other["handle"].as_str().unwrap_or(&handle).to_owned();
+    if other_id == me {
+        return api_error(StatusCode::BAD_REQUEST, "bad_handle", "that is you");
+    }
+    let (kind, target) = if let Some(pid) = b.project_id.as_deref() {
+        let project = match project_for(&state, pid) {
+            Ok(p) => p,
+            Err(r) => return *r,
+        };
+        if !state.owns(&principal, &project.id) {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "owner_only",
+                "only the project's owner invites people",
+            );
+        }
+        let _ = state.db.add_project_member(&project.id, &other_id, &me);
+        ("project", project.id)
+    } else if let Some(cid) = b.chat_id.as_deref() {
+        let (_, cm) = match member_chat(&state, &principal, cid) {
+            Ok(v) => v,
+            Err(r) => return *r,
+        };
+        if !cm
+            .members
+            .iter()
+            .any(|m| m.user_id() == Some(other_id.as_str()))
+        {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "not_member",
+                "that person is not in this chat",
+            );
+        }
+        ("dm", cm.chat.id)
+    } else {
+        let chat = match state.db.dm_between(&me, &other_id) {
+            Ok(Some(c)) => c,
+            _ => {
+                if state.db.blocked_either_way(&me, &other_id).unwrap_or(false) {
+                    return api_error(
+                        StatusCode::FORBIDDEN,
+                        "not_available",
+                        "this person is not available",
+                    );
+                }
+                let chat = PeopleChat {
+                    id: ulid(),
+                    kind: "dm".into(),
+                    created_by: me.clone(),
+                    created_at: now_ms(),
+                };
+                if let Err(e) = state.db.insert_people_chat(&chat) {
+                    return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+                }
+                for uid in [&me, &other_id] {
+                    let _ = state.db.add_member(
+                        &chat.id,
+                        &format!("user:{uid}"),
+                        "owner",
+                        &me,
+                        &json!({}),
+                    );
+                }
+                chat
+            }
+        };
+        ("dm", chat.id)
+    };
+    if let Ok(Some(existing)) = state.db.open_invite_for(&login, kind, &target) {
+        return Json(invite_json(&state, &existing)).into_response();
+    }
+    let inv = Invite {
+        code: invite_code(),
+        github_login: login,
+        inviter_user_id: me,
+        target_kind: kind.into(),
+        target_id: target,
+        created_at: now_ms(),
+        expires_at: now_ms() + INVITE_TTL_MS,
+        accepted_at: None,
+        accepted_user_id: None,
+        revoked_at: None,
+    };
+    if let Err(e) = state.db.insert_invite(&inv) {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+    }
+    (StatusCode::CREATED, Json(invite_json(&state, &inv))).into_response()
+}
+
+/// `GET /invites` — the caller's invites, newest first.
+pub async fn invites_list(State(state): State<AppState>, principal: Principal) -> Response {
+    let me = match user_of(&principal) {
+        Ok(u) => u,
+        Err(r) => return *r,
+    };
+    let out: Vec<Value> = state
+        .db
+        .invites_by(&me)
+        .unwrap_or_default()
+        .iter()
+        .map(|i| invite_json(&state, i))
+        .collect();
+    Json(out).into_response()
+}
+
+/// `DELETE /invites/{code}` — the inviter withdraws an open invite.
+pub async fn invite_revoke(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(code): Path<String>,
+) -> Response {
+    let me = match user_of(&principal) {
+        Ok(u) => u,
+        Err(r) => return *r,
+    };
+    match state.db.revoke_invite(&code, &me) {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => api_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no open invite with that code",
+        ),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    }
+}
+
+/// `GET /i/{code}` — the landing behind `arbos.life/i/<code>`: JSON for apps, a small HTML page
+/// for browsers (who invited, as which login to sign in, the download link). No auth.
+pub async fn invite_landing(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let inv = match state.db.invite(&code) {
+        Ok(Some(i)) => i,
+        Ok(None) => return api_error(StatusCode::NOT_FOUND, "not_found", "no such invite"),
+        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    };
+    let open = inv.accepted_at.is_none() && inv.revoked_at.is_none() && inv.expires_at > now_ms();
+    let mut v = invite_json(&state, &inv);
+    v["open"] = json!(open);
+    v["download_url"] = json!(format!(
+        "{}/download/mac",
+        state.cfg.public_url.trim_end_matches('/')
+    ));
+    v["sign_in_hint"] = json!(format!("Sign in with GitHub as @{}", inv.github_login));
+    let wants_html = headers
+        .get(header::ACCEPT)
+        .and_then(|a| a.to_str().ok())
+        .is_some_and(|a| a.contains("text/html"));
+    if !wants_html {
+        return Json(v).into_response();
+    }
+    let inviter = v["inviter_handle"].as_str().unwrap_or("someone").to_owned();
+    let what = match inv.target_kind.as_str() {
+        "project" => format!(
+            "work with them in the project “{}”",
+            v["project"]["name"].as_str().unwrap_or("a project")
+        ),
+        _ => "chat with them".to_owned(),
+    };
+    let body = if open {
+        format!(
+            "<p><strong>@{inviter}</strong> invited you to Arbos to {what}.</p>\
+             <p>Download Arbos, then sign in with GitHub as <strong>@{}</strong> — the chat is already waiting for you.</p>\
+             <p><a class=\"btn\" href=\"{}\">Download for Mac</a></p>",
+            html_escape(&inv.github_login),
+            v["download_url"].as_str().unwrap_or("/download/mac")
+        )
+    } else {
+        "<p>This invite is no longer open.</p>".to_owned()
+    };
+    let page = format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Arbos invite</title>\
+         <style>body{{font:16px/1.5 -apple-system,system-ui,sans-serif;background:#0b0b0d;color:#e8e8ea;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}}\
+         main{{max-width:28rem;padding:2rem}}h1{{font-size:1.4rem;margin:0 0 1rem}}.btn{{display:inline-block;background:#e8e8ea;color:#0b0b0d;padding:.6rem 1rem;border-radius:.6rem;text-decoration:none;font-weight:600}}</style></head>\
+         <body><main><h1>Arbos</h1>{body}</main></body></html>"
+    );
+    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], page).into_response()
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 // ---- room hooks ---------------------------------------------------------------------------------

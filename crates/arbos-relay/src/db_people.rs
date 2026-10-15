@@ -43,6 +43,12 @@ CREATE TABLE IF NOT EXISTS project_members (
   PRIMARY KEY (project_id, user_id)
 );
 CREATE INDEX IF NOT EXISTS project_members_user ON project_members(user_id);
+CREATE TABLE IF NOT EXISTS invites (
+  code TEXT PRIMARY KEY, github_login TEXT NOT NULL, inviter_user_id TEXT NOT NULL,
+  target_kind TEXT NOT NULL, target_id TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+  accepted_at INTEGER, accepted_user_id TEXT, revoked_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS invites_login ON invites(github_login);
 CREATE TABLE IF NOT EXISTS rate_events (
   user_id TEXT NOT NULL, kind TEXT NOT NULL, at INTEGER NOT NULL
 );
@@ -54,6 +60,21 @@ pub fn migrate_people(c: &Connection) {
         "ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'member'",
         [],
     );
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Invite {
+    pub code: String,
+    pub github_login: String,
+    pub inviter_user_id: String,
+    /// `dm` (target = chat id) or `project` (target = project id).
+    pub target_kind: String,
+    pub target_id: String,
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub accepted_at: Option<i64>,
+    pub accepted_user_id: Option<String>,
+    pub revoked_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -476,6 +497,111 @@ impl Db {
                 params![now - 7 * 24 * 3_600_000],
             )?;
             Ok(items)
+        })
+    }
+
+    // ---- invite links -------------------------------------------------------------------------
+
+    pub fn insert_invite(&self, inv: &Invite) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO invites(code, github_login, inviter_user_id, target_kind, target_id, created_at, expires_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![inv.code, inv.github_login, inv.inviter_user_id, inv.target_kind, inv.target_id, inv.created_at, inv.expires_at],
+            )
+            .map(|_| ())
+        })
+    }
+
+    fn invite_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Invite> {
+        Ok(Invite {
+            code: r.get(0)?,
+            github_login: r.get(1)?,
+            inviter_user_id: r.get(2)?,
+            target_kind: r.get(3)?,
+            target_id: r.get(4)?,
+            created_at: r.get(5)?,
+            expires_at: r.get(6)?,
+            accepted_at: r.get(7)?,
+            accepted_user_id: r.get(8)?,
+            revoked_at: r.get(9)?,
+        })
+    }
+
+    const INVITE_COLS: &'static str = "code, github_login, inviter_user_id, target_kind, target_id, created_at, expires_at, accepted_at, accepted_user_id, revoked_at";
+
+    pub fn invite(&self, code: &str) -> Result<Option<Invite>> {
+        self.with(|c| {
+            c.query_row(
+                &format!("SELECT {} FROM invites WHERE code = ?1", Self::INVITE_COLS),
+                params![code],
+                Self::invite_from_row,
+            )
+            .optional()
+        })
+    }
+
+    pub fn invites_by(&self, inviter: &str) -> Result<Vec<Invite>> {
+        self.with(|c| {
+            let mut st = c.prepare(&format!(
+                "SELECT {} FROM invites WHERE inviter_user_id = ?1 ORDER BY created_at DESC",
+                Self::INVITE_COLS
+            ))?;
+            let rows = st.query_map(params![inviter], Self::invite_from_row)?;
+            rows.collect()
+        })
+    }
+
+    /// An open invite for this target and login, to hand back the same link twice.
+    pub fn open_invite_for(
+        &self,
+        login: &str,
+        target_kind: &str,
+        target_id: &str,
+    ) -> Result<Option<Invite>> {
+        self.with(|c| {
+            c.query_row(
+                &format!(
+                    "SELECT {} FROM invites WHERE lower(github_login) = lower(?1) AND target_kind = ?2 AND target_id = ?3
+                     AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > ?4 ORDER BY created_at DESC LIMIT 1",
+                    Self::INVITE_COLS
+                ),
+                params![login, target_kind, target_id, now_ms()],
+                Self::invite_from_row,
+            )
+            .optional()
+        })
+    }
+
+    /// Mark every open invite for this GitHub login accepted by `user_id`. Returns the inviters
+    /// (deduplicated) so they can be told.
+    pub fn accept_invites_for_login(&self, login: &str, user_id: &str) -> Result<Vec<Invite>> {
+        let now = now_ms();
+        self.with(|c| {
+            let mut st = c.prepare(&format!(
+                "SELECT {} FROM invites WHERE lower(github_login) = lower(?1) AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > ?2",
+                Self::INVITE_COLS
+            ))?;
+            let open: Vec<Invite> = st
+                .query_map(params![login, now], Self::invite_from_row)?
+                .collect::<rusqlite::Result<_>>()?;
+            for inv in &open {
+                c.execute(
+                    "UPDATE invites SET accepted_at = ?2, accepted_user_id = ?3 WHERE code = ?1",
+                    params![inv.code, now, user_id],
+                )?;
+            }
+            Ok(open)
+        })
+    }
+
+    pub fn revoke_invite(&self, code: &str, inviter: &str) -> Result<bool> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE invites SET revoked_at = ?3 WHERE code = ?1 AND inviter_user_id = ?2 AND revoked_at IS NULL AND accepted_at IS NULL",
+                params![code, inviter, now_ms()],
+            )
+            .map(|n| n > 0)
         })
     }
 

@@ -457,6 +457,18 @@ pub async fn github_callback(
         // Always-on: the machine starts at sign-in (created now when the user has none).
         crate::boxes::ensure_awake(&state, &user.id, "signin").await;
     }
+    // Invite links: every open invite addressed to this GitHub login is now accepted; the
+    // inviters hear about it. The DM / project membership already exists for the placeholder.
+    if let Ok(accepted) = state.db.accept_invites_for_login(&gh.login, &user.id) {
+        for inv in accepted {
+            let _ = state.db.push_user(
+                &inv.inviter_user_id,
+                "people_invite_accepted",
+                &json!({ "code": inv.code, "handle": gh.login, "user_id": user.id, "target_kind": inv.target_kind, "target_id": inv.target_id }),
+                None,
+            );
+        }
+    }
     let device_id = ulid();
     let mut salt = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut salt);
