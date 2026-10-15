@@ -1253,7 +1253,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             model,
             effort,
         } => {
-            // Project doc `settings` (crdt-sync §6.3): the box reads it.
+            // Mirror into the project doc `settings` too (crdt-sync §6.3): the
+            // box reads the doc first, so both must agree.
             {
                 let docs = shared.docs.lock().unwrap();
                 if let Some(doc) = docs.get(&project_doc_key(&project_id)) {

@@ -559,6 +559,43 @@ pub fn build_rows(messages: &[Message]) -> Vec<Row> {
                         | Part::Unknown => {}
                     }
                 }
+                let shown_any = rows.iter().any(|r| r.message_id == message.id);
+                if !streaming && message.role == Role::Assistant && !shown_any {
+                    rows.push(Row {
+                        version: 1,
+                        id: format!("{}#empty", message.id),
+                        message_id: message.id.clone(),
+                        kind: RowKind::Note {
+                            text: match message.status {
+                                MessageStatus::Error => {
+                                    "The turn failed before it said anything.".into()
+                                }
+                                MessageStatus::Cancelled => {
+                                    "Stopped before it said anything.".into()
+                                }
+                                MessageStatus::Done
+                                | MessageStatus::Queued
+                                | MessageStatus::Streaming => "No reply text for this turn.".into(),
+                            },
+                        },
+                    });
+                }
+                if message.status == MessageStatus::Error
+                    && !message
+                        .parts
+                        .iter()
+                        .any(|p| matches!(p, Part::Error { .. }))
+                {
+                    rows.push(Row {
+                        version: 1,
+                        id: format!("{}#failed", message.id),
+                        message_id: message.id.clone(),
+                        kind: RowKind::Error {
+                            code: "turn_failed".into(),
+                            message: "The agent could not finish this turn.".into(),
+                        },
+                    });
+                }
                 if streaming {
                     let label = message
                         .working_label()

@@ -326,6 +326,20 @@ impl Message {
     /// The latest short step label the box emitted for this turn
     /// (`tool_start`, `subagent_working`, `deciding`, …), for the working indicator.
     pub fn working_label(&self) -> Option<String> {
+        // Text arriving after the last status event means the agent is writing.
+        let last_status = self
+            .parts
+            .iter()
+            .rposition(|p| matches!(p, Part::Status { .. }));
+        let last_text = self
+            .parts
+            .iter()
+            .rposition(|p| matches!(p, Part::Text { text, .. } if !text.trim().is_empty()));
+        if let (Some(t), s) = (last_text, last_status) {
+            if s.is_none_or(|s| t > s) {
+                return Some("Writing…".into());
+            }
+        }
         self.parts
             .iter()
             .chain(self.hidden_parts.iter())
