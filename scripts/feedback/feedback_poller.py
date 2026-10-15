@@ -419,8 +419,9 @@ class Cursor:
         return http_json("POST", f"{CURSOR_API}/agents", headers=self.h, json_body=body, timeout=120)
 
     def followup(self, agent_id: str, prompt: str) -> dict:
-        return http_json("POST", f"{CURSOR_API}/agents/{agent_id}/runs", headers=self.h,
-                         json_body={"prompt": {"text": prompt}}, timeout=120)
+        doc = http_json("POST", f"{CURSOR_API}/agents/{agent_id}/runs", headers=self.h,
+                        json_body={"prompt": {"text": prompt}}, timeout=120)
+        return doc.get("run", doc)
 
     def run(self, agent_id: str, run_id: str) -> dict:
         return http_json("GET", f"{CURSOR_API}/agents/{agent_id}/runs/{run_id}", headers=self.h)
