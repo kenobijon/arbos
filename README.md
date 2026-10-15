@@ -94,7 +94,7 @@ Relay environment (all optional unless noted):
 | `ARBOS_OPENAI_BASE`, `ARBOS_ANTHROPIC_BASE` | upstreams, default OpenRouter |
 | `ARBOS_OPENAI_IMAGES_BASE`, `ARBOS_IMAGE_MOCK` | image generation upstream (default `https://api.openai.com/v1`, needs `OPENAI_API_KEY`); `ARBOS_IMAGE_MOCK=1` returns a labelled placeholder PNG instead |
 | `DAYTONA_API_KEY`, `DAYTONA_API_URL`, `DAYTONA_ORG_ID` | Daytona access; without a key new projects get `process` boxes |
-| `ARBOS_DAYTONA_SNAPSHOT` | snapshot for new boxes, default `arbos-agent-0.1.10` |
+| `ARBOS_DAYTONA_SNAPSHOT` | snapshot for new boxes, default `arbos-agent-0.1.11` |
 | `ARBOS_DAYTONA_DOCKERFILE`, `ARBOS_BOOTSTRAP_DIR` | dev-image path (see below) |
 | `ARBOS_AUTH_MODE` | `github` (self-serve: Sign in with GitHub, JWT bearers, credits) or `paircode` (self-hosters); default `github` when `ARBOS_GITHUB_CLIENT_ID` is set |
 | `ARBOS_GITHUB_CLIENT_ID`, `ARBOS_GITHUB_CLIENT_SECRET`, `ARBOS_PUBLIC_URL`, `ARBOS_JWT_KEY` | GitHub OAuth app, the public origin of this relay (callback `…/auth/github/callback`), optional JWT signing key (derived from the relay key when unset) |
@@ -122,7 +122,7 @@ The named tunnel is the Cloudflare Zero Trust tunnel `arbos-relay` (remotely man
 
 Each user has one Daytona computer; every project of that user is a workspace on it: its own folder `/work/<project-id>`, its own pi main session and subagents, its own SQLite memory/history and blob dir, its own loopback MCP/hook/model-stub ports (7800 + 10·n). One `arbos-agentd` per box supervises them (`crates/arbos-agentd/src/workspace.rs`): workspaces start from `POST /box/hello` and the 3 s `GET /box/projects` poll, stop when a project is deleted, and up to 8 subagents run per box (4 per workspace). The box starts on demand and auto-stops when idle, as before.
 
-- Class: the snapshot fixes vCPU/RAM/disk. Default `ARBOS_DAYTONA_SNAPSHOT` = `arbos-agent-0.1.10` registered at **4 vCPU / 8 GiB / 10 GiB** (the Daytona per-sandbox maximum on this org; $0.332 per active hour, $0.013 per stopped day, $0 archived). Per-user override: `PUT /admin/users/{id}/box {"snapshot": "…"}` (admin token) before the box is created.
+- Class: the snapshot fixes vCPU/RAM/disk. Default `ARBOS_DAYTONA_SNAPSHOT` = `arbos-agent-0.1.11` registered at **4 vCPU / 8 GiB / 10 GiB** (the Daytona per-sandbox maximum on this org; $0.332 per active hour, $0.013 per stopped day, $0 archived). Per-user override: `PUT /admin/users/{id}/box {"snapshot": "…"}` (admin token) before the box is created.
 - Machine API (devices): `GET /machine` → `{user_id, state, since, provider, sandbox_id, spec {cpu, mem_gib, disk_gib, class}, spend_today_usd, spend_cap_usd, workspaces: [{project_id, state}], migrated_from}`; `POST /machine/start`, `POST /machine/stop?force=`. `arbosctl machine status|start|stop`.
 - Project docs: `status.box = {state, since}` (the user's machine, mirrored into every project doc) and `status.workspace = {state, since}` with `state ∈ running | stopped`.
 - Box API (box token): `POST /box/hello`, `GET /box/projects`, `POST /box/keepalive`, `POST /projects/{id}/workspace {state}`. The box names the workspace in `X-Arbos-Project` on model calls and skills calls, so usage and skills stay per project.
@@ -131,7 +131,7 @@ Each user has one Daytona computer; every project of that user is a workspace on
 
 ## Run on Daytona
 
-With `DAYTONA_API_KEY` set, `project create` (without `--local-box`) creates a real sandbox from the snapshot named by `ARBOS_DAYTONA_SNAPSHOT` (default `arbos-agent-0.1.10`, the current registered build). The relay must be reachable from the box (`ARBOS_RELAY_PUBLIC_URL`). If no production snapshot is registered yet, point the relay at the dev image instead:
+With `DAYTONA_API_KEY` set, `project create` (without `--local-box`) creates a real sandbox from the snapshot named by `ARBOS_DAYTONA_SNAPSHOT` (default `arbos-agent-0.1.11`, the current registered build). The relay must be reachable from the box (`ARBOS_RELAY_PUBLIC_URL`). If no production snapshot is registered yet, point the relay at the dev image instead:
 
 ```bash
 export DAYTONA_API_KEY=… ARBOS_RELAY_PUBLIC_URL=https://<public-url-of-this-relay> \
@@ -271,7 +271,7 @@ The vault holds logins, API keys and secrets the agent may *use* but never *see*
 
 ## Image
 
-`.github/workflows/image.yml` builds `image/Dockerfile` on an image tag (`image-v0.1.10`) or by hand (`workflow_dispatch` with a version), pushes it to GHCR as `ghcr.io/unarbos/arbos/arbos-agent:<version>` (public, so Daytona pulls it without credentials), smoke-tests it, and registers the Daytona snapshot `arbos-agent-<version>` with `image/register-snapshot.sh` (needs the `DAYTONA_API_KEY` repository secret; until it is set, run the script by hand with the GHCR image, as for 0.1.10). The relay needs an image rebuild whenever `arbos-agentd` changes: the binary is baked into the image, boxes do not update it at boot.
+`.github/workflows/image.yml` builds `image/Dockerfile` on an image tag (`image-v0.1.11`) or by hand (`workflow_dispatch` with a version), pushes it to GHCR as `ghcr.io/unarbos/arbos/arbos-agent:<version>` (public, so Daytona pulls it without credentials), smoke-tests it, and registers the Daytona snapshot `arbos-agent-<version>` with `image/register-snapshot.sh` (needs the `DAYTONA_API_KEY` repository secret; until it is set, run the script by hand with the GHCR image, as for 0.1.10 and 0.1.11). The relay needs an image rebuild whenever `arbos-agentd` changes: the binary is baked into the image, boxes do not update it at boot.
 
 Without CI the same build runs on any Docker host, including a Daytona Docker-in-Docker sandbox (`FROM docker:27-dind`, start `dockerd`, upload the build context over SSH), then goes to Daytona's transient registry:
 
