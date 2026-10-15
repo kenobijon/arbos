@@ -24,6 +24,7 @@ enum RowKind: Equatable {
     case question(text: String)
     case file(name: String, subtitle: String, projectId: Id, ref: String?)
     case voiceMemo(name: String, projectId: Id, ref: String?, fromUser: Bool)
+    case image(projectId: Id, ref: String?, fromUser: Bool)
     case error(code: String, message: String)
 }
 
@@ -102,6 +103,10 @@ enum Transcript {
         if a.mime.hasPrefix("audio/") {
             return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
                        kind: .voiceMemo(name: a.name, projectId: projectId, ref: a.blobRef, fromUser: fromUser))
+        }
+        if a.mime.hasPrefix("image/") {
+            return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
+                       kind: .image(projectId: projectId, ref: a.blobRef, fromUser: fromUser))
         }
         return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
                    kind: .file(name: a.name, subtitle: subtitle(for: a), projectId: projectId, ref: a.blobRef))
@@ -304,6 +309,28 @@ struct RowView: View {
                 if fromUser { Spacer(minLength: 0) }
                 VoiceMemoBubble(name: name, projectId: projectId, blobRef: ref, fromUser: fromUser)
                     .frame(maxWidth: maxBubble, alignment: fromUser ? .trailing : .leading)
+                if !fromUser { Spacer(minLength: 0) }
+            }
+        case .image(let projectId, let ref, let fromUser):
+            HStack {
+                if fromUser { Spacer(minLength: 0) }
+                Group {
+                    if let ref, let url = model.blobURL(projectId: projectId, key: ref) {
+                        AsyncImage(url: url) { phase in
+                            switch phase {
+                            case .success(let img): img.resizable().scaledToFill()
+                            case .failure: Image(systemName: "photo").font(.system(size: 28)).foregroundStyle(theme.muted)
+                            case .empty: ProgressView().tint(theme.muted)
+                            @unknown default: Color.clear
+                            }
+                        }
+                    } else {
+                        Image(systemName: "photo").font(.system(size: 28)).foregroundStyle(theme.muted)
+                    }
+                }
+                .frame(width: min(240, maxBubble), height: 180)
+                .background(theme.bubbleAssistant)
+                .clipShape(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous))
                 if !fromUser { Spacer(minLength: 0) }
             }
         case .error(let code, let message):

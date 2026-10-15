@@ -74,6 +74,15 @@ extension AppModel {
         link = .live
     }
 
+    /// Sends in fixture mode append locally so the composer can be exercised.
+    func fixtureAppend(chatId: Id, text: String, attachments: [Attachment]) {
+        var list = messages[chatId] ?? []
+        var m = user(newId(), chatId, text, at: nowMs())
+        m.parts = attachments.map { .attachment(id: newId(), attachment: $0) } + (text.isEmpty ? [] : m.parts)
+        list.append(m)
+        messages[chatId] = list
+    }
+
     private func user(_ id: Id, _ chat: Id, _ text: String, at: Int64) -> Message {
         Message(id: id, chatId: chat, role: .user, sender: "user", status: .done, turn: nil, decision: nil, subagentId: nil,
                 subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: at, completedAt: at, pending: false,

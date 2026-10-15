@@ -4,7 +4,9 @@
 // "Ask <Project>" field with mic, white voice button) floating above the
 // keyboard.
 
+import PhotosUI
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ChatView: View {
     @EnvironmentObject private var model: AppModel
@@ -20,6 +22,11 @@ struct ChatView: View {
     @State private var showVoice = false
     @State private var showSettings = false
     @State private var sentOnce = false
+    @State private var pending: [AppModel.PendingAttachment] = []
+    @State private var photoItem: PhotosPickerItem?
+    @State private var showPhotos = false
+    @State private var showFiles = false
+    @StateObject private var recorder = MemoRecorder()
     @FocusState private var composerFocused: Bool
 
     private var project: Project? { model.project(projectId) }
@@ -42,7 +49,7 @@ struct ChatView: View {
             composer
                 .padding(.horizontal, 18)
                 .padding(.top, 8)
-                .padding(.bottom, composerFocused ? 2 : 2)
+                .padding(.bottom, composerFocused ? 0 : 2)
                 .background(alignment: .top) {
                     LinearGradient(colors: [theme.bg.opacity(0), theme.bg], startPoint: .top, endPoint: .bottom)
                         .frame(height: 24)
@@ -78,6 +85,11 @@ struct ChatView: View {
                     case "voice": showVoice = true
                     case "threads": showThreads = true
                     case "model": showModelPicker = true
+                    case "recording": recorder.start()
+                    case "pending":
+                        pending = [.init(name: "Q3 board deck v5.pdf", mime: "application/pdf", data: Data()),
+                                   .init(name: "Photo Oct 15.jpg", mime: "image/jpeg", data: Data())]
+                        composerFocused = true
                     default: break
                     }
                 }
@@ -273,78 +285,180 @@ struct ChatView: View {
     // MARK: Composer
 
     private var composer: some View {
-        HStack(spacing: 12) {
-            Menu {
-                Button { } label: { Label("Photo or video", systemImage: "photo") }
-                Button { } label: { Label("Take photo", systemImage: "camera") }
-                Button { } label: { Label("File", systemImage: "doc") }
-            } label: {
-                ZStack {
-                    Circle().fill(theme.field)
-                    Circle().strokeBorder(theme.fieldBorder.opacity(0.6), lineWidth: 1)
-                    Image(systemName: "plus")
-                        .font(.system(size: 21, weight: .regular))
-                        .foregroundStyle(theme.text)
-                }
-                .frame(width: Theme.plusButton, height: Theme.plusButton)
-            }
-            .buttonStyle(.plain)
-            HStack(spacing: 8) {
-                TextField("", text: $draft, prompt: Text(needsAnswer ? "Answer \(name)" : "Ask \(name)").foregroundStyle(theme.placeholder), axis: .vertical)
-                    .lineLimit(1...8)
-                    .font(.system(size: Theme.body))
-                    .foregroundStyle(theme.text)
-                    .tint(Color(hex: "#1084FE")!)
-                    .focused($composerFocused)
-                    .padding(.leading, 16)
-                    .padding(.vertical, 10)
-                if draft.isEmpty {
-                    Button { composerFocused = true } label: {
-                        Image(systemName: "mic")
-                            .font(.system(size: 17))
-                            .foregroundStyle(theme.icon)
+        VStack(spacing: 8) {
+            if !pending.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(pending) { a in
+                            HStack(spacing: 6) {
+                                Image(systemName: a.mime.hasPrefix("image/") ? "photo" : (a.mime.hasPrefix("audio/") ? "waveform" : "doc"))
+                                    .font(.system(size: 12))
+                                Text(a.name).font(.system(size: Theme.tiny)).lineLimit(1)
+                                Button { pending.removeAll { $0.id == a.id } } label: {
+                                    Image(systemName: "xmark").font(.system(size: 10, weight: .bold))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .foregroundStyle(theme.text)
+                            .padding(.horizontal, 10).padding(.vertical, 6)
+                            .background(Capsule().fill(theme.bubbleAssistant))
+                        }
                     }
-                    .buttonStyle(.plain)
-                    .padding(.trailing, 4)
+                    .padding(.leading, Theme.plusButton + 12)
                 }
-                // Grok keeps the composer usable while the bot works: text sends,
-                // an empty field starts voice chat. Stop lives in the … menu.
-                Button(action: canSend ? send : { showVoice = true }) {
-                    Circle()
-                        .fill(.white)
-                        .frame(width: Theme.voiceButton, height: Theme.voiceButton)
-                        .overlay(
-                            Image(systemName: canSend ? "arrow.up" : "waveform")
-                                .font(.system(size: 16, weight: .bold))
-                                .foregroundStyle(.black)
-                        )
+            }
+            HStack(spacing: 12) {
+                Menu {
+                    Button { showPhotos = true } label: { Label("Photo or video", systemImage: "photo") }
+                    Button { showFiles = true } label: { Label("File", systemImage: "doc") }
+                } label: {
+                    ZStack {
+                        Circle().fill(theme.field)
+                        Circle().strokeBorder(theme.fieldBorder.opacity(0.6), lineWidth: 1)
+                        Image(systemName: "plus")
+                            .font(.system(size: 21, weight: .regular))
+                            .foregroundStyle(theme.text)
+                    }
+                    .frame(width: Theme.plusButton, height: Theme.plusButton)
                 }
                 .buttonStyle(.plain)
-                .padding(.trailing, 3)
+                .photosPicker(isPresented: $showPhotos, selection: $photoItem, matching: .any(of: [.images, .videos]))
+                .fileImporter(isPresented: $showFiles, allowedContentTypes: [.item], allowsMultipleSelection: false) { result in
+                    if case .success(let urls) = result, let url = urls.first {
+                        let ok = url.startAccessingSecurityScopedResource()
+                        defer { if ok { url.stopAccessingSecurityScopedResource() } }
+                        if let data = try? Data(contentsOf: url) {
+                            let mime = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
+                            pending.append(.init(name: url.lastPathComponent, mime: mime, data: data))
+                        }
+                    }
+                }
+                .onChange(of: photoItem) { _, item in
+                    guard let item else { return }
+                    Task {
+                        if let data = try? await item.loadTransferable(type: Data.self) {
+                            let type = item.supportedContentTypes.first
+                            let ext = type?.preferredFilenameExtension ?? "jpg"
+                            let mime = type?.preferredMIMEType ?? "image/jpeg"
+                            pending.append(.init(name: "Photo \(Date().formatted(date: .abbreviated, time: .shortened)).\(ext)", mime: mime, data: data))
+                        }
+                        photoItem = nil
+                    }
+                }
+
+                if recorder.recording {
+                    recordingField
+                } else {
+                    textField
+                }
             }
-            .frame(minHeight: Theme.fieldHeight)
-            .background(
-                RoundedRectangle(cornerRadius: Theme.fieldHeight / 2, style: .continuous).fill(theme.field)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: Theme.fieldHeight / 2, style: .continuous)
-                    .strokeBorder(needsAnswer ? theme.warn.opacity(0.7) : theme.fieldBorder, lineWidth: 1)
-            )
         }
     }
 
+    private var textField: some View {
+        HStack(spacing: 8) {
+            TextField("", text: $draft, prompt: Text(needsAnswer ? "Answer \(name)" : "Ask \(name)").foregroundStyle(theme.placeholder), axis: .vertical)
+                .lineLimit(1...8)
+                .font(.system(size: Theme.body))
+                .foregroundStyle(theme.text)
+                .tint(Color(hex: "#1084FE")!)
+                .focused($composerFocused)
+                .padding(.leading, 16)
+                .padding(.vertical, 10)
+            if draft.isEmpty {
+                // Hold to record a voice memo (Grok: "Start dictation" / voice memo).
+                Image(systemName: "mic")
+                    .font(.system(size: 17))
+                    .foregroundStyle(theme.icon)
+                    .padding(.trailing, 4)
+                    .contentShape(Rectangle())
+                    .onLongPressGesture(minimumDuration: 0.25, maximumDistance: 40) {
+                        // Release handled by the recording field's gesture end.
+                    } onPressingChanged: { pressing in
+                        if pressing && !recorder.recording {
+                            recorder.start()
+                        }
+                    }
+            }
+            // Grok keeps the composer usable while the bot works: text sends,
+            // an empty field starts voice chat. Stop lives in the … menu.
+            Button(action: canSend ? send : { showVoice = true }) {
+                Circle()
+                    .fill(.white)
+                    .frame(width: Theme.voiceButton, height: Theme.voiceButton)
+                    .overlay(
+                        Image(systemName: canSend ? "arrow.up" : "waveform")
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundStyle(.black)
+                    )
+            }
+            .buttonStyle(.plain)
+            .padding(.trailing, 3)
+        }
+        .frame(minHeight: Theme.fieldHeight)
+        .background(RoundedRectangle(cornerRadius: Theme.fieldHeight / 2, style: .continuous).fill(theme.field))
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.fieldHeight / 2, style: .continuous)
+                .strokeBorder(needsAnswer ? theme.warn.opacity(0.7) : theme.fieldBorder, lineWidth: 1)
+        )
+        .alert("Microphone access is off", isPresented: $recorder.permissionDenied) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text("Allow the microphone in Settings to record a voice memo.")
+        }
+    }
+
+    /// Replaces the field while recording: red dot, live bars, timer, send/cancel.
+    private var recordingField: some View {
+        HStack(spacing: 10) {
+            Button { recorder.cancel() } label: {
+                Image(systemName: "xmark").font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.icon)
+            }
+            .buttonStyle(.plain)
+            .padding(.leading, 14)
+            Circle().fill(theme.danger).frame(width: 8, height: 8)
+            HStack(spacing: 2) {
+                ForEach(Array(recorder.levels.enumerated()), id: \.offset) { _, l in
+                    Capsule().fill(theme.text).frame(width: 3, height: 4 + CGFloat(l) * 20)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            Text(recorder.timeLabel)
+                .font(.system(size: Theme.small, design: .monospaced))
+                .foregroundStyle(theme.text)
+            Button {
+                if let memo = recorder.stop() {
+                    model.send(chatId: chatId, text: draft.trimmingCharacters(in: .whitespacesAndNewlines),
+                               attachments: pending + [.init(name: memo.name, mime: "audio/m4a", data: memo.data)])
+                    pending.removeAll()
+                    draft = ""
+                    sentOnce = true
+                }
+            } label: {
+                Circle().fill(.white).frame(width: Theme.voiceButton, height: Theme.voiceButton)
+                    .overlay(Image(systemName: "arrow.up").font(.system(size: 16, weight: .bold)).foregroundStyle(.black))
+            }
+            .buttonStyle(.plain)
+            .padding(.trailing, 3)
+        }
+        .frame(minHeight: Theme.fieldHeight)
+        .background(RoundedRectangle(cornerRadius: Theme.fieldHeight / 2, style: .continuous).fill(theme.field))
+        .overlay(RoundedRectangle(cornerRadius: Theme.fieldHeight / 2, style: .continuous).strokeBorder(theme.danger.opacity(0.5), lineWidth: 1))
+    }
+
     private var canSend: Bool {
-        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pending.isEmpty
     }
 
     private func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        if needsAnswer {
+        guard !text.isEmpty || !pending.isEmpty else { return }
+        if needsAnswer && pending.isEmpty {
             model.answer(chatId: chatId, text: text)
         } else {
-            model.send(chatId: chatId, text: text)
+            model.send(chatId: chatId, text: text, attachments: pending)
         }
+        pending.removeAll()
         draft = ""
         sentOnce = true
     }

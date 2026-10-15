@@ -486,20 +486,59 @@ final class AppModel: ObservableObject {
 
     // MARK: Commands (crdt-sync §6.2: the client writes rows and commands)
 
-    func send(chatId: Id, text: String) {
-        write(chatId: chatId, text: text, command: "send")
+    /// An attachment staged in the composer, uploaded on send.
+    struct PendingAttachment: Identifiable, Equatable {
+        let id = UUID()
+        var name: String
+        var mime: String
+        var data: Data
+    }
+
+    func send(chatId: Id, text: String, attachments: [PendingAttachment] = []) {
+        if attachments.isEmpty {
+            write(chatId: chatId, text: text, command: "send", attachments: [])
+            return
+        }
+        guard let chat = chat(chatId) else { return }
+        if isFixture {
+            write(chatId: chatId, text: text, command: "send", attachments: attachments.map { Attachment(name: $0.name, mime: $0.mime, blobRef: nil) })
+            return
+        }
+        Task {
+            var uploaded: [Attachment] = []
+            for a in attachments {
+                let key = "att-\(newId().lowercased())-\(AppModel.safeName(a.name))"
+                do {
+                    _ = try await api.putBlob(projectId: chat.projectId, key: key, mime: a.mime, data: a.data)
+                    uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: key))
+                } catch {
+                    notice = Notice(text: "Attachment upload failed: \(error.localizedDescription)")
+                    uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: nil))
+                }
+            }
+            write(chatId: chatId, text: text, command: "send", attachments: uploaded)
+        }
+    }
+
+    static func safeName(_ name: String) -> String {
+        String(name.map { $0.isLetter || $0.isNumber || $0 == "." || $0 == "-" || $0 == "_" ? $0 : "_" })
     }
 
     func answer(chatId: Id, text: String) {
-        write(chatId: chatId, text: text, command: "answer")
+        write(chatId: chatId, text: text, command: "answer", attachments: [])
     }
 
-    private func write(chatId: Id, text: String, command: String) {
-        guard let doc = docs[chatId], let chat = chat(chatId) else { return }
+    private func write(chatId: Id, text: String, command: String, attachments: [Attachment]) {
+        guard let doc = docs[chatId], let chat = chat(chatId) else {
+            #if DEBUG
+            if isFixture { fixtureAppend(chatId: chatId, text: text, attachments: attachments) }
+            #endif
+            return
+        }
         let messageId = newId()
         unacked.insert(messageId)
         do {
-            try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId)
+            try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: attachments)
             try doc.pushCommand(command, payload: ["messageId": messageId], device: deviceId)
             if !chat.isPinned && chat.title == "New chat" {
                 let title = AppModel.title(from: text)
