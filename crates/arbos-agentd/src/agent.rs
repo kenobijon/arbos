@@ -356,6 +356,9 @@ pub struct Agent {
     pub subagent_turns: std::sync::atomic::AtomicU32,
     pub pi_ready: AtomicBool,
     pub ext_loaded: AtomicBool,
+    /// Set by `shutdown`: the pi supervisor must not respawn a child we are stopping (an orphaned
+    /// pi dies with `write EPIPE` at its next reply once agentd is gone).
+    pub shutting_down: AtomicBool,
     turn_lock: Mutex<()>,
     /// FIFO gate on concurrent subagent runs in this workspace (`SUBAGENT_MAX_CONCURRENT`).
     subagent_slots: Arc<Semaphore>,
@@ -410,6 +413,7 @@ impl Agent {
             subagent_turns: std::sync::atomic::AtomicU32::new(0),
             pi_ready: AtomicBool::new(false),
             ext_loaded: AtomicBool::new(false),
+            shutting_down: AtomicBool::new(false),
             turn_lock: Mutex::new(()),
             subagent_slots: Arc::new(Semaphore::new(SUBAGENT_MAX_CONCURRENT)),
             box_slots,
@@ -550,6 +554,9 @@ impl Agent {
                     .as_ref()
                     .map(|c| c.is_alive())
                     .unwrap_or(false);
+                if me.shutting_down.load(Ordering::SeqCst) {
+                    return;
+                }
                 if !alive && !me.turn_running.load(Ordering::SeqCst) {
                     me.pi_ready.store(false, Ordering::SeqCst);
                     let chat = me.current_chat.lock().await.clone().unwrap_or_default();
@@ -2383,6 +2390,8 @@ impl Agent {
 
     /// Stop every child in order (subagents, then pi) so session files and kernel snapshots land.
     pub async fn shutdown(&self) {
+        self.shutting_down.store(true, Ordering::SeqCst);
+        self.pi_ready.store(false, Ordering::SeqCst);
         for a in self.adapters.values() {
             a.shutdown_all().await;
         }

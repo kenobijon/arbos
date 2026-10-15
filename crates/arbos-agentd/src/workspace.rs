@@ -399,9 +399,18 @@ impl Supervisor {
                 ])
                 .await;
         }
+        // Every workspace at once (10 workspaces × a 5 s child grace would otherwise outlive the
+        // caller's budget and leave orphaned children behind).
+        let mut joins = Vec::new();
         for w in &all {
-            let _ = tokio::time::timeout(Duration::from_secs(20), w.agent.shutdown()).await;
-            w.sync.persist_all().await;
+            let w = w.clone();
+            joins.push(tokio::spawn(async move {
+                let _ = tokio::time::timeout(Duration::from_secs(25), w.agent.shutdown()).await;
+                w.sync.persist_all().await;
+            }));
+        }
+        for j in joins {
+            let _ = j.await;
         }
     }
 }

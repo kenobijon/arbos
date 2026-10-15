@@ -66,8 +66,20 @@ async fn run(
     let room = state.room(&room_name).await;
     let mut rx = room.tx.subscribe();
     let (mut sink, mut stream) = socket.split();
-    let mut device = principal.device_name();
     let is_box = principal.is_box();
+    // Rows from the box carry the box's device id (`box:<sandbox>` / `box:local-<user>`), the same
+    // id agentd writes into the doc, so clients see one stable author across restarts.
+    let mut device = match (&principal, principal.user_id()) {
+        (Principal::Box { .. }, Some(u)) => state
+            .db
+            .user_box(u)
+            .ok()
+            .flatten()
+            .map(|b| b.device_id)
+            .filter(|d| !d.is_empty())
+            .unwrap_or_else(|| principal.device_name()),
+        _ => principal.device_name(),
+    };
     // Box sockets count per user box (one box serves every project of the user).
     let box_user = principal.user_id().map(str::to_owned).unwrap_or_default();
     if is_box {
