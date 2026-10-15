@@ -639,6 +639,15 @@ pub async fn ensure_awake(state: &AppState, user_id: &str, reason: &str) {
     if st == BoxState::Awake {
         return;
     }
+    // Credits gate: a user who may not spend gets no machine time. The apps see the reason in
+    // the status detail; an explicit wake after a top-up clears it.
+    if let Err(r) = crate::credits::check(state, user_id) {
+        tracing::info!(%user_id, %r, "wake refused");
+        state
+            .set_box_state(user_id, BoxState::Error, Some(&r.to_string()))
+            .await;
+        return;
+    }
     if st == BoxState::Error {
         // Stale-box error: no more automatic retries; an explicit wake/start tries again once.
         if !explicit_wake(reason) {

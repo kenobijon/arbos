@@ -1,3 +1,4 @@
+mod admin;
 mod api;
 mod auth;
 mod blobs;
@@ -5,6 +6,7 @@ mod boxes;
 mod browser;
 mod channels;
 mod connectors;
+mod credits;
 mod daytona;
 mod db;
 mod db_accounts;
@@ -210,6 +212,9 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or_default(),
         default_grant_usd: env_f64("ARBOS_DEFAULT_GRANT_USD", 100.0),
         default_daily_cap_usd: env_f64("ARBOS_DEFAULT_DAILY_CAP_USD", 20.0),
+        global_daily_cap_usd: env_f64("ARBOS_GLOBAL_DAILY_CAP_USD", 500.0),
+        machine_usd_per_hour: env_f64("ARBOS_MACHINE_USD_PER_HOUR", 0.332),
+        machine_stopped_usd_per_day: env_f64("ARBOS_MACHINE_STOPPED_USD_PER_DAY", 0.013),
         releases_repo: env_nonempty("ARBOS_RELEASES_REPO")
             .unwrap_or_else(|| "unarbos/arbos".to_owned()),
     };
@@ -280,6 +285,7 @@ async fn main() -> anyhow::Result<()> {
     boxes::spawn_wake_runner(state.clone()).await;
     routines::spawn_scheduler(state.clone()).await;
     channels::spawn_pollers(state.clone()).await;
+    credits::spawn_meter(state.clone()).await;
 
     let app = Router::new()
         .route("/healthz", get(api::healthz))
@@ -342,6 +348,15 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/admin/users/{id}/box",
             axum::routing::put(api::admin_set_user_box),
+        )
+        .route("/admin/users", get(admin::list_users))
+        .route(
+            "/admin/users/{id}/credits",
+            axum::routing::put(admin::set_credits),
+        )
+        .route(
+            "/admin/killswitch",
+            get(admin::get_kill_switch).put(admin::set_kill_switch),
         )
         .route("/box/hello", post(api::box_hello))
         .route("/box/projects", get(api::box_projects))

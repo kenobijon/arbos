@@ -55,6 +55,12 @@ pub struct Config {
     pub default_grant_usd: f64,
     /// Soft per-user daily debit cap for new accounts (`ARBOS_DEFAULT_DAILY_CAP_USD`).
     pub default_daily_cap_usd: f64,
+    /// Relay-wide daily debit cap; reaching it trips the kill switch (`ARBOS_GLOBAL_DAILY_CAP_USD`).
+    pub global_daily_cap_usd: f64,
+    /// Our Daytona cost for a running box (`ARBOS_MACHINE_USD_PER_HOUR`).
+    pub machine_usd_per_hour: f64,
+    /// Our Daytona cost for a stopped box's disk (`ARBOS_MACHINE_STOPPED_USD_PER_DAY`).
+    pub machine_stopped_usd_per_day: f64,
     /// `owner/repo` whose `edge` release feeds `GET /download/mac` (`ARBOS_RELEASES_REPO`).
     pub releases_repo: String,
 }

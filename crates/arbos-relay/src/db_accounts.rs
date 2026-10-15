@@ -35,6 +35,9 @@ CREATE TABLE IF NOT EXISTS credit_ledger (
 );
 CREATE INDEX IF NOT EXISTS credit_ledger_user_at ON credit_ledger(user_id, at);
 CREATE INDEX IF NOT EXISTS credit_ledger_at ON credit_ledger(at);
+CREATE TABLE IF NOT EXISTS machine_meter (
+  user_id TEXT PRIMARY KEY, last_tick_at INTEGER NOT NULL, last_state TEXT NOT NULL
+);
 "#;
 
 /// Additive columns (SQLite has no `ADD COLUMN IF NOT EXISTS`; failures mean "already there").
@@ -102,6 +105,39 @@ pub struct Credits {
     pub spent_today_usd: f64,
     pub daily_cap_usd: Option<f64>,
     pub allow_negative: bool,
+}
+
+/// Why a debit was refused.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DebitRefused {
+    /// Balance would go below zero and the user has no override.
+    Insufficient { balance_usd: f64, needed_usd: f64 },
+    /// Today's debits already reach the user's daily cap.
+    DailyCap { cap_usd: f64, spent_today_usd: f64 },
+    /// The global kill switch is on.
+    ReadOnly { reason: String },
+}
+
+impl std::fmt::Display for DebitRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DebitRefused::Insufficient {
+                balance_usd,
+                needed_usd,
+            } => write!(
+                f,
+                "credits exhausted: balance ${balance_usd:.4}, needed ${needed_usd:.4}"
+            ),
+            DebitRefused::DailyCap {
+                cap_usd,
+                spent_today_usd,
+            } => write!(
+                f,
+                "daily cap ${cap_usd:.2} reached (spent ${spent_today_usd:.2} today)"
+            ),
+            DebitRefused::ReadOnly { reason } => write!(f, "read-only: {reason}"),
+        }
+    }
 }
 
 /// Kill switch record kept in `meta` under `kill_switch`.
@@ -203,6 +239,50 @@ impl Db {
             .user_by_github_id(gh.id)?
             .ok_or_else(|| anyhow!("user vanished"))?;
         Ok((user, created))
+    }
+
+    pub fn list_users(&self) -> Result<Vec<User>> {
+        self.with(|c| {
+            let mut st = c.prepare(&format!(
+                "SELECT {USER_COLS} FROM users ORDER BY created_at"
+            ))?;
+            let rows = st.query_map([], user_from_row)?;
+            rows.collect()
+        })
+    }
+
+    /// Admin: daily cap (`None` = unlimited) and the negative-balance override.
+    pub fn set_user_limits(
+        &self,
+        user_id: &str,
+        daily_cap_usd: Option<Option<f64>>,
+        allow_negative: Option<bool>,
+    ) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT OR IGNORE INTO users(id, created_at) VALUES (?1, ?2)",
+                params![user_id, now_ms()],
+            )?;
+            if let Some(cap) = daily_cap_usd {
+                match cap {
+                    Some(v) => c.execute(
+                        "UPDATE users SET spend_cap_usd = ?2, cap_unlimited = 0 WHERE id = ?1",
+                        params![user_id, v],
+                    )?,
+                    None => c.execute(
+                        "UPDATE users SET cap_unlimited = 1 WHERE id = ?1",
+                        params![user_id],
+                    )?,
+                };
+            }
+            if let Some(neg) = allow_negative {
+                c.execute(
+                    "UPDATE users SET allow_negative = ?2 WHERE id = ?1",
+                    params![user_id, neg as i64],
+                )?;
+            }
+            Ok(())
+        })
     }
 
     // ---- sign-in flows and grants -------------------------------------------------------------
@@ -427,6 +507,74 @@ impl Db {
         })
     }
 
+    /// Debits across every user since `since_ms` (the global cap).
+    pub fn debited_since_all(&self, since_ms: i64) -> Result<f64> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT COALESCE(-SUM(usd), 0.0) FROM credit_ledger WHERE usd < 0 AND at >= ?1",
+                params![since_ms],
+                |r| r.get(0),
+            )
+        })
+    }
+
+    /// Take `usd` from the user, atomically checked against the balance (unless the user has
+    /// the negative override) and the daily cap. The kill switch is checked by the caller
+    /// (`credits::check`), because it is relay-wide, not per user.
+    pub fn debit(
+        &self,
+        user_id: &str,
+        usd: f64,
+        kind: &str,
+        reference: Option<&str>,
+        start_of_day_ms: i64,
+    ) -> Result<std::result::Result<f64, DebitRefused>> {
+        if !usd.is_finite() || usd < 0.0 {
+            return Err(anyhow!("debit must be a non-negative amount"));
+        }
+        self.with(|c| {
+            let (cap, unlimited, allow_negative): (f64, i64, i64) = c
+                .query_row(
+                    "SELECT spend_cap_usd, cap_unlimited, allow_negative FROM users WHERE id = ?1",
+                    params![user_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?
+                .unwrap_or((0.0, 0, 0));
+            let balance: f64 = c.query_row(
+                "SELECT COALESCE(SUM(usd), 0.0) FROM credit_ledger WHERE user_id = ?1",
+                params![user_id],
+                |r| r.get(0),
+            )?;
+            if allow_negative == 0 && balance - usd < -1e-9 {
+                return Ok(Err(DebitRefused::Insufficient {
+                    balance_usd: balance,
+                    needed_usd: usd,
+                }));
+            }
+            if unlimited == 0 {
+                let today: f64 = c.query_row(
+                    "SELECT COALESCE(-SUM(usd), 0.0) FROM credit_ledger WHERE user_id = ?1 AND usd < 0 AND at >= ?2",
+                    params![user_id, start_of_day_ms],
+                    |r| r.get(0),
+                )?;
+                if today >= cap {
+                    return Ok(Err(DebitRefused::DailyCap {
+                        cap_usd: cap,
+                        spent_today_usd: today,
+                    }));
+                }
+            }
+            if usd > 0.0 {
+                c.execute(
+                    "INSERT INTO credit_ledger(user_id, at, kind, usd, ref) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![user_id, now_ms(), kind, -usd, reference],
+                )?;
+            }
+            Ok(Ok(balance - usd))
+        })
+    }
+
     pub fn credits(&self, user_id: &str, start_of_day_ms: i64) -> Result<Credits> {
         let user = self.user(user_id)?;
         self.with(|c| {
@@ -460,5 +608,34 @@ impl Db {
             .meta_get(KILL_SWITCH_KEY)?
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default())
+    }
+
+    pub fn set_kill_switch(&self, ks: &KillSwitch) -> Result<()> {
+        self.meta_set(KILL_SWITCH_KEY, &serde_json::to_string(ks)?)
+    }
+
+    // ---- machine metering ---------------------------------------------------------------------
+
+    /// Last metering tick for a user's box: `(at_ms, state)`.
+    pub fn meter_tick(&self, user_id: &str) -> Result<Option<(i64, String)>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT last_tick_at, last_state FROM machine_meter WHERE user_id = ?1",
+                params![user_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+        })
+    }
+
+    pub fn set_meter_tick(&self, user_id: &str, at: i64, state: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO machine_meter(user_id, last_tick_at, last_state) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(user_id) DO UPDATE SET last_tick_at = excluded.last_tick_at, last_state = excluded.last_state",
+                params![user_id, at, state],
+            )
+            .map(|_| ())
+        })
     }
 }

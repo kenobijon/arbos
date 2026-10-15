@@ -82,10 +82,15 @@ pub struct Relay {
 
 impl Relay {
     pub fn new(cfg: &Config) -> Self {
+        Self::with_token(cfg, &cfg.device_token)
+    }
+
+    /// Same relay, another bearer (the admin token for `arbosctl admin …`).
+    pub fn with_token(cfg: &Config, token: &str) -> Self {
         Self {
             http: reqwest::Client::new(),
             base: cfg.relay_url.clone(),
-            token: cfg.device_token.clone(),
+            token: token.to_owned(),
         }
     }
 
@@ -148,6 +153,19 @@ impl Relay {
         Self::finish(
             self.http
                 .post(format!("{}{}", self.base, path))
+                .bearer_auth(&self.token)
+                .json(body)
+                .send()
+                .await?,
+        )
+        .await
+    }
+
+    pub async fn put(&self, path: &str, body: &Value) -> Result<Value> {
+        self.need_token()?;
+        Self::finish(
+            self.http
+                .put(format!("{}{}", self.base, path))
                 .bearer_auth(&self.token)
                 .json(body)
                 .send()

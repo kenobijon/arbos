@@ -299,6 +299,9 @@ pub async fn generations(
         )
             .into_response();
     };
+    if let Err(r) = crate::credits::check_call(&state, &principal, &project_id) {
+        return crate::credits::refused_response(&r);
+    }
     if let Ok(Some(p)) = state.db.project(&project_id) {
         let today = state
             .db
@@ -368,6 +371,14 @@ pub async fn generations(
             price(&model, &size, &quality) * images,
             t0.elapsed().as_millis() as i64,
             None,
+        );
+        crate::credits::charge_call(
+            &state,
+            &principal,
+            &project_id,
+            price(&model, &size, &quality) * images,
+            "inference",
+            Some(&model),
         );
     }
     (

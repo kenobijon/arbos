@@ -205,6 +205,9 @@ async fn forward(
             return (StatusCode::PAYMENT_REQUIRED, json!({ "error": { "type": "spend_cap", "message": format!("daily spend cap ${:.2} reached", p.spend_cap_daily) } }).to_string()).into_response();
         }
     }
+    if let Err(r) = crate::credits::check_call(&state, &principal, &project_id) {
+        return crate::credits::refused_response(&r);
+    }
 
     let mut req_json: Option<Value> = serde_json::from_slice(&body).ok();
     let mut model = req_json
@@ -322,6 +325,8 @@ async fn forward(
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(64);
     let db = state.db.clone();
     let pid = project_id.clone();
+    let meter_state = state.clone();
+    let payer = principal.clone();
     tokio::spawn(async move {
         let mut meter = Meter {
             model: model.clone(),
@@ -367,6 +372,14 @@ async fn forward(
                 meter.usd(),
                 t0.elapsed().as_millis() as i64,
                 ttfb,
+            );
+            crate::credits::charge_call(
+                &meter_state,
+                &payer,
+                &pid,
+                meter.usd(),
+                "inference",
+                Some(&meter.model),
             );
         }
     });
@@ -545,8 +558,11 @@ fn audio_project(state: &AppState, principal: &Principal, headers: &HeaderMap) -
         .unwrap_or_else(|| "relay-admin".to_owned())
 }
 
-/// `Some(response)` when the project's daily cap is already spent.
-fn audio_spend_cap(state: &AppState, project_id: &str) -> Option<Response> {
+/// `Some(response)` when the project's daily cap is already spent or the user may not spend.
+fn audio_spend_cap(state: &AppState, principal: &Principal, project_id: &str) -> Option<Response> {
+    if let Err(r) = crate::credits::check_call(state, principal, project_id) {
+        return Some(crate::credits::refused_response(&r));
+    }
     let p = state.db.project(project_id).ok().flatten()?;
     let today = state
         .db
@@ -575,7 +591,7 @@ pub async fn audio_transcriptions(
     body: Bytes,
 ) -> Response {
     let project_id = audio_project(&state, &principal, &headers);
-    if let Some(r) = audio_spend_cap(&state, &project_id) {
+    if let Some(r) = audio_spend_cap(&state, &principal, &project_id) {
         return r;
     }
     let model = multipart_field(&body, "model").unwrap_or_else(|| "whisper-1".to_owned());
@@ -654,6 +670,16 @@ pub async fn audio_transcriptions(
             None,
         );
     }
+    if status.is_success() {
+        crate::credits::charge_call(
+            &state,
+            &principal,
+            &project_id,
+            usd,
+            "inference",
+            Some(&model),
+        );
+    }
     (
         status,
         [
@@ -674,7 +700,7 @@ pub async fn audio_speech(
     body: Bytes,
 ) -> Response {
     let project_id = audio_project(&state, &principal, &headers);
-    if let Some(r) = audio_spend_cap(&state, &project_id) {
+    if let Some(r) = audio_spend_cap(&state, &principal, &project_id) {
         return r;
     }
     let req: Value = match serde_json::from_slice(&body) {
@@ -781,6 +807,16 @@ pub async fn audio_speech(
             usd,
             t0.elapsed().as_millis() as i64,
             None,
+        );
+    }
+    if status.is_success() {
+        crate::credits::charge_call(
+            &state,
+            &principal,
+            &project_id,
+            usd,
+            "inference",
+            Some(&model),
         );
     }
     let mut resp_headers = HeaderMap::new();

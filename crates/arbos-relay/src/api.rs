@@ -181,7 +181,7 @@ pub async fn create_project(
         icon: b.icon.unwrap_or_else(|| monogram(&name)),
         instructions: b.instructions.unwrap_or_default(),
         models: b.models.unwrap_or_else(default_models),
-        state: "waking".into(),
+        state: "hibernated_light".into(),
         created_at: now,
         last_active_at: now,
         spend_cap_daily: 25.0,
@@ -205,16 +205,22 @@ pub async fn create_project(
         participants: Vec::new(),
     };
     state.db.insert_chat(&pinned).map_err(internal)?;
-    // One box per user: the first project creates it, later projects are workspaces on it. A
-    // sleeping box is woken so the new workspace starts right away.
-    let sb = boxes::ensure_user_box(&state, &project.user_id, provider)
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("box create: {e}")))?;
-    boxes::ensure_awake(&state, &project.user_id, "api").await;
+    // One box per user, created lazily: the first message (room send → ensure_awake → wake job
+    // → start_box) creates and starts it, so a project that is never used costs nothing. An
+    // existing box is woken now so the new workspace is ready when the user types.
+    let sb = state.db.user_box(&project.user_id).map_err(internal)?;
+    if sb.is_some() {
+        boxes::ensure_awake(&state, &project.user_id, "api").await;
+    }
     Ok(Json(json!({
         "project": project_json(&state, &project).await,
         "pinned_chat": chat_json(&pinned),
-        "sandbox": { "provider": sb.provider, "sandbox_id": sb.sandbox_id, "device_id": sb.device_id, "box_url": sb.box_url },
+        "sandbox": {
+            "provider": sb.as_ref().map(|s| s.provider.clone()).unwrap_or_else(|| provider.as_str().to_owned()),
+            "sandbox_id": sb.as_ref().and_then(|s| s.sandbox_id.clone()),
+            "device_id": sb.as_ref().map(|s| s.device_id.clone()),
+            "box_url": sb.as_ref().and_then(|s| s.box_url.clone()),
+        },
         "rooms": { "project": format!("/room/{}/{}", project.id, PROJECT_DOC_CHAT_ID), "pinned_chat": format!("/room/{}/{}", project.id, pinned.id) }
     }))
     .into_response())
@@ -582,6 +588,9 @@ pub async fn machine_start(State(state): State<AppState>, principal: Principal) 
         .to_owned();
     if principal.is_box() {
         return Err((StatusCode::FORBIDDEN, "devices only".into()));
+    }
+    if let Err(r) = crate::credits::check(&state, &user_id) {
+        return Ok(crate::credits::refused_response(&r));
     }
     if state.db.user_box(&user_id).map_err(internal)?.is_none() {
         let provider = if state.daytona.is_some() {

@@ -79,6 +79,14 @@ enum Cmd {
         #[command(subcommand)]
         cmd: DeviceCmd,
     },
+    /// Operator commands (admin token from ARBOS_RELAY_ADMIN_TOKEN or --admin-token): users,
+    /// credits, the global kill switch.
+    Admin {
+        #[arg(long, env = "ARBOS_RELAY_ADMIN_TOKEN")]
+        admin_token: String,
+        #[command(subcommand)]
+        cmd: AdminCmd,
+    },
     /// Routines: cron / webhook / event-triggered prompts run by the relay scheduler.
     Routines {
         #[command(subcommand)]
@@ -419,6 +427,35 @@ enum DeviceCmd {
     Revoke { id: String },
 }
 
+#[derive(Subcommand, Debug)]
+enum AdminCmd {
+    /// Every account with balance, caps, today's spend, and machine state.
+    Users,
+    /// Add credits to a user (USD).
+    Grant {
+        user: String,
+        usd: f64,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Set a user's daily cap in USD, or `--unlimited`.
+    Cap {
+        user: String,
+        #[arg(required_unless_present = "unlimited")]
+        usd: Option<f64>,
+        #[arg(long)]
+        unlimited: bool,
+    },
+    /// Global kill switch: `on [--reason …]` makes the relay read-only, `off` clears it,
+    /// `status` shows it with today's relay-wide spend.
+    Killswitch {
+        #[arg(value_parser = ["on", "off", "status"])]
+        action: String,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -733,6 +770,56 @@ async fn main() -> Result<()> {
                         x["kind"].as_str().unwrap_or(""),
                         rest
                     );
+                }
+            }
+        }
+        Cmd::Admin { admin_token, cmd } => {
+            let admin = Relay::with_token(&cfg, &admin_token);
+            match cmd {
+                AdminCmd::Users => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&admin.get("/admin/users").await?)?
+                ),
+                AdminCmd::Grant { user, usd, note } => {
+                    let v = admin
+                        .put(
+                            &format!("/admin/users/{user}/credits"),
+                            &serde_json::json!({ "grant_usd": usd, "note": note }),
+                        )
+                        .await?;
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                AdminCmd::Cap {
+                    user,
+                    usd,
+                    unlimited,
+                } => {
+                    let cap = if unlimited {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::json!(usd)
+                    };
+                    let v = admin
+                        .put(
+                            &format!("/admin/users/{user}/credits"),
+                            &serde_json::json!({ "daily_cap_usd": cap }),
+                        )
+                        .await?;
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                AdminCmd::Killswitch { action, reason } => {
+                    let v = match action.as_str() {
+                        "status" => admin.get("/admin/killswitch").await?,
+                        on => {
+                            admin
+                                .put(
+                                    "/admin/killswitch",
+                                    &serde_json::json!({ "on": on == "on", "reason": reason }),
+                                )
+                                .await?
+                        }
+                    };
+                    println!("{}", serde_json::to_string_pretty(&v)?);
                 }
             }
         }
