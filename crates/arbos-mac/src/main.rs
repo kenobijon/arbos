@@ -2,6 +2,7 @@
 
 mod app;
 mod audio;
+mod auth;
 mod model;
 mod sync;
 mod ui;

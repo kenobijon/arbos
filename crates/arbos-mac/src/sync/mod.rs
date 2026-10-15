@@ -18,6 +18,7 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 use tokio::sync::mpsc;
 
+use crate::model::AccountView;
 use crate::model::{
     BoxState, ChannelsView, Chat, ConnectorsView, Effort, Id, Link, LocalView, Machine, Message,
     Project, ProjectDocView, Routine, RoutineRun, RoutineTrigger, Skill, VaultNewItem, VaultView,
@@ -30,6 +31,8 @@ pub enum SyncEvent {
     NeedsPairing {
         relay_url: String,
     },
+    /// Who is signed in (`/auth/token` or `/me`); `None` after sign-out.
+    Account(Option<AccountView>),
     /// Pairing finished (or failed with a message).
     Paired {
         device_id: String,
@@ -148,6 +151,12 @@ pub enum ClientCommand {
     Pair {
         code: String,
     },
+    /// Exchange the one-time grant code from the browser leg (`POST /auth/token`).
+    SignIn {
+        grant_code: String,
+    },
+    /// `POST /auth/logout`, forget the tokens, back to the sign-in screen.
+    SignOut,
     OpenChat {
         chat_id: Id,
     },
@@ -354,11 +363,37 @@ pub trait SyncSource: Send + 'static {
     ) -> BoxFuture<'static, anyhow::Result<()>>;
 }
 
-/// Pick the source from the environment. `ARBOS_RELAY_URL=http://host:port`
-/// (or `ws://`) selects the relay; anything else runs the fixture.
+/// The relay everyone talks to unless told otherwise.
+pub const DEFAULT_RELAY_URL: &str = "https://relay.arbos.life";
+
+/// Pick the source. Order: `ARBOS_RELAY_URL` (`fixture` runs the seeded demo
+/// source), then `defaults read sh.arbos.mac RelayURL` for self-hosters on
+/// macOS, then the compiled-in default relay.
 pub fn source_from_env() -> Box<dyn SyncSource> {
-    match std::env::var("ARBOS_RELAY_URL") {
-        Ok(url) if !url.trim().is_empty() => Box::new(relay::RelaySource::from_env(url)),
-        Ok(_) | Err(_) => Box::new(fixture::FixtureSource::new()),
+    let url = match std::env::var("ARBOS_RELAY_URL") {
+        Ok(url) if !url.trim().is_empty() => url,
+        Ok(_) | Err(_) => {
+            relay_url_from_defaults().unwrap_or_else(|| DEFAULT_RELAY_URL.to_string())
+        }
+    };
+    if url.trim().eq_ignore_ascii_case("fixture") {
+        return Box::new(fixture::FixtureSource::new());
     }
+    Box::new(relay::RelaySource::from_env(url))
+}
+
+/// `defaults write sh.arbos.mac RelayURL https://relay.example` (macOS only).
+fn relay_url_from_defaults() -> Option<String> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let out = std::process::Command::new("defaults")
+        .args(["read", "sh.arbos.mac", "RelayURL"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let url = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    (!url.is_empty()).then_some(url)
 }

@@ -141,11 +141,12 @@ cargo run -p arbosctl -- project create --name demo --provider daytona
 ## Run the desktop client
 
 ```bash
-cargo run -p arbos-mac                                  # fixture source: seeded chats + scripted agent
-ARBOS_RELAY_URL=ws://127.0.0.1:7700 ARBOS_RELAY_TOKEN=... cargo run -p arbos-mac   # relay rooms
+cargo run -p arbos-mac                                  # https://relay.arbos.life (compiled-in default)
+ARBOS_RELAY_URL=fixture cargo run -p arbos-mac          # fixture source: seeded chats + scripted agent
+ARBOS_RELAY_URL=ws://127.0.0.1:7700 cargo run -p arbos-mac   # a local relay
 ```
 
-First run against a relay shows the pairing screen: enter the one-time code the relay logged. The device token goes to the login keychain on macOS (`security`), or `~/.config/arbos/` (0600) elsewhere; `ARBOS_RELAY_TOKEN` overrides. Matte is the default theme; Glass = macOS vibrancy + in-window frosted panels (the frost also renders on Linux). `ARBOS_SURFACE=glass` starts in Glass.
+Self-hosters on macOS can also point the bundle at their relay with `defaults write sh.arbos.mac RelayURL https://relay.example`. First launch shows "Sign in with GitHub": the relay runs the OAuth leg (`/auth/github/start`), macOS opens it in an `ASWebAuthenticationSession` that returns on `arbos://auth/callback`, Linux opens the system browser (`ARBOS_BROWSER` overrides) and listens on a loopback port, and the one-time grant is exchanged at `POST /auth/token`. The JWT and its rotating refresh token go to the login keychain on macOS (`security`), or `~/.config/arbos/` (0600) elsewhere; the token refreshes five minutes before expiry or on a 401. A relay in `ARBOS_AUTH_MODE=paircode` answers 409 on start, and the screen falls back to the one-time pairing code from the relay log. `ARBOS_RELAY_TOKEN` overrides both. After sign-in the app lands in a chat: an account with no projects gets "Home" created for it, and the machine provisions on the first message. Matte is the default theme; Glass = macOS vibrancy + in-window frosted panels (the frost also renders on Linux). `ARBOS_SURFACE=glass` starts in Glass.
 
 Widget cards answer with the mouse or the keyboard (arrows move, space toggles, Enter submits); the fixture's "Beta release" chat under Arbos shows every widget type. System notifications (macOS `osascript`, Linux `notify-send`) fire for turn finished, needs input, approval requested, wake failed, spend cap reached, cross-project message and routine ran — at most one per project per minute (later ones fold into "N updates in <Project>"), never while that project is streaming, and only while the window is unfocused or the chat is not on screen. Settings has an On/Off switch; `ARBOS_NOTIFY_ALWAYS=1` ignores the focus gate (demos), `ARBOS_NOTIFY_DRY_RUN=1` logs instead of delivering.
 

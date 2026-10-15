@@ -495,9 +495,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         ClientCommand::MachineStop => {
             set_machine(shared, MachineState::Stopped, Some("Stopped by you"), None);
         }
-        ClientCommand::Pair { .. } => {
+        ClientCommand::Pair { .. } | ClientCommand::SignIn { .. } => {
             let _ = shared.events.send(SyncEvent::Paired {
                 device_id: DEVICE.into(),
+            });
+        }
+        ClientCommand::SignOut => {
+            let _ = shared.events.send(SyncEvent::Account(None));
+            let _ = shared.events.send(SyncEvent::NeedsPairing {
+                relay_url: "fixture".into(),
             });
         }
         ClientCommand::CreateProject { name } => {

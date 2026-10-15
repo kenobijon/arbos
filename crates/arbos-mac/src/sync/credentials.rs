@@ -1,6 +1,11 @@
-//! Device token storage (`crdt-sync.md` §10.1). macOS: the login keychain via
-//! `security(1)`. Elsewhere: a 0600 JSON file under the config dir.
-//! `ARBOS_RELAY_TOKEN` (+ `ARBOS_DEVICE_ID`) override both.
+//! Credential storage. macOS: the login keychain via `security(1)`. Elsewhere:
+//! a 0600 JSON file under the config dir. `ARBOS_RELAY_TOKEN` (+
+//! `ARBOS_DEVICE_ID`) override both.
+//!
+//! Two shapes live here: the self-serve JWT pair from `POST /auth/token`
+//! (access + rotating refresh token, both bound to the device) and the legacy
+//! `adv_` device token from `/pair`, which the relay keeps honouring as a
+//! bearer. A legacy token has no refresh token and never expires.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -8,13 +13,47 @@ use std::process::Command;
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::model::now_ms;
+
 const KEYCHAIN_SERVICE: &str = "sh.arbos.mac.relay";
+
+/// `user` from `/auth/token` and `/me`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AccountUser {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub login: String,
+    #[serde(default)]
+    pub avatar_url: String,
+    #[serde(default)]
+    pub name: String,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DeviceCredentials {
     pub relay_url: String,
     pub device_id: String,
-    pub device_token: String,
+    /// Bearer for every HTTP call and `?token=` on WebSocket dials.
+    #[serde(alias = "device_token")]
+    pub access_token: String,
+    /// `arf_…`, rotates on every refresh. `None` for legacy `adv_` tokens.
+    #[serde(default)]
+    pub refresh_token: Option<String>,
+    /// Unix ms when the access token expires; 0 = never (legacy).
+    #[serde(default)]
+    pub expires_at: u64,
+    #[serde(default)]
+    pub user: Option<AccountUser>,
+}
+
+impl DeviceCredentials {
+    /// Refresh when the relay's 5-minute rule says so.
+    pub fn needs_refresh(&self) -> bool {
+        self.refresh_token.is_some()
+            && self.expires_at > 0
+            && self.expires_at.saturating_sub(now_ms()) < 5 * 60_000
+    }
 }
 
 fn config_dir() -> PathBuf {
@@ -39,7 +78,10 @@ pub fn load(relay_url: &str) -> Option<DeviceCredentials> {
             return Some(DeviceCredentials {
                 relay_url: relay_url.to_string(),
                 device_id: std::env::var("ARBOS_DEVICE_ID").unwrap_or_else(|_| "mac:env".into()),
-                device_token: token.trim().to_string(),
+                access_token: token.trim().to_string(),
+                refresh_token: None,
+                expires_at: 0,
+                user: None,
             });
         }
     }
@@ -68,6 +110,22 @@ pub fn store(creds: &DeviceCredentials) -> Result<()> {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
+}
+
+/// Sign-out: forget the tokens everywhere they could be.
+pub fn clear(relay_url: &str) {
+    if cfg!(target_os = "macos") {
+        let _ = Command::new("security")
+            .args([
+                "delete-generic-password",
+                "-s",
+                KEYCHAIN_SERVICE,
+                "-a",
+                relay_url,
+            ])
+            .output();
+    }
+    let _ = std::fs::remove_file(file_path(relay_url));
 }
 
 fn load_keychain(relay_url: &str) -> Option<DeviceCredentials> {

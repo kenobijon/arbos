@@ -1167,6 +1167,18 @@ pub struct Machine {
     pub progress: Option<f32>,
 }
 
+/// Settings → Account: who is signed in and what is left (`GET /me`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AccountView {
+    pub login: String,
+    pub name: String,
+    pub avatar_url: String,
+    pub device_name: String,
+    pub balance_usd: f64,
+    pub spent_today_usd: f64,
+    pub daily_cap_usd: Option<f64>,
+}
+
 /// Connection to the relay, S14.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Link {
