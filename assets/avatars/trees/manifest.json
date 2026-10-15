@@ -61,7 +61,7 @@
       "name": "Oakley",
       "personality": "steady",
       "default_face": "calm",
-      "ready": false,
+      "ready": true,
       "svg": "assets/avatars/trees/oak.svg",
       "png": {
         "56": "assets/avatars/trees/png/oak-56.png",
@@ -109,7 +109,7 @@
       "name": "Pip",
       "personality": "focused",
       "default_face": "focused",
-      "ready": false,
+      "ready": true,
       "svg": "assets/avatars/trees/pine.svg",
       "png": {
         "56": "assets/avatars/trees/png/pine-56.png",
@@ -157,7 +157,7 @@
       "name": "Lolli",
       "personality": "cheerful",
       "default_face": "happy",
-      "ready": false,
+      "ready": true,
       "svg": "assets/avatars/trees/lollipop.svg",
       "png": {
         "56": "assets/avatars/trees/png/lollipop-56.png",
@@ -205,7 +205,7 @@
       "name": "Frax",
       "personality": "curious",
       "default_face": "surprised",
-      "ready": false,
+      "ready": true,
       "svg": "assets/avatars/trees/fractal.svg",
       "png": {
         "56": "assets/avatars/trees/png/fractal-56.png",
@@ -253,7 +253,7 @@
       "name": "Morel",
       "personality": "playful",
       "default_face": "winking",
-      "ready": false,
+      "ready": true,
       "svg": "assets/avatars/trees/mushroom.svg",
       "png": {
         "56": "assets/avatars/trees/png/mushroom-56.png",
@@ -301,7 +301,7 @@
       "name": "Cy",
       "personality": "determined",
       "default_face": "determined",
-      "ready": false,
+      "ready": true,
       "svg": "assets/avatars/trees/cypress.svg",
       "png": {
         "56": "assets/avatars/trees/png/cypress-56.png",
@@ -349,7 +349,7 @@
       "name": "Willa",
       "personality": "gentle",
       "default_face": "calm",
-      "ready": false,
+      "ready": true,
       "svg": "assets/avatars/trees/willow.svg",
       "png": {
         "56": "assets/avatars/trees/png/willow-56.png",
@@ -397,7 +397,7 @@
       "name": "Palmer",
       "personality": "laid-back",
       "default_face": "winking",
-      "ready": false,
+      "ready": true,
       "svg": "assets/avatars/trees/palm.svg",
       "png": {
         "56": "assets/avatars/trees/png/palm-56.png",

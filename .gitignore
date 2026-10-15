@@ -17,3 +17,4 @@ harness/**/dist/
 *.key
 /keys/
 /secrets/
+__pycache__/
