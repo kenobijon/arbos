@@ -20,7 +20,7 @@ use crate::model::{
 };
 use crate::model::{AccountView, Person};
 use crate::sync::{ClientCommand, SyncEvent, SyncSource};
-use crate::ui::notify::{Gate, Notifier, NotifyEvent, NotifyKind};
+use crate::ui::notify::{self, Gate, Notifier, NotifyEvent, NotifyKind};
 
 /// How often held notification batches are re-checked.
 const NOTIFY_TICK_MS: u64 = 5_000;
@@ -177,6 +177,8 @@ pub struct AppState {
     /// System notifications (D49); the Shell flips `window_active`.
     pub notifier: Notifier,
     pub window_active: bool,
+    /// One-time explainer before the OS asks for notification permission.
+    pub notify_prompt: bool,
     /// Settings → Channels (F7).
     pub channels: ChannelsView,
     /// In-app update (D42): what the rail button and settings show.
@@ -230,7 +232,7 @@ impl AppState {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(NOTIFY_TICK_MS))
                 .await;
-            if this.update(cx, |state, _| state.notify_tick()).is_err() {
+            if this.update(cx, |state, cx| state.notify_tick(cx)).is_err() {
                 break;
             }
         });
@@ -303,6 +305,7 @@ impl AppState {
             routine_runs: HashMap::new(),
             notifier: Notifier::new(),
             window_active: true,
+            notify_prompt: false,
             channels: ChannelsView::default(),
             update: update_state,
             local: LocalView::default(),
@@ -435,12 +438,16 @@ impl AppState {
             SyncEvent::Paired { device_id } => {
                 self.pairing = None;
                 self.device_id = Some(device_id);
+                self.maybe_prompt_notifications();
                 // Land in a chat: if this account has no project yet, make "Home".
                 self.first_project_pending = true;
                 cx.notify();
             }
             SyncEvent::Account(account) => {
                 self.account = account;
+                if self.account.is_some() {
+                    self.maybe_prompt_notifications();
+                }
                 cx.notify();
             }
             SyncEvent::PeopleSearch { query, results } => {
@@ -956,6 +963,7 @@ impl AppState {
         {
             chat.unread = false;
         }
+        self.sync_badge();
         self.command(ClientCommand::MarkRead {
             chat_id: chat_id.clone(),
         });
@@ -1615,17 +1623,88 @@ impl AppState {
     }
 
     fn notify(&mut self, project_id: Id, chat_id: Option<&str>, kind: NotifyKind, detail: String) {
+        self.notify_from(project_id, chat_id, kind, detail, None, None);
+    }
+
+    /// Like [`Self::notify`], as a chat message: `sender` titles the banner
+    /// and `image` (the sender's chat picture) is attached.
+    fn notify_from(
+        &mut self,
+        project_id: Id,
+        chat_id: Option<&str>,
+        kind: NotifyKind,
+        detail: String,
+        sender: Option<String>,
+        image: Option<PathBuf>,
+    ) {
         let Some(project) = self.project(&project_id) else {
             return;
         };
-        let event = NotifyEvent {
-            project_id: project.id.clone(),
-            project_name: project.name.clone(),
-            kind,
-            detail,
-        };
+        let mut event = NotifyEvent::new(project.id.clone(), project.name.clone(), kind, detail);
+        event.chat_id = chat_id.map(str::to_string);
+        event.sender = sender;
+        event.image = image;
         let gate = self.notify_gate(&project_id, chat_id);
         self.notifier.offer(event, now_ms(), gate);
+    }
+
+    /// A person's GitHub avatar as a round PNG for the notification, from the
+    /// decoded image the rail already holds (`None` until it has loaded).
+    fn person_notification_png(&self, url: &str) -> Option<PathBuf> {
+        let img = self.avatars.get(url)?.as_ref()?;
+        let bytes = img.as_bytes(0)?;
+        let size = img.size(0);
+        let (w, h) = (size.width.0 as u32, size.height.0 as u32);
+        if w == 0 || h == 0 || bytes.len() < (w * h * 4) as usize {
+            return None;
+        }
+        let mut rgba = bytes[..(w * h * 4) as usize].to_vec();
+        let c = (w.min(h) as f32 - 1.0) / 2.0;
+        let r = w.min(h) as f32 / 2.0;
+        for (i, px) in rgba.chunks_exact_mut(4).enumerate() {
+            px.swap(0, 2);
+            let (x, y) = ((i as u32 % w) as f32, (i as u32 / w) as f32);
+            let d = ((x - c).powi(2) + (y - c).powi(2)).sqrt();
+            let cover = (r - d + 0.5).clamp(0.0, 1.0);
+            px[3] = (px[3] as f32 * cover) as u8;
+        }
+        let key = format!("person-{:016x}", crate::ui::avatars::fnv1a64(url));
+        notify::image_file(&key, w, h, &rgba)
+    }
+
+    /// The agent behind a reply: its name and chat image (a shared agent's
+    /// own tree and colour when the message or member list carries them,
+    /// else this project's).
+    fn agent_identity(&self, project_id: &str, message: &Message) -> (String, Option<PathBuf>) {
+        let project = self.projects.iter().find(|p| p.id == project_id);
+        let shared_agent = message.sender.strip_prefix("agent:").and_then(|pid| {
+            project
+                .and_then(|p| p.agents.iter().find(|a| a.project_id == pid))
+                .map(|a| (a.name.clone(), a.avatar.clone(), a.avatar_color.clone()))
+        });
+        let name = message
+            .sender_name
+            .clone()
+            .filter(|n| !n.is_empty())
+            .or_else(|| shared_agent.as_ref().map(|(n, _, _)| n.clone()))
+            .or_else(|| project.map(|p| p.name.clone()))
+            .unwrap_or_else(|| "Agent".to_string());
+        let slug = message
+            .sender_avatar
+            .clone()
+            .filter(|a| !a.is_empty() && !a.contains("://"))
+            .or_else(|| shared_agent.as_ref().and_then(|(_, s, _)| s.clone()))
+            .or_else(|| project.and_then(|p| self.avatar_slug(p)));
+        let color = message
+            .sender_avatar_color
+            .clone()
+            .filter(|c| !c.is_empty())
+            .or_else(|| shared_agent.as_ref().and_then(|(_, _, c)| c.clone()))
+            .or_else(|| project.and_then(|p| self.avatar_color(p)));
+        let image = slug
+            .as_deref()
+            .and_then(|s| crate::ui::avatars::notification_png(s, color.as_deref()));
+        (name, image)
     }
 
     fn notify_for_message(
@@ -1660,11 +1739,31 @@ impl AppState {
                     .sender_handle
                     .clone()
                     .unwrap_or_else(|| "someone".into());
-                self.notify(
+                let person = self
+                    .projects
+                    .iter()
+                    .find(|p| p.id == project_id)
+                    .and_then(|p| p.people.iter().find(|x| x.handle == handle).cloned());
+                let name = message
+                    .sender_name
+                    .clone()
+                    .filter(|n| !n.is_empty())
+                    .or_else(|| person.as_ref().map(|x| x.display_name()))
+                    .unwrap_or_else(|| format!("@{handle}"));
+                let url = message
+                    .sender_avatar
+                    .clone()
+                    .filter(|a| a.contains("://"))
+                    .or_else(|| person.as_ref().map(|x| x.avatar_url.clone()))
+                    .unwrap_or_default();
+                let image = self.person_notification_png(&url);
+                self.notify_from(
                     project_id,
                     Some(chat_id),
                     NotifyKind::DirectMessage,
-                    format!("@{handle}: {}", preview(message)),
+                    preview(message),
+                    Some(name),
+                    image,
                 );
                 return;
             }
@@ -1747,7 +1846,15 @@ impl AppState {
                 p
             }
         };
-        self.notify(project_id, Some(chat_id), NotifyKind::TurnFinished, detail);
+        let (sender, image) = self.agent_identity(&project_id, message);
+        self.notify_from(
+            project_id,
+            Some(chat_id),
+            NotifyKind::TurnFinished,
+            detail,
+            Some(sender),
+            image,
+        );
     }
 
     /// The routine whose prompt this assistant reply answers (F3: the prompt is
@@ -1785,7 +1892,7 @@ impl AppState {
         self.notify(project_id, chat_id, NotifyKind::ApprovalRequested, what);
     }
 
-    fn notify_tick(&mut self) {
+    fn notify_tick(&mut self, cx: &mut Context<Self>) {
         let gates: HashMap<Id, Gate> = self
             .projects
             .iter()
@@ -1793,6 +1900,61 @@ impl AppState {
             .collect();
         self.notifier
             .tick(now_ms(), |id| gates.get(id).copied().unwrap_or_default());
+        for chat_id in notify::take_clicks() {
+            self.open_chat_from_notification(chat_id, cx);
+        }
+        self.sync_badge();
+    }
+
+    /// A click on a notification: bring the window up and show that chat.
+    pub fn open_chat_from_notification(&mut self, chat_id: Id, cx: &mut Context<Self>) {
+        let project_id = self
+            .chats
+            .values()
+            .flat_map(|v| v.iter())
+            .find(|c| c.id == chat_id)
+            .map(|c| c.project_id.clone());
+        let Some(project_id) = project_id else {
+            return;
+        };
+        self.select_project(project_id, cx);
+        self.select_tab(chat_id, cx);
+        cx.activate(true);
+    }
+
+    /// Dock badge = chats with something unread (cleared as they are read).
+    pub fn sync_badge(&self) {
+        let total = self
+            .chats
+            .values()
+            .flat_map(|v| v.iter())
+            .filter(|c| c.unread)
+            .count();
+        notify::set_badge(total);
+    }
+
+    /// First launch after sign-in: show the explainer once, if the platform
+    /// will ask for permission at all.
+    fn maybe_prompt_notifications(&mut self) {
+        if self.notify_prompt || !notify::needs_permission() {
+            return;
+        }
+        if !notify::permission_asked(&crate::sync::credentials::config_dir()) {
+            self.notify_prompt = true;
+        }
+    }
+
+    pub fn allow_notifications(&mut self, cx: &mut Context<Self>) {
+        notify::mark_permission_asked(&crate::sync::credentials::config_dir());
+        notify::request_permission();
+        self.notify_prompt = false;
+        cx.notify();
+    }
+
+    pub fn dismiss_notify_prompt(&mut self, cx: &mut Context<Self>) {
+        notify::mark_permission_asked(&crate::sync::credentials::config_dir());
+        self.notify_prompt = false;
+        cx.notify();
     }
 
     pub fn set_window_active(&mut self, active: bool, cx: &mut Context<Self>) {

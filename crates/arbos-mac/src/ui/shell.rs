@@ -2584,6 +2584,86 @@ impl Shell {
             .child(frosted(PANEL_RADIUS, MENU_BLUR, card))
     }
 
+    /// One-time explainer before macOS asks for notification permission.
+    fn render_notify_prompt(&self, cx: &mut Context<Self>) -> Option<Div> {
+        if !self.state.read(cx).notify_prompt {
+            return None;
+        }
+        let theme = Theme::of(cx).clone();
+        let button = |id: &'static str, label: &'static str, primary: bool, theme: &Theme| {
+            div()
+                .id(id)
+                .px(px(10.0))
+                .py(px(5.0))
+                .rounded(px(6.0))
+                .text_size(px(12.0))
+                .cursor_pointer()
+                .bg(if primary {
+                    theme.accent
+                } else {
+                    gpui::transparent_black()
+                })
+                .text_color(if primary { theme.bg } else { theme.text_muted })
+                .hover(|s| s.opacity(0.85))
+                .child(label)
+        };
+        let card =
+            div()
+                .w(px(340.0))
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .px(px(14.0))
+                .py(px(12.0))
+                .rounded(px(PANEL_RADIUS))
+                .bg(theme.card())
+                .border_1()
+                .border_color(theme.border_strong)
+                .shadow_lg()
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme.text)
+                        .child("Get told when someone writes"),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(theme.text_muted)
+                        .child(
+                        "Arbos can show a banner when an agent finishes or a person messages you, \
+                         with their picture, even when the window is in the back. macOS will ask \
+                         you to allow it next.",
+                    ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap(px(6.0))
+                        .child(button("notify-later", "Not now", false, &theme).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.state.update(cx, |s, cx| s.dismiss_notify_prompt(cx));
+                            }),
+                        ))
+                        .child(
+                            button("notify-allow", "Allow notifications", true, &theme).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.state.update(cx, |s, cx| s.allow_notifications(cx));
+                                }),
+                            ),
+                        ),
+                );
+        Some(
+            div()
+                .absolute()
+                .right(px(16.0))
+                .top(px(TAB_BAR_HEIGHT + 12.0))
+                .child(frosted(PANEL_RADIUS, MENU_BLUR, card)),
+        )
+    }
+
     fn render_notices(&self, cx: &mut Context<Self>) -> Option<Div> {
         let theme = Theme::of(cx).clone();
         let notices = self.state.read(cx).live_notices();
@@ -2834,6 +2914,9 @@ impl Render for Shell {
         }
         if let Some(notices) = self.render_notices(cx) {
             root = root.child(notices);
+        }
+        if let Some(prompt) = self.render_notify_prompt(cx) {
+            root = root.child(prompt);
         }
         root.into_any_element()
     }

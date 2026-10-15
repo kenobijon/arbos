@@ -39,10 +39,12 @@ cpal = "0.15"
 rodio = { version = "0.20", default-features = false, features = ["wav"] }
 hound = "3.5"
 
-# Sign in with GitHub: ASWebAuthenticationSession through objc2 (macOS only).
+# Sign in with GitHub (ASWebAuthenticationSession), notifications
+# (UNUserNotificationCenter) and the Dock badge through objc2 (macOS only).
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 block2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSURL", "NSString", "NSError", "NSObject", "NSGeometry"] }
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSWindow", "NSResponder"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSURL", "NSString", "NSError", "NSObject", "NSGeometry", "NSBundle", "NSArray"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSWindow", "NSResponder", "NSDockTile"] }
+objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationAttachment", "UNNotificationSound", "UNNotificationTrigger"] }
 objc2-authentication-services = { version = "0.3", default-features = false, features = ["std", "block2", "ASWebAuthenticationSession", "ASFoundation"] }

@@ -522,6 +522,62 @@ fn decode_strip(bytes: &[u8], fps: f32, tint: Option<&Palette>) -> Option<Render
     Some(RenderImage::new(frames))
 }
 
+/// The avatar as a still PNG for a system notification: the first idle frame
+/// at rail size, with the disc and ring drawn under a coloured tree exactly as
+/// [`element`] shows it. Written once per (slug, colour) to the notify cache.
+pub fn notification_png(slug: &str, avatar_color: Option<&str>) -> Option<std::path::PathBuf> {
+    let palette = palette_for(avatar_color);
+    let disc = draws_disc(slug, &palette);
+    let key = format!(
+        "tree-{slug}-{}",
+        if disc { palette.id.as_str() } else { "mono" }
+    );
+    let (_, _, _, _, _, bytes) = embedded::STRIPS
+        .iter()
+        .find(|(s, k, r, _, t, _)| *s == slug && *k == "idle" && *r && *t == disc)
+        .or_else(|| {
+            embedded::STRIPS
+                .iter()
+                .find(|(s, k, _, _, t, _)| *s == slug && *k == "idle" && *t == disc)
+        })?;
+    let strip = image::load_from_memory(bytes).ok()?.into_rgba8();
+    let (w, h) = strip.dimensions();
+    if h == 0 || w < h {
+        return None;
+    }
+    let mut tree = image::imageops::crop_imm(&strip, 0, 0, h, h).to_image();
+    if !disc {
+        return crate::ui::notify::image_file(&key, h, h, tree.as_raw());
+    }
+    for px in tree.pixels_mut() {
+        if px[3] > 0 {
+            let level = px[0].max(px[1]).max(px[2]);
+            let [r, g, b] = palette.ink(level);
+            *px = image::Rgba([r, g, b, px[3]]);
+        }
+    }
+    // Disc + ring (2 px at this size, like the shipped art), then the tree.
+    let mut out = image::RgbaImage::new(h, h);
+    let c = (h as f32 - 1.0) / 2.0;
+    let radius = h as f32 / 2.0;
+    let ring_w = 2.0;
+    let ring_a = palette.ring_alpha as f32 / 255.0;
+    for (x, y, px) in out.enumerate_pixels_mut() {
+        let d = ((x as f32 - c).powi(2) + (y as f32 - c).powi(2)).sqrt();
+        let cover = (radius - d + 0.5).clamp(0.0, 1.0);
+        if cover <= 0.0 {
+            continue;
+        }
+        let in_ring = ((d - (radius - ring_w)) + 0.5).clamp(0.0, 1.0) * ring_a;
+        let mix = |i: usize| {
+            (palette.bg[i] as f32 * (1.0 - in_ring) + palette.ring[i] as f32 * in_ring) as u8
+        };
+        *px = image::Rgba([mix(0), mix(1), mix(2), (cover * 255.0) as u8]);
+    }
+    image::imageops::overlay(&mut out, &tree, 0, 0);
+    crate::ui::notify::image_file(&key, h, h, out.as_raw())
+}
+
 /// Length of one pass of the reply reaction, for the "play once" window.
 pub fn reply_duration_ms(slug: &str) -> u64 {
     image(slug, AvatarState::Reply, false)

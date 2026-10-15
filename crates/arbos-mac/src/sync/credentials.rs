@@ -56,7 +56,7 @@ impl DeviceCredentials {
     }
 }
 
-fn config_dir() -> PathBuf {
+pub fn config_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("ARBOS_MAC_CONFIG") {
         return PathBuf::from(dir);
     }
