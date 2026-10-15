@@ -311,6 +311,35 @@ impl Daytona {
         .await
     }
 
+    /// `secret.create` — `POST /secret { name, value, hosts }` (D28). Returns the secret id.
+    pub async fn create_secret(&self, name: &str, value: &str, hosts: &[String]) -> Result<String> {
+        let v: Value = self
+            .send(
+                self.req(reqwest::Method::POST, "/secret").json(&json!({
+                    "name": name, "value": value, "hosts": hosts,
+                    "description": "Arbos vault item (placeholder-protected)",
+                })),
+                "create secret",
+            )
+            .await?;
+        v.get("id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow!("daytona create secret: reply has no id"))
+    }
+
+    /// `secret.update` — `PATCH /secret/{id} { value, hosts }`; the placeholder stays, sandboxes see the new value in ≤ 15 s.
+    pub async fn update_secret(&self, id: &str, value: &str, hosts: &[String]) -> Result<()> {
+        let _: Value = self
+            .send(
+                self.req(reqwest::Method::PATCH, &format!("/secret/{id}"))
+                    .json(&json!({ "value": value, "hosts": hosts })),
+                "update secret",
+            )
+            .await?;
+        Ok(())
+    }
+
     /// `getPortPreviewUrl` — `GET /sandbox/{sandboxIdOrName}/ports/{port}/preview-url` (sandbox-wide token; relay only).
     pub async fn preview_url(&self, id: &str, port: u16) -> Result<PortPreviewUrl> {
         self.send(

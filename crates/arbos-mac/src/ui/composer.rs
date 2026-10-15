@@ -78,6 +78,8 @@ pub struct ComposerInput {
     /// Multi-line editors (skill bodies): Enter inserts a newline instead of
     /// submitting.
     pub enter_inserts_newline: bool,
+    /// Password fields: paint `*` per byte so caret offsets still line up with `content`.
+    masked: bool,
 }
 
 impl ComposerInput {
@@ -94,7 +96,12 @@ impl ComposerInput {
             scroll_y: 0.0,
             on_submit: None,
             enter_inserts_newline: false,
+            masked: false,
         }
+    }
+
+    pub fn set_masked(&mut self, masked: bool) {
+        self.masked = masked;
     }
 
     pub fn text(&self) -> &str {
@@ -623,6 +630,11 @@ impl Element for InputElement {
 
         let (display_text, text_color) = if content.is_empty() {
             (input.placeholder.to_string(), theme.text_faint)
+        } else if input.masked {
+            (
+                content.chars().map(|c| "*".repeat(c.len_utf8())).collect(),
+                theme.text,
+            )
         } else {
             (content.clone(), theme.text)
         };

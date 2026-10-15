@@ -293,7 +293,7 @@ impl PrimeAdapter {
 
     fn envs(&self, session_id: &str) -> Vec<(String, String)> {
         let prime_dir = self.cfg.prime_dir();
-        vec![
+        let mut envs = vec![
             (
                 "PRIME_AGENT_CODING_AGENT_DIR".into(),
                 prime_dir.display().to_string(),
@@ -343,7 +343,9 @@ impl PrimeAdapter {
                 std::env::var("PRIME_AGENT_BASH_SHELL")
                     .unwrap_or_else(|_| "/usr/local/lib/arbos/arbos-shell".into()),
             ),
-        ]
+        ];
+        envs.extend(crate::vault::grant_envs(&self.cfg.project_id));
+        envs
     }
 
     async fn spawn(
@@ -555,7 +557,7 @@ impl PiAdapter {
     }
 
     pub fn envs(cfg: &Config, session_id: &str, role: &str) -> Vec<(String, String)> {
-        vec![
+        let mut envs = vec![
             (
                 "PI_CODING_AGENT_DIR".into(),
                 cfg.pi_dir().display().to_string(),
@@ -580,7 +582,10 @@ impl PiAdapter {
             ("ARBOS_MCP_TOKEN".into(), cfg.mcp_token_for_role(role)),
             ("ARBOS_MCP_URL".into(), cfg.mcp_url()),
             ("ARBOS_BOX_TOKEN".into(), cfg.box_token.clone()),
-        ]
+        ];
+        // Approved vault grants (F8): placeholders only, usable through the egress tool.
+        envs.extend(crate::vault::grant_envs(&cfg.project_id));
+        envs
     }
 
     pub fn common_args(
@@ -886,6 +891,7 @@ impl ClaudeCodeAdapter {
             .env("DISABLE_TELEMETRY", "1")
             .env("DISABLE_ERROR_REPORTING", "1")
             .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+            .envs(crate::vault::grant_envs(&self.cfg.project_id))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::from(std::fs::File::create(&log)?));

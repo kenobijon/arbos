@@ -727,6 +727,7 @@ mod tests {
             image_mock: false,
             voice_mock: true,
             openai_audio_base: String::new(),
+            vault_mock: false,
         };
         AppState {
             db,

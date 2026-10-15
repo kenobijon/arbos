@@ -157,6 +157,17 @@ CREATE TABLE IF NOT EXISTS local_devices (
   home TEXT NOT NULL DEFAULT '', connected INTEGER NOT NULL DEFAULT 0, last_seen INTEGER, first_seen INTEGER NOT NULL,
   allow_reads INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS vault_items (
+  id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, kind TEXT NOT NULL,
+  fields TEXT NOT NULL, allowed_hosts TEXT NOT NULL DEFAULT '[]',
+  created_at INTEGER NOT NULL, last_used_at INTEGER, daytona_secrets TEXT NOT NULL DEFAULT '{}'
+);
+CREATE TABLE IF NOT EXISTS vault_requests (
+  id TEXT PRIMARY KEY, project_id TEXT NOT NULL, chat_id TEXT NOT NULL DEFAULT '',
+  item_id TEXT, item_name TEXT NOT NULL, purpose TEXT NOT NULL DEFAULT '', use_kind TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, decided_at INTEGER, expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS vault_requests_project ON vault_requests(project_id, created_at);
 "#;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -330,6 +341,41 @@ pub struct ChannelPairCode {
     pub project_id: String,
     pub chat_id: String,
     pub created_at: i64,
+    pub expires_at: i64,
+}
+
+/// One credential in the vault (F8). `fields` is ciphertext from `connectors::crypto` over a JSON
+/// object (`{ "url", "username", "password" }` for a login, `{ "value" }` for a secret/api_key).
+#[derive(Debug, Clone)]
+pub struct VaultItem {
+    pub id: String,
+    pub name: String,
+    /// `login | secret | api_key`.
+    pub kind: String,
+    pub fields_enc: String,
+    pub allowed_hosts: Vec<String>,
+    pub created_at: i64,
+    pub last_used_at: Option<i64>,
+    /// field → Daytona secret id, when the item was mirrored as Daytona Secrets (D28).
+    pub daytona_secrets: serde_json::Value,
+}
+
+/// A box asking to use a vault item (F8). Decided by the user from a device.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VaultRequest {
+    pub id: String,
+    pub project_id: String,
+    pub chat_id: String,
+    pub item_id: Option<String>,
+    pub item_name: String,
+    pub purpose: String,
+    /// `env | header | browser_fill`.
+    #[serde(rename = "use")]
+    pub use_kind: String,
+    /// `pending | approved | denied | expired`.
+    pub status: String,
+    pub created_at: i64,
+    pub decided_at: Option<i64>,
     pub expires_at: i64,
 }
 
@@ -2228,4 +2274,210 @@ fn fts_query(q: &str) -> String {
     };
     last.push('*');
     terms.join(" OR ")
+}
+
+impl Db {
+    // ---- vault (F8) ---------------------------------------------------------------------------
+
+    const VAULT_ITEM_COLS: &'static str =
+        "id, name, kind, fields, allowed_hosts, created_at, last_used_at, daytona_secrets";
+
+    fn row_to_vault_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<VaultItem> {
+        Ok(VaultItem {
+            id: r.get(0)?,
+            name: r.get(1)?,
+            kind: r.get(2)?,
+            fields_enc: r.get(3)?,
+            allowed_hosts: serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or_default(),
+            created_at: r.get(5)?,
+            last_used_at: r.get(6)?,
+            daytona_secrets: serde_json::from_str(&r.get::<_, String>(7)?).unwrap_or_default(),
+        })
+    }
+
+    pub fn upsert_vault_item(&self, it: &VaultItem) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO vault_items(id, name, kind, fields, allowed_hosts, created_at, last_used_at, daytona_secrets)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+                 ON CONFLICT(id) DO UPDATE SET name=excluded.name, kind=excluded.kind, fields=excluded.fields,
+                    allowed_hosts=excluded.allowed_hosts, daytona_secrets=excluded.daytona_secrets",
+                params![
+                    it.id, it.name, it.kind, it.fields_enc,
+                    serde_json::to_string(&it.allowed_hosts).unwrap_or_else(|_| "[]".into()),
+                    it.created_at, it.last_used_at, it.daytona_secrets.to_string()
+                ],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn list_vault_items(&self) -> Result<Vec<VaultItem>> {
+        self.with(|c| {
+            let mut st = c.prepare(&format!(
+                "SELECT {} FROM vault_items ORDER BY name",
+                Self::VAULT_ITEM_COLS
+            ))?;
+            let rows = st.query_map([], Self::row_to_vault_item)?;
+            rows.collect()
+        })
+    }
+
+    pub fn vault_item(&self, id: &str) -> Result<Option<VaultItem>> {
+        self.with(|c| {
+            c.query_row(
+                &format!(
+                    "SELECT {} FROM vault_items WHERE id = ?1",
+                    Self::VAULT_ITEM_COLS
+                ),
+                params![id],
+                Self::row_to_vault_item,
+            )
+            .optional()
+        })
+    }
+
+    pub fn vault_item_by_name(&self, name: &str) -> Result<Option<VaultItem>> {
+        self.with(|c| {
+            c.query_row(
+                &format!(
+                    "SELECT {} FROM vault_items WHERE name = ?1",
+                    Self::VAULT_ITEM_COLS
+                ),
+                params![name],
+                Self::row_to_vault_item,
+            )
+            .optional()
+        })
+    }
+
+    pub fn touch_vault_item(&self, id: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE vault_items SET last_used_at = ?2 WHERE id = ?1",
+                params![id, now_ms()],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn delete_vault_item(&self, id: &str) -> Result<bool> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE vault_requests SET status = 'expired' WHERE item_id = ?1 AND status IN ('pending', 'approved')",
+                params![id],
+            )?;
+            c.execute("DELETE FROM vault_items WHERE id = ?1", params![id])
+                .map(|n| n > 0)
+        })
+    }
+
+    const VAULT_REQ_COLS: &'static str =
+        "id, project_id, chat_id, item_id, item_name, purpose, use_kind, status, created_at, decided_at, expires_at";
+
+    fn row_to_vault_request(r: &rusqlite::Row<'_>) -> rusqlite::Result<VaultRequest> {
+        Ok(VaultRequest {
+            id: r.get(0)?,
+            project_id: r.get(1)?,
+            chat_id: r.get(2)?,
+            item_id: r.get(3)?,
+            item_name: r.get(4)?,
+            purpose: r.get(5)?,
+            use_kind: r.get(6)?,
+            status: r.get(7)?,
+            created_at: r.get(8)?,
+            decided_at: r.get(9)?,
+            expires_at: r.get(10)?,
+        })
+    }
+
+    pub fn insert_vault_request(&self, rq: &VaultRequest) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO vault_requests(id, project_id, chat_id, item_id, item_name, purpose, use_kind, status, created_at, decided_at, expires_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                params![
+                    rq.id, rq.project_id, rq.chat_id, rq.item_id, rq.item_name, rq.purpose, rq.use_kind,
+                    rq.status, rq.created_at, rq.decided_at, rq.expires_at
+                ],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// Pending requests past `expires_at` become `expired` on read, so clients never act on stale ones.
+    fn expire_vault_requests(c: &Connection) -> rusqlite::Result<()> {
+        c.execute(
+            "UPDATE vault_requests SET status = 'expired', decided_at = ?1 WHERE status = 'pending' AND expires_at < ?1",
+            params![now_ms()],
+        )
+        .map(|_| ())
+    }
+
+    pub fn vault_request(&self, id: &str) -> Result<Option<VaultRequest>> {
+        self.with(|c| {
+            Self::expire_vault_requests(c)?;
+            c.query_row(
+                &format!(
+                    "SELECT {} FROM vault_requests WHERE id = ?1",
+                    Self::VAULT_REQ_COLS
+                ),
+                params![id],
+                Self::row_to_vault_request,
+            )
+            .optional()
+        })
+    }
+
+    pub fn list_vault_requests(&self, limit: i64) -> Result<Vec<VaultRequest>> {
+        self.with(|c| {
+            Self::expire_vault_requests(c)?;
+            let mut st = c.prepare(&format!(
+                "SELECT {} FROM vault_requests ORDER BY (status = 'pending') DESC, created_at DESC LIMIT ?1",
+                Self::VAULT_REQ_COLS
+            ))?;
+            let rows = st.query_map(params![limit], Self::row_to_vault_request)?;
+            rows.collect()
+        })
+    }
+
+    /// Decide a pending request. Returns the updated row, or `None` when it is not pending.
+    pub fn decide_vault_request(&self, id: &str, approve: bool) -> Result<Option<VaultRequest>> {
+        self.with(|c| {
+            Self::expire_vault_requests(c)?;
+            let status = if approve { "approved" } else { "denied" };
+            let n = c.execute(
+                "UPDATE vault_requests SET status = ?2, decided_at = ?3 WHERE id = ?1 AND status = 'pending'",
+                params![id, status, now_ms()],
+            )?;
+            if n == 0 {
+                return Ok(None);
+            }
+            c.query_row(
+                &format!(
+                    "SELECT {} FROM vault_requests WHERE id = ?1",
+                    Self::VAULT_REQ_COLS
+                ),
+                params![id],
+                Self::row_to_vault_request,
+            )
+            .optional()
+        })
+    }
+
+    /// Approved requests of a project for one item (any use), newest first.
+    pub fn approved_vault_requests(
+        &self,
+        project_id: &str,
+        item_id: &str,
+    ) -> Result<Vec<VaultRequest>> {
+        self.with(|c| {
+            let mut st = c.prepare(&format!(
+                "SELECT {} FROM vault_requests WHERE project_id = ?1 AND item_id = ?2 AND status = 'approved' ORDER BY decided_at DESC",
+                Self::VAULT_REQ_COLS
+            ))?;
+            let rows = st.query_map(params![project_id, item_id], Self::row_to_vault_request)?;
+            rows.collect()
+        })
+    }
 }

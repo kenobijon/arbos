@@ -20,7 +20,7 @@ use tokio::sync::mpsc;
 
 use crate::model::{
     BoxState, ChannelsView, Chat, ConnectorsView, Effort, Id, Link, LocalView, Message, Project,
-    ProjectDocView, Routine, RoutineRun, RoutineTrigger, Skill,
+    ProjectDocView, Routine, RoutineRun, RoutineTrigger, Skill, VaultNewItem, VaultView,
 };
 
 /// Something the source learned; the UI applies it to its mirror.
@@ -105,6 +105,8 @@ pub enum SyncEvent {
         provider: String,
         auth_url: String,
     },
+    /// Settings → Vault: items (never values) and requests (F8).
+    Vault(VaultView),
     /// Routines of one project (Settings → Routines).
     Routines {
         project_id: Id,
@@ -244,6 +246,20 @@ pub enum ClientCommand {
     },
     ConnectorDisconnect {
         id: Id,
+    },
+    /// Settings → Vault opened or asked for a refresh.
+    VaultRefresh,
+    /// Add (or replace by name) a vault item; the values go to the relay once.
+    VaultAddItem {
+        item: VaultNewItem,
+    },
+    VaultDeleteItem {
+        id: Id,
+    },
+    /// Approve or deny a pending vault request.
+    VaultDecide {
+        request_id: Id,
+        approve: bool,
     },
     /// Settings → Routines opened or needs a refresh.
     RoutinesRefresh {

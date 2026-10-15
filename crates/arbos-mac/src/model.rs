@@ -810,6 +810,37 @@ impl LocalDevice {
     }
 }
 
+/// One vault item as the relay lists it (F8). Values are write-only; this never carries one.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VaultItem {
+    pub id: Id,
+    pub name: String,
+    /// `login | secret | api_key`.
+    pub kind: String,
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
+    #[serde(default)]
+    pub fields: Vec<String>,
+    #[serde(default)]
+    pub env: String,
+    #[serde(default)]
+    pub created_at: i64,
+    #[serde(default)]
+    pub last_used_at: Option<i64>,
+    #[serde(default)]
+    pub mock: bool,
+}
+
+impl VaultItem {
+    pub fn kind_label(&self) -> &'static str {
+        match self.kind.as_str() {
+            "login" => "Login",
+            "api_key" => "API key",
+            _ => "Secret",
+        }
+    }
+}
+
 /// Settings → This Mac state.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LocalView {
@@ -817,6 +848,76 @@ pub struct LocalView {
     /// Relay URL the install command points the helper at.
     pub relay_url: String,
     pub loaded: bool,
+}
+
+/// `vault_requests.status` (F8).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VaultRequestStatus {
+    Pending,
+    Approved,
+    Denied,
+    Expired,
+    #[serde(other)]
+    Other,
+}
+
+impl VaultRequestStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            VaultRequestStatus::Pending => "Pending",
+            VaultRequestStatus::Approved => "Approved",
+            VaultRequestStatus::Denied => "Denied",
+            VaultRequestStatus::Expired => "Expired",
+            VaultRequestStatus::Other => "Unknown",
+        }
+    }
+}
+
+/// A box asking to use a vault item (`GET /vault/requests` item).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VaultRequest {
+    pub id: Id,
+    pub project_id: Id,
+    #[serde(default)]
+    pub chat_id: Id,
+    pub item_name: String,
+    #[serde(default)]
+    pub purpose: String,
+    /// `env | header | browser_fill`.
+    #[serde(rename = "use", default)]
+    pub use_kind: String,
+    pub status: VaultRequestStatus,
+    #[serde(default)]
+    pub created_at: i64,
+    #[serde(default)]
+    pub decided_at: Option<i64>,
+}
+
+/// Fields of a new vault item as typed in Settings → Vault; sent once, never kept.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VaultNewItem {
+    pub name: String,
+    pub kind: String,
+    pub fields: Vec<(String, String)>,
+    pub allowed_hosts: Vec<String>,
+}
+
+/// Settings → Vault state.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct VaultView {
+    pub mock: bool,
+    pub items: Vec<VaultItem>,
+    pub requests: Vec<VaultRequest>,
+    pub loaded: bool,
+}
+
+impl VaultView {
+    pub fn pending(&self) -> impl Iterator<Item = &VaultRequest> {
+        self.requests
+            .iter()
+            .filter(|r| r.status == VaultRequestStatus::Pending)
+    }
 }
 
 /// How a routine fires (relay `routines.trigger`, F3).

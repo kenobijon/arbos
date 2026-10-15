@@ -27,6 +27,7 @@ use crate::ui::theme::{
     TAB_BAR_HEIGHT, TAB_MIN_WIDTH,
 };
 use crate::ui::transcript::{Transcript, COLUMN_MAX_WIDTH};
+use crate::ui::vault::{VaultEvent, VaultPanel};
 use crate::ui::voice::Voice;
 
 actions!(shell, [CloseTab, NewTab, ToggleRail, TogglePanel, Quit]);
@@ -49,6 +50,7 @@ pub struct Shell {
     channels: Entity<ChannelsPanel>,
     /// F6: the "+ project" picker under the tab header.
     group_picker_open: bool,
+    vault: Entity<VaultPanel>,
     shake_started_at: Option<u64>,
     tab_scroll: gpui::ScrollHandle,
     /// Tab index to scroll into view on the next frame (new/selected tab).
@@ -134,6 +136,15 @@ impl Shell {
             }
         })
         .detach();
+        let vault = cx.new(|cx| VaultPanel::new(state.clone(), cx));
+        cx.observe(&vault, |_, _, cx| cx.notify()).detach();
+        cx.subscribe(&vault, |this, _, event: &VaultEvent, cx| match event {
+            VaultEvent::Back => {
+                this.settings_open = true;
+                cx.notify();
+            }
+        })
+        .detach();
         let routines = cx.new(|cx| RoutinesPanel::new(state.clone(), cx));
         cx.subscribe(
             &routines,
@@ -176,6 +187,7 @@ impl Shell {
             routines,
             routines_open: false,
             channels,
+            vault,
             shake_started_at: None,
             tab_scroll: gpui::ScrollHandle::new(),
             reveal_tab: None,
@@ -1800,6 +1812,26 @@ impl Shell {
                         cx.notify();
                     })),
             )
+            .child(
+                div()
+                    .id("settings-vault")
+                    .flex()
+                    .items_center()
+                    .px(px(10.0))
+                    .py(px(6.0))
+                    .rounded(px(6.0))
+                    .text_size(px(12.5))
+                    .text_color(theme.text)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.surface_2))
+                    .child(div().flex_1().child("Vault"))
+                    .child(div().text_color(theme.text_faint).child("›"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.settings_open = false;
+                        this.vault.update(cx, |p, cx| p.show(cx));
+                        cx.notify();
+                    })),
+            )
             .child(div().h(px(1.0)).bg(theme.border))
             .child(
                 div()
@@ -2146,6 +2178,7 @@ impl Render for Shell {
                         || (shown && project.is_focused(window))
                         || this.connectors.read(cx).input_focused(window, cx)
                         || this.skills.read(cx).has_focus(window, cx)
+                        || this.vault.read(cx).input_focused(window, cx)
                     {
                         return;
                     }
@@ -2198,6 +2231,9 @@ impl Render for Shell {
         }
         if self.local.read(cx).is_open() {
             root = root.child(self.local.clone());
+        }
+        if self.vault.read(cx).is_open() {
+            root = root.child(self.vault.clone());
         }
         if self.routines_open {
             root = root.child(self.routines.clone());

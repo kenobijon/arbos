@@ -18,6 +18,7 @@ mod settings;
 mod skills;
 mod store;
 mod sync;
+mod vault;
 mod workspace;
 
 use std::time::{Duration, Instant};

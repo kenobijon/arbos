@@ -32,7 +32,7 @@ use crate::model::{
     new_id, now_ms, Attachment, AttachmentKind, BoxState, ChannelBinding, ChannelPairing,
     ChannelPlatform, ChannelsView, Chat, Connector, ConnectorProvider, ConnectorsView, Effort, Id,
     Link, LocalDevice, LocalView, Message, MessageStatus, Part, Project, ProjectDocView, Role,
-    Routine, RoutineRun, Skill, ThreadInfo,
+    Routine, RoutineRun, Skill, ThreadInfo, VaultItem, VaultRequest, VaultView,
 };
 
 const HELLO_DEADLINE: Duration = Duration::from_secs(15);
@@ -271,6 +271,7 @@ fn start_after_pairing(shared: &Arc<Shared>) {
         let shared = shared.clone();
         tokio::spawn(async move {
             refresh_connectors(&shared).await;
+            refresh_vault(&shared).await;
         });
     }
     let shared = shared.clone();
@@ -278,6 +279,8 @@ fn start_after_pairing(shared: &Arc<Shared>) {
         let mut poll = interval(REGISTRY_POLL);
         loop {
             poll.tick().await;
+            // Pending vault requests show up without a manual refresh.
+            refresh_vault(&shared).await;
             if let Err(err) = refresh_registry(&shared).await {
                 let text = format!("{err:#}");
                 if text.contains("HTTP 401") {
@@ -1895,6 +1898,70 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 refresh_connectors(&shared).await;
             });
         }
+        ClientCommand::VaultRefresh => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                refresh_vault(&shared).await;
+            });
+        }
+        ClientCommand::VaultAddItem { item } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let fields: serde_json::Map<String, Value> = item
+                    .fields
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                    .collect();
+                let body = json!({ "name": item.name, "kind": item.kind, "fields": fields, "allowed_hosts": item.allowed_hosts });
+                match shared.post_json("/vault/items", body).await {
+                    Ok(_) => shared.notice(format!("Vault: saved {}.", item.name)),
+                    Err(err) => shared.notice(format!("Vault: {err:#}")),
+                }
+                refresh_vault(&shared).await;
+            });
+        }
+        ClientCommand::VaultDeleteItem { id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let resp = shared
+                    .http
+                    .delete(format!("{}/vault/items/{}", shared.http_url, id))
+                    .bearer_auth(shared.token())
+                    .send()
+                    .await;
+                match resp {
+                    Ok(r) if r.status().is_success() => {}
+                    Ok(r) => shared.notice(format!("Vault delete: HTTP {}", r.status())),
+                    Err(err) => shared.notice(format!("Vault delete: {err}")),
+                }
+                refresh_vault(&shared).await;
+            });
+        }
+        ClientCommand::VaultDecide {
+            request_id,
+            approve,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                match shared
+                    .post_json(
+                        &format!("/vault/requests/{request_id}/decide"),
+                        json!({ "approve": approve }),
+                    )
+                    .await
+                {
+                    Ok(v) => {
+                        let name = v["request"]["item_name"].as_str().unwrap_or("item");
+                        shared.notice(format!(
+                            "Vault: {} {name}.",
+                            if approve { "approved" } else { "denied" }
+                        ));
+                    }
+                    Err(err) => shared.notice(format!("Vault decide: {err:#}")),
+                }
+                refresh_vault(&shared).await;
+            });
+        }
         ClientCommand::WatchBrowser { project_id, on } => {
             let mut watches = shared.browser_watch.lock().unwrap();
             if let Some(task) = watches.remove(&project_id) {
@@ -2292,6 +2359,42 @@ async fn refresh_connectors(shared: &Arc<Shared>) {
         items,
         loaded: true,
     }));
+}
+
+/// Settings → Vault: `GET /vault/items` + `GET /vault/requests` → one view (F8). Never values.
+async fn refresh_vault(shared: &Arc<Shared>) {
+    let (items, requests) = tokio::join!(
+        shared.get_json("/vault/items"),
+        shared.get_json("/vault/requests")
+    );
+    let (items, requests) = match (items, requests) {
+        (Ok(i), Ok(r)) => (i, r),
+        (Err(err), _) | (_, Err(err)) => {
+            if !format!("{err:#}").contains("HTTP 404") {
+                shared.notice(format!("Vault: {err:#}"));
+            }
+            return;
+        }
+    };
+    let parse = |v: &Value| -> Vec<Value> { v["items"].as_array().cloned().unwrap_or_default() };
+    let items: Vec<VaultItem> = parse(&items)
+        .iter()
+        .filter_map(|i| serde_json::from_value(i.clone()).ok())
+        .collect();
+    let requests: Vec<VaultRequest> = parse(&requests)
+        .iter()
+        .filter_map(|r| serde_json::from_value(r.clone()).ok())
+        .collect();
+    let _ = shared.events.send(SyncEvent::Vault(VaultView {
+        mock: requests_mock(&items),
+        items,
+        requests,
+        loaded: true,
+    }));
+}
+
+fn requests_mock(items: &[VaultItem]) -> bool {
+    items.iter().any(|i| i.mock)
 }
 
 /// S16: the box's `/browser/stream` (agentd proxies agent-browser's JPEG
