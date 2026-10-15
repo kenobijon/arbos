@@ -1871,6 +1871,82 @@ impl Shell {
                 div()
                     .text_size(px(11.0))
                     .text_color(theme.text_faint)
+                    .child("UPDATES"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(11.5))
+                            .text_color(
+                                if matches!(update.phase, crate::update::UpdatePhase::Failed { .. })
+                                {
+                                    theme.danger
+                                } else {
+                                    theme.text_muted
+                                },
+                            )
+                            .child(update.status_line()),
+                    )
+                    .when_some(update_action, |el, (id, label, installs)| {
+                        el.child(
+                            div()
+                                .id(id)
+                                .flex_shrink_0()
+                                .px(px(8.0))
+                                .py(px(3.0))
+                                .rounded(px(6.0))
+                                .text_size(px(11.5))
+                                .text_color(theme.accent)
+                                .cursor_pointer()
+                                .hover(|s| s.bg(theme.surface_2))
+                                .child(label)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.state.update(cx, |s, cx| {
+                                        if installs {
+                                            s.install_update(cx);
+                                        } else {
+                                            s.check_for_updates(cx);
+                                        }
+                                    });
+                                })),
+                        )
+                    })
+                    // Self-update could not finish here (read-only copy, unwritable folder…):
+                    // the newest build is one click away in the browser.
+                    .when(
+                        matches!(update.phase, crate::update::UpdatePhase::Failed { .. }),
+                        |el| {
+                            el.child(
+                                div()
+                                    .id("settings-update-download")
+                                    .flex_shrink_0()
+                                    .px(px(8.0))
+                                    .py(px(3.0))
+                                    .rounded(px(6.0))
+                                    .text_size(px(11.5))
+                                    .text_color(theme.accent)
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(theme.surface_2))
+                                    .child("Download")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.state.update(cx, |s, cx| s.open_download_page(cx));
+                                    })),
+                            )
+                        },
+                    ),
+            )
+            .child(div().h(px(1.0)).bg(theme.border))
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(theme.text_faint)
                     .child("APPEARANCE · SURFACE"),
             )
             .child(
@@ -2221,82 +2297,6 @@ impl Shell {
                     .text_size(px(11.0))
                     .text_color(theme.text_faint)
                     .child("One per project per minute, only while you are not looking."),
-            )
-            .child(div().h(px(1.0)).bg(theme.border))
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(theme.text_faint)
-                    .child("UPDATES"),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_size(px(11.5))
-                            .text_color(
-                                if matches!(update.phase, crate::update::UpdatePhase::Failed { .. })
-                                {
-                                    theme.danger
-                                } else {
-                                    theme.text_muted
-                                },
-                            )
-                            .child(update.status_line()),
-                    )
-                    .when_some(update_action, |el, (id, label, installs)| {
-                        el.child(
-                            div()
-                                .id(id)
-                                .flex_shrink_0()
-                                .px(px(8.0))
-                                .py(px(3.0))
-                                .rounded(px(6.0))
-                                .text_size(px(11.5))
-                                .text_color(theme.accent)
-                                .cursor_pointer()
-                                .hover(|s| s.bg(theme.surface_2))
-                                .child(label)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.state.update(cx, |s, cx| {
-                                        if installs {
-                                            s.install_update(cx);
-                                        } else {
-                                            s.check_for_updates(cx);
-                                        }
-                                    });
-                                })),
-                        )
-                    })
-                    // Self-update could not finish here (read-only copy, unwritable folder…):
-                    // the newest build is one click away in the browser.
-                    .when(
-                        matches!(update.phase, crate::update::UpdatePhase::Failed { .. }),
-                        |el| {
-                            el.child(
-                                div()
-                                    .id("settings-update-download")
-                                    .flex_shrink_0()
-                                    .px(px(8.0))
-                                    .py(px(3.0))
-                                    .rounded(px(6.0))
-                                    .text_size(px(11.5))
-                                    .text_color(theme.accent)
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(theme.surface_2))
-                                    .child("Download")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.state.update(cx, |s, cx| s.open_download_page(cx));
-                                    })),
-                            )
-                        },
-                    ),
             )
             .child(div().h(px(1.0)).bg(theme.border))
             .when_some(account.clone(), |el, account| {

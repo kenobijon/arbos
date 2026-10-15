@@ -91,6 +91,8 @@ pub struct UpdateState {
     pub feed_url: String,
     pub phase: UpdatePhase,
     pub last_checked_at: Option<u64>,
+    /// The running copy is translocated or in an unwritable folder: offer "Move to Applications".
+    pub needs_relocation: bool,
 }
 
 impl UpdateState {
@@ -100,6 +102,7 @@ impl UpdateState {
             feed_url: feed_url(),
             phase: UpdatePhase::Idle,
             last_checked_at: None,
+            needs_relocation: needs_relocation(),
         }
     }
 
@@ -118,7 +121,12 @@ impl UpdateState {
     /// The rail button is visible whenever a newer build is known, through
     /// download, install, and a failure that can be retried.
     pub fn button_visible(&self) -> bool {
-        self.available().is_some()
+        self.available().is_some() || self.needs_relocation
+    }
+
+    /// True when the button's click should move the app rather than install an update.
+    pub fn button_moves(&self) -> bool {
+        self.needs_relocation && self.available().is_none()
     }
 
     pub fn busy(&self) -> bool {
@@ -132,6 +140,13 @@ impl UpdateState {
 
     /// Short label for the rail button.
     pub fn button_label(&self) -> String {
+        if self.button_moves() {
+            return match &self.phase {
+                UpdatePhase::Installing(_) | UpdatePhase::Restarting(_) => "Moving".into(),
+                UpdatePhase::Failed { .. } => "Retry".into(),
+                _ => "Move to Applications".into(),
+            };
+        }
         match &self.phase {
             UpdatePhase::Available(_) => "Update".into(),
             UpdatePhase::Downloading { got, total, .. } => match total {
@@ -147,6 +162,17 @@ impl UpdateState {
 
     /// One line for the settings popover.
     pub fn status_line(&self) -> String {
+        if self.button_moves()
+            && matches!(
+                self.phase,
+                UpdatePhase::Idle | UpdatePhase::UpToDate | UpdatePhase::Checking
+            )
+        {
+            return format!(
+                "Arbos {} · running from a read-only copy; move it to Applications to enable updates",
+                self.current_version
+            );
+        }
         match &self.phase {
             UpdatePhase::Idle => format!("Arbos {}", self.current_version),
             UpdatePhase::Checking => format!("Arbos {} · checking…", self.current_version),
@@ -160,7 +186,17 @@ impl UpdateState {
             }
             UpdatePhase::Installing(a) => format!("Installing {}…", a.item.version),
             UpdatePhase::Restarting(a) => format!("Restarting into {}…", a.item.version),
-            UpdatePhase::Failed { message, .. } => format!("Update failed: {message}"),
+            UpdatePhase::Failed { message, .. } => {
+                // The full text is in ~/Library/Logs/Arbos/update.log; the
+                // popover row only has room for the first sentence.
+                let brief = message.lines().next().unwrap_or_default();
+                let brief: String = if brief.chars().count() > 120 {
+                    format!("{}…", brief.chars().take(119).collect::<String>())
+                } else {
+                    brief.to_string()
+                };
+                format!("Update failed: {brief}")
+            }
         }
     }
 }
@@ -175,6 +211,8 @@ impl Default for UpdateState {
 pub enum UpdateCommand {
     Check,
     Install,
+    /// Copy the running app into Applications and relaunch from there (no new version needed).
+    MoveToApplications,
 }
 
 #[derive(Debug)]
@@ -245,6 +283,18 @@ pub async fn run(
                     }
                 }
             }
+            UpdateCommand::MoveToApplications => {
+                let _ = events.send(UpdateEvent::Installing);
+                match move_to_applications() {
+                    Ok(moved) => {
+                        let _ = events.send(UpdateEvent::Installed(moved));
+                    }
+                    Err(err) => {
+                        log(format!("move to Applications failed: {err:#}"));
+                        let _ = events.send(UpdateEvent::Failed(format!("{err:#}")));
+                    }
+                }
+            }
             UpdateCommand::Install => {
                 let Some(available) = known.clone() else {
                     let _ = events.send(UpdateEvent::Failed("no update to install".into()));
@@ -308,34 +358,44 @@ fn chrono_like_now() -> String {
     format!("{secs}")
 }
 
-/// Refuse early, with a sentence a person can act on, when the running copy cannot be swapped:
-/// Gatekeeper's App Translocation (the app was opened from Downloads or the DMG and runs from a
-/// read-only random path), a read-only or system-owned folder, or a bare `cargo run` binary.
-fn check_install_location(install: &Install) -> anyhow::Result<()> {
-    let path = install.path();
-    let shown = path.display();
+/// Where the update goes. A copy that cannot be swapped in place — App Translocation (opened
+/// from Downloads or the DMG) or an unwritable folder — is installed into Applications instead,
+/// and the app relaunches from there; the stale copy in Downloads can be thrown away.
+fn install_target(install: &Install) -> anyhow::Result<(Install, bool)> {
     if cfg!(target_os = "macos") && matches!(install, Install::Executable(_)) {
         anyhow::bail!("not running from Arbos.app; install the app to update it");
     }
-    if path.to_string_lossy().contains("/AppTranslocation/") {
-        anyhow::bail!(
-            "Arbos is running from a read-only copy (macOS opened it straight from the download). Move Arbos to your Applications folder and open it from there, then update — or download the new version from {DOWNLOAD_URL}."
-        );
+    let path = install.path();
+    if client::is_translocated(path) || !client::parent_writable(path) {
+        let target = client::relocation_target(install)?;
+        return Ok((Install::MacBundle(target), true));
     }
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("{shown} has no parent folder"))?;
-    let probe = parent.join(format!(".arbos-update-probe-{}", std::process::id()));
-    match std::fs::write(&probe, b"") {
-        Ok(()) => {
-            let _ = std::fs::remove_file(&probe);
-            Ok(())
-        }
-        Err(e) => anyhow::bail!(
-            "the folder holding Arbos ({}) is not writable ({e}). Move Arbos to your own Applications folder, or download the new version from {DOWNLOAD_URL}.",
-            parent.display()
-        ),
+    Ok((install.clone(), false))
+}
+
+/// Is the running copy somewhere it cannot update itself (so the rail offers "Move to
+/// Applications" even when no newer build exists)?
+pub fn needs_relocation() -> bool {
+    if !cfg!(target_os = "macos") {
+        return false;
     }
+    match Install::detect() {
+        Ok(Install::MacBundle(p)) => client::is_translocated(&p) || !client::parent_writable(&p),
+        _ => false,
+    }
+}
+
+/// "Move to Applications": copy the running bundle into Applications, clear quarantine, and
+/// hand back the new location for the relaunch.
+pub fn move_to_applications() -> anyhow::Result<Install> {
+    let install = Install::detect()?;
+    let Install::MacBundle(bundle) = &install else {
+        anyhow::bail!("not running from Arbos.app");
+    };
+    log(format!("move {} to Applications", bundle.display()));
+    let moved = client::relocate_bundle(bundle)?;
+    log(format!("moved to {}", moved.path().display()));
+    Ok(moved)
 }
 
 async fn install(
@@ -344,14 +404,22 @@ async fn install(
 ) -> anyhow::Result<Install> {
     let key = arbos_update::public_key()
         .ok_or_else(|| anyhow::anyhow!("this build has no update public key"))?;
-    let install = Install::detect()?;
+    let running = Install::detect()?;
+    let (install, relocated) = install_target(&running)?;
     log(format!(
-        "install {} from {} into {}",
+        "install {} from {} into {}{}",
         available.item.version,
         available.url,
-        install.path().display()
+        install.path().display(),
+        if relocated {
+            format!(
+                " (running copy at {} cannot be updated in place)",
+                running.path().display()
+            )
+        } else {
+            String::new()
+        }
     ));
-    check_install_location(&install)?;
     let dir = client::updates_dir();
     client::prune(&dir, &available.item.version);
     let progress_tx = events.clone();
@@ -361,9 +429,13 @@ async fn install(
     let payload = client::download(available, &key, &dir, Some(progress)).await?;
     log(format!("downloaded and verified {}", payload.display()));
     let _ = events.send(UpdateEvent::Installing);
-    let staged = client::stage(&payload, &available.item.version, &dir, &install)?;
+    // Staging reads the running bundle's layout (executable name); apply targets `install`.
+    let staged = client::stage(&payload, &available.item.version, &dir, &running)?;
     log(format!("staged {}", staged.display()));
     client::apply(&staged, &install)?;
+    if relocated {
+        client::remove_quarantine(install.path());
+    }
     log(format!(
         "installed {} at {}",
         available.item.version,

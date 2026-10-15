@@ -83,9 +83,10 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
-    /// Verify every enclosure of the newest item in an appcast file against
-    /// the payload files in `--dir`, with the compiled-in public key. The
-    /// release pipeline runs this so a key mismatch never leaves the runner.
+    /// Verify every enclosure of one item in an appcast file (the newest, or
+    /// `--version`) against the payload files in `--dir`, with the compiled-in
+    /// public key. The release pipeline runs this so a key mismatch never
+    /// leaves the runner.
     VerifyAppcast {
         #[arg(long)]
         appcast: PathBuf,
@@ -93,6 +94,10 @@ enum Cmd {
         dir: PathBuf,
         #[arg(long)]
         public_file: Option<PathBuf>,
+        /// Check this item instead of the newest one (a stable build merged
+        /// into an edge feed that already carries newer edge builds).
+        #[arg(long)]
+        version: Option<String>,
     },
     /// Fetch a feed and print the item that would install, as JSON.
     Check {
@@ -270,16 +275,24 @@ async fn main() -> anyhow::Result<()> {
             appcast,
             dir,
             public_file,
+            version,
         } => {
             let key = load_public(public_file)?;
             let text = std::fs::read_to_string(&appcast)
                 .with_context(|| format!("reading {}", appcast.display()))?;
             let feed = Appcast::parse(&text)?;
-            let newest = feed
-                .items
-                .iter()
-                .max_by_key(|i| i.parsed_version())
-                .context("appcast has no items")?;
+            let newest = match &version {
+                Some(v) => feed
+                    .items
+                    .iter()
+                    .find(|i| &i.version == v)
+                    .with_context(|| format!("appcast has no item {v}"))?,
+                None => feed
+                    .items
+                    .iter()
+                    .max_by_key(|i| i.parsed_version())
+                    .context("appcast has no items")?,
+            };
             let mut checked = 0;
             for enc in &newest.enclosures {
                 let name = enc.url.rsplit('/').next().unwrap_or_default();

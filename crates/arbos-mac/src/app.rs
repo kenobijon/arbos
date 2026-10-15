@@ -367,6 +367,17 @@ impl AppState {
                 if let Some(available) = self.update.available().cloned() {
                     self.update.phase = UpdatePhase::Restarting(available);
                 }
+                if self.update.needs_relocation {
+                    self.update.needs_relocation = false;
+                    self.push_notice(format!(
+                        "Arbos now lives in {}; the copy you opened it from can be deleted.",
+                        installed
+                            .path()
+                            .parent()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "Applications".into())
+                    ));
+                }
                 // One frame shows "Restarting", then the relauncher takes over.
                 cx.spawn(async move |this, cx| {
                     cx.background_executor()
@@ -419,9 +430,23 @@ impl AppState {
         cx.notify();
     }
 
-    /// The rail button: download, verify, swap, relaunch in one click.
+    /// "Move to Applications" (translocated / read-only copy): copy, clear quarantine, relaunch.
+    pub fn move_to_applications(&mut self, cx: &mut Context<Self>) {
+        if self.update.busy() {
+            return;
+        }
+        let _ = self.update_commands.send(UpdateCommand::MoveToApplications);
+        cx.notify();
+    }
+
+    /// The rail button: download, verify, swap, relaunch in one click. From a translocated or
+    /// read-only copy the new version is installed into Applications instead.
     pub fn install_update(&mut self, cx: &mut Context<Self>) {
         if self.update.busy() {
+            return;
+        }
+        if self.update.button_moves() {
+            self.move_to_applications(cx);
             return;
         }
         let Some(available) = self.update.available().cloned() else {

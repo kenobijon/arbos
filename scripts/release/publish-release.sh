@@ -180,7 +180,9 @@ elif [[ -n "$FEED_TAG" ]]; then
 fi
 # A promoted stable build also joins the edge feed: installs on the edge channel are offered it
 # (it sorts above every 0.x.y.<build> of the previous base version) until a newer edge exists.
-if [[ "$CHANNEL" == "stable" && "$PROMOTE" != false ]]; then
+# The stable release already exists at this point, so nothing here may fail the run:
+# the edge feed is a convenience, and the next edge build rewrites it anyway.
+join_edge_feed() {
   echo "==> stable $VERSION joins the edge feed"
   EDGE_PREV="$DIST/.edge-appcast.xml"
   rm -f "$EDGE_PREV"
@@ -190,18 +192,25 @@ if [[ "$CHANNEL" == "stable" && "$PROMOTE" != false ]]; then
   EDGE_PREV_ARG=()
   if [[ -f "$EDGE_PREV" ]]; then EDGE_PREV_ARG=(--previous "$EDGE_PREV"); fi
   "$UPDATECTL" appcast --version "$VERSION" --link "$RELEASE_URL" --title "Arbos (edge)" \
-    "${NOTES_ARG[@]}" "${KEY_ARG[@]}" "${ENCLOSURES[@]}" "${EDGE_PREV_ARG[@]}" --out appcast-edge.xml
+    "${NOTES_ARG[@]}" "${KEY_ARG[@]}" "${ENCLOSURES[@]}" "${EDGE_PREV_ARG[@]}" --out appcast-edge.xml || return 1
   rm -f "$EDGE_PREV"
-  "$UPDATECTL" verify-appcast --appcast appcast-edge.xml --dir .
+  # Only our item is on disk; the feed may already carry newer edge builds above it.
+  "$UPDATECTL" verify-appcast --appcast appcast-edge.xml --dir . --version "$VERSION" || return 1
   mkdir -p edge-feed && cp appcast-edge.xml edge-feed/appcast.xml
   if ! $DRY_RUN; then
     if gh release view edge --repo "$REPO" >/dev/null 2>&1; then
-      gh_run release upload edge --repo "$REPO" --clobber edge-feed/appcast.xml
+      gh_run release upload edge --repo "$REPO" --clobber edge-feed/appcast.xml || return 1
     else
       echo "    (no edge feed release yet; nothing to update)"
     fi
   fi
   rm -rf edge-feed appcast-edge.xml
+}
+if [[ "$CHANNEL" == "stable" && "$PROMOTE" != false ]]; then
+  if ! join_edge_feed; then
+    echo "::warning::stable $VERSION could not be merged into the edge feed; the release itself is published"
+    rm -rf edge-feed appcast-edge.xml "$DIST/.edge-appcast.xml"
+  fi
 fi
 
 rm -f "$BODY"
