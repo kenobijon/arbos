@@ -2,7 +2,8 @@
 //! Tools: history_search, history_read, read_thread, memory_search, memory_read,
 //! peek, sub_llm, remember, recall, projects_list, projects_send, ask_user,
 //! spawn_subagent, wake_subagent, connectors_list, connector_call, local_devices,
-//! local_run, local_read, local_list, deliver_file, generate_image, group_send.
+//! local_run, local_read, local_list, deliver_file, generate_image, group_send, vault_list,
+//! vault_request, egress, browser_fill.
 //!
 //! Sessions authenticate with a role-bound bearer token (main vs subagent, `Config::
 //! mcp_token_for_role`); tools that speak to other Projects are refused to subagents (D69).
@@ -69,6 +70,7 @@ fn tools() -> Value {
         a.extend(crate::connectors::tool_specs());
         a.extend(crate::local::tool_specs());
         a.extend(crate::media::tool_specs());
+        a.extend(crate::vault::tool_specs());
     }
     list
 }
@@ -138,9 +140,16 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
     // `connector_call` is gated inside `connectors::connector_call`, where the catalog kind is
     // known, so it is classified exactly once and gets one card. `local_run/read/list` are gated
     // inside `local::local_call`, which knows the device and its "allow reads" switch.
+    // `vault_request` / `browser_fill` post their own card from `vault::obtain_grant`, carrying the
+    // relay request id the client forwards the decision to.
     if !matches!(
         name,
-        "connector_call" | "local_run" | "local_read" | "local_list"
+        "connector_call"
+            | "local_run"
+            | "local_read"
+            | "local_list"
+            | "vault_request"
+            | "browser_fill"
     ) {
         if let Err(refusal) = a.gate_tool(name, args, &chat_for_scratch).await {
             return err_result(format!("not executed: {refusal}"));
@@ -612,6 +621,10 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
         }
         "deliver_file" => crate::media::deliver_file(a, args).await,
         "generate_image" => crate::media::generate_image(a, args).await,
+        "vault_list" => crate::vault::vault_list(a).await,
+        "vault_request" => crate::vault::vault_request(a, args, &chat_for_scratch).await,
+        "egress" => crate::vault::egress(a, args, &chat_for_scratch).await,
+        "browser_fill" => crate::vault::browser_fill(a, args, &chat_for_scratch).await,
         _ => err_result(format!("unknown tool {name}")),
     }
 }

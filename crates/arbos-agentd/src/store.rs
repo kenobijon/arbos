@@ -172,9 +172,38 @@ pub struct HandleRow {
     pub created_at: i64,
 }
 
-/// Write-time redaction before T3 append (D19): tokens, keys, Authorization headers, `.env`-style values.
+/// Plaintext values that passed through this process (vault logins typed into the browser, F8).
+/// They are kept only so that `redact` can strip them wherever they resurface (page text, tool
+/// output); nothing reads them back.
+fn live_secrets() -> &'static std::sync::Mutex<Vec<String>> {
+    static LIVE: std::sync::OnceLock<std::sync::Mutex<Vec<String>>> = std::sync::OnceLock::new();
+    LIVE.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+/// Register a value for write-time redaction (D19). Short values are ignored: they would blank
+/// ordinary words.
+pub fn redact_live_value(value: &str) {
+    if value.len() < 6 {
+        return;
+    }
+    let mut v = live_secrets().lock().expect("live secrets");
+    if !v.iter().any(|x| x == value) {
+        v.push(value.to_owned());
+    }
+}
+
+/// Write-time redaction before T3 append (D19): tokens, keys, Authorization headers, `.env`-style
+/// values, plus every live vault value registered with `redact_live_value`.
 pub fn redact(text: &str) -> String {
     let mut out = text.to_owned();
+    {
+        let live = live_secrets().lock().expect("live secrets");
+        for v in live.iter() {
+            if out.contains(v.as_str()) {
+                out = out.replace(v.as_str(), "[REDACTED:vault]");
+            }
+        }
+    }
     let patterns: [(&str, &str); 6] = [
         (r"sk-or-v1-[A-Za-z0-9]{20,}", "[REDACTED:openrouter-key]"),
         (r"sk-ant-[A-Za-z0-9_\-]{20,}", "[REDACTED:anthropic-key]"),
