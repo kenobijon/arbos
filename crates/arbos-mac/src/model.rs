@@ -65,6 +65,21 @@ pub struct Project {
 }
 
 impl Project {
+    /// A project I can write to but do not own (D72 step 3).
+    pub fn is_guest(&self) -> bool {
+        self.shared && !self.is_people()
+    }
+
+    /// Owner of a shared project, when the member list carries them.
+    pub fn owner(&self) -> Option<&Person> {
+        self.people.iter().find(|p| p.role == "owner")
+    }
+
+    /// Members other than the owner (the people invited in).
+    pub fn guests(&self) -> impl Iterator<Item = &Person> {
+        self.people.iter().filter(|p| p.role != "owner")
+    }
+
     pub fn is_people(&self) -> bool {
         matches!(self.kind, SpaceKind::Dm | SpaceKind::Group)
     }
@@ -110,6 +125,9 @@ pub struct Person {
     /// `member` (has signed in) or `invited` (placeholder).
     #[serde(default)]
     pub status: String,
+    /// Project members: `owner` or `member`.
+    #[serde(default)]
+    pub role: String,
 }
 
 impl Person {
@@ -1285,6 +1303,20 @@ pub struct Machine {
     pub detail: Option<String>,
     /// 0..1 while waking.
     pub progress: Option<f32>,
+    /// Hosted machines never sleep (`machine.always_on`): no waking/asleep
+    /// states in the UI, machine time is included rather than billed to credits.
+    pub always_on: bool,
+}
+
+impl Machine {
+    /// What the UI shows: an always-on machine is awake unless unreachable.
+    pub fn shown_state(&self) -> MachineState {
+        if self.always_on && self.state != MachineState::Error {
+            MachineState::Awake
+        } else {
+            self.state
+        }
+    }
 }
 
 /// Settings → Account: who is signed in and what is left (`GET /me`).

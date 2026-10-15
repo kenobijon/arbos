@@ -40,6 +40,7 @@ actions!(
         Copy,
         Cut,
         Escape,
+        AcceptMention,
     ]
 );
 
@@ -75,6 +76,8 @@ pub struct ComposerInput {
     /// Runs deferred, after this entity's update ends, so the owner may read
     /// and update the input freely.
     pub on_submit: Option<SubmitHandler>,
+    /// Tab with an `@` token under the caret (D72 mention completion).
+    pub on_tab: Option<SubmitHandler>,
     /// Multi-line editors (skill bodies): Enter inserts a newline instead of
     /// submitting.
     pub enter_inserts_newline: bool,
@@ -95,6 +98,7 @@ impl ComposerInput {
             is_selecting: false,
             scroll_y: 0.0,
             on_submit: None,
+            on_tab: None,
             enter_inserts_newline: false,
             masked: false,
         }
@@ -190,6 +194,29 @@ impl ComposerInput {
         if let Some(cb) = self.on_submit.clone() {
             window.defer(cx, move |window, cx| cb(window, cx));
         }
+    }
+
+    fn accept_mention(&mut self, _: &AcceptMention, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(cb) = self.on_tab.clone() {
+            window.defer(cx, move |window, cx| cb(window, cx));
+        }
+    }
+
+    /// Replace the trailing `@token` with `@handle ` (mention completion).
+    pub fn complete_mention(&mut self, handle: &str, cx: &mut Context<Self>) {
+        let Some(at) = self.content.rfind('@') else {
+            return;
+        };
+        if self.content[at + 1..].contains(char::is_whitespace) {
+            return;
+        }
+        self.content.truncate(at);
+        self.content.push('@');
+        self.content.push_str(handle);
+        self.content.push(' ');
+        let len = self.content.len();
+        self.selected_range = len..len;
+        cx.notify();
     }
 
     fn newline(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
@@ -879,6 +906,7 @@ impl Render for ComposerInput {
             .track_focus(&self.focus_handle(cx))
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(Self::send))
+            .on_action(cx.listener(Self::accept_mention))
             .on_action(cx.listener(Self::newline))
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
@@ -935,9 +963,13 @@ impl Composer {
     pub fn new(state: Entity<AppState>, voice: Entity<Voice>, cx: &mut Context<Self>) -> Self {
         let input = cx.new(ComposerInput::new);
         let weak = cx.weak_entity();
+        let weak_tab = weak.clone();
         input.update(cx, |input, _| {
             input.on_submit = Some(Rc::new(move |window, cx| {
                 let _ = weak.update(cx, |composer, cx| composer.submit(window, cx));
+            }));
+            input.on_tab = Some(Rc::new(move |_window, cx| {
+                let _ = weak_tab.update(cx, |composer, cx| composer.accept_first_mention(cx));
             }));
         });
         cx.observe(&state, |_, _, cx| cx.notify()).detach();
@@ -1043,6 +1075,139 @@ impl Composer {
             }
         })
         .detach();
+    }
+
+    /// The `@token` being typed at the end of the input, if any.
+    fn mention_query(&self, cx: &App) -> Option<String> {
+        let text = self.input.read(cx).text();
+        let at = text.rfind('@')?;
+        let token = &text[at + 1..];
+        if token.contains(char::is_whitespace) {
+            return None;
+        }
+        // Only at a word start: "@" preceded by nothing or whitespace.
+        if at > 0 && !text[..at].ends_with(char::is_whitespace) {
+            return None;
+        }
+        Some(token.to_lowercase())
+    }
+
+    /// People and agents of the current space matching the `@token`:
+    /// (handle, label, is_agent).
+    fn mention_candidates(&self, cx: &App) -> Vec<(String, String, bool)> {
+        let Some(query) = self.mention_query(cx) else {
+            return Vec::new();
+        };
+        let state = self.state.read(cx);
+        let Some(space) = state.selected() else {
+            return Vec::new();
+        };
+        if !space.is_people() && space.people.is_empty() {
+            return Vec::new();
+        }
+        let mut out: Vec<(String, String, bool)> = Vec::new();
+        for a in &space.agents {
+            if a.handle.starts_with(&query) {
+                out.push((
+                    a.handle.clone(),
+                    format!("{} · owned by @{}", a.name, a.owner_handle),
+                    true,
+                ));
+            }
+        }
+        for p in &space.people {
+            if p.handle.to_lowercase().starts_with(&query) {
+                out.push((p.handle.clone(), p.name.clone().unwrap_or_default(), false));
+            }
+        }
+        if space.agents.len() == 1
+            && "arbos".starts_with(&query)
+            && !out.iter().any(|(h, _, _)| h == "arbos")
+        {
+            out.push(("arbos".into(), "the agent in this chat".into(), true));
+        }
+        out.truncate(6);
+        out
+    }
+
+    fn accept_first_mention(&mut self, cx: &mut Context<Self>) {
+        if let Some((handle, _, _)) = self.mention_candidates(cx).into_iter().next() {
+            self.input
+                .update(cx, |input, cx| input.complete_mention(&handle, cx));
+            cx.notify();
+        }
+    }
+
+    fn render_mentions(
+        &self,
+        candidates: Vec<(String, String, bool)>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = Theme::of(cx).clone();
+        let mut menu = div()
+            .id("mention-menu")
+            .flex()
+            .flex_col()
+            .min_w(px(260.0))
+            .p(px(4.0))
+            .rounded(px(10.0))
+            .bg(theme.card())
+            .border_1()
+            .border_color(theme.border_strong)
+            .shadow_lg();
+        for (i, (handle, label, is_agent)) in candidates.into_iter().enumerate() {
+            let h = handle.clone();
+            menu = menu.child(
+                div()
+                    .id(ElementId::NamedInteger("mention-item".into(), i as u64))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .px(px(8.0))
+                    .py(px(5.0))
+                    .rounded(px(6.0))
+                    .cursor_pointer()
+                    .when(i == 0, |el| el.bg(theme.surface_2))
+                    .hover(|s| s.bg(theme.surface_2))
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .text_color(theme.text)
+                            .child(format!("@{handle}")),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(11.0))
+                            .text_color(theme.text_faint)
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.5))
+                            .text_color(theme.text_faint)
+                            .child(if is_agent { "agent" } else { "person" }),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.input
+                            .update(cx, |input, cx| input.complete_mention(&h, cx));
+                        cx.notify();
+                    })),
+            );
+        }
+        menu = menu.child(
+            div()
+                .px(px(8.0))
+                .pt(px(2.0))
+                .text_size(px(10.5))
+                .text_color(theme.text_faint)
+                .child("Tab completes the first match"),
+        );
+        div()
+            .absolute()
+            .bottom(px(COMPOSER_HEIGHT + 44.0))
+            .left(px(16.0))
+            .child(frosted(10.0, PANEL_BLUR, menu))
     }
 
     fn render_picker_menu(&self, picker: Picker, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1154,7 +1319,10 @@ impl Render for Composer {
             .map(|p| (p.model.clone(), p.effort))
             .unwrap_or((MODELS[0].to_string(), Effort::High));
         // A people chat has no model of its own: its agents run on their owners' settings.
-        let in_people = state.selected().map(|p| p.is_people()).unwrap_or(false);
+        let in_people = state
+            .selected()
+            .map(|p| p.is_people() || p.is_guest())
+            .unwrap_or(false);
         let link_full = state.link == crate::model::Link::Reconnecting;
         let voice_mode = state.voice_mode;
         let (recording, transcribing, in_call, voice_notice) = {
@@ -1495,6 +1663,10 @@ impl Render for Composer {
         ));
         if let Some(picker) = self.open_picker {
             root = root.child(self.render_picker_menu(picker, cx));
+        }
+        let mentions = self.mention_candidates(cx);
+        if !mentions.is_empty() {
+            root = root.child(self.render_mentions(mentions, cx));
         }
         root
     }

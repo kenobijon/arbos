@@ -519,15 +519,38 @@ impl Transcript {
                 seed,
                 note,
             } => {
-                let color = self
-                    .state
-                    .read(cx)
-                    .projects
-                    .iter()
-                    .find(|p| {
-                        format!("project:{}", p.id) == seed || format!("agent:{}", p.id) == seed
+                let state = self.state.read(cx);
+                // A shared agent's reply may carry only its handle: name, glyph
+                // and colour come from the chat's member list or my projects.
+                let agent = seed.strip_prefix("agent:").and_then(|pid| {
+                    state
+                        .selected()
+                        .and_then(|space| space.agents.iter().find(|a| a.project_id == pid))
+                        .map(|a| (a.name.clone(), a.icon.clone(), a.color.clone()))
+                        .or_else(|| {
+                            state
+                                .projects
+                                .iter()
+                                .find(|p| p.id == pid)
+                                .map(|p| (p.name.clone(), p.icon.clone(), p.color.clone()))
+                        })
+                });
+                let (name, icon) = match &agent {
+                    Some((n, i, _)) if name == "Agent" || icon.is_none() => {
+                        (n.clone(), Some(i.clone()))
+                    }
+                    _ => (name, icon),
+                };
+                let color = agent
+                    .as_ref()
+                    .map(|(_, _, c)| groups::project_color(c, theme.accent))
+                    .or_else(|| {
+                        state
+                            .projects
+                            .iter()
+                            .find(|p| format!("project:{}", p.id) == seed)
+                            .map(|p| groups::project_color(&p.color, theme.accent))
                     })
-                    .map(|p| groups::project_color(&p.color, theme.accent))
                     .unwrap_or_else(|| groups::sender_color(&seed, &theme));
                 let chip = groups::sender_chip(&name, icon.as_deref(), color, &theme);
                 match note {
@@ -717,6 +740,7 @@ pub fn build_rows(
                         name: message.sender_name.clone(),
                         avatar_url: message.sender_avatar.clone().unwrap_or_default(),
                         status: "member".into(),
+                        role: String::new(),
                     })
                 } else {
                     None

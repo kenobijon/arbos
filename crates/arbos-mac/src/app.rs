@@ -127,6 +127,8 @@ pub struct AppState {
     pub avatars: HashMap<String, Option<Arc<RenderImage>>>,
     /// A DM just started from the sheet: select it when it arrives.
     awaiting_dm: Option<String>,
+    /// The sheet invites into this project instead of starting a DM (step 3).
+    pub invite_target: Option<Id>,
     /// Last time we told the room we are typing, per chat.
     typing_sent_at: HashMap<Id, u64>,
     /// Set by a fresh sign-in: with no projects yet, create "Home" and land in it.
@@ -263,6 +265,7 @@ impl AppState {
             typing: HashMap::new(),
             avatars: HashMap::new(),
             awaiting_dm: None,
+            invite_target: None,
             typing_sent_at: HashMap::new(),
             device_id: None,
             projects: Vec::new(),
@@ -1507,6 +1510,11 @@ impl AppState {
         cx.notify();
     }
 
+    pub fn machine_restart(&mut self, cx: &mut Context<Self>) {
+        self.command(ClientCommand::MachineRestart);
+        cx.notify();
+    }
+
     pub fn toggle_show_details(&mut self, cx: &mut Context<Self>) {
         self.show_details = !self.show_details;
         if let Some(chat_id) = self.active_chat_id() {
@@ -1839,16 +1847,37 @@ impl AppState {
     pub fn open_new_chat(&mut self, cx: &mut Context<Self>) {
         self.new_chat_open = true;
         self.new_project_open = false;
+        self.invite_target = None;
         self.people_query.clear();
         self.people_results.clear();
         self.people_error = None;
         cx.notify();
     }
 
+    /// Project header "Invite": the same sheet, but a pick adds a member.
+    pub fn open_invite(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        self.open_new_chat(cx);
+        self.invite_target = Some(project_id);
+        cx.notify();
+    }
+
     pub fn close_new_chat(&mut self, cx: &mut Context<Self>) {
         self.new_chat_open = false;
         self.awaiting_dm = None;
+        self.invite_target = None;
         cx.notify();
+    }
+
+    /// The sheet's pick: invite into the target project or start a DM.
+    pub fn pick_person(&mut self, handle: String, cx: &mut Context<Self>) {
+        match self.invite_target.clone() {
+            Some(project_id) => {
+                self.new_chat_open = false;
+                self.invite_target = None;
+                self.invite_to_project(project_id, handle, cx);
+            }
+            None => self.start_dm(handle, cx),
+        }
     }
 
     pub fn search_people(&mut self, query: String, cx: &mut Context<Self>) {
@@ -1955,7 +1984,6 @@ impl AppState {
         cx.notify();
     }
 
-    #[allow(dead_code)] // D72 step 3 wires the project header to these.
     pub fn invite_to_project(&mut self, project_id: Id, handle: String, cx: &mut Context<Self>) {
         let handle = handle.trim().trim_start_matches('@').to_string();
         if handle.is_empty() {
@@ -1965,7 +1993,6 @@ impl AppState {
         cx.notify();
     }
 
-    #[allow(dead_code)]
     pub fn remove_project_member(
         &mut self,
         project_id: Id,

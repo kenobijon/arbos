@@ -144,6 +144,7 @@ pub fn picker(state: &Entity<AppState>, top: f32, right: f32, cx: &mut Context<S
         .projects
         .iter()
         .filter(|p| p.id != selected)
+        .filter(|p| !p.is_people() && !p.is_guest())
         .filter(|p| {
             group
                 .as_ref()

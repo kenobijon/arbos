@@ -212,13 +212,11 @@ pub enum ClientCommand {
         handle: String,
     },
     /// `POST /projects/{id}/members {handle}` (D72 step 3).
-    #[allow(dead_code)]
     InviteToProject {
         project_id: Id,
         handle: String,
     },
     /// `DELETE /projects/{id}/members/{user_id}`.
-    #[allow(dead_code)]
     RemoveProjectMember {
         project_id: Id,
         user_id: String,
@@ -296,6 +294,8 @@ pub enum ClientCommand {
     },
     MachineStart,
     MachineStop,
+    /// Always-on machines: stop then start (`POST /machine/stop`, `/machine/start`).
+    MachineRestart,
     FetchBlob {
         project_id: Id,
         key: String,

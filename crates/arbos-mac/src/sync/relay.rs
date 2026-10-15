@@ -491,6 +491,14 @@ async fn refresh_me(shared: &Arc<Shared>) {
     };
     let _ = shared.events.send(SyncEvent::Account(Some(view)));
     if let Some(m) = v.get("machine").and_then(Value::as_object) {
+        if let Some(always_on) = m.get("always_on").and_then(Value::as_bool) {
+            let snapshot = {
+                let mut machine = shared.machine.lock().unwrap();
+                machine.always_on = always_on;
+                machine.clone()
+            };
+            let _ = shared.events.send(SyncEvent::Machine(snapshot));
+        }
         if m.get("exists").and_then(Value::as_bool) != Some(false) {
             if let Some(word) = m.get("state").and_then(Value::as_str) {
                 let since = m.get("since").and_then(Value::as_u64).filter(|v| *v > 0);
@@ -675,6 +683,11 @@ fn people_space_from(shared: &Shared, v: &Value) -> Option<(Project, Chat)> {
                     .get("status")
                     .and_then(Value::as_str)
                     .unwrap_or("member")
+                    .to_string(),
+                role: m
+                    .get("role")
+                    .and_then(Value::as_str)
+                    .unwrap_or("owner")
                     .to_string(),
             });
         } else if let Some(pid) = member.strip_prefix("agent:") {
@@ -891,6 +904,13 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
             continue;
         };
         let detail = shared.get_json(&format!("/projects/{id}")).await?;
+        // Who else is in this project (D72 step 3); older relays answer 404.
+        let members = shared
+            .get_json(&format!("/projects/{id}/members"))
+            .await
+            .ok()
+            .and_then(|v| v.get("members").cloned())
+            .unwrap_or(Value::Null);
         let p = detail.get("project").cloned().unwrap_or(item.clone());
         let models = p.get("models").cloned().unwrap_or(Value::Null);
         let talking = models.get("talking_model").cloned().unwrap_or(Value::Null);
@@ -943,10 +963,9 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
             kind: SpaceKind::Project,
             agents: Vec::new(),
             pending: false,
-            people: item
-                .get("members")
-                .or_else(|| detail.get("members"))
-                .and_then(Value::as_array)
+            people: members
+                .as_array()
+                .or_else(|| item.get("members").and_then(Value::as_array))
                 .map(|a| {
                     a.iter()
                         .filter_map(|m| {
@@ -965,6 +984,11 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
                                     .unwrap_or("")
                                     .to_string(),
                                 status: "member".into(),
+                                role: m
+                                    .get("role")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("member")
+                                    .to_string(),
                             })
                         })
                         .filter(|p| p.id != shared.me_id())
@@ -1373,6 +1397,9 @@ async fn refresh_machine(shared: &Arc<Shared>) {
         }
         if let Some(v) = value.get("spend_cap_usd").and_then(Value::as_f64) {
             m.spend_cap_usd = v;
+        }
+        if let Some(v) = value.get("always_on").and_then(Value::as_bool) {
+            m.always_on = v;
         }
         m.clone()
     };
@@ -1949,7 +1976,16 @@ async fn send_message(
         let Some(doc) = docs.get(&chat_id) else {
             return;
         };
-        let in_people = shared.is_people(&chat_id);
+        // People chats, and projects with more than one human, carry who wrote
+        // (API §3/§7); a solo project keeps the plain `user` the box expects.
+        let in_people = shared.is_people(&chat_id) || {
+            let projects = shared.projects.lock().unwrap();
+            projects
+                .iter()
+                .find(|p| p.id == project_id)
+                .map(|p| p.shared || !p.people.is_empty())
+                .unwrap_or(false)
+        };
         let me = shared.me_user();
         let mentions = if in_people {
             mentions_for(&shared, &chat_id, &text)
@@ -2857,6 +2893,34 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     }
                     Err(err) => shared.notice(format!("New project failed: {err:#}")),
                 }
+            });
+        }
+        ClientCommand::MachineRestart => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                set_machine(
+                    &shared,
+                    MachineState::Waking,
+                    None,
+                    Some("Restarting your machine…".into()),
+                );
+                if let Err(err) = shared.post_json("/machine/stop", json!({})).await {
+                    shared.notice(format!("Machine restart: {err:#}"));
+                }
+                match shared.post_json("/machine/start", json!({})).await {
+                    Ok(v) => {
+                        if let Some(word) = v.get("state").and_then(Value::as_str) {
+                            set_machine(
+                                &shared,
+                                machine_state_from_word(word),
+                                v.get("since").and_then(Value::as_u64).filter(|v| *v > 0),
+                                None,
+                            );
+                        }
+                    }
+                    Err(err) => shared.notice(format!("Machine restart: {err:#}")),
+                }
+                refresh_machine(&shared).await;
             });
         }
         ClientCommand::MachineStart | ClientCommand::MachineStop => {

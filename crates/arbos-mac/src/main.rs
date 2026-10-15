@@ -86,6 +86,7 @@ fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("enter", composer::Send, input),
         KeyBinding::new("shift-enter", composer::Newline, input),
+        KeyBinding::new("tab", composer::AcceptMention, input),
         KeyBinding::new("backspace", composer::Backspace, input),
         KeyBinding::new("delete", composer::Delete, input),
         KeyBinding::new("left", composer::Left, input),
