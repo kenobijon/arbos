@@ -324,9 +324,10 @@ jobs:
           file: image/Dockerfile
           platforms: linux/amd64
           push: ${{ needs.plan.outputs.publish == 'true' }}
+          # The channel tag (`edge`, `stable`) moves only when the build is promoted.
           tags: |
             ${{ env.IMAGE }}:${{ needs.plan.outputs.version }}
-            ${{ env.IMAGE }}:${{ needs.plan.outputs.channel }}
+            ${{ needs.plan.outputs.promote == 'true' && format('{0}:{1}', env.IMAGE, needs.plan.outputs.channel) || '' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - uses: actions/upload-artifact@v4
