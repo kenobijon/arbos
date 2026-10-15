@@ -142,3 +142,27 @@
     });
   }
 })();
+
+// Download buttons name the version they fetch. /download/mac/version is served next to the
+// /download/mac redirect by scripts/deploy/refresh-mac-download.sh (same origin, so CSP
+// connect-src 'self' allows it); if it is missing the buttons simply stay as they are.
+(function () {
+  if (!window.fetch) return;
+  fetch('/download/mac/version', { cache: 'no-store' }).then(function (r) {
+    return r.ok ? r.text() : '';
+  }).then(function (v) {
+    v = (v || '').trim();
+    if (!/^\d+(\.\d+)+$/.test(v)) return;
+    var links = document.querySelectorAll('a[href$="/download/mac"]');
+    Array.prototype.forEach.call(links, function (a) {
+      a.setAttribute('title', 'Arbos ' + v + ' for macOS (Apple silicon and Intel)');
+      a.setAttribute('aria-label', 'Download Arbos ' + v + ' for Mac');
+      if (a.classList.contains('btn-primary')) {
+        var tag = document.createElement('span');
+        tag.className = 'btn-version';
+        tag.textContent = ' ' + v;
+        a.appendChild(tag);
+      }
+    });
+  }).catch(function () {});
+})();
