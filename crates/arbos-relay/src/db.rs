@@ -111,6 +111,11 @@ CREATE TABLE IF NOT EXISTS skills (
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS skills_fts USING fts5(text, id UNINDEXED, tokenize = 'porter unicode61');
+CREATE TABLE IF NOT EXISTS audit (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL, kind TEXT NOT NULL, entry TEXT NOT NULL,
+  at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS audit_project ON audit(project_id, at);
 "#;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1318,6 +1323,40 @@ impl Db {
             )?;
             let rows = st.query_map(params![now_ms() - max_age_ms], Self::row_to_run)?;
             rows.collect()
+        })
+    }
+
+    // ---- audit mirror (feature `approve`): boxes POST their audit.jsonl lines here ------------
+
+    pub fn record_audit(
+        &self,
+        project_id: &str,
+        kind: &str,
+        entry: &serde_json::Value,
+    ) -> Result<()> {
+        let at = entry.get("ts").and_then(|v| v.as_i64()).unwrap_or(now_ms());
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO audit(project_id, kind, entry, at) VALUES (?1,?2,?3,?4)",
+                params![project_id, kind, entry.to_string(), at],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// The newest `limit` audit entries, oldest first.
+    pub fn audit(&self, project_id: &str, limit: i64) -> Result<Vec<serde_json::Value>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT entry FROM audit WHERE project_id = ?1 ORDER BY at DESC, id DESC LIMIT ?2",
+            )?;
+            let rows = st.query_map(params![project_id, limit], |r| {
+                let raw: String = r.get(0)?;
+                Ok(serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null))
+            })?;
+            let mut out: Vec<serde_json::Value> = rows.collect::<Result<_, _>>()?;
+            out.reverse();
+            Ok(out)
         })
     }
 }

@@ -779,3 +779,48 @@ pub async fn record_timing(
         .map_err(internal)?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
+
+/// Audit mirror (feature `approve`): the box posts each `audit.jsonl` line (`approval_requested`,
+/// `approval_decided`, …) so clients can read them while the box is asleep.
+pub async fn record_audit(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    Json(entry): Json<Value>,
+) -> ApiResult {
+    let id = resolve_project_id(&state, &id)?;
+    if !principal.can_access_project(&id) {
+        return Err((StatusCode::FORBIDDEN, "not your project".into()));
+    }
+    let kind = entry
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_owned();
+    state
+        .db
+        .record_audit(&id, &kind, &entry)
+        .map_err(internal)?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[derive(Deserialize)]
+pub struct AuditQuery {
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+pub async fn list_audit(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    Query(q): Query<AuditQuery>,
+) -> ApiResult {
+    let id = resolve_project_id(&state, &id)?;
+    if !principal.can_access_project(&id) {
+        return Err((StatusCode::FORBIDDEN, "not your project".into()));
+    }
+    let limit = q.limit.unwrap_or(200).clamp(1, 1000);
+    let entries = state.db.audit(&id, limit).map_err(internal)?;
+    Ok(Json(json!({ "project_id": id, "entries": entries })).into_response())
+}
