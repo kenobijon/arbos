@@ -4,6 +4,7 @@ pub mod connectors;
 pub mod frost;
 pub mod markdown;
 pub mod motion;
+pub mod notify;
 pub mod routines;
 pub mod shell;
 pub mod theme;

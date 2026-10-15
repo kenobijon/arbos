@@ -16,6 +16,10 @@ use crate::model::{
     Project, ProjectDocView, QuestionState, Role, Routine, RoutineRun, RoutineTrigger, StatusKind,
 };
 use crate::sync::{ClientCommand, SyncEvent, SyncSource};
+use crate::ui::notify::{Gate, Notifier, NotifyEvent, NotifyKind};
+
+/// How often held notification batches are re-checked.
+const NOTIFY_TICK_MS: u64 = 5_000;
 
 /// Pairing screen state (crdt-sync §10.1).
 #[derive(Clone, Debug)]
@@ -99,9 +103,13 @@ pub struct AppState {
     pub routines: HashMap<Id, Vec<Routine>>,
     /// Run history per routine, newest first.
     pub routine_runs: HashMap<Id, Vec<RoutineRun>>,
+    /// System notifications (D49); the Shell flips `window_active`.
+    pub notifier: Notifier,
+    pub window_active: bool,
     awaiting_new_project: bool,
     commands: mpsc::UnboundedSender<ClientCommand>,
     _pump: Task<()>,
+    _notify_tick: Task<()>,
 }
 
 /// What the Details drawer (stub) describes.
@@ -136,6 +144,15 @@ impl AppState {
             }
         });
 
+        let notify_tick = cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(NOTIFY_TICK_MS))
+                .await;
+            if this.update(cx, |state, _| state.notify_tick()).is_err() {
+                break;
+            }
+        });
+
         Self {
             source_name,
             pairing: None,
@@ -161,9 +178,12 @@ impl AppState {
             connectors: ConnectorsView::default(),
             routines: HashMap::new(),
             routine_runs: HashMap::new(),
+            notifier: Notifier::new(),
+            window_active: true,
             awaiting_new_project: false,
             commands: command_tx,
             _pump: pump,
+            _notify_tick: notify_tick,
         }
     }
 
@@ -261,6 +281,21 @@ impl AppState {
                 cx.notify();
             }
             SyncEvent::Projects(projects) => {
+                for p in &projects {
+                    let crossed = p.spend_cap_usd > 0.0 && p.spend_today_usd >= p.spend_cap_usd;
+                    let was_below = self
+                        .project(&p.id)
+                        .map(|old| old.spend_today_usd < old.spend_cap_usd)
+                        .unwrap_or(false);
+                    if crossed && was_below {
+                        self.notify(
+                            p.id.clone(),
+                            None,
+                            NotifyKind::SpendCapReached,
+                            format!("${:.2} of ${:.2} today", p.spend_today_usd, p.spend_cap_usd),
+                        );
+                    }
+                }
                 // A project this device just created becomes the selection.
                 if self.awaiting_new_project {
                     let known: std::collections::HashSet<Id> =
@@ -292,10 +327,22 @@ impl AppState {
                 detail,
                 progress,
             } => {
+                let failed = state == BoxState::Error
+                    && self
+                        .project(&project_id)
+                        .is_some_and(|p| p.state != BoxState::Error);
                 if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
                     p.state = state;
-                    p.state_detail = detail;
+                    p.state_detail = detail.clone();
                     p.wake_progress = progress;
+                }
+                if failed {
+                    self.notify(
+                        project_id,
+                        None,
+                        NotifyKind::WakeFailed,
+                        detail.unwrap_or_else(|| "The box did not come up".into()),
+                    );
                 }
                 cx.notify();
             }
@@ -328,6 +375,9 @@ impl AppState {
                 let list = self.messages.entry(chat_id.clone()).or_default();
                 let mut text_only = false;
                 let mut appended = 0;
+                let mut was_streaming = false;
+                let mut had_open_question = false;
+                let mut is_new = false;
                 match list.iter_mut().find(|m| m.id == message.id) {
                     Some(existing) => {
                         let old_len = existing.text_len();
@@ -337,10 +387,22 @@ impl AppState {
                             && new_len > old_len
                             && same_shape(existing, &message);
                         appended = new_len.saturating_sub(old_len);
-                        *existing = message;
+                        was_streaming = existing.is_streaming();
+                        had_open_question = needs_input(existing);
+                        *existing = message.clone();
                     }
-                    None => list.push(message.clone()),
+                    None => {
+                        is_new = true;
+                        list.push(message.clone());
+                    }
                 }
+                self.notify_for_message(
+                    &chat_id,
+                    &message,
+                    was_streaming,
+                    had_open_question,
+                    is_new,
+                );
                 if text_only && appended > 0 {
                     cx.emit(AppEvent::TranscriptText { chat_id });
                 } else {
@@ -862,6 +924,181 @@ impl AppState {
         cx.notify();
     }
 
+    // ----- system notifications (D49) --------------------------------------
+
+    fn notify_gate(&self, project_id: &str, chat_id: Option<&str>) -> Gate {
+        let project_shown = self.selected_project.as_deref() == Some(project_id);
+        let chat_shown = match chat_id {
+            Some(id) => self.active_chat_id().as_deref() == Some(id),
+            None => true,
+        };
+        Gate {
+            streaming: self.project_is_streaming(project_id),
+            visible: self.window_active && project_shown && chat_shown,
+        }
+    }
+
+    fn notify(&mut self, project_id: Id, chat_id: Option<&str>, kind: NotifyKind, detail: String) {
+        let Some(project) = self.project(&project_id) else {
+            return;
+        };
+        let event = NotifyEvent {
+            project_id: project.id.clone(),
+            project_name: project.name.clone(),
+            kind,
+            detail,
+        };
+        let gate = self.notify_gate(&project_id, chat_id);
+        self.notifier.offer(event, now_ms(), gate);
+    }
+
+    fn notify_for_message(
+        &mut self,
+        chat_id: &str,
+        message: &Message,
+        was_streaming: bool,
+        had_open_question: bool,
+        is_new: bool,
+    ) {
+        let Some(chat) = self
+            .chats
+            .values()
+            .flat_map(|v| v.iter())
+            .find(|c| c.id == chat_id)
+        else {
+            return;
+        };
+        let project_id = chat.project_id.clone();
+        let title = chat.title.clone();
+        let is_system = chat.is_system;
+
+        let sender = message.sender.as_str();
+        if message.role == Role::User {
+            // A prompt another project injected is news; our own typed
+            // messages and routine prompts are not (the routine's reply is).
+            if is_new && (sender.starts_with("project:") || (is_system && sender != "user")) {
+                self.notify(
+                    project_id,
+                    Some(chat_id),
+                    NotifyKind::CrossProject,
+                    preview(message),
+                );
+            }
+            return;
+        }
+        if needs_input(message) && !had_open_question {
+            let question = message
+                .open_questions()
+                .next_back()
+                .and_then(|p| match p {
+                    Part::Question { question, .. } => Some(question.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| preview(message));
+            self.notify(project_id, Some(chat_id), NotifyKind::NeedsInput, question);
+            return;
+        }
+        let finished = !message.is_streaming() && message.status != MessageStatus::Queued;
+        if !finished || !(was_streaming || is_new) {
+            return;
+        }
+        if message.role == Role::Project || sender.starts_with("project:") {
+            self.notify(
+                project_id,
+                Some(chat_id),
+                NotifyKind::CrossProject,
+                preview(message),
+            );
+            return;
+        }
+        if message.role != Role::Assistant {
+            return;
+        }
+        let failed = message.status == MessageStatus::Error;
+        if let Some(routine) = self.routine_behind(chat_id, message) {
+            let detail = if failed {
+                format!("{routine}: run failed")
+            } else {
+                let p = preview(message);
+                if p.is_empty() {
+                    routine
+                } else {
+                    format!("{routine}: {p}")
+                }
+            };
+            self.notify(project_id, Some(chat_id), NotifyKind::RoutineRan, detail);
+            return;
+        }
+        let detail = if failed {
+            format!("{title}: turn failed")
+        } else {
+            let p = preview(message);
+            if p.is_empty() {
+                title
+            } else {
+                p
+            }
+        };
+        self.notify(project_id, Some(chat_id), NotifyKind::TurnFinished, detail);
+    }
+
+    /// The routine whose prompt this assistant reply answers (F3: the prompt is
+    /// a user-role message with `sender: routine:<id>` and `routineName`).
+    fn routine_behind(&self, chat_id: &str, reply: &Message) -> Option<String> {
+        let list = self.messages_of(chat_id);
+        let prompt = match reply.in_reply_to.as_deref() {
+            Some(id) => list.iter().find(|m| m.id == id),
+            None => {
+                let at = list
+                    .iter()
+                    .position(|m| m.id == reply.id)
+                    .unwrap_or(list.len());
+                list[..at].iter().rev().find(|m| m.role == Role::User)
+            }
+        }?;
+        let id = prompt.sender.strip_prefix("routine:")?;
+        Some(
+            prompt
+                .routine_name
+                .clone()
+                .unwrap_or_else(|| format!("Routine {id}")),
+        )
+    }
+
+    /// F2 approvals call this when a gate card appears; no caller on this
+    /// branch yet.
+    #[allow(dead_code)]
+    pub fn notify_approval_requested(
+        &mut self,
+        project_id: Id,
+        chat_id: Option<&str>,
+        what: String,
+    ) {
+        self.notify(project_id, chat_id, NotifyKind::ApprovalRequested, what);
+    }
+
+    fn notify_tick(&mut self) {
+        let gates: HashMap<Id, Gate> = self
+            .projects
+            .iter()
+            .map(|p| (p.id.clone(), self.notify_gate(&p.id, None)))
+            .collect();
+        self.notifier
+            .tick(now_ms(), |id| gates.get(id).copied().unwrap_or_default());
+    }
+
+    pub fn set_window_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        if self.window_active != active {
+            self.window_active = active;
+            cx.notify();
+        }
+    }
+
+    pub fn set_notifications_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.notifier.enabled = enabled;
+        cx.notify();
+    }
+
     pub fn push_notice(&mut self, text: impl Into<String>) {
         let now = now_ms();
         self.notices
@@ -1129,6 +1366,40 @@ fn same_shape(a: &Message, b: &Message) -> bool {
             (Part::Text { .. }, _) | (Part::Reasoning { .. }, _) => false,
             (other_a, other_b) => other_a == other_b,
         })
+}
+
+/// The message is waiting on the user: an open `question` part or the legacy
+/// `waiting_user` status.
+fn needs_input(m: &Message) -> bool {
+    m.open_questions().next().is_some()
+        || m.parts.iter().any(|p| {
+            matches!(
+                p,
+                Part::Status {
+                    code: StatusKind::AskUser,
+                    ..
+                }
+            )
+        })
+}
+
+/// First non-empty text line, clipped for a notification body.
+fn preview(m: &Message) -> String {
+    const MAX: usize = 96;
+    let line = m
+        .parts
+        .iter()
+        .find_map(|p| match p {
+            Part::Text { text, .. } => text.lines().map(str::trim).find(|l| !l.is_empty()),
+            _ => None,
+        })
+        .unwrap_or("");
+    if line.chars().count() <= MAX {
+        line.to_string()
+    } else {
+        let cut: String = line.chars().take(MAX - 1).collect();
+        format!("{cut}…")
+    }
 }
 
 pub fn init_source(cx: &mut App) -> Box<dyn SyncSource> {
