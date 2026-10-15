@@ -60,7 +60,14 @@ enum Cmd {
     },
     /// Copy every legacy per-project sandbox into the user box (idempotent; old sandboxes are
     /// stopped and marked `migrated_to`, never deleted).
-    MigrateToUserBox,
+    MigrateToUserBox {
+        /// Only this project id.
+        #[arg(long)]
+        project: Option<String>,
+        /// Copy again even if already marked migrated.
+        #[arg(long)]
+        force: bool,
+    },
     /// Devices.
     Devices {
         #[command(subcommand)]
@@ -358,8 +365,12 @@ async fn main() -> Result<()> {
             };
             println!("{}", serde_json::to_string_pretty(&v)?);
         }
-        Cmd::MigrateToUserBox => {
-            let v = relay.post("/machine/migrate", &json!({})).await?;
+        Cmd::MigrateToUserBox { project, force } => {
+            let mut path = format!("/machine/migrate?force={force}");
+            if let Some(p) = project {
+                path.push_str(&format!("&project={p}"));
+            }
+            let v = relay.post(&path, &json!({})).await?;
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&v)?);
             } else {

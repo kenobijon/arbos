@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, Mutex, Semaphore};
 
@@ -1895,6 +1895,7 @@ impl Agent {
             Some(&json!({ "chat_id": chat_id, "pack": "pack-v0" })),
         );
 
+        let mut resumed_fresh = false;
         if is_new {
             adapter
                 .start(StartRequest {
@@ -1913,24 +1914,93 @@ impl Agent {
                 )
                 .await;
         } else if !adapter.is_open(&subagent_id) {
-            adapter.resume(&subagent_id).await?;
-            let _ = self
-                .post_timing(
-                    "subagent_resume_ms",
-                    t0.elapsed().as_millis() as i64,
-                    Some(harness.as_str()),
-                )
-                .await;
+            match adapter.resume(&subagent_id).await {
+                Ok(()) => {
+                    let _ = self
+                        .post_timing(
+                            "subagent_resume_ms",
+                            t0.elapsed().as_millis() as i64,
+                            Some(harness.as_str()),
+                        )
+                        .await;
+                }
+                Err(e) => {
+                    // A session that cannot come back (moved box, corrupt store, harness upgrade)
+                    // must not sink the hand-off: start the same subagent fresh with its summary.
+                    tracing::warn!(subagent = %subagent_id, error = %e, "resume failed; starting the subagent fresh");
+                    resumed_fresh = true;
+                    adapter
+                        .start(StartRequest {
+                            session_id: subagent_id.clone(),
+                            cwd: self.cfg.work_dir.clone(),
+                            system_prompt: pack.clone(),
+                            model: subagent_model.clone(),
+                            thinking: "medium".into(),
+                        })
+                        .await
+                        .with_context(|| format!("resume failed ({e}); fresh start failed too"))?;
+                }
+            }
         }
-        let mut stream = adapter
+        let stream = adapter
             .stream(&subagent_id)
             .ok_or_else(|| anyhow!("no stream for {subagent_id}"))?;
         let first_prompt = if is_new {
             brief.to_owned()
+        } else if resumed_fresh {
+            let summary = self
+                .store
+                .subagent(&subagent_id)
+                .ok()
+                .flatten()
+                .map(|r| r.summary)
+                .unwrap_or_default();
+            format!(
+                "Your previous session could not be resumed, so this is a fresh session for the same thread. What you had done before: {}\n\nContinue:\n\n{brief}",
+                if summary.trim().is_empty() { "(no summary recorded)" } else { summary.trim() }
+            )
         } else {
             format!("Context update: continue your thread.\n\n{brief}")
         };
-        adapter.prompt(&subagent_id, &first_prompt).await?;
+        let mut stream = match adapter.prompt(&subagent_id, &first_prompt).await {
+            Ok(()) => stream,
+            Err(e) if !is_new && !resumed_fresh => {
+                // The resumed child died on first contact (broken pipe): same fallback as above.
+                tracing::warn!(subagent = %subagent_id, error = %e, "resumed session failed on prompt; starting fresh");
+                let _ = adapter.stop(&subagent_id).await;
+                adapter
+                    .start(StartRequest {
+                        session_id: subagent_id.clone(),
+                        cwd: self.cfg.work_dir.clone(),
+                        system_prompt: pack.clone(),
+                        model: subagent_model.clone(),
+                        thinking: "medium".into(),
+                    })
+                    .await
+                    .with_context(|| format!("prompt failed ({e}); fresh start failed too"))?;
+                let fresh = adapter
+                    .stream(&subagent_id)
+                    .ok_or_else(|| anyhow!("no stream for {subagent_id}"))?;
+                let summary = self
+                    .store
+                    .subagent(&subagent_id)
+                    .ok()
+                    .flatten()
+                    .map(|r| r.summary)
+                    .unwrap_or_default();
+                adapter
+                    .prompt(
+                        &subagent_id,
+                        &format!(
+                            "Your previous session could not be resumed, so this is a fresh session for the same thread. What you had done before: {}\n\nContinue:\n\n{brief}",
+                            if summary.trim().is_empty() { "(no summary recorded)" } else { summary.trim() }
+                        ),
+                    )
+                    .await?;
+                fresh
+            }
+            Err(e) => return Err(e),
+        };
 
         self.subagent_turns.fetch_add(1, Ordering::SeqCst);
         let keepalive = self.spawn_keepalive();

@@ -26,7 +26,12 @@ pub struct MigrationReport {
 }
 
 /// Migrate every unmigrated legacy sandbox whose project belongs to `user_id`.
-pub async fn migrate_user(state: &AppState, user_id: &str) -> Result<Vec<MigrationReport>> {
+pub async fn migrate_user(
+    state: &AppState,
+    user_id: &str,
+    only_project: Option<&str>,
+    force: bool,
+) -> Result<Vec<MigrationReport>> {
     let projects = state.db.projects_of_user(user_id)?;
     let legacy = state.db.legacy_sandboxes()?;
     let mut reports = Vec::new();
@@ -62,7 +67,10 @@ pub async fn migrate_user(state: &AppState, user_id: &str) -> Result<Vec<Migrati
         let Some(project) = projects.iter().find(|p| p.id == project_id) else {
             continue; // another user's project (or deleted)
         };
-        if migrated_to.is_some() {
+        if only_project.is_some_and(|o| o != project_id) {
+            continue;
+        }
+        if migrated_to.is_some() && !force {
             reports.push(MigrationReport {
                 project_id: project_id.clone(),
                 legacy_sandbox: legacy_sb.sandbox_id.clone(),
@@ -74,7 +82,7 @@ pub async fn migrate_user(state: &AppState, user_id: &str) -> Result<Vec<Migrati
         }
         let res = migrate_one(state, user_id, &project.id, &legacy_sb, &target).await;
         let (outcome, work_mib) = match res {
-            Ok(mib) => {
+            Ok(Step::Copied(mib)) => {
                 let _ = state.db.mark_legacy_migrated(&project_id, user_id);
                 if let Ok(Some(mut b)) = state.db.user_box(user_id) {
                     if !b.migrated_from.contains(&project_id) {
@@ -83,6 +91,13 @@ pub async fn migrate_user(state: &AppState, user_id: &str) -> Result<Vec<Migrati
                     }
                 }
                 ("migrated".to_owned(), Some(mib))
+            }
+            Ok(Step::Skipped(why)) => {
+                // Nothing to carry over; marked so the next run stays quiet.
+                let _ = state
+                    .db
+                    .mark_legacy_migrated(&project_id, &format!("skipped: {why}"));
+                (format!("skipped: {why}"), None)
             }
             Err(e) => (format!("failed: {e:#}"), None),
         };
@@ -98,14 +113,22 @@ pub async fn migrate_user(state: &AppState, user_id: &str) -> Result<Vec<Migrati
     Ok(reports)
 }
 
-/// Copy one legacy sandbox's `/work` into the user box's `/work/<project>`. Returns the size in MiB.
+/// One project's migration outcome.
+pub enum Step {
+    /// `/work` copied; size in MiB.
+    Copied(i64),
+    /// Nothing to copy (legacy sandbox gone, or a local sandbox for a Daytona box).
+    Skipped(String),
+}
+
+/// Copy one legacy sandbox's `/work` into the user box's `/work/<project>`.
 async fn migrate_one(
     state: &AppState,
     user_id: &str,
     project_id: &str,
     legacy: &crate::db::Sandbox,
     target: &crate::db::Sandbox,
-) -> Result<i64> {
+) -> Result<Step> {
     let legacy_provider =
         Provider::parse(&legacy.provider).ok_or_else(|| anyhow!("bad legacy provider"))?;
     let target_provider =
@@ -147,7 +170,7 @@ async fn migrate_one(
             if !st.success() {
                 return Err(anyhow!("cp -a failed"));
             }
-            Ok(dir_size_mib(&dst))
+            Ok(Step::Copied(dir_size_mib(&dst)))
         }
         (Provider::Daytona, Provider::Daytona) => {
             let dt = state
@@ -163,7 +186,23 @@ async fn migrate_one(
                 .clone()
                 .ok_or_else(|| anyhow!("target box has no sandbox id"))?;
             // 1. The old sandbox must run for the toolbox to read it.
-            let cur = dt.get(&old_id).await?;
+            let cur = match dt.get(&old_id).await {
+                Ok(c) => c,
+                Err(e) if e.to_string().contains("404") => {
+                    return Ok(Step::Skipped(format!(
+                        "legacy sandbox {old_id} no longer exists"
+                    )))
+                }
+                Err(e) => return Err(e),
+            };
+            if matches!(
+                cur.state,
+                SandboxState::Destroyed | SandboxState::Destroying
+            ) {
+                return Ok(Step::Skipped(format!(
+                    "legacy sandbox {old_id} is destroyed"
+                )));
+            }
             if cur.state != SandboxState::Started {
                 dt.start(&old_id).await?;
                 dt.wait_for(&old_id, Duration::from_secs(180), |s| {
@@ -172,7 +211,16 @@ async fn migrate_one(
                 .await?;
                 tokio::time::sleep(Duration::from_secs(3)).await;
             }
-            // 2. Size, then one tarball of /work (SQLite side files excluded; they are rebuilt).
+            // 2. Quiesce: the legacy agentd restarts with the sandbox and would write to the
+            //    SQLite files while they are packed; stop it so the WAL is checkpointed on close.
+            let _ = dt
+                .toolbox_exec(
+                    &old_id,
+                    "pkill -TERM -x arbos-agentd 2>/dev/null; sleep 3; pkill -KILL -x arbos-agentd 2>/dev/null; pkill -KILL -f 'pi --mode rpc' 2>/dev/null; pkill -KILL -x prime-agent 2>/dev/null; true",
+                    60,
+                )
+                .await;
+            // 3. Size, then one tarball of /work (WAL/SHM included: a quiescent WAL is consistent).
             let du = dt
                 .toolbox_exec(&old_id, "du -sm /work | cut -f1", 120)
                 .await?;
@@ -189,7 +237,7 @@ async fn migrate_one(
             let tar = dt
                 .toolbox_exec(
                     &old_id,
-                    "cd /work && tar czf /tmp/arbos-migrate.tgz --exclude='./.arbos/agentd/*.db-wal' --exclude='./.arbos/agentd/*.db-shm' --exclude='./.arbos/logs' . && ls -l /tmp/arbos-migrate.tgz",
+                    "cd /work && tar czf /tmp/arbos-migrate.tgz --exclude='./.arbos/logs' . && ls -l /tmp/arbos-migrate.tgz",
                     900,
                 )
                 .await?;
@@ -204,8 +252,10 @@ async fn migrate_one(
                 .await
                 .context("download tarball")?;
             tracing::info!(project = %project_id, mib, bytes = bytes.len(), "legacy /work packed");
-            // 3. Stop the workspace on the user box, replace its directory, release it.
+            // 4. Stop the workspace on the user box, replace its directory, release it.
             hold_workspace(state, target, project_id, true).await?;
+            // The held workspace's children have just exited; give their last writes a moment.
+            tokio::time::sleep(Duration::from_secs(2)).await;
             let remote_tgz = format!("/tmp/arbos-migrate-{project_id}.tgz");
             let upload = dt.toolbox_upload(&new_id, &remote_tgz, bytes).await;
             let extract = match upload {
@@ -213,7 +263,7 @@ async fn migrate_one(
                     dt.toolbox_exec(
                         &new_id,
                         &format!(
-                            "rm -rf /work/{p} && mkdir -p /work/{p} && tar xzf {t} -C /work/{p} && rm -f {t} && echo ok",
+                            "for i in 1 2 3 4 5; do rm -rf /work/{p} && break; sleep 2; done; mkdir -p /work/{p} && tar xzf {t} -C /work/{p} && rm -f {t} && echo ok",
                             p = project_id,
                             t = remote_tgz
                         ),
@@ -234,10 +284,13 @@ async fn migrate_one(
             let _ = dt
                 .toolbox_exec(&old_id, "rm -f /tmp/arbos-migrate.tgz", 60)
                 .await;
-            // 4. Hibernate the old sandbox; it stays as a fallback (never deleted here).
+            // 5. Hibernate the old sandbox; it stays as a fallback (never deleted here).
             let _ = dt.stop(&old_id, false).await;
-            Ok(mib)
+            Ok(Step::Copied(mib))
         }
+        (Provider::Process, Provider::Daytona) => Ok(Step::Skipped(
+            "local process sandbox; its files stay under the relay data dir".into(),
+        )),
         (a, b) => Err(anyhow!(
             "cannot migrate a {} sandbox into a {} box",
             a.as_str(),

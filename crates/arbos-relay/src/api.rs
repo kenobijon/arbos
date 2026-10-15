@@ -597,16 +597,30 @@ pub async fn machine_stop(
 
 /// `POST /machine/migrate`: copy every legacy per-project sandbox of the caller's user into the
 /// user box (D70). Idempotent; old sandboxes are stopped and marked, never deleted.
-pub async fn machine_migrate(State(state): State<AppState>, principal: Principal) -> ApiResult {
+pub async fn machine_migrate(
+    State(state): State<AppState>,
+    principal: Principal,
+    Query(q): Query<MigrateQuery>,
+) -> ApiResult {
     let user_id = match &principal {
         Principal::Device { user_id, .. } => user_id.clone(),
         Principal::Admin => "u_default".to_owned(),
         Principal::Box { .. } => return Err((StatusCode::FORBIDDEN, "devices only".into())),
     };
-    let reports = crate::migrate::migrate_user(&state, &user_id)
+    let reports = crate::migrate::migrate_user(&state, &user_id, q.project.as_deref(), q.force)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
     Ok(Json(crate::migrate::report_json(&user_id, &reports)).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct MigrateQuery {
+    /// Only this project (id).
+    #[serde(default)]
+    pub project: Option<String>,
+    /// Copy again even when the legacy sandbox is already marked migrated.
+    #[serde(default)]
+    pub force: bool,
 }
 
 #[derive(Deserialize)]
