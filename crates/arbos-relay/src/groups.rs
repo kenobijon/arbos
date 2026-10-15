@@ -377,7 +377,7 @@ pub async fn group_send(
 
     // A project's words land in the host chat as a `project` message. When the host agent is
     // the one addressed, that message also drives its turn (`to` set).
-    if matches!(sender, Sender::Project(_)) {
+    if matches!(sender, Sender::Project(_)) && sender_project != host_id {
         let addressed_to_host = to.as_deref() == Some(host_id.as_str());
         let payload = push_payload(
             &chat,
