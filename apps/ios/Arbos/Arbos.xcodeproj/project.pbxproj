@@ -21,6 +21,7 @@
 		A15CBD2513A3DFEA102E839D /* Keychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A892804BF00CAFB11A07C1 /* Keychain.swift */; };
 		A195EDF981D82D89797CAADF /* RelayAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A13F46FAAEFD7122680FEBDA /* RelayAPI.swift */; };
 		A1ED1ECA03BAD316F116572E /* Room.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11BDF873D89AEB240C28AB2 /* Room.swift */; };
+		A1F9FCC992F315C2D209ABAB /* AgentProfileView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A162A8CC623FC6DCDBDFF5C4 /* AgentProfileView.swift */; };
 		A1756FFB6E2EC2BD9A966B71 /* Avatar.swift in Sources */ = {isa = PBXBuildFile; fileRef = A166570A69559C91100AC65C /* Avatar.swift */; };
 		A18F59FA9AE462F8486DB31A /* ChatListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DFDB106DEC76C607F1D977 /* ChatListView.swift */; };
 		A1ED1D7F2332871010811C4F /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10D68BEDFFBE789DB809322 /* ChatView.swift */; };
@@ -50,6 +51,7 @@
 		A1A892804BF00CAFB11A07C1 /* Keychain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Keychain.swift; sourceTree = "<group>"; };
 		A13F46FAAEFD7122680FEBDA /* RelayAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayAPI.swift; sourceTree = "<group>"; };
 		A11BDF873D89AEB240C28AB2 /* Room.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Room.swift; sourceTree = "<group>"; };
+		A162A8CC623FC6DCDBDFF5C4 /* AgentProfileView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentProfileView.swift; sourceTree = "<group>"; };
 		A166570A69559C91100AC65C /* Avatar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Avatar.swift; sourceTree = "<group>"; };
 		A1DFDB106DEC76C607F1D977 /* ChatListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatListView.swift; sourceTree = "<group>"; };
 		A10D68BEDFFBE789DB809322 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
@@ -157,6 +159,7 @@
 		A1C0E2252AFA1180F1B1FAB8 /* UI */ = {
 			isa = PBXGroup;
 			children = (
+				A162A8CC623FC6DCDBDFF5C4,
 				A166570A69559C91100AC65C,
 				A1DFDB106DEC76C607F1D977,
 				A10D68BEDFFBE789DB809322,
@@ -259,6 +262,7 @@
 				A15CBD2513A3DFEA102E839D /* Keychain.swift in Sources */,
 				A195EDF981D82D89797CAADF /* RelayAPI.swift in Sources */,
 				A1ED1ECA03BAD316F116572E /* Room.swift in Sources */,
+				A1F9FCC992F315C2D209ABAB /* AgentProfileView.swift in Sources */,
 				A1756FFB6E2EC2BD9A966B71 /* Avatar.swift in Sources */,
 				A18F59FA9AE462F8486DB31A /* ChatListView.swift in Sources */,
 				A1ED1D7F2332871010811C4F /* ChatView.swift in Sources */,

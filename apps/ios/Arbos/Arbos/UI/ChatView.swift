@@ -36,6 +36,7 @@ struct ChatView: View {
 
     @State private var showMembers = false
     @State private var showShare = false
+    @State private var showProfile = false
     @State private var replyTo: Message?
     @State private var mentionQuery: String?
 
@@ -102,6 +103,9 @@ struct ChatView: View {
                 ProjectMembersSheet(project: project).environmentObject(model).environment(\.theme, theme)
             }
         }
+        .sheet(isPresented: $showProfile) {
+            AgentProfileView(projectId: projectId).environmentObject(model).environment(\.theme, theme)
+        }
         .fullScreenCover(isPresented: $showVoice, onDismiss: demoDismissed) {
             if let project {
                 VoiceModeView(project: project).environmentObject(model).environment(\.theme, theme)
@@ -165,6 +169,7 @@ struct ChatView: View {
                     case "voice": showVoice = true
                     case "threads": showThreads = true
                     case "model": showModelPicker = true
+                    case "profile": showProfile = true
                     case "recording": recorder.start()
                     case "pending":
                         pending = [.init(name: "Q3 board deck v5.pdf", mime: "application/pdf", data: Data()),
@@ -274,6 +279,10 @@ struct ChatView: View {
                 .padding(.leading, 10)
                 .padding(.trailing, 16)
                 .frame(height: Theme.control)
+                .contentShape(Capsule())
+                .onTapGesture { if !isPeople { showProfile = true } }
+                .accessibilityAddTraits(isPeople ? [] : .isButton)
+                .accessibilityHint(isPeople ? "" : "Opens the agent profile")
             }
             Spacer()
             if isPeople {

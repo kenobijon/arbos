@@ -11,7 +11,7 @@ enum DebugHooks {
     static var fixture: Bool { value("ARBOS_FIXTURE") == "1" }
     /// Fixture machine reports `always_on` (D73 policy screens).
     static var alwaysOn: Bool { value("ARBOS_ALWAYS_ON") == "1" }
-    /// keyboard | settings | voice | threads | model — opened on the chat screen.
+    /// keyboard | settings | voice | threads | model | profile — opened on the chat screen.
     static var show: String? { value("ARBOS_SHOW") }
     /// Scripted tour for the screen recording (fixture only).
     static var demo: Bool { value("ARBOS_DEMO") == "1" }
