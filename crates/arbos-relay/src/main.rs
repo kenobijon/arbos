@@ -3,6 +3,7 @@ mod auth;
 mod blobs;
 mod boxes;
 mod browser;
+mod channels;
 mod connectors;
 mod daytona;
 mod db;
@@ -157,6 +158,7 @@ async fn main() -> anyhow::Result<()> {
         local_box_image: args.local_box_image.clone(),
         box_idle_grace_ms: 30_000,
         connectors_mock: std::env::var("ARBOS_CONNECTORS_MOCK").is_ok_and(|v| v == "1"),
+        channels_mock: std::env::var("ARBOS_CHANNELS_MOCK").is_ok_and(|v| v == "1"),
     };
     let relay_key = Arc::new(connectors::crypto::RelayKey::load(&db)?);
     let daytona = daytona_key.map(|k| {
@@ -190,6 +192,9 @@ async fn main() -> anyhow::Result<()> {
     if state.cfg.connectors_mock {
         tracing::info!("ARBOS_CONNECTORS_MOCK=1: connectors return canned data; sends land in connector_outbox");
     }
+    if state.cfg.channels_mock {
+        tracing::info!("ARBOS_CHANNELS_MOCK=1: channel sends land in channel_outbox; POST /channels/mock/inbound injects messages");
+    }
 
     if db.device_count()? == 0 {
         let code = arbos_core::auth::pairing_code();
@@ -200,6 +205,7 @@ async fn main() -> anyhow::Result<()> {
     rooms::spawn_sweeper(state.clone()).await;
     boxes::spawn_wake_runner(state.clone()).await;
     routines::spawn_scheduler(state.clone()).await;
+    channels::spawn_pollers(state.clone()).await;
 
     let app = Router::new()
         .route("/healthz", get(api::healthz))
@@ -281,6 +287,22 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/connectors/{provider}/connect", post(connectors::connect))
         .route("/connectors/{id}", delete(connectors::disconnect))
+        .route("/channels", get(channels::overview))
+        .route("/channels/pair/new", post(channels::pair_new))
+        .route("/channels/bindings", get(channels::list_bindings))
+        .route("/channels/bindings/{id}", delete(channels::unbind))
+        .route("/channels/mock/inbound", post(channels::mock_inbound))
+        .route("/channels/mock/outbox", get(channels::mock_outbox))
+        .route("/channels/slack/events", post(channels::slack::events))
+        .route(
+            "/channels/telegram/webhook/{secret}",
+            post(channels::telegram::webhook),
+        )
+        .route(
+            "/channels/whatsapp/webhook",
+            get(channels::whatsapp::verify).post(channels::whatsapp::webhook),
+        )
+        .route("/projects/{id}/channels/reply", post(channels::reply))
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(state);

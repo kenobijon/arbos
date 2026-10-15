@@ -111,6 +111,24 @@ CREATE TABLE IF NOT EXISTS skills (
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS skills_fts USING fts5(text, id UNINDEXED, tokenize = 'porter unicode61');
+CREATE TABLE IF NOT EXISTS channel_bindings (
+  id TEXT PRIMARY KEY, platform TEXT NOT NULL, external_chat_id TEXT NOT NULL, external_user_id TEXT NOT NULL,
+  project_id TEXT NOT NULL, chat_id TEXT NOT NULL, label TEXT NOT NULL DEFAULT '', bound_at INTEGER NOT NULL,
+  UNIQUE(platform, external_chat_id, external_user_id)
+);
+CREATE TABLE IF NOT EXISTS channel_pair_codes (
+  code TEXT PRIMARY KEY, project_id TEXT NOT NULL, chat_id TEXT NOT NULL, created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL, used_at INTEGER
+);
+CREATE TABLE IF NOT EXISTS channel_hints (
+  platform TEXT NOT NULL, external_chat_id TEXT NOT NULL, external_user_id TEXT NOT NULL, hinted_at INTEGER NOT NULL,
+  PRIMARY KEY (platform, external_chat_id, external_user_id)
+);
+CREATE TABLE IF NOT EXISTS channel_seen (event_key TEXT PRIMARY KEY, seen_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS channel_outbox (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, platform TEXT NOT NULL, external_chat_id TEXT NOT NULL, text TEXT NOT NULL,
+  request_id TEXT NOT NULL, status TEXT NOT NULL, detail TEXT, binding_id TEXT, created_at INTEGER NOT NULL
+);
 "#;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -236,6 +254,30 @@ pub struct OauthState {
     pub code_verifier: String,
     pub redirect_uri: String,
     pub scopes: Vec<String>,
+}
+
+/// One paired external conversation (`channel_bindings`, F7): messages from `external_user_id` in
+/// `external_chat_id` on `platform` land in `project_id`/`chat_id`; replies go back the same way.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelBinding {
+    pub id: String,
+    pub platform: String,
+    pub external_chat_id: String,
+    pub external_user_id: String,
+    pub project_id: String,
+    pub chat_id: String,
+    pub label: String,
+    pub bound_at: i64,
+}
+
+/// A pairing code minted from Settings → Channels (`channel_pair_codes`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelPairCode {
+    pub code: String,
+    pub project_id: String,
+    pub chat_id: String,
+    pub created_at: i64,
+    pub expires_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1102,6 +1144,239 @@ impl Db {
                     "id": r.get::<_, i64>(0)?, "provider": r.get::<_, String>(1)?, "action": r.get::<_, String>(2)?,
                     "args": serde_json::from_str::<serde_json::Value>(&r.get::<_, String>(3)?).unwrap_or_default(),
                     "created_at": r.get::<_, i64>(4)?,
+                }))
+            })?;
+            rows.collect()
+        })
+    }
+
+    // ---- channels (F7) ------------------------------------------------------------------------
+
+    const BINDING_COLS: &'static str =
+        "id, platform, external_chat_id, external_user_id, project_id, chat_id, label, bound_at";
+
+    fn row_to_binding(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChannelBinding> {
+        Ok(ChannelBinding {
+            id: r.get(0)?,
+            platform: r.get(1)?,
+            external_chat_id: r.get(2)?,
+            external_user_id: r.get(3)?,
+            project_id: r.get(4)?,
+            chat_id: r.get(5)?,
+            label: r.get(6)?,
+            bound_at: r.get(7)?,
+        })
+    }
+
+    pub fn new_channel_pair_code(&self, c: &ChannelPairCode) -> Result<()> {
+        self.with(|conn| {
+            conn.execute(
+                "DELETE FROM channel_pair_codes WHERE expires_at < ?1",
+                params![now_ms()],
+            )?;
+            conn.execute(
+                "INSERT INTO channel_pair_codes(code, project_id, chat_id, created_at, expires_at) VALUES (?1,?2,?3,?4,?5)",
+                params![c.code, c.project_id, c.chat_id, c.created_at, c.expires_at],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// The newest unused, unexpired code (so a client can show it again after a restart).
+    pub fn active_channel_pair_code(&self) -> Result<Option<ChannelPairCode>> {
+        self.with(|conn| {
+            conn.query_row(
+                "SELECT code, project_id, chat_id, created_at, expires_at FROM channel_pair_codes
+                 WHERE used_at IS NULL AND expires_at > ?1 ORDER BY created_at DESC LIMIT 1",
+                params![now_ms()],
+                |r| {
+                    Ok(ChannelPairCode {
+                        code: r.get(0)?,
+                        project_id: r.get(1)?,
+                        chat_id: r.get(2)?,
+                        created_at: r.get(3)?,
+                        expires_at: r.get(4)?,
+                    })
+                },
+            )
+            .optional()
+        })
+    }
+
+    /// Consume a pairing code (one use). `None` when unknown, used, or expired.
+    pub fn redeem_channel_pair_code(&self, code: &str) -> Result<Option<ChannelPairCode>> {
+        let now = now_ms();
+        self.with(|conn| {
+            let row = conn
+                .query_row(
+                    "SELECT code, project_id, chat_id, created_at, expires_at FROM channel_pair_codes
+                     WHERE code = ?1 AND used_at IS NULL AND expires_at > ?2",
+                    params![code, now],
+                    |r| {
+                        Ok(ChannelPairCode {
+                            code: r.get(0)?,
+                            project_id: r.get(1)?,
+                            chat_id: r.get(2)?,
+                            created_at: r.get(3)?,
+                            expires_at: r.get(4)?,
+                        })
+                    },
+                )
+                .optional()?;
+            if row.is_some() {
+                conn.execute(
+                    "UPDATE channel_pair_codes SET used_at = ?2 WHERE code = ?1",
+                    params![code, now],
+                )?;
+            }
+            Ok(row)
+        })
+    }
+
+    /// Bind (or re-bind) one external user + chat to a project chat.
+    pub fn upsert_channel_binding(&self, b: &ChannelBinding) -> Result<()> {
+        self.with(|conn| {
+            conn.execute(
+                "INSERT INTO channel_bindings(id, platform, external_chat_id, external_user_id, project_id, chat_id, label, bound_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+                 ON CONFLICT(platform, external_chat_id, external_user_id) DO UPDATE SET
+                    project_id=excluded.project_id, chat_id=excluded.chat_id, label=excluded.label, bound_at=excluded.bound_at",
+                params![b.id, b.platform, b.external_chat_id, b.external_user_id, b.project_id, b.chat_id, b.label, b.bound_at],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn channel_binding_for(
+        &self,
+        platform: &str,
+        external_chat_id: &str,
+        external_user_id: &str,
+    ) -> Result<Option<ChannelBinding>> {
+        self.with(|conn| {
+            conn.query_row(
+                &format!(
+                    "SELECT {} FROM channel_bindings WHERE platform = ?1 AND external_chat_id = ?2 AND external_user_id = ?3",
+                    Self::BINDING_COLS
+                ),
+                params![platform, external_chat_id, external_user_id],
+                Self::row_to_binding,
+            )
+            .optional()
+        })
+    }
+
+    pub fn channel_binding(&self, id: &str) -> Result<Option<ChannelBinding>> {
+        self.with(|conn| {
+            conn.query_row(
+                &format!(
+                    "SELECT {} FROM channel_bindings WHERE id = ?1",
+                    Self::BINDING_COLS
+                ),
+                params![id],
+                Self::row_to_binding,
+            )
+            .optional()
+        })
+    }
+
+    pub fn list_channel_bindings(&self) -> Result<Vec<ChannelBinding>> {
+        self.with(|conn| {
+            let mut st = conn.prepare(&format!(
+                "SELECT {} FROM channel_bindings ORDER BY bound_at DESC",
+                Self::BINDING_COLS
+            ))?;
+            let rows = st.query_map([], Self::row_to_binding)?;
+            rows.collect()
+        })
+    }
+
+    pub fn delete_channel_binding(&self, id: &str) -> Result<bool> {
+        self.with(|conn| {
+            conn.execute("DELETE FROM channel_bindings WHERE id = ?1", params![id])
+                .map(|n| n > 0)
+        })
+    }
+
+    /// Record that an unbound sender got the pairing hint. Returns `true` the first time only.
+    pub fn mark_channel_hinted(
+        &self,
+        platform: &str,
+        external_chat_id: &str,
+        external_user_id: &str,
+    ) -> Result<bool> {
+        self.with(|conn| {
+            conn.execute(
+                "INSERT OR IGNORE INTO channel_hints(platform, external_chat_id, external_user_id, hinted_at) VALUES (?1,?2,?3,?4)",
+                params![platform, external_chat_id, external_user_id, now_ms()],
+            )
+            .map(|n| n > 0)
+        })
+    }
+
+    /// Idempotency for webhook retries: `true` when `event_key` is new.
+    pub fn channel_event_first_seen(&self, event_key: &str) -> Result<bool> {
+        self.with(|conn| {
+            conn.execute(
+                "DELETE FROM channel_seen WHERE seen_at < ?1",
+                params![now_ms() - 7 * 86_400_000],
+            )?;
+            conn.execute(
+                "INSERT OR IGNORE INTO channel_seen(event_key, seen_at) VALUES (?1, ?2)",
+                params![event_key, now_ms()],
+            )
+            .map(|n| n > 0)
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_channel_outbox(
+        &self,
+        platform: &str,
+        external_chat_id: &str,
+        text: &str,
+        request_id: &str,
+        status: &str,
+        detail: Option<&str>,
+        binding_id: Option<&str>,
+    ) -> Result<i64> {
+        self.with(|conn| {
+            conn.execute(
+                "INSERT INTO channel_outbox(platform, external_chat_id, text, request_id, status, detail, binding_id, created_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![platform, external_chat_id, text, request_id, status, detail, binding_id, now_ms()],
+            )?;
+            Ok(conn.last_insert_rowid())
+        })
+    }
+
+    pub fn set_channel_outbox_status(
+        &self,
+        id: i64,
+        status: &str,
+        detail: Option<&str>,
+    ) -> Result<()> {
+        self.with(|conn| {
+            conn.execute(
+                "UPDATE channel_outbox SET status = ?2, detail = ?3 WHERE id = ?1",
+                params![id, status, detail],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn channel_outbox(&self, limit: i64) -> Result<Vec<serde_json::Value>> {
+        self.with(|conn| {
+            let mut st = conn.prepare(
+                "SELECT id, platform, external_chat_id, text, request_id, status, detail, binding_id, created_at
+                 FROM channel_outbox ORDER BY id DESC LIMIT ?1",
+            )?;
+            let rows = st.query_map(params![limit], |r| {
+                Ok(serde_json::json!({
+                    "id": r.get::<_, i64>(0)?, "platform": r.get::<_, String>(1)?, "externalChatId": r.get::<_, String>(2)?,
+                    "text": r.get::<_, String>(3)?, "requestId": r.get::<_, String>(4)?, "status": r.get::<_, String>(5)?,
+                    "detail": r.get::<_, Option<String>>(6)?, "bindingId": r.get::<_, Option<String>>(7)?,
+                    "created_at": r.get::<_, i64>(8)?,
                 }))
             })?;
             rows.collect()

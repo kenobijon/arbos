@@ -564,7 +564,7 @@ async fn verify_connection(state: &AppState, p: Provider, cn: &Connector) -> Res
 }
 
 /// Decrypted bearer token for a connector, refreshed first when it is about to expire.
-async fn bearer_for(
+pub(crate) async fn bearer_for(
     state: &AppState,
     p: Provider,
     cn: &Connector,
@@ -786,6 +786,7 @@ mod tests {
             local_box_image: String::new(),
             box_idle_grace_ms: 0,
             connectors_mock: mock,
+            channels_mock: true,
         };
         AppState {
             db,
