@@ -65,6 +65,34 @@ async fn ask_user(State(a): State<S>, headers: HeaderMap, Json(b): Json<Value>) 
     }
 }
 
+/// Risky harness tool calls (feature `approve`): `{ tool, input, session_id, role }` →
+/// `{ state: "allowed" }` or `{ state: "pending", approvalId }` for the extension to poll.
+async fn approval(State(a): State<S>, headers: HeaderMap, Json(b): Json<Value>) -> Response {
+    if !authed(&a, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let str_of = |k: &str| b.get(k).and_then(Value::as_str).unwrap_or("").to_owned();
+    let input = b.get("input").cloned().unwrap_or(Value::Null);
+    let role = b
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or("main")
+        .to_owned();
+    Json(
+        a.hook_approval(&str_of("tool"), &input, &str_of("session_id"), &role)
+            .await,
+    )
+    .into_response()
+}
+
+async fn approval_status(State(a): State<S>, headers: HeaderMap, Json(b): Json<Value>) -> Response {
+    if !authed(&a, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let id = b.get("approvalId").and_then(Value::as_str).unwrap_or("");
+    Json(a.approval_status(id).await).into_response()
+}
+
 async fn act_limit(State(a): State<S>, headers: HeaderMap, Json(_b): Json<Value>) -> Response {
     if !authed(&a, &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
@@ -245,6 +273,8 @@ pub fn router(agent: Arc<Agent>) -> Router {
         .route("/hook/route", post(route))
         .route("/hook/ask_user", post(ask_user))
         .route("/hook/act-limit", post(act_limit))
+        .route("/hook/approval", post(approval))
+        .route("/hook/approval-status", post(approval_status))
         .route("/hook/deny", post(deny))
         .route("/hook/handle", post(handle))
         .route("/hook/handle-path", post(handle_path))

@@ -84,6 +84,20 @@ CREATE TABLE IF NOT EXISTS turn_metrics (
 CREATE TABLE IF NOT EXISTS asks (
   id TEXT PRIMARY KEY, chat_id TEXT, session_id TEXT, question TEXT NOT NULL, answered INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL
 );
+
+-- Approval cards (feature approve): the doc part is the source of truth for clients; this row
+-- survives a restart so a late decision still dispatches.
+CREATE TABLE IF NOT EXISTS approvals (
+  id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, message_id TEXT NOT NULL, title TEXT NOT NULL, risk TEXT NOT NULL,
+  payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+  decided_at INTEGER, decided_by TEXT, reason TEXT
+);
+
+-- Approved drafts with no connector to deliver them (feature approve, until connectors land).
+CREATE TABLE IF NOT EXISTS outbox (
+  id TEXT PRIMARY KEY, approval_id TEXT NOT NULL, channel TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT,
+  body TEXT NOT NULL, created_at INTEGER NOT NULL
+);
 "#;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -940,6 +954,116 @@ impl Store {
                 .map(|_| ())
         })
     }
+
+    // ---- approvals (feature approve) ------------------------------------------------------------
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_approval(
+        &self,
+        id: &str,
+        chat_id: &str,
+        message_id: &str,
+        title: &str,
+        risk: &str,
+        payload: &Value,
+        expires_at: i64,
+    ) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO approvals(id, chat_id, message_id, title, risk, payload, created_at, expires_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![id, chat_id, message_id, title, risk, payload.to_string(), now_ms(), expires_at],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn approval(&self, id: &str) -> Result<Option<ApprovalRow>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT id, chat_id, message_id, title, risk, payload, state, created_at, expires_at, decided_at, decided_by, reason FROM approvals WHERE id = ?1",
+                params![id],
+                approval_row,
+            )
+            .optional()
+        })
+    }
+
+    pub fn pending_approvals(&self) -> Result<Vec<ApprovalRow>> {
+        self.with(|c| {
+            let mut st = c.prepare("SELECT id, chat_id, message_id, title, risk, payload, state, created_at, expires_at, decided_at, decided_by, reason FROM approvals WHERE state = 'pending' ORDER BY created_at")?;
+            let rows = st.query_map([], approval_row)?;
+            rows.collect()
+        })
+    }
+
+    /// Record the decision; returns false when the row was already decided (first decision wins).
+    pub fn decide_approval(
+        &self,
+        id: &str,
+        state: &str,
+        decided_by: Option<&str>,
+        reason: Option<&str>,
+    ) -> Result<bool> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE approvals SET state = ?2, decided_at = ?3, decided_by = ?4, reason = ?5 WHERE id = ?1 AND state = 'pending'",
+                params![id, state, now_ms(), decided_by, reason],
+            )
+            .map(|n| n > 0)
+        })
+    }
+
+    pub fn outbox_insert(
+        &self,
+        approval_id: &str,
+        channel: &str,
+        recipient: &str,
+        subject: Option<&str>,
+        body: &str,
+    ) -> Result<String> {
+        let id = ulid();
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO outbox(id, approval_id, channel, recipient, subject, body, created_at) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                params![id, approval_id, channel, recipient, subject, body, now_ms()],
+            )
+            .map(|_| ())
+        })?;
+        Ok(id)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalRow {
+    pub id: String,
+    pub chat_id: String,
+    pub message_id: String,
+    pub title: String,
+    pub risk: String,
+    pub payload: Value,
+    pub state: String,
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub decided_at: Option<i64>,
+    pub decided_by: Option<String>,
+    pub reason: Option<String>,
+}
+
+fn approval_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ApprovalRow> {
+    Ok(ApprovalRow {
+        id: r.get(0)?,
+        chat_id: r.get(1)?,
+        message_id: r.get(2)?,
+        title: r.get(3)?,
+        risk: r.get(4)?,
+        payload: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or(Value::Null),
+        state: r.get(6)?,
+        created_at: r.get(7)?,
+        expires_at: r.get(8)?,
+        decided_at: r.get(9)?,
+        decided_by: r.get(10)?,
+        reason: r.get(11)?,
+    })
 }
 
 /// Turn free text into a safe FTS5 query: quoted terms joined with OR-less implicit AND, prefix match on the last.

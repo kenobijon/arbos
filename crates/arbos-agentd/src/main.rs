@@ -1,4 +1,5 @@
 mod agent;
+mod approval;
 mod config;
 mod connectors;
 mod harness;
@@ -129,7 +130,8 @@ fn seed_state(cfg: &Config) -> Result<()> {
         serde_json::to_string_pretty(&settings)?,
     )?;
     // Project tools reach the main agent through codemode only: 14 direct schemas cost ~4k prefix tokens (D68).
-    let mcp = json!({ "mcpServers": { "arbos": { "url": cfg.mcp_url(), "headers": { "Authorization": format!("Bearer {}", cfg.mcp_token) }, "exposure": "codemode" } } });
+    // `timeout` (seconds; pi default 60) covers gated tools blocked on an approval card inline.
+    let mcp = json!({ "mcpServers": { "arbos": { "url": cfg.mcp_url(), "headers": { "Authorization": format!("Bearer {}", cfg.mcp_token) }, "exposure": "codemode", "timeout": 900 } } });
     std::fs::write(
         cfg.pi_dir().join("mcp.json"),
         serde_json::to_string_pretty(&mcp)?,
@@ -449,6 +451,16 @@ async fn boot() -> Result<()> {
                 tokio::time::sleep(Duration::from_secs(60)).await;
                 // Running turns: refresh activity with auto-stop off; idle: let the relay restore auto-stop.
                 let _ = agent2.keepalive(agent2.any_turn_running()).await;
+            }
+        });
+    }
+    // Approval cards expire 24 h after they were posted (feature `approve`).
+    {
+        let agent2 = agent.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                agent2.expire_approvals().await;
             }
         });
     }
