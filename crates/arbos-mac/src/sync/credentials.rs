@@ -111,5 +111,9 @@ fn store_keychain(creds: &DeviceCredentials) -> Result<()> {
 pub fn downloads_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     let dl = PathBuf::from(&home).join("Downloads");
-    if dl.is_dir() { dl } else { PathBuf::from(home) }
+    if dl.is_dir() {
+        dl
+    } else {
+        PathBuf::from(home)
+    }
 }

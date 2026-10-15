@@ -12,8 +12,8 @@ use gpui_tokio::Tokio;
 use tokio::sync::mpsc;
 
 use crate::model::{
-    BoxState, Chat, Effort, Id, Link, Message, MessageStatus, Part, Project, ProjectDocView, Role,
-    StatusKind, new_id, now_ms,
+    new_id, now_ms, BoxState, Chat, Effort, Id, Link, Message, MessageStatus, Part, Project,
+    ProjectDocView, Role, StatusKind,
 };
 use crate::sync::{ClientCommand, SyncEvent, SyncSource};
 
@@ -687,7 +687,9 @@ impl AppState {
     }
 
     pub fn fetch_blob(&mut self, key: String, save: bool, cx: &mut Context<Self>) {
-        let Some(project_id) = self.selected_project.clone() else { return };
+        let Some(project_id) = self.selected_project.clone() else {
+            return;
+        };
         self.command(ClientCommand::FetchBlob {
             project_id,
             key,
@@ -697,7 +699,9 @@ impl AppState {
     }
 
     pub fn watch_browser(&mut self, on: bool, cx: &mut Context<Self>) {
-        let Some(project_id) = self.selected_project.clone() else { return };
+        let Some(project_id) = self.selected_project.clone() else {
+            return;
+        };
         if !on {
             self.browser_frame = None;
         }

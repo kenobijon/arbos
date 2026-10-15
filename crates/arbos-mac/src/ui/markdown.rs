@@ -5,12 +5,21 @@
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Block {
     Paragraph(String),
-    Heading { level: u8, text: String },
+    Heading {
+        level: u8,
+        text: String,
+    },
     Bullets(Vec<String>),
     Numbered(Vec<String>),
-    Code { lang: String, code: String },
+    Code {
+        lang: String,
+        code: String,
+    },
     /// GitHub-style pipe table: header row, then body rows.
-    Table { header: Vec<String>, rows: Vec<Vec<String>> },
+    Table {
+        header: Vec<String>,
+        rows: Vec<Vec<String>>,
+    },
 }
 
 pub fn split_blocks(source: &str) -> Vec<Block> {
@@ -198,7 +207,14 @@ fn inline_styled(text: &str) -> Vec<Styled> {
                         push(&mut current, style, &mut spans);
                         let label: String = chars[i + 1..close].iter().collect();
                         let href: String = chars[close + 2..end].iter().collect();
-                        spans.push((label, InlineStyle { link: true, ..style }, Some(href)));
+                        spans.push((
+                            label,
+                            InlineStyle {
+                                link: true,
+                                ..style
+                            },
+                            Some(href),
+                        ));
                         i = end + 1;
                         continue;
                     }
@@ -215,7 +231,14 @@ fn inline_styled(text: &str) -> Vec<Styled> {
             }
             push(&mut current, style, &mut spans);
             let url: String = chars[i..url_end].iter().collect();
-            spans.push((url.clone(), InlineStyle { link: true, ..style }, Some(url)));
+            spans.push((
+                url.clone(),
+                InlineStyle {
+                    link: true,
+                    ..style
+                },
+                Some(url),
+            ));
             i = url_end;
             continue;
         }

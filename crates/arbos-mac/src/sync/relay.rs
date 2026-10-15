@@ -10,18 +10,18 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::{anyhow, Context as _, Result};
 use arbos_core::wire::{
-    Ack, BoxState as WireBox, ErrorHeader, Frame, FrameType, Hello, PROJECT_DOC_CHAT_ID,
-    RowHeader, RowsReq, State as WireState, StatusHeader, WakeHeader,
+    Ack, BoxState as WireBox, ErrorHeader, Frame, FrameType, Hello, RowHeader, RowsReq,
+    State as WireState, StatusHeader, WakeHeader, PROJECT_DOC_CHAT_ID,
 };
-use arbos_core::{PROTO_VERSION, wire};
+use arbos_core::{wire, PROTO_VERSION};
 use futures::future::BoxFuture;
 use futures::{SinkExt, StreamExt};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tokio::time::{Instant, interval, sleep, timeout};
+use tokio::time::{interval, sleep, timeout, Instant};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
@@ -29,8 +29,8 @@ use super::credentials::{self, DeviceCredentials};
 use super::doc::ChatDoc;
 use super::{ClientCommand, SyncEvent, SyncSource};
 use crate::model::{
-    Attachment, BoxState, Chat, Effort, Id, Link, Message, MessageStatus, Part, Project,
-    ProjectDocView, Role, ThreadInfo, new_id, now_ms,
+    new_id, now_ms, Attachment, BoxState, Chat, Effort, Id, Link, Message, MessageStatus, Part,
+    Project, ProjectDocView, Role, ThreadInfo,
 };
 
 const HELLO_DEADLINE: Duration = Duration::from_secs(15);
@@ -130,7 +130,7 @@ impl Shared {
         if !status.is_success() {
             return Err(anyhow!("GET {path}: HTTP {status} {body}"));
         }
-        Ok(serde_json::from_str(&body).with_context(|| format!("GET {path}: bad JSON"))?)
+        serde_json::from_str(&body).with_context(|| format!("GET {path}: bad JSON"))
     }
 
     async fn post_json(&self, path: &str, body: Value) -> Result<Value> {
@@ -274,7 +274,9 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
     let mut projects: Vec<Project> = Vec::new();
     let mut all_chats: Vec<Chat> = Vec::new();
     for item in items {
-        let Some(id) = item.get("id").and_then(Value::as_str) else { continue };
+        let Some(id) = item.get("id").and_then(Value::as_str) else {
+            continue;
+        };
         let detail = shared.get_json(&format!("/projects/{id}")).await?;
         let p = detail.get("project").cloned().unwrap_or(item.clone());
         let models = p.get("models").cloned().unwrap_or(Value::Null);
@@ -301,7 +303,11 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
                 .and_then(Value::as_str)
                 .unwrap_or("Project")
                 .to_string(),
-            icon: p.get("icon").and_then(Value::as_str).unwrap_or("Ω").to_string(),
+            icon: p
+                .get("icon")
+                .and_then(Value::as_str)
+                .unwrap_or("Ω")
+                .to_string(),
             color: "#8b7cf6".into(),
             state,
             state_detail: previous.as_ref().and_then(|x| x.state_detail.clone()),
@@ -404,7 +410,9 @@ fn emit_snapshot(shared: &Shared, chat_id: &str) {
 
 fn emit_project_doc(shared: &Shared, project_id: &str) {
     let docs = shared.docs.lock().unwrap();
-    let Some(doc) = docs.get(&project_doc_key(project_id)) else { return };
+    let Some(doc) = docs.get(&project_doc_key(project_id)) else {
+        return;
+    };
     let to_json = |v: loro::LoroValue| serde_json::to_value(v).unwrap_or(Value::Null);
     let threads_v = to_json(doc.doc.get_map("threads").get_deep_value());
     let mut threads: Vec<ThreadInfo> = threads_v
@@ -454,9 +462,9 @@ fn ensure_room(shared: &Arc<Shared>, project_id: &str, key: &str, room_chat: &st
             let _ = change_tx.send(touched);
         }
     }));
-    let local_sub = doc.doc.subscribe_local_update(Box::new(move |bytes| {
-        local_tx.send(bytes.clone()).is_ok()
-    }));
+    let local_sub = doc
+        .doc
+        .subscribe_local_update(Box::new(move |bytes| local_tx.send(bytes.clone()).is_ok()));
     {
         let mut subs = shared.subscriptions.lock().unwrap();
         subs.push(sub);
@@ -528,10 +536,14 @@ fn mark_activity(shared: &Shared, chat_id: &str) {
 fn apply_project_doc_status(shared: &Shared, project_id: &str) {
     let status = {
         let docs = shared.docs.lock().unwrap();
-        let Some(doc) = docs.get(&project_doc_key(project_id)) else { return };
+        let Some(doc) = docs.get(&project_doc_key(project_id)) else {
+            return;
+        };
         serde_json::to_value(doc.doc.get_map("status").get_deep_value()).unwrap_or(Value::Null)
     };
-    let Some(b) = status.get("box").and_then(Value::as_str) else { return };
+    let Some(b) = status.get("box").and_then(Value::as_str) else {
+        return;
+    };
     let state = match b {
         "awake" => BoxState::Awake,
         "waking" => BoxState::Waking,
@@ -853,13 +865,23 @@ fn send_wake(shared: &Arc<Shared>, project_id: &str, reason: &'static str) {
     let shared = shared.clone();
     let project_id = project_id.to_string();
     tokio::spawn(async move {
-        set_project_state(&shared, &project_id, BoxState::Waking, Some("Waking sandbox…".into()));
+        set_project_state(
+            &shared,
+            &project_id,
+            BoxState::Waking,
+            Some("Waking sandbox…".into()),
+        );
         if let Err(err) = shared
             .post_json(&format!("/projects/{project_id}/wake"), json!({}))
             .await
         {
             shared.notice(format!("Wake failed: {err:#}"));
-            set_project_state(&shared, &project_id, BoxState::Error, Some(format!("{err:#}")));
+            set_project_state(
+                &shared,
+                &project_id,
+                BoxState::Error,
+                Some(format!("{err:#}")),
+            );
         }
     });
 }
@@ -957,7 +979,9 @@ async fn send_message(
     shared.unacked.lock().unwrap().insert(message_id.clone());
     {
         let docs = shared.docs.lock().unwrap();
-        let Some(doc) = docs.get(&chat_id) else { return };
+        let Some(doc) = docs.get(&chat_id) else {
+            return;
+        };
         let msg = Message {
             id: message_id.clone(),
             chat_id: chat_id.clone(),

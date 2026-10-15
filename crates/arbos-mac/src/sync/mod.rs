@@ -24,9 +24,13 @@ use crate::model::{BoxState, Chat, Effort, Id, Link, Message, Project, ProjectDo
 #[derive(Clone, Debug)]
 pub enum SyncEvent {
     /// No device token for this relay yet: show the pairing screen.
-    NeedsPairing { relay_url: String },
+    NeedsPairing {
+        relay_url: String,
+    },
     /// Pairing finished (or failed with a message).
-    Paired { device_id: String },
+    Paired {
+        device_id: String,
+    },
     PairingFailed(String),
     /// Registry: the full project list, rail order.
     Projects(Vec<Project>),
@@ -38,7 +42,10 @@ pub enum SyncEvent {
         progress: Option<f32>,
     },
     /// Project doc `chats` index for one project, in tab order.
-    Chats { project_id: Id, chats: Vec<Chat> },
+    Chats {
+        project_id: Id,
+        chats: Vec<Chat>,
+    },
     /// The relay created a chat for a locally minted tab; swap the id.
     ChatCreated {
         project_id: Id,
@@ -51,9 +58,15 @@ pub enum SyncEvent {
         view: ProjectDocView,
     },
     /// Full message list of one chat doc (after a checkpoint or a list-level edit).
-    ChatSnapshot { chat_id: Id, messages: Vec<Message> },
+    ChatSnapshot {
+        chat_id: Id,
+        messages: Vec<Message>,
+    },
     /// One message changed (streaming text, status, a new part).
-    MessageUpsert { chat_id: Id, message: Message },
+    MessageUpsert {
+        chat_id: Id,
+        message: Message,
+    },
     /// A blob the user asked for (file card, tool output).
     Blob {
         project_id: Id,

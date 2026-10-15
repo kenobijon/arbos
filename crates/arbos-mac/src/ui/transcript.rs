@@ -30,6 +30,9 @@ pub const ASSISTANT_MAX_WIDTH: f32 = 540.0;
 #[derive(Clone, Debug)]
 pub struct ToolView {
     pub call: ToolCall,
+    /// One-line input shown on the card; from `call.input`, or from the
+    /// preceding `tool_start` status when the box left `input` empty.
+    pub input_line: String,
     pub output_summary: String,
     pub output_ref: Option<String>,
     pub is_error: bool,
@@ -161,7 +164,8 @@ impl Transcript {
             let max = f32::from(self.list.max_offset_for_scrollbar().y);
             let cur = -f32::from(self.list.scroll_px_offset_for_scrollbar().y);
             let remaining = max - cur;
-            let near_end = remaining <= STICK_THRESHOLD_PX || event.visible_range.end >= event.count;
+            let near_end =
+                remaining <= STICK_THRESHOLD_PX || event.visible_range.end >= event.count;
             self.pinned_to_bottom = near_end;
             if !near_end {
                 self.spring.velocity = 0.0;
@@ -574,7 +578,11 @@ fn meta_line(message: &Message) -> String {
         let input = num("input") + num("input_tokens") + num("prompt_tokens");
         let output = num("output") + num("output_tokens") + num("completion_tokens");
         if input > 0.0 || output > 0.0 {
-            parts.push(format!("{} in / {} out", fmt_tokens(input), fmt_tokens(output)));
+            parts.push(format!(
+                "{} in / {} out",
+                fmt_tokens(input),
+                fmt_tokens(output)
+            ));
         }
         let cached = num("cacheRead");
         if cached > 0.0 {
@@ -631,6 +639,7 @@ fn tool_view(part: &Part) -> Option<ToolView> {
             subagent_name,
             ..
         } => Some(ToolView {
+            input_line: call.input_line(),
             call: call.clone(),
             output_summary: output_summary.clone(),
             output_ref: output_ref.clone(),
@@ -684,6 +693,18 @@ pub fn build_rows(messages: &[Message], expanded: &HashSet<String>) -> Vec<Row> 
                     .iter()
                     .rposition(|p| matches!(p, Part::Text { .. }));
                 let mut pending_tools: Vec<(String, ToolView)> = Vec::new();
+                let mut tool_starts: Vec<String> = message
+                    .parts
+                    .iter()
+                    .filter_map(|p| match p {
+                        Part::Status {
+                            code: StatusKind::ToolStart,
+                            message: text,
+                            ..
+                        } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect();
                 let flush_tools =
                     |pending: &mut Vec<(String, ToolView)>, rows: &mut Vec<Row>, live: bool| {
                         if pending.is_empty() {
@@ -710,7 +731,17 @@ pub fn build_rows(messages: &[Message], expanded: &HashSet<String>) -> Vec<Row> 
                         Part::Tool {
                             id, subagent_name, ..
                         } => {
-                            if let Some(view) = tool_view(part) {
+                            if let Some(mut view) = tool_view(part) {
+                                if view.input_line.is_empty() {
+                                    if let Some(ix) = tool_starts
+                                        .iter()
+                                        .position(|t| t.starts_with(&view.call.name))
+                                    {
+                                        let text = tool_starts.remove(ix);
+                                        view.input_line =
+                                            text[view.call.name.len()..].trim().to_string();
+                                    }
+                                }
                                 if subagent_name.is_some() {
                                     flush_tools(&mut pending_tools, &mut rows, false);
                                     let row_id = format!("{}#{}", message.id, id);
@@ -1071,7 +1102,15 @@ fn render_block(
         .line_height(px(21.0));
     match block {
         Block::Paragraph(text) => base
-            .child(styled_text(&format!("{row_id}.p"), text, theme.text, theme, veil, now, 0))
+            .child(styled_text(
+                &format!("{row_id}.p"),
+                text,
+                theme.text,
+                theme,
+                veil,
+                now,
+                0,
+            ))
             .into_any_element(),
         Block::Heading { level, text } => {
             let size = match level {
@@ -1082,7 +1121,15 @@ fn render_block(
             base.text_size(px(size))
                 .font_weight(FontWeight::SEMIBOLD)
                 .pt(px(6.0))
-                .child(styled_text(&format!("{row_id}.h"), text, theme.text, theme, veil, now, 0))
+                .child(styled_text(
+                    &format!("{row_id}.h"),
+                    text,
+                    theme.text,
+                    theme,
+                    veil,
+                    now,
+                    0,
+                ))
                 .into_any_element()
         }
         Block::Bullets(items) | Block::Numbered(items) => {
@@ -1152,7 +1199,9 @@ fn render_block(
                     .flex()
                     .border_t_1()
                     .border_color(theme.border)
-                    .when(ri % 2 == 1, |el| el.bg(Theme::with_alpha(theme.code_bg, 0.4)));
+                    .when(ri % 2 == 1, |el| {
+                        el.bg(Theme::with_alpha(theme.code_bg, 0.4))
+                    });
                 for i in 0..cols {
                     r = r.child(cell(row.get(i).map(String::as_str).unwrap_or(""), false, i));
                 }

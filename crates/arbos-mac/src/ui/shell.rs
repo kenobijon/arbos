@@ -13,7 +13,7 @@ use gpui::{
 use crate::app::{AppState, DetailsTarget};
 use crate::model::{now_ms, BoxState, Chat, Link, Project};
 use crate::ui::composer::{Composer, ComposerEvent, ComposerInput};
-use crate::ui::frost::{MENU_BLUR, PANEL_BLUR, edge_faded, frosted, rounded_clip};
+use crate::ui::frost::{edge_faded, frosted, rounded_clip, MENU_BLUR, PANEL_BLUR};
 use crate::ui::motion::{ease_out_cubic, PulseClock, COMPOSER_DROP_MS, SHAKE_MS};
 use crate::ui::theme::{
     reapply_window_background, Appearance, Surface, Theme, COMPOSER_HEIGHT, COMPOSER_WIDTH,
@@ -924,7 +924,10 @@ impl Shell {
                 if let Some(p) = state.project(id) {
                     rows.push(("Project".into(), p.name.clone()));
                     rows.push(("Box state".into(), format!("{:?}", p.state)));
-                    rows.push(("Model".into(), format!("{} · {}", p.model, p.effort.label())));
+                    rows.push((
+                        "Model".into(),
+                        format!("{} · {}", p.model, p.effort.label()),
+                    ));
                     rows.push((
                         "Spend today".into(),
                         format!("${:.2} of ${:.2}", p.spend_today_usd, p.spend_cap_usd),
@@ -944,7 +947,11 @@ impl Shell {
                             .map(|t| {
                                 (
                                     format!("{} · {} · {}", t.name, t.status, t.harness),
-                                    if t.summary.is_empty() { t.purpose.clone() } else { t.summary.clone() },
+                                    if t.summary.is_empty() {
+                                        t.purpose.clone()
+                                    } else {
+                                        t.summary.clone()
+                                    },
                                 )
                             })
                             .collect(),
@@ -955,8 +962,15 @@ impl Shell {
                 }
                 "Project details".to_string()
             }
-            DetailsTarget::Message { chat_id, message_id } => {
-                if let Some(m) = state.messages_of(chat_id).iter().find(|m| &m.id == message_id) {
+            DetailsTarget::Message {
+                chat_id,
+                message_id,
+            } => {
+                if let Some(m) = state
+                    .messages_of(chat_id)
+                    .iter()
+                    .find(|m| &m.id == message_id)
+                {
                     let mut rows = Vec::new();
                     rows.push(("Message".into(), m.id.clone()));
                     rows.push(("Status".into(), format!("{:?}", m.status)));
@@ -987,7 +1001,12 @@ impl Shell {
                         .parts
                         .iter()
                         .filter_map(|p| match p {
-                            crate::model::Part::Tool { call, output_summary, output_ref, .. } => Some((
+                            crate::model::Part::Tool {
+                                call,
+                                output_summary,
+                                output_ref,
+                                ..
+                            } => Some((
                                 format!("{} {}", call.name, call.call_input_short()),
                                 match output_ref {
                                     Some(r) => format!("{output_summary} · blob {r}"),
@@ -1093,7 +1112,9 @@ impl Shell {
                                         .cursor_pointer()
                                         .child("Save")
                                         .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.state.update(cx, |s, cx| s.fetch_blob(key2.clone(), true, cx));
+                                            this.state.update(cx, |s, cx| {
+                                                s.fetch_blob(key2.clone(), true, cx)
+                                            });
                                         })),
                                 )
                             })
@@ -1126,7 +1147,12 @@ impl Shell {
                     .child(heading.to_uppercase()),
             );
             if rows.is_empty() {
-                sec = sec.child(div().text_size(px(12.0)).text_color(theme.text_faint).child("—"));
+                sec = sec.child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(theme.text_faint)
+                        .child("—"),
+                );
             }
             for (k, v) in rows {
                 sec = sec.child(
@@ -1134,7 +1160,12 @@ impl Shell {
                         .flex()
                         .flex_col()
                         .gap(px(2.0))
-                        .child(div().text_size(px(11.0)).text_color(theme.text_muted).child(k))
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(theme.text_muted)
+                                .child(k),
+                        )
                         .child(div().text_size(px(12.5)).text_color(theme.text).child(v)),
                 );
             }
@@ -1167,16 +1198,30 @@ impl Shell {
         let device = state.device_id.clone();
         let glass_ok = Theme::glass_available();
 
-        let option = |id: &'static str, label: &'static str, selected: bool, enabled: bool, theme: &Theme| {
+        let option = |id: &'static str,
+                      label: &'static str,
+                      selected: bool,
+                      enabled: bool,
+                      theme: &Theme| {
             div()
                 .id(id)
                 .px(px(10.0))
                 .py(px(5.0))
                 .rounded(px(6.0))
                 .text_size(px(12.5))
-                .bg(if selected { theme.surface_2 } else { gpui::transparent_black() })
-                .text_color(if enabled { theme.text } else { theme.text_faint })
-                .when(enabled, |el| el.cursor_pointer().hover(|s| s.bg(theme.surface_2)))
+                .bg(if selected {
+                    theme.surface_2
+                } else {
+                    gpui::transparent_black()
+                })
+                .text_color(if enabled {
+                    theme.text
+                } else {
+                    theme.text_faint
+                })
+                .when(enabled, |el| {
+                    el.cursor_pointer().hover(|s| s.bg(theme.surface_2))
+                })
                 .child(label)
         };
 
@@ -1192,24 +1237,41 @@ impl Shell {
             .border_1()
             .border_color(theme.border_strong)
             .shadow_lg()
-            .child(div().text_size(px(11.0)).text_color(theme.text_faint).child("APPEARANCE · SURFACE"))
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(theme.text_faint)
+                    .child("APPEARANCE · SURFACE"),
+            )
             .child(
                 div()
                     .flex()
                     .gap(px(4.0))
                     .child(
-                        option("surface-matte", "Matte", theme.surface == Surface::Matte, true, &theme)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let a = Theme::of(cx).appearance;
-                                this.set_theme(a, Surface::Matte, cx);
-                            })),
+                        option(
+                            "surface-matte",
+                            "Matte",
+                            theme.surface == Surface::Matte,
+                            true,
+                            &theme,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let a = Theme::of(cx).appearance;
+                            this.set_theme(a, Surface::Matte, cx);
+                        })),
                     )
                     .child(
-                        option("surface-glass", "Glass", theme.surface == Surface::Glass, true, &theme)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let a = Theme::of(cx).appearance;
-                                this.set_theme(a, Surface::Glass, cx);
-                            })),
+                        option(
+                            "surface-glass",
+                            "Glass",
+                            theme.surface == Surface::Glass,
+                            true,
+                            &theme,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let a = Theme::of(cx).appearance;
+                            this.set_theme(a, Surface::Glass, cx);
+                        })),
                     ),
             )
             .child(
@@ -1222,24 +1284,41 @@ impl Shell {
                         "Glass here: frosted panels only; window vibrancy needs macOS."
                     }),
             )
-            .child(div().text_size(px(11.0)).text_color(theme.text_faint).child("APPEARANCE · MODE"))
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(theme.text_faint)
+                    .child("APPEARANCE · MODE"),
+            )
             .child(
                 div()
                     .flex()
                     .gap(px(4.0))
                     .child(
-                        option("mode-dark", "Dark", theme.appearance == Appearance::Dark, true, &theme)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let s = Theme::of(cx).surface;
-                                this.set_theme(Appearance::Dark, s, cx);
-                            })),
+                        option(
+                            "mode-dark",
+                            "Dark",
+                            theme.appearance == Appearance::Dark,
+                            true,
+                            &theme,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let s = Theme::of(cx).surface;
+                            this.set_theme(Appearance::Dark, s, cx);
+                        })),
                     )
                     .child(
-                        option("mode-light", "Light", theme.appearance == Appearance::Light, true, &theme)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let s = Theme::of(cx).surface;
-                                this.set_theme(Appearance::Light, s, cx);
-                            })),
+                        option(
+                            "mode-light",
+                            "Light",
+                            theme.appearance == Appearance::Light,
+                            true,
+                            &theme,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let s = Theme::of(cx).surface;
+                            this.set_theme(Appearance::Light, s, cx);
+                        })),
                     ),
             )
             .child(div().h(px(1.0)).bg(theme.border))
@@ -1272,7 +1351,11 @@ impl Shell {
             .rounded(px(COMPOSER_HEIGHT / 2.0))
             .bg(theme.card())
             .border_1()
-            .border_color(if pairing.error.is_some() { theme.danger } else { theme.border_strong })
+            .border_color(if pairing.error.is_some() {
+                theme.danger
+            } else {
+                theme.border_strong
+            })
             .child(self.pairing_input.clone())
             .child(
                 div()

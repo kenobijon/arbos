@@ -164,7 +164,11 @@ impl Theme {
     /// Floating cards: translucent tint on frost, flat card on matte (§3.11).
     pub fn card(&self) -> Hsla {
         let mut c = self.surface_1;
-        c.a = if self.is_frost() { FROST_TINT_ALPHA } else { 1.0 };
+        c.a = if self.is_frost() {
+            FROST_TINT_ALPHA
+        } else {
+            1.0
+        };
         c
     }
 

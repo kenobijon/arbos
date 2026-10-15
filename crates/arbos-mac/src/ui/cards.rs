@@ -79,24 +79,26 @@ pub fn status_row(code: StatusKind, text: &str, live: bool, theme: &Theme, cx: &
                     .text_color(theme.text)
                     .child(text.to_string()),
             ),
-        StatusKind::SubagentWorking | StatusKind::SubagentDone => card_shell(theme).py(px(4.0)).child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(10.0))
-                .px(px(12.0))
-                .py(px(8.0))
-                .when(live, |el| el.child(spinner(theme, cx)))
-                .when(!live, |el| {
-                    el.child(div().text_color(theme.ok).text_size(px(11.0)).child("✓"))
-                })
-                .child(
-                    div()
-                        .text_size(px(12.5))
-                        .text_color(theme.text)
-                        .child(text.to_string()),
-                ),
-        ),
+        StatusKind::SubagentWorking | StatusKind::SubagentDone => {
+            card_shell(theme).py(px(4.0)).child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .px(px(12.0))
+                    .py(px(8.0))
+                    .when(live, |el| el.child(spinner(theme, cx)))
+                    .when(!live, |el| {
+                        el.child(div().text_color(theme.ok).text_size(px(11.0)).child("✓"))
+                    })
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .text_color(theme.text)
+                            .child(text.to_string()),
+                    ),
+            )
+        }
         StatusKind::AskUser => div()
             .w_full()
             .py(px(4.0))
@@ -167,7 +169,7 @@ pub fn tool_group(
     let total_ms: u64 = tools.iter().filter_map(|t| t.duration_ms).sum();
     let summary = if tools.len() == 1 {
         let t = &tools[0];
-        format!("{} {}", t.call.name, t.call.input_line())
+        format!("{} {}", t.call.name, t.input_line)
     } else if running {
         format!("Running {} tools…", tools.len())
     } else {
@@ -261,16 +263,25 @@ pub fn tool_group(
                         .overflow_hidden()
                         .text_size(px(12.0))
                         .text_color(theme.text_muted)
-                        .child(tool.call.input_line()),
+                        .child(tool.input_line.clone()),
                 );
             if !tool.output_summary.is_empty() {
+                let first_line = tool
+                    .output_summary
+                    .lines()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
                 line = line.child(
                     div()
-                        .max_w(px(220.0))
+                        .max_w(px(240.0))
                         .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
                         .text_size(px(11.5))
                         .text_color(theme.text_faint)
-                        .child(tool.output_summary.clone()),
+                        .child(first_line),
                 );
             }
             line = line.child(

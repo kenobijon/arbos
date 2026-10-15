@@ -7,8 +7,8 @@
 //! colour to paint a gradient "to", so the fade must be per pixel.
 
 use gpui::{
-    AnyElement, App, Bounds, Corners, EdgeFade, Element, ElementId, GlobalElementId,
-    InspectorElementId, IntoElement, LayoutId, Pixels, Window, px,
+    px, AnyElement, App, Bounds, Corners, EdgeFade, Element, ElementId, GlobalElementId,
+    InspectorElementId, IntoElement, LayoutId, Pixels, Window,
 };
 
 use crate::ui::theme::Theme;
@@ -232,7 +232,9 @@ impl Element for RoundedClip {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        window.with_rounded_clip(bounds, px(self.radius), |window| self.child.prepaint(window, cx));
+        window.with_rounded_clip(bounds, px(self.radius), |window| {
+            self.child.prepaint(window, cx)
+        });
     }
 
     fn paint(
@@ -245,6 +247,8 @@ impl Element for RoundedClip {
         window: &mut Window,
         cx: &mut App,
     ) {
-        window.with_rounded_clip(bounds, px(self.radius), |window| self.child.paint(window, cx));
+        window.with_rounded_clip(bounds, px(self.radius), |window| {
+            self.child.paint(window, cx)
+        });
     }
 }

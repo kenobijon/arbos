@@ -113,7 +113,9 @@ fn de_turn<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<TurnKind>, D
     let v = Option::<serde_json::Value>::deserialize(d)?;
     Ok(match v {
         None | Some(serde_json::Value::Null) => None,
-        Some(serde_json::Value::String(s)) => serde_json::from_value(serde_json::Value::String(s)).ok(),
+        Some(serde_json::Value::String(s)) => {
+            serde_json::from_value(serde_json::Value::String(s)).ok()
+        }
         Some(serde_json::Value::Object(map)) => map
             .get("kind")
             .cloned()

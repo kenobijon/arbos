@@ -23,7 +23,16 @@ fn main() {
 
     gpui_platform::application().run(move |cx: &mut App| {
         gpui_tokio::init_from_handle(cx, handle);
-        cx.set_global(Theme::with(Appearance::Dark, Surface::Matte));
+        // Matte is the default (D10); `ARBOS_SURFACE=glass` starts in Glass for demos.
+        let surface = match std::env::var("ARBOS_SURFACE").as_deref() {
+            Ok("glass") => Surface::Glass,
+            Ok(_) | Err(_) => Surface::Matte,
+        };
+        let appearance = match std::env::var("ARBOS_APPEARANCE").as_deref() {
+            Ok("light") => Appearance::Light,
+            Ok(_) | Err(_) => Appearance::Dark,
+        };
+        cx.set_global(Theme::with(appearance, surface));
         PulseClock::init(cx);
         bind_keys(cx);
 

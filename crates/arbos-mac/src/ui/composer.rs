@@ -18,7 +18,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::app::{AppState, ComposerMode};
 use crate::model::Effort;
 use crate::sync::fixture::MODELS;
-use crate::ui::frost::{MENU_BLUR, PANEL_BLUR, frosted};
+use crate::ui::frost::{frosted, MENU_BLUR, PANEL_BLUR};
 use crate::ui::theme::{Theme, COMPOSER_HEIGHT, PANEL_RADIUS};
 
 actions!(
@@ -1160,10 +1160,11 @@ impl Render for Composer {
             );
         }
 
-        let mut root = div()
-            .relative()
-            .w_full()
-            .child(frosted(COMPOSER_HEIGHT / 2.0, PANEL_BLUR, pill));
+        let mut root =
+            div()
+                .relative()
+                .w_full()
+                .child(frosted(COMPOSER_HEIGHT / 2.0, PANEL_BLUR, pill));
         if let Some(picker) = self.open_picker {
             root = root.child(self.render_picker_menu(picker, cx));
         }

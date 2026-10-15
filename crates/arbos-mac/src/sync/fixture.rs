@@ -353,7 +353,11 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         }
         ClientCommand::CreateProject { name } => {
             let id = new_id();
-            let icon = name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_else(|| "Ω".into());
+            let icon = name
+                .chars()
+                .next()
+                .map(|c| c.to_uppercase().to_string())
+                .unwrap_or_else(|| "Ω".into());
             shared.projects.lock().unwrap().push(Project {
                 id: id.clone(),
                 name: name.clone(),
@@ -408,9 +412,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             });
         }
         ClientCommand::WatchBrowser { on: true, .. } => {
-            let _ = shared
-                .events
-                .send(SyncEvent::Notice("Fixture has no browser stream; the relay source shows the box's JPEG frames here.".into()));
+            let _ = shared.events.send(SyncEvent::Notice(
+                "Fixture has no browser stream; the relay source shows the box's JPEG frames here."
+                    .into(),
+            ));
         }
         ClientCommand::WatchBrowser { on: false, .. } => {}
     }
@@ -496,15 +501,18 @@ fn emit_projects(shared: &Shared) {
 
 fn emit_project_docs(shared: &Shared) {
     let t = now_ms() as i64;
-    let thread = |id: &str, name: &str, purpose: &str, summary: &str, status: &str, ago_min: i64| ThreadInfo {
-        id: id.into(),
-        name: name.into(),
-        purpose: purpose.into(),
-        summary: summary.into(),
-        status: status.into(),
-        harness: "prime".into(),
-        last_turn_at: Some(t - ago_min * 60_000),
-    };
+    let thread =
+        |id: &str, name: &str, purpose: &str, summary: &str, status: &str, ago_min: i64| {
+            ThreadInfo {
+                id: id.into(),
+                name: name.into(),
+                purpose: purpose.into(),
+                summary: summary.into(),
+                status: status.into(),
+                harness: "prime".into(),
+                last_turn_at: Some(t - ago_min * 60_000),
+            }
+        };
     let arbos = ProjectDocView {
         threads: vec![
             thread("01J9THREADRAIL", "rail-layout", "Match the rail tiles to the mock", "Tiles 72 px, gap 10 px; cargo check clean.", "idle", 40),
