@@ -181,6 +181,8 @@ pub struct AppState {
     pub window_active: bool,
     /// One-time explainer before the OS asks for notification permission.
     pub notify_prompt: bool,
+    /// Last `FocusChat` sent to the source (dedupe).
+    focus_sent: Option<Option<Id>>,
     /// Settings → Channels (F7).
     pub channels: ChannelsView,
     /// In-app update (D42): what the rail button and settings show.
@@ -308,6 +310,7 @@ impl AppState {
             notifier: Notifier::new(),
             window_active: true,
             notify_prompt: false,
+            focus_sent: None,
             channels: ChannelsView::default(),
             update: update_state,
             local: LocalView::default(),
@@ -1015,6 +1018,7 @@ impl AppState {
             self.active_tab.insert(project_id, id.clone());
             self.command(ClientCommand::OpenChat { chat_id: id });
         }
+        self.sync_focus();
         cx.notify();
     }
 
@@ -1036,6 +1040,7 @@ impl AppState {
             chat_id: chat_id.clone(),
         });
         self.command(ClientCommand::OpenChat { chat_id });
+        self.sync_focus();
         cx.notify();
     }
 
@@ -1989,6 +1994,8 @@ impl AppState {
             self.open_chat_from_notification(chat_id, cx);
         }
         self.sync_badge();
+        // Selection paths that bypass select_tab/select_project still report.
+        self.sync_focus();
     }
 
     /// A click on a notification: bring the window up and show that chat.
@@ -2045,8 +2052,24 @@ impl AppState {
     pub fn set_window_active(&mut self, active: bool, cx: &mut Context<Self>) {
         if self.window_active != active {
             self.window_active = active;
+            self.sync_focus();
             cx.notify();
         }
+    }
+
+    /// Tell the relay which chat is on screen in a focused window (API §7c:
+    /// presence `focused_chat`), whenever that changes.
+    fn sync_focus(&mut self) {
+        let focused = if self.window_active {
+            self.active_chat_id()
+        } else {
+            None
+        };
+        if self.focus_sent.as_ref() == Some(&focused) {
+            return;
+        }
+        self.focus_sent = Some(focused.clone());
+        self.command(ClientCommand::FocusChat { chat_id: focused });
     }
 
     pub fn set_notifications_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {

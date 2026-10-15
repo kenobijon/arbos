@@ -296,6 +296,12 @@ pub enum ClientCommand {
     MachineStop,
     /// Always-on machines: stop then start (`POST /machine/stop`, `/machine/start`).
     MachineRestart,
+    /// The chat on screen in a focused window (`None` = none): presence
+    /// frames carry it as `focused_chat` so the relay skips pushing to this
+    /// device for that chat (API §7c).
+    FocusChat {
+        chat_id: Option<Id>,
+    },
     /// Avatar picker: `PATCH /projects/{id} {avatar: slug}` (mirrored into the doc).
     SetAvatar {
         project_id: Id,
