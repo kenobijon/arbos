@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Ace">
+<circle cx="32" cy="32" r="31" fill="#000000" stroke="#ffffff" stroke-width="2"/>
+<path d="M32 54L32 30" fill="none" stroke="#ffffff" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M32 40L24 30" fill="none" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M32 40L41 30" fill="none" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M12 20C12 26.63 20.95 32 32 32C43.05 32 52 26.63 52 20L12 20Z" fill="#ffffff"/>
+<rect x="12" y="18" width="40" height="3.5" rx="1.75" fill="#ffffff"/>
+<path d="M28.22 22.92C29.23 22.92 30.06 23.42 30.06 24.04C30.06 24.66 29.23 25.16 28.22 25.16C27.2 25.16 26.38 24.66 26.38 24.04C26.38 23.42 27.2 22.92 28.22 22.92Z" fill="#000000"/>
+<path d="M35.78 22.92C36.8 22.92 37.62 23.42 37.62 24.04C37.62 24.66 36.8 25.16 35.78 25.16C34.77 25.16 33.94 24.66 33.94 24.04C33.94 23.42 34.77 22.92 35.78 22.92Z" fill="#000000"/>
+<path d="M26.3 21.96L30.14 21.96" fill="none" stroke="#000000" stroke-width="1.44" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M33.86 21.96L37.7 21.96" fill="none" stroke="#000000" stroke-width="1.44" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M30.72 27.56L33.28 27.56" fill="none" stroke="#000000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

@@ -210,6 +210,20 @@ def motion(state, tree, face):
     return m
 
 
+def assert_seamless(node, path="root"):
+    """Every animated property of a looping state must start and end on the same value."""
+    if isinstance(node, dict):
+        if node.get("a") == 1 and isinstance(node.get("k"), list):
+            first, last = node["k"][0]["s"], node["k"][-1]["s"]
+            if first != last:
+                raise AssertionError(f"{path}: loop is not seamless ({first} != {last})")
+        for key, value in node.items():
+            assert_seamless(value, f"{path}.{key}")
+    elif isinstance(node, list):
+        for k, value in enumerate(node):
+            assert_seamless(value, f"{path}[{k}]")
+
+
 def tree_lottie(slug, name, face_kind, tree, state):
     face = face_parts(face_kind, tree.face)
     n = DURATION[state]
@@ -252,6 +266,8 @@ def tree_lottie(slug, name, face_kind, tree, state):
         n,
     )
     disc_layer = layer("disc", 3, disc_items(), layer_ks((32, 32)), n)
+    if LOOPS[state]:
+        assert_seamless(tree_layer, f"{slug}/{state}")
     return {
         "v": "5.12.1",
         "fr": FPS,

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Bao">
+<circle cx="32" cy="32" r="31" fill="#000000" stroke="#ffffff" stroke-width="2"/>
+<path d="M20.53 51.05C20.24 52.68 21.34 54 23 54L41 54C42.66 54 43.76 52.68 43.47 51.05L39.53 28.95C39.24 27.32 37.66 26 36 26L28 26C26.34 26 24.76 27.32 24.47 28.95L20.53 51.05Z" fill="#ffffff"/>
+<path d="M32 17.5C40.84 17.5 48 19.96 48 23C48 26.04 40.84 28.5 32 28.5C23.16 28.5 16 26.04 16 23C16 19.96 23.16 17.5 32 17.5Z" fill="#ffffff"/>
+<path d="M26 25L22 17" fill="none" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M32 25L32 15" fill="none" stroke="#ffffff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M38 25L43 17" fill="none" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M26.33 39.14C27.66 36.74 28.99 36.74 30.32 39.14" fill="none" stroke="#000000" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M33.68 39.14C35.01 36.74 36.34 36.74 37.67 39.14" fill="none" stroke="#000000" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M29.53 42.66C31.18 44.56 32.82 44.56 34.47 42.66" fill="none" stroke="#000000" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
