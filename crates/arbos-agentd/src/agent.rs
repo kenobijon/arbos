@@ -380,6 +380,8 @@ pub struct Agent {
     /// Running subagents → (chat id, progress message id), so a file a subagent delivers lands
     /// on its own card (F10 `deliver_file`).
     pub subagent_msgs: Mutex<HashMap<String, (String, String)>>,
+    /// Group-chat bookkeeping (chat kinds from the registry, this box's "Projects ⇄" tab).
+    pub groups: crate::groups::GroupState,
 }
 
 impl Agent {
@@ -435,6 +437,7 @@ impl Agent {
             skills: SkillsIndex::new(),
             approvals: crate::approval::Approvals::default(),
             subagent_msgs: Mutex::new(HashMap::new()),
+            groups: crate::groups::GroupState::default(),
         })
     }
 
@@ -904,6 +907,14 @@ impl Agent {
         // that the reply is read as plain chat text.
         if let Some(note) = channel_note {
             prompt_text = format!("{note}\n\n{prompt_text}");
+        }
+        // Group chats (F6): the agent is told which room it speaks in; a user message in a
+        // hosted group also goes out to the other participants.
+        if let Some(gt) = self.group_turn_context(chat_id, host, &user_msg_id).await {
+            if let Some(text) = &gt.fan_out_user_text {
+                self.spawn_group_fan_out(&gt, text);
+            }
+            prompt_text = format!("{}{prompt_text}", gt.prelude);
         }
 
         let outcome = self
@@ -2039,7 +2050,7 @@ impl Agent {
             s.push_str(&skills_text);
             s.push_str("\n\n");
         }
-        s.push_str("## Tools\n\nMCP server `arbos`: history_search, history_read, read_thread, memory_search, memory_read (you may search and read the entire history of this Project), peek, sub_llm, remember/recall, projects_list/projects_send, ask_user (optional widget: choice, multi_select, text, date, form), skills_list/skills_read/skills_save (reusable how-tos), draft_message (an outbound email or chat message shown to the user as an approval card; nothing is sent without their click), connectors_list/connector_call (the user's Gmail, Calendar, Slack, GitHub, Harness Comms through the relay; write/send actions need the user's approval), local_devices/local_run/local_read/local_list (the user's own computer through the arbos-local helper; every command and, unless the user allowed reads, every file read needs the user's approval), deliver_file (hand a file you made to the user as a card), generate_image (an image from a prompt, delivered as a card).\n\n");
+        s.push_str("## Tools\n\nMCP server `arbos`: history_search, history_read, read_thread, memory_search, memory_read (you may search and read the entire history of this Project), peek, sub_llm, remember/recall, projects_list, ask_user (optional widget: choice, multi_select, text, date, form), skills_list/skills_read/skills_save (reusable how-tos), draft_message (an outbound email or chat message shown to the user as an approval card; nothing is sent without their click), connectors_list/connector_call (the user's Gmail, Calendar, Slack, GitHub, Harness Comms through the relay; write/send actions need the user's approval), local_devices/local_run/local_read/local_list (the user's own computer through the arbos-local helper; every command and, unless the user allowed reads, every file read needs the user's approval), deliver_file (hand a file you made to the user as a card), generate_image (an image from a prompt, delivered as a card).\n\n");
         s.push_str(&crate::media::prompt_section(&self.cfg));
         s.push_str("## Return contract\n\nEnd your final reply with one fenced ```json block:\n{ \"status\": \"done\" | \"blocked\" | \"partial\" | \"needs_input\", \"summary\": \"<= 5 lines\", \"artifacts\": [ { \"kind\": \"file\" | \"commit\" | \"url\" | \"command\", \"ref\": \"…\", \"note\": \"…\" } ], \"acceptance\": [ { \"criterion\": \"…\", \"met\": true, \"evidence\": \"…\" } ], \"open_items\": [], \"proposed_memory\": [ { \"kind\": \"decision\", \"scope\": \"project\", \"text\": \"…\" } ], \"questions\": [] }\n");
         s

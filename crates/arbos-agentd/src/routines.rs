@@ -33,6 +33,11 @@ impl Agent {
                     tracing::warn!(error = %e, "channel_message push failed");
                 }
             }
+            "group_message" => {
+                if let Err(e) = self.handle_group_message(payload).await {
+                    tracing::warn!(error = %e, "group_message push failed");
+                }
+            }
             other => {
                 tracing::info!(kind = other, push = %payload, "push delivered");
                 let _ = self.store.t3_append(

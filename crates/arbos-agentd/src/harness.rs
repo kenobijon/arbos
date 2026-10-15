@@ -313,7 +313,7 @@ impl PrimeAdapter {
                 "ARBOS_AUDIT_PATH".into(),
                 self.cfg.audit_path().display().to_string(),
             ),
-            ("ARBOS_MCP_TOKEN".into(), self.cfg.mcp_token.clone()),
+            ("ARBOS_MCP_TOKEN".into(), self.cfg.subagent_mcp_token()),
             ("ARBOS_MCP_URL".into(), self.cfg.mcp_url()),
             ("ARBOS_BOX_TOKEN".into(), self.cfg.box_token.clone()),
             (
@@ -577,7 +577,7 @@ impl PiAdapter {
                 cfg.blobs_dir().display().to_string(),
             ),
             ("ARBOS_HOOK_URL".into(), cfg.hook_base()),
-            ("ARBOS_MCP_TOKEN".into(), cfg.mcp_token.clone()),
+            ("ARBOS_MCP_TOKEN".into(), cfg.mcp_token_for_role(role)),
             ("ARBOS_MCP_URL".into(), cfg.mcp_url()),
             ("ARBOS_BOX_TOKEN".into(), cfg.box_token.clone()),
         ]
@@ -880,7 +880,7 @@ impl ClaudeCodeAdapter {
             .env("ANTHROPIC_MODEL", &self.cfg.subagent_model)
             .env("ANTHROPIC_DEFAULT_SONNET_MODEL", &self.cfg.subagent_model)
             .env("ANTHROPIC_DEFAULT_HAIKU_MODEL", &self.cfg.talking_model)
-            .env("ARBOS_MCP_TOKEN", &self.cfg.mcp_token)
+            .env("ARBOS_MCP_TOKEN", self.cfg.subagent_mcp_token())
             .env("ARBOS_AUDIT_PATH", self.cfg.audit_path())
             .env("DISABLE_AUTOUPDATER", "1")
             .env("DISABLE_TELEMETRY", "1")
