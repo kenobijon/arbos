@@ -67,6 +67,19 @@ impl Effort {
     }
 }
 
+/// What a chat tab is (registry `kind`): a plain chat, a group of Projects (F6), or the S15
+/// system tab that collects group traffic on a participant Project.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatKind {
+    #[default]
+    Chat,
+    Group,
+    Projects,
+    #[serde(other)]
+    Other,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Chat {
     pub id: Id,
@@ -77,6 +90,17 @@ pub struct Chat {
     pub is_system: bool,
     pub unread: bool,
     pub last_message_at: u64,
+    #[serde(default)]
+    pub kind: ChatKind,
+    /// Group chats: participant project ids, host first.
+    #[serde(default)]
+    pub participants: Vec<Id>,
+}
+
+impl Chat {
+    pub fn is_group(&self) -> bool {
+        self.kind == ChatKind::Group
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -537,6 +561,11 @@ pub struct Message {
     /// Set on user messages a routine injected (`sender: routine:<id>`, F3).
     #[serde(default)]
     pub routine_name: Option<String>,
+    /// Another Project's message in a group chat (`role: project`, F6): its name and glyph.
+    #[serde(default)]
+    pub sender_name: Option<String>,
+    #[serde(default)]
+    pub sender_icon: Option<String>,
     /// Token usage as the box reports it (shape varies by harness).
     #[serde(default)]
     pub usage: Option<serde_json::Value>,

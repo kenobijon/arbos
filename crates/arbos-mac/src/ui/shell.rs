@@ -16,6 +16,7 @@ use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
 use crate::ui::composer::{Composer, ComposerEvent, ComposerInput};
 use crate::ui::connectors::{ConnectorsEvent, ConnectorsPanel};
 use crate::ui::frost::{edge_faded, frosted, rounded_clip, MENU_BLUR, PANEL_BLUR};
+use crate::ui::groups;
 use crate::ui::local::{LocalEvent, LocalPanel};
 use crate::ui::motion::{ease_out_cubic, PulseClock, COMPOSER_DROP_MS, SHAKE_MS};
 use crate::ui::routines::{RoutinesEvent, RoutinesPanel};
@@ -46,6 +47,8 @@ pub struct Shell {
     routines: Entity<RoutinesPanel>,
     routines_open: bool,
     channels: Entity<ChannelsPanel>,
+    /// F6: the "+ project" picker under the tab header.
+    group_picker_open: bool,
     shake_started_at: Option<u64>,
     tab_scroll: gpui::ScrollHandle,
     /// Tab index to scroll into view on the next frame (new/selected tab).
@@ -53,6 +56,15 @@ pub struct Shell {
 }
 
 impl Shell {
+    pub(crate) fn app_state(&self) -> &Entity<AppState> {
+        &self.state
+    }
+
+    pub(crate) fn set_group_picker(&mut self, open: bool, cx: &mut Context<Self>) {
+        self.group_picker_open = open;
+        cx.notify();
+    }
+
     pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
         let voice = cx.new(|cx| Voice::new(state.clone(), cx));
@@ -160,6 +172,7 @@ impl Shell {
             local,
             focus_handle: cx.focus_handle(),
             settings_open: false,
+            group_picker_open: false,
             routines,
             routines_open: false,
             channels,
@@ -502,6 +515,9 @@ impl Shell {
         let rail_collapsed = state.rail_collapsed;
         let panel_open = state.right_panel_open;
         let in_call = self.voice.read(cx).in_call();
+        let projects = state.projects.clone();
+        let can_group = project.is_some() && projects.len() > 1;
+        let picker_open = self.group_picker_open;
 
         let shake = self
             .shake_started_at
@@ -597,6 +613,9 @@ impl Shell {
             } else {
                 chat.title.clone()
             };
+            if let Some(glyphs) = groups::tab_glyphs(&chat, &projects, &theme) {
+                tab = tab.child(glyphs);
+            }
             tab = tab.child(
                 div()
                     .overflow_hidden()
@@ -705,6 +724,16 @@ impl Shell {
             )
             .children(pinned_tab)
             .child(strip)
+            .when(can_group, |el| {
+                el.child(
+                    groups::header_button(picker_open, &theme).on_click(cx.listener(
+                        |this, _, _, cx| {
+                            let open = !this.group_picker_open;
+                            this.set_group_picker(open, cx);
+                        },
+                    )),
+                )
+            })
             .child(
                 icon_button("call-toggle", "☎", in_call, &theme).on_click(cx.listener(
                     |this, _, _, cx| {
@@ -2155,6 +2184,14 @@ impl Render for Shell {
         }
         if self.settings_open {
             root = root.child(self.render_settings(cx));
+        }
+        if self.group_picker_open {
+            let right = if panel_open {
+                RIGHT_PANEL_WIDTH + 44.0
+            } else {
+                44.0
+            };
+            root = root.child(groups::picker(&self.state, TAB_BAR_HEIGHT + 4.0, right, cx));
         }
         if self.connectors.read(cx).is_open() {
             root = root.child(self.connectors.clone());
