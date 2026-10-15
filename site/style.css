@@ -106,7 +106,15 @@ svg { display: block; }
 .btn-nav-primary { background: #fff; color: var(--bg); height: 2.25rem; padding: 0 1rem; font-size: 0.875rem; font-weight: 500; border-radius: 999px; }
 .btn-nav-primary:hover { background: #f1efea; }
 .btn-block { width: 100%; margin-top: 1.5rem; }
+.btn-badge { background: #000; color: #fff; border: 1px solid rgba(255,255,255,0.28); gap: 0.5rem; padding-left: 0.875rem; padding-right: 1.125rem; }
+.btn-badge:hover { border-color: rgba(255,255,255,0.55); background: #0f0f0f; }
+.btn-badge .iphone { width: 1.1em; height: 1.1em; flex: none; }
+.badge-text { display: flex; flex-direction: column; align-items: flex-start; line-height: 1.1; }
+.badge-top { font-size: 0.875em; font-weight: 500; }
+.badge-sub { font-size: 0.65em; color: rgba(255,255,255,0.65); letter-spacing: 0.01em; }
+.dl-badge { margin-left: auto; display: inline-flex; align-items: center; gap: 0.25rem; padding: 0.25rem 0.625rem; border-radius: 999px; border: 1px solid rgba(255,255,255,0.22); font-size: 0.75rem; font-weight: 500; color: var(--heading); white-space: nowrap; }
 .btn .apple { width: 0.85em; height: 1em; margin-top: -0.1em; }
+@media (max-width: 639px) { .hero-actions .btn { flex: 1 1 auto; } .hero-actions .btn-badge { order: 3; flex-basis: 100%; } }
 
 /* ---------- Header ---------- */
 .site-header { position: fixed; inset: 0 0 auto 0; z-index: 50; height: var(--header-h); }
