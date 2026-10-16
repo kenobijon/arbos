@@ -77,6 +77,9 @@ final class CallManager: NSObject, ObservableObject {
     private var voipToken: String?
     private var registeredVoipToken: String?
     private var ringTimeout: Task<Void, Never>?
+    /// Outgoing wait: play a local ringback until someone joins (or we hang up).
+    private var ringbackWanted = false
+    private var ringbackPlayer: AVAudioPlayer?
 
     private override init() {
         let config = CXProviderConfiguration()
@@ -124,6 +127,8 @@ final class CallManager: NSObject, ObservableObject {
         error = nil
         phase = .connecting
         isPresented = true
+        ringbackWanted = true
+        syncRingback()
         do {
             let (started, isNew) = try await api.startCall(chatId: chatId, projectId: projectId, kind: kind)
             call = started
@@ -147,6 +152,8 @@ final class CallManager: NSObject, ObservableObject {
         error = nil
         phase = .connecting
         isPresented = true
+        ringbackWanted = true
+        syncRingback()
         do {
             let fresh = try await api.joinCall(existing.callId)
             call = fresh
@@ -208,6 +215,8 @@ final class CallManager: NSObject, ObservableObject {
         incoming = nil
         phase = .connecting
         isPresented = true
+        ringbackWanted = false
+        stopRingback()
         do {
             let fresh = try await api.joinCall(inc.call.callId)
             call = fresh
@@ -290,6 +299,8 @@ final class CallManager: NSObject, ObservableObject {
     }
 
     private func teardown(leave: Bool, reason: CXCallEndedReason = .remoteEnded) async {
+        ringbackWanted = false
+        stopRingback()
         let ended = call
         let wasConnected = connectedAt
         await room.disconnect()
@@ -365,7 +376,73 @@ final class CallManager: NSObject, ObservableObject {
                 return CallTile(id: identity, person: person, isSpeaking: p.isSpeaking,
                                 micOn: p.isMicrophoneEnabled(), cameraOn: p.isCameraEnabled(), videoTrack: video)
             }
+        syncRingback()
     }
+
+    // MARK: Outgoing ringback
+
+    /// Play while we wait for someone else ("Calling…" / "Ringing…"); stop when they join.
+    private func syncRingback() {
+        let waiting = ringbackWanted && tiles.isEmpty && (phase == .connecting || phase == .connected || phase == .reconnecting)
+        if waiting { startRingback() } else { stopRingback() }
+    }
+
+    private func startRingback() {
+        if let ringbackPlayer, ringbackPlayer.isPlaying { return }
+        do {
+            let player = try AVAudioPlayer(data: CallManager.ringbackWAV)
+            player.numberOfLoops = -1
+            player.volume = 0.55
+            player.prepareToPlay()
+            // CallKit / LiveKit own the session — do not retarget the category.
+            _ = player.play()
+            ringbackPlayer = player
+        } catch {
+            log.error("ringback: \(error.localizedDescription, privacy: .public)")
+            ringbackPlayer = nil
+        }
+    }
+
+    private func stopRingback() {
+        ringbackPlayer?.stop()
+        ringbackPlayer = nil
+    }
+
+    /// Dual-tone ringback (≈ North American): 440 + 480 Hz, 2 s on / 4 s off.
+    private static let ringbackWAV: Data = {
+        let sampleRate = 44_100
+        let onSamples = sampleRate * 2
+        let cycleSamples = sampleRate * 6
+        var pcm = Data(count: cycleSamples * 2)
+        pcm.withUnsafeMutableBytes { raw in
+            guard let base = raw.bindMemory(to: Int16.self).baseAddress else { return }
+            let amp = 0.28 * Double(Int16.max)
+            for i in 0..<onSamples {
+                let t = Double(i) / Double(sampleRate)
+                let sample = (sin(2 * Double.pi * 440 * t) + sin(2 * Double.pi * 480 * t)) * 0.5
+                base[i] = Int16(amp * sample)
+            }
+            // Remaining samples stay 0 (silence for the 4 s off gap).
+        }
+        var wav = Data()
+        wav.reserveCapacity(44 + pcm.count)
+        func u32(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { wav.append(contentsOf: $0) } }
+        func u16(_ v: UInt16) { withUnsafeBytes(of: v.littleEndian) { wav.append(contentsOf: $0) } }
+        wav.append(contentsOf: [0x52, 0x49, 0x46, 0x46]) // RIFF
+        u32(UInt32(36 + pcm.count))
+        wav.append(contentsOf: [0x57, 0x41, 0x56, 0x45, 0x66, 0x6D, 0x74, 0x20]) // WAVEfmt
+        u32(16) // PCM fmt chunk size
+        u16(1) // PCM
+        u16(1) // mono
+        u32(UInt32(sampleRate))
+        u32(UInt32(sampleRate * 2)) // byte rate
+        u16(2) // block align
+        u16(16) // bits
+        wav.append(contentsOf: [0x64, 0x61, 0x74, 0x61]) // data
+        u32(UInt32(pcm.count))
+        wav.append(pcm)
+        return wav
+    }()
 
     // MARK: CallKit mirror
 
