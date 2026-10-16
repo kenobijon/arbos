@@ -499,11 +499,9 @@ struct RowView: View {
     }
 
     /// Compact reply reference above the prose (iMessage-style), not inline "@user asked:".
+    /// Accent bar is an overlay so a bare Shape cannot stretch the chip (and the bubble) vertically.
     private func replyChip(handle: String, preview: String?) -> some View {
         HStack(alignment: .top, spacing: 8) {
-            RoundedRectangle(cornerRadius: 1, style: .continuous)
-                .fill(theme.muted.opacity(0.55))
-                .frame(width: 2)
             VStack(alignment: .leading, spacing: 2) {
                 Text("@\(handle)")
                     .font(.system(size: Theme.tiny, weight: .semibold))
@@ -516,6 +514,12 @@ struct RowView: View {
                 }
             }
             Spacer(minLength: 0)
+        }
+        .padding(.leading, 10)
+        .overlay(alignment: .leading) {
+            RoundedRectangle(cornerRadius: 1, style: .continuous)
+                .fill(theme.muted.opacity(0.55))
+                .frame(width: 2)
         }
     }
 
