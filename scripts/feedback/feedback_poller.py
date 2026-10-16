@@ -398,12 +398,18 @@ class GitHub:
         return lines
 
     def later_ios_build(self, sha: str, since_iso: str) -> dict | None:
-        """A successful iOS run on main, started after `since_iso`, whose commit contains `sha`
-        (a queued run cancelled by a newer push still ships in that newer build)."""
+        return self.later_run("ios.yml", "push", sha, since_iso)
+
+    def later_release(self, sha: str, since_iso: str) -> dict | None:
+        return self.later_run("release.yml", "workflow_run", sha, since_iso)
+
+    def later_run(self, workflow: str, event: str, sha: str, since_iso: str) -> dict | None:
+        """The earliest successful run of `workflow` on main, started after `since_iso`, whose commit
+        contains `sha` (a run cancelled by a newer push still ships in that newer build)."""
         q = urllib.parse.urlencode({"branch": "main", "status": "success", "created": f">={since_iso}", "per_page": 30})
-        runs = self.repo_api("GET", f"/actions/workflows/ios.yml/runs?{q}").get("workflow_runs", [])
+        runs = self.repo_api("GET", f"/actions/workflows/{workflow}/runs?{q}").get("workflow_runs", [])
         for r in sorted(runs, key=lambda r: r["run_started_at"]):
-            if r.get("event") != "push":
+            if r.get("event") != event:
                 continue
             try:
                 cmp = self.repo_api("GET", f"/compare/{sha}...{r['head_sha']}")
@@ -1179,11 +1185,19 @@ class Loop:
             elif b:
                 st["testflight_state"] = b.get("processingState")
 
-        # Mac: edge release
+        # Mac: edge release. CI green but the Release run cancelled or never scheduled (a newer push
+        # took the slot) → the next successful Release that contains the commit is the one.
+        if st.get("expects_ci") and not st.get("release_done") and ci and ci["status"] == "completed" and ci["conclusion"] == "success" \
+                and (rel is None or (rel["status"] == "completed" and rel["conclusion"] in ("cancelled", "skipped"))):
+            later = self.gh.later_release(sha, st["pushed_at"])
+            if later:
+                rel = later
+                st["release_superseded_by"] = later["head_sha"]
         if st.get("expects_ci") and rel and rel["status"] == "completed" and not st.get("release_done"):
             if rel["conclusion"] == "success":
+                built = st.get("release_superseded_by") or sha
                 edge = next((r["tag_name"] for r in self.gh.releases()
-                             if r["tag_name"].startswith("edge-") and r.get("target_commitish", "").startswith(sha[:7])), None)
+                             if r["tag_name"].startswith("edge-") and r.get("target_commitish", "").startswith(built[:7])), None)
                 st.update(release_done=True, release_run=rel["html_url"], edge_release=edge, release_at=rel["updated_at"])
                 self.store.event(fid, "edge_released", release=edge, run=rel["html_url"])
                 self.gh.comment(st["issue"], f"Mac edge release: **{edge or '?'}** ({rel['html_url']}).")
