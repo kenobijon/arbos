@@ -317,6 +317,9 @@ struct Message: Identifiable, Equatable {
     var askedByHandle: String? = nil
     var mentions: [String] = []
     var replyTo: String? = nil
+    /// What the agent is doing right now ("Cloning RaoFoundation/subtensor"),
+    /// written by the harness while the turn runs; the working line shows it.
+    var activity: String? = nil
 
     var isStreaming: Bool { status == .streaming }
 
@@ -404,7 +407,8 @@ enum DocJSON {
             ownerHandle: str(m["ownerHandle"]),
             askedByHandle: str(m["askedByHandle"]),
             mentions: (m["mentions"] as? [Any])?.compactMap { $0 as? String } ?? [],
-            replyTo: str(m["replyTo"])
+            replyTo: str(m["replyTo"]),
+            activity: str(m["activity"]).flatMap { $0.isEmpty ? nil : $0 }
         )
     }
 

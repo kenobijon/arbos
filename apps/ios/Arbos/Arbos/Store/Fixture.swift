@@ -161,25 +161,61 @@ extension AppModel {
         Task { await fixtureReply(chatId: chatId) }
     }
 
+    /// Grok Bot reply flow: an ack bubble at once, a working line that names
+    /// the current activity, a milestone bubble, then the result bubble.
     private func fixtureReply(chatId: Id) async {
-        try? await Task.sleep(nanoseconds: 1_400_000_000)
-        let id = newId()
-        var m = Message(id: id, chatId: chatId, role: .assistant, sender: "agent", status: .streaming, turn: .reply, decision: nil,
-                        subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: nowMs(),
-                        completedAt: nil, pending: false, parts: [.status(id: "\(id)-s", code: .working, message: "Working")], hiddenCount: 0)
-        messages[chatId, default: []].append(m)
-        try? await Task.sleep(nanoseconds: 1_800_000_000)
-        let words = "Done. Short replies from now on, and I'll keep anything that goes out on Discord to one or two casual lines in your voice.".split(separator: " ")
-        var text = ""
-        for w in words {
-            text += (text.isEmpty ? "" : " ") + w
-            m.parts = [.text(id: "\(id)-t", text: text)]
-            if let i = messages[chatId]?.firstIndex(where: { $0.id == id }) { messages[chatId]?[i] = m }
-            try? await Task.sleep(nanoseconds: 90_000_000)
+        func append(_ m: Message) { messages[chatId, default: []].append(m) }
+        func replace(_ m: Message) { if let i = messages[chatId]?.firstIndex(where: { $0.id == m.id }) { messages[chatId]?[i] = m } }
+        func bubble(_ text: String, done: Bool = true) -> Message {
+            let id = newId()
+            return Message(id: id, chatId: chatId, role: .assistant, sender: "agent", status: done ? .done : .streaming, turn: .reply, decision: nil,
+                           subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: nowMs(),
+                           completedAt: done ? nowMs() : nil, pending: false, parts: [.text(id: "\(id)-t", text: text)], hiddenCount: 0)
         }
-        m.status = .done
-        m.completedAt = nowMs()
-        if let i = messages[chatId]?.firstIndex(where: { $0.id == id }) { messages[chatId]?[i] = m }
+        let request = messages[chatId]?.last(where: { $0.role == .user })?.plainText.lowercased() ?? ""
+        let clone = request.contains("pull") || request.contains("clone") || request.contains("subtensor")
+        try? await Task.sleep(nanoseconds: 900_000_000)
+        // 1. Ack.
+        append(bubble(clone ? "On it — pulling RaoFoundation/subtensor into your project folder." : "On it."))
+        // 2. Working, with the activity the harness reports.
+        let workId = newId()
+        var work = Message(id: workId, chatId: chatId, role: .assistant, sender: "agent", status: .streaming, turn: .act, decision: nil,
+                           subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: nowMs(),
+                           completedAt: nil, pending: false, parts: [.status(id: "\(workId)-s", code: .working, message: "Working")], hiddenCount: 0)
+        append(work)
+        let steps = clone
+            ? ["Cloning RaoFoundation/subtensor", "Checking out main", "Reading the latest commit"]
+            : ["Reading your Discord style", "Drafting the rewrite rule"]
+        for step in steps {
+            try? await Task.sleep(nanoseconds: 1_600_000_000)
+            work.activity = step
+            replace(work)
+        }
+        try? await Task.sleep(nanoseconds: 1_400_000_000)
+        // 3. Milestone bubble: the working row becomes a short progress note.
+        work.activity = nil
+        work.status = .done
+        work.completedAt = nowMs()
+        work.parts = [.text(id: "\(workId)-t", text: clone ? "Cloned — shallow, `main`, 1 commit. Reading it now." : "Got your style from 40 recent messages.")]
+        replace(work)
+        // 4. Result, streamed.
+        let resultText = clone
+            ? "The RaoFoundation/subtensor repo is in your project folder at `subtensor/`, on `main`. Latest commit: \"etao: per-subnet emission weights (spec 480)\". Shallow clone to keep it quick — say the word if you need the full history."
+            : "Done. Short replies from now on, and I'll keep anything that goes out on Discord to one or two casual lines in your voice."
+        var result = bubble("", done: false)
+        result.parts = [.status(id: "\(result.id)-s", code: .working, message: "Working")]
+        append(result)
+        try? await Task.sleep(nanoseconds: 700_000_000)
+        var text = ""
+        for w in resultText.split(separator: " ") {
+            text += (text.isEmpty ? "" : " ") + w
+            result.parts = [.text(id: "\(result.id)-t", text: text)]
+            replace(result)
+            try? await Task.sleep(nanoseconds: 60_000_000)
+        }
+        result.status = .done
+        result.completedAt = nowMs()
+        replace(result)
     }
 
     private func user(_ id: Id, _ chat: Id, _ text: String, at: Int64) -> Message {

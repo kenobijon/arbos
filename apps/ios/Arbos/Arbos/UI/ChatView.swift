@@ -900,6 +900,12 @@ struct ChatView: View {
         .fixedSize(horizontal: false, vertical: true)
     }
 
+    /// "Cloning RaoFoundation/subtensor" when the harness says what it is doing, else "<name> is working".
+    private var workingText: String {
+        if let a = model.currentActivity(chatId) { return a }
+        return "\(workingName) is working"
+    }
+
     private var workingLine: some View {
         HStack(spacing: 10) {
             if isPeople, let m = messages.last(where: { $0.role == .assistant && $0.isStreaming }),
@@ -909,11 +915,13 @@ struct ChatView: View {
             } else if let project {
                 AgentAvatar(project: project, theme: theme, size: 26, working: true)
             }
-            WorkingStatusText(text: "\(workingName) is working", color: theme.muted)
+            WorkingStatusText(text: workingText, color: theme.muted)
+                .id(workingText)
             Spacer(minLength: 0)
         }
         .padding(.leading, 12)
-        .accessibilityLabel("\(workingName) is working")
+        .accessibilityLabel(workingText)
+        .animation(.easeInOut(duration: 0.25), value: workingText)
     }
 
     // MARK: Composer

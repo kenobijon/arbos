@@ -1542,6 +1542,21 @@ final class AppModel: ObservableObject {
     /// A turn is running: the last assistant message streams, or any recent
     /// one does. A message left `streaming` by a box that died hours ago
     /// must not pin the indicator forever.
+    /// The running turn's current activity for the working line: the
+    /// message's `activity`, else the latest working/step status part with a
+    /// real message; nil → "<name> is working".
+    func currentActivity(_ chatId: Id) -> String? {
+        guard let m = messages(of: chatId).last(where: { $0.role == .assistant && $0.isStreaming }) else { return nil }
+        if let a = m.activity?.trimmingCharacters(in: .whitespacesAndNewlines), !a.isEmpty { return a }
+        for part in m.parts.reversed() {
+            if case .status(_, let code, let text) = part, code == .working || code == .step {
+                let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !t.isEmpty, t.lowercased() != "working", t.lowercased() != "thinking" { return t }
+            }
+        }
+        return nil
+    }
+
     func isStreaming(_ chatId: Id) -> Bool {
         let list = messages(of: chatId)
         if let last = list.last(where: { $0.role == .assistant }), last.isStreaming { return true }
