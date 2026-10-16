@@ -48,7 +48,7 @@ Config comes from the environment (systemd EnvironmentFile=/etc/arbos/feedback.e
 
 Only the standard library plus `cryptography` (for the ES256 App Store Connect token).
 
-CLI:  feedback_poller.py [run] | status | set-cursor <ISO-8601> | inject <image> "<comment>" [ios|mac] | requeue <id>… | prioritize <id>…
+CLI:  feedback_poller.py [run] | status | set-cursor <ISO-8601> | inject <image> "<comment>" [ios|mac] | requeue <id>… | prioritize <id>… | confirm <id> [note]
 """
 
 from __future__ import annotations
@@ -84,6 +84,12 @@ ASSET_RELEASE_TAG = "feedback-screenshots"
 USER_AGENT = "arbos-feedback-poller/1 (+https://github.com/unarbos/arbos)"
 
 TERMINAL = {"shipped", "failed", "ignored", "rejected", "duplicate", "no_change"}
+
+# Fixes in these areas only count as shipped with device-level evidence (a real phone, the
+# tester's confirmation, or Jacob's OK): the simulator cannot show a silent ringback, a missing
+# haptic, or a notification that never fires. Judged on the comment and on the files touched.
+DEVICE_ONLY_TEXT = re.compile(r"\b(sound|audio|ring\w*|call\w*|voice|speaker|mic\w*|mute|haptic|vibrat\w*|notif\w*|push|banner|alert|tone|dial\w*|facetime|apns)\b", re.I)
+DEVICE_ONLY_FILES = re.compile(r"(Recorder|VoiceMode|Call|Audio|Ringback|Haptic|Notif|LocalNotifier|Push|APNs|AVAudio|CallKit|LiveKit)", re.I)
 
 # Obvious-malice patterns: a cheap first pass before the model. Anything here is flagged, never built.
 MALICE_PATTERNS = [
@@ -1345,6 +1351,12 @@ class Loop:
             return
         self.store.save_state(fid, st)
 
+    @staticmethod
+    def needs_device_evidence(info: dict, st: dict) -> bool:
+        if DEVICE_ONLY_TEXT.search(info.get("comment") or ""):
+            return True
+        return any(DEVICE_ONLY_FILES.search(f or "") for f in st.get("files") or [])
+
     def ship(self, fid: str, st: dict, partial: bool = False) -> None:
         info = self.store.submission(fid)
         parts = []
@@ -1359,10 +1371,18 @@ class Loop:
         self.store.save_state(fid, st)
         self.store.event(fid, "shipped", testflight_build=st.get("testflight_build"), edge=st.get("edge_release"),
                          elapsed_min=elapsed, commit=st.get("commit"), issue=st.get("issue_url"))
+        unverified = self.needs_device_evidence(info, st)
+        st["device_evidence"] = "pending" if unverified else "not needed"
+        self.store.save_state(fid, st)
         self.gh.comment(st["issue"], ("Shipped" if not partial else "Shipped (partially)") + ": " + (", ".join(parts) or "see runs above")
                         + f".\n\nScreenshot → installable build: **{elapsed} min** "
-                        f"(submitted {info['created']}, ready {end}).\n\nCommit {st.get('commit_url')} · agent {st.get('agent_url')}")
-        self.gh.set_labels(st["issue"], ["shipped"], [])
+                        f"(submitted {info['created']}, ready {end}).\n\nCommit {st.get('commit_url')} · agent {st.get('agent_url')}"
+                        + ("\n\n**Please confirm on your phone.** This is an audio / call / haptic / notification change, which the "
+                           "simulator cannot prove; it stays `shipped-unverified` until you (the reporter) confirm it works on the device — "
+                           "reply here, or send the next screenshot feedback. An operator flips it with `arbos-feedback confirm <id>`."
+                           if unverified else ""))
+        self.gh.ensure_label("shipped-unverified", "C2E0C6", "Built and in TestFlight/edge; needs device-level confirmation (audio/call/haptic/notification)")
+        self.gh.set_labels(st["issue"], ["shipped-unverified"] if unverified else ["shipped"], ["needs-human"])
 
     def fail(self, fid: str, st: dict, error: str, extra: str = "") -> None:
         st.update(status="failed", error=error, failed_at=iso())
@@ -1493,6 +1513,24 @@ def main(argv: list[str]) -> int:
                     loop.gh.comment(st["issue"], "Requeued by the operator; a new agent run follows.")
                     loop.gh.set_labels(st["issue"], [], ["needs-human"])
             print(f"{fid}: queued ({tier}, {st['tester']})")
+        return 0
+    if cmd == "confirm":
+        # Device-level evidence arrived (tester / Jacob / a real-device run): shipped-unverified → shipped.
+        store = Store(cfg)
+        loop = Loop(cfg)
+        note = " ".join(argv[3:]) or "confirmed on a device"
+        fid = argv[2]
+        st = store.state(fid)
+        if not st:
+            print(f"{fid}: unknown")
+            return 2
+        st["device_evidence"] = note
+        store.save_state(fid, st)
+        store.event(fid, "device_confirmed", note=note)
+        if st.get("issue"):
+            loop.gh.comment(st["issue"], f"Confirmed on a device: {note}.")
+            loop.gh.set_labels(st["issue"], ["shipped"], ["shipped-unverified"])
+        print(f"{fid}: shipped (device evidence: {note})")
         return 0
     if cmd == "prioritize":
         # Operator override: move an item to the priority tier (front of the queue, no per-tester cap).
