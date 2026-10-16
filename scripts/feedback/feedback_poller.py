@@ -1410,8 +1410,11 @@ class Loop:
                 return
             valid = [b for b in self.asc.group_builds(gid) if b["attributes"].get("processingState") == "VALID"]
             valid.sort(key=lambda b: b["attributes"].get("uploadedDate") or "", reverse=True)
+            seen = []
             for b in valid[:5]:
                 state = self.asc.external_state(b["id"])
+                seen.append(f"{b['attributes'].get('version')}={state}")
+                rec["states"] = seen
                 if state in ("IN_BETA_TESTING", "WAITING_FOR_BETA_REVIEW", "IN_BETA_REVIEW", "BETA_APPROVED"):
                     rec["result"] = f"newest build {b['attributes']['version']} is {state}"
                     break
