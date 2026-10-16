@@ -183,12 +183,45 @@ final class AppModel: ObservableObject {
         guard !archivedProjectIds.contains(projectId) else { return }
         archivedProjectIds.insert(projectId)
         UserDefaults.standard.set(Array(archivedProjectIds), forKey: "archivedProjects")
+        // Archive clears a home pin — the row is hidden until search/open.
+        unpinHome(projectId: projectId)
     }
 
     func unarchive(_ projectId: Id) {
         guard archivedProjectIds.contains(projectId) else { return }
         archivedProjectIds.remove(projectId)
         UserDefaults.standard.set(Array(archivedProjectIds), forKey: "archivedProjects")
+    }
+
+    // MARK: Home pins (device-local)
+
+    /// Home-list keys (`p:<projectId>` / `c:<peopleChatId>`) kept at the top.
+    @Published private(set) var pinnedHomeIds: Set<String> = {
+        Set(UserDefaults.standard.stringArray(forKey: "pinnedHome") ?? [])
+    }()
+
+    func isHomePinned(projectId: Id) -> Bool { pinnedHomeIds.contains("p:" + projectId) }
+    func isHomePinned(peopleChatId: Id) -> Bool { pinnedHomeIds.contains("c:" + peopleChatId) }
+
+    func pinHome(projectId: Id) {
+        unarchive(projectId)
+        setHomePinned("p:" + projectId, true)
+    }
+
+    func unpinHome(projectId: Id) { setHomePinned("p:" + projectId, false) }
+
+    func pinHome(peopleChatId: Id) { setHomePinned("c:" + peopleChatId, true) }
+    func unpinHome(peopleChatId: Id) { setHomePinned("c:" + peopleChatId, false) }
+
+    private func setHomePinned(_ key: String, _ pinned: Bool) {
+        if pinned {
+            guard !pinnedHomeIds.contains(key) else { return }
+            pinnedHomeIds.insert(key)
+        } else {
+            guard pinnedHomeIds.contains(key) else { return }
+            pinnedHomeIds.remove(key)
+        }
+        UserDefaults.standard.set(Array(pinnedHomeIds), forKey: "pinnedHome")
     }
 
     @Published private(set) var machineError: String?

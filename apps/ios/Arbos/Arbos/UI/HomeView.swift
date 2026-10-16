@@ -72,18 +72,39 @@ struct HomeView: View {
                         ForEach(homeRows) { row in
                             switch row {
                             case .project(let project):
+                                let pinned = model.isHomePinned(projectId: project.id)
                                 Button { openSearchHit(project) } label: {
                                     AgentRow(project: project, preview: preview(project), time: timeLabel(project),
                                              streaming: model.isStreaming(project: project.id),
-                                             unread: model.chats(of: project.id).contains { model.chatHasUnread($0) })
+                                             unread: model.chats(of: project.id).contains { model.chatHasUnread($0) },
+                                             pinned: pinned)
                                 }
                                 .buttonStyle(.plain)
                                 .contextMenu {
+                                    Button {
+                                        withAnimation {
+                                            if pinned { model.unpinHome(projectId: project.id) }
+                                            else { model.pinHome(projectId: project.id) }
+                                        }
+                                    } label: {
+                                        Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
+                                    }
                                     Button { model.showProfile(.agent(projectId: project.id)) } label: { Label("Profile", systemImage: "person.crop.circle") }
                                 }
                                 .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
                                 .listRowSeparator(.hidden)
                                 .listRowBackground(theme.bg)
+                                .swipeActions(edge: .leading) {
+                                    Button {
+                                        withAnimation {
+                                            if pinned { model.unpinHome(projectId: project.id) }
+                                            else { model.pinHome(projectId: project.id) }
+                                        }
+                                    } label: {
+                                        Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
+                                    }
+                                    .tint(Color(hex: "#1084FE")!)
+                                }
                                 .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                                     Button {
                                         withAnimation { model.archive(project.id) }
@@ -93,13 +114,23 @@ struct HomeView: View {
                                     .tint(theme.muted)
                                 }
                             case .people(let chat):
+                                let pinned = model.isHomePinned(peopleChatId: chat.id)
                                 Button { model.open(peopleChat: chat) } label: {
                                     PeopleRow(chat: chat, preview: peoplePreview(chat), time: timeLabel(ms: peopleActivity(chat)),
                                               unread: model.peopleUnread.contains(chat.id) || model.unreadCount(for: chat) > 0,
-                                              count: model.unreadCount(for: chat), me: model.user?.id)
+                                              count: model.unreadCount(for: chat), me: model.user?.id,
+                                              pinned: pinned)
                                 }
                                 .buttonStyle(.plain)
                                 .contextMenu {
+                                    Button {
+                                        withAnimation {
+                                            if pinned { model.unpinHome(peopleChatId: chat.id) }
+                                            else { model.pinHome(peopleChatId: chat.id) }
+                                        }
+                                    } label: {
+                                        Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
+                                    }
                                     if chat.kind == "dm", let other = chat.counterpart(me: model.user?.id) {
                                         Button { model.showProfile(.user(ProfilePerson(other))) } label: { Label("Profile", systemImage: "person.crop.circle") }
                                     } else {
@@ -109,6 +140,17 @@ struct HomeView: View {
                                 .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
                                 .listRowSeparator(.hidden)
                                 .listRowBackground(theme.bg)
+                                .swipeActions(edge: .leading) {
+                                    Button {
+                                        withAnimation {
+                                            if pinned { model.unpinHome(peopleChatId: chat.id) }
+                                            else { model.pinHome(peopleChatId: chat.id) }
+                                        }
+                                    } label: {
+                                        Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
+                                    }
+                                    .tint(Color(hex: "#1084FE")!)
+                                }
                             }
                         }
                         // Launch timing: the populated list is on screen.
@@ -351,14 +393,19 @@ struct HomeView: View {
         var activity: Int64 { 0 }
     }
 
-    /// Projects and DMs in one list, newest activity first.
+    /// Projects and DMs in one list: pinned first, then newest activity.
     private var homeRows: [HomeRow] {
         let q = searchQuery
-        var rows: [(Int64, HomeRow)] = projects.map { (lastActivity($0), .project($0)) }
-        for c in model.peopleChats where matchesPeople(c, q: q) {
-            rows.append((peopleActivity(c), .people(c)))
+        var rows: [(Bool, Int64, HomeRow)] = projects.map {
+            (model.isHomePinned(projectId: $0.id), lastActivity($0), .project($0))
         }
-        return rows.sorted { $0.0 > $1.0 }.map(\.1)
+        for c in model.peopleChats where matchesPeople(c, q: q) {
+            rows.append((model.isHomePinned(peopleChatId: c.id), peopleActivity(c), .people(c)))
+        }
+        return rows.sorted {
+            if $0.0 != $1.0 { return $0.0 && !$1.0 }
+            return $0.1 > $1.1
+        }.map(\.2)
     }
 
     /// Match the names shown on the row (agent name, person name/@handle, group title),
@@ -517,6 +564,7 @@ struct AgentRow: View {
     let time: String
     let streaming: Bool
     let unread: Bool
+    var pinned: Bool = false
 
     var body: some View {
         HStack(spacing: 14) {
@@ -528,6 +576,12 @@ struct AgentRow: View {
                         .foregroundStyle(theme.text)
                         .lineLimit(1)
                     Spacer()
+                    if pinned {
+                        Image(systemName: "pin.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(theme.muted)
+                            .accessibilityLabel("Pinned")
+                    }
                     Text(time)
                         .font(.system(size: Theme.small))
                         .foregroundStyle(theme.muted)
@@ -561,6 +615,7 @@ struct PeopleRow: View {
     /// Unread messages (Grok/Telegram-style count pill); 0 → the dot only.
     var count: Int = 0
     let me: String?
+    var pinned: Bool = false
 
     private var other: ChatMember? { chat.counterpart(me: me) }
 
@@ -609,6 +664,12 @@ struct PeopleRow: View {
                         .foregroundStyle(theme.muted)
                         .lineLimit(1)
                     Spacer()
+                    if pinned {
+                        Image(systemName: "pin.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(theme.muted)
+                            .accessibilityLabel("Pinned")
+                    }
                     Text(time).font(.system(size: Theme.small)).foregroundStyle(theme.muted)
                 }
                 HStack(spacing: 6) {
