@@ -32,6 +32,8 @@ const ACT_MAX_CALLS = Number(process.env.ARBOS_ACT_MAX_CALLS ?? 8);
 const HEAD_LINES = 20;
 const TAIL_LINES = 10;
 const ROUTE_PREFIX = "(Arbos: call `route` first.) ";
+// Talking to the user is not "acting": these never count toward the act limit.
+const FREE_TOOLS = new Set(["route", "ask_user", "send_message"]);
 // Mirrors `arbos_core::approval::SHELL_TOOLS`; the classification itself happens in agentd.
 const SHELL_TOOLS = new Set(["bash", "shell", "run_command", "execute_command"]);
 const APPROVAL_POLL_MS = Number(process.env.ARBOS_APPROVAL_POLL_MS ?? 1500);
@@ -158,7 +160,7 @@ export default function arbosPiExt(pi: ExtensionAPI) {
       void hook("/hook/deny", { session_id: sessionId, tool: event.toolName, rule: denied.rule, call_id: event.toolCallId });
       return { block: true, reason: `Blocked by the Arbos deny-list (${denied.rule}): ${denied.why}` };
     }
-    if (SESSION_ROLE === "main" && event.toolName !== "route" && event.toolName !== "ask_user" && !event.parentToolCallId) {
+    if (SESSION_ROLE === "main" && !FREE_TOOLS.has(event.toolName) && !event.parentToolCallId) {
       actCalls += 1;
       if (actCalls > ACT_MAX_CALLS) {
         void hook("/hook/act-limit", { session_id: sessionId, calls: actCalls, call_id: event.toolCallId });
@@ -293,6 +295,7 @@ export default function arbosPiExt(pi: ExtensionAPI) {
         void hook("/hook/route-corrected", { session_id: sessionId, action });
         return { content: [{ type: "text", text: "Route recorded. Do not repeat your answer; end the turn." }], details: { action }, terminate: true };
       }
+      const acked = typeof args.ack === "string" && args.ack.trim().length > 0;
       switch (action) {
         case "reply":
           if (args.reply && args.reply.trim()) {
@@ -301,11 +304,26 @@ export default function arbosPiExt(pi: ExtensionAPI) {
           return { content: [{ type: "text", text: "Route accepted: reply. Write the reply now." }], details: { action } };
         case "act":
           return {
-            content: [{ type: "text", text: `Route accepted: act. Follow your plan with at most ${ACT_MAX_CALLS} tool calls, then summarize.` }],
+            content: [
+              {
+                type: "text",
+                text: acked
+                  ? `Route accepted: act. Your acknowledgement is already in the chat. Do the work with at most ${ACT_MAX_CALLS} tool calls (send_message only at real milestones), then write only the result.`
+                  : `Route accepted: act. Follow your plan with at most ${ACT_MAX_CALLS} tool calls, then summarize.`,
+              },
+            ],
             details: { action },
           };
         case "wake":
         case "new":
+          if (acked) {
+            // The `ack` sentence is already in the chat as its own bubble: nothing more to say now.
+            return {
+              content: [{ type: "text", text: `Route accepted: ${action}. Your acknowledgement is in the chat; the result arrives later as an [Arbos] message. End the turn now without writing anything.` }],
+              details: { action },
+              terminate: true,
+            };
+          }
           // No terminate: the model writes the one-sentence acknowledgement itself (demo review item 2).
           return {
             content: [
@@ -321,6 +339,28 @@ export default function arbosPiExt(pi: ExtensionAPI) {
           throw new Error(`unknown action ${String(never)}`);
         }
       }
+    },
+  });
+
+  // ---- 2b. send_message: a progress bubble at a real milestone (agent-flow contract §1) ------
+  if (SESSION_ROLE === "main") pi.registerTool({
+    name: "send_message",
+    label: "Send message",
+    description:
+      "Post a short progress message to the user now, as its own chat bubble, while you keep working. Only at a real milestone of longer work (something finished, something unexpected), never for each command. Optional `activity`: 2–5 plain words for the working line (\"Running tests\").",
+    promptSnippet: "send_message: post a short progress note to the user mid-task (real milestones only)",
+    parameters: Type.Object({
+      text: Type.String({ description: "One or two plain sentences" }),
+      activity: Type.Optional(Type.Union([Type.String(), Type.Null()], { description: "What you are doing next, 2-5 words, present tense" })),
+    }),
+    exposure: "model-only",
+    executionMode: "sequential",
+    async execute(_toolCallId, params) {
+      const res = await hook("/hook/send_message", { session_id: sessionId, text: params.text, activity: params.activity ?? null });
+      if (res && !res.ok) {
+        return { content: [{ type: "text", text: `Not sent (${res.error ?? "unknown"}). Keep working; say it in your final result instead.` }], details: undefined };
+      }
+      return { content: [{ type: "text", text: "Sent. Keep working; do not repeat it in your final result." }], details: undefined };
     },
   });
 

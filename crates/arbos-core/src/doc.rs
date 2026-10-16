@@ -806,6 +806,17 @@ impl ChatDoc {
         self.live_text.retain(|(m, _), _| m != msg_id);
     }
 
+    /// What the agent is doing right now, in plain words, on the streaming assistant row
+    /// (agent-flow contract §2). `None` clears it: clients fall back to "<agent> is working".
+    pub fn set_activity(&mut self, msg_id: &str, activity: Option<&str>) {
+        let v = activity
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(Value::from)
+            .unwrap_or(Value::Null);
+        self.set_message_fields(msg_id, &[("activity", v)]);
+    }
+
     pub fn messages(&self) -> Vec<MessageView> {
         let v = lv_to_json(&self.messages_list().get_deep_value());
         v.as_array()

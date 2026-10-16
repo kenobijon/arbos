@@ -65,6 +65,23 @@ async fn ask_user(State(a): State<S>, headers: HeaderMap, Json(b): Json<Value>) 
     }
 }
 
+/// `send_message(text, activity?)`: a progress bubble mid-turn (agent-flow contract §1).
+async fn send_message(State(a): State<S>, headers: HeaderMap, Json(b): Json<Value>) -> Response {
+    if !authed(&a, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let text = b.get("text").and_then(Value::as_str).unwrap_or("");
+    let activity = b
+        .get("activity")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    match a.hook_send_message(text, activity).await {
+        Ok(()) => ok(),
+        Err(e) => err(e),
+    }
+}
+
 /// Risky harness tool calls (feature `approve`): `{ tool, input, session_id, role }` →
 /// `{ state: "allowed" }` or `{ state: "pending", approvalId }` for the extension to poll.
 async fn approval(State(a): State<S>, headers: HeaderMap, Json(b): Json<Value>) -> Response {
@@ -284,6 +301,7 @@ pub fn router(agent: Arc<Agent>) -> Router {
     Router::new()
         .route("/hook/route", post(route))
         .route("/hook/ask_user", post(ask_user))
+        .route("/hook/send_message", post(send_message))
         .route("/hook/act-limit", post(act_limit))
         .route("/hook/approval", post(approval))
         .route("/hook/approval-status", post(approval_status))

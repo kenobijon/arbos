@@ -644,6 +644,7 @@ pub(crate) async fn project_json(state: &AppState, p: &Project) -> Value {
         "owner": crate::people::with_presence(state, crate::notify::Sender::user(state, &p.user_id).json()),
         "model": p.models.get("talking_model").and_then(|m| m.get("id")).cloned().unwrap_or(Value::Null),
         "machine": machine_profile(state, &p.user_id, bs, since),
+        "activity": activity_json(state, &p.id).await,
     })
 }
 
@@ -1400,6 +1401,55 @@ pub async fn record_timing(
         .record_timing(&id, &b.kind, b.ms, b.detail.as_deref())
         .map_err(internal)?;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[derive(Deserialize)]
+pub struct ActivityBody {
+    pub chat_id: String,
+    #[serde(default)]
+    pub text: Option<String>,
+}
+
+/// `POST /projects/{id}/activity` (box): what the agent is doing right now, in plain words
+/// (agent-flow contract §3). `text: null` clears it. Kept in memory; shown on the project JSON.
+pub async fn set_activity(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    Json(b): Json<ActivityBody>,
+) -> ApiResult {
+    let id = resolve_project_id(&state, &id)?;
+    if !state.allows(&principal, &id) {
+        return Err((StatusCode::FORBIDDEN, "not your project".into()));
+    }
+    let mut map = state.activity.lock().await;
+    match b.text.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        Some(text) => {
+            map.insert(
+                id,
+                crate::state::ProjectActivity {
+                    chat_id: b.chat_id,
+                    text: text.chars().take(80).collect(),
+                    at: arbos_core::ids::now_ms(),
+                },
+            );
+        }
+        None => {
+            map.remove(&id);
+        }
+    }
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// The project's current activity, or null when none or stale.
+async fn activity_json(state: &AppState, project_id: &str) -> Value {
+    let map = state.activity.lock().await;
+    match map.get(project_id) {
+        Some(a) if arbos_core::ids::now_ms() - a.at <= crate::state::ACTIVITY_TTL_MS => {
+            serde_json::to_value(a).unwrap_or(Value::Null)
+        }
+        _ => Value::Null,
+    }
 }
 
 /// Audit mirror (feature `approve`): the box posts each `audit.jsonl` line (`approval_requested`,

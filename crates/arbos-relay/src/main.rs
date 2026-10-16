@@ -280,6 +280,7 @@ async fn main() -> anyhow::Result<()> {
         fallback_sent: Arc::new(Mutex::new(HashMap::new())),
         livekit: livekit::from_env(),
         presence_seen: Arc::new(Mutex::new(HashMap::new())),
+        activity: Arc::new(Mutex::new(HashMap::new())),
     };
     tracing::info!(auth_mode = auth_mode.as_str(), public_url = %state.cfg.public_url, "sign-in");
     if state.cfg.connectors_mock {
@@ -496,6 +497,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/projects/{id}/pushes", get(api::take_pushes))
         .route("/projects/{id}/usage", get(api::usage))
         .route("/projects/{id}/timings", post(api::record_timing))
+        .route("/projects/{id}/activity", post(api::set_activity))
         .route(
             "/projects/{id}/routines",
             get(routines::list).post(routines::create),

@@ -7,6 +7,11 @@ import { Type, type Static } from "typebox";
 export const ROUTE_PARAMS = Type.Object(
   {
     action: Type.Union([Type.Literal("reply"), Type.Literal("act"), Type.Literal("wake"), Type.Literal("new")]),
+    ack: Type.Optional(
+      Type.Union([Type.String(), Type.Null()], {
+        description: "act/new/wake: one short sentence to the user saying what you are about to do (shown at once, before any tool runs). Not for reply.",
+      }),
+    ),
     subagent_id: Type.Optional(Type.Union([Type.String(), Type.Null()], { description: "wake: which subagent" })),
     name: Type.Optional(Type.Union([Type.String(), Type.Null()], { description: "new: short-name" })),
     purpose: Type.Optional(Type.Union([Type.String(), Type.Null()], { description: "new: one sentence" })),
