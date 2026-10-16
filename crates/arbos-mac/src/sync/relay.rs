@@ -1165,6 +1165,7 @@ fn people_space_from(shared: &Shared, v: &Value) -> Option<(Project, Chat)> {
             .pointer("/me/muted")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        primary_chat: None,
     };
     let previous_unread = shared
         .chats
@@ -1539,6 +1540,13 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
                     serde_json::from_value::<crate::model::ProjectMachine>(m.clone()).ok()
                 }),
             muted: previous.as_ref().is_some_and(|x| x.muted),
+            primary_chat: p
+                .get("primary_chat")
+                .or_else(|| detail.get("primary_chat"))
+                .or_else(|| item.get("primary_chat"))
+                .and_then(Value::as_str)
+                .filter(|c| !c.is_empty())
+                .map(str::to_string),
         });
         let chats: Vec<Chat> = detail
             .get("chats")

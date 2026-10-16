@@ -193,7 +193,7 @@ impl RoutinesPanel {
                 let Some(project_id) = state.selected_project.clone() else {
                     return;
                 };
-                let tabs = state.tabs(&project_id);
+                let tabs = state.visible_tabs(&project_id);
                 match tabs.iter().find(|c| c.is_pinned).or(tabs.first()) {
                     Some(c) => c.id.clone(),
                     None => return,
@@ -281,7 +281,7 @@ impl RoutinesPanel {
                     .tabs(&p.id)
                     .iter()
                     .map(|c| (c.id.clone(), c.title.clone()))
-                    .collect()
+                    .collect::<Vec<_>>()
             })
             .unwrap_or_default();
         let now = now_ms() as i64;
@@ -464,7 +464,7 @@ impl RoutinesPanel {
             .as_deref()
             .map(|p| {
                 state
-                    .tabs(p)
+                    .visible_tabs(p)
                     .iter()
                     .map(|c| (c.id.clone(), c.title.clone(), c.is_pinned))
                     .collect()

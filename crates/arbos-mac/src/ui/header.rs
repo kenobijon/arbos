@@ -385,6 +385,10 @@ pub fn chips(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option<
             people::member_chips(space, shell.add_agent_open, &theme, cx).into_any_element(),
         );
     }
+    // One chat per agent unless the multi-chat flag is on: no chips, no "+".
+    if !state.multi_chat {
+        return None;
+    }
     let tabs: Vec<(Chat, bool, bool)> = state
         .tabs(&space.id)
         .iter()
@@ -581,20 +585,23 @@ pub fn menu(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
     } else {
         let model = space.model.clone();
         let effort = space.effort.label();
-        body = body.child(
-            glass::menu_row("menu-new-chat", "square-pencil", "New chat", false, &theme)
-                .child(
-                    div()
-                        .text_size(px(TEXT_TINY))
-                        .text_color(theme.text_faint)
-                        .child("⌘T"),
-                )
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.menu_open = false;
-                    this.state.update(cx, |s, cx| s.new_tab(cx));
-                    Composer::focus(&this.composer, window, cx);
-                })),
-        );
+        let multi_chat = state.multi_chat;
+        if multi_chat {
+            body = body.child(
+                glass::menu_row("menu-new-chat", "square-pencil", "New chat", false, &theme)
+                    .child(
+                        div()
+                            .text_size(px(TEXT_TINY))
+                            .text_color(theme.text_faint)
+                            .child("⌘T"),
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.menu_open = false;
+                        this.state.update(cx, |s, cx| s.new_tab(cx));
+                        Composer::focus(&this.composer, window, cx);
+                    })),
+            );
+        }
         if !space.is_guest() {
             body = body
                 .child(
@@ -675,7 +682,7 @@ pub fn menu(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
                             }
                         })),
                 );
-            if projects_count > 1 {
+            if multi_chat && projects_count > 1 {
                 body = body.child(
                     glass::menu_row(
                         "menu-group",

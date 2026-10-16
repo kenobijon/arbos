@@ -62,6 +62,20 @@ fn muted_path() -> PathBuf {
     crate::sync::credentials::config_dir().join("muted.json")
 }
 
+/// Multi-chat (several chats per agent: chips, ⌘T, agent groups) is off by
+/// default. `ARBOS_MULTI_CHAT=1` or `{"multi_chat": true}` in
+/// `<config>/settings.json` turns it back on.
+fn multi_chat_enabled() -> bool {
+    if let Ok(v) = std::env::var("ARBOS_MULTI_CHAT") {
+        return matches!(v.trim(), "1" | "true" | "yes" | "on");
+    }
+    std::fs::read_to_string(crate::sync::credentials::config_dir().join("settings.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("multi_chat").and_then(|b| b.as_bool()))
+        .unwrap_or(false)
+}
+
 fn load_muted() -> HashSet<Id> {
     std::fs::read_to_string(muted_path())
         .ok()
@@ -261,6 +275,9 @@ pub struct AppState {
     /// Bytes and chats kept on this Mac by the on-device store (Settings → About).
     pub store_usage: (i64, i64),
     pub active_tab: HashMap<Id, Id>,
+    /// Feature flag: several chats per agent. Off → one chat per agent, the
+    /// primary one (`primary_chat()`); extra chats stay in the data, unseen.
+    pub multi_chat: bool,
     pub link: Link,
     pub rail_collapsed: bool,
     pub right_panel_open: bool,
@@ -494,6 +511,7 @@ impl AppState {
             selected_project: None,
             store_usage: (0, 0),
             active_tab: HashMap::new(),
+            multi_chat: multi_chat_enabled(),
             link: Link::Connecting,
             rail_collapsed: false,
             right_panel_open: false,
@@ -964,6 +982,7 @@ impl AppState {
                     if self.tabs(&project_id).iter().any(|c| c.id == chat_id) {
                         self.active_tab.insert(project_id.clone(), chat_id);
                     }
+                    // select_project() coerces to the primary chat in single-chat mode.
                     self.select_project(project_id, cx);
                 }
             }
@@ -1007,7 +1026,8 @@ impl AppState {
                         self.active_tab.insert(project_id.clone(), first.id.clone());
                     }
                 }
-                self.chats.insert(project_id, chats);
+                self.chats.insert(project_id.clone(), chats);
+                self.enforce_single_chat(&project_id);
                 cx.notify();
             }
             SyncEvent::ChatSnapshot { chat_id, messages } => {
@@ -1035,6 +1055,10 @@ impl AppState {
                     .cloned()
                     .collect();
                 self.messages.insert(chat_id.clone(), messages);
+                // Message counts decide an agent's primary chat (single-chat mode).
+                if let Some(project_id) = self.project_of_chat(&chat_id).map(|p| p.id.clone()) {
+                    self.enforce_single_chat(&project_id);
+                }
                 for m in &arrived {
                     self.notify_for_message(&chat_id, m, false, false, true);
                 }
@@ -1176,6 +1200,64 @@ impl AppState {
             .unwrap_or(&[])
     }
 
+    /// The chats the UI may show for a space: all of them with multi-chat on,
+    /// or for a people chat; just the primary chat of an agent otherwise.
+    pub fn visible_tabs(&self, project_id: &str) -> Vec<&Chat> {
+        let is_people = self.project(project_id).is_some_and(|p| p.is_people());
+        if self.multi_chat || is_people {
+            self.tabs(project_id).iter().collect()
+        } else {
+            self.primary_chat(project_id).into_iter().collect()
+        }
+    }
+
+    /// The one chat of an agent. The relay's `primary_chat` wins when it names a
+    /// chat we have; otherwise the chat with the most messages, ties → earliest
+    /// created (ULID order). Groups and system tabs only when nothing else exists.
+    pub fn primary_chat(&self, project_id: &str) -> Option<&Chat> {
+        let tabs = self.tabs(project_id);
+        if let Some(named) = self
+            .project(project_id)
+            .and_then(|p| p.primary_chat.as_deref())
+            .and_then(|id| tabs.iter().find(|c| c.id == id))
+        {
+            return Some(named);
+        }
+        let plain: Vec<&Chat> = tabs
+            .iter()
+            .filter(|c| !c.is_group() && !c.is_system)
+            .collect();
+        let pool = if plain.is_empty() {
+            tabs.iter().collect()
+        } else {
+            plain
+        };
+        pool.into_iter().min_by(|a, b| {
+            let (na, nb) = (self.messages_of(&a.id).len(), self.messages_of(&b.id).len());
+            nb.cmp(&na).then_with(|| a.id.cmp(&b.id))
+        })
+    }
+
+    /// Single-chat mode: the active tab of an agent is always its primary chat.
+    /// Returns true when the active tab changed (and the chat was opened).
+    fn enforce_single_chat(&mut self, project_id: &str) -> bool {
+        if self.multi_chat || self.project(project_id).is_none_or(|p| p.is_people()) {
+            return false;
+        }
+        let Some(primary) = self.primary_chat(project_id).map(|c| c.id.clone()) else {
+            return false;
+        };
+        if self.active_tab.get(project_id) == Some(&primary) {
+            return false;
+        }
+        self.active_tab
+            .insert(project_id.to_string(), primary.clone());
+        if self.selected_project.as_deref() == Some(project_id) {
+            self.command(ClientCommand::OpenChat { chat_id: primary });
+        }
+        true
+    }
+
     pub fn active_chat(&self) -> Option<&Chat> {
         let project_id = self.selected_project.as_deref()?;
         let chat_id = self.active_tab.get(project_id)?;
@@ -1204,7 +1286,10 @@ impl AppState {
     }
 
     pub fn project_unread(&self, project_id: &str) -> usize {
-        self.tabs(project_id).iter().filter(|c| c.unread).count()
+        self.visible_tabs(project_id)
+            .iter()
+            .filter(|c| c.unread)
+            .count()
     }
 
     /// S8: the last assistant message ended with an `ask_user` question and
@@ -1281,6 +1366,11 @@ impl AppState {
 
     pub fn select_project(&mut self, project_id: Id, cx: &mut Context<Self>) {
         self.selected_project = Some(project_id.clone());
+        if self.enforce_single_chat(&project_id) {
+            self.sync_focus();
+            cx.notify();
+            return;
+        }
         if let Some(chat_id) = self.active_tab.get(&project_id).cloned() {
             self.command(ClientCommand::OpenChat { chat_id });
         } else if let Some(first) = self.tabs(&project_id).first() {
@@ -1295,6 +1385,19 @@ impl AppState {
     pub fn select_tab(&mut self, chat_id: Id, cx: &mut Context<Self>) {
         let Some(project_id) = self.selected_project.clone() else {
             return;
+        };
+        // Single-chat: an agent has one chat, whichever one was asked for.
+        let chat_id = if self
+            .visible_tabs(&project_id)
+            .iter()
+            .any(|c| c.id == chat_id)
+        {
+            chat_id
+        } else {
+            match self.primary_chat(&project_id) {
+                Some(primary) if !self.multi_chat => primary.id.clone(),
+                _ => chat_id,
+            }
         };
         self.active_tab.insert(project_id, chat_id.clone());
         if let Some(chat) = self
@@ -1315,6 +1418,9 @@ impl AppState {
     }
 
     pub fn new_tab(&mut self, cx: &mut Context<Self>) {
+        if !self.multi_chat {
+            return;
+        }
         let Some(project_id) = self.selected_project.clone() else {
             return;
         };
@@ -1347,6 +1453,9 @@ impl AppState {
     /// F6: a group chat hosted by the selected project with `participant` (and, when the active
     /// tab is already a group, the participant is added there instead).
     pub fn add_project_to_chat(&mut self, participant: Id, cx: &mut Context<Self>) {
+        if !self.multi_chat {
+            return;
+        }
         let Some(project_id) = self.selected_project.clone() else {
             return;
         };
@@ -1405,6 +1514,9 @@ impl AppState {
 
     /// Returns false for the pinned tab (S3.8: it never closes).
     pub fn close_tab(&mut self, chat_id: Id, cx: &mut Context<Self>) -> bool {
+        if !self.multi_chat {
+            return false;
+        }
         let Some(project_id) = self.selected_project.clone() else {
             return false;
         };
@@ -2251,6 +2363,14 @@ impl AppState {
         let project_id = chat.project_id.clone();
         let title = chat.title.clone();
         let is_system = chat.is_system;
+        // Single-chat mode: a chat the UI cannot open does not notify either.
+        if !self
+            .visible_tabs(&project_id)
+            .iter()
+            .any(|c| c.id == chat_id)
+        {
+            return;
+        }
 
         let sender = message.sender.as_str();
         let in_people = self

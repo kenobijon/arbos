@@ -629,9 +629,9 @@ pub(super) fn link_list(items: &[Link], theme: &Theme, cx: &mut Context<Shell>) 
     list
 }
 
-/// The chats of a space, for content tabs.
+/// The chats of a space, for content tabs (one per agent unless multi-chat is on).
 pub(super) fn chats_of<'a>(state: &'a AppState, space_id: &str) -> Vec<&'a Chat> {
-    state.tabs(space_id).iter().collect()
+    state.visible_tabs(space_id)
 }
 
 /// A plain pill for the "more" menu.

@@ -689,6 +689,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 owner_person: None,
                 machine_info: None,
                 muted: false,
+                primary_chat: None,
             });
             let chat_id = new_id();
             shared.chats.lock().unwrap().push(Chat {
@@ -2971,6 +2972,7 @@ fn seed_projects() -> Vec<Project> {
             owner_person: None,
             machine_info: None,
             muted: false,
+            primary_chat: None,
         },
         Project {
             id: PROJECT_COMMS.into(),
@@ -2996,6 +2998,7 @@ fn seed_projects() -> Vec<Project> {
             owner_person: None,
             machine_info: None,
             muted: false,
+            primary_chat: None,
         },
         Project {
             id: PROJECT_ARBOS.into(),
@@ -3021,6 +3024,7 @@ fn seed_projects() -> Vec<Project> {
             owner_person: None,
             machine_info: None,
             muted: false,
+            primary_chat: None,
         },
     ]
 }
@@ -3917,6 +3921,7 @@ fn people_space(id: &str, other: Person, agents: Vec<AgentMember>) -> Project {
         owner_person: None,
         machine_info: None,
         muted: false,
+        primary_chat: None,
     }
 }
 
@@ -3949,6 +3954,7 @@ fn seed_people_projects() -> Vec<Project> {
             owner_person: None,
             machine_info: None,
             muted: false,
+            primary_chat: None,
         },
     ]
 }

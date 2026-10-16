@@ -35,7 +35,7 @@ fn top_strip() -> f32 {
 /// Newest message with prose across a space's chats, for the preview line.
 fn latest<'a>(state: &'a AppState, space: &Project) -> Option<&'a Message> {
     let mut best: Option<&Message> = None;
-    for chat in state.tabs(&space.id) {
+    for chat in state.visible_tabs(&space.id) {
         if let Some(m) = state
             .messages_of(&chat.id)
             .iter()
@@ -54,7 +54,7 @@ pub fn last_activity(state: &AppState, space: &Project) -> u64 {
     match latest(state, space) {
         Some(m) if m.created_at > 0 => m.created_at,
         _ => state
-            .tabs(&space.id)
+            .visible_tabs(&space.id)
             .iter()
             .map(|c| c.last_message_at)
             .max()
