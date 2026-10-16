@@ -257,14 +257,25 @@ def bonsai():
 
 
 def birch():
-    canopy = [ellipse(32, 22, 13, 17), shine(26, 11, 4, 3, -30)]
-    trunk = [
-        stub(32, 36, 54, 9, ink="l"),
-        Rect(28, 41, 4, 2, 1, fill="d"),
-        Rect(32, 46, 4, 2, 1, fill="d"),
-        Rect(28, 51, 4, 2, 1, fill="d"),
+    # Birdie — plump pigeon in 3/4 view (birch slug kept for the hash contract).
+    # Big oval body + puffed chest, small head tucked in, stubby beak, folded
+    # wing, fan tail, short feet.
+    canopy = [
+        ellipse(29, 34, 16, 13),
+        Circle(36, 22, 9),
+        ellipse(18, 30, 7, 9, -25),
+        ellipse(11, 40, 7, 4.5, 35),
+        ellipse(14, 45, 6, 3.5, 15),
+        ellipse(24, 36, 10, 7, -20, fill="d"),
+        round_poly([(43, 20), (53, 23), (43, 26)], 1.5),
+        shine(32, 15, 3, 2.2, -30),
+        Circle(34, 28, 3.5, fill="l"),
     ]
-    return Tree(canopy, trunk, Face(32, 24, 1.05, 0.85), (32, 39))
+    trunk = [
+        round_poly([(23, 46), (28, 46), (27.5, 54), (22.5, 54)], 1.8, fill="d"),
+        round_poly([(33, 46), (38, 46), (39, 54), (34, 54)], 1.8, fill="d"),
+    ]
+    return Tree(canopy, trunk, Face(36, 20, 0.8, 0.95), (29, 47))
 
 
 def baobab():
