@@ -1247,6 +1247,7 @@ class Loop:
         if st.get("expects_ci") and not st.get("release_done") and ci and ci["status"] == "completed" and ci["conclusion"] == "success" \
                 and (rel is None or (rel["status"] == "completed" and rel["conclusion"] in ("cancelled", "skipped"))):
             later = self.gh.later_release(sha, since)
+            log(f"[{fid}] no Release for the commit; superseding edge release run: {later['head_sha'][:8] if later else 'none yet'}")
             if later:
                 rel = later
                 st["release_superseded_by"] = later["head_sha"]
@@ -1262,7 +1263,7 @@ class Loop:
                 st.update(release_done=True, release_run=rel["html_url"], release_failed=True)
                 self.store.event(fid, "release_failed", run=rel["html_url"])
                 self.gh.comment(st["issue"], f"Release workflow failed: {rel['html_url']} (the iOS build is unaffected).")
-        if st.get("expects_ci") and ci and ci["status"] == "completed" and ci["conclusion"] in ("cancelled", "skipped") and not st.get("ci_superseded_by"):
+        if st.get("expects_ci") and ci and ci["status"] == "completed" and ci["conclusion"] in ("cancelled", "skipped") and not st.get("release_done"):
             later = self.gh.later_run("ci.yml", "push", sha, since)
             if later:
                 ci = later
@@ -1270,6 +1271,7 @@ class Loop:
                 by_name["CI"] = later
             else:
                 ci = None
+            log(f"[{fid}] CI run cancelled; superseding green CI: {later['head_sha'][:8] if later else 'none yet'}")
         if st.get("expects_ci") and ci and ci["status"] == "completed" and ci["conclusion"] != "success" and not st.get("ci_failed_noted"):
             errors = self.gh.run_error_lines(ci["id"])
             if st.get("retries", 0) < 1 and not (self.rate_limit_reason() or "").endswith("already today"):
