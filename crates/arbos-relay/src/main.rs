@@ -281,6 +281,7 @@ async fn main() -> anyhow::Result<()> {
         livekit: livekit::from_env(),
         presence_seen: Arc::new(Mutex::new(HashMap::new())),
         activity: Arc::new(Mutex::new(HashMap::new())),
+        box_http_seen: Arc::new(Mutex::new(HashMap::new())),
     };
     tracing::info!(auth_mode = auth_mode.as_str(), public_url = %state.cfg.public_url, "sign-in");
     if state.cfg.connectors_mock {

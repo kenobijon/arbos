@@ -1225,6 +1225,7 @@ pub async fn box_hello(
             "incompatible agentd protocol; rebuild box (D44)".into(),
         ));
     }
+    boxes::box_seen_http(&state, user_id).await;
     if let Some(url) = &b.url {
         if let Ok(Some(mut sb)) = state.db.user_box(user_id) {
             if sb.provider != "daytona" {
@@ -1252,6 +1253,7 @@ pub async fn box_projects(State(state): State<AppState>, principal: Principal) -
     let Principal::Box { user_id } = &principal else {
         return Err((StatusCode::FORBIDDEN, "box only".into()));
     };
+    boxes::box_seen_http(&state, user_id).await;
     let projects = state.db.projects_of_user(user_id).map_err(internal)?;
     let mut out = Vec::new();
     for p in &projects {
@@ -1277,6 +1279,7 @@ pub async fn box_keepalive(
     let Principal::Box { user_id } = &principal else {
         return Err((StatusCode::FORBIDDEN, "box only".into()));
     };
+    boxes::box_seen_http(&state, user_id).await;
     boxes::keepalive(&state, user_id, b.turn_running)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;

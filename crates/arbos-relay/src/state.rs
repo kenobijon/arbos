@@ -149,6 +149,9 @@ pub struct AppState {
     pub presence_seen: Arc<Mutex<HashMap<String, i64>>>,
     /// project_id → what its agent is doing right now (agent-flow contract §3), in memory only.
     pub activity: Arc<Mutex<HashMap<String, ProjectActivity>>>,
+    /// user_id → last HTTP call from that user's box (`/box/hello`, `/box/projects`,
+    /// `/box/keepalive`). A box with no project opens no room socket; this is its heartbeat.
+    pub box_http_seen: Arc<Mutex<HashMap<String, i64>>>,
 }
 
 /// The agent's current activity as the box last reported it.
@@ -394,6 +397,7 @@ pub(crate) mod test_support {
             livekit: None,
             presence_seen: Arc::new(Mutex::new(HashMap::new())),
             activity: Arc::new(Mutex::new(HashMap::new())),
+            box_http_seen: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }

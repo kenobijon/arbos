@@ -776,6 +776,8 @@ mod tests {
             fallback_sent: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             livekit: None,
             presence_seen: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            activity: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            box_http_seen: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 

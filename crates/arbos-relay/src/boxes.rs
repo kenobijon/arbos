@@ -712,14 +712,7 @@ pub async fn ensure_awake(state: &AppState, user_id: &str, reason: &str) {
 /// bounced once; the second time it becomes `error · box cannot reach relay` and the wake job
 /// ends, so the relay stops waking it forever. Returns true when it acted.
 async fn stale_wake_check(state: &AppState, user_id: &str, since: i64) -> bool {
-    let connected = state
-        .box_conns
-        .lock()
-        .await
-        .get(user_id)
-        .map(|c| c.0 > 0)
-        .unwrap_or(false);
-    if connected || now_ms() - since < HELLO_DEADLINE_MS {
+    if box_reachable(state, user_id).await || now_ms() - since < HELLO_DEADLINE_MS {
         return false;
     }
     // An upgrade stops agentd on purpose while it packs /work (minutes for a multi-GB
@@ -759,12 +752,57 @@ async fn stale_wake_check(state: &AppState, user_id: &str, since: i64) -> bool {
     true
 }
 
+/// A box's HTTP heartbeat is this fresh at most (its registry poll runs every 3 s).
+pub const BOX_HTTP_LIVE_MS: i64 = 20_000;
+
+/// Is the box there: a room socket open, or an HTTP call from it moments ago? A box whose user
+/// has no project yet never opens a socket (nothing to sync) but polls `/box/projects` all the
+/// same, so the poll is its heartbeat.
+pub async fn box_reachable(state: &AppState, user_id: &str) -> bool {
+    let sockets = state
+        .box_conns
+        .lock()
+        .await
+        .get(user_id)
+        .map(|c| c.0 > 0)
+        .unwrap_or(false);
+    if sockets {
+        return true;
+    }
+    state
+        .box_http_seen
+        .lock()
+        .await
+        .get(user_id)
+        .is_some_and(|t| now_ms() - t < BOX_HTTP_LIVE_MS)
+}
+
+/// `/box/hello`, `/box/projects`, `/box/keepalive`: the box is alive, socket or not. A box the
+/// relay still believed waking (or asleep, or given up on) is awake from this moment.
+pub async fn box_seen_http(state: &AppState, user_id: &str) {
+    state
+        .box_http_seen
+        .lock()
+        .await
+        .insert(user_id.to_owned(), now_ms());
+    let (st, _) = state.box_state(user_id).await;
+    if st != BoxState::Awake {
+        tracing::info!(%user_id, from = ?st, "box reached the relay over HTTP; awake");
+        box_connected_inner(state, user_id).await;
+    }
+}
+
 pub async fn box_connected(state: &AppState, user_id: &str) {
     {
         let mut c = state.box_conns.lock().await;
         let e = c.entry(user_id.to_owned()).or_insert((0, 0));
         e.0 += 1;
     }
+    box_connected_inner(state, user_id).await;
+}
+
+/// What a connection and an HTTP heartbeat have in common: the wake is over, the box is awake.
+async fn box_connected_inner(state: &AppState, user_id: &str) {
     state.stale_bounces.lock().await.remove(user_id);
     let _ = state.db.finish_wake_job(user_id);
     if let Some(t0) = state.wake_started.lock().await.remove(user_id) {
@@ -810,6 +848,34 @@ pub async fn sweep_box_liveness(state: &AppState) {
         .iter()
         .map(|(k, (n, t))| (k.clone(), *n, *t))
         .collect();
+    // Boxes that never opened a socket (no project yet) are alive only through their HTTP
+    // heartbeat; when that stops for the grace period they are asleep like any other.
+    let silent: Vec<String> = {
+        let seen = state.box_http_seen.lock().await;
+        let conns = state.box_conns.lock().await;
+        seen.iter()
+            .filter(|(u, t)| {
+                now_ms() - **t > state.cfg.box_idle_grace_ms.max(BOX_HTTP_LIVE_MS)
+                    && conns.get(*u).map(|c| c.0).unwrap_or(0) == 0
+            })
+            .map(|(u, _)| u.clone())
+            .collect()
+    };
+    for user_id in silent {
+        let (st, _) = state.box_state(&user_id).await;
+        let had_socket = state
+            .box_conns
+            .lock()
+            .await
+            .get(&user_id)
+            .is_some_and(|c| c.1 > 0);
+        if st == BoxState::Awake && !had_socket {
+            state
+                .set_box_state(&user_id, BoxState::Asleep, Some("box heartbeat lost"))
+                .await;
+        }
+        state.box_http_seen.lock().await.remove(&user_id);
+    }
     for (user_id, n, last) in snapshot {
         if n == 0 && last > 0 && now_ms() - last > state.cfg.box_idle_grace_ms {
             let (st, _) = state.box_state(&user_id).await;
@@ -1034,4 +1100,62 @@ pub async fn provider_status(state: &AppState, user_id: &str) -> Value {
         }
     }
     v
+}
+
+#[cfg(test)]
+mod zero_project_tests {
+    //! A box whose user has no project opens no room socket; its HTTP polls must still make it
+    //! awake, keep the stale-box detector quiet, and put it to sleep only when they stop.
+
+    use super::*;
+    use crate::people::tests_support::person;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    #[tokio::test]
+    async fn box_with_no_project_is_awake_through_its_http_heartbeat() {
+        let state = test_state(AuthMode::Github);
+        let (user, _dev) = person(&state, 1);
+        assert!(state.db.projects_of_user(&user).unwrap().is_empty());
+
+        // The wake started well past the hello deadline and no socket ever came.
+        state.box_states.write().await.insert(
+            user.clone(),
+            (BoxState::Waking, now_ms() - HELLO_DEADLINE_MS - 5_000),
+        );
+        assert!(!box_reachable(&state, &user).await);
+
+        // `GET /box/projects` from the box: awake, wake over, detector has nothing to do.
+        box_seen_http(&state, &user).await;
+        assert_eq!(state.box_state(&user).await.0, BoxState::Awake);
+        assert!(box_reachable(&state, &user).await);
+        sweep_box_liveness(&state).await;
+        assert_eq!(state.box_state(&user).await.0, BoxState::Awake);
+        assert!(
+            !stale_wake_check(&state, &user, 0).await,
+            "reachable boxes are never bounced"
+        );
+
+        // Had the relay already given up ("error"), the same poll brings it back.
+        state
+            .set_box_state(&user, BoxState::Error, Some("box cannot reach relay"))
+            .await;
+        box_seen_http(&state, &user).await;
+        assert_eq!(state.box_state(&user).await.0, BoxState::Awake);
+
+        // A project created now finds an awake box: no wake job, state unchanged.
+        let project_id = crate::people::tests_support::project_of(&state, &user, "First");
+        ensure_awake_project(&state, &project_id, "api").await;
+        assert_eq!(state.box_state(&user).await.0, BoxState::Awake);
+        assert!(state.wake_started.lock().await.get(&user).is_none());
+
+        // The heartbeat stops (box died): after the grace period it is asleep, not "error".
+        state
+            .box_http_seen
+            .lock()
+            .await
+            .insert(user.clone(), now_ms() - 120_000);
+        sweep_box_liveness(&state).await;
+        assert_eq!(state.box_state(&user).await.0, BoxState::Asleep);
+    }
 }
