@@ -40,6 +40,8 @@ Config comes from the environment (systemd EnvironmentFile=/etc/arbos/feedback.e
   FEEDBACK_STATE_DIR (default /var/lib/arbos-feedback), FEEDBACK_KILL_FILE
   FEEDBACK_MIN_INTERVAL_S (90), FEEDBACK_MAX_PER_DAY (60), FEEDBACK_TESTER_MAX_PER_DAY (10)
   FEEDBACK_TESTER_MAX_WAIT_MIN (30): after this wait a tester item is ordered with the priority ones
+  FEEDBACK_TOPICS_FILE (/etc/arbos/feedback-topics.txt): "<issue> <regex>" lines; matching feedback is folded
+      into that issue (a feature already being built) instead of starting an agent
   FEEDBACK_DEDUPE_DAYS (7), FEEDBACK_AGENT_TIMEOUT_MIN (75), FEEDBACK_SHIP_TIMEOUT_MIN (90)
 
 Only the standard library plus `cryptography` (for the ES256 App Store Connect token).
@@ -145,6 +147,7 @@ class Config:
     tester_max_per_day: int
     tester_max_wait_min: int
     dedupe_days: int
+    topics: list[tuple[int, str]]
     agent_timeout_min: int
     ship_timeout_min: int
 
@@ -167,6 +170,18 @@ class Config:
         priority = listed("FEEDBACK_PRIORITY", "FEEDBACK_PRIORITY_FILE", "/etc/arbos/feedback-priority.txt")
         priority |= listed("FEEDBACK_ALLOWLIST", "FEEDBACK_ALLOWLIST_FILE", "/etc/arbos/feedback-allowlist.txt")
         blocklist = listed("FEEDBACK_BLOCKLIST", "FEEDBACK_BLOCKLIST_FILE", "/etc/arbos/feedback-blocklist.txt")
+        # Topics already being built: "<issue number> <regex>" per line; matching feedback is folded
+        # into that issue instead of starting an agent.
+        topics: list[tuple[int, str]] = []
+        tf = Path(env.get("FEEDBACK_TOPICS_FILE", "/etc/arbos/feedback-topics.txt"))
+        if tf.is_file():
+            for line in tf.read_text().splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                num, _, pattern = line.partition(" ")
+                if num.isdigit() and pattern.strip():
+                    topics.append((int(num), pattern.strip()))
         p8_b64 = env.get("ASC_KEY_P8_B64", "")
         pem = base64.b64decode(p8_b64) if p8_b64 else b""
         return Config(
@@ -190,6 +205,7 @@ class Config:
             max_per_day=int(env.get("FEEDBACK_MAX_PER_DAY", "60")),
             tester_max_per_day=int(env.get("FEEDBACK_TESTER_MAX_PER_DAY", "10")),
             tester_max_wait_min=int(env.get("FEEDBACK_TESTER_MAX_WAIT_MIN", "30")),
+            topics=topics,
             dedupe_days=int(env.get("FEEDBACK_DEDUPE_DAYS", "7")),
             agent_timeout_min=int(env.get("FEEDBACK_AGENT_TIMEOUT_MIN", "75")),
             ship_timeout_min=int(env.get("FEEDBACK_SHIP_TIMEOUT_MIN", "90")),
@@ -801,6 +817,15 @@ class Loop:
             self.store.save_state(fid, st)
             self.store.event(fid, "ignored", reason="tester on the blocklist", tester=st["tester"])
             return
+        for issue_no, pattern in self.cfg.topics:
+            if re.search(pattern, info.get("comment") or "", re.I):
+                st.update(status="duplicate", duplicate_of=f"issue#{issue_no}")
+                self.store.save_state(fid, st)
+                self.store.event(fid, "duplicate", of=f"issue#{issue_no}", tester=st["tester"], topic=pattern)
+                with contextlib.suppress(HttpError):
+                    self.gh.comment(issue_no, f"+1 from {st['tester']} ({info.get('source')}, build {info.get('build') or '?'}, `{fid}`): "
+                                    f"{(info.get('comment') or '').strip()[:300]}")
+                return
         original = self.find_duplicate(info)
         if original:
             st.update(status="duplicate", duplicate_of=original)
