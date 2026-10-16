@@ -1404,7 +1404,9 @@ final class AppModel: ObservableObject {
     /// People group: `POST /chats {kind: group, members}`. Relays that still
     /// return 501 for that route: open a DM with the first person, then add the
     /// rest (`POST /chats/{id}/members` turns a DM into a group on the third person).
-    func createGroup(handles: [String]) async -> Bool {
+    /// Optional `agentIds` are added afterwards (`POST /chats/{id}/agents`) so the
+    /// group can start with people and your agents in one step.
+    func createGroup(handles: [String], agentIds: [Id] = []) async -> Bool {
         let cleaned = handles
             .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "@ ")) }
             .filter { !$0.isEmpty }
@@ -1413,11 +1415,18 @@ final class AppModel: ObservableObject {
             return false
         }
         do {
-            let chat: PeopleChat
+            var chat: PeopleChat
             do {
                 chat = try await api.createGroup(handles: cleaned)
             } catch let e as RelayError where e.status == 404 || e.status == 405 || e.status == 501 {
                 chat = try await createGroupViaDm(handles: cleaned)
+            }
+            for pid in agentIds {
+                do {
+                    chat = try await api.addAgent(chatId: chat.id, projectId: pid)
+                } catch {
+                    notice = Notice(text: "Group created, but adding an agent failed: \(error.localizedDescription)")
+                }
             }
             if let i = peopleChats.firstIndex(where: { $0.id == chat.id }) {
                 peopleChats[i] = chat
