@@ -2,14 +2,21 @@
 //! per `question` part. Five widget types — choice, multi-select, text, date,
 //! form — each answered from the card with the mouse or the keyboard (Enter
 //! submits, arrows move, Space toggles). An answered card stays in the
-//! transcript with its value, in the same frame as the approval card (F2).
+//! transcript with its value.
+//!
+//! The look is Grok Bot's question card and nothing else: one rounded card in
+//! the assistant-bubble grey, a short bold question, a thin grey × top-right,
+//! and a white (dark: slightly lighter) inner list of rows, each with a small
+//! grey lettered badge. No icons, chips, coloured buttons or hints. The frame
+//! helpers at the bottom ([`card_frame`], [`card_header`], [`option_list`],
+//! [`option_row`]) are shared with the approval card.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use gpui::{
     actions, div, prelude::*, px, App, Context, Div, Entity, FocusHandle, Focusable, FontWeight,
-    Render, SharedString, Window,
+    Hsla, Render, SharedString, Stateful, Window,
 };
 use serde_json::{json, Value};
 
@@ -18,7 +25,8 @@ use arbos_core::widget::{add_days, check_date, today_iso};
 use crate::app::AppState;
 use crate::model::{ChoiceOption, FieldKind, FormField, Id, Part, QuestionState, Widget};
 use crate::ui::composer::ComposerInput;
-use crate::ui::theme::{Theme, PANEL_RADIUS};
+use crate::ui::icons::icon;
+use crate::ui::theme::{Appearance, Theme, TEXT_TINY};
 use crate::ui::transcript::ASSISTANT_MAX_WIDTH;
 
 actions!(
@@ -49,6 +57,9 @@ pub struct QuestionCard {
     form_bool: BTreeMap<String, bool>,
     error: Option<String>,
     focused_once: bool,
+    /// × was clicked: the card hides for this session (the question stays open on the box;
+    /// the composer still answers it).
+    dismissed: bool,
 }
 
 impl QuestionCard {
@@ -122,6 +133,7 @@ impl QuestionCard {
             form_bool,
             error: None,
             focused_once: false,
+            dismissed: false,
         }
     }
 
@@ -329,119 +341,80 @@ impl QuestionCard {
 
     // ---- rendering ----------------------------------------------------------------------------
 
-    fn chip(
-        &self,
-        id: impl Into<SharedString>,
-        label: &str,
-        selected: bool,
-        highlighted: bool,
-        enabled: bool,
-        theme: &Theme,
-    ) -> gpui::Stateful<Div> {
-        div()
-            .id(id.into())
-            .px(px(10.0))
-            .py(px(5.0))
-            .rounded(px(8.0))
-            .text_size(px(12.5))
-            .border_1()
-            .border_color(if highlighted {
-                theme.accent
-            } else if selected {
-                Theme::with_alpha(theme.accent, 0.6)
-            } else {
-                theme.border_strong
-            })
-            .bg(if selected {
-                theme.accent_soft
-            } else {
-                theme.surface_2
-            })
-            .text_color(if enabled || selected {
-                theme.text
-            } else {
-                theme.text_faint
-            })
-            .when(enabled, |el| {
-                el.cursor_pointer().hover(|s| s.border_color(theme.accent))
-            })
-            .child(label.to_string())
-    }
-
-    fn render_options(
+    fn render_rows(
         &self,
         options: &[ChoiceOption],
         multi: bool,
         picked: &BTreeSet<String>,
         open: bool,
-        theme: &Theme,
+        look: &CardLook,
         cx: &mut Context<Self>,
     ) -> Div {
-        let mut row = div().flex().flex_wrap().gap(px(6.0));
+        let mut list = option_list(&look.palette);
         for (ix, o) in options.iter().enumerate() {
             let selected = picked.contains(&o.id);
-            let highlighted = open && ix == self.highlighted;
+            let state = if selected {
+                RowState::Chosen
+            } else if !open {
+                RowState::Faded
+            } else if ix == self.highlighted {
+                RowState::Highlighted
+            } else {
+                RowState::Open
+            };
             let id = o.id.clone();
-            let chip = self
-                .chip(
-                    format!("{}-opt-{}", self.question_id, o.id),
-                    &o.label,
-                    selected,
-                    highlighted,
-                    open,
-                    theme,
-                )
-                .when(open, |el| {
-                    el.on_click(cx.listener(move |this, _, window, cx| {
-                        window.focus(&this.focus_handle, cx);
-                        this.highlighted = ix;
-                        if multi {
-                            this.toggle_id(id.clone(), cx);
-                        } else {
-                            this.answer(json!(id), cx);
-                        }
-                    }))
-                });
-            row = row.child(chip);
+            let row = option_row(
+                format!("{}-opt-{}", self.question_id, o.id),
+                Some(letter(ix)),
+                &o.label,
+                state,
+                ix > 0,
+                look,
+            )
+            .when(open, |el| {
+                el.on_click(cx.listener(move |this, _, window, cx| {
+                    window.focus(&this.focus_handle, cx);
+                    this.highlighted = ix;
+                    if multi {
+                        this.toggle_id(id.clone(), cx);
+                    } else {
+                        this.answer(json!(id), cx);
+                    }
+                }))
+            });
+            list = list.child(row);
         }
-        row
+        list
     }
 
-    fn render_input_box(&self, input: &Entity<ComposerInput>, theme: &Theme) -> Div {
+    fn render_input_box(&self, input: &Entity<ComposerInput>, palette: &CardPalette) -> Div {
         div()
             .flex()
             .w_full()
-            .min_h(px(32.0))
-            .px(px(10.0))
-            .py(px(5.0))
-            .rounded(px(8.0))
-            .bg(theme.surface_2)
-            .border_1()
-            .border_color(theme.border_strong)
+            .min_h(px(ROW_HEIGHT))
+            .items_center()
+            .px(px(ROW_PAD_X))
+            .py(px(6.0))
+            .bg(palette.inner)
             .child(input.clone())
     }
 
-    fn submit_button(
-        &self,
-        label: &str,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        div()
-            .id(SharedString::from(format!("{}-submit", self.question_id)))
-            .px(px(12.0))
-            .py(px(5.0))
-            .rounded_full()
-            .bg(theme.text)
-            .text_color(theme.bg)
-            .text_size(px(12.0))
-            .font_weight(FontWeight::SEMIBOLD)
-            .cursor_pointer()
-            .child(label.to_string())
-            .on_click(cx.listener(|this, _, _, cx| this.submit(cx)))
+    /// The last row of a card that needs a Send: no badge, the label in the body weight.
+    fn send_row(&self, look: &CardLook, cx: &mut Context<Self>) -> Stateful<Div> {
+        option_row(
+            format!("{}-submit", self.question_id),
+            None,
+            "Send",
+            RowState::Open,
+            true,
+            look,
+        )
+        .font_weight(FontWeight::SEMIBOLD)
+        .on_click(cx.listener(|this, _, _, cx| this.submit(cx)))
     }
 
-    fn render_answered(&self, view: &PartView, theme: &Theme, cx: &mut Context<Self>) -> Div {
+    fn render_answered(&self, view: &PartView, look: &CardLook, cx: &mut Context<Self>) -> Div {
+        let (palette, theme) = (&look.palette, look.theme);
         let answer = view.answer.clone().unwrap_or(Value::Null);
         match &view.widget {
             Widget::Choice { options } | Widget::MultiSelect { options } => {
@@ -454,7 +427,7 @@ impl QuestionCard {
                     Value::String(s) => BTreeSet::from([s.clone()]),
                     _ => BTreeSet::new(),
                 };
-                self.render_options(options, false, &picked, false, theme, cx)
+                self.render_rows(options, false, &picked, false, look, cx)
             }
             Widget::Text { .. } | Widget::Date { .. } | Widget::Form { .. } => {
                 let text = view.widget.answer_text(&answer);
@@ -463,44 +436,34 @@ impl QuestionCard {
                     .unwrap_or(&text)
                     .trim()
                     .to_string();
-                div()
-                    .px(px(10.0))
-                    .py(px(6.0))
-                    .rounded(px(8.0))
-                    .bg(theme.surface_2)
-                    .text_size(px(13.0))
-                    .text_color(theme.text)
-                    .child(text)
+                option_list(palette).child(
+                    div()
+                        .min_h(px(ROW_HEIGHT))
+                        .px(px(ROW_PAD_X + 2.0))
+                        .py(px(8.0))
+                        .text_size(px(ROW_TEXT))
+                        .line_height(px(ROW_TEXT + 5.0))
+                        .text_color(theme.text)
+                        .child(text),
+                )
             }
         }
     }
 
-    fn render_open(&self, view: &PartView, theme: &Theme, cx: &mut Context<Self>) -> Div {
-        let body = div().flex().flex_col().gap(px(8.0));
+    fn render_open(&self, view: &PartView, look: &CardLook, cx: &mut Context<Self>) -> Div {
+        let (palette, theme) = (&look.palette, look.theme);
         match &view.widget {
-            Widget::Choice { options } => body
-                .child(self.render_options(options, false, &BTreeSet::new(), true, theme, cx))
-                .child(self.hint("↑↓ move · Enter picks", theme)),
-            Widget::MultiSelect { options } => body
-                .child(self.render_options(options, true, &self.selected, true, theme, cx))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(10.0))
-                        .child(self.submit_button("Send", theme, cx))
-                        .child(self.hint("↑↓ move · Space toggles · Enter sends", theme)),
-                ),
+            Widget::Choice { options } => {
+                self.render_rows(options, false, &BTreeSet::new(), true, look, cx)
+            }
+            Widget::MultiSelect { options } => self
+                .render_rows(options, true, &self.selected, true, look, cx)
+                .child(self.send_row(look, cx)),
             Widget::Text { .. } => {
                 let input = self.text_input.clone().expect("text widget has an input");
-                body.child(self.render_input_box(&input, theme)).child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(10.0))
-                        .child(self.submit_button("Send", theme, cx))
-                        .child(self.hint("Enter sends · Shift+Enter newline", theme)),
-                )
+                option_list(palette)
+                    .child(self.render_input_box(&input, palette))
+                    .child(self.send_row(look, cx))
             }
             Widget::Date { min, max } => {
                 let input = self.text_input.clone().expect("date widget has an input");
@@ -511,53 +474,47 @@ impl QuestionCard {
                     ("In a week", add_days(&today, 7)),
                     ("In a month", add_days(&today, 30)),
                 ];
-                let mut chips = div().flex().flex_wrap().gap(px(6.0));
+                let mut list = option_list(palette);
+                let mut ix = 0;
                 for (label, iso) in quick {
                     let Some(iso) = iso else { continue };
                     let within = check_date(&iso, min.as_deref(), max.as_deref()).is_ok();
-                    let chip = self
-                        .chip(
-                            format!("{}-quick-{label}", self.question_id),
-                            label,
-                            false,
-                            false,
-                            within,
-                            theme,
-                        )
-                        .when(within, |el| {
-                            el.on_click(
-                                cx.listener(move |this, _, _, cx| this.set_date(iso.clone(), cx)),
-                            )
-                        });
-                    chips = chips.child(chip);
+                    let row = option_row(
+                        format!("{}-quick-{label}", self.question_id),
+                        Some(letter(ix)),
+                        label,
+                        if within {
+                            RowState::Open
+                        } else {
+                            RowState::Faded
+                        },
+                        ix > 0,
+                        look,
+                    )
+                    .when(within, |el| {
+                        el.on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_date(iso.clone(), cx);
+                            this.submit(cx);
+                        }))
+                    });
+                    list = list.child(row);
+                    ix += 1;
                 }
-                let bounds = match (min, max) {
-                    (Some(a), Some(b)) => format!("{a} … {b}"),
-                    (Some(a), None) => format!("from {a}"),
-                    (None, Some(b)) => format!("until {b}"),
-                    (None, None) => String::new(),
-                };
-                body.child(chips).child(
+                list.child(
                     div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child(
-                            div()
-                                .w(px(160.0))
-                                .child(self.render_input_box(&input, theme)),
-                        )
-                        .child(self.submit_button("Send", theme, cx))
-                        .child(self.hint(&bounds, theme)),
+                        .border_t_1()
+                        .border_color(palette.hairline)
+                        .child(self.render_input_box(&input, palette)),
                 )
+                .child(self.send_row(look, cx))
             }
             Widget::Form { fields } => {
-                let mut rows = div().flex().flex_col().gap(px(8.0));
-                for f in fields {
+                let mut list = option_list(palette);
+                for (ix, f) in fields.iter().enumerate() {
                     let label = div()
                         .w(px(120.0))
                         .flex_shrink_0()
-                        .text_size(px(12.5))
+                        .text_size(px(ROW_TEXT))
                         .text_color(theme.text_muted)
                         .child(if f.required {
                             format!("{} *", f.label)
@@ -567,26 +524,23 @@ impl QuestionCard {
                     let control: Div = match f.kind {
                         FieldKind::Text | FieldKind::Number | FieldKind::Date => {
                             match self.form_inputs.get(&f.id) {
-                                Some(input) => {
-                                    div().flex_1().child(self.render_input_box(input, theme))
-                                }
+                                Some(input) => div().flex_1().child(input.clone()),
                                 None => div(),
                             }
                         }
                         FieldKind::Choice => {
-                            let picked: BTreeSet<String> =
-                                self.form_choice.get(&f.id).cloned().into_iter().collect();
+                            let picked: Option<&String> = self.form_choice.get(&f.id);
                             let mut row = div().flex().flex_wrap().gap(px(6.0));
                             for o in &f.options {
                                 let fid = f.id.clone();
                                 let oid = o.id.clone();
+                                let on = picked == Some(&o.id);
                                 row = row.child(
-                                    self.chip(
+                                    pill(
                                         format!("{}-{}-{}", self.question_id, f.id, o.id),
                                         &o.label,
-                                        picked.contains(&o.id),
-                                        false,
-                                        true,
+                                        on,
+                                        palette,
                                         theme,
                                     )
                                     .on_click(cx.listener(
@@ -604,12 +558,11 @@ impl QuestionCard {
                             let on = self.form_bool.get(&f.id).copied().unwrap_or(false);
                             let fid = f.id.clone();
                             div().child(
-                                self.chip(
+                                pill(
                                     format!("{}-{}-bool", self.question_id, f.id),
                                     if on { "Yes" } else { "No" },
                                     on,
-                                    false,
-                                    true,
+                                    palette,
                                     theme,
                                 )
                                 .on_click(cx.listener(
@@ -622,32 +575,22 @@ impl QuestionCard {
                             )
                         }
                     };
-                    rows = rows.child(
+                    list = list.child(
                         div()
                             .flex()
                             .items_center()
                             .gap(px(10.0))
+                            .min_h(px(ROW_HEIGHT))
+                            .px(px(ROW_PAD_X + 2.0))
+                            .py(px(6.0))
+                            .when(ix > 0, |el| el.border_t_1().border_color(palette.hairline))
                             .child(label)
                             .child(control),
                     );
                 }
-                body.child(rows).child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(10.0))
-                        .child(self.submit_button("Send", theme, cx))
-                        .child(self.hint("Enter in any field sends", theme)),
-                )
+                list.child(self.send_row(look, cx))
             }
         }
-    }
-
-    fn hint(&self, text: &str, theme: &Theme) -> Div {
-        div()
-            .text_size(px(11.0))
-            .text_color(theme.text_faint)
-            .child(text.to_string())
     }
 }
 
@@ -663,6 +606,11 @@ impl Render for QuestionCard {
         let Some(view) = self.part(cx) else {
             return div().into_any_element();
         };
+        if self.dismissed {
+            return div().into_any_element();
+        }
+        let look = CardLook::of(&theme);
+        let palette = look.palette;
         let open = view.state == QuestionState::Open;
         // The newest open card takes the keyboard once, so Enter/arrows work at once.
         if open && !self.focused_once {
@@ -682,37 +630,32 @@ impl Render for QuestionCard {
                 }
             }
         }
-        let focused = self.focus_handle.is_focused(window);
-        let label = if open { "QUESTION" } else { "ANSWERED" };
-        let accent = if open { theme.warn } else { theme.accent };
-
-        let header = div()
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(accent)
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(label),
-            )
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(theme.text_faint)
-                    .child(view.widget.type_name().replace('_', " ")),
-            );
 
         let body = if open {
-            self.render_open(&view, &theme, cx)
+            self.render_open(&view, &look, cx)
         } else {
-            self.render_answered(&view, &theme, cx)
+            self.render_answered(&view, &look, cx)
         };
 
-        div()
-            .id(SharedString::from(format!("question-{}", self.question_id)))
-            .key_context("QuestionCard")
+        let on_close: Option<CloseHandler> = open.then(|| {
+            Box::new(cx.listener(
+                |this: &mut Self, _: &gpui::ClickEvent, _: &mut Window, cx| {
+                    this.dismissed = true;
+                    cx.notify();
+                },
+            )) as CloseHandler
+        });
+
+        let card =
+            card_frame(format!("question-{}", self.question_id), &palette).child(card_header(
+                format!("question-{}-x", self.question_id),
+                &view.question,
+                on_close,
+                &palette,
+                &theme,
+            ));
+
+        card.key_context("QuestionCard")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::submit_action))
             .on_action(cx.listener(Self::next))
@@ -731,34 +674,260 @@ impl Render for QuestionCard {
                     }
                 }),
             )
-            .w_full()
-            .max_w(px(ASSISTANT_MAX_WIDTH))
-            .my(px(4.0))
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .px(px(12.0))
-            .py(px(10.0))
-            .rounded(px(PANEL_RADIUS))
-            .bg(theme.card())
-            .border_l_2()
-            .border_color(accent)
-            .when(focused && open, |el| {
-                el.border_1()
-                    .border_l_2()
-                    .border_color(Theme::with_alpha(accent, 0.8))
-            })
-            .child(header)
-            .child(
-                div()
-                    .text_size(px(13.5))
-                    .text_color(theme.text)
-                    .child(view.question.clone()),
-            )
             .child(body)
             .when_some(self.error.clone(), |el, e| {
-                el.child(div().text_size(px(11.5)).text_color(theme.danger).child(e))
+                el.child(
+                    div()
+                        .px(px(2.0))
+                        .text_size(px(TEXT_TINY))
+                        .text_color(theme.danger)
+                        .child(e),
+                )
             })
             .into_any_element()
     }
+}
+
+// ---- the Grok Bot question card frame, shared with the approval card ------------------------
+
+/// Outer card radius (Grok's inline cards sit at the bubble radius plus a little).
+pub const CARD_RADIUS: f32 = 18.0;
+/// Inner list radius.
+pub const LIST_RADIUS: f32 = 11.0;
+pub const CARD_PAD: f32 = 12.0;
+pub const ROW_HEIGHT: f32 = 34.0;
+pub const ROW_PAD_X: f32 = 9.0;
+pub const ROW_TEXT: f32 = 13.5;
+pub const TITLE_TEXT: f32 = 14.5;
+pub const BADGE: f32 = 20.0;
+
+/// The card's colours for the current appearance: light = the assistant-bubble grey with a
+/// white list; dark = near-black with a slightly lighter list; badges and × always grey.
+#[derive(Clone, Copy, Debug)]
+pub struct CardPalette {
+    pub outer: Hsla,
+    pub inner: Hsla,
+    pub badge: Hsla,
+    pub badge_ink: Hsla,
+    pub close: Hsla,
+    pub hairline: Hsla,
+    pub highlight: Hsla,
+}
+
+impl CardPalette {
+    pub fn of(theme: &Theme) -> Self {
+        match theme.appearance {
+            Appearance::Dark => Self {
+                outer: theme.bubble_assistant,
+                inner: hex(0x2c2c2c),
+                badge: hex(0x3a3a3c),
+                badge_ink: hex(0x8e8e93),
+                close: hex(0x8e8e93),
+                hairline: Theme::with_alpha(gpui::white(), 0.08),
+                highlight: Theme::with_alpha(gpui::white(), 0.05),
+            },
+            Appearance::Light => Self {
+                outer: theme.bubble_assistant,
+                inner: gpui::white(),
+                badge: hex(0xf1f1f3),
+                badge_ink: hex(0xb4b4b8),
+                close: hex(0xb4b4b8),
+                hairline: Theme::with_alpha(gpui::black(), 0.06),
+                highlight: Theme::with_alpha(gpui::black(), 0.035),
+            },
+        }
+    }
+}
+
+fn hex(v: u32) -> Hsla {
+    gpui::rgb(v).into()
+}
+
+/// Palette plus theme, passed together so row helpers stay short.
+#[derive(Clone, Copy)]
+pub struct CardLook<'a> {
+    pub palette: CardPalette,
+    pub theme: &'a Theme,
+}
+
+impl<'a> CardLook<'a> {
+    pub fn of(theme: &'a Theme) -> Self {
+        Self {
+            palette: CardPalette::of(theme),
+            theme,
+        }
+    }
+}
+
+/// `A`, `B`, … for the row badges; past `Z` the number.
+pub fn letter(ix: usize) -> String {
+    if ix < 26 {
+        char::from(b'A' + ix as u8).to_string()
+    } else {
+        (ix + 1).to_string()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowState {
+    Open,
+    /// Keyboard cursor.
+    Highlighted,
+    /// The picked answer on an answered (or multi-select) card.
+    Chosen,
+    /// Not picked on an answered card, or out of bounds.
+    Faded,
+}
+
+/// A click on the card's ×.
+pub type CloseHandler = Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static>;
+
+/// The outer card: bubble grey, generous radius; the header row goes in first.
+pub fn card_frame(id: impl Into<SharedString>, palette: &CardPalette) -> Stateful<Div> {
+    div()
+        .id(id.into())
+        .w_full()
+        .max_w(px(ASSISTANT_MAX_WIDTH))
+        .my(px(4.0))
+        .flex()
+        .flex_col()
+        .gap(px(9.0))
+        .p(px(CARD_PAD))
+        .rounded(px(CARD_RADIUS))
+        .bg(palette.outer)
+}
+
+/// Bold question, thin grey × on the right (none when the card is settled).
+pub fn card_header(
+    close_id: impl Into<SharedString>,
+    title: &str,
+    on_close: Option<CloseHandler>,
+    palette: &CardPalette,
+    theme: &Theme,
+) -> Div {
+    let mut header = div().flex().items_start().gap(px(10.0)).child(
+        div()
+            .flex_1()
+            .min_w_0()
+            .pl(px(1.0))
+            .text_size(px(TITLE_TEXT))
+            .line_height(px(TITLE_TEXT + 4.5))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(theme.text)
+            .child(title.to_string()),
+    );
+    if let Some(on_close) = on_close {
+        header = header.child(
+            div()
+                .id(close_id.into())
+                .flex_shrink_0()
+                .size(px(18.0))
+                .mt(px(0.5))
+                .mr(px(-1.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(5.0))
+                .cursor_pointer()
+                .hover(|s| s.bg(palette.highlight))
+                .child(icon("xmark", 13.0, palette.close))
+                .on_click(move |e, window, cx| on_close(e, window, cx)),
+        );
+    }
+    header
+}
+
+/// The white (dark: lighter) inner list that holds the rows.
+pub fn option_list(palette: &CardPalette) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .rounded(px(LIST_RADIUS))
+        .bg(palette.inner)
+        .overflow_hidden()
+}
+
+/// One row: lettered badge, plain label, a hairline above when not the first.
+pub fn option_row(
+    id: impl Into<SharedString>,
+    badge: Option<String>,
+    label: &str,
+    state: RowState,
+    hairline_above: bool,
+    look: &CardLook,
+) -> Stateful<Div> {
+    let (palette, theme) = (&look.palette, look.theme);
+    let ink = match state {
+        RowState::Open | RowState::Highlighted | RowState::Chosen => theme.text,
+        RowState::Faded => theme.text_faint,
+    };
+    let (badge_bg, badge_ink) = match state {
+        RowState::Chosen => (theme.text, palette.inner),
+        RowState::Open | RowState::Highlighted | RowState::Faded => {
+            (palette.badge, palette.badge_ink)
+        }
+    };
+    let clickable = matches!(state, RowState::Open | RowState::Highlighted);
+    div()
+        .id(id.into())
+        .flex()
+        .items_center()
+        .gap(px(10.0))
+        .min_h(px(ROW_HEIGHT))
+        .px(px(ROW_PAD_X))
+        .py(px(6.0))
+        .when(hairline_above, |el| {
+            el.border_t_1().border_color(palette.hairline)
+        })
+        .when(state == RowState::Highlighted, |el| {
+            el.bg(palette.highlight)
+        })
+        .when(clickable, |el| {
+            el.cursor_pointer().hover(|s| s.bg(palette.highlight))
+        })
+        .when_some(badge, |el, letter| {
+            el.child(
+                div()
+                    .flex_shrink_0()
+                    .size(px(BADGE))
+                    .rounded(px(5.0))
+                    .bg(badge_bg)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(11.5))
+                    .text_color(badge_ink)
+                    .child(letter),
+            )
+        })
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_size(px(ROW_TEXT))
+                .line_height(px(ROW_TEXT + 5.0))
+                .text_color(ink)
+                .child(label.to_string()),
+        )
+}
+
+/// Small grey pill for form choices / yes-no (inside a form row).
+fn pill(
+    id: impl Into<SharedString>,
+    label: &str,
+    on: bool,
+    palette: &CardPalette,
+    theme: &Theme,
+) -> Stateful<Div> {
+    div()
+        .id(id.into())
+        .px(px(9.0))
+        .py(px(3.0))
+        .rounded(px(6.0))
+        .text_size(px(12.0))
+        .bg(if on { theme.text } else { palette.badge })
+        .text_color(if on { palette.inner } else { theme.text })
+        .cursor_pointer()
+        .child(label.to_string())
 }

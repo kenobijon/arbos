@@ -1,14 +1,18 @@
-//! S18 draft-and-approve card (feature `approve`): title, risk + state chip,
-//! a preview of what would happen (the draft's recipient/subject/body or the
-//! command), and Approve / Reject while pending. The part shape is owned by
+//! S18 draft-and-approve card (feature `approve`), drawn as the Grok Bot
+//! question card: the title is the question, the preview (a draft's To /
+//! Subject / body or the gated command) is plain text under it, and the
+//! answers are two lettered rows — A Approve, B Reject — in the white inner
+//! list. The × top-right is Reject. The part shape is owned by
 //! `arbos_core::approval`; Approve/Reject write the `approve` / `reject`
 //! commands through `AppState`.
 
-use gpui::{div, prelude::*, px, App, Div, FontWeight, Hsla, SharedString, Stateful};
+use gpui::{div, prelude::*, px, App, Div, SharedString, Stateful};
 
 use crate::model::{ApprovalRisk, ApprovalState};
-use crate::ui::glass;
-use crate::ui::theme::{Appearance, Theme, BUBBLE_RADIUS, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
+use crate::ui::theme::{Theme, TEXT_SMALL};
+use crate::ui::widgets::{
+    card_frame, card_header, option_list, option_row, CardLook, CloseHandler, RowState, ROW_PAD_X,
+};
 
 /// Everything the card renders, flattened from `Part::Approval`.
 #[derive(Clone, Debug, PartialEq)]
@@ -71,38 +75,22 @@ impl ApprovalView {
         }
         out
     }
-}
 
-fn state_color(state: ApprovalState, theme: &Theme) -> Hsla {
-    match state {
-        ApprovalState::Pending => theme.warn,
-        ApprovalState::Approved => theme.online,
-        ApprovalState::Rejected => theme.danger,
-        ApprovalState::Expired => theme.text_faint,
+    /// The title as a question: "Send the weekly update to the beta list?".
+    fn question(&self) -> String {
+        let t = self.title.trim();
+        if t.is_empty() {
+            return "Approve this?".into();
+        }
+        if t.ends_with('?') {
+            t.to_string()
+        } else {
+            format!("{}?", t.trim_end_matches('.'))
+        }
     }
 }
 
-fn chip(text: impl Into<SharedString>, color: Hsla, theme: &Theme) -> Div {
-    div()
-        .px(px(8.0))
-        .py(px(2.0))
-        .rounded_full()
-        .bg(Theme::with_alpha(
-            color,
-            if theme.appearance == Appearance::Dark {
-                0.16
-            } else {
-                0.12
-            },
-        ))
-        .text_size(px(TEXT_TINY))
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(color)
-        .child(text.into())
-}
-
-/// The card (Grok's inline widget): an assistant-bubble card with the title,
-/// a risk + state chip, the preview, and two capsule buttons while pending.
+/// The card: question title, plain preview, A Approve / B Reject rows; × = Reject.
 pub fn approval_card(
     row_id: &str,
     view: &ApprovalView,
@@ -110,108 +98,92 @@ pub fn approval_card(
     on_approve: impl Fn(&mut App) + 'static,
     on_reject: impl Fn(&mut App) + 'static,
 ) -> Stateful<Div> {
-    let accent = state_color(view.state, theme);
+    let look = CardLook::of(theme);
+    let palette = look.palette;
     let pending = view.state == ApprovalState::Pending;
+    let on_reject = std::rc::Rc::new(on_reject);
 
-    let header = div()
+    let close: Option<CloseHandler> = pending.then(|| {
+        let on_reject = on_reject.clone();
+        Box::new(move |_: &gpui::ClickEvent, _: &mut gpui::Window, cx: &mut App| on_reject(cx))
+            as CloseHandler
+    });
+
+    let mut preview = div()
         .flex()
-        .items_center()
-        .gap(px(8.0))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .text_size(px(TEXT_BODY))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.text)
-                .child(view.title.clone()),
-        )
-        .child(chip(view.risk.label(), theme.text_muted, theme))
-        .child(chip(view.state.label(), accent, theme));
-
-    let mut body = div().flex().flex_col().gap(px(5.0));
+        .flex_col()
+        .gap(px(3.0))
+        .px(px(1.0))
+        .text_size(px(TEXT_SMALL))
+        .line_height(px(TEXT_SMALL + 5.0))
+        .text_color(theme.text_muted);
+    let mut has_preview = false;
     for (label, value) in view.preview() {
-        let mono = label.is_empty();
-        let mut line = div().flex().gap(px(8.0)).text_size(px(TEXT_SMALL));
-        if !label.is_empty() {
-            line = line.child(
-                div()
-                    .w(px(60.0))
-                    .flex_shrink_0()
-                    .text_color(theme.text_muted)
-                    .child(label),
-            );
-        }
-        line = line.child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .text_color(theme.text)
-                .when(mono, |el| {
-                    el.mt(px(4.0))
-                        .px(px(12.0))
-                        .py(px(9.0))
-                        .rounded(px(10.0))
-                        .bg(theme.code_bg)
-                        .text_size(px(TEXT_SMALL))
-                        .line_height(px(19.0))
-                })
-                .child(value),
-        );
-        body = body.child(line);
+        has_preview = true;
+        preview = preview.child(if label.is_empty() {
+            value
+        } else {
+            format!("{label}: {value}")
+        });
     }
 
-    let mut footer = div()
-        .flex()
-        .items_center()
-        .gap(px(10.0))
-        .text_size(px(TEXT_TINY))
-        .text_color(theme.text_muted);
-    if pending {
-        footer = footer
-            .child(
-                glass::quiet_button(format!("{row_id}-reject"), "Reject", theme)
-                    .flex_1()
-                    .on_click(move |_, _, cx| on_reject(cx)),
-            )
-            .child(
-                glass::primary_button(format!("{row_id}-approve"), "Approve", theme)
-                    .flex_1()
-                    .on_click(move |_, _, cx| on_approve(cx)),
-            );
-    } else {
-        let mut note = format!("{} ", view.state.label());
+    let (approve_state, reject_state) = match view.state {
+        ApprovalState::Pending => (RowState::Open, RowState::Open),
+        ApprovalState::Approved => (RowState::Chosen, RowState::Faded),
+        ApprovalState::Rejected => (RowState::Faded, RowState::Chosen),
+        ApprovalState::Expired => (RowState::Faded, RowState::Faded),
+    };
+    let approve_row = option_row(
+        format!("{row_id}-approve"),
+        Some("A".into()),
+        "Approve",
+        approve_state,
+        false,
+        &look,
+    )
+    .when(pending, |el| el.on_click(move |_, _, cx| on_approve(cx)));
+    let reject_row = option_row(
+        format!("{row_id}-reject"),
+        Some("B".into()),
+        "Reject",
+        reject_state,
+        true,
+        &look,
+    )
+    .when(pending, |el| {
+        let on_reject = on_reject.clone();
+        el.on_click(move |_, _, cx| on_reject(cx))
+    });
+    let mut list = option_list(&palette).child(approve_row).child(reject_row);
+
+    if !pending {
+        let mut note = view.state.label().to_string();
         if let Some(by) = &view.decided_by {
-            note.push_str(&format!("by {by}"));
+            note.push_str(&format!(" by {by}"));
         }
         if let Some(reason) = view.reason.as_deref().filter(|r| !r.trim().is_empty()) {
             note.push_str(&format!(" · {reason}"));
         }
-        footer = footer.child(note.trim().to_string());
-    }
-
-    let mut card = div()
-        .id(SharedString::from(row_id.to_string()))
-        .max_w(px(crate::ui::transcript::ASSISTANT_MAX_WIDTH))
-        .w_full()
-        .my(px(6.0))
-        .flex()
-        .flex_col()
-        .gap(px(12.0))
-        .px(px(16.0))
-        .py(px(14.0))
-        .rounded(px(BUBBLE_RADIUS))
-        .bg(theme.bubble_assistant)
-        .child(header)
-        .child(body)
-        .child(footer);
-    if pending {
-        card = card.child(
+        list = list.child(
             div()
-                .text_size(px(TEXT_TINY))
-                .text_color(theme.text_muted)
-                .child("Nothing happens until you decide. Expires in 24 h."),
+                .border_t_1()
+                .border_color(palette.hairline)
+                .px(px(ROW_PAD_X))
+                .py(px(7.0))
+                .text_size(px(TEXT_SMALL))
+                .text_color(theme.text_faint)
+                .child(note),
         );
     }
-    card
+
+    card_frame(SharedString::from(row_id.to_string()), &palette)
+        .child(card_header(
+            format!("{row_id}-x"),
+            &view.question(),
+            close,
+            &palette,
+            theme,
+        ))
+        .when(has_preview, |el| el.child(preview))
+        .child(list)
 }
