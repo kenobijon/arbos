@@ -100,6 +100,20 @@ struct ChatView: View {
         }
     }
 
+    /// Rebuild transcript rows, including "@agent joined" lines for people-chat agents.
+    private func refreshRows() {
+        // Agents are always added after the chat exists (never founders), so every agent
+        // gets a centred "@handle joined" line at its membership time.
+        let joins: [Transcript.Join] = (people?.agents ?? []).compactMap { a in
+            guard a.joinedAt > 0 else { return nil }
+            let handle = mentionSlug(a.project?.name ?? a.handle)
+            guard !handle.isEmpty else { return nil }
+            return Transcript.Join(id: a.id, handle: handle, at: a.joinedAt)
+        }
+        rows = Transcript.rows(messages, projectId: isPeople ? "\(peopleSlot):\(chatId)" : projectId,
+                               me: model.myUserId, people: isPeople, joins: joins)
+    }
+
     var body: some View {
         GeometryReader { geo in
             ZStack(alignment: .top) {
@@ -243,10 +257,14 @@ struct ChatView: View {
             }
         }
         .onDisappear { if model.visibleChatId == chatId { model.visibleChatId = nil } }
-        .onChange(of: messages, initial: true) { _, new in
-            rows = Transcript.rows(new, projectId: isPeople ? "\(peopleSlot):\(chatId)" : projectId, me: model.myUserId, people: isPeople)
+        .onChange(of: messages, initial: true) { _, _ in
+            refreshRows()
             model.markRead(chatId: chatId)
             if isPeople { model.markPeopleRead(chatId) }
+        }
+        // Adding an agent updates membership without a new message — rebuild so "@bob joined" appears.
+        .onChange(of: people?.agents.map { "\($0.id):\($0.joinedAt)" } ?? []) { _, _ in
+            refreshRows()
         }
         .onChange(of: model.caughtUp.contains(chatId), initial: true) { _, ready in
             if ready, !sentOnce, !DebugHooks.liveDemo, let text = DebugHooks.autoSend, DebugHooks.openChat == chatId {

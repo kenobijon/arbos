@@ -80,10 +80,10 @@ extension AppModel {
                           alwaysOn: DebugHooks.alwaysOn, machineTodayUsd: 2.88, reported: true)
         // One DM with three unread messages, for the count pill and the notification screens.
         let meMember = ChatMember(id: "fx-me", kind: .user, member: "user:fx-me", role: "owner", handle: "you", avatarUrl: nil, name: "You", status: "member",
-                                  project: nil, ownerId: nil, ownerHandle: nil, replyPolicy: nil)
+                                  joinedAt: now - 40 * 60_000, project: nil, ownerId: nil, ownerHandle: nil, replyPolicy: nil)
         let unconst = ChatMember(id: "gh_32490803", kind: .user, member: "user:gh_32490803", role: "member", handle: "unconst",
                                  avatarUrl: "https://avatars.githubusercontent.com/u/32490803?v=4", name: "Unconst", status: "member",
-                                 project: nil, ownerId: nil, ownerHandle: nil, replyPolicy: nil)
+                                 joinedAt: now - 40 * 60_000, project: nil, ownerId: nil, ownerHandle: nil, replyPolicy: nil)
         peopleChats = [PeopleChat(id: "fx-dm-unconst", kind: "dm", createdBy: "gh_32490803", createdAt: now - 40 * 60_000, title: "@unconst",
                                   pending: false, members: [unconst, meMember], headSeq: 12, readSeq: 9, unread: true,
                                   lockState: "people_only", lastActivityAt: now - 7 * 60_000, myRole: "member", muted: false)]

@@ -31,6 +31,8 @@ struct ChatMember: Identifiable, Equatable {
     var avatarUrl: String?
     var name: String?
     var status: String
+    /// When this member was added to the chat (relay `joined_at`, unix ms).
+    var joinedAt: Int64
     /// Agents only.
     var project: Project?
     var ownerId: String?
@@ -53,10 +55,11 @@ struct ChatMember: Identifiable, Equatable {
                               avatarColor: ((p["avatar_color"] as? String) ?? (d["avatar_color"] as? String)).flatMap { $0.isEmpty ? nil : $0 })
         }
         let settings = d["settings"] as? [String: Any]
+        let joinedAt = (d["joined_at"] as? NSNumber)?.int64Value ?? (d["joined_at"] as? Int64) ?? 0
         return ChatMember(id: id, kind: isAgent ? .agent : .user, member: member, role: d["role"] as? String ?? "member",
                           handle: d["handle"] as? String ?? (isAgent ? "agent" : "someone"), avatarUrl: d["avatar_url"] as? String,
-                          name: d["name"] as? String, status: d["status"] as? String ?? "member", project: project,
-                          ownerId: d["owner"] as? String, ownerHandle: d["owner_handle"] as? String,
+                          name: d["name"] as? String, status: d["status"] as? String ?? "member", joinedAt: joinedAt,
+                          project: project, ownerId: d["owner"] as? String, ownerHandle: d["owner_handle"] as? String,
                           replyPolicy: settings?["reply_policy"] as? String)
     }
 }
