@@ -1296,7 +1296,7 @@ final class AppModel: ObservableObject {
             do {
                 if let urlStr = try await api.connectConnector(provider: provider),
                    let url = URL(string: urlStr) {
-                    UIApplication.shared.open(url)
+                    await UIApplication.shared.open(url)
                 }
                 for wait in [0, 4, 8, 15, 30] as [UInt64] {
                     if wait > 0 { try? await Task.sleep(nanoseconds: wait * 1_000_000_000) }
