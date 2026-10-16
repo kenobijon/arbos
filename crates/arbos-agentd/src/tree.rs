@@ -592,7 +592,10 @@ impl Tree {
         let who = leaf.role.clone().unwrap_or_else(|| leaf.kind.clone());
         let mut s = format!("[{}] {who} ({}): ", fmt_ts(leaf.at), leaf.kind);
         if let Some((page, facts)) = self.page_card(&leaf.id) {
-            s.push_str(&format!("〔{page}〕 "));
+            // a parked (failed) page card is empty: show nothing rather than an empty bracket
+            if !page.is_empty() {
+                s.push_str(&format!("〔{page}〕 "));
+            }
             if !facts.is_empty() {
                 s.push_str(&format!("facts: {} — ", facts.join(" | ")));
             }
