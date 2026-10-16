@@ -813,6 +813,7 @@ mod tests {
                 .iter()
                 .map(|s| (*s).to_owned())
                 .collect(),
+            multi_chat: false,
         };
         AppState {
             db,
@@ -911,6 +912,7 @@ mod tests {
             avatar: None,
             avatar_color: None,
             description: String::new(),
+            primary_chat_id: None,
         };
         let env = crate::boxes::box_env(
             &state,

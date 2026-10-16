@@ -75,6 +75,9 @@ pub struct Config {
     /// Public site that fronts invite links (`ARBOS_SITE_URL`, default `https://arbos.life`):
     /// `<site>/i/<code>` is served by the relay's `GET /i/{code}`.
     pub site_url: String,
+    /// `ARBOS_MULTI_CHAT=1`: agents may open extra chats/tabs (the "Projects ⇄" tab, box-created
+    /// chats). Off by default: one chat per agent; a box asking for a new chat gets the primary one.
+    pub multi_chat: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -363,6 +366,7 @@ pub(crate) mod test_support {
             machine_stopped_usd_per_day: 0.013,
             releases_repo: "unarbos/arbos".into(),
             site_url: "https://arbos.life".into(),
+            multi_chat: false,
             avatar_slugs: crate::avatar::DEFAULT_SLUGS
                 .iter()
                 .map(|s| (*s).to_owned())

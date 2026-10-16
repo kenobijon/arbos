@@ -2448,6 +2448,7 @@ pub(crate) mod tests_support {
             avatar: None,
             avatar_color: None,
             description: String::new(),
+            primary_chat_id: None,
         };
         state.db.insert_project(&project).expect("project");
         state

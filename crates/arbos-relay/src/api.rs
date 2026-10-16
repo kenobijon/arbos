@@ -252,6 +252,7 @@ pub async fn create_project(
         avatar: Some(avatar),
         avatar_color: Some(avatar_color),
         description: clean_description(b.description.as_deref().unwrap_or_default())?,
+        primary_chat_id: None,
     };
     if state
         .db
@@ -280,6 +281,7 @@ pub async fn create_project(
         participants: Vec::new(),
     };
     state.db.insert_chat(&pinned).map_err(internal)?;
+    let _ = state.db.set_primary_chat(&project.id, Some(&pinned.id));
     // One box per user, created lazily: the first message (room send → ensure_awake → wake job
     // → start_box) creates and starts it, so a project that is never used costs nothing. An
     // existing box is woken now so the new workspace is ready when the user types.
@@ -641,11 +643,39 @@ pub(crate) async fn project_json(state: &AppState, p: &Project) -> Value {
         "spend_today_usd": today, "spend_cap_usd": p.spend_cap_daily,
         "created_at": p.created_at, "last_active_at": p.last_active_at,
         "description": p.description,
+        "primary_chat_id": primary_chat_id(state, p),
         "owner": crate::people::with_presence(state, crate::notify::Sender::user(state, &p.user_id).json()),
         "model": p.models.get("talking_model").and_then(|m| m.get("id")).cloned().unwrap_or(Value::Null),
         "machine": machine_profile(state, &p.user_id, bs, since),
         "activity": activity_json(state, &p.id).await,
     })
+}
+
+/// The one chat clients show for this agent. Stored on the project the first time it is asked
+/// for (or when the stored one was closed): among the project's plain chats, the most used
+/// (room head = rows ever appended), ties broken by the earliest created. Never flips on its own.
+pub fn primary_chat_id(state: &AppState, p: &Project) -> Option<String> {
+    let chats = state.db.list_chats(&p.id).ok()?;
+    let plain: Vec<&Chat> = chats.iter().filter(|c| c.kind == "chat").collect();
+    if let Some(stored) = &p.primary_chat_id {
+        if plain.iter().any(|c| &c.id == stored) {
+            return Some(stored.clone());
+        }
+    }
+    let best = plain
+        .iter()
+        .map(|c| {
+            let head = state
+                .db
+                .room_head(&arbos_core::wire::room_name(&p.id, &c.id))
+                .unwrap_or(0);
+            (head, std::cmp::Reverse(c.created_at), c.id.clone())
+        })
+        .max()
+        .map(|(_, _, id)| id)
+        .or_else(|| chats.first().map(|c| c.id.clone()))?;
+    let _ = state.db.set_primary_chat(&p.id, Some(&best));
+    Some(best)
 }
 
 /// The agent's machine as a profile line: state, since when, and what kind of machine.
@@ -1035,6 +1065,19 @@ pub async fn create_chat(
         }
     };
     let existing = state.db.list_chats(&p.id).map_err(internal)?;
+    // Single-chat product (ARBOS_MULTI_CHAT off): an agent's box never opens another chat or
+    // tab; it is handed the primary chat instead. People's devices are not gated here — the apps
+    // hide the new-tab affordance themselves.
+    if !state.cfg.multi_chat && matches!(principal, Principal::Box { .. }) {
+        if let Some(primary) =
+            primary_chat_id(&state, &p).and_then(|id| existing.iter().find(|c| c.id == id))
+        {
+            return Ok(Json(json!({
+                "chat": chat_json(primary), "room": format!("/room/{}/{}", p.id, primary.id), "primary": true,
+            }))
+            .into_response());
+        }
+    }
     // One "Projects ⇄" tab per project: a second request returns the first.
     if kind == "projects" {
         if let Some(c) = existing.iter().find(|c| c.kind == "projects") {
@@ -1201,6 +1244,8 @@ fn workspace_json(state: &AppState, p: &Project) -> Result<Value, (StatusCode, S
     let pushes = state.db.take_pushes(&p.id).map_err(internal)?;
     let mut project = serde_json::to_value(p).unwrap_or(Value::Null);
     project["skills_rev"] = json!(state.db.skills_rev(Some(&p.id)).map_err(internal)?);
+    project["primary_chat_id"] = json!(primary_chat_id(state, p));
+    project["multi_chat"] = json!(state.cfg.multi_chat);
     Ok(json!({
         "project": project,
         "chats": chats,
@@ -1498,4 +1543,93 @@ pub async fn list_audit(
     let limit = q.limit.unwrap_or(200).clamp(1, 1000);
     let entries = state.db.audit(&id, limit).map_err(internal)?;
     Ok(Json(json!({ "project_id": id, "entries": entries })).into_response())
+}
+
+#[cfg(test)]
+mod primary_chat_tests {
+    //! Single-chat product: the primary chat is the most-used plain chat (ties → earliest),
+    //! sticks once chosen, and a box asking for a new chat/tab gets it instead.
+
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+    use axum::Json;
+
+    use arbos_core::ids::{now_ms, ulid};
+
+    use super::*;
+    use crate::people::tests_support::{person, project_of};
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    fn chat(state: &AppState, project: &str, title: &str, created_at: i64, kind: &str) -> String {
+        let c = Chat {
+            id: ulid(),
+            project_id: project.to_owned(),
+            title: title.into(),
+            is_pinned: false,
+            position: 0,
+            created_at,
+            doc_epoch: 1,
+            kind: kind.into(),
+            participants: Vec::new(),
+        };
+        state.db.insert_chat(&c).expect("chat");
+        c.id
+    }
+
+    fn rows(state: &AppState, project: &str, chat: &str, n: usize) {
+        let room = arbos_core::wire::room_name(project, chat);
+        for i in 0..n {
+            state
+                .db
+                .append_row(&room, "dev", &format!("b{i}"), b"x")
+                .expect("row");
+        }
+    }
+
+    #[tokio::test]
+    async fn most_used_then_earliest_and_sticky() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _dev) = person(&state, 1);
+        let project = project_of(&state, &alice, "Research");
+        let t = now_ms();
+        let older = chat(&state, &project, "A", t - 3000, "chat");
+        let busy = chat(&state, &project, "B", t - 2000, "chat");
+        let newer = chat(&state, &project, "C", t - 1000, "chat");
+        let _tab = chat(&state, &project, "Projects ⇄", t - 5000, "projects");
+        rows(&state, &project, &busy, 5);
+        rows(&state, &project, &newer, 5);
+        rows(&state, &project, &older, 1);
+        let p = state.db.project(&project).unwrap().unwrap();
+        // Busy ties with newer at 5 rows; the earlier created wins; tabs never count.
+        assert_eq!(primary_chat_id(&state, &p).as_deref(), Some(busy.as_str()));
+        // Stored: more traffic elsewhere does not flip it.
+        rows(&state, &project, &newer, 20);
+        let p = state.db.project(&project).unwrap().unwrap();
+        assert_eq!(p.primary_chat_id.as_deref(), Some(busy.as_str()));
+        assert_eq!(primary_chat_id(&state, &p).as_deref(), Some(busy.as_str()));
+        // Closing the primary picks again (now the busiest remaining).
+        state.db.close_chat(&project, &busy).unwrap();
+        let p = state.db.project(&project).unwrap().unwrap();
+        assert_eq!(primary_chat_id(&state, &p).as_deref(), Some(newer.as_str()));
+
+        // A box asking for a new chat (or the Projects tab) gets the primary one, nothing new.
+        let before = state.db.list_chats(&project).unwrap().len();
+        let r = create_chat(
+            State(state.clone()),
+            Principal::Box {
+                user_id: alice.clone(),
+            },
+            Path(project.clone()),
+            Json(CreateChatBody {
+                title: None,
+                kind: Some("projects".into()),
+            }),
+        )
+        .await
+        .map(|r| r.status())
+        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(r, StatusCode::OK);
+        assert_eq!(state.db.list_chats(&project).unwrap().len(), before);
+    }
 }

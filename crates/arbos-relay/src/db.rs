@@ -196,6 +196,10 @@ pub struct Project {
     /// Short public blurb for the agent's profile page (not the instructions).
     #[serde(default)]
     pub description: String,
+    /// The one chat every client shows for this agent (single-chat product): chosen once —
+    /// most activity, ties → earliest — and kept until that chat is closed.
+    #[serde(default)]
+    pub primary_chat_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -438,6 +442,7 @@ impl Db {
             "ALTER TABLE projects ADD COLUMN description TEXT NOT NULL DEFAULT ''",
             [],
         );
+        let _ = c.execute("ALTER TABLE projects ADD COLUMN primary_chat_id TEXT", []);
         // One box per user: devices and projects belong to a user; legacy sandboxes record where
         // their /work went.
         let _ = c.execute(
@@ -548,12 +553,13 @@ impl Db {
                    avatar TEXT,
                    deleted_at INTEGER,
                    avatar_color TEXT,
-                   description TEXT NOT NULL DEFAULT ''
+                   description TEXT NOT NULL DEFAULT '',
+                   primary_chat_id TEXT
                  );
                  INSERT INTO projects_new(id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily,
-                                          project_token_hash, color, user_id, workspace_state, avatar, deleted_at, avatar_color, description)
+                                          project_token_hash, color, user_id, workspace_state, avatar, deleted_at, avatar_color, description, primary_chat_id)
                    SELECT id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily,
-                          project_token_hash, color, user_id, workspace_state, avatar, deleted_at, avatar_color, description FROM projects;
+                          project_token_hash, color, user_id, workspace_state, avatar, deleted_at, avatar_color, description, primary_chat_id FROM projects;
                  DROP TABLE projects;
                  ALTER TABLE projects_new RENAME TO projects;
                  COMMIT;",
@@ -658,9 +664,9 @@ impl Db {
     pub fn insert_project(&self, p: &Project) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO projects(id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color, user_id, workspace_state, avatar, avatar_color, description)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
-                params![p.id, p.name, p.icon, p.instructions, p.models.to_string(), p.state, p.created_at, p.last_active_at, p.spend_cap_daily, p.color, p.user_id, p.workspace_state, p.avatar, p.avatar_color, p.description],
+                "INSERT INTO projects(id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color, user_id, workspace_state, avatar, avatar_color, description, primary_chat_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                params![p.id, p.name, p.icon, p.instructions, p.models.to_string(), p.state, p.created_at, p.last_active_at, p.spend_cap_daily, p.color, p.user_id, p.workspace_state, p.avatar, p.avatar_color, p.description, p.primary_chat_id],
             )
             .map(|_| ())
         })
@@ -683,11 +689,12 @@ impl Db {
             avatar: r.get(12)?,
             avatar_color: r.get(13)?,
             description: r.get::<_, Option<String>>(14)?.unwrap_or_default(),
+            primary_chat_id: r.get(15)?,
         })
     }
 
     const PROJECT_COLS: &'static str =
-        "id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color, user_id, workspace_state, avatar, avatar_color, description";
+        "id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color, user_id, workspace_state, avatar, avatar_color, description, primary_chat_id";
 
     /// By id, else by name. Names are unique per user only, so a name lookup prefers the id
     /// match and otherwise returns the most recently active project with that name; callers that
@@ -841,6 +848,30 @@ impl Db {
                 )?;
             }
             Ok(())
+        })
+    }
+
+    pub fn set_primary_chat(&self, project_id: &str, chat_id: Option<&str>) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE projects SET primary_chat_id = ?2 WHERE id = ?1",
+                params![project_id, chat_id],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// Total rows ever appended to a room (`room_seq.head`): the relay's measure of how much a
+    /// chat has been used (it never reads the rows themselves).
+    pub fn room_head(&self, room: &str) -> Result<i64> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT head FROM room_seq WHERE room = ?1",
+                params![room],
+                |r| r.get(0),
+            )
+            .optional()
+            .map(|h| h.unwrap_or(0))
         })
     }
 
@@ -2724,6 +2755,7 @@ mod avatar_migration_tests {
             avatar: None,
             avatar_color: avatar_color.map(str::to_owned),
             description: String::new(),
+            primary_chat_id: None,
         }
     }
 

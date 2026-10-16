@@ -235,6 +235,10 @@ async fn main() -> anyhow::Result<()> {
         avatar_slugs: avatar::slugs_from_env(),
         avatar_colors: avatar::colors_from_env(),
         site_url: env_nonempty("ARBOS_SITE_URL").unwrap_or_else(|| "https://arbos.life".to_owned()),
+        multi_chat: matches!(
+            std::env::var("ARBOS_MULTI_CHAT").as_deref(),
+            Ok("1") | Ok("true") | Ok("yes") | Ok("on")
+        ),
         releases_repo: env_nonempty("ARBOS_RELEASES_REPO")
             .unwrap_or_else(|| "unarbos/arbos".to_owned()),
     };
