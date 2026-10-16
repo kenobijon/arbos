@@ -486,7 +486,6 @@ async fn stop_camera(room: &Room, c: CameraPublish) {
 }
 
 /// RGB → I420 (BT.601), the shape `NativeVideoSource` wants.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn rgb_to_i420(width: u32, height: u32, rgb: &[u8]) -> I420Buffer {
     let mut buf = I420Buffer::new(width, height);
     let (sy, su, sv) = buf.strides();
@@ -518,7 +517,6 @@ mod camera {
     #[cfg(target_os = "macos")]
     use std::sync::atomic::Ordering;
 
-    #[cfg(target_os = "macos")]
     use livekit::webrtc::prelude::*;
     use livekit::webrtc::video_source::native::NativeVideoSource;
     use tokio::sync::mpsc;
@@ -547,17 +545,21 @@ mod camera {
                         15,
                     ),
                 ));
-                let mut cam = match Camera::new(CameraIndex::Index(0), requested) {
+                let opened = Camera::new(CameraIndex::Index(0), requested).and_then(|mut c| {
+                    c.open_stream()?;
+                    Ok(c)
+                });
+                let mut cam = match opened {
                     Ok(c) => c,
                     Err(err) => {
-                        let _ = events.send(CallEvent::CameraUnavailable(format!("{err}")));
+                        if std::env::var_os("ARBOS_SYNTHETIC_CAMERA").is_some() {
+                            let _ = synthetic(source, stop, events);
+                        } else {
+                            let _ = events.send(CallEvent::CameraUnavailable(format!("{err}")));
+                        }
                         return;
                     }
                 };
-                if let Err(err) = cam.open_stream() {
-                    let _ = events.send(CallEvent::CameraUnavailable(format!("{err}")));
-                    return;
-                }
                 let mut last_tile = std::time::Instant::now();
                 while !stop.load(Ordering::Relaxed) {
                     let frame = match cam.frame() {
@@ -608,10 +610,79 @@ mod camera {
 
     #[cfg(not(target_os = "macos"))]
     pub fn start(
-        _source: NativeVideoSource,
-        _stop: Arc<AtomicBool>,
-        _events: mpsc::UnboundedSender<CallEvent>,
+        source: NativeVideoSource,
+        stop: Arc<AtomicBool>,
+        events: mpsc::UnboundedSender<CallEvent>,
     ) -> anyhow::Result<()> {
+        if std::env::var_os("ARBOS_SYNTHETIC_CAMERA").is_some() {
+            return synthetic(source, stop, events);
+        }
         anyhow::bail!("no camera on this platform yet")
+    }
+
+    /// `ARBOS_SYNTHETIC_CAMERA=1`: a moving test pattern instead of a camera
+    /// (headless Macs, CI, demos) — proves the publish → receive path.
+    pub fn synthetic(
+        source: NativeVideoSource,
+        stop: Arc<AtomicBool>,
+        events: mpsc::UnboundedSender<CallEvent>,
+    ) -> anyhow::Result<()> {
+        use std::sync::atomic::Ordering;
+        let (w, h) = (super::CAMERA_WIDTH, super::CAMERA_HEIGHT);
+        std::thread::Builder::new()
+            .name("arbos-synthetic-camera".into())
+            .spawn(move || {
+                let start = std::time::Instant::now();
+                let mut rgb = vec![0u8; (w * h * 3) as usize];
+                let mut n: u64 = 0;
+                while !stop.load(Ordering::Relaxed) {
+                    let t = start.elapsed().as_secs_f32();
+                    for y in 0..h as usize {
+                        for x in 0..w as usize {
+                            let i = (y * w as usize + x) * 3;
+                            let band = ((x as f32 / w as f32) * 7.0 + t * 0.5) as u32 % 7;
+                            let (r, g, b) = match band {
+                                0 => (235, 235, 235),
+                                1 => (240, 200, 40),
+                                2 => (40, 200, 220),
+                                3 => (60, 200, 90),
+                                4 => (220, 70, 200),
+                                5 => (230, 60, 60),
+                                _ => (50, 80, 230),
+                            };
+                            // A dark bar that sweeps down so motion is obvious.
+                            let sweep = ((t * 60.0) as usize) % h as usize;
+                            let dim = if y.abs_diff(sweep) < 12 { 0.35 } else { 1.0 };
+                            rgb[i] = (r as f32 * dim) as u8;
+                            rgb[i + 1] = (g as f32 * dim) as u8;
+                            rgb[i + 2] = (b as f32 * dim) as u8;
+                        }
+                    }
+                    let i420 = super::rgb_to_i420(w, h, &rgb);
+                    source.capture_frame(&VideoFrame {
+                        rotation: VideoRotation::VideoRotation0,
+                        timestamp_us: 0,
+                        frame_metadata: None,
+                        buffer: i420,
+                    });
+                    if n % 3 == 0 {
+                        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+                        for px in rgb.chunks_exact(3) {
+                            rgba.extend_from_slice(&[px[2], px[1], px[0], 255]);
+                        }
+                        if let Some(buf) = image::RgbaImage::from_raw(w, h, rgba) {
+                            let _ = events.send(CallEvent::Video {
+                                identity: "local".into(),
+                                frame: Arc::new(gpui::RenderImage::new(vec![image::Frame::new(
+                                    buf,
+                                )])),
+                            });
+                        }
+                    }
+                    n += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(66));
+                }
+            })?;
+        Ok(())
     }
 }
