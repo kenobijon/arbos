@@ -1299,13 +1299,12 @@ def main(argv: list[str]) -> int:
                 print(f"{fid}: unknown")
                 continue
             info = store.submission(fid)
-            # The issue stays: a second attempt continues the same thread.
-            for k in ("agent_id", "agent_url", "run_id", "commit", "commit_url", "pushed_at", "files", "runs", "error",
-                      "deferred_reason", "duplicate_of", "ios_done", "ios_run", "testflight_build", "release_done",
-                      "ci_failed_noted", "screen"):
-                st.pop(k, None)
+            # The issue stays (a second attempt continues the same thread); everything the first
+            # attempt tracked about agent, commit and builds goes, or a stale value would count as shipped.
+            keep = {k: st[k] for k in ("id", "created", "issue", "issue_url", "screenshot_urls", "boost") if k in st}
             tier = loop.tier(info)
-            st.update(status="queued", retries=0, tier=tier, tester=loop.tester_label(info, tier), tester_key=loop.tester_key(info))
+            st = {**keep, "status": "queued", "retries": 0, "tier": tier, "tester": loop.tester_label(info, tier),
+                  "tester_key": loop.tester_key(info), "target": loop.pick_target(info)}
             store.save_state(fid, st)
             store.event(fid, "requeued", tier=tier, tester=st["tester"])
             if st.get("issue"):
