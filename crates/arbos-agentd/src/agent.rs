@@ -1172,6 +1172,23 @@ impl Agent {
             }
             tracing::info!(chat_id, "ack_fallback: model wrote no sentence after route");
         }
+        // An act turn that ran out of time says so instead of leaving an empty bubble; the
+        // subagent that continues it reports back in a later message.
+        if matches!(turn.route, Some(ValidRoute::Act { .. }))
+            && turn.escalate
+            && !turn.stopped
+            && turn.streamed_text.trim().is_empty()
+        {
+            let mut h = host.lock().await;
+            if let Some(p) = h.doc.add_text_part(&assistant_msg_id, "text") {
+                h.doc.append_text(
+                    &assistant_msg_id,
+                    &p,
+                    "This is taking longer than I thought; I'm continuing in the background and will post the result here.",
+                );
+            }
+            tracing::info!(chat_id, "escalation note: act turn ended with no text");
+        }
 
         self.spawn_memory_pass(chat_id, &assistant_msg_id, &user_text, &turn.streamed_text);
 
