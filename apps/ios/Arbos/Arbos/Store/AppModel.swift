@@ -1017,7 +1017,7 @@ final class AppModel: ObservableObject {
                 let key = AppModel.blobKey(for: a.name)
                 do {
                     _ = try await api.putBlob(projectId: "\(peopleSlot):\(chatId)", key: key, mime: a.mime, data: a.data)
-                    uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: key))
+                    uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: key, kind: Self.attachmentKind(mime: a.mime, name: a.name)))
                 } catch {
                     notice = Notice(text: "Attachment upload failed: \(error.localizedDescription)")
                 }
@@ -1238,7 +1238,20 @@ final class AppModel: ObservableObject {
     func blobURL(projectId: Id, key: String) -> URL? {
         let base = api.endpoint.httpUrl
         guard !base.isEmpty else { return nil }
-        return URL(string: "\(base)/blob/\(projectId)/\(key)?token=\(credentials?.deviceToken ?? "")")
+        // Build via URLComponents so a people-slot `:` and JWT characters stay valid;
+        // leave the token value un-encoded (`=` padding) — the relay does not decode.
+        guard var comps = URLComponents(string: base) else { return nil }
+        comps.percentEncodedPath = "/blob/\(Self.blobPathSegment(projectId))/\(Self.blobPathSegment(key))"
+        let token = credentials?.deviceToken ?? ""
+        comps.percentEncodedQuery = token.isEmpty ? nil : "token=\(token)"
+        return comps.url
+    }
+
+    /// Path segment for `/blob/{project}/{key}`: encode spaces etc., keep `:` for `people:{chat}`.
+    private static func blobPathSegment(_ raw: String) -> String {
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.insert(":")
+        return raw.addingPercentEncoding(withAllowedCharacters: allowed) ?? raw
     }
 
     var authHeaders: [String: String] {
@@ -1300,23 +1313,35 @@ final class AppModel: ObservableObject {
         }
         guard let chat = chat(chatId) else { return }
         if isFixture {
-            write(chatId: chatId, text: text, command: "send", attachments: attachments.map { Attachment(name: $0.name, mime: $0.mime, blobRef: nil) })
+            write(chatId: chatId, text: text, command: "send", attachments: attachments.map {
+                Attachment(name: $0.name, mime: $0.mime, blobRef: nil, kind: Self.attachmentKind(mime: $0.mime, name: $0.name))
+            })
             return
         }
         Task {
             var uploaded: [Attachment] = []
             for a in attachments {
                 let key = AppModel.blobKey(for: a.name)
+                let kind = Self.attachmentKind(mime: a.mime, name: a.name)
                 do {
                     _ = try await api.putBlob(projectId: chat.projectId, key: key, mime: a.mime, data: a.data)
-                    uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: key))
+                    uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: key, kind: kind))
                 } catch {
                     notice = Notice(text: "Attachment upload failed: \(error.localizedDescription)")
-                    uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: nil))
+                    uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: nil, kind: kind))
                 }
             }
             write(chatId: chatId, text: text, command: "send", attachments: uploaded)
         }
+    }
+
+    /// Attachment `kind` hint written into the doc (matches agentd / Mac).
+    static func attachmentKind(mime: String, name: String) -> String? {
+        let probe = Attachment(name: name, mime: mime, blobRef: nil)
+        if probe.isImage { return "image" }
+        if mime.lowercased().hasPrefix("audio/") { return "audio" }
+        if mime.lowercased().hasPrefix("video/") { return "video" }
+        return nil
     }
 
     /// Voice memo → text through the relay, so the agent reads what was said (the audio

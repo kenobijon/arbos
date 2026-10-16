@@ -224,10 +224,23 @@ struct Attachment: Codable, Equatable {
     var name: String
     var mime: String
     var blobRef: String?
+    /// Producer hint (`image`, `audio`, …); clients may also infer from mime/name.
+    var kind: String? = nil
 
     enum CodingKeys: String, CodingKey {
-        case name, mime
+        case name, mime, kind
         case blobRef = "ref"
+    }
+
+    /// True for a still image the transcript should show as a tappable preview.
+    var isImage: Bool {
+        if let kind, kind.lowercased() == "image" { return true }
+        if mime.lowercased().hasPrefix("image/") { return true }
+        let ext: String = {
+            guard let dot = name.lastIndex(of: ".") else { return "" }
+            return String(name[name.index(after: dot)...]).lowercased()
+        }()
+        return ["png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "bmp", "tif", "tiff"].contains(ext)
     }
 }
 
@@ -396,13 +409,16 @@ enum DocJSON {
                 isError: (pm["isError"] as? Bool) ?? false
             )
         case "attachment":
-            let a = pm["attachment"] as? [String: Any]
+            // Nested `{ attachment: { name, mime, ref } }` is the schema; tolerate a
+            // flat part map if a writer omitted the wrapper.
+            let a = (pm["attachment"] as? [String: Any]) ?? pm
             return .attachment(
                 id: id,
                 attachment: Attachment(
-                    name: str(a?["name"]) ?? "attachment",
-                    mime: str(a?["mime"]) ?? "application/octet-stream",
-                    blobRef: str(a?["ref"])
+                    name: str(a["name"]) ?? "attachment",
+                    mime: str(a["mime"]) ?? "application/octet-stream",
+                    blobRef: str(a["ref"]),
+                    kind: str(a["kind"]).flatMap { $0 == "attachment" ? nil : $0 }
                 )
             )
         case "error":

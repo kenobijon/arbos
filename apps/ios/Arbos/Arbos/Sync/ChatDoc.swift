@@ -107,6 +107,7 @@ final class ChatDoc {
             let att = try part.insertContainer(key: "attachment", child: LoroMap())
             try att.insert(key: "name", v: a.name)
             try att.insert(key: "mime", v: a.mime)
+            if let kind = a.kind { try att.insert(key: "kind", v: kind) }
             if let ref = a.blobRef { try att.insert(key: "ref", v: ref) } else { try att.insert(key: "ref", v: LoroValue.null) }
         }
         let part = try parts.insertContainer(pos: parts.len(), child: LoroMap())

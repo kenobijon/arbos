@@ -53,13 +53,17 @@ enum Transcript {
             let streaming = message.isStreaming
             switch message.role {
             case .user:
+                var hasImage = false
                 for part in message.parts {
                     if case .attachment(let id, let a) = part {
+                        if a.isImage { hasImage = true }
                         chunk.append(attachmentRow(id: "\(message.id)#\(id)", message: message, a: a, projectId: projectId, fromUser: true))
                     }
                 }
                 let text = message.plainText
-                if !text.isEmpty {
+                // Generic labels ("Image", "Photo", …) are not prose — the attachment
+                // row already carries the media. Showing them as a bubble is noise.
+                if !text.isEmpty, !(hasImage && Self.isGenericMediaLabel(text)) {
                     let mine = !people || me == nil || message.sender == me || message.sender == "user"
                     if mine {
                         chunk.append(Row(id: "\(message.id)#user", messageId: message.id, role: .user,
@@ -139,16 +143,22 @@ enum Transcript {
     }
 
     private static func attachmentRow(id: String, message: Message, a: Attachment, projectId: Id, fromUser: Bool) -> Row {
-        if a.mime.hasPrefix("audio/") {
+        if a.mime.lowercased().hasPrefix("audio/") || a.kind?.lowercased() == "audio" {
             return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
                        kind: .voiceMemo(name: a.name, projectId: projectId, ref: a.blobRef, fromUser: fromUser))
         }
-        if a.mime.hasPrefix("image/") {
+        if a.isImage {
             return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
                        kind: .image(projectId: projectId, ref: a.blobRef, fromUser: fromUser))
         }
         return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
                    kind: .file(name: a.name, subtitle: subtitle(for: a), projectId: projectId, ref: a.blobRef))
+    }
+
+    /// UTType-style labels some clients leave as the only text on a media-only send.
+    private static func isGenericMediaLabel(_ text: String) -> Bool {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return t == "image" || t == "photo" || t == "video" || t == "attachment" || t == "(attachment)"
     }
 
     private static func subtitle(for a: Attachment) -> String {
@@ -412,23 +422,7 @@ struct RowView: View {
         case .image(let projectId, let ref, let fromUser):
             HStack {
                 if fromUser { Spacer(minLength: 0) }
-                Group {
-                    if let ref, let url = model.blobURL(projectId: projectId, key: ref) {
-                        AsyncImage(url: url) { phase in
-                            switch phase {
-                            case .success(let img): img.resizable().scaledToFill()
-                            case .failure: Image(systemName: "photo").font(.system(size: 28)).foregroundStyle(theme.muted)
-                            case .empty: ProgressView().tint(theme.muted)
-                            @unknown default: Color.clear
-                            }
-                        }
-                    } else {
-                        Image(systemName: "photo").font(.system(size: 28)).foregroundStyle(theme.muted)
-                    }
-                }
-                .frame(width: min(240, maxBubble), height: 180)
-                .background(theme.bubbleAssistant)
-                .clipShape(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous))
+                ImageBubble(projectId: projectId, blobRef: ref, fromUser: fromUser, maxWidth: maxBubble)
                 if !fromUser { Spacer(minLength: 0) }
             }
         case .error(let code, let message):
@@ -599,6 +593,92 @@ struct PersonAvatar: View {
         Text(String(handle.prefix(1)).uppercased())
             .font(.system(size: size * 0.42, weight: .semibold))
             .foregroundStyle(theme.text)
+    }
+}
+
+/// Inline image attachment: loads with the device bearer (same as voice memos),
+/// tappable for a full-screen look. AsyncImage alone cannot send `Authorization`
+/// and often stays blank on people-chat blob URLs.
+struct ImageBubble: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    let projectId: Id
+    let blobRef: String?
+    let fromUser: Bool
+    let maxWidth: CGFloat
+
+    @State private var image: UIImage?
+    @State private var failed = false
+    @State private var showFull = false
+
+    private var width: CGFloat { min(240, maxWidth) }
+    private var fill: Color { fromUser ? theme.bubbleUser : theme.bubbleAssistant }
+
+    var body: some View {
+        Button { if image != nil { showFull = true } } label: {
+            ZStack {
+                fill
+                if let image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                } else if failed || blobRef == nil {
+                    Image(systemName: "photo")
+                        .font(.system(size: 28))
+                        .foregroundStyle(fromUser ? theme.userText.opacity(0.7) : theme.muted)
+                } else {
+                    ProgressView().tint(fromUser ? theme.userText.opacity(0.7) : theme.muted)
+                }
+            }
+            .frame(width: width, height: 180)
+            .clipShape(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(image == nil)
+        .accessibilityLabel(image == nil ? "Image" : "Image, tap to view")
+        .task(id: blobRef) { await load() }
+        .fullScreenCover(isPresented: $showFull) {
+            if let image {
+                ZStack(alignment: .topTrailing) {
+                    Color.black.ignoresSafeArea()
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .ignoresSafeArea()
+                    Button { showFull = false } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 36, height: 36)
+                            .background(Circle().fill(Color.white.opacity(0.18)))
+                    }
+                    .buttonStyle(.plain)
+                    .padding(16)
+                }
+            }
+        }
+    }
+
+    private func load() async {
+        guard let ref = blobRef,
+              let url = model.blobURL(projectId: projectId, key: ref) else {
+            failed = true
+            return
+        }
+        var req = URLRequest(url: url)
+        for (k, v) in model.authHeaders { req.setValue(v, forHTTPHeaderField: k) }
+        do {
+            let (data, response) = try await URLSession.shared.data(for: req)
+            guard let http = response as? HTTPURLResponse, (200..<400).contains(http.statusCode),
+                  let img = UIImage(data: data) else {
+                failed = true
+                return
+            }
+            image = img
+            failed = false
+        } catch {
+            failed = true
+        }
     }
 }
 
