@@ -9,6 +9,8 @@ enum DebugHooks {
     static var autoSend: String? { value("ARBOS_AUTO_SEND") }
     static var pairCode: String? { value("ARBOS_PAIR_CODE") }
     static var fixture: Bool { value("ARBOS_FIXTURE") == "1" }
+    /// Accept an incoming call automatically (two-simulator relay tests).
+    static var autoAcceptCall: Bool { value("ARBOS_AUTO_ACCEPT") == "1" }
     /// Join a LiveKit room directly (dev server + locally minted token), bypassing the relay.
     static var callUrl: String? { value("ARBOS_CALL_URL") }
     static var callToken: String? { value("ARBOS_CALL_TOKEN") }

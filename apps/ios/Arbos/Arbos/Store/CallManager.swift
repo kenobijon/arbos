@@ -162,6 +162,11 @@ final class CallManager: NSObject, ObservableObject {
     func ring(_ incomingCall: Call, from: CallPerson?, viaVoip: Bool) {
         guard !isActive, incoming == nil, call?.callId != incomingCall.callId else { return }
         incoming = (incomingCall, from)
+        #if DEBUG
+        if DebugHooks.autoAcceptCall {
+            Task { try? await Task.sleep(nanoseconds: 1_500_000_000); await self.accept() }
+        }
+        #endif
         phase = .ringing
         activeByChat[incomingCall.chatId] = incomingCall
         let uuid = UUID()
@@ -442,7 +447,10 @@ extension CallManager: RoomDelegate {
             case .reconnecting: if self.phase == .connected { self.phase = .reconnecting }
             case .connected: if self.phase == .reconnecting { self.phase = .connected }
             case .disconnected:
-                if self.isActive {
+                // Only a drop from a live session counts; the SDK also reports
+                // .disconnected while a connect is still in flight.
+                if (oldConnectionState == .connected || oldConnectionState == .reconnecting),
+                   self.phase == .connected || self.phase == .reconnecting {
                     self.error = self.error ?? "Connection lost."
                     await self.teardown(leave: true, reason: .failed)
                 }
