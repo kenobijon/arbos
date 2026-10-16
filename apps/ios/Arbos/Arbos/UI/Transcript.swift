@@ -98,7 +98,15 @@ enum Transcript {
                                          kind: .other(text: text, handle: message.senderHandle ?? "someone", avatar: message.senderAvatar)))
                     }
                 }
-            case .assistant, .system, .project:
+            case .system:
+                // Call lines and other system notes: one muted centred line.
+                let text = message.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !text.isEmpty {
+                    let icon = text.hasPrefix("Call ended") ? "phone.down.fill" : (text.contains(" call") ? "phone.fill" : nil)
+                    chunk.append(Row(id: "\(message.id)#system", messageId: message.id, role: .system,
+                                     kind: .system(icon: icon, text: text, avatarProject: nil)))
+                }
+            case .assistant, .project:
                 // Hand-off ack: Grok shows "Messaged ◉ <bot>" as a system line.
                 if message.turn == .new, let name = message.subagentName ?? subagentNames[message.subagentId ?? ""] {
                     chunk.append(Row(id: "\(message.id)#handoff", messageId: message.id, role: .system,

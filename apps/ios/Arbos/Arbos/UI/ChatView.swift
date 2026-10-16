@@ -39,6 +39,22 @@ struct ChatView: View {
     @State private var showMembers = false
     @State private var showShare = false
     @State private var showProfile = false
+    @ObservedObject private var calls = CallManager.shared
+
+    /// Who the CallKit card names: the other person, or the chat/project.
+    private var callTitle: String {
+        if let c = counterpart { return c.displayName }
+        return project?.name ?? people?.title ?? name
+    }
+
+    private var hasCallBar: Bool {
+        guard let active = calls.activeByChat[chatId], !active.ended else { return false }
+        return calls.call?.callId != active.callId || !calls.isPresented
+    }
+
+    private func startCall(_ kind: CallKind) {
+        Task { await calls.start(chatId: chatId, projectId: isPeople ? nil : projectId, kind: kind, title: callTitle) }
+    }
     @State private var replyTo: Message?
     @State private var mentionQuery: String?
     /// Chip-picked addressee in a people chat: `agent:…`, `user:…`, or `"everyone"`.
@@ -123,6 +139,13 @@ struct ChatView: View {
                 VStack(spacing: 8) {
                     header
                     if let people { memberChips(people).padding(.horizontal, 16) }
+                    if let active = calls.activeByChat[chatId], !active.ended, calls.call?.callId != active.callId || !calls.isPresented {
+                        CallBar(call: active) {
+                            if calls.call?.callId == active.callId { calls.isPresented = true }
+                            else { Task { await calls.join(active, title: callTitle) } }
+                        }
+                        .padding(.horizontal, 16)
+                    }
                 }
             }
         }
@@ -236,6 +259,7 @@ struct ChatView: View {
             model.markRead(chatId: chatId)
             model.visibleChatId = chatId
             if isPeople { model.markPeopleRead(chatId) }
+            if isPeople || project?.shared == true { Task { await model.refreshActiveCall(chatId: chatId, projectId: isPeople ? nil : projectId) } }
             if let show = DebugHooks.show {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
                     switch show {
@@ -246,6 +270,13 @@ struct ChatView: View {
                     case "model": showModelPicker = true
                     case "profile": showProfile = true
                     case "feedback": FeedbackCenter.shared.open(screen: "chat", chatId: chatId, projectId: isPeople ? nil : projectId)
+                    case "call":
+                        if let url = DebugHooks.callUrl, let token = DebugHooks.callToken {
+                            Task { await calls.debugJoin(url: url, token: token, kind: DebugHooks.callKind == "video" ? .video : .voice,
+                                                         chatId: chatId, projectId: isPeople ? peopleSlot : projectId) }
+                        } else {
+                            startCall(DebugHooks.callKind == "video" ? .video : .voice)
+                        }
                     case "recording": recorder.start()
                     case "pending":
                         pending = [.init(name: "Q3 board deck v5.pdf", mime: "application/pdf", data: Data()),
@@ -315,7 +346,7 @@ struct ChatView: View {
             }
             theme.bg.opacity(theme.isGlass ? 0.78 : 1)
         }
-        .frame(height: isPeople ? 156 : 118)
+        .frame(height: (isPeople ? 156 : 118) + (hasCallBar ? 52 : 0))
         .mask(LinearGradient(colors: [.black, .black, .clear], startPoint: .top, endPoint: .bottom))
         .ignoresSafeArea(edges: .top)
         .allowsHitTesting(false)
@@ -366,10 +397,9 @@ struct ChatView: View {
                 .accessibilityHint(isPeople ? "" : "Opens the agent profile")
             }
             Spacer()
-            if isPeople {
+            if isPeople || project?.shared == true {
                 Button {
-                    callVideo = true
-                    showVoice = true
+                    startCall(.video)
                 } label: {
                     GlassCircle {
                         Image(systemName: "video.fill")
@@ -391,14 +421,8 @@ struct ChatView: View {
             }
             Menu {
                 if isPeople {
-                    Button {
-                        callVideo = true
-                        showVoice = true
-                    } label: { Label("Video call", systemImage: "video") }
-                    Button {
-                        callVideo = false
-                        showVoice = true
-                    } label: { Label("Voice call", systemImage: "phone") }
+                    Button { startCall(.video) } label: { Label("Video call", systemImage: "video") }
+                    Button { startCall(.voice) } label: { Label("Voice call", systemImage: "phone") }
                     Button { showMembers = true } label: { Label("Members & agents", systemImage: "person.2") }
                     if let c = counterpart {
                         Button(role: .destructive) { model.block(c) } label: { Label("Block @\(c.handle)", systemImage: "hand.raised") }
@@ -409,10 +433,16 @@ struct ChatView: View {
                         Task { if let c = await model.newChat(projectId: projectId) { model.open(chat: c) } }
                     } label: { Label("New chat", systemImage: "square.and.pencil") }
                     Button { showModelPicker = true } label: { Label("Model · \(project?.shortModel ?? "")", systemImage: "cpu") }
-                    Button {
-                        callVideo = true
-                        showVoice = true
-                    } label: { Label("Video call", systemImage: "video") }
+                    if project?.shared == true {
+                        // People in a shared project talk to each other; the agent joins in Phase 2.
+                        Button { startCall(.video) } label: { Label("Video call", systemImage: "video") }
+                        Button { startCall(.voice) } label: { Label("Voice call", systemImage: "phone") }
+                    } else {
+                        Button {
+                            callVideo = true
+                            showVoice = true
+                        } label: { Label("Video call", systemImage: "video") }
+                    }
                     Button { showShare = true } label: { Label(project?.shared == true ? "Members" : "Share project…", systemImage: "person.2.badge.plus") }
                     if streaming {
                         Button(role: .destructive) { stop() } label: { Label("Stop \(name)", systemImage: "stop.circle") }
@@ -445,7 +475,7 @@ struct ChatView: View {
                 // bottom safe-area inset, and LazyVStack can drop every visible row
                 // for a white transcript until the next layout pass.
                 VStack(alignment: .leading, spacing: 0) {
-                    Color.clear.frame(height: isPeople ? 104 : 64).onAppear { scroller = proxy }
+                    Color.clear.frame(height: (isPeople ? 104 : 64) + (hasCallBar ? 52 : 0)).onAppear { scroller = proxy }
                     if let banner = machineBannerText {
                         HStack(spacing: 6) {
                             if model.machine.state == .waking { ProgressView().controlSize(.mini).tint(theme.muted) }

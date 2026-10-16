@@ -9,10 +9,12 @@
 /* Begin PBXBuildFile section */
 		A1BB87570AFC8FD22F77F310 /* ArbosApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EF7B8D4ACE5D286ED5271D /* ArbosApp.swift */; };
 		A1B8CC06713710E1DE0950B9 /* DebugHooks.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B4441E009E79A1090EF589 /* DebugHooks.swift */; };
+		A134D74DFA78D38A472BF229 /* Call.swift in Sources */ = {isa = PBXBuildFile; fileRef = A17AB0DF610F874C5BE921E3 /* Call.swift */; };
 		A1547843CA4E6FD14D625E8D /* Model.swift in Sources */ = {isa = PBXBuildFile; fileRef = A123D7A2CAFBECAE6ECFCF29 /* Model.swift */; };
 		A117280222D51C2ECDBA9FC8 /* People.swift in Sources */ = {isa = PBXBuildFile; fileRef = A19AC72230E7AD9814A783A6 /* People.swift */; };
 		A12DF47CDA1B30754EA90287 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1FEF1EDAC69C84BDD3779FC /* Assets.xcassets */; };
 		A17DC1D0E22C9438EC90011C /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F0A4FDC36335E86EDA8A5F /* AppModel.swift */; };
+		A16CDC927A9BCBA23734AFF8 /* CallManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E06B8AB50C3A04CA1B1326 /* CallManager.swift */; };
 		A17F7FD4D50498CC4760775E /* Feedback.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EA51EFDDA9FCC9D359DDAD /* Feedback.swift */; };
 		A1E51B078F3180B74D6F5A88 /* Fixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = A16FB2CB37599A2DEEA1A19E /* Fixture.swift */; };
 		A10B17B543EDC6C9BAAEDF33 /* PushManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15D0D4E1ADC058D632D0769 /* PushManager.swift */; };
@@ -24,6 +26,7 @@
 		A16EA7B171BC56646BAFF4F9 /* Room.swift in Sources */ = {isa = PBXBuildFile; fileRef = A143D937501D0DB6490E379A /* Room.swift */; };
 		A1B0F9F54DB2257BA4BA7B63 /* AgentProfileView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A124D4FA40F4E5025A2B2C9D /* AgentProfileView.swift */; };
 		A143D97A2803EDDA4BEA6B67 /* Avatar.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EE5A7A5FF12E4EF7FE7B27 /* Avatar.swift */; };
+		A11149E871067930CB116885 /* CallView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1686D5A87F44B94E76A8761 /* CallView.swift */; };
 		A1953B70D02D6BA87E3679F0 /* ChatListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15AADDA918609E3CF8ABB86 /* ChatListView.swift */; };
 		A17FC3E175B29A6CC8654F7C /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D946C1D0D3D6797F9935E9 /* ChatView.swift */; };
 		A10A6AAB1A89692C252B33E4 /* FeedbackSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A19A848187E4B392C3266926 /* FeedbackSheet.swift */; };
@@ -41,6 +44,7 @@
 		A1C634E69BCD2C37B7F27346 /* MessageNotification.swift in Sources */ = {isa = PBXBuildFile; fileRef = A189C676F775E104AF2116C8 /* MessageNotification.swift */; };
 		A1E4BA8C12CCEA3325BE2435 /* Loro in Frameworks */ = {isa = PBXBuildFile; productRef = A1636595BB2F59B8CC2A4343 /* Loro */; };
 		A1A6E93FCA4EB187A868F141 /* Lottie in Frameworks */ = {isa = PBXBuildFile; productRef = A1826140A452A6596E8D3496 /* Lottie */; };
+		A142325F91336BDF2882011F /* LiveKit in Frameworks */ = {isa = PBXBuildFile; productRef = A192208521894CF66C53FA38 /* LiveKit */; };
 		A1C2B4D2E940DD983D12AF36 /* lottie in Resources */ = {isa = PBXBuildFile; fileRef = A1E626B934A96ED1554A02FC /* lottie */; };
 		A16D540D32FAED8715DB6E99 /* manifest.json in Resources */ = {isa = PBXBuildFile; fileRef = A18B2A1ED6AC20D525E86040 /* manifest.json */; };
 		A1B67B3F74BDAB239C56AED6 /* NotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10999EDEF21B6240657C678 /* NotificationService.swift */; };
@@ -81,10 +85,12 @@
 		A1E59E8E49DC7AEE0EE9D0F3 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A1EF7B8D4ACE5D286ED5271D /* ArbosApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArbosApp.swift; sourceTree = "<group>"; };
 		A1B4441E009E79A1090EF589 /* DebugHooks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugHooks.swift; sourceTree = "<group>"; };
+		A17AB0DF610F874C5BE921E3 /* Call.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Call.swift; sourceTree = "<group>"; };
 		A123D7A2CAFBECAE6ECFCF29 /* Model.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Model.swift; sourceTree = "<group>"; };
 		A19AC72230E7AD9814A783A6 /* People.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = People.swift; sourceTree = "<group>"; };
 		A1FEF1EDAC69C84BDD3779FC /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A1F0A4FDC36335E86EDA8A5F /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		A1E06B8AB50C3A04CA1B1326 /* CallManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallManager.swift; sourceTree = "<group>"; };
 		A1EA51EFDDA9FCC9D359DDAD /* Feedback.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Feedback.swift; sourceTree = "<group>"; };
 		A16FB2CB37599A2DEEA1A19E /* Fixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Fixture.swift; sourceTree = "<group>"; };
 		A15D0D4E1ADC058D632D0769 /* PushManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushManager.swift; sourceTree = "<group>"; };
@@ -96,6 +102,7 @@
 		A143D937501D0DB6490E379A /* Room.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Room.swift; sourceTree = "<group>"; };
 		A124D4FA40F4E5025A2B2C9D /* AgentProfileView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentProfileView.swift; sourceTree = "<group>"; };
 		A1EE5A7A5FF12E4EF7FE7B27 /* Avatar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Avatar.swift; sourceTree = "<group>"; };
+		A1686D5A87F44B94E76A8761 /* CallView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallView.swift; sourceTree = "<group>"; };
 		A15AADDA918609E3CF8ABB86 /* ChatListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatListView.swift; sourceTree = "<group>"; };
 		A1D946C1D0D3D6797F9935E9 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
 		A19A848187E4B392C3266926 /* FeedbackSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedbackSheet.swift; sourceTree = "<group>"; };
@@ -127,6 +134,7 @@
 			files = (
 				A1E4BA8C12CCEA3325BE2435 /* Loro in Frameworks */,
 				A1A6E93FCA4EB187A868F141 /* Lottie in Frameworks */,
+				A142325F91336BDF2882011F /* LiveKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -198,6 +206,7 @@
 		A129D150D7BE729304F92EAE /* Model */ = {
 			isa = PBXGroup;
 			children = (
+				A17AB0DF610F874C5BE921E3,
 				A123D7A2CAFBECAE6ECFCF29,
 				A19AC72230E7AD9814A783A6,
 			);
@@ -216,6 +225,7 @@
 			isa = PBXGroup;
 			children = (
 				A1F0A4FDC36335E86EDA8A5F,
+				A1E06B8AB50C3A04CA1B1326,
 				A1EA51EFDDA9FCC9D359DDAD,
 				A16FB2CB37599A2DEEA1A19E,
 				A15D0D4E1ADC058D632D0769,
@@ -241,6 +251,7 @@
 			children = (
 				A124D4FA40F4E5025A2B2C9D,
 				A1EE5A7A5FF12E4EF7FE7B27,
+				A1686D5A87F44B94E76A8761,
 				A15AADDA918609E3CF8ABB86,
 				A1D946C1D0D3D6797F9935E9,
 				A19A848187E4B392C3266926,
@@ -289,6 +300,7 @@
 			packageProductDependencies = (
 				A1636595BB2F59B8CC2A4343 /* Loro */,
 				A1826140A452A6596E8D3496 /* Lottie */,
+				A192208521894CF66C53FA38 /* LiveKit */,
 			);
 			productName = Arbos;
 			productReference = A15C30AC29682FF68428C798 /* Arbos.app */;
@@ -343,6 +355,7 @@
 			packageReferences = (
 				A1B12C4DAB52DBC6960BE255 /* XCRemoteSwiftPackageReference "loro-swift" */,
 				A1442F24100113CD3717BBCB /* XCRemoteSwiftPackageReference "lottie-spm" */,
+				A15BB86C523299D91321EF64 /* XCRemoteSwiftPackageReference "client-sdk-swift" */,
 			);
 			productRefGroup = A1CA9DEF8434A85687602C88 /* Products */;
 			projectDirPath = "";
@@ -383,9 +396,11 @@
 			files = (
 				A1BB87570AFC8FD22F77F310 /* ArbosApp.swift in Sources */,
 				A1B8CC06713710E1DE0950B9 /* DebugHooks.swift in Sources */,
+				A134D74DFA78D38A472BF229 /* Call.swift in Sources */,
 				A1547843CA4E6FD14D625E8D /* Model.swift in Sources */,
 				A117280222D51C2ECDBA9FC8 /* People.swift in Sources */,
 				A17DC1D0E22C9438EC90011C /* AppModel.swift in Sources */,
+				A16CDC927A9BCBA23734AFF8 /* CallManager.swift in Sources */,
 				A17F7FD4D50498CC4760775E /* Feedback.swift in Sources */,
 				A1E51B078F3180B74D6F5A88 /* Fixture.swift in Sources */,
 				A10B17B543EDC6C9BAAEDF33 /* PushManager.swift in Sources */,
@@ -397,6 +412,7 @@
 				A16EA7B171BC56646BAFF4F9 /* Room.swift in Sources */,
 				A1B0F9F54DB2257BA4BA7B63 /* AgentProfileView.swift in Sources */,
 				A143D97A2803EDDA4BEA6B67 /* Avatar.swift in Sources */,
+				A11149E871067930CB116885 /* CallView.swift in Sources */,
 				A1953B70D02D6BA87E3679F0 /* ChatListView.swift in Sources */,
 				A17FC3E175B29A6CC8654F7C /* ChatView.swift in Sources */,
 				A10A6AAB1A89692C252B33E4 /* FeedbackSheet.swift in Sources */,
@@ -479,7 +495,8 @@
 				INFOPLIST_KEY_CFBundleDisplayName = Arbos;
 				INFOPLIST_KEY_CFBundleIconName = AppIcon;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Arbos records voice memos you hold the microphone button for.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Arbos uses the microphone for voice memos and calls.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Arbos uses the camera for video calls.";
 				INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsArbitraryLoads = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -511,7 +528,8 @@
 				INFOPLIST_KEY_CFBundleDisplayName = Arbos;
 				INFOPLIST_KEY_CFBundleIconName = AppIcon;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Arbos records voice memos you hold the microphone button for.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Arbos uses the microphone for voice memos and calls.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Arbos uses the camera for video calls.";
 				INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsArbitraryLoads = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -629,6 +647,14 @@
 				version = 4.6.1;
 			};
 		};
+		A15BB86C523299D91321EF64 /* XCRemoteSwiftPackageReference "client-sdk-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/livekit/client-sdk-swift";
+			requirement = {
+				kind = exactVersion;
+				version = 2.17.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -641,6 +667,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = A1442F24100113CD3717BBCB /* XCRemoteSwiftPackageReference "lottie-spm" */;
 			productName = Lottie;
+		};
+		A192208521894CF66C53FA38 /* LiveKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A15BB86C523299D91321EF64 /* XCRemoteSwiftPackageReference "client-sdk-swift" */;
+			productName = LiveKit;
 		};
 		A10D33CF6B79AD48FE412AEF /* Lottie */ = {
 			isa = XCSwiftPackageProductDependency;

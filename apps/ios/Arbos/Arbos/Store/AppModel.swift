@@ -278,9 +278,67 @@ final class AppModel: ObservableObject {
                                           appVersion: FeedbackCenter.appVersion, os: "iOS \(UIDevice.current.systemVersion)", projectId: projectId)
     }
 
+    // MARK: Calls v1
+
+    private func hookCalls() {
+        let calls = CallManager.shared
+        calls.api = api
+        calls.isFixture = isFixture
+        calls.deviceId = { [weak self] in self?.deviceId ?? "" }
+        calls.me = { [weak self] in
+            guard let self, let u = self.user else { return nil }
+            return CallPerson(id: u.id, kind: "user", name: u.name, handle: u.login, avatar: nil, avatarColor: nil, avatarUrl: u.avatarUrl)
+        }
+        calls.writeSystemLine = { [weak self] chatId, projectId, text, callId in
+            self?.writeSystemLine(chatId: chatId, projectId: projectId, text: text, callId: callId)
+        }
+        guard !isFixture else { return }
+        calls.prepareVoip()
+        Task { await calls.sendVoipTokenIfNeeded(force: true) }
+    }
+
+    /// A system row in a chat doc (call start/end lines). Fixture: local append.
+    func writeSystemLine(chatId: Id, projectId: Id, text: String, callId: String) {
+        #if DEBUG
+        if isFixture {
+            let m = Message(id: newId(), chatId: chatId, role: .system, sender: "system", status: .done, turn: nil, decision: nil,
+                            subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: nowMs(),
+                            completedAt: nowMs(), pending: false, parts: [.text(id: newId(), text: text)], hiddenCount: 0)
+            messages[chatId, default: []].append(m)
+            return
+        }
+        #endif
+        guard let doc = docs[chatId] else { return }
+        do {
+            try doc.insertSystemLine(id: newId(), text: text, deviceId: deviceId, callId: callId)
+            doc.commit()
+        } catch {
+            notice = Notice(text: "Could not write the call line: \(error.localizedDescription)")
+        }
+    }
+
+    /// Opening a chat: is a call on there? (GET /chats/{id}/call)
+    func refreshActiveCall(chatId: Id, projectId: Id?) async {
+        guard credentials != nil, !isFixture else { return }
+        if let c = try? await api.activeCall(chatId: chatId, projectId: projectId) {
+            CallManager.shared.noteActive(c, chatId: chatId)
+        } else {
+            CallManager.shared.noteActive(nil, chatId: chatId)
+        }
+    }
+
+    /// A peer's presence says `in_call`: fetch it for the Join bar.
+    private func peerInCall(_ callId: String, chatId: Id) {
+        guard CallManager.shared.activeByChat[chatId]?.callId != callId else { return }
+        Task {
+            if let c = try? await api.call(callId) { CallManager.shared.noteActive(c, chatId: chatId) }
+        }
+    }
+
     // MARK: Push registration + badge
 
     private func hookPush() {
+        hookCalls()
         guard let creds = credentials, !isFixture else { return }
         let api = self.api
         PushManager.shared.register = { token, env in
@@ -423,7 +481,11 @@ final class AppModel: ObservableObject {
 
     func signOut(remote: Bool = true) {
         let had = tokens
-        if remote, let creds = credentials { let api = self.api; Task { try? await api.unregisterPush(deviceId: creds.deviceId) } }
+        if remote, let creds = credentials {
+            let api = self.api
+            Task { try? await api.unregisterPush(deviceId: creds.deviceId); try? await api.unregisterVoip(deviceId: creds.deviceId) }
+        }
+        CallManager.shared.forgetVoipRegistration()
         PushManager.shared.forgetRegistration()
         PushManager.shared.setBadge(0)
         if remote, had != nil { Task { await api.logout() } }
@@ -650,6 +712,11 @@ final class AppModel: ObservableObject {
             guard self.unacked[key] != nil else { return }
             self.unacked[key] = nil
             self.emitSnapshot(key)
+        }
+        if !isProjectDoc {
+            room.onPresence = { [weak self] header in
+                if let callId = header["in_call"] as? String { self?.peerInCall(callId, chatId: key) }
+            }
         }
         rooms[key] = room
         room.start()
@@ -1276,6 +1343,15 @@ final class AppModel: ObservableObject {
                 if let by = p.payload["by_handle"] { PushManager.post(id: p.id, title: "@\(by)", body: "Started a chat with you", chatId: p.payload["chat_id"] ?? "") }
             case "people_agent_added", "people_agent_removed", "people_member_added", "people_member_removed":
                 needChats = true
+            case "call_started":
+                if let c = Call.parse(p.raw["call"]), c.chatId != CallManager.shared.call?.chatId {
+                    CallManager.shared.ring(c, from: CallPerson.parse(p.raw["sender"]) ?? c.startedBy, viaVoip: false)
+                }
+            case "call_ended":
+                if let cid = p.payload["call_id"], let chat = p.payload["chat_id"] {
+                    CallManager.shared.remoteEnded(callId: cid, chatId: chat, durationS: Int(p.payload["duration_s"] ?? "") ?? 0,
+                                                   writerDevice: p.payload["writer_device"])
+                }
             case "people_project_shared":
                 if let by = p.payload["by_handle"] { PushManager.post(id: p.id, title: "@\(by)", body: "Shared a project with you", chatId: "") }
                 await refreshRegistry()

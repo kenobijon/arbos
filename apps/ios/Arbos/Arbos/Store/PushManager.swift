@@ -143,13 +143,22 @@ final class PushManager: NSObject, ObservableObject, UNUserNotificationCenterDel
     // MARK: Delegate
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
-        let chatId = notification.request.content.userInfo["chat_id"] as? String
+        let info = notification.request.content.userInfo
+        if notification.request.content.categoryIdentifier == "ARBOS_CALL" {
+            // In the foreground the ringing screen takes over; no banner on top of it.
+            await MainActor.run { CallManager.shared.handleCallAlert(info) }
+            return []
+        }
+        let chatId = info["chat_id"] as? String
         let onScreen = await MainActor.run { chatId != nil && chatId == visibleChatId() }
         return onScreen ? [] : [.banner, .sound, .list, .badge]
     }
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
         let info = response.notification.request.content.userInfo
+        if response.notification.request.content.categoryIdentifier == "ARBOS_CALL" {
+            await MainActor.run { CallManager.shared.handleCallAlert(info) }
+        }
         let chatId = (info["chat_id"] as? String) ?? ""
         let projectId = (info["project_id"] as? String) ?? "people"
         guard !chatId.isEmpty, response.actionIdentifier != UNNotificationDismissActionIdentifier else { return }

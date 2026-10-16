@@ -358,6 +358,60 @@ final class RelayAPI {
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    // MARK: Calls v1
+
+    /// `POST /chats/{id}/calls` (or the projects form) `{kind}` → 201 new call / 200 join;
+    /// both carry a fresh LiveKit token. Returns the call and whether we started it.
+    func startCall(chatId: String, projectId: String?, kind: CallKind) async throws -> (Call, started: Bool) {
+        let path = (projectId == nil || projectId == peopleSlot) ? "/chats/\(chatId)/calls" : "/projects/\(projectId!)/chats/\(chatId)/calls"
+        let (data, http) = try await request("POST", path, body: ["kind": kind.rawValue])
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let call = Call.parse(obj) else {
+            throw RelayError(status: http.statusCode, message: "Bad call response")
+        }
+        // 201 {call, joined: false} = we started it; 200 {call, joined: true} = we were added.
+        let joined = (obj["joined"] as? NSNumber)?.boolValue ?? (http.statusCode != 201)
+        return (call, !joined)
+    }
+
+    func joinCall(_ callId: String) async throws -> Call {
+        guard let call = Call.parse(try await json("POST", "/calls/\(callId)/join", body: [String: Any]())) else {
+            throw RelayError(status: 0, message: "Bad call response")
+        }
+        return call
+    }
+
+    /// `POST /calls/{id}/leave` → `{ended, duration_s}`; the client told `ended: true` writes the end line.
+    func leaveCall(_ callId: String) async throws -> (ended: Bool, durationS: Int) {
+        let v = try await json("POST", "/calls/\(callId)/leave", body: [String: Any]()) as? [String: Any]
+        return (((v?["ended"] as? NSNumber)?.boolValue) ?? false, ((v?["duration_s"] as? NSNumber)?.intValue) ?? 0)
+    }
+
+    /// `GET /calls/{id}` → the call, also after it ended (no token then).
+    func call(_ callId: String) async throws -> Call {
+        guard let call = Call.parse(try await json("GET", "/calls/\(callId)")) else { throw RelayError(status: 0, message: "Bad call response") }
+        return call
+    }
+
+    /// `GET /chats/{id}/call` (or the projects form) → the active call, nil on 404.
+    func activeCall(chatId: String, projectId: String?) async throws -> Call? {
+        let path = (projectId == nil || projectId == peopleSlot) ? "/chats/\(chatId)/call" : "/projects/\(projectId!)/chats/\(chatId)/call"
+        do {
+            return Call.parse(try await json("GET", path))
+        } catch let e as RelayError where e.status == 404 {
+            return nil
+        }
+    }
+
+    /// `POST /devices/{id}/voip {token, environment, bundle_id}` → `{push}` (false until the APNs key exists).
+    func registerVoip(deviceId: Id, token: String, environment: String, bundleId: String) async throws -> Bool {
+        let v = try await json("POST", "/devices/\(deviceId)/voip", body: ["token": token, "environment": environment, "bundle_id": bundleId])
+        return ((v as? [String: Any])?["push"] as? NSNumber)?.boolValue ?? true
+    }
+
+    func unregisterVoip(deviceId: Id) async throws {
+        _ = try await request("DELETE", "/devices/\(deviceId)/voip")
+    }
+
     // MARK: Push notifications
 
     /// `POST /devices/{id}/push {platform, token, environment, bundle_id, app_version}`

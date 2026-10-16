@@ -18,6 +18,7 @@ struct RootView: View {
     @EnvironmentObject private var model: AppModel
     @ObservedObject private var push = PushManager.shared
     @ObservedObject private var feedback = FeedbackCenter.shared
+    @ObservedObject private var calls = CallManager.shared
     @Environment(\.colorScheme) private var systemScheme
     @Environment(\.scenePhase) private var scenePhase
     @State private var showPrimer = false
@@ -43,6 +44,18 @@ struct RootView: View {
         .sheet(isPresented: $showPrimer) {
             NotificationsPrimerView().environment(\.theme, theme)
         }
+        .fullScreenCover(isPresented: $calls.isPresented) {
+            CallScreen(expected: expectedPeer)
+                .environmentObject(model)
+                .environment(\.theme, theme)
+                .preferredColorScheme(theme.isDark ? .dark : .light)
+        }
+        .fullScreenCover(isPresented: Binding(get: { calls.incoming != nil && !calls.isPresented }, set: { if !$0 { calls.decline() } })) {
+            IncomingCallView()
+                .environmentObject(model)
+                .environment(\.theme, theme)
+                .preferredColorScheme(theme.isDark ? .dark : .light)
+        }
         .sheet(isPresented: $feedback.isPresented) {
             FeedbackSheet().environmentObject(model).environment(\.theme, theme)
         }
@@ -60,6 +73,12 @@ struct RootView: View {
             model.setAppActive(phase == .active)
             if phase == .active { Task { await push.refreshStatus(); await model.refreshUnread() } }
         }
+    }
+
+    /// The other person of the DM the call belongs to, for the card before they join.
+    private var expectedPeer: CallPerson? {
+        guard let c = calls.call, let chat = model.peopleChat(c.chatId), let other = chat.counterpart(me: model.user?.id) else { return nil }
+        return CallPerson(id: other.id, kind: "user", name: other.name, handle: other.handle, avatar: nil, avatarColor: nil, avatarUrl: other.avatarUrl)
     }
 
     /// Ask once, a beat after the home screen appears (never in the fixture or a live demo).

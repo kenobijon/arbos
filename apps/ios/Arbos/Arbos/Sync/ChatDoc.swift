@@ -118,6 +118,37 @@ final class ChatDoc {
         _ = try map.insertContainer(key: "hiddenParts", child: LoroList())
     }
 
+    /// A system line ("<name> started a video call", "Call ended · 12 min"):
+    /// role `system`, one text part, `callId` so clients can fold it. Does not commit.
+    func insertSystemLine(id: Id, text: String, deviceId: String, callId: String? = nil) throws {
+        let list = messages
+        let map = try list.insertContainer(pos: list.len(), child: LoroMap())
+        try map.insert(key: "id", v: id)
+        try map.insert(key: "chatId", v: key)
+        try map.insert(key: "role", v: "system")
+        try map.insert(key: "sender", v: "system")
+        try map.insert(key: "status", v: "done")
+        try map.insert(key: "deviceId", v: deviceId)
+        try map.insert(key: "createdAt", v: nowMs())
+        try map.insert(key: "completedAt", v: nowMs())
+        try map.insert(key: "waitingUser", v: false)
+        try map.insert(key: "pending", v: false)
+        if let callId {
+            try map.insert(key: "callId", v: callId)
+            try map.insert(key: "call_id", v: callId)
+        }
+        for k in ["turn", "decision", "subagentId", "subagentName", "inReplyTo", "usage", "returnContract", "model", "effort"] {
+            try map.insert(key: k, v: LoroValue.null)
+        }
+        let parts = try map.insertContainer(key: "parts", child: LoroList())
+        let part = try parts.insertContainer(pos: parts.len(), child: LoroMap())
+        try part.insert(key: "id", v: newId())
+        try part.insert(key: "kind", v: "text")
+        let textC = try part.insertContainer(key: "text", child: LoroText())
+        try textC.pushStr(s: text)
+        _ = try map.insertContainer(key: "hiddenParts", child: LoroList())
+    }
+
     /// Append a `commands` row (`send`, `stop`, `answer`, `retry`, `retitle`). Does not commit.
     func pushCommand(_ kind: String, payload: [String: Any], device: String) throws {
         let list = commands

@@ -130,7 +130,9 @@ struct HomeView: View {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { model.postSampleNotifications() }
             }
             #endif
-            if !DebugHooks.liveDemo, let id = DebugHooks.openProject, model.path.isEmpty, let p = model.project(id) {
+            if !DebugHooks.liveDemo, DebugHooks.openProject == peopleSlot, let cid = DebugHooks.openChat, model.path.isEmpty, let c = model.peopleChat(cid) {
+                model.open(peopleChat: c)
+            } else if !DebugHooks.liveDemo, let id = DebugHooks.openProject, model.path.isEmpty, let p = model.project(id) {
                 if let cid = DebugHooks.openChat, let c = model.chat(cid) { model.open(chat: c) } else { model.open(project: p) }
             }
         }

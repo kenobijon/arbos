@@ -9,6 +9,10 @@ enum DebugHooks {
     static var autoSend: String? { value("ARBOS_AUTO_SEND") }
     static var pairCode: String? { value("ARBOS_PAIR_CODE") }
     static var fixture: Bool { value("ARBOS_FIXTURE") == "1" }
+    /// Join a LiveKit room directly (dev server + locally minted token), bypassing the relay.
+    static var callUrl: String? { value("ARBOS_CALL_URL") }
+    static var callToken: String? { value("ARBOS_CALL_TOKEN") }
+    static var callKind: String? { value("ARBOS_CALL_KIND") }
     /// Text to put in the feedback sheet and send as soon as it opens (endpoint check).
     static var autoFeedback: String? { value("ARBOS_AUTO_FEEDBACK") }
     /// Fixture machine reports `always_on` (D73 policy screens).

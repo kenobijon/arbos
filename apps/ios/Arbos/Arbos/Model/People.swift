@@ -127,20 +127,25 @@ struct PushItem: Identifiable, Equatable {
     var payload: [String: String]
     /// `people_message` carries `sender {kind, id, name, handle, avatar, avatar_color, avatar_url}` (§7c).
     var sender: [String: String] = [:]
+    /// The payload as received, for nested shapes (`call_started.call`).
+    var raw: [String: Any] = [:]
     var createdAt: Int64
+
+    static func == (a: PushItem, b: PushItem) -> Bool { a.id == b.id && a.kind == b.kind }
 
     static func parse(_ raw: Any) -> PushItem? {
         guard let d = raw as? [String: Any], let id = d["id"] as? String, let kind = d["kind"] as? String else { return nil }
         var payload: [String: String] = [:]
         var sender: [String: String] = [:]
-        for (k, v) in (d["payload"] as? [String: Any]) ?? [:] {
+        let rawPayload = (d["payload"] as? [String: Any]) ?? [:]
+        for (k, v) in rawPayload {
             if k == "sender", let s = v as? [String: Any] {
                 for (sk, sv) in s { if let str = sv as? String { sender[sk] = str } }
             } else {
                 payload[k] = "\(v)"
             }
         }
-        return PushItem(id: id, kind: kind, payload: payload, sender: sender, createdAt: (d["created_at"] as? NSNumber)?.int64Value ?? 0)
+        return PushItem(id: id, kind: kind, payload: payload, sender: sender, raw: rawPayload, createdAt: (d["created_at"] as? NSNumber)?.int64Value ?? 0)
     }
 }
 

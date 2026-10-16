@@ -16,6 +16,12 @@ final class Room {
     var onBoxState: ((BoxState, String?) -> Void)?
     var onCaughtUp: (() -> Void)?
     var onAcked: (() -> Void)?
+    /// Another peer's presence header (typing, `in_call`, …).
+    var onPresence: (([String: Any]) -> Void)?
+    /// The call id this device is in for this chat; sent as `in_call` in presence.
+    var inCall: String? {
+        didSet { if inCall != oldValue { Task { [weak self] in await self?.sendPresence() } } }
+    }
 
     private let api: RelayAPI
     private let deviceId: () -> String
@@ -192,7 +198,9 @@ final class Room {
                 } else {
                     throw RelayError(status: 0, message: "relay error \(code): \(frame.string("message") ?? "")")
                 }
-            case .hello, .state, .rowsReq, .push, .presence, .probe, .probeOk, .wake:
+            case .presence:
+                if frame.string("device") != deviceId() { onPresence?(frame.header) }
+            case .hello, .state, .rowsReq, .push, .probe, .probeOk, .wake:
                 break
             }
         }
@@ -215,6 +223,7 @@ final class Room {
     private func sendPresence() async {
         var header: [String: Any] = ["device": deviceId(), "at": nowMs()]
         if focused { header["focused_chat"] = roomChat }
+        if let inCall { header["in_call"] = inCall }
         try? await send(Frame(.presence, header: header))
     }
 
