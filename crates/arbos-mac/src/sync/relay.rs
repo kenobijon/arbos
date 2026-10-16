@@ -1262,6 +1262,10 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
                     c.archived_at = archived_at;
                 }
                 cache_archived(shared, &chat_id, archived_at.is_some());
+                eprintln!(
+                    "relay: chat_archived push {chat_id} archived={}",
+                    archived_at.is_some()
+                );
                 let _ = shared.events.send(SyncEvent::ChatArchived {
                     chat_id,
                     archived_at,
