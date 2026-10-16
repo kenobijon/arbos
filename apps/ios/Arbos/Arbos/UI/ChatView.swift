@@ -52,8 +52,11 @@ struct ChatView: View {
         return rows.filter { m_text($0).localizedCaseInsensitiveContains(q) }
     }
 
-    /// Who the CallKit card names: the other person, or the chat/project.
+    /// Who the CallKit card names: the other person in a DM, else the group/project.
     private var callTitle: String {
+        if let people, people.isGroup {
+            return people.title.isEmpty ? "Group" : people.title
+        }
         if let c = counterpart { return c.displayName }
         return project?.name ?? people?.title ?? name
     }

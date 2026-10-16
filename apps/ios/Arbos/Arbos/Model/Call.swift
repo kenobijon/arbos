@@ -41,6 +41,17 @@ struct CallPerson: Identifiable, Equatable, Hashable {
         return CallPerson(id: id, kind: identity.hasPrefix("a_") ? "agent" : "user", name: name, handle: name ?? id,
                           avatar: nil, avatarColor: nil, avatarUrl: nil)
     }
+
+    /// A people-chat member (human or agent) as a call tile before they join.
+    static func from(member: ChatMember) -> CallPerson {
+        if member.isAgent {
+            return CallPerson(id: member.id, kind: "agent", name: member.project?.name ?? member.name,
+                              handle: mentionSlug(member.project?.name ?? member.handle),
+                              avatar: member.project?.avatar, avatarColor: member.project?.avatarColor, avatarUrl: nil)
+        }
+        return CallPerson(id: member.id, kind: "user", name: member.name, handle: member.handle,
+                          avatar: nil, avatarColor: nil, avatarUrl: member.avatarUrl)
+    }
 }
 
 /// §8 `reachable[]` on a 201 start: can this callee be rung right now?

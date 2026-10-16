@@ -360,6 +360,8 @@ final class AppModel: ObservableObject {
         }
         calls.calleeName = { [weak self] chatId in
             guard let self, let chat = self.peopleChat(chatId) else { return nil }
+            // Groups name the chat, not the first other human (that looked like a DM to Kenobi).
+            if chat.isGroup { return chat.title.isEmpty ? "Group" : chat.title }
             return chat.counterpart(me: self.user?.id)?.displayName
         }
         // Presence carries `in_call` for the chat we are talking in.
