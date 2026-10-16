@@ -431,6 +431,9 @@ pub struct Reachable {
     /// Some iPhone of theirs can be rung through PushKit.
     #[serde(default)]
     pub any_voip: bool,
+    /// Some device has a regular APNs token (Incoming-call banner / wake).
+    #[serde(default)]
+    pub any_push: bool,
     #[serde(default)]
     pub devices: Vec<ReachableDevice>,
 }
@@ -452,7 +455,7 @@ impl Reachable {
     /// What the caller's status line says while this callee has not picked
     /// up; `None` when their Arbos is open (nothing to add to the ringback).
     pub fn status_line(&self) -> Option<String> {
-        match (self.any_live, self.any_voip) {
+        match (self.any_live, self.any_voip || self.any_push) {
             (true, _) => None,
             (false, true) => Some(format!("Ringing {}'s iPhone", self.first_name())),
             (false, false) => Some(format!(

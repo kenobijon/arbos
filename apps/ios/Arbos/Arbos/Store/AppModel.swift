@@ -273,8 +273,19 @@ final class AppModel: ObservableObject {
             let pid = (n.userInfo?["project_id"] as? String) ?? peopleSlot
             Task { @MainActor in self.openFromNotification(chatId: cid, projectId: pid) }
         }
-        NotificationCenter.default.addObserver(forName: PushManager.remoteReceived, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in await self?.refreshPeople(); await self?.refreshUnread() }
+        NotificationCenter.default.addObserver(forName: PushManager.remoteReceived, object: nil, queue: .main) { [weak self] n in
+            // content-available on ARBOS_CALL wakes a backgrounded phone; report
+            // CallKit here so it rings without the user opening the app first.
+            let info = n.userInfo ?? [:]
+            Task { @MainActor in
+                let aps = info["aps"] as? [String: Any]
+                let category = (aps?["category"] as? String) ?? (info["category"] as? String)
+                let event = info["event"] as? String
+                if category == PushManager.callCategory || event == "started" || event == "ended" || event == "missed" {
+                    CallManager.shared.handleCallAlert(info)
+                }
+                await self?.refreshPeople(); await self?.refreshUnread()
+            }
         }
     }
 
