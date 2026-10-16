@@ -452,12 +452,18 @@ fn agent_tabs(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option
                 theme.bubble_assistant
             })
             .text_size(px(TEXT_SMALL))
-            .text_color(if active { theme.text } else { theme.text_muted })
+            // The active chip is a user bubble (dark in both appearances):
+            // white text on it, like the bubbles themselves.
+            .text_color(if active {
+                theme.bubble_text()
+            } else {
+                theme.text_muted
+            })
             .when(chat.unread && !active, |el| {
                 el.font_weight(FontWeight::SEMIBOLD).text_color(theme.text)
             })
             .cursor_pointer()
-            .hover(|s| s.text_color(theme.text))
+            .when(!active, |el| el.hover(|s| s.text_color(theme.text)))
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.state.update(cx, |s, cx| s.select_tab(id.clone(), cx));
                 Composer::focus(&this.composer, window, cx);
@@ -486,9 +492,16 @@ fn agent_tabs(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_color(theme.text_faint)
-                    .hover(|s| s.bg(theme.border_strong).text_color(theme.text))
-                    .child(icon("xmark", 9.0, theme.text_muted))
+                    .hover(|s| s.bg(theme.border_strong))
+                    .child(icon(
+                        "xmark",
+                        9.0,
+                        if active {
+                            Theme::with_alpha(theme.bubble_text(), 0.8)
+                        } else {
+                            theme.text_muted
+                        },
+                    ))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
                         this.state.update(cx, |s, cx| {
