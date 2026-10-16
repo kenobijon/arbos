@@ -663,12 +663,19 @@ impl Agent {
         Ok(())
     }
 
+    /// Wait briefly for the supervisor to respawn pi (it polls every 2 s). A send that
+    /// lands between death and respawn must not permanently Fail with no assistant bubble.
     async fn pi(&self) -> Result<Arc<RpcChild>> {
-        self.pi
-            .lock()
-            .await
-            .clone()
-            .ok_or_else(|| anyhow!("pi main agent not running"))
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            if let Some(c) = self.pi.lock().await.clone() {
+                return Ok(c);
+            }
+            if self.shutting_down.load(Ordering::SeqCst) || Instant::now() >= deadline {
+                return Err(anyhow!("pi main agent not running"));
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
     }
 
     async fn ensure_chat_session(&self, chat_id: &str) -> Result<()> {
@@ -742,7 +749,7 @@ impl Agent {
                     .to_owned();
                 self.retitle(chat_id, &title).await
             }
-            "retry" => Ok(()),
+            "retry" => self.handle_retry(chat_id, &host, &cmd).await,
             "approve" | "reject" => {
                 let approval_id = cmd
                     .payload
@@ -768,7 +775,7 @@ impl Agent {
             }
             other => Err(anyhow!("unknown command kind {other}")),
         };
-        let h = host.lock().await;
+        let mut h = host.lock().await;
         match &res {
             Ok(()) => h.doc.set_command_status(&cmd.id, CommandStatus::Done, None),
             Err(e) => {
@@ -778,6 +785,30 @@ impl Agent {
                     CommandStatus::Failed,
                     Some(json!({ "error": e.to_string() })),
                 );
+                // iOS never renders command status. A send that failed before any assistant
+                // row would leave the user message alone forever — surface an error with Retry.
+                if matches!(cmd.kind.as_str(), "send" | "answer") {
+                    let user_msg = cmd
+                        .payload
+                        .get("messageId")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    if !user_msg.is_empty() {
+                        let has_reply = h.doc.messages().iter().any(|m| {
+                            m.role == "assistant"
+                                && m.rest.get("inReplyTo").and_then(Value::as_str) == Some(user_msg)
+                                && m.status != "cancelled"
+                        });
+                        if !has_reply {
+                            let id = ulid();
+                            h.doc
+                                .start_assistant_message(&id, user_msg, &self.cfg.device_id);
+                            h.doc.add_status_part(&id, "failed", "Failed");
+                            h.doc.add_error_part(&id, "send_failed", &e.to_string());
+                            h.doc.finish_message(&id, MessageStatus::Error);
+                        }
+                    }
+                }
             }
         }
         res
@@ -786,6 +817,55 @@ impl Agent {
     /// Abort the turn running in `chat_id` (people chat removal).
     pub(crate) async fn stop_turn(&self, chat_id: &str) -> Result<()> {
         self.handle_stop(chat_id).await
+    }
+
+    /// Re-run the turn for a failed assistant message (`retry { messageId }`). The payload is the
+    /// assistant row the UI shows Retry on; we find its user message (`inReplyTo`) and `send` again.
+    async fn handle_retry(
+        self: &Arc<Self>,
+        chat_id: &str,
+        host: &SharedHost,
+        cmd: &CommandView,
+    ) -> Result<()> {
+        let failed_id = cmd
+            .payload
+            .get("messageId")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        if failed_id.is_empty() {
+            return Err(anyhow!("retry: missing messageId"));
+        }
+        let user_msg_id = {
+            let mut h = host.lock().await;
+            let msgs = h.doc.messages();
+            let failed = msgs.iter().find(|m| m.id == failed_id);
+            let user_id = failed
+                .and_then(|m| m.rest.get("inReplyTo").and_then(Value::as_str))
+                .map(str::to_owned)
+                .or_else(|| {
+                    let ix = msgs.iter().position(|m| m.id == failed_id)?;
+                    msgs[..ix]
+                        .iter()
+                        .rev()
+                        .find(|m| m.role == "user")
+                        .map(|m| m.id.clone())
+                })
+                .ok_or_else(|| anyhow!("retry: no user message for {failed_id}"))?;
+            if failed.is_some_and(|m| m.role == "assistant") {
+                h.doc.finish_message(&failed_id, MessageStatus::Cancelled);
+            }
+            user_id
+        };
+        let send = CommandView {
+            id: cmd.id.clone(),
+            kind: "send".into(),
+            payload: json!({ "messageId": user_msg_id }),
+            issued_by: cmd.issued_by.clone(),
+            issued_at: cmd.issued_at,
+            status: cmd.status.clone(),
+        };
+        self.handle_send(chat_id, host, &send).await
     }
 
     /// `stop` runs out of band (its own task, no turn lock): abort the pi turn now, mark the turn
@@ -1180,6 +1260,9 @@ impl Agent {
 
     /// One prompt to the main pi session, folded into a new assistant message. The caller holds
     /// `turn_lock`. Finalizes the message (decision, usage, status), T3, and turn metrics.
+    ///
+    /// The assistant / "Working…" row is created *before* `ensure_chat_session`: a session or
+    /// pi failure must still leave a visible error (with Retry), not a silent Failed command.
     async fn drive_turn(
         self: &Arc<Self>,
         chat_id: &str,
@@ -1188,8 +1271,6 @@ impl Agent {
         prompt_text: &str,
         kind: TurnKind,
     ) -> Result<TurnOutcome> {
-        self.ensure_chat_session(chat_id).await?;
-
         let assistant_msg_id = ulid();
         let text_part_id = {
             let mut h = host.lock().await;
@@ -1232,6 +1313,18 @@ impl Agent {
             }
             pid
         };
+
+        if let Err(e) = self.ensure_chat_session(chat_id).await {
+            {
+                let mut h = host.lock().await;
+                h.doc.add_status_part(&assistant_msg_id, "failed", "Failed");
+                h.doc
+                    .add_error_part(&assistant_msg_id, "session", &e.to_string());
+                h.doc
+                    .finish_message(&assistant_msg_id, MessageStatus::Error);
+            }
+            return Err(e);
+        }
 
         *self.turn.lock().await = Some(TurnState {
             chat_id: chat_id.to_owned(),
