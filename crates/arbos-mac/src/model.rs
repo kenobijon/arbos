@@ -82,8 +82,9 @@ pub struct Project {
     /// People chats: my `me.muted` on the relay (synced across devices).
     #[serde(default)]
     pub muted: bool,
-    /// The agent's one chat when the relay/agentd names it (`primary_chat`);
-    /// otherwise the client picks: most messages, ties → earliest created.
+    /// The agent's one chat, §9b `primary_chat_id` (stored on the relay, never
+    /// flips); older relays and the fixture send none and the client picks:
+    /// most messages, ties → earliest created.
     #[serde(default)]
     pub primary_chat: Option<Id>,
 }
