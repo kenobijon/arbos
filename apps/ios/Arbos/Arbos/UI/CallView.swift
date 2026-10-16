@@ -80,9 +80,11 @@ struct CallScreen: View {
         case .reconnecting: return "Reconnecting…"
         case .connected:
             if calls.tiles.isEmpty {
-                if calls.calleeUnreachable, let name = calls.calleeName?(calls.call?.chatId ?? "") {
+                if calls.calleeUnreachable {
+                    let name = calls.call?.reachable.first?.displayName ?? calls.calleeName?(calls.call?.chatId ?? "") ?? "Their"
                     return "\(name)'s Arbos isn't open — they'll see a missed call"
                 }
+                if let r = calls.calleeRingingByPush { return "Ringing \(r.displayName)'s iPhone" }
                 return "Ringing…"
             }
             return primary?.micOn == false ? "Muted" : "Connected"

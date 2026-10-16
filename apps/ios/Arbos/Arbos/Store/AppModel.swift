@@ -1479,6 +1479,11 @@ final class AppModel: ObservableObject {
                 if let c = Call.parse(p.raw["call"]), c.chatId != CallManager.shared.call?.chatId {
                     CallManager.shared.ring(c, from: CallPerson.parse(p.raw["sender"]) ?? c.startedBy, viaVoip: false)
                 }
+            case "call_missed":
+                if let cid = p.payload["call_id"], let chat = p.payload["chat_id"] {
+                    CallManager.shared.missedCall(callId: cid, chatId: chat, projectId: p.payload["project_id"] ?? peopleSlot,
+                                                  from: CallPerson.parse(p.raw["from"]) ?? CallPerson.parse(p.raw["sender"]))
+                }
             case "call_ended":
                 if let cid = p.payload["call_id"], let chat = p.payload["chat_id"] {
                     CallManager.shared.remoteEnded(callId: cid, chatId: chat, durationS: Int(p.payload["duration_s"] ?? "") ?? 0,

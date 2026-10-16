@@ -72,18 +72,25 @@ final class RelayAPI {
 
     // MARK: Raw calls
 
-    func request(_ method: String, _ path: String, body: Any? = nil, auth: Bool = true) async throws -> (Data, HTTPURLResponse) {
+    /// `ios/1.0.0 (202610161326)` — who placed a call, for the relay's call record.
+    static var clientHeader: String {
+        let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        let b = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+        return "ios/\(v) (\(b))"
+    }
+
+    func request(_ method: String, _ path: String, body: Any? = nil, auth: Bool = true, headers: [String: String] = [:]) async throws -> (Data, HTTPURLResponse) {
         do {
-            return try await requestOnce(method, path, body: body, auth: auth)
+            return try await requestOnce(method, path, body: body, auth: auth, headers: headers)
         } catch let error as RelayError where error.isUnauthorized && auth {
             if let refresher, await refresher() {
-                return try await requestOnce(method, path, body: body, auth: auth)
+                return try await requestOnce(method, path, body: body, auth: auth, headers: headers)
             }
             throw error
         }
     }
 
-    private func requestOnce(_ method: String, _ path: String, body: Any?, auth: Bool) async throws -> (Data, HTTPURLResponse) {
+    private func requestOnce(_ method: String, _ path: String, body: Any?, auth: Bool, headers: [String: String] = [:]) async throws -> (Data, HTTPURLResponse) {
         guard let url = URL(string: endpoint.httpUrl + path) else {
             throw RelayError(status: 0, message: "Bad relay URL")
         }
@@ -92,6 +99,7 @@ final class RelayAPI {
         if auth {
             req.setValue("Bearer \(token())", forHTTPHeaderField: "Authorization")
         }
+        for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
         if let body {
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -374,7 +382,7 @@ final class RelayAPI {
     /// both carry a fresh LiveKit token. Returns the call and whether we started it.
     func startCall(chatId: String, projectId: String?, kind: CallKind) async throws -> (Call, started: Bool) {
         let path = (projectId == nil || projectId == peopleSlot) ? "/chats/\(chatId)/calls" : "/projects/\(projectId!)/chats/\(chatId)/calls"
-        let (data, http) = try await request("POST", path, body: ["kind": kind.rawValue])
+        let (data, http) = try await request("POST", path, body: ["kind": kind.rawValue], headers: ["X-Arbos-Client": RelayAPI.clientHeader])
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let call = Call.parse(obj) else {
             throw RelayError(status: http.statusCode, message: "Bad call response")
         }

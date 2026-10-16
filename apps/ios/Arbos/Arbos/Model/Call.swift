@@ -43,6 +43,23 @@ struct CallPerson: Identifiable, Equatable, Hashable {
     }
 }
 
+/// §8 `reachable[]` on a 201 start: can this callee be rung right now?
+struct CallReachability: Equatable {
+    var userId: String
+    var handle: String
+    var name: String?
+    var anyLive: Bool
+    var anyVoip: Bool
+
+    var displayName: String { name?.isEmpty == false ? name! : "@\(handle)" }
+
+    static func parse(_ raw: Any?) -> CallReachability? {
+        guard let d = raw as? [String: Any], let id = d["user_id"] as? String else { return nil }
+        return CallReachability(userId: id, handle: d["handle"] as? String ?? id, name: d["name"] as? String,
+                                anyLive: (d["any_live"] as? NSNumber)?.boolValue ?? false, anyVoip: (d["any_voip"] as? NSNumber)?.boolValue ?? false)
+    }
+}
+
 struct Call: Identifiable, Equatable {
     var callId: String
     var chatId: String
@@ -58,6 +75,8 @@ struct Call: Identifiable, Equatable {
     var endedAt: Int64?
     var reason: String?
     var participants: [CallPerson]
+    /// Only on the 201 start response.
+    var reachable: [CallReachability] = []
 
     var id: String { callId }
     var isPeople: Bool { projectId == peopleSlot || projectId.isEmpty }
@@ -74,7 +93,8 @@ struct Call: Identifiable, Equatable {
                     token: (d["token"] as? String).flatMap { $0.isEmpty ? nil : $0 }, tokenExpiresAt: n("token_expires_at"),
                     startedBy: CallPerson.parse(d["started_by"]), startedAt: n("started_at") ?? nowMs(), endedAt: n("ended_at"),
                     reason: d["reason"] as? String,
-                    participants: ((d["participants"] as? [Any]) ?? []).compactMap(CallPerson.parse))
+                    participants: ((d["participants"] as? [Any]) ?? []).compactMap(CallPerson.parse),
+                    reachable: ((outer["reachable"] as? [Any]) ?? (d["reachable"] as? [Any]) ?? []).compactMap(CallReachability.parse))
     }
 }
 

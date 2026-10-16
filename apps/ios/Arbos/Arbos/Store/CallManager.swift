@@ -342,10 +342,32 @@ final class CallManager: NSObject, ObservableObject {
         }
     }
 
-    /// The DM peer's reachability for the caller's status line (§9 presence).
+    /// The DM peer's reachability for the caller's status line: the relay's
+    /// `reachable[]` from the 201 start when we have it, else §9 presence.
     var calleeUnreachable: Bool {
+        if let c = call, !c.reachable.isEmpty {
+            return c.reachable.allSatisfy { !$0.anyLive && !$0.anyVoip }
+        }
         guard let c = call, let peer = calleePresence?(c.chatId) else { return false }
         return !peer.online && (peer.lastSeenAt.map { nowMs() - $0 > 90_000 } ?? true)
+    }
+
+    /// "Ringing Robert's iPhone": nobody has Arbos open but a VoIP token can ring them.
+    var calleeRingingByPush: CallReachability? {
+        guard let c = call, !c.reachable.isEmpty else { return nil }
+        return c.reachable.first { !$0.anyLive && $0.anyVoip }
+    }
+
+    /// Missed-call lines already written on this device (`call_missed` arrives once per device, but the alert may repeat it).
+    private var missedWritten: Set<String> = []
+
+    /// `call_missed` (push or alert): the callee's client writes the line, once per call.
+    func missedCall(callId: String, chatId: String, projectId: String, from: CallPerson?) {
+        guard !missedWritten.contains(callId) else { return }
+        missedWritten.insert(callId)
+        activeByChat[chatId] = nil
+        if incoming?.call.callId == callId { endIncoming(reason: .unanswered) }
+        writeSystemLine?(chatId, projectId, "Missed call from \(from?.displayName ?? "someone")", callId)
     }
     /// Set by AppModel: the DM counterpart's presence for a chat.
     var calleePresence: ((String) -> (online: Bool, lastSeenAt: Int64?)?)?
@@ -430,9 +452,9 @@ final class CallManager: NSObject, ObservableObject {
                 let r = try await api.leaveCall(ended.callId)
                 if r.ended {
                     activeByChat[ended.chatId] = nil
-                    // Nobody ever joined: the shared line says so, for both sides.
-                    let line = missed ? "Missed call from \(me()?.displayName ?? "someone")" : callEndedLine(durationS: r.durationS)
-                    writeSystemLine?(ended.chatId, ended.projectId, line, ended.callId)
+                    // Nobody ever joined: the callee's client writes "Missed call from …"
+                    // from its call_missed push (§8); the caller writes nothing more.
+                    if !missed { writeSystemLine?(ended.chatId, ended.projectId, callEndedLine(durationS: r.durationS), ended.callId) }
                 }
             } catch {
                 log.error("leave: \(error.localizedDescription, privacy: .public)")
@@ -720,6 +742,14 @@ final class CallManager: NSObject, ObservableObject {
     /// An ARBOS_CALL alert (tap or foreground): `event` started → ring, ended → stop.
     func handleCallAlert(_ info: [AnyHashable: Any]) {
         let event = (info["event"] as? String) ?? ""
+        if event == "missed" {
+            let c = Call.parse(info["call"])
+            if let cid = c?.callId ?? info["call_id"] as? String, let chat = c?.chatId ?? info["chat_id"] as? String {
+                missedCall(callId: cid, chatId: chat, projectId: c?.projectId ?? (info["project_id"] as? String) ?? peopleSlot,
+                           from: CallPerson.parse(info["sender"]) ?? c?.startedBy)
+            }
+            return
+        }
         if event == "ended" {
             if let cid = (info["call"] as? [String: Any])?["call_id"] as? String ?? info["call_id"] as? String,
                let chat = info["chat_id"] as? String {
