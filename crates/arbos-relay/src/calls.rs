@@ -123,16 +123,23 @@ fn user_of_identity(identity: &str) -> Option<&str> {
     identity.strip_prefix("u_")
 }
 
-/// Live participants as `sender{}` objects.
+/// Live participants as `sender{}` objects: humans first, then agents in the call (Phase 2).
 fn participants_json(state: &AppState, call: &CallRow) -> Vec<Value> {
-    state
+    let mut out: Vec<Value> = state
         .db
         .call_participants(&call.id)
         .unwrap_or_default()
         .iter()
         .filter(|p| p.left_at.is_none())
         .map(|p| Sender::user(state, &p.user_id).json())
-        .collect()
+        .collect();
+    out.extend(crate::voice::agent_participants_json(state, &call.id));
+    out
+}
+
+/// The call object without a token (worker and admin views).
+pub fn call_json_public(state: &AppState, call: &CallRow) -> Value {
+    call_json(state, call, None)
 }
 
 /// The call object; with a fresh token for `for_user` when the call is live.
@@ -149,6 +156,7 @@ fn call_json(state: &AppState, call: &CallRow, for_user: Option<&str>) -> Value 
         "ended_at": call.ended_at,
         "reason": call.end_reason,
         "participants": participants_json(state, call),
+        "agents": crate::voice::agents_in_chat(state, &chat_ref_of(call)).iter().map(|p| Sender::agent(state, p).json()).collect::<Vec<_>>(),
         "max_participants": crate::livekit::MAX_PARTICIPANTS,
         "started_device": call.started_device,
         "platform": call.platform,
@@ -508,9 +516,11 @@ async fn start_or_join(
         .collect();
     let reachable = reachability(state, &callees).await;
     announce_started(state, &call, &starter).await;
+    // Phase 2: the chat's project agents join through the voice worker.
+    let dispatched = crate::voice::dispatch_agents(state, &call).await;
     (
         StatusCode::CREATED,
-        Json(json!({ "call": call_json(state, &call, Some(&me)), "joined": false, "reachable": reachable })),
+        Json(json!({ "call": call_json(state, &call, Some(&me)), "joined": false, "reachable": reachable, "agents_dispatched": dispatched })),
     )
         .into_response()
 }
@@ -853,11 +863,15 @@ pub async fn handle_webhook(state: &AppState, event: &Value) {
         "participant_joined" => {
             if let Some(u) = user_of_identity(identity) {
                 let _ = state.db.call_join(&call.id, u);
+            } else if let Some(p) = crate::voice::project_of_identity(identity) {
+                let _ = state.db.call_agent_join(&call.id, p);
             }
         }
         "participant_left" => {
             if let Some(u) = user_of_identity(identity) {
                 let _ = state.db.call_leave(&call.id, u);
+            } else if let Some(p) = crate::voice::project_of_identity(identity) {
+                let _ = state.db.call_agent_leave(&call.id, p);
             }
         }
         "room_finished" => end_call(state, &call.id, "room_finished", None).await,
@@ -923,6 +937,12 @@ pub async fn admin_calls(State(state): State<AppState>, principal: Principal) ->
                 "duration_s": c.ended_at.map(|e| (e - c.started_at) / 1000),
                 "started_device": c.started_device, "platform": c.platform, "app_version": c.app_version,
                 "joined": state.db.call_participants(&c.id).unwrap_or_default().iter().map(|p| p.user_id.clone()).collect::<Vec<_>>(),
+                "voice": state.db.voice_calls_of(&c.id).unwrap_or_default().iter().map(|v| json!({
+                    "project_id": v.project_id, "mode": v.usage.mode, "minutes": (v.usage.seconds / 60.0 * 100.0).round() / 100.0,
+                    "audio_in_tokens": v.usage.audio_in_tokens, "audio_out_tokens": v.usage.audio_out_tokens,
+                    "tool_calls": v.usage.tool_calls, "decisions": v.usage.decisions, "usd": v.usage.usd,
+                    "ttfa_ms_p50": v.usage.ttfa_ms_p50, "barge_ms_p50": v.usage.barge_ms_p50, "stop_reason": v.usage.stop_reason,
+                })).collect::<Vec<_>>(),
             })
         })
         .collect();
@@ -932,6 +952,7 @@ pub async fn admin_calls(State(state): State<AppState>, principal: Principal) ->
         "voip_tokens": state.db.all_voip_tokens().map(|t| t.len()).unwrap_or(0),
         "active": active,
         "recent": recent,
+        "voice": crate::voice::admin_json(&state),
     }))
     .into_response()
 }

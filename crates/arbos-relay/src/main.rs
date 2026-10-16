@@ -16,6 +16,7 @@ mod db_accounts;
 mod db_calls;
 mod db_people;
 mod db_push;
+mod db_voice;
 mod feedback;
 mod groups;
 mod images;
@@ -33,6 +34,7 @@ mod smoke;
 mod state;
 mod upgrade;
 mod vault;
+mod voice;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -286,6 +288,8 @@ async fn main() -> anyhow::Result<()> {
         presence_seen: Arc::new(Mutex::new(HashMap::new())),
         activity: Arc::new(Mutex::new(HashMap::new())),
         box_http_seen: Arc::new(Mutex::new(HashMap::new())),
+        voice: Arc::new(voice::cfg_from_env()),
+        voice_conns: Arc::new(Mutex::new(HashMap::new())),
     };
     tracing::info!(auth_mode = auth_mode.as_str(), public_url = %state.cfg.public_url, "sign-in");
     if state.cfg.connectors_mock {
@@ -357,6 +361,19 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/livekit/webhook", post(calls::livekit_webhook))
         .route("/admin/calls", get(calls::admin_calls))
+        .route("/box/voice", get(voice::ws_box_voice))
+        .route("/voice/calls/{id}", get(voice::call_info))
+        .route("/voice/calls/{id}/tool", post(voice::call_tool))
+        .route("/voice/calls/{id}/events", post(voice::call_events))
+        .route("/voice/calls/{id}/usage", post(voice::call_usage))
+        .route(
+            "/projects/{id}/voice",
+            get(voice::get_agent_settings).put(voice::put_agent_settings),
+        )
+        .route(
+            "/admin/users/{id}/voice",
+            axum::routing::put(voice::put_user_cap),
+        )
         .route(
             "/devices/{id}/push",
             post(notify::register_push).delete(notify::unregister_push),

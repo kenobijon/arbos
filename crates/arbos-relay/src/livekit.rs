@@ -162,7 +162,7 @@ impl LiveKit {
             &self.api_secret,
             &json!({
                 "iss": self.api_key, "sub": "arbos-relay", "iat": now, "nbf": now - 10, "exp": now + ADMIN_TTL_S,
-                "video": { "roomCreate": true, "roomAdmin": true, "room": room },
+                "video": { "roomCreate": true, "roomAdmin": true, "room": room, "agent": true },
             }),
         )
     }
@@ -179,6 +179,32 @@ impl LiveKit {
             return None;
         }
         serde_json::from_slice(body).ok()
+    }
+
+    /// Ask LiveKit to send a registered agent worker (`agent_name`) into `room` with `metadata`
+    /// (Calls Phase 2: the voice worker joins as `a_<project_id>`). Returns the dispatch id.
+    pub async fn create_dispatch(
+        &self,
+        http: &reqwest::Client,
+        room: &str,
+        agent_name: &str,
+        metadata: &Value,
+    ) -> anyhow::Result<String> {
+        let resp = http
+            .post(format!(
+                "{}/twirp/livekit.AgentDispatchService/CreateDispatch",
+                self.http_url
+            ))
+            .bearer_auth(self.admin_token(room))
+            .json(&json!({ "room": room, "agent_name": agent_name, "metadata": metadata.to_string() }))
+            .send()
+            .await?;
+        let status = resp.status();
+        let body: Value = resp.json().await.unwrap_or(Value::Null);
+        if !status.is_success() {
+            anyhow::bail!("LiveKit CreateDispatch: HTTP {status} {body}");
+        }
+        Ok(body["id"].as_str().unwrap_or_default().to_owned())
     }
 
     /// Close the LiveKit room (everyone still connected is disconnected). Best effort.
