@@ -48,7 +48,19 @@ fn main() {
             let source = app::init_source(cx);
             let state = cx.new(|cx| AppState::new(source, cx));
 
-            let bounds = Bounds::centered(None, size(px(1320.0), px(880.0)), cx);
+            // `ARBOS_WINDOW=x,y,w,h` places the window (demos, two instances side by side).
+            let bounds = match std::env::var("ARBOS_WINDOW")
+                .ok()
+                .map(|v| {
+                    v.split(',')
+                        .filter_map(|n| n.trim().parse::<f32>().ok())
+                        .collect::<Vec<_>>()
+                })
+                .as_deref()
+            {
+                Some([x, y, w, h]) => Bounds::new(point(px(*x), px(*y)), size(px(*w), px(*h))),
+                _ => Bounds::centered(None, size(px(1320.0), px(880.0)), cx),
+            };
             let theme = Theme::of(cx).clone();
             let window = cx
                 .open_window(
