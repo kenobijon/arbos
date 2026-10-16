@@ -459,6 +459,13 @@ enum AdminCmd {
     },
     /// Delete a test user (only `test_…` users; their projects and box must be gone first).
     DeleteTestUser { user: String },
+    /// Attach another signed-in device to a user and print its token pair (test users; a real
+    /// account needs --name).
+    AddDevice {
+        user: String,
+        #[arg(long)]
+        name: Option<String>,
+    },
     /// Recreate a user's box from the current default snapshot, carrying /work (the old sandbox
     /// is kept 7 days). Progress: `GET /machine` → upgrade.phase.
     UpgradeBox {
@@ -855,6 +862,15 @@ async fn main() -> Result<()> {
                         .post(
                             "/admin/users/test",
                             &serde_json::json!({ "handle": handle, "name": name }),
+                        )
+                        .await?;
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                AdminCmd::AddDevice { user, name } => {
+                    let v = admin
+                        .post(
+                            &format!("/admin/users/{user}/devices"),
+                            &serde_json::json!({ "name": name }),
                         )
                         .await?;
                     println!("{}", serde_json::to_string_pretty(&v)?);
