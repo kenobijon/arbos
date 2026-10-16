@@ -639,6 +639,8 @@ pub fn members_popover(
         let user_id = p.id.clone();
         let chat_a = chat_id.clone();
         let chat_b = chat_id.clone();
+        let open_handle = p.handle.clone();
+        let open_space = chat_id.clone();
         card = card.child(
             div()
                 .flex()
@@ -646,14 +648,42 @@ pub fn members_popover(
                 .gap(px(8.0))
                 .px(px(8.0))
                 .py(px(5.0))
-                .child(avatar(image, p, 22.0, &theme))
                 .child(
                     div()
+                        .id(ElementId::Name(SharedString::from(format!(
+                            "member-open-{}",
+                            p.id
+                        ))))
                         .flex_1()
                         .min_w_0()
-                        .text_size(px(12.5))
-                        .text_color(theme.text)
-                        .child(format!("@{}", p.handle)),
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .rounded(px(6.0))
+                        .cursor_pointer()
+                        .hover(|st| st.bg(theme.surface_2))
+                        .child(avatar(image, p, 22.0, &theme))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(px(12.5))
+                                .text_color(theme.text)
+                                .child(format!("@{}", p.handle)),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.members_open = false;
+                            let (handle, sid) = (open_handle.clone(), open_space.clone());
+                            this.state.update(cx, |s, cx| {
+                                s.open_profile(
+                                    crate::app::ProfilePage::User {
+                                        handle,
+                                        space_id: Some(sid),
+                                    },
+                                    cx,
+                                )
+                            });
+                        })),
                 )
                 .child(
                     action(
@@ -699,7 +729,30 @@ pub fn members_popover(
                 .gap(px(8.0))
                 .px(px(8.0))
                 .py(px(5.0))
-                .child(agent_glyph(a, 22.0, &theme))
+                .child(
+                    div()
+                        .id(ElementId::Name(SharedString::from(format!(
+                            "agent-open-{}",
+                            a.project_id
+                        ))))
+                        .rounded(px(6.0))
+                        .cursor_pointer()
+                        .hover(|st| st.bg(theme.surface_2))
+                        .child(agent_glyph(a, 22.0, &theme))
+                        .on_click({
+                            let pid = a.project_id.clone();
+                            cx.listener(move |this, _, _, cx| {
+                                this.members_open = false;
+                                let pid = pid.clone();
+                                this.state.update(cx, |s, cx| {
+                                    s.open_profile(
+                                        crate::app::ProfilePage::Agent { project_id: pid },
+                                        cx,
+                                    )
+                                });
+                            })
+                        }),
+                )
                 .child(
                     div()
                         .flex_1()
@@ -887,6 +940,8 @@ pub fn project_members_popover(
         let user_id = p.id.clone();
         let pid = project_id.clone();
         let is_owner = p.role == "owner";
+        let open_handle = p.handle.clone();
+        let open_space = project_id.clone();
         card = card.child(
             div()
                 .flex()
@@ -894,14 +949,42 @@ pub fn project_members_popover(
                 .gap(px(8.0))
                 .px(px(8.0))
                 .py(px(5.0))
-                .child(avatar(image, p, 22.0, &theme))
                 .child(
                     div()
+                        .id(ElementId::Name(SharedString::from(format!(
+                            "pmember-open-{}",
+                            p.id
+                        ))))
                         .flex_1()
                         .min_w_0()
-                        .text_size(px(12.5))
-                        .text_color(theme.text)
-                        .child(format!("@{}", p.handle)),
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .rounded(px(6.0))
+                        .cursor_pointer()
+                        .hover(|st| st.bg(theme.surface_2))
+                        .child(avatar(image, p, 22.0, &theme))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(px(12.5))
+                                .text_color(theme.text)
+                                .child(format!("@{}", p.handle)),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.members_open = false;
+                            let (handle, sid) = (open_handle.clone(), open_space.clone());
+                            this.state.update(cx, |s, cx| {
+                                s.open_profile(
+                                    crate::app::ProfilePage::User {
+                                        handle,
+                                        space_id: Some(sid),
+                                    },
+                                    cx,
+                                )
+                            });
+                        })),
                 )
                 .child(
                     div()

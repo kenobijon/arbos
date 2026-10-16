@@ -39,6 +39,11 @@ pub enum SyncEvent {
         results: Vec<Person>,
     },
     /// Someone in a people chat started/stopped typing (room presence).
+    /// Someone's device sent a presence frame in a room we share (API §7c
+    /// frames carry `handle`): they are online right now.
+    Presence {
+        handle: String,
+    },
     Typing {
         chat_id: Id,
         handle: String,
