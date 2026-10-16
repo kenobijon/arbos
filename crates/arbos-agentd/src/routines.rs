@@ -1,6 +1,9 @@
 //! Relay pushes delivered to the box (`GET /projects/{id}/pushes`), and the `routine_run` push
 //! (F3): the prompt lands in the chosen chat as a user message with `sender = routine:<id>`, runs
 //! as a normal turn, and the run status goes back to the relay.
+//!
+//! MCP tools (`routines_list` / `routines_create` / `routines_update` / `routines_delete`) let the
+//! main agent schedule cron jobs and one-shot reminders through the relay scheduler.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,8 +15,170 @@ use arbos_core::doc::CommandView;
 use arbos_core::ids::{now_ms, ulid};
 
 use crate::agent::Agent;
+use crate::mcp::{err_result, text_result};
 
 const PUSH_POLL: Duration = Duration::from_secs(5);
+
+/// MCP tool specs for cron / once / webhook / event routines.
+pub fn tool_specs() -> Vec<Value> {
+    vec![
+        json!({
+            "name": "routines_list",
+            "description": "List this Project's scheduled routines (cron jobs, one-shot reminders, webhooks, event triggers): id, name, prompt, trigger, enabled, next_run_at.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+        json!({
+            "name": "routines_create",
+            "description": "Schedule a routine that will message this chat later. Use for reminders and recurring jobs. trigger: {kind:\"cron\", expr, tz?} (five-field cron, e.g. \"0 9 * * 1-5\"), {kind:\"once\", in_seconds} or {kind:\"once\", at} (unix ms), {kind:\"webhook\"}, or {kind:\"event\", event}. prompt is what you will be asked to do when it fires (write it as an instruction to yourself, e.g. \"Tell the user: time is up.\"). Defaults to the current chat.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" },
+                    "prompt": { "type": "string" },
+                    "trigger": { "type": "object" },
+                    "chat_id": { "type": "string" },
+                    "enabled": { "type": "boolean" }
+                },
+                "required": ["name", "prompt", "trigger"]
+            }
+        }),
+        json!({
+            "name": "routines_update",
+            "description": "Pause, resume, or edit a routine by id (name, prompt, trigger, enabled, chat_id).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "name": { "type": "string" },
+                    "prompt": { "type": "string" },
+                    "trigger": { "type": "object" },
+                    "chat_id": { "type": "string" },
+                    "enabled": { "type": "boolean" }
+                },
+                "required": ["id"]
+            }
+        }),
+        json!({
+            "name": "routines_delete",
+            "description": "Delete a routine by id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "id": { "type": "string" } },
+                "required": ["id"]
+            }
+        }),
+    ]
+}
+
+fn routines_path(agent: &Agent, suffix: &str) -> String {
+    format!(
+        "{}/projects/{}/routines{}",
+        agent.cfg.relay_url, agent.cfg.project_id, suffix
+    )
+}
+
+async fn relay_routines_json(
+    agent: &Agent,
+    method: reqwest::Method,
+    suffix: &str,
+    body: Option<Value>,
+) -> Result<Value, String> {
+    let mut req = agent
+        .http_client()
+        .request(method, routines_path(agent, suffix))
+        .bearer_auth(&agent.cfg.box_token);
+    if let Some(b) = body {
+        req = req.json(&b);
+    }
+    let r = req.send().await.map_err(|e| e.to_string())?;
+    let status = r.status();
+    let text = r.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!("relay routines{suffix}: HTTP {status} {text}"));
+    }
+    if text.trim().is_empty() {
+        return Ok(json!({ "ok": true }));
+    }
+    serde_json::from_str(&text).map_err(|e| e.to_string())
+}
+
+/// Dispatch `routines_*` MCP tools.
+pub async fn call_tool(agent: &Arc<Agent>, name: &str, args: &Value, chat_hint: &str) -> Value {
+    let s = |k: &str| args.get(k).and_then(Value::as_str).map(str::to_owned);
+    match name {
+        "routines_list" => match relay_routines_json(agent, reqwest::Method::GET, "", None).await {
+            Ok(v) => text_result(v.to_string()),
+            Err(e) => err_result(e),
+        },
+        "routines_create" => {
+            let name = s("name").unwrap_or_default();
+            let prompt = s("prompt").unwrap_or_default();
+            let Some(trigger) = args.get("trigger").cloned() else {
+                return err_result("trigger is required");
+            };
+            if name.trim().is_empty() || prompt.trim().is_empty() {
+                return err_result("name and prompt are required");
+            }
+            let chat_id = s("chat_id").filter(|c| !c.is_empty()).or_else(|| {
+                let hint = chat_hint.trim();
+                (!hint.is_empty() && hint != "shared").then(|| hint.to_owned())
+            });
+            let body = json!({
+                "name": name.trim(),
+                "prompt": prompt.trim(),
+                "trigger": trigger,
+                "chatId": chat_id,
+                "enabled": args.get("enabled").and_then(Value::as_bool).unwrap_or(true),
+            });
+            match relay_routines_json(agent, reqwest::Method::POST, "", Some(body)).await {
+                Ok(v) => text_result(v.to_string()),
+                Err(e) => err_result(e),
+            }
+        }
+        "routines_update" => {
+            let id = s("id").unwrap_or_default();
+            if id.trim().is_empty() {
+                return err_result("id is required");
+            }
+            let mut body = json!({});
+            if let Some(o) = body.as_object_mut() {
+                if let Some(v) = s("name") {
+                    o.insert("name".into(), json!(v));
+                }
+                if let Some(v) = s("prompt") {
+                    o.insert("prompt".into(), json!(v));
+                }
+                if let Some(v) = s("chat_id") {
+                    o.insert("chatId".into(), json!(v));
+                }
+                if let Some(v) = args.get("trigger") {
+                    o.insert("trigger".into(), v.clone());
+                }
+                if let Some(v) = args.get("enabled").and_then(Value::as_bool) {
+                    o.insert("enabled".into(), json!(v));
+                }
+            }
+            match relay_routines_json(agent, reqwest::Method::PATCH, &format!("/{id}"), Some(body))
+                .await
+            {
+                Ok(v) => text_result(v.to_string()),
+                Err(e) => err_result(e),
+            }
+        }
+        "routines_delete" => {
+            let id = s("id").unwrap_or_default();
+            if id.trim().is_empty() {
+                return err_result("id is required");
+            }
+            match relay_routines_json(agent, reqwest::Method::DELETE, &format!("/{id}"), None).await
+            {
+                Ok(_) => text_result(json!({ "ok": true, "id": id }).to_string()),
+                Err(e) => err_result(e),
+            }
+        }
+        other => err_result(format!("unknown routines tool {other}")),
+    }
+}
 
 impl Agent {
     /// Dispatch one push by kind. Unknown kinds are logged into the T3 store as before so

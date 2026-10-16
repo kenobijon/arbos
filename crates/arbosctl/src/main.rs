@@ -1369,6 +1369,10 @@ fn trigger_label(t: &Value) -> String {
             t["expr"].as_str().unwrap_or("?"),
             t["tz"].as_str().unwrap_or("UTC")
         ),
+        Some("once") => format!(
+            "once at {}",
+            fmt_ms(t["at"].as_i64().or_else(|| t["at_ms"].as_i64()))
+        ),
         Some("webhook") => "webhook".to_owned(),
         Some("event") => format!("event {}", t["event"].as_str().unwrap_or("?")),
         Some(other) => other.to_owned(),

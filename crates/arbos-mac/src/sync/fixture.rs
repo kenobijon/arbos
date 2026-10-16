@@ -801,13 +801,16 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         } => {
             let next_run_at = match &trigger {
                 RoutineTrigger::Cron { .. } => Some(now_ms() as i64 + 3_600_000),
+                RoutineTrigger::Once { at } => Some(*at),
                 RoutineTrigger::Webhook { .. } | RoutineTrigger::Event { .. } => None,
             };
             let fire_url = match &trigger {
                 RoutineTrigger::Webhook { .. } => {
                     Some("http://127.0.0.1:7700/routines/<id>/fire?secret=…".into())
                 }
-                RoutineTrigger::Cron { .. } | RoutineTrigger::Event { .. } => None,
+                RoutineTrigger::Cron { .. }
+                | RoutineTrigger::Once { .. }
+                | RoutineTrigger::Event { .. } => None,
             };
             shared.routines.lock().unwrap().push(Routine {
                 id: new_id(),
@@ -835,7 +838,9 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     r.enabled = enabled;
                     r.next_run_at = match (&r.trigger, enabled) {
                         (RoutineTrigger::Cron { .. }, true) => Some(now_ms() as i64 + 3_600_000),
+                        (RoutineTrigger::Once { at }, true) => Some(*at),
                         (RoutineTrigger::Cron { .. }, false)
+                        | (RoutineTrigger::Once { .. }, false)
                         | (RoutineTrigger::Webhook { .. }, _)
                         | (RoutineTrigger::Event { .. }, _) => None,
                     };

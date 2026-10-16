@@ -1,7 +1,7 @@
-//! Routines (design §10, F3): prompts that run on a cron schedule, on a webhook, or on a relay
-//! event while the user is away. The scheduler lives in the relay: every tick it picks due
-//! routines, wakes the box (Flow 5), and queues a `routine_run` push; the box runs the prompt as a
-//! user turn with `sender = routine:<id>` and reports the run back here.
+//! Routines (design §10, F3): prompts that run on a cron schedule, once at a set time, on a
+//! webhook, or on a relay event while the user is away. The scheduler lives in the relay: every
+//! tick it picks due routines, wakes the box (Flow 5), and queues a `routine_run` push; the box
+//! runs the prompt as a user turn with `sender = routine:<id>` and reports the run back here.
 
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -44,9 +44,20 @@ fn bad(e: impl std::fmt::Display) -> (StatusCode, String) {
 /// A validated trigger. The JSON form in the table is what clients send.
 #[derive(Debug, Clone)]
 pub enum Trigger {
-    Cron { expr: String, tz: Tz },
-    Webhook { secret: String },
-    Event { event: String },
+    Cron {
+        expr: String,
+        tz: Tz,
+    },
+    /// Fire once at `at_ms` (unix ms), then stop. Accepts `at` / `at_ms`, or `in_seconds` (converted at parse).
+    Once {
+        at_ms: i64,
+    },
+    Webhook {
+        secret: String,
+    },
+    Event {
+        event: String,
+    },
 }
 
 impl Trigger {
@@ -66,6 +77,27 @@ impl Trigger {
                     .parse()
                     .map_err(|_| format!("unknown time zone {tz_name:?}"))?;
                 Ok(Trigger::Cron { expr, tz })
+            }
+            Some("once") => {
+                let now = now_ms();
+                let at_ms = if let Some(at) = v
+                    .get("at")
+                    .or_else(|| v.get("at_ms"))
+                    .and_then(Value::as_i64)
+                {
+                    at
+                } else if let Some(secs) = v.get("in_seconds").and_then(Value::as_i64) {
+                    if !(1..=30 * 24 * 60 * 60).contains(&secs) {
+                        return Err("once in_seconds must be between 1 and 2592000".into());
+                    }
+                    now.saturating_add(secs.saturating_mul(1000))
+                } else {
+                    return Err("once trigger needs at or in_seconds".into());
+                };
+                if at_ms <= now {
+                    return Err("once at must be in the future".into());
+                }
+                Ok(Trigger::Once { at_ms })
             }
             Some("webhook") => {
                 let secret = v
@@ -89,7 +121,7 @@ impl Trigger {
                 })
             }
             Some(other) => Err(format!(
-                "trigger kind must be cron|webhook|event, got {other:?}"
+                "trigger kind must be cron|once|webhook|event, got {other:?}"
             )),
             None => Err("trigger needs kind".into()),
         }
@@ -98,13 +130,15 @@ impl Trigger {
     pub fn to_json(&self) -> Value {
         match self {
             Trigger::Cron { expr, tz } => json!({ "kind": "cron", "expr": expr, "tz": tz.name() }),
+            Trigger::Once { at_ms } => json!({ "kind": "once", "at": at_ms }),
             Trigger::Webhook { secret } => json!({ "kind": "webhook", "secret": secret }),
             Trigger::Event { event } => json!({ "kind": "event", "event": event }),
         }
     }
 }
 
-/// The next fire time strictly after `now_ms`, or `None` when the trigger is not time-based.
+/// The next fire time at or after `now_ms` for time-based triggers, or `None` otherwise.
+/// Cron uses the next occurrence *strictly after* `now_ms`; once uses `at_ms` while it is still due.
 pub fn next_run_ms(trigger: &Trigger, now_ms: i64) -> Option<i64> {
     match trigger {
         Trigger::Cron { expr, tz } => {
@@ -114,6 +148,7 @@ pub fn next_run_ms(trigger: &Trigger, now_ms: i64) -> Option<i64> {
                 .ok()
                 .map(|t| t.timestamp_millis())
         }
+        Trigger::Once { at_ms } => (*at_ms > now_ms).then_some(*at_ms),
         Trigger::Webhook { .. } | Trigger::Event { .. } => None,
     }
 }
@@ -243,8 +278,20 @@ pub async fn spawn_scheduler(state: AppState) {
                 let (fires, next) = schedule_step(&trigger, rt.next_run_at, now);
                 // Advance before firing so a slow wake cannot make the next tick fire it again.
                 let _ = state.db.mark_routine_fired(&rt.id, now, next);
+                // One-shot routines disable after they fire so they leave the due set cleanly.
+                if fires && matches!(trigger, Trigger::Once { .. }) {
+                    let _ =
+                        state
+                            .db
+                            .update_routine(&rt.id, None, None, None, None, Some(false), None);
+                }
                 if fires {
-                    if let Err(e) = fire(&state, &rt, "cron", None).await {
+                    let cause = match &trigger {
+                        Trigger::Cron { .. } => "cron",
+                        Trigger::Once { .. } => "once",
+                        Trigger::Webhook { .. } | Trigger::Event { .. } => "schedule",
+                    };
+                    if let Err(e) = fire(&state, &rt, cause, None).await {
                         tracing::warn!(routine = %rt.id, error = %e, "routine fire failed");
                     }
                 }
@@ -626,6 +673,17 @@ mod tests {
         // Webhooks and events have no next run.
         let hook = Trigger::parse(&json!({ "kind": "webhook" })).unwrap();
         assert_eq!(next_run_ms(&hook, now), None);
+
+        // One-shot: due at `at`, then gone (build the trigger directly so the test clock can be past).
+        let once_at = at("2026-10-15T10:00:20Z");
+        let once = Trigger::Once { at_ms: once_at };
+        assert_eq!(next_run_ms(&once, now), Some(once_at));
+        let (fired, next) = schedule_step(&once, Some(once_at), at("2026-10-15T10:00:25Z"));
+        assert!(fired);
+        assert_eq!(next, None);
+        assert!(Trigger::parse(&json!({ "kind": "once", "at": now_ms() - 1 })).is_err());
+        let in_secs = Trigger::parse(&json!({ "kind": "once", "in_seconds": 30 })).unwrap();
+        assert!(matches!(in_secs, Trigger::Once { at_ms } if at_ms > now_ms()));
 
         // Scheduler steps inside one minute: fires once at the due tick, then stays quiet until
         // the next minute boundary even when ticks keep coming.

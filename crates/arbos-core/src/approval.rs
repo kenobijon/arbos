@@ -140,6 +140,10 @@ pub const NOT_RISKY_TOOLS: &[&str] = &[
     "recall",
     "peek",
     "deliver_file",
+    "routines_list",
+    "routines_create",
+    "routines_update",
+    "routines_delete",
 ];
 
 /// Shell tools whose `command` argument is checked against the destructive patterns.

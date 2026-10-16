@@ -1089,6 +1089,11 @@ pub enum RoutineTrigger {
         #[serde(default = "utc")]
         tz: String,
     },
+    /// Fire once at unix ms, then stop.
+    Once {
+        #[serde(alias = "at_ms")]
+        at: i64,
+    },
     Webhook {
         #[serde(default)]
         secret: String,
@@ -1120,6 +1125,7 @@ impl RoutineTrigger {
                     format!("{base} {tz}")
                 }
             }
+            RoutineTrigger::Once { .. } => "Once".into(),
             RoutineTrigger::Webhook { .. } => "Webhook".into(),
             RoutineTrigger::Event { event } => match event.as_str() {
                 "box_awake" => "On box awake".into(),
