@@ -268,7 +268,7 @@ final class AppModel: ObservableObject {
             guard let self, self.appActive else { return nil }
             return self.visibleChatId
         }
-        PushManager.shared.isChatArchived = { [weak self] id in self?.archivedChatIds.contains(id) ?? false }
+        PushManager.shared.isChatArchived = { [weak self] id in self?.isChatArchived(id) ?? false }
         NotificationCenter.default.addObserver(forName: PushManager.openChat, object: nil, queue: .main) { [weak self] n in
             guard let self, let cid = n.userInfo?["chat_id"] as? String else { return }
             let pid = (n.userInfo?["project_id"] as? String) ?? peopleSlot
@@ -454,16 +454,16 @@ final class AppModel: ObservableObject {
     var unreadTotal: Int {
         // Archived agent chats never badge (§9c).
         if !unreadCounts.isEmpty {
-            return unreadCounts.reduce(0) { $0 + (archivedChatIds.contains($1.key) ? 0 : $1.value) }
+            return unreadCounts.reduce(0) { $0 + (isChatArchived($1.key) ? 0 : $1.value) }
         }
         let people = peopleChats.reduce(0) { $0 + unreadCount(for: $1) }
-        let projects = chats.values.flatMap { $0 }.filter { $0.unread && !archivedChatIds.contains($0.id) }.count
+        let projects = chats.values.flatMap { $0 }.filter { $0.unread && !isChatArchived($0.id) }.count
         return people + projects
     }
 
     /// Unread rows of one agent chat for its dot: none while archived.
     func chatHasUnread(_ chat: Chat) -> Bool {
-        if archivedChatIds.contains(chat.id) { return false }
+        if isChatArchived(chat.id) { return false }
         if chat.unread { return true }
         return (unreadCounts[chat.id] ?? 0) > 0 && chat.id != visibleChatId
     }
@@ -1806,9 +1806,15 @@ final class AppModel: ObservableObject {
     }
     private var archiveFlushing = false
 
-    func isChatArchived(_ chatId: Id) -> Bool { archivedChatIds.contains(chatId) }
+    /// The pinned "Main" chat never counts as archived, whatever the relay says (Mac rule).
+    func isChatArchived(_ chatId: Id) -> Bool {
+        archivedChatIds.contains(chatId) && chat(chatId)?.isPinned != true
+    }
 
-    func archiveChat(_ chatId: Id) { setArchived(chatId, true) }
+    func archiveChat(_ chatId: Id) {
+        guard chat(chatId)?.isPinned != true else { return }
+        setArchived(chatId, true)
+    }
 
     func unarchiveChat(_ chatId: Id) { setArchived(chatId, false) }
 

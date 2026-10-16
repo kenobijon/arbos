@@ -24,10 +24,13 @@ struct ChatListView: View {
                 ForEach(active) { chat in
                     row(chat)
                         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                            Button { withAnimation { model.archiveChat(chat.id) } } label: {
-                                Label("Archive", systemImage: "archivebox")
+                            // The pinned "Main" chat is never hidden (same rule as the Mac).
+                            if !chat.isPinned {
+                                Button { withAnimation { model.archiveChat(chat.id) } } label: {
+                                    Label("Archive", systemImage: "archivebox")
+                                }
+                                .tint(theme.muted)
                             }
-                            .tint(theme.muted)
                         }
                 }
                 if !archived.isEmpty {
