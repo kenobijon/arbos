@@ -445,6 +445,16 @@ impl Agent {
         &self.http
     }
 
+    /// Relay blob mirror slot for a chat (`PUT/GET /blob/{slot}/{key}`).
+    /// People chats use `people:{chat_id}`; project chats use this project's id.
+    pub fn blob_slot(&self, chat_id: &str) -> String {
+        if self.people.is_people_chat(chat_id) {
+            format!("people:{chat_id}")
+        } else {
+            self.cfg.project_id.clone()
+        }
+    }
+
     pub fn new(
         cfg: Arc<Config>,
         store: Store,

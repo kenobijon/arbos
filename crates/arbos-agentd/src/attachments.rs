@@ -73,7 +73,7 @@ impl Agent {
         }
         let in_dir = self.cfg.work_dir.join("in");
         let _ = std::fs::create_dir_all(&in_dir);
-        let blob_slot = self.attachment_blob_slot(chat_id);
+        let blob_slot = self.blob_slot(chat_id);
         for a in parts {
             let name = a
                 .get("name")
@@ -162,15 +162,6 @@ impl Agent {
             }
         }
         out
-    }
-
-    /// Where clients put people-chat blobs (`people:{chat_id}`) vs project blobs (project id).
-    fn attachment_blob_slot(&self, chat_id: &str) -> String {
-        if self.people.is_people_chat(chat_id) {
-            format!("people:{chat_id}")
-        } else {
-            self.cfg.project_id.clone()
-        }
     }
 
     async fn fetch_blob(&self, blob_slot: &str, blob_ref: &str) -> Result<Vec<u8>> {
