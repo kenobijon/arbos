@@ -95,10 +95,16 @@ def _norm(s: str) -> str:
 
 
 def names_of(ctx: JudgeContext) -> list[str]:
+    """The agent's names, each also without spaces ("Alpha Lab" is transcribed "AlphaLab")."""
     names = {"arbos", ctx.agent_name.lower().strip()}
     if ctx.wake_name:
         names.add(ctx.wake_name.lower().strip())
-    return [n for n in names if n]
+    out = set()
+    for n in names:
+        if n:
+            out.add(n)
+            out.add(n.replace(" ", ""))
+    return sorted(out, key=len, reverse=True)
 
 
 def _vocative(t: str, names: list[str]) -> bool:

@@ -1,0 +1,12 @@
+[
+  {"sleep": 7},
+  {"say": "No problem. So the deploy is tomorrow at ten, right?", "wait": false},
+  {"sleep": 9},
+  {"say": "My kid has a school thing at three, so I'll drop off early.", "wait": false},
+  {"sleep": 22},
+  {"say": "Thanks. Alpha Lab, in one sentence, what is the difference between server VAD and semantic VAD?", "wait": false},
+  {"sleep": 14},
+  {"say": "Ha, same here. Friday brain.", "wait": false},
+  {"sleep": 26},
+  {"hangup": true}
+]

@@ -1,0 +1,14 @@
+[
+  {"sleep": 2},
+  {"say": "Hey both, thanks for jumping on. Let's keep this short.", "wait": false},
+  {"sleep": 8},
+  {"say": "Yeah. I still need to check the staging logs before that.", "wait": false},
+  {"sleep": 9},
+  {"say": "Can someone check what time it is in Tokyo right now?", "wait": false},
+  {"sleep": 24},
+  {"say": "Let's grab lunch after this, I'm starving.", "wait": false},
+  {"sleep": 14},
+  {"say": "Okay, that's all. Alpha Lab, say goodbye to everyone.", "wait": false},
+  {"sleep": 10},
+  {"hangup": true}
+]
