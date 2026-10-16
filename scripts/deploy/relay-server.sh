@@ -133,9 +133,9 @@ if command -v op >/dev/null 2>&1 && [[ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; th
   : "${ARBOS_GITHUB_CLIENT_ID:=$(opread 'op://Arbos/Arbos GitHub OAuth app/ARBOS_GITHUB_CLIENT_ID')}"
   : "${ARBOS_GITHUB_CLIENT_SECRET:=$(opread 'op://Arbos/Arbos GitHub OAuth app/ARBOS_GITHUB_CLIENT_SECRET')}"
   # Calls (LiveKit, scripts/deploy/livekit): absent until the SFU is set up; the relay keeps calls off without them.
-  : "${LIVEKIT_URL:=$(opread 'op://Arbos/Arbos LiveKit/LIVEKIT_URL')}"
-  : "${LIVEKIT_API_KEY:=$(opread 'op://Arbos/Arbos LiveKit/LIVEKIT_API_KEY')}"
-  : "${LIVEKIT_API_SECRET:=$(opread 'op://Arbos/Arbos LiveKit/LIVEKIT_API_SECRET')}"
+  : "${LIVEKIT_URL:=$(opread 'op://Arbos/ypyfs6fm7dtkzphirv6ep7lfjq/LIVEKIT_URL')}"
+  : "${LIVEKIT_API_KEY:=$(opread 'op://Arbos/ypyfs6fm7dtkzphirv6ep7lfjq/LIVEKIT_API_KEY')}"
+  : "${LIVEKIT_API_SECRET:=$(opread 'op://Arbos/ypyfs6fm7dtkzphirv6ep7lfjq/LIVEKIT_API_SECRET')}"
 fi
 # keep values already in the env file when nothing new was supplied
 if [[ -f "$ENV_FILE" ]]; then
