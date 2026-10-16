@@ -32,9 +32,10 @@ final class MemoRecorder: ObservableObject {
         try? session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker])
         try? session.setActive(true)
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("memo-\(Int(Date().timeIntervalSince1970)).m4a")
+        // 16 kHz mono is enough for speech and keeps the upload/STT payload small.
         let settings: [String: Any] = [
             AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
-            AVSampleRateKey: 44100,
+            AVSampleRateKey: 16_000,
             AVNumberOfChannelsKey: 1,
             AVEncoderAudioQualityKey: AVAudioQuality.medium.rawValue,
         ]
@@ -69,10 +70,17 @@ final class MemoRecorder: ObservableObject {
         recording = false
         defer { recorder = nil; url = nil }
         guard let url, seconds >= 1, let data = try? Data(contentsOf: url) else { return nil }
-        let f = DateFormatter()
-        f.dateFormat = "MMM d HH.mm"
-        return ("Voice memo \(f.string(from: Date())).m4a", data)
+        // POSIX stamp (ASCII only) — same idea as photo names; relay blob keys reject locale letters.
+        let stamp = Self.memoStamp.string(from: Date())
+        return ("Voice memo \(stamp).m4a", data)
     }
+
+    private static let memoStamp: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd HH.mm.ss"
+        return f
+    }()
 
     func cancel() {
         timer?.invalidate()

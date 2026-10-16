@@ -1275,7 +1275,7 @@ final class AppModel: ObservableObject {
     func transcribe(projectId: Id?, memo: PendingAttachment) async -> String? {
         if isFixture { return nil }
         do {
-            let text = try await api.transcribe(projectId: projectId, data: memo.data, filename: memo.name, mime: memo.mime)
+            let text = try await api.transcribe(projectId: projectId, data: memo.data, mime: memo.mime)
             return text.isEmpty ? nil : text
         } catch {
             notice = Notice(text: "Could not transcribe the memo: \(error.localizedDescription)")

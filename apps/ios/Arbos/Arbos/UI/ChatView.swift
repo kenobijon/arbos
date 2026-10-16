@@ -907,7 +907,9 @@ struct ChatView: View {
         sentOnce = true
         transcribing = true
         Task {
-            let transcript = await model.transcribe(projectId: project?.id, memo: memo)
+            // People chats have no Project row; meter STT on the people blob slot (same as uploads).
+            let sttProject: Id? = project?.id ?? (isPeople ? "\(peopleSlot):\(chatId)" : nil)
+            let transcript = await model.transcribe(projectId: sttProject, memo: memo)
             transcribing = false
             let text = [typed, transcript ?? ""].filter { !$0.isEmpty }.joined(separator: "\n\n")
             if isPeople {

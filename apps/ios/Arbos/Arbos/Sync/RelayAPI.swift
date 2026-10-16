@@ -329,14 +329,15 @@ final class RelayAPI {
 
     /// `POST /proxy/v1/audio/transcriptions` (multipart `file` + `model`) → the memo's text.
     /// The relay meters it on `projectId` (`X-Arbos-Project`).
-    func transcribe(projectId: Id?, data: Data, filename: String, mime: String) async throws -> String {
+    func transcribe(projectId: Id?, data: Data, mime: String) async throws -> String {
         guard let url = URL(string: "\(endpoint.httpUrl)/proxy/v1/audio/transcriptions") else {
             throw RelayError(status: 0, message: "Bad relay URL")
         }
         let boundary = "arbos-\(UUID().uuidString)"
         var body = Data()
-        body.append(Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nwhisper-1\r\n".utf8))
-        body.append(Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"\(filename)\"\r\nContent-Type: \(mime)\r\n\r\n".utf8))
+        // Match Mac: mini-transcribe is much faster than whisper-1 for short voice memos.
+        body.append(Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\ngpt-4o-mini-transcribe\r\n".utf8))
+        body.append(Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"memo.m4a\"\r\nContent-Type: \(mime)\r\n\r\n".utf8))
         body.append(data)
         body.append(Data("\r\n--\(boundary)--\r\n".utf8))
         var req = URLRequest(url: url)
