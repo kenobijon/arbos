@@ -1123,6 +1123,17 @@ pub async fn agent_add(
         .db
         .enqueue_push(&project.id, "people_agent_added", &json!({ "chat_id": id }));
     crate::boxes::ensure_awake(&state, &project.user_id, "people").await;
+    // Agents already in the chat re-read members so they see the newcomer by handle.
+    for m in &cm.members {
+        let Some(pid) = m.project_id() else { continue };
+        if pid == project.id {
+            continue;
+        }
+        let _ = state
+            .db
+            .enqueue_push(pid, "people_agent_added", &json!({ "chat_id": id }));
+        crate::boxes::ensure_awake_project(&state, pid, "people").await;
+    }
     notify_members(
         &state,
         &cm,
@@ -2102,6 +2113,28 @@ mod agent_tests {
             .is_some());
         let pushes = state.db.take_pushes(&alices_project).unwrap();
         assert!(pushes.iter().any(|(_, k, _)| k == "people_agent_added"));
+
+        // A second agent joining tells agents already in the chat to refresh their roster.
+        let bobs_project = project_of(&state, &bob, "Bob");
+        let r = agent_add(
+            State(state.clone()),
+            bob_dev.clone(),
+            Path(chat.clone()),
+            Json(AddAgentBody {
+                project_id: bobs_project.clone(),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let alice_pushes = state.db.take_pushes(&alices_project).unwrap();
+        assert!(
+            alice_pushes
+                .iter()
+                .any(|(_, k, _)| k == "people_agent_added"),
+            "the agent already in the chat re-reads members when another joins"
+        );
+        let bob_pushes = state.db.take_pushes(&bobs_project).unwrap();
+        assert!(bob_pushes.iter().any(|(_, k, _)| k == "people_agent_added"));
 
         // Bob cannot remove Alice's agent; Alice can.
         let r = agent_remove(

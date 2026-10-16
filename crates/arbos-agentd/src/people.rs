@@ -485,18 +485,45 @@ impl Agent {
                 }
             })
             .collect();
-        let others = info.agents().saturating_sub(1);
+        let me_agent = format!("agent:{}", self.cfg.project_id);
+        let other_agents: Vec<String> = info
+            .members
+            .iter()
+            .filter(|m| {
+                m["member"]
+                    .as_str()
+                    .is_some_and(|s| s.starts_with("agent:") && s != me_agent)
+            })
+            .map(|m| {
+                let h = m["handle"].as_str().unwrap_or("?");
+                match m["description"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|d| !d.is_empty())
+                {
+                    Some(d) => {
+                        let short: String = d.chars().take(160).collect();
+                        format!("@{h} ({short})")
+                    }
+                    None => format!("@{h}"),
+                }
+            })
+            .collect();
+        let others_clause = if other_agents.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "; other agents present (they answer when @mentioned or when the reply gate picks them): {}",
+                other_agents.join(", ")
+            )
+        };
         Some(format!(
             "[People chat with {}. You are @{} (the agent of {}'s Project \"{}\"){}. This message is from @{} ({role}); treat it as a request from another person in the conversation and address them by handle. Your reply is read by everyone in the chat.]\n\n",
             people.join(", "),
             info.slug,
             info.owner_handle(),
             self.cfg.project_id,
-            if others > 0 {
-                format!("; {others} other agent(s) are here — they answer when mentioned or when the reply gate picks them")
-            } else {
-                String::new()
-            },
+            others_clause,
             handle,
         ))
     }
