@@ -139,6 +139,7 @@ struct ChatView: View {
     private var hasOtherAgentChats: Bool { agentChats.count > 1 }
     private var name: String {
         if let people { return counterpart.map { "@\($0.handle)" } ?? people.title }
+        if let chat, chat.isGroup, !chat.title.isEmpty { return chat.title }
         return project?.name ?? "Arbos"
     }
     /// Who is working: the streaming agent's handle in a people chat.

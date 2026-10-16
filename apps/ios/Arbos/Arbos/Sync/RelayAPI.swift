@@ -209,7 +209,9 @@ final class RelayAPI {
             title: v["title"] as? String ?? "New chat",
             isPinned: v["is_pinned"] as? Bool ?? false,
             unread: false,
-            lastMessageAt: (v["created_at"] as? NSNumber)?.int64Value ?? 0
+            lastMessageAt: (v["created_at"] as? NSNumber)?.int64Value ?? 0,
+            kind: v["kind"] as? String ?? "chat",
+            participants: ((v["participants"] as? [Any]) ?? []).compactMap { ($0 as? String) ?? ($0 as? [String: Any])?["project_id"] as? String ?? ($0 as? [String: Any])?["id"] as? String }
         )
     }
 

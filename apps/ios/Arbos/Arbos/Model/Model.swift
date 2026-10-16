@@ -204,6 +204,13 @@ struct Chat: Identifiable, Equatable, Codable {
     var isPinned: Bool
     var unread: Bool
     var lastMessageAt: Int64
+    /// `chat` (a plain thread), `group` (an agent-hosted group chat other
+    /// projects/people were added to — F6), `projects` (the system chat).
+    var kind: String = "chat"
+    /// Other projects in an agent-hosted group.
+    var participants: [Id] = []
+
+    var isGroup: Bool { kind == "group" }
 }
 
 enum Role: String, Codable {

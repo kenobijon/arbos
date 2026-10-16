@@ -1761,7 +1761,9 @@ final class AppModel: ObservableObject {
     /// created (ULID order); before any messages have loaded, the pinned
     /// ("main") chat, else the first.
     func primaryChat(of projectId: Id) -> Chat? {
-        let list = chats(of: projectId)
+        let all = chats(of: projectId)
+        // Agent-hosted group chats are their own rows on Home; the primary is a plain thread.
+        let list = all.filter { !$0.isGroup && $0.kind != "projects" }.isEmpty ? all : all.filter { !$0.isGroup && $0.kind != "projects" }
         guard !list.isEmpty else { return nil }
         if let pid = project(projectId)?.primaryChatId, let c = list.first(where: { $0.id == pid }) { return c }
         let counted = list.map { ($0, messages(of: $0.id).count) }
@@ -1769,6 +1771,11 @@ final class AppModel: ObservableObject {
             return counted.max { a, b in a.1 != b.1 ? a.1 < b.1 : a.0.id > b.0.id }?.0
         }
         return list.first { $0.isPinned } ?? list.min { $0.id < $1.id }
+    }
+
+    /// Agent-hosted group chats (F6) across my agents — always visible, flag or not.
+    var agentGroupChats: [Chat] {
+        chats.values.flatMap { $0 }.filter(\.isGroup)
     }
 
     /// Pinned ("main") chat of a project — with multi-chat on; the primary chat otherwise.

@@ -75,6 +75,18 @@ struct HomeView: View {
                                     }
                                     .tint(theme.muted)
                                 }
+                            case .group(let chat):
+                                Button { model.open(chat: chat) } label: {
+                                    AgentGroupRow(chat: chat, preview: chatPreview(chat), time: timeLabel(ms: chatActivity(chat)),
+                                                  streaming: model.isStreaming(chat.id), unread: chat.unread)
+                                }
+                                .buttonStyle(.plain)
+                                .contextMenu {
+                                    Button { model.showProfile(.group(chatId: chat.id, projectId: chat.projectId)) } label: { Label("Group info", systemImage: "person.2") }
+                                }
+                                .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
+                                .listRowSeparator(.hidden)
+                                .listRowBackground(theme.bg)
                             case .people(let chat):
                                 Button { model.open(peopleChat: chat) } label: {
                                     PeopleRow(chat: chat, preview: peoplePreview(chat), time: timeLabel(ms: peopleActivity(chat)),
@@ -311,10 +323,13 @@ struct HomeView: View {
     enum HomeRow: Identifiable {
         case project(Project)
         case people(PeopleChat)
+        /// An agent-hosted group chat (F6): listed on its own, under its host agent's data.
+        case group(Chat)
         var id: String {
             switch self {
             case .project(let p): return "p:" + p.id
             case .people(let c): return "c:" + c.id
+            case .group(let c): return "g:" + c.id
             }
         }
         var activity: Int64 { 0 }
@@ -327,7 +342,21 @@ struct HomeView: View {
         for c in model.peopleChats where q.isEmpty || c.title.lowercased().contains(q) || c.humans.contains { $0.handle.lowercased().contains(q) } {
             rows.append((peopleActivity(c), .people(c)))
         }
+        for c in model.agentGroupChats where (q.isEmpty || c.title.lowercased().contains(q)) && !model.isArchived(c.projectId) {
+            rows.append((chatActivity(c), .group(c)))
+        }
         return rows.sorted { $0.0 > $1.0 }.map(\.1)
+    }
+
+    private func chatActivity(_ c: Chat) -> Int64 {
+        max(c.lastMessageAt, model.messages(of: c.id).last?.createdAt ?? 0)
+    }
+
+    private func chatPreview(_ c: Chat) -> String {
+        guard let m = model.messages(of: c.id).last(where: { !$0.plainText.isEmpty }) else { return "No messages yet" }
+        let line = m.plainText.split(separator: "\n").first.map(String.init) ?? ""
+        let who = m.role == .user ? "You" : (m.senderHandle.map { "@\($0)" } ?? (model.project(c.projectId)?.name ?? ""))
+        return (who.isEmpty ? "" : who + ": ") + HomeView.plain(line)
     }
 
     private func peopleActivity(_ c: PeopleChat) -> Int64 {
@@ -343,10 +372,10 @@ struct HomeView: View {
         return (who.isEmpty ? "" : who + ": ") + HomeView.plain(line)
     }
 
-    /// Newest message with prose across the project's chats.
+    /// Newest message with prose across the project's plain chats (groups have their own rows).
     private func latest(_ p: Project) -> Message? {
         var best: Message? = nil
-        for chat in model.chats(of: p.id) {
+        for chat in model.chats(of: p.id) where !chat.isGroup {
             if let m = model.messages(of: chat.id).last(where: { !$0.plainText.isEmpty }) {
                 if best == nil || m.createdAt > best!.createdAt { best = m }
             }
@@ -549,5 +578,66 @@ struct UnreadBadge: View {
             .frame(minWidth: 20, minHeight: 20)
             .background(Capsule().fill(Color(hex: "#1084FE")!))
             .accessibilityLabel("\(count) unread")
+    }
+}
+
+/// An agent-hosted group chat on Home: the host agent's tree with the other
+/// agents stacked behind it, the chat title, who said what last.
+struct AgentGroupRow: View {
+    @Environment(\.theme) private var theme
+    @EnvironmentObject private var model: AppModel
+    let chat: Chat
+    let preview: String
+    let time: String
+    let streaming: Bool
+    let unread: Bool
+
+    private var host: Project? { model.project(chat.projectId) }
+    private var others: [Project] { chat.participants.compactMap { model.project($0) }.prefix(2).map { $0 } }
+
+    var body: some View {
+        HStack(spacing: 14) {
+            ZStack(alignment: .bottomTrailing) {
+                if let host {
+                    AgentAvatar(project: host, theme: theme, size: 46, working: streaming)
+                } else {
+                    GlassCircle(size: 46) { Image(systemName: "person.2.fill").font(.system(size: 16)).foregroundStyle(theme.text) }
+                }
+                HStack(spacing: -6) {
+                    ForEach(others) { p in
+                        AgentAvatar(project: p, theme: theme, size: 18, still: true)
+                            .overlay(Circle().strokeBorder(theme.bg, lineWidth: 2))
+                    }
+                    if others.isEmpty {
+                        GlassCircle(size: 18) { Image(systemName: "person.2.fill").font(.system(size: 8, weight: .bold)).foregroundStyle(theme.text) }
+                            .overlay(Circle().strokeBorder(theme.bg, lineWidth: 2))
+                    }
+                }
+                .offset(x: 4, y: 3)
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(chat.title.isEmpty ? "Group" : chat.title)
+                        .font(.system(size: Theme.body, weight: .semibold))
+                        .foregroundStyle(theme.text)
+                        .lineLimit(1)
+                    if let host {
+                        Text("· \(host.name)").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted).lineLimit(1)
+                    }
+                    Spacer()
+                    Text(time).font(.system(size: Theme.small)).foregroundStyle(theme.muted)
+                }
+                HStack(spacing: 6) {
+                    Text(preview)
+                        .font(.system(size: Theme.small))
+                        .foregroundStyle(theme.muted)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                    if unread { Circle().fill(Color(hex: "#1084FE")!).frame(width: 8, height: 8) }
+                }
+            }
+        }
+        .padding(.vertical, 12)
+        .contentShape(Rectangle())
     }
 }

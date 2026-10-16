@@ -50,6 +50,15 @@ extension AppModel {
             }
             caughtUp.insert(chat.id)
         }
+        // An agent-hosted group chat (F6): Comms hosts, Affine and Hyper were added.
+        let g = "fx-comms-group-launch"
+        allChats["fx-comms", default: []].append(Chat(id: g, projectId: "fx-comms", title: "Launch copy", isPinned: false, unread: true,
+                                                      lastMessageAt: now - 9 * 60_000, kind: "group", participants: ["fx-affine", "fx-hyper"]))
+        allMessages[g] = [
+            user("g0", g, "Affine, Hyper — align the launch copy with the Discord tone Comms set.", at: now - 30 * 60_000),
+            assistant("g1", g, "Got it. Three variants in the shared doc, all short and casual.", at: now - 9 * 60_000),
+        ]
+        caughtUp.insert(g)
         let c = "fx-comms-main"
         let t0 = now - 14 * 60_000
         allMessages[c] = [
