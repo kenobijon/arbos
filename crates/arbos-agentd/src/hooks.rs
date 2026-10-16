@@ -297,6 +297,18 @@ async fn route_corrected(State(a): State<S>, headers: HeaderMap, Json(b): Json<V
     ok()
 }
 
+/// Memory tree (D77) node counts, build cursor and today's spend; for operators (`arbosctl`,
+/// the roll-out check). Same bearer as the other hooks.
+async fn tree_stats(State(a): State<S>, headers: HeaderMap) -> Response {
+    if !authed(&a, &headers) {
+        return err("unauthorized");
+    }
+    let mut v = a.tree.stats();
+    v["mode"] = json!(a.tree_mode().as_str());
+    v["spend"] = a.tree.spend_report();
+    Json(v).into_response()
+}
+
 pub fn router(agent: Arc<Agent>) -> Router {
     Router::new()
         .route("/hook/route", post(route))
@@ -314,5 +326,6 @@ pub fn router(agent: Arc<Agent>) -> Router {
         .route("/hook/compacted", post(noop))
         .route("/hook/turn-without-route", post(turn_without_route))
         .route("/hook/route-corrected", post(route_corrected))
+        .route("/hook/tree-stats", axum::routing::get(tree_stats))
         .with_state(agent)
 }

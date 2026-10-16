@@ -24,6 +24,7 @@ mod settings;
 mod skills;
 mod store;
 mod sync;
+mod tree;
 mod vault;
 mod workspace;
 
@@ -78,6 +79,26 @@ enum Cmd {
         #[arg(long)]
         out: Option<String>,
     },
+    /// Memory tree (D77) offline check: build the tree over a copy of a workspace's `agentd.db`
+    /// (cards through OpenRouter or the relay proxy, same env rules as eval-responders), walk one
+    /// query as if asked in a new chat, and print the pack with every decision.
+    EvalTree {
+        /// Path to a copy of `<workspace>/.arbos/agentd/agentd.db` (the copy gets the tree tables).
+        #[arg(long)]
+        db: String,
+        /// The question, as the user would type it in a new chat.
+        #[arg(long)]
+        query: String,
+        /// The chat the question is asked in (its own recent window is excluded).
+        #[arg(long, default_value = "new-chat")]
+        chat: String,
+        #[arg(long, default_value = "typesafe/jev-1.14")]
+        scorer: String,
+        #[arg(long, default_value = "anthropic/claude-haiku-5.5")]
+        card_model: String,
+        #[arg(long)]
+        out: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -124,7 +145,59 @@ async fn main() -> Result<()> {
             })
             .await
         }
+        Cmd::EvalTree {
+            db,
+            query,
+            chat,
+            scorer,
+            card_model,
+            out,
+        } => eval_tree(db, query, chat, scorer, card_model, out).await,
     }
+}
+
+async fn eval_tree(
+    db: String,
+    query: String,
+    chat: String,
+    scorer: String,
+    card_model: String,
+    out: Option<String>,
+) -> Result<()> {
+    let llm = match std::env::var("OPENROUTER_API_KEY")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        Some(key) => llm::Llm::with_endpoints(
+            "https://openrouter.ai/api/v1",
+            "https://openrouter.ai/api/alpha/decisions",
+            &key,
+        ),
+        None => {
+            let relay = std::env::var("ARBOS_RELAY_URL")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("set OPENROUTER_API_KEY, or ARBOS_RELAY_URL + ARBOS_BOX_TOKEN")
+                })?;
+            let token = std::env::var("ARBOS_BOX_TOKEN").unwrap_or_default();
+            let relay = relay.trim_end_matches('/');
+            llm::Llm::with_endpoints(
+                &format!("{relay}/proxy/v1"),
+                &format!("{relay}/proxy/decisions"),
+                &token,
+            )
+        }
+    };
+    let store = store::Store::open(std::path::Path::new(&db))?;
+    let tree = tree::Tree::with_ids("eval", "eval", &card_model, store, std::sync::Arc::new(llm));
+    let report = tree.eval(&scorer, &chat, &query).await?;
+    let text = serde_json::to_string_pretty(&report)?;
+    match out {
+        Some(p) => std::fs::write(p, text)?,
+        None => println!("{text}"),
+    }
+    Ok(())
 }
 
 fn mask(s: &str) -> String {

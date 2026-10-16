@@ -403,6 +403,8 @@ pub struct Agent {
     pub sync: SyncHub,
     pub llm: Arc<Llm>,
     pub memory: Arc<Memory>,
+    /// Memory tree (D77): read-only side index over T3, walked by the decision model per turn.
+    pub tree: Arc<crate::tree::Tree>,
     pi: Mutex<Option<Arc<RpcChild>>>,
     current_chat: Mutex<Option<String>>,
     pub turn: Arc<Mutex<Option<TurnState>>>,
@@ -464,6 +466,7 @@ impl Agent {
         let cfg_for_settings = cfg.clone();
         let llm = Arc::new(Llm::new(&cfg));
         let memory = Arc::new(Memory::new(cfg.clone(), store.clone(), llm.clone()));
+        let tree = Arc::new(crate::tree::Tree::new(&cfg, store.clone(), llm.clone()));
         let mut adapters: HashMap<Harness, Arc<dyn HarnessAdapter>> = HashMap::new();
         adapters.insert(
             Harness::Prime,
@@ -483,6 +486,7 @@ impl Agent {
             sync,
             llm,
             memory,
+            tree,
             pi: Mutex::new(None),
             current_chat: Mutex::new(None),
             turn: Arc::new(Mutex::new(None)),
@@ -1152,6 +1156,16 @@ impl Agent {
         }
         *self.turn_images.lock().expect("turn images") = attachments.images;
 
+        // Memory tree (D77): the decision model walks this agent's history and the chosen raw
+        // records ride in front of the message. Falls back to today's behaviour (nothing added)
+        // when the tree is not built, the walk times out, or the daily cap is reached.
+        if let Some(memory_block) = self
+            .tree_pack(chat_id, Some(&user_msg_id), "reply", &user_text)
+            .await
+        {
+            prompt_text = format!("{memory_block}\n\n{prompt_text}");
+        }
+
         let outcome = self
             .drive_turn(chat_id, host, &user_msg_id, &prompt_text, TurnKind::User)
             .await;
@@ -1360,7 +1374,96 @@ impl Agent {
                 tracing::debug!(error = %e, "compaction");
             }
             let _ = me.write_system_prompt();
+            if me.tree_mode() != crate::tree::TreeMode::Off {
+                if let Err(e) = me.tree.build_pass().await {
+                    tracing::debug!(error = %e, "memory tree build pass");
+                }
+            }
         });
+    }
+
+    /// The tree mode for this Project (`decision_model.memory_tree`, else the box env).
+    pub fn tree_mode(&self) -> crate::tree::TreeMode {
+        self.settings
+            .models
+            .try_read()
+            .map(|m| m.decision_cfg.memory_tree)
+            .unwrap_or(self.cfg.decision_cfg.memory_tree)
+    }
+
+    /// Whether `chat_id` sees only its own subtree (people and group chats, D72/D69).
+    pub fn tree_restricted(&self, chat_id: &str) -> bool {
+        self.people.is_people_chat(chat_id)
+            || self
+                .groups
+                .kind_of(chat_id)
+                .map(|k| k != "chat")
+                .unwrap_or(false)
+    }
+
+    /// Walk the memory tree for one turn or subagent launch; `None` = inject nothing.
+    pub async fn tree_pack(
+        &self,
+        chat_id: &str,
+        message_id: Option<&str>,
+        purpose: &str,
+        query_text: &str,
+    ) -> Option<String> {
+        let mode = self.tree_mode();
+        if mode == crate::tree::TreeMode::Off {
+            return None;
+        }
+        let (scorer, asker) = {
+            let m = self.settings.models.read().await;
+            (
+                m.decision_cfg.scorer.clone(),
+                self.people
+                    .asker(chat_id)
+                    .map(|a| format!("@{} ({})", a.handle, a.role))
+                    .unwrap_or_else(|| "the project owner".to_owned()),
+            )
+        };
+        let recent = self
+            .store
+            .t3_thread_before(chat_id, None, 12)
+            .map(|rows| json!({ "n": rows.len(), "ids": rows.iter().map(|r| r.id.clone()).collect::<Vec<_>>() }))
+            .unwrap_or(Value::Null);
+        self.tree
+            .pack_for_turn(
+                mode,
+                &scorer,
+                chat_id,
+                message_id,
+                purpose,
+                self.tree_restricted(chat_id),
+                query_text,
+                &asker,
+                &recent,
+            )
+            .await
+    }
+
+    /// Periodic builder: new leaves become episodes and cards even when no turn runs.
+    pub fn spawn_tree_builder(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+        let me = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(20)).await;
+            loop {
+                if me.tree_mode() != crate::tree::TreeMode::Off {
+                    match me.tree.build_pass().await {
+                        Ok(stats) => {
+                            if stats.get("cards").and_then(Value::as_i64).unwrap_or(0) > 0
+                                || stats.get("leaves").and_then(Value::as_i64).unwrap_or(0) > 0
+                            {
+                                tracing::info!(stats = %stats, "memory tree build pass");
+                            }
+                        }
+                        Err(e) => tracing::debug!(error = %e, "memory tree build pass"),
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        })
     }
 
     /// One prompt to the main pi session, folded into a new assistant message. The caller holds
@@ -2608,7 +2711,7 @@ impl Agent {
             s.push_str(&skills_text);
             s.push_str("\n\n");
         }
-        s.push_str("## Tools\n\nMCP server `arbos`: history_search, history_read, read_thread, memory_search, memory_read (you may search and read the entire history of this Project), peek, sub_llm, remember/recall, projects_list, ask_user (optional widget: choice, multi_select, text, date, form), skills_list/skills_read/skills_save (reusable how-tos), draft_message (an outbound email or chat message shown to the user as an approval card; nothing is sent without their click), connectors_list/connector_call (the user's Gmail, Calendar, Slack, GitHub, Harness Comms through the relay; write/send actions need the user's approval), local_devices/local_run/local_read/local_list (the user's own computer through the arbos-local helper; every command and, unless the user allowed reads, every file read needs the user's approval), deliver_file (hand a file you made to the user as a card), generate_image (an image from a prompt, delivered as a card), vault_list/vault_request/egress/browser_fill (the user's credentials: you only ever get a placeholder such as `arbos-secret://name/value` or `$ARBOS_SECRET_NAME`; send it through `egress`, never try to read or print the value; logins are typed by browser_fill), routines_list/routines_create/routines_update/routines_delete (cron jobs and one-shot reminders on the relay scheduler).\n\n");
+        s.push_str("## Tools\n\nMCP server `arbos`: context_search, context_open, context_around (this Project's memory tree: raw events plus index cards of episodes and threads), history_search, history_read, read_thread, memory_search, memory_read (you may search and read the entire history of this Project), peek, sub_llm, remember/recall, projects_list, ask_user (optional widget: choice, multi_select, text, date, form), skills_list/skills_read/skills_save (reusable how-tos), draft_message (an outbound email or chat message shown to the user as an approval card; nothing is sent without their click), connectors_list/connector_call (the user's Gmail, Calendar, Slack, GitHub, Harness Comms through the relay; write/send actions need the user's approval), local_devices/local_run/local_read/local_list (the user's own computer through the arbos-local helper; every command and, unless the user allowed reads, every file read needs the user's approval), deliver_file (hand a file you made to the user as a card), generate_image (an image from a prompt, delivered as a card), vault_list/vault_request/egress/browser_fill (the user's credentials: you only ever get a placeholder such as `arbos-secret://name/value` or `$ARBOS_SECRET_NAME`; send it through `egress`, never try to read or print the value; logins are typed by browser_fill), routines_list/routines_create/routines_update/routines_delete (cron jobs and one-shot reminders on the relay scheduler).\n\n");
         s.push_str(&crate::media::prompt_section(&self.cfg));
         s.push_str("## Return contract\n\nEnd your final reply with one fenced ```json block:\n{ \"status\": \"done\" | \"blocked\" | \"partial\" | \"needs_input\", \"summary\": \"<= 5 lines\", \"artifacts\": [ { \"kind\": \"file\" | \"commit\" | \"url\" | \"command\", \"ref\": \"…\", \"note\": \"…\" } ], \"acceptance\": [ { \"criterion\": \"…\", \"met\": true, \"evidence\": \"…\" } ], \"open_items\": [], \"proposed_memory\": [ { \"kind\": \"decision\", \"scope\": \"project\", \"text\": \"…\" } ], \"questions\": [] }\n");
         s
@@ -2742,7 +2845,20 @@ impl Agent {
             .insert(subagent_id.clone(), (chat_id.to_owned(), msg_id.clone()));
         let _ = self.store.set_subagent_last_status(&subagent_id, "working");
         let t0 = Instant::now();
-        let pack = self.build_pack(&sub_name, purpose, brief, data_heavy);
+        let mut pack = self.build_pack(&sub_name, purpose, brief, data_heavy);
+        if let Some(memory_block) = self
+            .tree_pack(
+                chat_id,
+                Some(in_reply_to),
+                "subagent",
+                &format!("{purpose}\n{brief}"),
+            )
+            .await
+        {
+            pack.push_str("\n## Retrieved memory\n\n");
+            pack.push_str(&memory_block);
+            pack.push('\n');
+        }
         std::fs::create_dir_all(self.cfg.state_dir.join("packs"))?;
         std::fs::write(
             self.cfg
