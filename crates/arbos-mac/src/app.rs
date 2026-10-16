@@ -180,6 +180,9 @@ pub struct AppState {
     pub window_active: bool,
     /// One-time explainer before the OS asks for notification permission.
     pub notify_prompt: bool,
+    /// Answered this session: never re-arm it on a later sync, even when the
+    /// marker file could not be written.
+    notify_prompt_answered: bool,
     /// Last `FocusChat` sent to the source (dedupe).
     focus_sent: Option<Option<Id>>,
     /// Settings → Channels (F7).
@@ -308,6 +311,7 @@ impl AppState {
             notifier: Notifier::new(),
             window_active: true,
             notify_prompt: false,
+            notify_prompt_answered: false,
             focus_sent: None,
             channels: ChannelsView::default(),
             update: update_state,
@@ -2026,7 +2030,7 @@ impl AppState {
     /// First launch after sign-in: show the explainer once, if the platform
     /// will ask for permission at all.
     fn maybe_prompt_notifications(&mut self) {
-        if self.notify_prompt || !notify::needs_permission() {
+        if self.notify_prompt || self.notify_prompt_answered || !notify::needs_permission() {
             return;
         }
         if !notify::permission_asked(&crate::sync::credentials::config_dir()) {
@@ -2038,12 +2042,14 @@ impl AppState {
         notify::mark_permission_asked(&crate::sync::credentials::config_dir());
         notify::request_permission();
         self.notify_prompt = false;
+        self.notify_prompt_answered = true;
         cx.notify();
     }
 
     pub fn dismiss_notify_prompt(&mut self, cx: &mut Context<Self>) {
         notify::mark_permission_asked(&crate::sync::credentials::config_dir());
         self.notify_prompt = false;
+        self.notify_prompt_answered = true;
         cx.notify();
     }
 
