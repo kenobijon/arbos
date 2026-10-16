@@ -339,13 +339,9 @@ impl Shared {
     fn drop_store(&self, wipe: bool) {
         let taken = self.store.lock().unwrap().take();
         if let (true, Some(s)) = (wipe, taken) {
-            let path = s.path().clone();
+            let path = s.path().to_path_buf();
             drop(s);
-            for suffix in ["", "-wal", "-shm", "-journal"] {
-                let mut p = path.as_os_str().to_owned();
-                p.push(suffix);
-                let _ = std::fs::remove_file(PathBuf::from(p));
-            }
+            store::remove_files(&path);
         }
     }
 
@@ -757,7 +753,10 @@ fn log_first_paint(source: &str, projects: usize) {
     if projects == 0 || FIRST_PAINT_LOGGED.swap(true, Ordering::SeqCst) {
         return;
     }
-    let ms = SOURCE_START.get().map(|t| t.elapsed().as_millis()).unwrap_or(0);
+    let ms = SOURCE_START
+        .get()
+        .map(|t| t.elapsed().as_millis())
+        .unwrap_or(0);
     eprintln!("launch: first-content {ms} ms source={source} projects={projects}");
 }
 
@@ -776,8 +775,10 @@ fn load_store(shared: &Arc<Shared>) {
     let started = std::time::Instant::now();
     let Some((projects, chats, people, docs, pending, selection)) = shared.with_store(|s| {
         (
-            s.get_json::<Vec<Project>>(store::KEY_PROJECTS).unwrap_or_default(),
-            s.get_json::<Vec<Chat>>(store::KEY_CHATS).unwrap_or_default(),
+            s.get_json::<Vec<Project>>(store::KEY_PROJECTS)
+                .unwrap_or_default(),
+            s.get_json::<Vec<Chat>>(store::KEY_CHATS)
+                .unwrap_or_default(),
             s.get_json::<Vec<Id>>(store::KEY_PEOPLE).unwrap_or_default(),
             s.load_docs(),
             s.load_pending(),
@@ -805,8 +806,14 @@ fn load_store(shared: &Arc<Shared>) {
             continue;
         }
         // A doc the registry no longer lists (closed elsewhere) is dropped.
-        let known = saved.room_chat == PROJECT_DOC_CHAT_ID && projects.iter().any(|p| p.id == saved.project_id)
-            || shared.chats.lock().unwrap().iter().any(|c| c.id == saved.key);
+        let known = saved.room_chat == PROJECT_DOC_CHAT_ID
+            && projects.iter().any(|p| p.id == saved.project_id)
+            || shared
+                .chats
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c.id == saved.key);
         if !known {
             shared.with_store(|s| s.delete_doc(&saved.key));
             continue;
@@ -827,7 +834,10 @@ fn load_store(shared: &Arc<Shared>) {
     }
     if let Some((project_id, chat_id)) = selection {
         if projects.iter().any(|p| p.id == project_id) {
-            let _ = shared.events.send(SyncEvent::RestoreSelection { project_id, chat_id });
+            let _ = shared.events.send(SyncEvent::RestoreSelection {
+                project_id,
+                chat_id,
+            });
         }
     }
     emit_store_usage(shared);
@@ -889,10 +899,12 @@ fn start_store_flusher(shared: &Arc<Shared>) {
                 keys.iter()
                     .filter_map(|k| {
                         if let Some(pid) = k.strip_prefix("proj:") {
-                            projects
-                                .iter()
-                                .any(|p| p.id == pid)
-                                .then(|| (k.clone(), (pid.to_string(), PROJECT_DOC_CHAT_ID.to_string())))
+                            projects.iter().any(|p| p.id == pid).then(|| {
+                                (
+                                    k.clone(),
+                                    (pid.to_string(), PROJECT_DOC_CHAT_ID.to_string()),
+                                )
+                            })
                         } else {
                             chats
                                 .iter()
@@ -903,7 +915,13 @@ fn start_store_flusher(shared: &Arc<Shared>) {
                     .collect()
             };
             for (key, (project_id, room_chat)) in rooms {
-                let cursor = shared.room_seq.lock().unwrap().get(&key).copied().unwrap_or(0);
+                let cursor = shared
+                    .room_seq
+                    .lock()
+                    .unwrap()
+                    .get(&key)
+                    .copied()
+                    .unwrap_or(0);
                 let snapshot = {
                     let docs = shared.docs.lock().unwrap();
                     let Some(doc) = docs.get(&key) else { continue };
@@ -914,7 +932,9 @@ fn start_store_flusher(shared: &Arc<Shared>) {
                 };
                 match snapshot {
                     Ok(bytes) => {
-                        shared.with_store(|s| s.save_doc(&key, &project_id, &room_chat, cursor, &bytes));
+                        shared.with_store(|s| {
+                            s.save_doc(&key, &project_id, &room_chat, cursor, &bytes)
+                        });
                     }
                     Err(err) => eprintln!("store: export {key}: {err}"),
                 }
@@ -1719,7 +1739,11 @@ fn ensure_room_with(
     shared.docs.lock().unwrap().insert(key.to_string(), doc);
     if from_store {
         // Paint from disk now; the room's backfill only adds what is new.
-        shared.room_seq.lock().unwrap().insert(key.to_string(), cursor);
+        shared
+            .room_seq
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), cursor);
         if is_project_doc {
             emit_project_doc(shared, project_id);
             apply_project_doc_status(shared, project_id);
@@ -1740,7 +1764,10 @@ fn ensure_room_with(
     let key3 = key.to_string();
     let room_chat = room_chat.to_string();
     let task = tokio::spawn(async move {
-        room_loop(shared3, project, key3, room_chat, cursor, pending, local_rx, cmd_rx).await;
+        room_loop(
+            shared3, project, key3, room_chat, cursor, pending, local_rx, cmd_rx,
+        )
+        .await;
     });
     shared
         .rooms
@@ -2114,14 +2141,20 @@ async fn run_session(
                     if let Some(doc) = docs.get(key) {
                         match doc.doc.import(&bytes) {
                             Ok(_) => *cursor = (*cursor).max(seq.max(state.checkpoint_seq)),
-                            Err(err) => eprintln!("relay room {room}: checkpoint import failed: {err}"),
+                            Err(err) => {
+                                eprintln!("relay room {room}: checkpoint import failed: {err}")
+                            }
                         }
                     }
                 }
                 Err(err) => eprintln!("relay room {room}: checkpoint fetch failed: {err:#}"),
             }
         }
-        shared.room_seq.lock().unwrap().insert(key.to_string(), *cursor);
+        shared
+            .room_seq
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), *cursor);
         shared.mark_dirty(key);
     }
     // Own rows are requested too: a row pushed by this device but saved before

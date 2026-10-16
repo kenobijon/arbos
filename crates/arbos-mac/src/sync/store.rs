@@ -9,7 +9,7 @@
 //! per-doc and total caps with least-recently-opened eviction.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -25,7 +25,6 @@ pub const TOTAL_CAP_BYTES: i64 = 250_000_000;
 pub const KEY_PROJECTS: &str = "projects";
 pub const KEY_CHATS: &str = "chats";
 pub const KEY_PEOPLE: &str = "people";
-pub const KEY_ACCOUNT: &str = "account";
 pub const KEY_SELECTION: &str = "selection";
 
 #[derive(Clone, Debug)]
@@ -86,7 +85,7 @@ impl Store {
         }
     }
 
-    fn open_at(path: &PathBuf) -> Result<Store> {
+    fn open_at(path: &Path) -> Result<Store> {
         let conn = Connection::open(path).with_context(|| format!("open {}", path.display()))?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
@@ -111,16 +110,11 @@ impl Store {
         ))?;
         Ok(Store {
             conn,
-            path: path.clone(),
+            path: path.to_path_buf(),
         })
     }
 
-    /// Sign-out: delete the file (and its WAL side files).
-    pub fn wipe(relay_url: &str, device_id: &str) {
-        remove_files(&file_path(relay_url, device_id));
-    }
-
-    pub fn path(&self) -> &PathBuf {
+    pub fn path(&self) -> &Path {
         &self.path
     }
 
@@ -161,7 +155,14 @@ impl Store {
 
     /// Snapshot and cursor land in one statement so they can never disagree.
     /// A snapshot over the per-doc cap replaces nothing and drops the old row.
-    pub fn save_doc(&self, key: &str, project_id: &str, room_chat: &str, cursor: i64, snapshot: &[u8]) {
+    pub fn save_doc(
+        &self,
+        key: &str,
+        project_id: &str,
+        room_chat: &str,
+        cursor: i64,
+        snapshot: &[u8],
+    ) {
         if snapshot.len() > PER_DOC_CAP_BYTES {
             let _ = self
                 .conn
@@ -264,7 +265,9 @@ impl Store {
             .unwrap_or((0, 0));
         let kv: i64 = self
             .conn
-            .query_row("SELECT COALESCE(SUM(LENGTH(v)), 0) FROM kv", [], |r| r.get(0))
+            .query_row("SELECT COALESCE(SUM(LENGTH(v)), 0) FROM kv", [], |r| {
+                r.get(0)
+            })
             .unwrap_or(0);
         Usage {
             bytes: docs.0 + kv,
@@ -302,16 +305,10 @@ impl Store {
         }
         eprintln!("store: evicted down to {total} bytes");
     }
-
-    /// Everything except the file itself ("Clear saved chats").
-    pub fn clear_all(&self) {
-        let _ = self
-            .conn
-            .execute_batch("DELETE FROM docs; DELETE FROM pending; DELETE FROM kv; VACUUM;");
-    }
 }
 
-fn remove_files(path: &PathBuf) {
+/// Delete the database and its WAL side files (sign-out, corrupt file).
+pub fn remove_files(path: &Path) {
     for suffix in ["", "-wal", "-shm", "-journal"] {
         let mut p = path.as_os_str().to_owned();
         p.push(suffix);
