@@ -87,6 +87,8 @@ struct ChatView: View {
     /// Chip-picked addressee in a people chat: `agent:…`, `user:…`, or `"everyone"`.
     /// Nil means infer from the last agent reply (carry the convo) or the human counterpart.
     @State private var talkTo: String?
+    /// True while a swipe-left is creating the next agent chat (avoids double create).
+    @State private var swipeCreating = false
 
     private var project: Project? { model.project(projectId) }
     private var chat: Chat? { model.chat(chatId) }
@@ -215,6 +217,8 @@ struct ChatView: View {
         .navigationBarBackButtonHidden(true)
         // Hiding the system back button also disables the edge-swipe pop; re-enable it.
         .background(InteractivePopGestureEnabler())
+        // Full-chat swipes: right → Home, left → next agent chat (or create), up → archive + previous.
+        .simultaneousGesture(chatNavSwipe)
         .sheet(isPresented: $showModelPicker, onDismiss: demoDismissed) {
             if let project {
                 ModelPickerView(project: project).environmentObject(model).environment(\.theme, theme)
@@ -540,6 +544,78 @@ struct ChatView: View {
         }
         .padding(.horizontal, 16)
         .padding(.top, 6)
+    }
+
+    // MARK: Chat navigation swipes
+
+    /// Right → Home; left → next chat with this agent (create if none); up → close and open previous.
+    private var chatNavSwipe: some Gesture {
+        DragGesture(minimumDistance: 50, coordinateSpace: .local)
+            .onEnded { value in handleChatSwipe(value) }
+    }
+
+    private func handleChatSwipe(_ value: DragGesture.Value) {
+        let dx = value.translation.width
+        let dy = value.translation.height
+        let vx = value.velocity.width
+        let vy = value.velocity.height
+        let absX = abs(dx), absY = abs(dy)
+
+        // Horizontal: clear sideways flick (vertical scroll stays dominant otherwise).
+        if absX > 70, absX > absY * 1.25, abs(vx) >= abs(vy) || absX > 120 {
+            if dx > 0 {
+                composerFocused = false
+                dismiss()
+            } else if !isPeople {
+                goToNextAgentChat()
+            }
+            return
+        }
+
+        // Up: archive this agent chat and open the previous one (not people chats).
+        // High distance + velocity so ordinary transcript scrolling does not fire this.
+        if !isPeople, dy < -140, value.predictedEndTranslation.height < -280,
+           absY > absX * 2, vy < -900 {
+            archiveAgentChatAndGoPrevious()
+        }
+    }
+
+    /// Swipe left: next thread with this agent, or create one when there is no next.
+    private func goToNextAgentChat() {
+        guard !isPeople, !swipeCreating else { return }
+        let list = agentChats
+        if let i = list.firstIndex(where: { $0.id == chatId }), i + 1 < list.count {
+            model.open(chat: list[i + 1])
+            return
+        }
+        swipeCreating = true
+        Task {
+            if let c = await model.newChat(projectId: projectId) {
+                model.open(chat: c)
+            }
+            swipeCreating = false
+        }
+    }
+
+    /// Swipe up: close the current non-pinned chat and open the previous thread (or Home).
+    private func archiveAgentChatAndGoPrevious() {
+        guard !isPeople, let current = chat else { return }
+        let list = agentChats
+        guard let i = list.firstIndex(where: { $0.id == chatId }) else {
+            composerFocused = false
+            dismiss()
+            return
+        }
+        let previous: Chat? = i > 0 ? list[i - 1] : nil
+        if !current.isPinned {
+            model.closeChat(current)
+        }
+        if let previous {
+            model.open(chat: previous)
+        } else {
+            composerFocused = false
+            dismiss()
+        }
     }
 
     /// Chevron when this agent has other chats (instant Menu); plus when alone (new chat).
