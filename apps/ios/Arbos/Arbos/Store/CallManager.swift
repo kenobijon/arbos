@@ -453,8 +453,9 @@ final class CallManager: NSObject, ObservableObject {
         if let dir = DebugHooks.micDir {
             // No audio device on a headless simulator: the engine renders without one and the
             // "microphone" is whatever MicInjector feeds from `dir`.
-            try? AudioManager.shared.setManualRenderingMode(true)
+            if DebugHooks.micManual { try? AudioManager.shared.setManualRenderingMode(true) }
             AudioManager.shared.mixer.micVolume = 0
+            AudioManager.shared.mixer.appVolume = 1
             micInjector = MicInjector(directory: dir)
         }
         #endif
