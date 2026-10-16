@@ -924,7 +924,13 @@ extension CallManager: RoomDelegate {
 
 extension CallManager: CXProviderDelegate {
     nonisolated func providerDidReset(_ provider: CXProvider) {
-        Task { @MainActor in await self.teardown(leave: true, reason: .failed) }
+        // CallKit lost its state (its daemon restarted; routine on the simulator). The LiveKit
+        // call is fine: forget the CallKit handle and keep talking rather than hang up on
+        // everyone. The system call UI simply stops tracking this call.
+        Task { @MainActor in
+            log.notice("CallKit provider reset; keeping the call without a CallKit handle")
+            self.cxUUID = nil
+        }
     }
 
     nonisolated func provider(_ provider: CXProvider, perform action: CXStartCallAction) {
