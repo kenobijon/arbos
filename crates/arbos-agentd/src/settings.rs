@@ -60,6 +60,8 @@ pub struct DecisionConfig {
     pub scorer: String,
     /// An agent replies when its yes-probability is at or above this.
     pub threshold: f64,
+    /// Memory tree (D77): `on` injects the walked pack, `log` only records it, `off` disables.
+    pub memory_tree: crate::tree::TreeMode,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -102,6 +104,11 @@ impl Models {
                 .and_then(Value::as_f64)
                 .filter(|t| (0.0..=1.0).contains(t))
                 .unwrap_or(d.threshold),
+            memory_tree: v
+                .pointer("/decision_model/memory_tree")
+                .and_then(Value::as_str)
+                .and_then(crate::tree::TreeMode::parse)
+                .unwrap_or(d.memory_tree),
         };
         Models {
             talking: slot("talking_model", &fallback.talking),
@@ -120,6 +127,7 @@ impl Models {
                 "provider": self.decision_cfg.provider.as_str(),
                 "scorer": self.decision_cfg.scorer,
                 "threshold": self.decision_cfg.threshold,
+                "memory_tree": self.decision_cfg.memory_tree.as_str(),
             },
         })
     }

@@ -32,6 +32,14 @@ const DRAFT_CHANNELS: &[&str] = &["email", "slack", "telegram", "whatsapp", "sms
 
 fn tools() -> Value {
     let mut list = json!([
+        { "name": "context_search", "description": "Search this agent's memory tree: raw events (every past message, tool call and result) plus index cards of episodes and threads. Returns ids for context_open / context_around. Scoped to what this chat may see.",
+          "inputSchema": { "type": "object", "properties": { "query": { "type": "string" }, "limit": { "type": "integer" } }, "required": ["query"] } },
+        { "name": "context_open", "description": "Open a memory-tree node: a thread or project returns its child cards; an episode returns its raw events verbatim; an event id returns the full text (up to 12k chars).",
+          "inputSchema": { "type": "object", "properties": { "node_id": { "type": "string" } }, "required": ["node_id"] } },
+        { "name": "context_children", "description": "Alias of context_open for thread/episode nodes.",
+          "inputSchema": { "type": "object", "properties": { "node_id": { "type": "string" } }, "required": ["node_id"] } },
+        { "name": "context_around", "description": "The raw events just before and after one event in the same thread.",
+          "inputSchema": { "type": "object", "properties": { "leaf_id": { "type": "string" }, "before": { "type": "integer" }, "after": { "type": "integer" } }, "required": ["leaf_id"] } },
         { "name": "history_search", "description": "Search this Project's whole history (chats, subagent sessions, tool outputs). Ranked hits with snippets; every hit id is readable with history_read.",
           "inputSchema": { "type": "object", "properties": { "query": { "type": "string" }, "thread_id": { "type": "string" }, "kind": { "type": "string", "enum": ["user","assistant","tool_call","tool_output","compaction","memory","session_entry"] }, "limit": { "type": "integer", "maximum": 20 }, "cursor": { "type": "string" } }, "required": ["query"] } },
         { "name": "history_read", "description": "Read one history entry verbatim by id, or a range {thread_id, from_id, to_id}. Big entries return a handle for peek.",
@@ -158,6 +166,36 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
         }
     }
     match name {
+        "context_search" => {
+            let q = s("query").unwrap_or_default();
+            let limit = args.get("limit").and_then(Value::as_i64).unwrap_or(10);
+            let restricted = a.tree_restricted(&chat_for_scratch);
+            text_result(
+                a.tree
+                    .tool_search(&chat_for_scratch, restricted, &q, limit)
+                    .to_string(),
+            )
+        }
+        "context_open" | "context_children" => {
+            let id = s("node_id").unwrap_or_default();
+            let restricted = a.tree_restricted(&chat_for_scratch);
+            text_result(
+                a.tree
+                    .tool_open(&chat_for_scratch, restricted, &id)
+                    .to_string(),
+            )
+        }
+        "context_around" => {
+            let id = s("leaf_id").unwrap_or_default();
+            let restricted = a.tree_restricted(&chat_for_scratch);
+            let before = args.get("before").and_then(Value::as_i64).unwrap_or(4);
+            let after = args.get("after").and_then(Value::as_i64).unwrap_or(4);
+            text_result(
+                a.tree
+                    .tool_around(&chat_for_scratch, restricted, &id, before, after)
+                    .to_string(),
+            )
+        }
         "history_search" => {
             let q = s("query").unwrap_or_default();
             let limit = args

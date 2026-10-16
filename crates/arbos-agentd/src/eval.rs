@@ -302,6 +302,7 @@ pub async fn run(args: EvalArgs) -> Result<()> {
             .clone()
             .unwrap_or_else(|| DEFAULT_DECISION_SCORER.to_owned()),
         threshold: args.threshold.unwrap_or(DEFAULT_DECISION_THRESHOLD),
+        memory_tree: crate::tree::TreeMode::Off,
     };
     let providers: Vec<DecisionProvider> = match args.provider.as_str() {
         "jev" => vec![DecisionProvider::Jev],

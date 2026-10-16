@@ -32,6 +32,13 @@ pub struct GroupState {
     projects_tab: Mutex<Option<String>>,
 }
 
+impl GroupState {
+    /// The registry kind of a chat (`group`, `people`, …) when known.
+    pub fn kind_of(&self, chat_id: &str) -> Option<String> {
+        self.kinds.lock().expect("groups").get(chat_id).cloned()
+    }
+}
+
 /// The group a turn belongs to: the host side (the chat itself is a group) or the participant
 /// side (the message arrived from a group through the relay).
 #[derive(Debug, Clone)]

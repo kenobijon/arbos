@@ -263,9 +263,14 @@ impl Store {
         Ok(Self(Arc::new(Mutex::new(c))))
     }
 
-    fn with<T>(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> Result<T> {
+    pub(crate) fn with<T>(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> Result<T> {
         let c = self.0.lock().expect("store lock");
         Ok(f(&c)?)
+    }
+
+    /// Run additive DDL (a module's own tables, `CREATE … IF NOT EXISTS`).
+    pub(crate) fn exec_batch(&self, sql: &str) -> Result<()> {
+        self.with(|c| c.execute_batch(sql))
     }
 
     pub fn meta_get(&self, key: &str) -> Result<Option<String>> {
@@ -598,7 +603,30 @@ impl Store {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<(T3Row, f64, String)>> {
-        let q = fts_query(query);
+        self.t3_search_fts(&fts_query(query), thread_id, kind, limit, offset)
+    }
+
+    /// Keyword candidates for the memory tree: any of the content words (OR), ranked by bm25.
+    pub fn t3_search_any(&self, words: &[String], limit: i64) -> Result<Vec<(T3Row, f64, String)>> {
+        let terms: Vec<String> = words
+            .iter()
+            .map(|w| format!("\"{}\"", w.replace('"', "")))
+            .filter(|w| w.len() > 2)
+            .collect();
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.t3_search_fts(&terms.join(" OR "), None, None, limit, 0)
+    }
+
+    fn t3_search_fts(
+        &self,
+        q: &str,
+        thread_id: Option<&str>,
+        kind: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<(T3Row, f64, String)>> {
         self.with(|c| {
             let mut st = c.prepare(
                 "SELECT t.id, t.thread_id, t.subagent_id, t.session_id, t.kind, t.role, t.at, t.text, t.size, bm25(t3_fts) AS score,

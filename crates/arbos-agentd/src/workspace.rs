@@ -231,6 +231,7 @@ impl Supervisor {
             agent.dispatch_push(p.clone());
         }
         agent.spawn_push_poller();
+        tasks.push(agent.spawn_tree_builder());
 
         // Prime ask_user marker directory (D64 skill) → InputRequested.
         {
