@@ -722,6 +722,11 @@ async fn stale_wake_check(state: &AppState, user_id: &str, since: i64) -> bool {
     if connected || now_ms() - since < HELLO_DEADLINE_MS {
         return false;
     }
+    // An upgrade stops agentd on purpose while it packs /work (minutes for a multi-GB
+    // workspace); bouncing the sandbox underneath it kills the toolbox session mid-pack.
+    if state.upgrading.lock().await.contains_key(user_id) {
+        return false;
+    }
     let bounces = {
         let mut m = state.stale_bounces.lock().await;
         let n = m.entry(user_id.to_owned()).or_insert(0);
