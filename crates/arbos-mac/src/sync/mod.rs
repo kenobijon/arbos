@@ -109,6 +109,12 @@ pub enum SyncEvent {
         last_chats: HashMap<Id, Id>,
         archived: Vec<Id>,
     },
+    /// §9c: a chat's archive state changed for me (another device, `chat_archived`
+    /// push) — `None` = unarchived.
+    ChatArchived {
+        chat_id: Id,
+        archived_at: Option<u64>,
+    },
     /// Bytes and chat count kept on this Mac (Settings → About).
     StoreUsage {
         bytes: i64,
@@ -370,8 +376,9 @@ pub enum ClientCommand {
         chat_id: Id,
         participant: Id,
     },
-    /// Archive (hide from the tab strip) or unarchive a chat on this Mac only;
-    /// the relay keeps it open, history stays in context, memory and search.
+    /// Archive (hide from the tab strip) or unarchive a chat for me on every
+    /// device (§9c `PUT /chats/{id}/settings {archived}`); the relay keeps it
+    /// open, history stays in context, memory and search.
     ArchiveChat {
         chat_id: Id,
         archived: bool,

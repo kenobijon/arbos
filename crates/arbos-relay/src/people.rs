@@ -308,8 +308,10 @@ pub fn chat_json(state: &AppState, cm: &ChatWithMembers, me: &str, device_id: &s
         .any(|m| m["status"].as_str() == Some("invited"));
     let has_agent = cm.members.iter().any(|m| m.project_id().is_some());
     let mine = cm.members.iter().find(|m| m.user_id() == Some(me));
+    let archived_at = state.db.chat_archived_at(me, &cm.chat.id).ok().flatten();
     json!({
         "id": cm.chat.id,
+        "archived_at": archived_at,
         "kind": cm.chat.kind,
         "created_by": cm.chat.created_by,
         "created_at": cm.chat.created_at,
@@ -326,6 +328,7 @@ pub fn chat_json(state: &AppState, cm: &ChatWithMembers, me: &str, device_id: &s
         "me": {
             "role": mine.map(|m| m.role.clone()),
             "muted": mine.is_some_and(|m| m.muted),
+            "archived_at": archived_at,
             "read_receipts": mine.map(|m| m.settings.get("read_receipts").and_then(Value::as_bool).unwrap_or(true)).unwrap_or(true),
         },
     })
@@ -1591,6 +1594,37 @@ pub struct ChatSettingsBody {
     pub read_receipts: Option<bool>,
     #[serde(default)]
     pub muted: Option<bool>,
+    /// Archive (hide) this chat for me on every device; `false` brings it back (D78).
+    #[serde(default)]
+    pub archived: Option<bool>,
+}
+
+/// Flip the archive state for the caller and tell their other devices (`chat_archived`).
+fn apply_archive(
+    state: &AppState,
+    principal: &Principal,
+    me: &str,
+    chat_id: &str,
+    project_label: &str,
+    archived: bool,
+) -> Result<Option<i64>, Box<Response>> {
+    let at = state
+        .db
+        .set_chat_archived(me, chat_id, archived)
+        .map_err(|e| {
+            Box::new(api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db",
+                e.to_string(),
+            ))
+        })?;
+    let _ = state.db.push_user_except(
+        me,
+        &device_of(principal),
+        "chat_archived",
+        &json!({ "chat_id": chat_id, "project_id": project_label, "archived_at": at }),
+    );
+    Ok(at)
 }
 
 /// `PUT /chats/{id}/settings {"read_receipts"?, "muted"?}` — my own settings for this chat.
@@ -1603,10 +1637,45 @@ pub async fn chat_settings(
     Path(id): Path<String>,
     Json(b): Json<ChatSettingsBody>,
 ) -> Response {
+    // A project chat (plain or group, own or shared) reaches here too: only `archived` applies.
+    if state.db.people_chat(&id).ok().flatten().is_none() {
+        let me = match user_of(&principal) {
+            Ok(u) => u,
+            Err(r) => return *r,
+        };
+        let Ok(Some(project_id)) = state.db.chat_project_id(&id) else {
+            return api_error(StatusCode::NOT_FOUND, "not_found", "no such chat");
+        };
+        if !state.allows(&principal, &project_id) {
+            return api_error(StatusCode::FORBIDDEN, "not_member", "not your chat");
+        }
+        if b.read_receipts.is_some() || b.muted.is_some() {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                "only archived applies to a project chat",
+            );
+        }
+        if let Some(a) = b.archived {
+            if let Err(r) = apply_archive(&state, &principal, &me, &id, &project_id, a) {
+                return *r;
+            }
+        }
+        return match state.db.chat(&project_id, &id) {
+            Ok(Some(c)) => Json(crate::api::chat_json_for(&state, &c, Some(&me))).into_response(),
+            Ok(None) => api_error(StatusCode::NOT_FOUND, "not_found", "no such chat"),
+            Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+        };
+    }
     let (me, cm) = match member_chat(&state, &principal, &id) {
         Ok(v) => v,
         Err(r) => return *r,
     };
+    if let Some(a) = b.archived {
+        if let Err(r) = apply_archive(&state, &principal, &me, &id, PEOPLE_PROJECT, a) {
+            return *r;
+        }
+    }
     let member = format!("user:{me}");
     let mut settings = cm
         .members
@@ -1952,9 +2021,18 @@ pub fn on_room_push(
         "sender": crate::notify::Sender::user(state, user_id).json(),
     });
     for other in humans.iter().filter(|u| *u != user_id) {
-        let _ = state
+        // Archived for them: hidden on purpose, no notification (D78).
+        if state
             .db
-            .push_user(other, "people_message", &payload, Some(chat_id));
+            .chat_archived_at(other, chat_id)
+            .ok()
+            .flatten()
+            .is_none()
+        {
+            let _ = state
+                .db
+                .push_user(other, "people_message", &payload, Some(chat_id));
+        }
         // A message un-hides a chat that was "deleted for me" on any of their devices.
         if let Ok(devices) = state.db.devices_of_user(other) {
             for d in devices {

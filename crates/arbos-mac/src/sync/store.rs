@@ -31,6 +31,8 @@ pub const KEY_SELECTION: &str = "selection";
 pub const KEY_LAST_CHATS: &str = "last_chats";
 /// Chat ids the user archived on this Mac (hidden from the tab strip, kept everywhere else).
 pub const KEY_ARCHIVED_CHATS: &str = "archived_chats";
+/// Set once the local archived ids were pushed up to the relay (§9c union migration).
+pub const KEY_ARCHIVE_MIGRATED: &str = "archive_migrated";
 
 #[derive(Clone, Debug)]
 pub struct SavedDoc {

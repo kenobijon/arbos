@@ -21,6 +21,7 @@
     "people2": {
       "kind": "people_group",
       "title": "group",
+      "people": ["@jacob", "@sam"],
       "agents": [
         { "id": "p_research", "name": "@research", "role": "Jacob's research agent: literature search, web research, fact checking, summaries.", "host": false },
         { "id": "p_coder", "name": "@coder", "role": "Sam's coding agent: writes, reviews and debugs code; runs tests; opens pull requests.", "host": false }
@@ -29,6 +30,7 @@
     "people3": {
       "kind": "people_group",
       "title": "group",
+      "people": ["@ana", "@ben", "@cem"],
       "agents": [
         { "id": "p_planner", "name": "@planner", "role": "Trip planning: itineraries, flights, hotels, visas, packing lists.", "host": false },
         { "id": "p_chef", "name": "@chef", "role": "Recipes, meal plans, grocery lists, cooking technique.", "host": false },
@@ -82,6 +84,9 @@
     { "id": "c43", "roster": "people3", "from": "@cem", "text": "All humans say hi", "recent": [], "expected": [], "note": "humans only, nobody" },
     { "id": "c44", "roster": "people3", "from": "@cem", "text": "All humans say hi", "recent": [{ "from": "@cem", "text": "All agents say hi" }, { "from": "@planner (agent)", "text": "Hi — planner here." }], "expected": [], "note": "humans only after an agent just spoke" },
     { "id": "c45", "roster": "people2", "from": "@jacob", "text": "All agents say hi", "recent": [], "expected": ["p_research", "p_coder"], "note": "all agents greeting" },
-    { "id": "c46", "roster": "people2", "from": "@jacob", "text": "All humans say hi", "recent": [{ "from": "@jacob", "text": "All agents say hi" }, { "from": "@research (agent)", "text": "Hi everyone — research here." }], "expected": [], "note": "humans only; prior agent greeting must not continue" }
+    { "id": "c46", "roster": "people2", "from": "@jacob", "text": "All humans say hi", "recent": [{ "from": "@jacob", "text": "All agents say hi" }, { "from": "@research (agent)", "text": "Hi everyone — research here." }], "expected": [], "note": "humans only; prior agent greeting must not continue" },
+    { "id": "c47", "roster": "people2", "from": "@jacob", "text": "Call?", "recent": [{ "from": "@jacob", "text": "Yo Jen" }, { "from": "@jacob", "text": "Ken" }], "expected": [], "note": "short call invite after pinging people by name; agents stay quiet" },
+    { "id": "c48", "roster": "people2", "from": "@sam", "text": "Ken", "recent": [{ "from": "@sam", "text": "Yo Jen" }], "expected": [], "note": "first-name ping to a person, nobody" },
+    { "id": "c49", "roster": "people3", "from": "@cem", "text": "you free for a quick call?", "recent": [{ "from": "@cem", "text": "hey Ben" }], "expected": [], "note": "call invite to a person after a human greeting" }
   ]
 }

@@ -190,6 +190,14 @@ fn decision_cfg_of(models: &Value) -> DecisionConfig {
             .and_then(Value::as_f64)
             .filter(|t| (0.0..=1.0).contains(t))
             .unwrap_or(env_threshold),
+        memory_tree: models
+            .pointer("/decision_model/memory_tree")
+            .and_then(Value::as_str)
+            .and_then(crate::tree::TreeMode::parse)
+            .unwrap_or_else(|| {
+                crate::tree::TreeMode::parse(&env_or("ARBOS_MEMORY_TREE", "on"))
+                    .unwrap_or(crate::tree::TreeMode::On)
+            }),
     }
 }
 

@@ -508,6 +508,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 participants: Vec::new(),
                 unread: false,
                 last_message_at: now_ms(),
+                archived_at: None,
             });
             emit_chats(shared);
             let _ = shared.events.send(SyncEvent::ChatSnapshot {
@@ -542,6 +543,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 participants: all,
                 unread: false,
                 last_message_at: now_ms(),
+                archived_at: None,
             };
             shared.chats.lock().unwrap().push(chat.clone());
             emit_chats(shared);
@@ -696,6 +698,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 participants: Vec::new(),
                 unread: false,
                 last_message_at: now_ms(),
+                archived_at: None,
             });
             add_doc(shared, ChatDoc::new(&chat_id, &id));
             emit_projects(shared);
@@ -3096,6 +3099,7 @@ fn seed_chats() -> Vec<Chat> {
         participants: Vec::new(),
         unread: false,
         last_message_at: t.saturating_sub(ago_min * 60_000),
+        archived_at: None,
     };
     vec![
         chat(CHAT_ARBOS_MAIN, PROJECT_ARBOS, "Arbos", true, 3),
@@ -3965,6 +3969,7 @@ fn seed_people_chats() -> Vec<Chat> {
             participants: Vec::new(),
             unread: true,
             last_message_at: now_ms().saturating_sub(12 * 60_000),
+            archived_at: None,
         },
         Chat {
             id: SHARED_STUDIO_CHAT.into(),
@@ -3976,6 +3981,7 @@ fn seed_people_chats() -> Vec<Chat> {
             participants: Vec::new(),
             unread: false,
             last_message_at: now_ms().saturating_sub(50 * 60_000),
+            archived_at: None,
         },
     ]
 }
@@ -4227,6 +4233,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                 participants: Vec::new(),
                 unread: false,
                 last_message_at: now_ms(),
+                archived_at: None,
             });
             add_doc(shared, ChatDoc::new(&id, "people"));
             emit_projects(shared);

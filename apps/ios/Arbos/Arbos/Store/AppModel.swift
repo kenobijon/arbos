@@ -268,6 +268,7 @@ final class AppModel: ObservableObject {
             guard let self, self.appActive else { return nil }
             return self.visibleChatId
         }
+        PushManager.shared.isChatArchived = { [weak self] id in self?.isChatArchived(id) ?? false }
         NotificationCenter.default.addObserver(forName: PushManager.openChat, object: nil, queue: .main) { [weak self] n in
             guard let self, let cid = n.userInfo?["chat_id"] as? String else { return }
             let pid = (n.userInfo?["project_id"] as? String) ?? peopleSlot
@@ -359,6 +360,8 @@ final class AppModel: ObservableObject {
         }
         calls.calleeName = { [weak self] chatId in
             guard let self, let chat = self.peopleChat(chatId) else { return nil }
+            // Groups name the chat, not the first other human (that looked like a DM to Kenobi).
+            if chat.isGroup { return chat.title.isEmpty ? "Group" : chat.title }
             return chat.counterpart(me: self.user?.id)?.displayName
         }
         // Presence carries `in_call` for the chat we are talking in.
@@ -451,10 +454,20 @@ final class AppModel: ObservableObject {
 
     /// Everything unread: people chats by sequence, project chats by flag.
     var unreadTotal: Int {
-        if !unreadCounts.isEmpty { return unreadCounts.values.reduce(0, +) }
+        // Archived agent chats never badge (§9c).
+        if !unreadCounts.isEmpty {
+            return unreadCounts.reduce(0) { $0 + (isChatArchived($1.key) ? 0 : $1.value) }
+        }
         let people = peopleChats.reduce(0) { $0 + unreadCount(for: $1) }
-        let projects = chats.values.flatMap { $0 }.filter(\.unread).count
+        let projects = chats.values.flatMap { $0 }.filter { $0.unread && !isChatArchived($0.id) }.count
         return people + projects
+    }
+
+    /// Unread rows of one agent chat for its dot: none while archived.
+    func chatHasUnread(_ chat: Chat) -> Bool {
+        if isChatArchived(chat.id) { return false }
+        if chat.unread { return true }
+        return (unreadCounts[chat.id] ?? 0) > 0 && chat.id != visibleChatId
     }
 
     func unreadCount(for chat: PeopleChat) -> Int {
@@ -743,7 +756,9 @@ final class AppModel: ObservableObject {
             }
             projects = newProjects.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
             chats = newChats
+            adoptRelayArchiveState(newChats)
             saveRegistryCache()
+            await flushArchiveWrites()
             await refreshMachine()
             for p in newProjects {
                 ensureRoom(projectId: p.id, key: projectDocKey(p.id), roomChat: projectDocChatId)
@@ -1729,6 +1744,8 @@ final class AppModel: ObservableObject {
                 await refreshRegistry()
             case "project_member_removed":
                 await refreshRegistry()
+            case "chat_archived":
+                applyArchivePush(p)
             default:
                 break
             }
@@ -1773,23 +1790,127 @@ final class AppModel: ObservableObject {
         didSet { UserDefaults.standard.set(multiChatEnabled, forKey: "multiChatEnabled") }
     }
 
-    // MARK: Chat archive (device-local, nothing deleted)
+    // MARK: Chat archive (§9c: per user, synced through the relay; nothing deleted)
 
-    /// Archived chats hide from the chats sheet's main list only. History stays
-    /// in the agent's context/memory tree and searchable history; nothing is
-    /// sent to the relay or agentd.
+    /// Archived chats hide from the chats sheet's main list and never badge or
+    /// notify here. History stays in the agent's context/memory tree and
+    /// searchable history; nothing goes to agentd. The relay keeps the flag per
+    /// user per chat (`archived_at`): the sheet writes it with
+    /// `PUT /chats/{id}/settings {archived}`, every listing seeds it and the
+    /// `chat_archived` push updates it live. The UserDefaults copy is only an
+    /// offline cache plus the writes that have not reached the relay yet.
     @Published private(set) var archivedChatIds: Set<Id> = Set(UserDefaults.standard.stringArray(forKey: "archivedChats") ?? [])
 
-    func isChatArchived(_ chatId: Id) -> Bool { archivedChatIds.contains(chatId) }
+    /// Archive writes the relay has not confirmed (offline, or a relay without §9c yet).
+    private var pendingArchiveWrites: [Id: Bool] {
+        get { (UserDefaults.standard.dictionary(forKey: "archivePendingWrites") as? [String: Bool]) ?? [:] }
+        set { UserDefaults.standard.set(newValue, forKey: "archivePendingWrites") }
+    }
+    private var archiveFlushing = false
+
+    /// The pinned "Main" chat never counts as archived, whatever the relay says (Mac rule).
+    func isChatArchived(_ chatId: Id) -> Bool {
+        archivedChatIds.contains(chatId) && chat(chatId)?.isPinned != true
+    }
 
     func archiveChat(_ chatId: Id) {
-        archivedChatIds.insert(chatId)
+        guard chat(chatId)?.isPinned != true else { return }
+        setArchived(chatId, true)
+    }
+
+    func unarchiveChat(_ chatId: Id) { setArchived(chatId, false) }
+
+    private func setArchived(_ chatId: Id, _ archived: Bool) {
+        if archived { archivedChatIds.insert(chatId) } else { archivedChatIds.remove(chatId) }
+        setChatArchivedAt(chatId, archived ? Int64(Date().timeIntervalSince1970 * 1000) : nil)
+        saveArchiveCache()
+        if archived {
+            PushManager.shared.clearDelivered(chatId: chatId)
+            applyBadge()
+        }
+        var pending = pendingArchiveWrites
+        pending[chatId] = archived
+        pendingArchiveWrites = pending
+        Task { await flushArchiveWrites() }
+    }
+
+    private func saveArchiveCache() {
         UserDefaults.standard.set(Array(archivedChatIds), forKey: "archivedChats")
     }
 
-    func unarchiveChat(_ chatId: Id) {
-        archivedChatIds.remove(chatId)
-        UserDefaults.standard.set(Array(archivedChatIds), forKey: "archivedChats")
+    private func setChatArchivedAt(_ chatId: Id, _ at: Int64?) {
+        for (pid, list) in chats {
+            guard let i = list.firstIndex(where: { $0.id == chatId }) else { continue }
+            var updated = list
+            updated[i].archivedAt = at
+            chats[pid] = updated
+        }
+    }
+
+    /// Send pending archive writes to the relay; a write that fails stays
+    /// pending (the local state already shows it) and is retried on the next
+    /// registry refresh. 404/405 means the relay has no §9c yet: keep local.
+    func flushArchiveWrites() async {
+        guard !archiveFlushing, credentials != nil, !isFixture else { return }
+        let pending = pendingArchiveWrites
+        guard !pending.isEmpty else { return }
+        archiveFlushing = true
+        defer { archiveFlushing = false }
+        for (chatId, archived) in pending {
+            // The user may have flipped it again meanwhile: send the current value.
+            let want = pendingArchiveWrites[chatId] ?? archived
+            do {
+                let at = try await api.setChatArchived(chatId: chatId, archived: want)
+                if want, let at { setChatArchivedAt(chatId, at) }
+                var p = pendingArchiveWrites
+                if p[chatId] == want { p[chatId] = nil }
+                pendingArchiveWrites = p
+            } catch {
+                pushLog.notice("archive write \(chatId, privacy: .public)=\(want) failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    /// First launch after the §9c update: the chats this device had archived
+    /// locally go UP to the relay (union), after which the relay is the source
+    /// of truth and the local list is only a cache.
+    private func migrateLocalArchiveToRelay() {
+        let key = "archiveMigratedToRelay"
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+        var pending = pendingArchiveWrites
+        for id in archivedChatIds where pending[id] == nil { pending[id] = true }
+        pendingArchiveWrites = pending
+        UserDefaults.standard.set(true, forKey: key)
+    }
+
+    /// A relay listing with `archived_at` seeds the set: relay state, plus the
+    /// writes still on their way up (so a flip made offline does not snap back).
+    private func adoptRelayArchiveState(_ lists: [Id: [Chat]]) {
+        let all = lists.values.flatMap { $0 }
+        guard all.contains(where: { $0.archiveSynced }) else { return }
+        migrateLocalArchiveToRelay()
+        var next = archivedChatIds
+        let pending = pendingArchiveWrites
+        for c in all where c.archiveSynced && pending[c.id] == nil {
+            if c.archivedAt != nil { next.insert(c.id) } else { next.remove(c.id) }
+        }
+        if next != archivedChatIds {
+            archivedChatIds = next
+            saveArchiveCache()
+            applyBadge()
+        }
+    }
+
+    /// `chat_archived {chat_id, project_id, archived_at}` from another device.
+    private func applyArchivePush(_ p: PushItem) {
+        guard let chatId = p.payload["chat_id"] else { return }
+        let at = (p.raw["archived_at"] as? NSNumber)?.int64Value
+        if pendingArchiveWrites[chatId] != nil { return }
+        if at != nil { archivedChatIds.insert(chatId) } else { archivedChatIds.remove(chatId) }
+        setChatArchivedAt(chatId, at)
+        saveArchiveCache()
+        if at != nil { PushManager.shared.clearDelivered(chatId: chatId) }
+        applyBadge()
     }
 
     /// The chat the user last opened per agent on this device (tapping the agent returns there).
@@ -2026,6 +2147,8 @@ final class AppModel: ObservableObject {
     /// S8: the last assistant message asked a question and nothing was sent since.
     func chatNeedsAnswer(_ chatId: Id) -> Bool {
         guard let last = messages(of: chatId).last, last.role == .assistant, !last.isStreaming else { return false }
+        // A choice card is answered from its rows, so it does not switch the composer.
+        if let q = last.openQuestion { return !q.hasChoices }
         return last.askUserText != nil
     }
 
@@ -2106,9 +2229,9 @@ final class AppModel: ObservableObject {
         return nil
     }
 
-    /// Voice memo → text through the relay, so the agent reads what was said (the audio
-    /// still travels as an attachment). `nil` when the relay cannot transcribe; the user
-    /// sees why and the memo is sent as audio only.
+    /// Voice memo → text through the relay. The audio is only an STT input; callers send
+    /// the transcript (or put it in the draft) and do not attach the file. `nil` when the
+    /// relay cannot transcribe; the user sees why.
     func transcribe(projectId: Id?, memo: PendingAttachment) async -> String? {
         if isFixture { return nil }
         do {
@@ -2141,11 +2264,42 @@ final class AppModel: ObservableObject {
         return cleaned.isEmpty ? "file" : cleaned
     }
 
+    /// Typed answer from the composer (S8). When the open question is a `question` part
+    /// the phone cannot draw as rows (text, date, form, or plain), the answer carries its
+    /// `questionId` so agentd flips the part to answered.
     func answer(chatId: Id, text: String) {
-        write(chatId: chatId, text: text, command: "answer", attachments: [])
+        var extra: [String: Any] = [:]
+        if let q = messages(of: chatId).last?.openQuestion, !q.hasChoices {
+            extra = ["questionId": q.questionId, "value": text]
+            markQuestionAnswered(chatId: chatId, questionId: q.questionId, answer: [text])
+        }
+        write(chatId: chatId, text: text, command: "answer", attachments: [], extra: extra)
     }
 
-    private func write(chatId: Id, text: String, command: String, attachments: [Attachment]) {
+    /// Answer from a question card row: the label becomes the user's bubble at once
+    /// (optimistic, same words as the Mac), the card flips to answered, and the structured
+    /// value travels in the `answer` command for agentd to render for the model.
+    func answerQuestion(chatId: Id, questionId: String, value: Any, label: String) {
+        let ids: [String] = (value as? [String]) ?? [(value as? String) ?? ""]
+        markQuestionAnswered(chatId: chatId, questionId: questionId, answer: ids)
+        write(chatId: chatId, text: "Answer: \(label)", command: "answer", attachments: [],
+              extra: ["questionId": questionId, "value": value])
+    }
+
+    private func markQuestionAnswered(chatId: Id, questionId: String, answer: [String]) {
+        guard var list = messages[chatId] else { return }
+        for i in list.indices {
+            for j in list[i].parts.indices {
+                guard case .question(let id, var q) = list[i].parts[j], q.questionId == questionId else { continue }
+                q.open = false
+                q.answer = answer
+                list[i].parts[j] = .question(id: id, question: q)
+            }
+        }
+        messages[chatId] = list
+    }
+
+    private func write(chatId: Id, text: String, command: String, attachments: [Attachment], extra: [String: Any] = [:]) {
         guard let doc = docs[chatId], let chat = chat(chatId) else {
             #if DEBUG
             if isFixture { fixtureAppend(chatId: chatId, text: text, attachments: attachments) }
@@ -2156,7 +2310,7 @@ final class AppModel: ObservableObject {
         markUnacked(chatId: chatId, messageId: messageId)
         do {
             try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: attachments)
-            try doc.pushCommand(command, payload: ["messageId": messageId], device: deviceId)
+            try doc.pushCommand(command, payload: extra.merging(["messageId": messageId]) { _, new in new }, device: deviceId)
             if !chat.isPinned && chat.title == "New chat" {
                 let title = AppModel.title(from: text)
                 try doc.pushCommand("retitle", payload: ["title": title], device: deviceId)

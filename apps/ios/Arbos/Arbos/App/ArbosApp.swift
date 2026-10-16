@@ -61,7 +61,7 @@ struct RootView: View {
             .preferredColorScheme(theme.isDark ? .dark : .light)
         }
         .fullScreenCover(isPresented: $calls.isPresented) {
-            CallScreen(expected: expectedPeer)
+            CallScreen(expected: expectedPeople)
                 .environmentObject(model)
                 .environment(\.theme, theme)
                 .preferredColorScheme(theme.isDark ? .dark : .light)
@@ -91,10 +91,16 @@ struct RootView: View {
         }
     }
 
-    /// The other person of the DM the call belongs to, for the card before they join.
-    private var expectedPeer: CallPerson? {
-        guard let c = calls.call, let chat = model.peopleChat(c.chatId), let other = chat.counterpart(me: model.user?.id) else { return nil }
-        return CallPerson(id: other.id, kind: "user", name: other.name, handle: other.handle, avatar: nil, avatarColor: nil, avatarUrl: other.avatarUrl)
+    /// Who the call screen shows before anyone joins: the DM peer, or (for a
+    /// people group) every other human plus the agents in that chat.
+    private var expectedPeople: [CallPerson] {
+        guard let c = calls.call, let chat = model.peopleChat(c.chatId) else { return [] }
+        let me = model.user?.id
+        if chat.isGroup {
+            return chat.members.filter { $0.id != me }.map(CallPerson.from(member:))
+        }
+        guard let other = chat.counterpart(me: me) else { return [] }
+        return [CallPerson.from(member: other)]
     }
 
     /// Ask once, a beat after the home screen appears (never in the fixture or a live demo).

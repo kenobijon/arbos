@@ -383,7 +383,7 @@ pub fn render(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
 }
 
 /// The agent's chat tabs, next to its name: every visible chat as a pill
-/// (groups with their participants' heads), "×" on each but the primary
+/// (groups with their participants' heads), "×" on each but the pinned "Main"
 /// (archives it), "+" for a new chat, and an "Archived" pill when there is
 /// something in it. With multi-chat off: the primary, groups and the
 /// Projects tab only, no "+", no "×", no Archived.
@@ -391,7 +391,6 @@ fn agent_tabs(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option
     let theme = Theme::of(cx).clone();
     let state = shell.state.read(cx);
     let multi_chat = state.multi_chat;
-    let primary_id = state.primary_chat(&space.id).map(|c| c.id.clone());
     let tabs: Vec<(Chat, bool, bool)> = state
         .visible_tabs(&space.id)
         .into_iter()
@@ -427,13 +426,12 @@ fn agent_tabs(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option
         let phase = PulseClock::phase(cx, 1200);
         let id = chat.id.clone();
         let close_id = chat.id.clone();
-        let is_primary = primary_id.as_deref() == Some(&*chat.id);
         let title = if chat.is_pinned {
             "Main".to_string()
         } else {
             chat.title.clone()
         };
-        let closable = multi_chat && !is_primary && !chat.is_pinned;
+        let closable = multi_chat && !chat.is_pinned;
         let mut pill = div()
             .id(ElementId::Name(SharedString::from(format!(
                 "tab-{}",
@@ -454,12 +452,18 @@ fn agent_tabs(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option
                 theme.bubble_assistant
             })
             .text_size(px(TEXT_SMALL))
-            .text_color(if active { theme.text } else { theme.text_muted })
+            // The active chip is a user bubble (dark in both appearances):
+            // white text on it, like the bubbles themselves.
+            .text_color(if active {
+                theme.bubble_text()
+            } else {
+                theme.text_muted
+            })
             .when(chat.unread && !active, |el| {
                 el.font_weight(FontWeight::SEMIBOLD).text_color(theme.text)
             })
             .cursor_pointer()
-            .hover(|s| s.text_color(theme.text))
+            .when(!active, |el| el.hover(|s| s.text_color(theme.text)))
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.state.update(cx, |s, cx| s.select_tab(id.clone(), cx));
                 Composer::focus(&this.composer, window, cx);
@@ -488,9 +492,16 @@ fn agent_tabs(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_color(theme.text_faint)
-                    .hover(|s| s.bg(theme.border_strong).text_color(theme.text))
-                    .child(icon("xmark", 9.0, theme.text_muted))
+                    .hover(|s| s.bg(theme.border_strong))
+                    .child(icon(
+                        "xmark",
+                        9.0,
+                        if active {
+                            Theme::with_alpha(theme.bubble_text(), 0.8)
+                        } else {
+                            theme.text_muted
+                        },
+                    ))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
                         this.state.update(cx, |s, cx| {

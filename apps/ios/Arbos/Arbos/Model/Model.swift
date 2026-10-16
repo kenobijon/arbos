@@ -209,6 +209,10 @@ struct Chat: Identifiable, Equatable, Codable {
     var kind: String = "chat"
     /// Other projects in an agent-hosted group.
     var participants: [Id] = []
+    /// §9c: when this user archived the chat (relay, synced across devices);
+    /// nil = not archived. `archiveSynced` says the relay sent the field at all.
+    var archivedAt: Int64? = nil
+    var archiveSynced: Bool = false
 
     var isGroup: Bool { kind == "group" }
     /// The agent's "projects" system chat (§9b: shown even with multi-chat off).
@@ -289,6 +293,30 @@ struct Attachment: Codable, Equatable {
     }
 }
 
+/// One answer row of a `choice` / `multi_select` question widget.
+struct ChoiceOption: Equatable, Hashable {
+    var id: String
+    var label: String
+}
+
+/// A `question` part (design §10 widgets): what the agent asked, the answer
+/// rows when the widget is a choice, and whether it is still open. Widgets
+/// the phone cannot draw (text, date, form) carry no options; the composer
+/// answers those.
+struct Question: Equatable {
+    var questionId: String
+    var question: String
+    var options: [ChoiceOption]
+    var multi: Bool
+    /// `widget.type` as written, "" for a plain question.
+    var widgetType: String
+    /// Picked option ids (or the typed text) once answered.
+    var answer: [String]
+    var open: Bool
+
+    var hasChoices: Bool { !options.isEmpty }
+}
+
 /// One row of `messages[].parts` (crdt-sync §6.2). Unknown kinds decode to
 /// `.unknown` and render as nothing, per the "additive only" rule.
 enum Part: Equatable {
@@ -298,15 +326,21 @@ enum Part: Equatable {
     case attachment(id: Id, attachment: Attachment)
     case error(id: Id, code: String, message: String)
     case status(id: Id, code: StatusKind, message: String)
+    case question(id: Id, question: Question)
     case subagentResult(id: Id)
     case unknown(id: Id)
 
     var id: Id {
         switch self {
         case .text(let id, _), .reasoning(let id), .tool(let id, _, _), .attachment(let id, _),
-             .error(let id, _, _), .status(let id, _, _), .subagentResult(let id), .unknown(let id):
+             .error(let id, _, _), .status(let id, _, _), .question(let id, _), .subagentResult(let id), .unknown(let id):
             return id
         }
+    }
+
+    var questionValue: Question? {
+        if case .question(_, let q) = self { return q }
+        return nil
     }
 
     var isStatus: Bool {
@@ -368,6 +402,12 @@ struct Message: Identifiable, Equatable {
         }
         return nil
     }
+
+    /// The `question` parts of this message (agentd writes one per `ask_user`).
+    var questions: [Question] { parts.compactMap(\.questionValue) }
+
+    /// The newest open question, when one exists.
+    var openQuestion: Question? { questions.last { $0.open } }
 
     var hasErrorPart: Bool {
         parts.contains { if case .error = $0 { return true } else { return false } }
@@ -475,11 +515,46 @@ enum DocJSON {
         case "status":
             let code = StatusKind(rawValue: str(pm["code"]) ?? "") ?? .other
             return .status(id: id, code: code, message: str(pm["message"]) ?? "")
+        case "question":
+            return .question(id: id, question: question(pm))
         case "subagent_result":
             return .subagentResult(id: id)
         default:
             return .unknown(id: id)
         }
+    }
+
+    /// `{ questionId, question, widget?: { type, options? }, answer?, state }`.
+    static func question(_ pm: [String: Any]) -> Question {
+        let widget = pm["widget"] as? [String: Any]
+        let type = str(widget?["type"]) ?? ""
+        var options: [ChoiceOption] = []
+        if type == "choice" || type == "multi_select" {
+            for o in (widget?["options"] as? [Any]) ?? [] {
+                guard let om = o as? [String: Any], let oid = str(om["id"]) else { continue }
+                options.append(ChoiceOption(id: oid, label: str(om["label"]) ?? oid))
+            }
+        }
+        var answer: [String] = []
+        switch pm["answer"] {
+        case let s as String: answer = [s]
+        case let list as [Any]: answer = list.compactMap { $0 as? String }
+        case let n as NSNumber: answer = [n.stringValue]
+        default: break
+        }
+        return Question(
+            questionId: str(pm["questionId"]) ?? id(pm),
+            question: str(pm["question"]) ?? "",
+            options: options,
+            multi: type == "multi_select",
+            widgetType: type,
+            answer: answer,
+            open: (str(pm["state"]) ?? "open") != "answered"
+        )
+    }
+
+    private static func id(_ pm: [String: Any]) -> String {
+        str(pm["id"]) ?? UUID().uuidString
     }
 
     static func str(_ v: Any?) -> String? {

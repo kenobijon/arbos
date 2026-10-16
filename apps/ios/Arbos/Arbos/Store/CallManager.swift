@@ -89,6 +89,8 @@ final class CallManager: NSObject, ObservableObject {
     /// Outgoing wait: play a local ringback until someone joins (or we hang up).
     private var ringbackWanted = false
     private var ringbackPlayer: AVAudioPlayer?
+    /// True between CallKit `didActivate` and `didDeactivate` — LiveKit's engine may run only then.
+    private var callKitOwnsAudio = false
 
     private override init() {
         let config = CXProviderConfiguration()
@@ -102,6 +104,16 @@ final class CallManager: NSObject, ObservableObject {
         super.init()
         provider.setDelegate(self, queue: nil)
         room.add(delegate: self)
+        // CallKit owns AVAudioSession. LiveKit's automatic session config and an
+        // early audio engine start fight that window and leave remote audio
+        // almost inaudible (VPIO / voiceChat gain with the engine outside
+        // didActivate…didDeactivate). Match LiveKit's CallKit example.
+        AudioManager.shared.audioSession.isAutomaticConfigurationEnabled = false
+        do {
+            try AudioManager.shared.setEngineAvailability(.none)
+        } catch {
+            audioLog.error("engine none at launch: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     var isActive: Bool { phase == .connecting || phase == .connected || phase == .reconnecting }
@@ -237,7 +249,8 @@ final class CallManager: NSObject, ObservableObject {
 
     private func startIncomingRingFallback() {
         guard incoming != nil, incomingRingPlayer == nil else { return }
-        prepareCallAudioSession(video: incoming?.call.kind == .video)
+        // CallKit refused the report: we own the session and must activate it.
+        prepareCallAudioSession(video: incoming?.call.kind == .video, activate: true)
         do {
             let player = try AVAudioPlayer(data: CallManager.ringtoneWAV)
             player.numberOfLoops = -1
@@ -296,6 +309,22 @@ final class CallManager: NSObject, ObservableObject {
         u32(UInt32(pcm.count))
         wav.append(pcm)
         return wav
+    }
+
+    /// In-app Accept: answer through CallKit when we reported the call so
+    /// `didActivate` runs and the LiveKit engine is allowed to open.
+    func acceptFromUI() {
+        if let uuid = cxUUID, incoming != nil {
+            let action = CXAnswerCallAction(call: uuid)
+            callController.request(CXTransaction(action: action)) { [weak self] err in
+                if let err {
+                    log.error("CXAnswerCallAction: \(err.localizedDescription, privacy: .public)")
+                    Task { @MainActor in await self?.accept() }
+                }
+            }
+        } else {
+            Task { await accept() }
+        }
     }
 
     func accept() async {
@@ -432,7 +461,14 @@ final class CallManager: NSObject, ObservableObject {
             do { try await room.localParticipant.setCamera(enabled: true); cameraOn = true } catch { cameraOn = false }
         }
         speakerOn = video
-        AudioManager.shared.isSpeakerOutputPreferred = speakerOn
+        // Prefer CallKit's didActivate to open the engine; if it has not run yet
+        // (slow CXStartCallAction, in-app accept without CallKit, debug join),
+        // take the session ourselves so the call is not silent.
+        if callKitOwnsAudio {
+            applySpeakerRoute()
+        } else {
+            enableCallAudioEngine(video: video)
+        }
         refreshTiles()
     }
 
@@ -441,6 +477,8 @@ final class CallManager: NSObject, ObservableObject {
         stopRingback()
         outgoingTimeout?.cancel()
         outgoingTimeout = nil
+        disableCallAudioEngine()
+        callKitOwnsAudio = false
         let missed = !anyoneJoined
         let ended = call
         let wasConnected = connectedAt
@@ -500,7 +538,8 @@ final class CallManager: NSObject, ObservableObject {
 
     func toggleSpeaker() {
         speakerOn.toggle()
-        AudioManager.shared.isSpeakerOutputPreferred = speakerOn
+        // Automatic session config is off (CallKit); re-apply category options + port.
+        configureCallAudioSession(video: call?.kind == .video, activate: false)
     }
 
     func flipCamera() async {
@@ -535,24 +574,59 @@ final class CallManager: NSObject, ObservableObject {
         if waiting { force ? startRingback(force: true) : resumeRingbackIfNeeded() } else { stopRingback() }
     }
 
-    /// The call's audio session, set before any call sound: `.playAndRecord` /
-    /// `.voiceChat` is what LiveKit and CallKit use too, so the ringback is
-    /// not cut when they take over, and — unlike the app's default
-    /// `.soloAmbient` — it plays with the ring/silent switch off, through
-    /// the receiver (voice) or the speaker (video), like a phone call.
-    private func prepareCallAudioSession(video: Bool) {
+    /// Category/mode for call audio. CallKit activates the session; we only
+    /// `setActive` ourselves when CallKit is not in the picture (in-app ring
+    /// fallback). Do not open LiveKit's engine here — that is `enableCallAudioEngine`.
+    private func prepareCallAudioSession(video: Bool, activate: Bool = false) {
+        configureCallAudioSession(video: video, activate: activate && !callKitOwnsAudio)
+        observeAudioSession()
+    }
+
+    private func configureCallAudioSession(video: Bool, activate: Bool) {
         let session = AVAudioSession.sharedInstance()
+        let mode: AVAudioSession.Mode = video ? .videoChat : .voiceChat
+        var options: AVAudioSession.CategoryOptions = [.allowBluetooth, .allowBluetoothA2DP]
+        if speakerOn || video { options.insert(.defaultToSpeaker) }
         do {
-            if session.category != .playAndRecord || session.mode != .voiceChat {
-                try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetooth, .allowBluetoothA2DP])
-            }
-            try session.setActive(true)
-            try session.overrideOutputAudioPort(video ? .speaker : .none)
-            audioLog.notice("session ready category=\(session.category.rawValue, privacy: .public) mode=\(session.mode.rawValue, privacy: .public) route=\(session.currentRoute.outputs.map(\.portType.rawValue).joined(separator: ","), privacy: .public)")
+            try session.setCategory(.playAndRecord, mode: mode, options: options)
+            // CallKit activates the session; calling setActive again fights it and
+            // is a known source of near-silent remote audio with Voice Processing.
+            if activate { try session.setActive(true) }
+            applySpeakerRoute()
+            audioLog.notice("session ready category=\(session.category.rawValue, privacy: .public) mode=\(session.mode.rawValue, privacy: .public) activate=\(activate) route=\(session.currentRoute.outputs.map(\.portType.rawValue).joined(separator: ","), privacy: .public)")
         } catch {
             audioLog.error("session setup: \(error.localizedDescription, privacy: .public)")
         }
-        observeAudioSession()
+    }
+
+    private func applySpeakerRoute() {
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.overrideOutputAudioPort(speakerOn ? .speaker : .none)
+        } catch {
+            audioLog.error("speaker route: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Open LiveKit's audio engine after the session is call-ready (CallKit
+    /// didActivate, or a non-CallKit fallback).
+    private func enableCallAudioEngine(video: Bool) {
+        configureCallAudioSession(video: video, activate: !callKitOwnsAudio)
+        do {
+            try AudioManager.shared.setEngineAvailability(.default)
+            audioLog.notice("engine default (call audio live)")
+        } catch {
+            audioLog.error("engine default: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func disableCallAudioEngine() {
+        do {
+            try AudioManager.shared.setEngineAvailability(.none)
+            audioLog.notice("engine none")
+        } catch {
+            audioLog.error("engine none: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     private var audioObservers: [NSObjectProtocol] = []
@@ -608,7 +682,7 @@ final class CallManager: NSObject, ObservableObject {
                 guard let self, !Task.isCancelled, self.ringbackWanted, self.tiles.isEmpty, self.isActive, let p = self.ringbackPlayer else { return }
                 if p.isPlaying { return }
                 let session = AVAudioSession.sharedInstance()
-                try? session.setActive(true)
+                // Do not setActive here: CallKit owns activation; fighting it quiets the call.
                 let ok = p.play()
                 audioLog.notice("ringback retry \(attempt) \(ok ? "ok" : "refused", privacy: .public) active-others=\(session.isOtherAudioPlaying) route=\(session.currentRoute.outputs.map(\.portType.rawValue).joined(separator: ","), privacy: .public)")
                 if ok { return }
@@ -876,12 +950,22 @@ extension CallManager: CXProviderDelegate {
 
     nonisolated func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
         audioLog.notice("audio session activated by CallKit category=\(audioSession.category.rawValue, privacy: .public)")
-        // CallKit has just handed us the session: make sure the ringback is sounding on it.
-        Task { @MainActor in self.resumeRingbackIfNeeded() }
+        // CallKit has the session: configure it and allow LiveKit's engine to run.
+        // Do not setActive — CallKit already did.
+        Task { @MainActor in
+            self.callKitOwnsAudio = true
+            let video = self.call?.kind == .video || self.incoming?.call.kind == .video
+            self.enableCallAudioEngine(video: video)
+            self.resumeRingbackIfNeeded()
+        }
     }
 
     nonisolated func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
         log.notice("audio session deactivated by CallKit")
+        Task { @MainActor in
+            self.callKitOwnsAudio = false
+            self.disableCallAudioEngine()
+        }
     }
 }
 

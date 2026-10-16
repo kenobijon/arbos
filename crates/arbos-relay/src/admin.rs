@@ -186,6 +186,72 @@ pub async fn create_test_user(
     }
 }
 
+#[derive(Deserialize, Default)]
+pub struct AddDeviceBody {
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// `POST /admin/users/{id}/devices {"name"?}` — attach another signed-in device to a user and
+/// hand back its token pair (same shape as `/auth/token`), so a Mac and a simulator can be two
+/// devices of one account for push-path and archive-sync proofs. Test users only unless the
+/// body says `"name"` for a real one and the caller knows what they are doing: refused for
+/// non-test users without a name.
+pub async fn add_device(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    body: Option<Json<AddDeviceBody>>,
+) -> Response {
+    if let Err(r) = admin_only(&principal) {
+        return *r;
+    }
+    let b = body.map(|b| b.0).unwrap_or_default();
+    let user = match state.db.user(&id) {
+        Ok(Some(u)) => u,
+        Ok(None) => return api_error(StatusCode::NOT_FOUND, "not_found", "no such user"),
+        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    };
+    if !user.test && b.name.as_deref().map(str::trim).unwrap_or("").is_empty() {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "a device for a real account needs a name (this mints a signed-in session for them)",
+        );
+    }
+    let n = state.db.devices_of_user(&id).map(|d| d.len()).unwrap_or(0);
+    let name = b
+        .name
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            format!(
+                "{} (test device {})",
+                user.login.clone().unwrap_or_else(|| id.clone()),
+                n + 1
+            )
+        });
+    let device_id = ulid();
+    if let Err(e) = state.db.insert_device(
+        &device_id,
+        &name,
+        &arbos_core::auth::hash(&format!("jwt:{device_id}:{}", ulid())),
+        &id,
+        "github",
+    ) {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+    }
+    tracing::info!(user = %id, device = %device_id, %name, "admin attached a device");
+    match crate::signin::issue_tokens(&state, &id, &device_id) {
+        Ok(mut tokens) => {
+            tokens["device_name"] = json!(name);
+            tokens["test"] = json!(user.test);
+            (StatusCode::CREATED, Json(tokens)).into_response()
+        }
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    }
+}
+
 /// `DELETE /admin/users/{id}` — test users only; refused while the user still owns projects or a
 /// box (delete those first so nothing is orphaned).
 pub async fn delete_test_user(

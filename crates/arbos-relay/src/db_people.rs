@@ -512,6 +512,27 @@ impl Db {
         })
     }
 
+    /// Queue a notification for every live device of a user except `except_device` (the one
+    /// that caused it already knows).
+    pub fn push_user_except(
+        &self,
+        user_id: &str,
+        except_device: &str,
+        kind: &str,
+        payload: &Value,
+    ) -> Result<()> {
+        let now = now_ms();
+        let body = payload.to_string();
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO user_pushes(user_id, device_id, kind, payload, chat_id, created_at)
+                 SELECT ?1, id, ?2, ?3, NULL, ?4 FROM devices WHERE user_id = ?1 AND revoked_at IS NULL AND id != ?5",
+                params![user_id, kind, body, now, except_device],
+            )
+            .map(|_| ())
+        })
+    }
+
     pub fn take_user_pushes(&self, device_id: &str) -> Result<Vec<(i64, String, Value, i64)>> {
         self.with(|c| {
             let mut st = c.prepare(

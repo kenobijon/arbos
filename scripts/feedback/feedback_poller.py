@@ -51,7 +51,13 @@ Config comes from the environment (systemd EnvironmentFile=/etc/arbos/feedback.e
 
 Only the standard library plus `cryptography` (for the ES256 App Store Connect token).
 
-CLI:  feedback_poller.py [run] | status | set-cursor <ISO-8601> | inject <image> "<comment>" [ios|mac] | requeue <id>… | prioritize <id>… | confirm <id> [note] | handoff <id> [label]
+Inbox entries (<state>/inbox/<name>/) carry comment.txt and optional screenshot image(s), target.txt
+(ios|mac), handle.txt (the tester's GitHub login when the report was relayed from a chat / DM) and
+origin.txt (where it came from, shown as the issue's Source). `inject` writes one for you.
+
+CLI:  feedback_poller.py [run] | status | testers | set-cursor <ISO-8601>
+      | inject <image|-> "<comment>" [ios|mac] [--handle <login>] [--origin "<text>"] [--email <tester email, grouping only>]
+      | requeue <id>… | prioritize <id>… | confirm <id> [note] | handoff <id> [label]
 """
 
 from __future__ import annotations
@@ -776,7 +782,12 @@ class Loop:
                 continue
             images = sorted(p for p in entry.iterdir() if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".gif", ".webp"))
             comment_file = entry / "comment.txt"
-            if not images or not comment_file.is_file():
+            if not comment_file.is_file():
+                continue
+            # A relayed report (a chat / DM message the operator copied over) has a handle but no image.
+            handle = (entry / "handle.txt").read_text().strip().lstrip("@") if (entry / "handle.txt").is_file() else ""
+            origin = (entry / "origin.txt").read_text().strip() if (entry / "origin.txt").is_file() else ""
+            if not images and not handle:
                 continue
             stamp = utcnow().strftime("%Y%m%d%H%M%S")
             fid = f"local-{re.sub(r'[^A-Za-z0-9_-]', '-', entry.name)[:40]}-{stamp}"
@@ -789,11 +800,15 @@ class Loop:
                 dims = image_dims(target)
                 shots.append({"file": target.name, "width": dims[0] if dims else None,
                               "height": dims[1] if dims else None})
-            email = (entry / "email.txt").read_text().strip().lower() if (entry / "email.txt").is_file() else "inbox@server"
+            if (entry / "email.txt").is_file():
+                email = (entry / "email.txt").read_text().strip().lower()
+            else:
+                email = "" if handle else "inbox@server"
             forced = (entry / "target.txt").read_text().strip().lower() if (entry / "target.txt").is_file() else ""
             info = {
                 "id": fid, "source": "inbox", "created": iso(), "comment": comment_file.read_text().strip(),
-                "email": email, "device": "synthetic", "os": None, "device_platform": None,
+                "email": email, "handle": handle or None, "origin": origin or None,
+                "device": "relayed report" if handle else "synthetic", "os": None, "device_platform": None,
                 "device_family": None, "app_platform": None, "bundle": None, "build": None,
                 "build_id": None, "locale": None, "screen_points": None, "screenshots": shots,
                 "forced_target": forced or None, "raw": {},
@@ -830,10 +845,10 @@ class Loop:
         """What the public issue shows: never an email."""
         if tier == "priority" and info.get("source") != "inbox":
             return "Jacob (owner)"
-        if info.get("source") == "inbox":
-            return "synthetic (poller inbox)"
         if info.get("handle"):
             return f"@{info['handle']}"
+        if info.get("source") == "inbox":
+            return "synthetic (poller inbox)"
         tag = "tester-" + hashlib.sha256(self.tester_key(info).encode()).hexdigest()[:8]
         name = info.get("tester_name")
         return f"{name} ({tag})" if name else tag
@@ -1013,11 +1028,16 @@ class Loop:
         dims = ", ".join(f"{s.get('width')}x{s.get('height')}" for s in info.get("screenshots", []) if s.get("width"))
         src = {"testflight": "TestFlight screenshot feedback", "mac": "the Mac app's Send feedback sheet",
                "app": f"the {info.get('device') or 'app'} app's in-app Send feedback sheet"}.get(
-            info["source"], "synthetic item placed in the poller inbox")
+            info["source"], info.get("origin") or "synthetic item placed in the poller inbox")
+        if info.get("screenshots"):
+            shot_line = f"{dims or 'unknown size'} (attached)"
+        else:
+            shot_line = ("none — this is a text report relayed from a chat message; the comment is all the "
+                         "evidence, so find the screen it describes in the code")
         repl = {
             "FEEDBACK_ID": fid, "COMMENT": info["comment"].strip() or "(no comment)", "SOURCE": src,
             "DEVICE": info.get("device") or "?", "OS_VERSION": info.get("os") or "?", "TESTER": st.get("tester", "tester"),
-            "APP_BUILD": info.get("build") or "?", "SCREENSHOT_DIMS": dims or "unknown size",
+            "APP_BUILD": info.get("build") or "?", "SCREENSHOT_DIMS": shot_line,
             "TARGET_NAME": t["name"], "TARGET_PATH": t["path"], "CHECKS": t["checks"], "ISSUE_URL": issue_url,
         }
         out = self.prompt_template
@@ -1048,7 +1068,7 @@ class Loop:
                 log(f"[{fid}] deferred: {reason}")
             return
         shots = self.store.screenshots(fid)
-        if not shots:
+        if not shots and not (info.get("source") == "inbox" and info.get("handle")):
             st.update(status="failed", error="no screenshot file")
             self.store.save_state(fid, st)
             self.store.event(fid, "failed", error="no screenshot file")
@@ -1065,8 +1085,8 @@ class Loop:
         self.gh.ensure_label("flagged", "B60205", "Feedback screened as obviously malicious; no automatic fix")
         verdict, why = self.screen_intent(info)
         in_app = f"{info.get('device') or 'app'} app (Send feedback)"
-        source_label = {"testflight": "TestFlight", "mac": in_app, "app": in_app, "inbox": "synthetic (poller inbox)"}.get(
-            info["source"], info["source"])
+        source_label = {"testflight": "TestFlight", "mac": in_app, "app": in_app,
+                        "inbox": info.get("origin") or "synthetic (poller inbox)"}.get(info["source"], info["source"])
         body_lines = [
             f"**Comment:** {info['comment'].strip() or '(none)'}",
             "",
@@ -1497,17 +1517,71 @@ class Loop:
             print(f"{fid}\t{st.get('created', '')}\t" + "  ".join(str(b) for b in bits))
 
 
-def inject(cfg: Config, image: Path, comment: str, target: str | None) -> None:
+def inject(cfg: Config, image: Path | None, comment: str, target: str | None,
+           handle: str | None = None, origin: str | None = None, email: str | None = None) -> None:
     inbox = cfg.state_dir / "inbox"
     inbox.mkdir(parents=True, exist_ok=True)
-    name = f"manual-{utcnow().strftime('%Y%m%d%H%M%S')}"
+    stamp = utcnow().strftime("%Y%m%d%H%M%S%f")[:-3]
+    name = f"{'relay-' + handle.lstrip('@') if handle else 'manual'}-{stamp}"
     d = inbox / name
     d.mkdir()
-    shutil.copy2(image, d / image.name)
+    if image is not None:
+        shutil.copy2(image, d / image.name)
     (d / "comment.txt").write_text(comment + "\n")
     if target:
         (d / "target.txt").write_text(target + "\n")
+    if handle:
+        (d / "handle.txt").write_text(handle.lstrip("@") + "\n")
+    if origin:
+        (d / "origin.txt").write_text(origin + "\n")
+    if email:
+        # Groups the item with the same person's TestFlight items (the key is hashed in the issue, never shown).
+        (d / "email.txt").write_text(email.strip().lower() + "\n")
     print(f"placed {d}; the next tick picks it up")
+
+
+def tester_summary(store: Store) -> list[dict]:
+    """Per-tester counts: items taken in, issues opened, and where every item stands."""
+    rows: dict[str, dict] = {}
+    for fid in store.items():
+        st = store.state(fid)
+        sub = store.item_dir(fid) / "submission.json"
+        info = json.loads(sub.read_text()) if sub.is_file() else {}
+        # Group by the stable tester key (older items carry an earlier, shorter label for the same person);
+        # show the most informative label seen. The key itself may be an email and is never printed.
+        key = st.get("tester_key") or (Loop.tester_key(info) if info else st.get("tester") or "?")
+        row = rows.setdefault(key, {"tester": "", "sources": set(), "ingested": 0, "issues": 0,
+                                    "shipped": 0, "shipped_unverified": 0, "folded": 0, "other": {}})
+        if len(st.get("tester") or "") > len(row["tester"]):
+            row["tester"] = st["tester"]
+        row["ingested"] += 1
+        row["sources"].add("relayed chat" if info.get("origin") else info.get("source") or "?")
+        if st.get("issue"):
+            row["issues"] += 1
+        status = st.get("status", "?")
+        if status == "shipped":
+            if st.get("device_evidence") == "pending":
+                row["shipped_unverified"] += 1
+            else:
+                row["shipped"] += 1
+        elif status in ("duplicate", "handed_off"):
+            row["folded"] += 1
+        else:
+            row["other"][status] = row["other"].get(status, 0) + 1
+    out = sorted(rows.values(), key=lambda r: -r["ingested"])
+    for key, r in zip(sorted(rows, key=lambda k: -rows[k]["ingested"]), out):
+        r["tester"] = r["tester"] or ("tester-" + hashlib.sha256(key.encode()).hexdigest()[:8])
+        r["sources"] = ", ".join(sorted(r["sources"]))
+    return out
+
+
+def print_testers(store: Store) -> None:
+    print("| Tester | Sources | Ingested | Issues | Shipped | Shipped-unverified | Folded (dup/handoff) | Other |")
+    print("|---|---|---|---|---|---|---|---|")
+    for r in tester_summary(store):
+        other = ", ".join(f"{k} {v}" for k, v in sorted(r["other"].items())) or "—"
+        print(f"| {r['tester']} | {r['sources']} | {r['ingested']} | {r['issues']} | {r['shipped']} | "
+              f"{r['shipped_unverified']} | {r['folded']} | {other} |")
 
 
 def main(argv: list[str]) -> int:
@@ -1517,7 +1591,26 @@ def main(argv: list[str]) -> int:
         if len(argv) < 4:
             print(__doc__)
             return 2
-        inject(cfg, Path(argv[2]), argv[3], argv[4] if len(argv) > 4 else None)
+        rest, handle, origin, email = list(argv[4:]), None, None, None
+        for flag in ("--handle", "--origin", "--email"):
+            if flag in rest:
+                i = rest.index(flag)
+                value = rest[i + 1] if i + 1 < len(rest) else ""
+                del rest[i:i + 2]
+                if flag == "--handle":
+                    handle = value
+                elif flag == "--origin":
+                    origin = value
+                else:
+                    email = value
+        image = None if argv[2] == "-" else Path(argv[2])
+        if image is None and not handle:
+            print("inject: a report without an image needs --handle <login>")
+            return 2
+        inject(cfg, image, argv[3], rest[0] if rest else None, handle, origin, email)
+        return 0
+    if cmd == "testers":
+        print_testers(Store(cfg))
         return 0
     if cmd == "requeue":
         store = Store(cfg)
@@ -1610,6 +1703,8 @@ def main(argv: list[str]) -> int:
     loop = Loop(cfg)
     if cmd == "status":
         loop.status()
+        print()
+        print_testers(loop.store)
         return 0
     if cmd != "run":
         print(__doc__)

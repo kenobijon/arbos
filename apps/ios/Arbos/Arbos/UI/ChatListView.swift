@@ -1,4 +1,4 @@
-// The "Chats" bottom sheet of one agent (chat icon beside the agent name):
+// The "Chats" bottom sheet of one agent (chat icon to the right of the agent pill):
 // every chat the user has with the agent — title, last line, time, unread —
 // plus its agent-hosted groups (group icon). "+" starts a new chat. Swipe a
 // row to archive it: that hides it from this list only; history stays in the
@@ -43,10 +43,13 @@ struct ChatListView: View {
                 ForEach(active) { chat in
                     row(chat)
                         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                            Button { withAnimation { model.archiveChat(chat.id) } } label: {
-                                Label("Archive", systemImage: "archivebox")
+                            // The pinned "Main" chat is never hidden (same rule as the Mac).
+                            if !chat.isPinned {
+                                Button { withAnimation { model.archiveChat(chat.id) } } label: {
+                                    Label("Archive", systemImage: "archivebox")
+                                }
+                                .tint(theme.muted)
                             }
-                            .tint(theme.muted)
                         }
                 }
                 if !archived.isEmpty {
@@ -111,7 +114,7 @@ struct ChatListView: View {
             dismiss()
         } label: {
             ChatRow(chat: chat, project: project, preview: ChatListView.preview(of: chat, in: model),
-                    time: ChatListView.time(of: chat, in: model), streaming: model.isStreaming(chat.id))
+                    time: ChatListView.time(of: chat, in: model), unread: model.chatHasUnread(chat), streaming: model.isStreaming(chat.id))
         }
         .listRowBackground(theme.bg)
         .listRowSeparatorTint(theme.separator)
@@ -164,7 +167,7 @@ struct ArchivedChatsView: View {
                             model.open(chat: chat)
                         } label: {
                             ChatRow(chat: chat, project: project, preview: ChatListView.preview(of: chat, in: model),
-                                    time: ChatListView.time(of: chat, in: model), streaming: model.isStreaming(chat.id))
+                                    time: ChatListView.time(of: chat, in: model), unread: false, streaming: model.isStreaming(chat.id))
                         }
                         .listRowBackground(theme.bg)
                         .listRowSeparatorTint(theme.separator)
@@ -196,6 +199,7 @@ struct ChatRow: View {
     let project: Project?
     let preview: String
     var time: String = ""
+    var unread: Bool = false
     let streaming: Bool
 
     private var title: String {
@@ -227,7 +231,7 @@ struct ChatRow: View {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     Text(title)
-                        .font(.system(size: Theme.body, weight: chat.unread ? .semibold : .regular))
+                        .font(.system(size: Theme.body, weight: unread ? .semibold : .regular))
                         .foregroundStyle(theme.text)
                         .lineLimit(1)
                     if streaming { PulseDot(color: theme.warn) }
@@ -235,7 +239,7 @@ struct ChatRow: View {
                     if !time.isEmpty {
                         Text(time)
                             .font(.system(size: Theme.small))
-                            .foregroundStyle(chat.unread ? Color(hex: "#1084FE")! : theme.muted)
+                            .foregroundStyle(unread ? Color(hex: "#1084FE")! : theme.muted)
                     }
                 }
                 HStack(spacing: 8) {
@@ -244,7 +248,7 @@ struct ChatRow: View {
                         .foregroundStyle(theme.muted)
                         .lineLimit(1)
                     Spacer(minLength: 0)
-                    if chat.unread {
+                    if unread {
                         Circle().fill(Color(hex: "#1084FE")!).frame(width: 9, height: 9)
                     }
                 }
