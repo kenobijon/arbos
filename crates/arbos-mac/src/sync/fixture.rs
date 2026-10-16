@@ -239,6 +239,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             let _ = shared.events.send(SyncEvent::CallReady {
                 call: call.clone(),
                 created: true,
+                reachable: Vec::new(),
             });
             // Sam picks up after a moment so the tile grid has someone in it.
             let shared = shared.clone();
@@ -258,6 +259,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             let _ = shared.events.send(SyncEvent::CallReady {
                 call: fixture_call(&chat_id, CallKind::Video),
                 created: false,
+                reachable: Vec::new(),
             });
         }
         ClientCommand::LeaveCall { call_id } => {

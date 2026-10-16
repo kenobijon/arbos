@@ -355,6 +355,122 @@ pub struct CallEnded {
     pub writer_is_me: bool,
 }
 
+/// `/me/pushes` `call_missed` payload: a call in one of my chats ended and I
+/// never joined it (contract §8).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CallMissed {
+    #[serde(default)]
+    pub call_id: String,
+    #[serde(default)]
+    pub chat_id: Id,
+    #[serde(default)]
+    pub project_id: String,
+    #[serde(default)]
+    pub kind: CallKind,
+    #[serde(default)]
+    pub from: Sender,
+    #[serde(default)]
+    pub started_at: u64,
+    #[serde(default)]
+    pub ended_at: Option<u64>,
+    #[serde(default)]
+    pub duration_s: u64,
+    #[serde(default, deserialize_with = "null_to_empty")]
+    pub reason: String,
+}
+
+impl CallMissed {
+    /// The system line this client writes into the chat.
+    pub fn line(&self) -> String {
+        format!("Missed call from {}", self.from.display_name())
+    }
+
+    /// Native notification body ("Missed voice call").
+    pub fn notification_body(&self) -> String {
+        format!("Missed {}", self.kind.label())
+    }
+}
+
+/// One of a callee's devices in the 201 start response (`reachable[].devices[]`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ReachableDevice {
+    #[serde(default)]
+    pub device_id: String,
+    #[serde(default, deserialize_with = "null_to_empty")]
+    pub name: String,
+    #[serde(default, deserialize_with = "null_to_empty")]
+    pub kind: String,
+    #[serde(default, deserialize_with = "null_to_empty")]
+    pub platform: String,
+    #[serde(default, deserialize_with = "null_to_empty")]
+    pub app_version: String,
+    /// Its Arbos is open: it talked to the relay in the last 30 s.
+    #[serde(default)]
+    pub polled_within_30s: bool,
+    #[serde(default)]
+    pub last_seen_at: Option<u64>,
+}
+
+/// Per callee, in the 201 start response: can anyone pick up?
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Reachable {
+    #[serde(default)]
+    pub user_id: String,
+    #[serde(default, deserialize_with = "null_to_empty")]
+    pub handle: String,
+    #[serde(default, deserialize_with = "null_to_empty")]
+    pub name: String,
+    /// Some device of theirs has Arbos open right now.
+    #[serde(default)]
+    pub any_live: bool,
+    /// Some iPhone of theirs can be rung through PushKit.
+    #[serde(default)]
+    pub any_voip: bool,
+    #[serde(default)]
+    pub devices: Vec<ReachableDevice>,
+}
+
+impl Reachable {
+    fn first_name(&self) -> String {
+        let name = if self.name.trim().is_empty() {
+            self.handle.clone()
+        } else {
+            self.name.clone()
+        };
+        name.split_whitespace()
+            .next()
+            .filter(|n| !n.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| "They".into())
+    }
+
+    /// What the caller's status line says while this callee has not picked
+    /// up; `None` when their Arbos is open (nothing to add to the ringback).
+    pub fn status_line(&self) -> Option<String> {
+        match (self.any_live, self.any_voip) {
+            (true, _) => None,
+            (false, true) => Some(format!("Ringing {}'s iPhone", self.first_name())),
+            (false, false) => Some(format!("{}'s Arbos isn't open", self.first_name())),
+        }
+    }
+}
+
+/// The call-screen status line for a set of callees (`None` when everyone is live).
+pub fn reachable_line(callees: &[Reachable]) -> Option<String> {
+    let lines: Vec<String> = callees.iter().filter_map(Reachable::status_line).collect();
+    if lines.is_empty() {
+        None
+    } else if lines.len() <= 2 {
+        Some(lines.join(" · "))
+    } else {
+        Some(format!(
+            "{} · +{} more",
+            lines[..2].join(" · "),
+            lines.len() - 2
+        ))
+    }
+}
+
 /// "Call ended · 12 min" ("Call ended" under a minute).
 pub fn call_ended_line(duration_s: u64) -> String {
     if duration_s < 60 {

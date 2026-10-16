@@ -23,6 +23,7 @@ pub mod shell;
 pub mod sidebar;
 pub mod skills;
 pub mod theme;
+pub mod tones;
 pub mod transcript;
 pub mod vault;
 pub mod veil;

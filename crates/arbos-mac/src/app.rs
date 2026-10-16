@@ -13,7 +13,10 @@ use tokio::sync::mpsc;
 
 use crate::auth;
 use crate::calls::{self, CallCmd, CallEvent};
-use crate::model::{call_ended_line, AccountView, Call, CallEnded, CallKind, Person, Sender};
+use crate::model::{
+    call_ended_line, reachable_line, AccountView, Call, CallEnded, CallKind, CallMissed, Person,
+    Reachable, Sender,
+};
 use crate::model::{
     new_id, now_ms, AttachmentKind, BoxState, ChannelsView, Chat, ChatKind, ConnectorsView, Effort,
     Id, Link, LocalView, Machine, Message, MessageStatus, Part, Project, ProjectDocView,
@@ -22,9 +25,14 @@ use crate::model::{
 };
 use crate::sync::{ClientCommand, SyncEvent, SyncSource};
 use crate::ui::notify::{self, Gate, Notifier, NotifyEvent, NotifyKind};
+use crate::ui::tones::{Tone, TonePlayer};
 
 /// How often held notification batches are re-checked.
 const NOTIFY_TICK_MS: u64 = 5_000;
+/// The ring card and its sound give up after this long.
+const RING_TIMEOUT_MS: u64 = 45_000;
+/// An outgoing call nobody answers is hung up after this long.
+const RINGBACK_TIMEOUT_MS: u64 = 60_000;
 /// Presence frames come every 15 s; three missed = offline (relay §7c uses 45 s too).
 const PRESENCE_ONLINE_MS: u64 = 45_000;
 
@@ -304,6 +312,13 @@ pub struct AppState {
     pub calls_in_chat: HashMap<Id, Call>,
     /// Someone is calling me (ringing): the call and who started it.
     pub incoming_call: Option<(Call, Sender)>,
+    /// When the ring card came up (auto-dismiss after `RING_TIMEOUT_MS`).
+    incoming_since: Option<u64>,
+    /// The ring (callee) and ringback (caller) tones while they should sound.
+    ring_tone: Option<TonePlayer>,
+    ringback_tone: Option<TonePlayer>,
+    /// `call_missed` ids whose "Missed call from …" line this device wrote.
+    missed_written: HashSet<String>,
     /// The call this device is in.
     pub my_call: Option<ActiveCall>,
     commands: mpsc::UnboundedSender<ClientCommand>,
@@ -347,6 +362,11 @@ pub struct ActiveCall {
     pub expanded: bool,
     /// One line about a problem (no mic, no camera, reconnecting).
     pub notice: Option<String>,
+    /// I started this call: ringback plays until someone else is in the room.
+    pub outgoing: bool,
+    /// From the 201 start response: "Robert's Arbos isn't open" / "Ringing
+    /// Robert's iPhone" while nobody has picked up (`None` = they are live).
+    pub reachable: Option<String>,
 }
 
 impl ActiveCall {
@@ -497,6 +517,10 @@ impl AppState {
             call_commands: call_command_tx,
             calls_in_chat: HashMap::new(),
             incoming_call: None,
+            incoming_since: None,
+            ring_tone: None,
+            ringback_tone: None,
+            missed_written: HashSet::new(),
             my_call: None,
             _pump: pump,
             _notify_tick: notify_tick,
@@ -691,9 +715,14 @@ impl AppState {
                 }
                 cx.notify();
             }
-            SyncEvent::CallReady { call, created } => self.on_call_ready(call, created, cx),
+            SyncEvent::CallReady {
+                call,
+                created,
+                reachable,
+            } => self.on_call_ready(call, created, reachable, cx),
             SyncEvent::CallStarted { call, sender } => self.on_call_started(call, sender, cx),
             SyncEvent::CallEnded(ended) => self.on_call_ended(ended, cx),
+            SyncEvent::CallMissed(missed) => self.on_call_missed(missed, cx),
             SyncEvent::CallInfo(call) => self.on_call_info(call, cx),
             SyncEvent::CallSeen { chat_id, call_id } => {
                 let known = self
@@ -2362,6 +2391,7 @@ impl AppState {
     }
 
     fn notify_tick(&mut self, cx: &mut Context<Self>) {
+        self.tick_calls(cx);
         let gates: HashMap<Id, Gate> = self
             .projects
             .iter()
@@ -3158,8 +3188,11 @@ impl AppState {
             joined_at: now_ms(),
             expanded: true,
             notice: None,
+            outgoing: true,
+            reachable: None,
         });
         self.command(ClientCommand::StartCall { chat_id, kind });
+        self.sync_tones();
         cx.notify();
     }
 
@@ -3167,6 +3200,7 @@ impl AppState {
         if self.my_call.is_some() {
             return;
         }
+        self.incoming_since = None;
         let known = self
             .calls_in_chat
             .values()
@@ -3183,6 +3217,8 @@ impl AppState {
             joined_at: now_ms(),
             expanded: true,
             notice: None,
+            outgoing: false,
+            reachable: None,
         });
         self.incoming_call = None;
         self.command(ClientCommand::JoinCall { call_id });
@@ -3201,8 +3237,62 @@ impl AppState {
     }
 
     pub fn decline_incoming(&mut self, cx: &mut Context<Self>) {
-        self.incoming_call = None;
+        if let Some((call, _)) = self.incoming_call.take() {
+            notify::withdraw_call(&call.call_id);
+        }
+        self.incoming_since = None;
+        self.sync_tones();
         cx.notify();
+    }
+
+    /// Ringback while my outgoing call has nobody else in it; ring while the
+    /// ring card is up. Idempotent: called after every call state change.
+    fn sync_tones(&mut self) {
+        let ringback = self
+            .my_call
+            .as_ref()
+            .map(|c| {
+                c.outgoing
+                    && c.participants.is_empty()
+                    && !matches!(c.status, CallStatus::Failed(_))
+            })
+            .unwrap_or(false);
+        match (ringback, self.ringback_tone.is_some()) {
+            (true, false) => self.ringback_tone = Some(TonePlayer::start(Tone::Ringback)),
+            (false, true) => self.ringback_tone = None,
+            _ => {}
+        }
+        let ring = self.incoming_call.is_some() && self.my_call.is_none();
+        match (ring, self.ring_tone.is_some()) {
+            (true, false) => self.ring_tone = Some(TonePlayer::start(Tone::Ring)),
+            (false, true) => self.ring_tone = None,
+            _ => {}
+        }
+    }
+
+    /// Every notify tick: stop ringing after `RING_TIMEOUT_MS`, give up on an
+    /// unanswered outgoing call after `RINGBACK_TIMEOUT_MS`.
+    fn tick_calls(&mut self, cx: &mut Context<Self>) {
+        if let Some(since) = self.incoming_since {
+            if now_ms().saturating_sub(since) > RING_TIMEOUT_MS {
+                self.decline_incoming(cx);
+            }
+        }
+        let give_up = self
+            .my_call
+            .as_ref()
+            .map(|c| {
+                c.outgoing
+                    && c.participants.is_empty()
+                    && now_ms().saturating_sub(c.joined_at) > RINGBACK_TIMEOUT_MS
+            })
+            .unwrap_or(false);
+        if give_up {
+            self.leave_call(cx);
+            self.push_notice("No answer.");
+            cx.notify();
+        }
+        self.sync_tones();
     }
 
     pub fn leave_call(&mut self, cx: &mut Context<Self>) {
@@ -3215,6 +3305,7 @@ impl AppState {
                 call_id: active.call.call_id,
             });
         }
+        self.sync_tones();
         cx.notify();
     }
 
@@ -3259,7 +3350,13 @@ impl AppState {
         }
     }
 
-    fn on_call_ready(&mut self, call: Call, created: bool, cx: &mut Context<Self>) {
+    fn on_call_ready(
+        &mut self,
+        call: Call,
+        created: bool,
+        reachable: Vec<Reachable>,
+        cx: &mut Context<Self>,
+    ) {
         self.calls_in_chat
             .insert(call.chat_id.clone(), call.clone());
         if created {
@@ -3295,15 +3392,22 @@ impl AppState {
             joined_at: now_ms(),
             expanded: true,
             notice: None,
+            outgoing: false,
+            reachable: None,
         });
         active.call = call.clone();
         active.status = CallStatus::Connecting;
+        if created {
+            active.outgoing = true;
+            active.reachable = reachable_line(&reachable);
+        }
         let _ = self.call_commands.send(CallCmd::Join {
             url: call.livekit_url.clone(),
             token,
             camera,
         });
         self.incoming_call = None;
+        self.sync_tones();
         cx.notify();
     }
 
@@ -3324,7 +3428,9 @@ impl AppState {
             });
             notify::deliver_call(&call.call_id, &call.chat_id, &title, &body, image);
             self.incoming_call = Some((call, sender));
+            self.incoming_since = Some(now_ms());
         }
+        self.sync_tones();
         cx.notify();
     }
 
@@ -3381,6 +3487,64 @@ impl AppState {
                 });
             }
         }
+        if self.incoming_call.is_none() {
+            self.incoming_since = None;
+        }
+        self.sync_tones();
+        cx.notify();
+    }
+
+    /// `call_missed` (contract §8): the system line once per call, and a
+    /// native "Missed voice call" banner from the caller.
+    fn on_call_missed(&mut self, missed: CallMissed, cx: &mut Context<Self>) {
+        if missed.call_id.is_empty() {
+            return;
+        }
+        self.calls_in_chat
+            .retain(|_, c| c.call_id != missed.call_id);
+        if self
+            .incoming_call
+            .as_ref()
+            .map(|(c, _)| c.call_id == missed.call_id)
+            .unwrap_or(false)
+        {
+            self.incoming_call = None;
+            self.incoming_since = None;
+            notify::withdraw_call(&missed.call_id);
+        }
+        let already = self
+            .messages
+            .get(&missed.chat_id)
+            .map(|list| {
+                list.iter().any(|m| {
+                    m.role == Role::System
+                        && m.call_id.as_deref() == Some(missed.call_id.as_str())
+                        && m.plain_text().starts_with("Missed call")
+                })
+            })
+            .unwrap_or(false);
+        if !already && self.missed_written.insert(missed.call_id.clone()) {
+            self.command(ClientCommand::SystemLine {
+                chat_id: missed.chat_id.clone(),
+                text: missed.line(),
+                call_id: Some(missed.call_id.clone()),
+            });
+            let image = self.avatar_file_for(&missed.from.avatar_url).or_else(|| {
+                self.tree_png_for(
+                    missed.from.avatar.as_deref(),
+                    missed.from.avatar_color.as_deref(),
+                )
+            });
+            notify::deliver(&notify::Notification {
+                project_id: missed.project_id.clone(),
+                title: missed.from.display_name(),
+                body: missed.notification_body(),
+                count: 1,
+                chat_id: Some(missed.chat_id.clone()),
+                image,
+            });
+        }
+        self.sync_tones();
         cx.notify();
     }
 
@@ -3404,8 +3568,11 @@ impl AppState {
                 .unwrap_or(false)
             {
                 self.incoming_call = None;
+                self.incoming_since = None;
+                notify::withdraw_call(&call.call_id);
             }
         }
+        self.sync_tones();
         cx.notify();
     }
 
@@ -3524,6 +3691,7 @@ impl AppState {
                 }
             }
         }
+        self.sync_tones();
         cx.notify();
     }
 

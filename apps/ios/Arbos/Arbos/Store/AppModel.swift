@@ -296,6 +296,15 @@ final class AppModel: ObservableObject {
         calls.writeSystemLine = { [weak self] chatId, projectId, text, callId in
             self?.writeSystemLine(chatId: chatId, projectId: projectId, text: text, callId: callId)
         }
+        calls.calleePresence = { [weak self] chatId in
+            guard let self, let chat = self.peopleChat(chatId), chat.kind == "dm", let other = chat.counterpart(me: self.user?.id) else { return nil }
+            let seen = max(other.lastSeenAt ?? 0, self.lastSeen[other.id] ?? 0)
+            return (other.online || (nowMs() - seen) < 90_000, seen > 0 ? seen : nil)
+        }
+        calls.calleeName = { [weak self] chatId in
+            guard let self, let chat = self.peopleChat(chatId) else { return nil }
+            return chat.counterpart(me: self.user?.id)?.displayName
+        }
         // Presence carries `in_call` for the chat we are talking in.
         callSink = calls.$call.receive(on: DispatchQueue.main).sink { [weak self] c in
             guard let self else { return }
@@ -1469,6 +1478,11 @@ final class AppModel: ObservableObject {
             case "call_started":
                 if let c = Call.parse(p.raw["call"]), c.chatId != CallManager.shared.call?.chatId {
                     CallManager.shared.ring(c, from: CallPerson.parse(p.raw["sender"]) ?? c.startedBy, viaVoip: false)
+                }
+            case "call_missed":
+                if let cid = p.payload["call_id"], let chat = p.payload["chat_id"] {
+                    CallManager.shared.missedCall(callId: cid, chatId: chat, projectId: p.payload["project_id"] ?? peopleSlot,
+                                                  from: CallPerson.parse(p.raw["from"]) ?? CallPerson.parse(p.raw["sender"]))
                 }
             case "call_ended":
                 if let cid = p.payload["call_id"], let chat = p.payload["chat_id"] {

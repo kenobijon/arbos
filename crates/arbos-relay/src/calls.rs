@@ -39,6 +39,76 @@ const EMPTY_AFTER_MS: i64 = 60_000;
 /// Hard cap on a call row that stays live with no activity at all (lost webhooks and leaves).
 const STALE_MS: i64 = 8 * 3_600_000;
 
+/// A callee device counts as "Arbos is open" when it talked to the relay this recently.
+const LIVE_WINDOW_MS: i64 = 30_000;
+
+/// What the starting client said it is: `X-Arbos-Client: ios/1.2 (202610161326)` →
+/// `("ios", "1.2 (202610161326)")`; falls back to the device's push registration.
+fn client_identity(
+    state: &AppState,
+    headers: &HeaderMap,
+    device_id: &str,
+) -> (Option<String>, Option<String>) {
+    if let Some(h) = headers
+        .get("x-arbos-client")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        let (platform, version) = h.split_once('/').unwrap_or((h, ""));
+        return (
+            Some(platform.trim().to_ascii_lowercase()),
+            Some(version.trim().to_owned()).filter(|v| !v.is_empty()),
+        );
+    }
+    state
+        .db
+        .push_token(device_id)
+        .ok()
+        .flatten()
+        .map(|t| {
+            (
+                Some(t.platform),
+                Some(t.app_version).filter(|v| !v.is_empty()),
+            )
+        })
+        .unwrap_or((None, None))
+}
+
+/// `reachable` in the start response: can each callee hear this call right now?
+async fn reachability(state: &AppState, callees: &[String]) -> Vec<Value> {
+    let now = now_ms();
+    let presence = state.presence_seen.lock().await.clone();
+    callees
+        .iter()
+        .map(|u| {
+            let devices: Vec<Value> = state
+                .db
+                .device_reach_rows(u)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(id, name, kind, seen, platform, app_version, voip)| {
+                    let seen = seen.into_iter().chain(presence.get(&id).copied()).max();
+                    json!({
+                        "device_id": id, "name": name, "kind": kind,
+                        "platform": platform, "app_version": app_version,
+                        "polled_within_30s": seen.is_some_and(|t| now - t < LIVE_WINDOW_MS),
+                        "last_seen_at": seen,
+                        "voip_token": voip,
+                    })
+                })
+                .collect();
+            let card = Sender::user(state, u);
+            json!({
+                "user_id": u, "handle": card.handle, "name": card.name,
+                "any_live": devices.iter().any(|d| d["polled_within_30s"] == true),
+                "any_voip": devices.iter().any(|d| d["voip_token"] == true),
+                "devices": devices,
+            })
+        })
+        .collect()
+}
+
 fn identity_of(user_id: &str) -> String {
     format!("u_{user_id}")
 }
@@ -74,6 +144,9 @@ fn call_json(state: &AppState, call: &CallRow, for_user: Option<&str>) -> Value 
         "reason": call.end_reason,
         "participants": participants_json(state, call),
         "max_participants": crate::livekit::MAX_PARTICIPANTS,
+        "started_device": call.started_device,
+        "platform": call.platform,
+        "app_version": call.app_version,
     });
     if let (Some(lk), Some(user), true) = (&state.livekit, for_user, call.active()) {
         let me = Sender::user(state, user);
@@ -268,6 +341,65 @@ async fn announce_ended(
     }
 }
 
+/// Members who never joined a call that is now over: `call_missed` on `/me/pushes` (their next
+/// app open shows "Missed call from <name>" and writes the system line) and an APNs alert.
+async fn announce_missed(state: &AppState, call: &CallRow) {
+    let chat = chat_ref_of(call);
+    let joined: Vec<String> = state
+        .db
+        .call_participants(&call.id)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| p.user_id)
+        .collect();
+    let from = Sender::user(state, &call.started_by);
+    let ended_at = call.ended_at.unwrap_or_else(now_ms);
+    let project_label = call
+        .project_id
+        .clone()
+        .unwrap_or_else(|| people::PEOPLE_PROJECT.to_owned());
+    let what = if call.kind == "video" {
+        "video"
+    } else {
+        "voice"
+    };
+    for user in members(state, &chat) {
+        if user == call.started_by || joined.contains(&user) {
+            continue;
+        }
+        let _ = state.db.push_user(
+            &user,
+            "call_missed",
+            &json!({
+                "call_id": call.id, "chat_id": call.chat_id, "project_id": project_label, "kind": call.kind,
+                "from": from.json(), "started_at": call.started_at, "ended_at": ended_at,
+                "duration_s": ((ended_at - call.started_at) / 1000).max(0), "reason": call.end_reason,
+            }),
+            None,
+        );
+        if !state.push.is_on() {
+            continue;
+        }
+        for t in state.db.push_tokens_of_user(&user).unwrap_or_default() {
+            let payload = json!({
+                "aps": {
+                    "alert": { "title": from.title(), "body": format!("Missed {what} call") },
+                    "sound": "default",
+                    "thread-id": call.chat_id,
+                    "category": CATEGORY,
+                    "mutable-content": 1,
+                },
+                "event": "missed",
+                "chat_id": call.chat_id,
+                "project_id": project_label,
+                "call": call_json(state, call, None),
+                "sender": from.json(),
+            });
+            deliver_alert(state, &t, payload, format!("call:{}", call.id)).await;
+        }
+    }
+}
+
 /// End a call for `reason`; announces once, closes the LiveKit room. `writer_device` is the
 /// device that should write the "Call ended" line when no client already knows it ended.
 pub async fn end_call(
@@ -288,6 +420,7 @@ pub async fn end_call(
         None => state.db.freshest_device_of(&call.started_by).ok().flatten(),
     };
     announce_ended(state, &call, reason, writer.as_deref()).await;
+    announce_missed(state, &call).await;
     if let Some(lk) = &state.livekit {
         lk.delete_room(&state.http, &call.room).await;
     }
@@ -304,13 +437,14 @@ pub struct StartBody {
 async fn start_or_join(
     state: &AppState,
     principal: &Principal,
+    headers: &HeaderMap,
     chat: ChatRef,
     body: StartBody,
 ) -> Response {
     if state.livekit.is_none() {
         return calls_off();
     }
-    let (_device, me) = match device_user(principal) {
+    let (device, me) = match device_user(principal) {
         Ok(v) => v,
         Err(r) => return *r,
     };
@@ -334,6 +468,7 @@ async fn start_or_join(
             .into_response();
     }
     let now = now_ms();
+    let (platform, app_version) = client_identity(state, headers, &device);
     let call = CallRow {
         id: ulid(),
         chat_id: chat.chat_id.clone(),
@@ -345,17 +480,25 @@ async fn start_or_join(
         ended_at: None,
         end_reason: None,
         last_activity_at: now,
+        started_device: Some(device),
+        platform,
+        app_version,
     };
     if let Err(e) = state.db.insert_call(&call) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
     }
     let _ = state.db.call_join(&call.id, &me);
-    tracing::info!(call = %call.id, chat = %call.chat_id, kind, by = %me, "call started");
+    tracing::info!(call = %call.id, chat = %call.chat_id, kind, by = %me, platform = ?call.platform, app_version = ?call.app_version, "call started");
     let starter = Sender::user(state, &me);
     announce_started(state, &call, &starter).await;
+    let callees: Vec<String> = members(state, &chat)
+        .into_iter()
+        .filter(|u| *u != me)
+        .collect();
+    let reachable = reachability(state, &callees).await;
     (
         StatusCode::CREATED,
-        Json(json!({ "call": call_json(state, &call, Some(&me)), "joined": false })),
+        Json(json!({ "call": call_json(state, &call, Some(&me)), "joined": false, "reachable": reachable })),
     )
         .into_response()
 }
@@ -365,6 +508,7 @@ pub async fn start_people_call(
     State(state): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
+    headers: HeaderMap,
     body: Option<Json<StartBody>>,
 ) -> Response {
     if !state.allows(&principal, &format!("{}{id}", people::PEOPLE_ACL_PREFIX)) {
@@ -373,6 +517,7 @@ pub async fn start_people_call(
     start_or_join(
         &state,
         &principal,
+        &headers,
         ChatRef::people(&id),
         body.map(|b| b.0).unwrap_or_default(),
     )
@@ -384,6 +529,7 @@ pub async fn start_project_call(
     State(state): State<AppState>,
     principal: Principal,
     Path((project_id, chat_id)): Path<(String, String)>,
+    headers: HeaderMap,
     body: Option<Json<StartBody>>,
 ) -> Response {
     let Some(project) = resolve_project_chat(&state, &principal, &project_id, &chat_id) else {
@@ -392,6 +538,7 @@ pub async fn start_project_call(
     start_or_join(
         &state,
         &principal,
+        &headers,
         ChatRef::project(&project, &chat_id),
         body.map(|b| b.0).unwrap_or_default(),
     )
@@ -762,6 +909,8 @@ pub async fn admin_calls(State(state): State<AppState>, principal: Principal) ->
                 "call_id": c.id, "chat_id": c.chat_id, "kind": c.kind, "started_by": c.started_by,
                 "started_at": c.started_at, "ended_at": c.ended_at, "reason": c.end_reason,
                 "duration_s": c.ended_at.map(|e| (e - c.started_at) / 1000),
+                "started_device": c.started_device, "platform": c.platform, "app_version": c.app_version,
+                "joined": state.db.call_participants(&c.id).unwrap_or_default().iter().map(|p| p.user_id.clone()).collect::<Vec<_>>(),
             })
         })
         .collect();
@@ -833,6 +982,7 @@ mod tests {
             State(state.clone()),
             carol_dev.clone(),
             Path(chat.clone()),
+            HeaderMap::new(),
             Some(Json(StartBody {
                 kind: Some("video".into()),
             })),
@@ -844,6 +994,7 @@ mod tests {
             State(state.clone()),
             alice_dev.clone(),
             Path(chat.clone()),
+            HeaderMap::new(),
             Some(Json(StartBody {
                 kind: Some("video".into()),
             })),
@@ -874,6 +1025,7 @@ mod tests {
             State(state.clone()),
             bob_dev.clone(),
             Path(chat.clone()),
+            HeaderMap::new(),
             None,
         )
         .await;
@@ -955,6 +1107,7 @@ mod tests {
                 State(state.clone()),
                 alice_dev.clone(),
                 Path(chat.clone()),
+                HeaderMap::new(),
                 None,
             )
             .await,
@@ -1048,7 +1201,14 @@ mod tests {
         let card = crate::people::with_presence(&state, json!({ "id": bob }));
         assert_eq!(card["online"], true);
 
-        let r = start_people_call(State(state.clone()), alice_dev, Path(chat.clone()), None).await;
+        let r = start_people_call(
+            State(state.clone()),
+            alice_dev,
+            Path(chat.clone()),
+            HeaderMap::new(),
+            None,
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::CREATED);
         let kinds: Vec<String> = pushes_of(&state, &bob_dev)
             .into_iter()
@@ -1062,12 +1222,139 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn missed_calls_and_reachability() {
+        let mut state = test_state(AuthMode::Github);
+        with_livekit(&mut state);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let (carol, carol_dev) = person(&state, 3);
+        // A three-person chat: Bob's phone is live and has a VoIP token; Carol is dark.
+        let chat = dm(&state, &alice, &bob);
+        state
+            .db
+            .add_member(
+                &chat,
+                &format!("user:{carol}"),
+                "member",
+                &alice,
+                &json!({}),
+            )
+            .unwrap();
+        let Principal::Device { id: bob_device, .. } = &bob_dev else {
+            unreachable!()
+        };
+        state.db.touch_device(bob_device).unwrap();
+        state
+            .db
+            .upsert_voip_token(&VoipToken {
+                device_id: bob_device.clone(),
+                user_id: bob.clone(),
+                token: "ab".repeat(32),
+                environment: "production".into(),
+                bundle_id: "com.unarbos.arbos.ios".into(),
+                updated_at: now_ms(),
+            })
+            .unwrap();
+        state
+            .db
+            .upsert_push_token(&crate::db_push::PushToken {
+                device_id: bob_device.clone(),
+                user_id: bob.clone(),
+                platform: "ios".into(),
+                token: "cd".repeat(32),
+                environment: "production".into(),
+                bundle_id: "com.unarbos.arbos.ios".into(),
+                app_version: "1.0.0 (202610161326)".into(),
+                updated_at: now_ms(),
+            })
+            .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-arbos-client", "mac/0.6.1 (456)".parse().unwrap());
+        let r = start_people_call(
+            State(state.clone()),
+            alice_dev.clone(),
+            Path(chat.clone()),
+            headers,
+            Some(Json(StartBody {
+                kind: Some("video".into()),
+            })),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::CREATED);
+        let v = body_json(r).await;
+        assert_eq!(v["call"]["platform"], "mac");
+        assert_eq!(v["call"]["app_version"], "0.6.1 (456)");
+        let Principal::Device {
+            id: alice_device, ..
+        } = &alice_dev
+        else {
+            unreachable!()
+        };
+        assert_eq!(v["call"]["started_device"], *alice_device);
+        let reach = v["reachable"].as_array().unwrap();
+        assert_eq!(reach.len(), 2, "every callee, not the caller");
+        let for_bob = reach.iter().find(|r| r["user_id"] == bob).unwrap();
+        let for_carol = reach.iter().find(|r| r["user_id"] == carol).unwrap();
+        assert_eq!(for_bob["any_live"], true);
+        assert_eq!(for_bob["any_voip"], true);
+        assert_eq!(for_bob["devices"][0]["polled_within_30s"], true);
+        assert_eq!(for_bob["devices"][0]["voip_token"], true);
+        assert_eq!(for_bob["devices"][0]["app_version"], "1.0.0 (202610161326)");
+        assert_eq!(for_carol["any_live"], false);
+        assert_eq!(for_carol["any_voip"], false);
+        assert_eq!(for_carol["devices"][0]["polled_within_30s"], false);
+
+        // Bob joins, Alice and Bob hang up; Carol never answered → only Carol gets call_missed.
+        let call_id = v["call"]["call_id"].as_str().unwrap().to_owned();
+        join_call(State(state.clone()), bob_dev.clone(), Path(call_id.clone())).await;
+        leave_call(
+            State(state.clone()),
+            alice_dev.clone(),
+            Path(call_id.clone()),
+        )
+        .await;
+        let v = body_json(
+            leave_call(State(state.clone()), bob_dev.clone(), Path(call_id.clone())).await,
+        )
+        .await;
+        assert_eq!(v["ended"], true);
+        let carol_pushes = pushes_of(&state, &carol_dev);
+        let missed: Vec<_> = carol_pushes
+            .iter()
+            .filter(|(k, _)| k == "call_missed")
+            .collect();
+        assert_eq!(missed.len(), 1);
+        assert_eq!(missed[0].1["from"]["handle"], "user1");
+        assert_eq!(missed[0].1["kind"], "video");
+        assert_eq!(missed[0].1["call_id"], call_id);
+        assert!(carol_pushes.iter().any(|(k, _)| k == "call_ended"));
+        for p in [&alice_dev, &bob_dev] {
+            assert!(
+                !pushes_of(&state, p).iter().any(|(k, _)| k == "call_missed"),
+                "the caller and a member who joined never get call_missed"
+            );
+        }
+        // The only APNs token belongs to Bob, who joined: a "started" alert went out, no "missed".
+        let alerts = state.push.captured().await;
+        assert!(alerts.iter().any(|o| o.payload["event"] == "started"));
+        assert!(alerts.iter().all(|o| o.payload["event"] != "missed"));
+    }
+
+    #[tokio::test]
     async fn calls_are_off_without_livekit() {
         let state = test_state(AuthMode::Github);
         let (alice, alice_dev) = person(&state, 1);
         let (bob, _) = person(&state, 2);
         let chat = dm(&state, &alice, &bob);
-        let r = start_people_call(State(state.clone()), alice_dev, Path(chat), None).await;
+        let r = start_people_call(
+            State(state.clone()),
+            alice_dev,
+            Path(chat),
+            HeaderMap::new(),
+            None,
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }
