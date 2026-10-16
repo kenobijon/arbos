@@ -1427,6 +1427,10 @@ class Loop:
                         rec["result"] = f"could not submit {b['attributes']['version']}: HTTP {e.status} {e.body[:160]}"
                         log(rec["result"])
                     break
+        except Exception as e:  # noqa: BLE001 - Apple has bad minutes; try again in 10 min, not in an hour
+            rec["result"] = f"error: {str(e)[:200]}"
+            rec["at"] = iso(utcnow() - dt.timedelta(minutes=50))
+            raise
         finally:
             Store._write(marker, rec)
             log(f"TestFlight reconcile: {rec['result']}")
