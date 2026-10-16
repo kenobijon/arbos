@@ -16,10 +16,11 @@
 # Nothing is written into the repo; the key file lives in a temp dir and is
 # removed when the lane ends.
 #
-# Build number: BUILD_NUMBER (UTC `YYYYMMDDHHMM` from ios.yml) plus the Actions
-# run id when present, else UTC `YYYYMMDDHHMMSS`. The run-id suffix keeps two
-# main pushes in the same minute from colliding on TestFlight ("Redundant
-# Binary Upload").
+# Build number: BUILD_NUMBER (UTC `YYYYMMDDHHMM` from ios.yml) plus the last
+# 6 digits of the Actions run id when present, else UTC `YYYYMMDDHHMMSS`.
+# Apple's CFBundleVersion max is 18 characters; the suffix keeps two main
+# pushes in the same minute from colliding on TestFlight ("Redundant Binary
+# Upload") without overflowing that limit.
 #
 # Every xcodebuild runs under `set -o pipefail`; its full output is in
 # build/xcodebuild-<lane>.log (ios.yml keeps the logs as an artifact) and the
@@ -35,7 +36,9 @@ DEFAULT_TEAM = "25SCF3Q2AK"
 def build_number
   base = ENV["BUILD_NUMBER"] || Time.now.utc.strftime("%Y%m%d%H%M%S")
   run = ENV["GITHUB_RUN_ID"].to_s
-  run.empty? ? base : "#{base}#{run}"
+  return base if run.empty?
+  # 12 (YYYYMMDDHHMM) + 6 = 18, the CFBundleVersion ceiling.
+  "#{base}#{run[-6, 6]}"
 end
 
 def out_dir
