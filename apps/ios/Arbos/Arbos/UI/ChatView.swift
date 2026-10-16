@@ -376,7 +376,11 @@ struct ChatView: View {
                 }
             }
         }
-        .onDisappear { if model.visibleChatId == chatId { model.visibleChatId = nil } }
+        .onDisappear {
+            // Catch notifies that landed after the last onChange mark-read while we were still in the chat.
+            if isPeople { model.markPeopleRead(chatId) }
+            if model.visibleChatId == chatId { model.visibleChatId = nil }
+        }
         // Profile "search" sets pendingSearchChat while this chat is already on screen
         // (sheet over us), so onAppear alone never sees it — watch the published flag.
         .onChange(of: model.pendingSearchChat) { _, _ in openPendingSearchIfNeeded() }

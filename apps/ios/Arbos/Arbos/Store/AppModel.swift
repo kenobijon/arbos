@@ -447,8 +447,9 @@ final class AppModel: ObservableObject {
     }
 
     func unreadCount(for chat: PeopleChat) -> Int {
-        if let n = unreadCounts[chat.id] { return n }
+        // On screen: never show a stale remote count (notify can lag behind Loro).
         if chat.id == visibleChatId { return 0 }
+        if let n = unreadCounts[chat.id] { return n }
         let bySeq = Int(max(0, chat.headSeq - chat.readSeq))
         return bySeq > 0 ? bySeq : (peopleUnread.contains(chat.id) ? 1 : 0)
     }
@@ -1453,15 +1454,19 @@ final class AppModel: ObservableObject {
     }
 
     /// Mark a people chat read up to the relay head (cross-launch cursor).
+    /// Always PUT /read so chat_events unread clears even when Loro read_seq is already caught up
+    /// (notify can insert events after the rows were already on screen).
     func markPeopleRead(_ chatId: String) {
         peopleUnread.remove(chatId)
         if unreadCounts[chatId] != nil { unreadCounts[chatId] = 0 }
         PushManager.shared.clearDelivered(chatId: chatId)
         defer { applyBadge() }
-        guard let chat = peopleChat(chatId), chat.headSeq > chat.readSeq || chat.unread else { return }
-        if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
-            peopleChats[i].readSeq = chat.headSeq
-            peopleChats[i].unread = false
+        guard let chat = peopleChat(chatId) else { return }
+        if chat.headSeq > chat.readSeq || chat.unread {
+            if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
+                peopleChats[i].readSeq = chat.headSeq
+                peopleChats[i].unread = false
+            }
         }
         Task { try? await api.markRead(chatId: chatId, seq: chat.headSeq) }
     }

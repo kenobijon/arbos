@@ -198,6 +198,20 @@ pub async fn device_focused(state: &AppState, device_id: &str, chat_id: &str) ->
     }
 }
 
+/// Is any of this user's devices looking at `chat_id` right now?
+async fn user_focused_on_chat(state: &AppState, user_id: &str, chat_id: &str) -> bool {
+    let ids = state.db.devices_of_user(user_id).unwrap_or_default();
+    for d in ids {
+        let Some(id) = d.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if device_focused(state, id, chat_id).await {
+            return true;
+        }
+    }
+    false
+}
+
 /// Presence from a room socket: remember (or forget) what the device looks at.
 pub async fn set_focus(state: &AppState, device_id: &str, focused_chat: Option<&str>) {
     let mut focus = state.focus.lock().await;
@@ -277,6 +291,10 @@ async fn deliver(state: &AppState, token: &PushToken, out: Outgoing) {
 
 /// Announce one whole message: record it, then alert every recipient device except the
 /// sender's own and those focused on the chat. Returns the event id, `None` when already seen.
+///
+/// A recipient with the chat on screen is marked read through this event. Notify can land
+/// after Loro already showed the row and the client marked read — without this, the list
+/// badge counts messages the user already saw.
 pub async fn announce(
     state: &AppState,
     chat: &ChatRef,
@@ -299,6 +317,9 @@ pub async fn announce(
     for user in recipients(state, chat) {
         if sender.user_id.as_deref() == Some(user.as_str()) {
             continue;
+        }
+        if user_focused_on_chat(state, &user, &chat.chat_id).await {
+            let _ = state.db.mark_chat_read(&user, &chat.chat_id);
         }
         if !state.push.is_on() {
             continue;
@@ -702,7 +723,8 @@ mod tests {
         );
         assert_eq!(state.push.captured().await.len(), 2);
 
-        // Bob's phone is looking at the chat: only his other device hears the next one.
+        // Bob's phone is looking at the chat: only his other device hears the next one,
+        // and the event is marked read (he is seeing it) so the badge does not stick.
         set_focus(&state, &device_id(&bob_dev), Some(&chat)).await;
         announce(
             &state,
@@ -715,7 +737,8 @@ mod tests {
         let sent = state.push.captured().await;
         assert_eq!(sent.len(), 3);
         assert_eq!(sent[2].device_token, bob_tok2);
-        assert_eq!(sent[2].payload["aps"]["badge"], 2);
+        assert_eq!(sent[2].payload["aps"]["badge"], 0);
+        assert_eq!(state.db.unread_total(&bob).expect("bob unread"), 0);
 
         // Focus on a different chat does not suppress.
         set_focus(&state, &device_id(&bob_dev), Some("other-chat")).await;
