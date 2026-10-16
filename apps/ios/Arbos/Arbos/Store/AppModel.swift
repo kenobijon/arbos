@@ -945,11 +945,18 @@ final class AppModel: ObservableObject {
                 mentions = [address]
             }
         }
-        // Carry on with the agent who just spoke when nothing (and nobody) was addressed.
+        // Carry on with the agent who last spoke when nothing (and nobody) was addressed —
+        // even if a later user line is already in the transcript (follow-up without `@`).
         var reply = replyTo
         if mentions.isEmpty && reply == nil,
-           let last = messages(of: chatId).last, last.role == .assistant {
+           let last = messages(of: chatId).last(where: { $0.role == .assistant }) {
             reply = last.id
+            if let h = last.senderHandle?.lowercased(),
+               let agent = chat.agents.first(where: {
+                   mentionSlug($0.project?.name ?? "").lowercased() == h || $0.handle.lowercased() == h
+               }) {
+                mentions = [agent.member]
+            }
         }
         let author = ChatDoc.Author(sender: "user:\(me.id)", handle: me.login, name: me.name, avatar: me.avatarUrl)
         let messageId = newId()

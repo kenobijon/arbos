@@ -63,13 +63,15 @@ struct ChatView: View {
         return name
     }
 
-    /// Who the next people-chat message is for — chip pick, reply-to, or the agent who just spoke.
+    /// Who the next people-chat message is for — chip pick, reply-to, or the agent who last spoke.
+    /// Uses the last assistant turn (not only when it is the absolute last row) so a follow-up
+    /// without `@` still names — and reaches — that agent while you wait for their reply.
     private var effectiveTalkTo: String? {
         if let talkTo { return talkTo }
         if let r = replyTo, r.role == .assistant, let member = agentMember(for: r) {
             return member.member
         }
-        if let last = messages.last, last.role == .assistant, let member = agentMember(for: last) {
+        if let last = messages.last(where: { $0.role == .assistant }), let member = agentMember(for: last) {
             return member.member
         }
         return nil
@@ -875,17 +877,23 @@ struct ChatView: View {
         return (jpeg, "image/jpeg", "jpg")
     }
 
+    /// Chip / inferred agent, or `"everyone"` when the draft says so — matches `composerPrompt`.
+    private func sendAddress(for text: String) -> String? {
+        if AppModel.addressesEveryone(text) || talkTo == "everyone" { return "everyone" }
+        return effectiveTalkTo
+    }
+
     /// A voice memo goes out as its transcript (typed text first, if any) with the
     /// audio attached, so the agent reads it instead of receiving a file it cannot hear.
     private func sendMemo(_ memo: AppModel.PendingAttachment) {
         let typed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         let extras = pending
         let reply = replyTo?.id
-        let address = talkTo
+        let address = sendAddress(for: typed)
         pending.removeAll()
         draft = ""
         replyTo = nil
-        if address == "everyone" { talkTo = nil }
+        pinTalkTo(afterSending: address)
         sentOnce = true
         transcribing = true
         Task {
@@ -900,18 +908,27 @@ struct ChatView: View {
         }
     }
 
+    /// After a send, keep the agent chip selected so the next line stays with them;
+    /// clear a one-shot "everyone" address.
+    private func pinTalkTo(afterSending address: String?) {
+        if address == "everyone" {
+            talkTo = nil
+        } else if let address, address.hasPrefix("agent:") {
+            talkTo = address
+        }
+    }
+
     private func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !pending.isEmpty else { return }
         if isPeople {
-            let address = talkTo
+            let address = sendAddress(for: text)
             model.sendPeople(chatId: chatId, text: text, replyTo: replyTo?.id, address: address, attachments: pending)
             pending.removeAll()
             draft = ""
             replyTo = nil
             mentionQuery = nil
-            // Keep talkTo so the next line stays with the same agent; clear "everyone".
-            if address == "everyone" { talkTo = nil }
+            pinTalkTo(afterSending: address)
             sentOnce = true
             return
         }
