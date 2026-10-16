@@ -840,11 +840,29 @@ final class AppModel: ObservableObject {
         directory = seen.values.sorted { $0.handle.lowercased() < $1.handle.lowercased() }
     }
 
-    /// People group: `POST /chats {kind: group, members}`.
+    /// People group: `POST /chats {kind: group, members}`. Relays that still
+    /// return 501 for that route: open a DM with the first person, then add the
+    /// rest (`POST /chats/{id}/members` turns a DM into a group on the third person).
     func createGroup(handles: [String]) async -> Bool {
+        let cleaned = handles
+            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "@ ")) }
+            .filter { !$0.isEmpty }
+        guard !cleaned.isEmpty else {
+            notice = Notice(text: "Add at least one other person")
+            return false
+        }
         do {
-            let chat = try await api.createGroup(handles: handles)
-            if !peopleChats.contains(where: { $0.id == chat.id }) { peopleChats.insert(chat, at: 0) }
+            let chat: PeopleChat
+            do {
+                chat = try await api.createGroup(handles: cleaned)
+            } catch let e as RelayError where e.status == 404 || e.status == 405 || e.status == 501 {
+                chat = try await createGroupViaDm(handles: cleaned)
+            }
+            if let i = peopleChats.firstIndex(where: { $0.id == chat.id }) {
+                peopleChats[i] = chat
+            } else {
+                peopleChats.insert(chat, at: 0)
+            }
             ensureRoom(projectId: peopleSlot, key: chat.id, roomChat: chat.id)
             path = [.chat(chatId: chat.id, projectId: peopleSlot)]
             return true
@@ -852,6 +870,15 @@ final class AppModel: ObservableObject {
             notice = Notice(text: "Could not create the group: \(error.localizedDescription)")
             return false
         }
+    }
+
+    /// Fallback when `POST /chats {kind: group}` is not on the relay yet.
+    private func createGroupViaDm(handles: [String]) async throws -> PeopleChat {
+        var chat = try await api.openDM(handle: handles[0])
+        for handle in handles.dropFirst() {
+            chat = try await api.addMember(chatId: chat.id, handle: handle)
+        }
+        return chat
     }
 
     /// Agent profile: rename / recolour a project (`PATCH /projects/{id}`).

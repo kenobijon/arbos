@@ -458,6 +458,8 @@ struct NewGroupView: View {
     @State private var remote: [Person] = []
     @State private var picked: [Person] = []
     @State private var creating = false
+    /// Shown on this screen — the root notice alert sits under the sheet and looks like a silent fail.
+    @State private var errorText: String?
 
     private var trimmed: String { query.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "@")) }
 
@@ -500,6 +502,15 @@ struct NewGroupView: View {
             .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
             .padding(.horizontal, 16).padding(.vertical, 10)
             .onChange(of: query) { _, _ in search() }
+
+            if let errorText {
+                Text(errorText)
+                    .font(.system(size: Theme.small))
+                    .foregroundStyle(theme.danger)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 8)
+            }
 
             ScrollView {
                 LazyVStack(spacing: 0) {
@@ -550,6 +561,7 @@ struct NewGroupView: View {
 
     private func toggle(_ p: Person) {
         if let i = picked.firstIndex(of: p) { picked.remove(at: i) } else { picked.append(p) }
+        errorText = nil
     }
 
     private func search() {
@@ -565,8 +577,15 @@ struct NewGroupView: View {
     private func create() {
         guard !picked.isEmpty, !creating else { return }
         creating = true
+        errorText = nil
         Task {
-            if await model.createGroup(handles: picked.map(\.handle)) { onDone() }
+            if await model.createGroup(handles: picked.map(\.handle)) {
+                onDone()
+            } else {
+                // Copy onto this screen: RootView's alert is behind the sheet.
+                errorText = model.notice?.text ?? "Could not create the group."
+                model.notice = nil
+            }
             creating = false
         }
     }
