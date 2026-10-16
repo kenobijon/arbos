@@ -157,12 +157,13 @@ final class AppModel: ObservableObject {
 
     func open(chat: Chat) {
         unarchive(chat.projectId)
+        rememberOpened(chat)
         path = [.chat(chatId: chat.id, projectId: chat.projectId)]
     }
 
     func open(project: Project) {
         unarchive(project.id)
-        if let chat = mainChat(of: project.id) {
+        if let chat = landingChat(of: project.id) {
             open(chat: chat)
         } else {
             Task { if let c = await newChat(projectId: project.id) { open(chat: c) } }
@@ -1752,8 +1753,47 @@ final class AppModel: ObservableObject {
     /// Multi-chat UI (new chat / chat switcher / thread swipes / chat list /
     /// chat-level archive) is off by default; Settings → Debug flips it. The
     /// data stays: extra chats remain on the box and the relay.
-    @Published var multiChatEnabled: Bool = UserDefaults.standard.bool(forKey: "multiChatEnabled") {
+    @Published var multiChatEnabled: Bool = (UserDefaults.standard.object(forKey: "multiChatEnabled") as? Bool) ?? true {
         didSet { UserDefaults.standard.set(multiChatEnabled, forKey: "multiChatEnabled") }
+    }
+
+    // MARK: Chat archive (device-local, nothing deleted)
+
+    /// Archived chats hide from the chats sheet's main list only. History stays
+    /// in the agent's context/memory tree and searchable history; nothing is
+    /// sent to the relay or agentd.
+    @Published private(set) var archivedChatIds: Set<Id> = Set(UserDefaults.standard.stringArray(forKey: "archivedChats") ?? [])
+
+    func isChatArchived(_ chatId: Id) -> Bool { archivedChatIds.contains(chatId) }
+
+    func archiveChat(_ chatId: Id) {
+        archivedChatIds.insert(chatId)
+        UserDefaults.standard.set(Array(archivedChatIds), forKey: "archivedChats")
+    }
+
+    func unarchiveChat(_ chatId: Id) {
+        archivedChatIds.remove(chatId)
+        UserDefaults.standard.set(Array(archivedChatIds), forKey: "archivedChats")
+    }
+
+    /// The chat the user last opened per agent on this device (tapping the agent returns there).
+    private var lastOpenedChat: [Id: Id] {
+        get { (UserDefaults.standard.dictionary(forKey: "lastOpenedChat") as? [String: String]) ?? [:] }
+        set { UserDefaults.standard.set(newValue, forKey: "lastOpenedChat") }
+    }
+
+    func rememberOpened(_ chat: Chat) {
+        guard chat.projectId != peopleSlot else { return }
+        var m = lastOpenedChat
+        m[chat.projectId] = chat.id
+        lastOpenedChat = m
+    }
+
+    /// Tapping an agent: the last chat used here, if it still exists and is
+    /// not archived; a never-opened agent lands on `primary_chat_id`.
+    func landingChat(of projectId: Id) -> Chat? {
+        if let id = lastOpenedChat[projectId], let c = chat(id), !isChatArchived(c.id) { return c }
+        return primaryChat(of: projectId)
     }
 
     /// The one chat an agent shows. Rule: the relay's `primary_chat` when it

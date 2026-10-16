@@ -115,16 +115,6 @@ struct ChatView: View {
     /// Chip-picked addressee in a people chat: `agent:…`, `user:…`, or `"everyone"`.
     /// Nil means infer from the last agent reply (carry the convo) or the human counterpart.
     @State private var talkTo: String?
-    /// True while a swipe-left is creating the next agent chat (avoids double create).
-    @State private var swipeCreating = false
-    /// Live cue while a nav swipe is arming (archive up, next/new left).
-    @State private var swipeHint: ChatSwipeHint = .none
-
-    private enum ChatSwipeHint: Equatable {
-        case none
-        case archive
-        case nextOrNew
-    }
 
     private var project: Project? { model.project(projectId) }
     private var chat: Chat? { model.chat(chatId) }
@@ -134,9 +124,6 @@ struct ChatView: View {
     private var messages: [Message] { model.messages(of: chatId) }
     private var needsAnswer: Bool { model.chatNeedsAnswer(chatId) }
     private var streaming: Bool { model.isStreaming(chatId) }
-    /// Other threads with this agent (chevron when more than one; plus when alone).
-    private var agentChats: [Chat] { isPeople || !model.multiChatEnabled ? [] : model.chats(of: projectId) }
-    private var hasOtherAgentChats: Bool { agentChats.count > 1 }
     private var name: String {
         if let people { return counterpart.map { "@\($0.handle)" } ?? people.title }
         if let chat, chat.isGroup, !chat.title.isEmpty { return chat.title }
@@ -237,7 +224,6 @@ struct ChatView: View {
                         .padding(.horizontal, 16)
                     }
                 }
-                chatSwipeHintOverlay
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -516,7 +502,17 @@ struct ChatView: View {
                         .onTapGesture { openHeaderProfile() }
                         .accessibilityAddTraits(.isButton)
                         .accessibilityHint("Opens the agent profile")
-                        if model.multiChatEnabled { agentChatSwitcher }
+                        if model.multiChatEnabled {
+                            Button { showThreads = true } label: {
+                                Image(systemName: "bubble.left.and.bubble.right")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(theme.muted)
+                                    .frame(width: 24, height: 22)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Chats with \(project?.name ?? "this agent")")
+                        }
                     }
                 }
                 .padding(.leading, 10)
@@ -560,11 +556,8 @@ struct ChatView: View {
                 } else {
                     if model.multiChatEnabled {
                         Button { showThreads = true } label: { Label("Chats", systemImage: "bubble.left.and.bubble.right") }
-                        Button {
-                            Task { if let c = await model.newChat(projectId: projectId) { model.open(chat: c) } }
-                        } label: { Label("New chat", systemImage: "square.and.pencil") }
                     } else {
-                        // §9b: the agent's "projects" system chat and its group chats stay reachable; plain extra threads do not.
+                        // Single-chat mode: the agent's "projects" system chat and its groups stay reachable.
                         if let sys = model.chats(of: projectId).first(where: { $0.isSystem }), sys.id != chatId {
                             Button { model.open(chat: sys) } label: { Label("Projects", systemImage: "square.grid.2x2") }
                         }
@@ -611,213 +604,20 @@ struct ChatView: View {
 
     // MARK: Chat navigation swipes
 
-    /// Left swipe at the end of the thread list will create a chat (else opens the next).
-    private var swipeCreatesNew: Bool {
-        let list = agentChats
-        guard let i = list.firstIndex(where: { $0.id == chatId }) else { return true }
-        return i + 1 >= list.count
-    }
-
-    /// Archive (up) or next/new (left) badge while the finger is still down.
-    @ViewBuilder
-    private var chatSwipeHintOverlay: some View {
-        Group {
-            switch swipeHint {
-            case .none:
-                Color.clear
-            case .archive:
-                VStack {
-                    Spacer()
-                    swipeHintBadge(systemImage: "archivebox")
-                        .padding(.bottom, 100)
-                }
-            case .nextOrNew:
-                VStack {
-                    Spacer()
-                    HStack {
-                        Spacer()
-                        swipeHintBadge(systemImage: swipeCreatesNew ? "square.and.pencil" : "chevron.right")
-                            .padding(.trailing, 28)
-                    }
-                    Spacer()
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .transition(.opacity.combined(with: .scale(scale: 0.85)))
-        .allowsHitTesting(false)
-    }
-
-    private func swipeHintBadge(systemImage: String) -> some View {
-        Image(systemName: systemImage)
-            .font(.system(size: 22, weight: .semibold))
-            .foregroundStyle(theme.text)
-            .frame(width: 56, height: 56)
-            .background {
-                ZStack {
-                    if theme.isGlass { Circle().fill(.ultraThinMaterial) }
-                    Circle().fill(theme.muted.opacity(theme.isDark ? 0.4 : 0.22))
-                }
-            }
-            .accessibilityHidden(true)
-    }
-
-    /// Right → previous chat with this agent (Home when on the first); left → next (create if none); up → close and open previous.
+    /// Swipe right goes back to Home (#916/#925). There is no swipe between
+    /// chats: the chats sheet (bubble icon beside the agent name) switches chats.
     private var chatNavSwipe: some Gesture {
         DragGesture(minimumDistance: 50, coordinateSpace: .local)
-            .onChanged { value in updateSwipeHint(value) }
-            .onEnded { value in
-                handleChatSwipe(value)
-                withAnimation(.easeOut(duration: 0.15)) { swipeHint = .none }
-            }
-    }
-
-    /// Soft thresholds so the cue appears before the gesture commits.
-    private func updateSwipeHint(_ value: DragGesture.Value) {
-        guard !isPeople, model.multiChatEnabled else {
-            if swipeHint != .none { withAnimation(.easeOut(duration: 0.12)) { swipeHint = .none } }
-            return
-        }
-        let dx = value.translation.width
-        let dy = value.translation.height
-        let absX = abs(dx), absY = abs(dy)
-        let next: ChatSwipeHint
-        if absX > 50, absX > absY * 1.1, dx < 0 {
-            next = .nextOrNew
-        } else if dy < -80, absY > absX * 1.5 {
-            next = .archive
-        } else {
-            next = .none
-        }
-        guard next != swipeHint else { return }
-        withAnimation(.easeOut(duration: 0.12)) { swipeHint = next }
+            .onEnded { value in handleChatSwipe(value) }
     }
 
     private func handleChatSwipe(_ value: DragGesture.Value) {
         let dx = value.translation.width
-        let dy = value.translation.height
-        let vx = value.velocity.width
-        let vy = value.velocity.height
-        let absX = abs(dx), absY = abs(dy)
-
-        // Horizontal: clear sideways flick (vertical scroll stays dominant otherwise).
-        if absX > 70, absX > absY * 1.25, abs(vx) >= abs(vy) || absX > 120 {
-            if dx > 0 {
-                // Swipe back to Home (#916/#925) — always; thread stepping only with multi-chat on.
-                if isPeople || !model.multiChatEnabled {
-                    composerFocused = false
-                    dismiss()
-                } else {
-                    goToPreviousAgentChat()
-                }
-            } else if !isPeople, model.multiChatEnabled {
-                goToNextAgentChat()
-            }
-            return
-        }
-
-        // Up: archive this agent chat and open the previous one (multi-chat only).
-        // High distance + velocity so ordinary transcript scrolling does not fire this.
-        if !isPeople, model.multiChatEnabled, dy < -140, value.predictedEndTranslation.height < -280,
-           absY > absX * 2, vy < -900 {
-            archiveAgentChatAndGoPrevious()
-        }
-    }
-
-    /// Swipe right: previous thread with this agent, or Home when already on the first.
-    private func goToPreviousAgentChat() {
-        guard !isPeople else { return }
-        let list = agentChats
-        if let i = list.firstIndex(where: { $0.id == chatId }), i > 0 {
-            model.open(chat: list[i - 1])
-            return
-        }
-        composerFocused = false
-        dismiss()
-    }
-
-    /// Swipe left: next thread with this agent, or create one when there is no next.
-    private func goToNextAgentChat() {
-        guard !isPeople, !swipeCreating else { return }
-        let list = agentChats
-        if let i = list.firstIndex(where: { $0.id == chatId }), i + 1 < list.count {
-            model.open(chat: list[i + 1])
-            return
-        }
-        swipeCreating = true
-        Task {
-            if let c = await model.newChat(projectId: projectId) {
-                model.open(chat: c)
-            }
-            swipeCreating = false
-        }
-    }
-
-    /// Swipe up: close the current non-pinned chat and open the previous thread (or Home).
-    private func archiveAgentChatAndGoPrevious() {
-        guard !isPeople, let current = chat else { return }
-        let list = agentChats
-        guard let i = list.firstIndex(where: { $0.id == chatId }) else {
+        let absX = abs(dx), absY = abs(value.translation.height)
+        let vx = value.velocity.width, vy = value.velocity.height
+        if dx > 0, absX > 70, absX > absY * 1.25, abs(vx) >= abs(vy) || absX > 120 {
             composerFocused = false
             dismiss()
-            return
-        }
-        let previous: Chat? = i > 0 ? list[i - 1] : nil
-        if !current.isPinned {
-            model.closeChat(current)
-        }
-        if let previous {
-            model.open(chat: previous)
-        } else {
-            composerFocused = false
-            dismiss()
-        }
-    }
-
-    /// Chevron when this agent has other chats (instant Menu); plus when alone (new chat).
-    @ViewBuilder
-    private var agentChatSwitcher: some View {
-        if hasOtherAgentChats {
-            Menu {
-                ForEach(agentChats) { chat in
-                    Button {
-                        guard chat.id != chatId else { return }
-                        model.open(chat: chat)
-                    } label: {
-                        if chat.id == chatId {
-                            Label(chat.isPinned ? "Main" : chat.title, systemImage: "checkmark")
-                        } else {
-                            Text(chat.isPinned ? "Main" : chat.title)
-                        }
-                    }
-                }
-                Divider()
-                Button {
-                    Task { if let c = await model.newChat(projectId: projectId) { model.open(chat: c) } }
-                } label: {
-                    Label("New chat", systemImage: "plus")
-                }
-            } label: {
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(theme.muted)
-                    .frame(width: 22, height: 22)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Chats with \(name)")
-        } else {
-            Button {
-                Task { if let c = await model.newChat(projectId: projectId) { model.open(chat: c) } }
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(theme.muted)
-                    .frame(width: 22, height: 22)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("New chat")
         }
     }
 
