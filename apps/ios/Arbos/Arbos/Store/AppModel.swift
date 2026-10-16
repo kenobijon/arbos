@@ -108,16 +108,40 @@ final class AppModel: ObservableObject {
     }
 
     func open(chat: Chat) {
+        unarchive(chat.projectId)
         path = [.chat(chatId: chat.id, projectId: chat.projectId)]
     }
 
     func open(project: Project) {
+        unarchive(project.id)
         if let chat = mainChat(of: project.id) {
             open(chat: chat)
         } else {
             Task { if let c = await newChat(projectId: project.id) { open(chat: c) } }
         }
     }
+
+    // MARK: Home archive (device-local)
+
+    /// Agents hidden from the home list until found in search (or opened).
+    @Published private(set) var archivedProjectIds: Set<Id> = {
+        Set(UserDefaults.standard.stringArray(forKey: "archivedProjects") ?? [])
+    }()
+
+    func isArchived(_ projectId: Id) -> Bool { archivedProjectIds.contains(projectId) }
+
+    func archive(_ projectId: Id) {
+        guard !archivedProjectIds.contains(projectId) else { return }
+        archivedProjectIds.insert(projectId)
+        UserDefaults.standard.set(Array(archivedProjectIds), forKey: "archivedProjects")
+    }
+
+    func unarchive(_ projectId: Id) {
+        guard archivedProjectIds.contains(projectId) else { return }
+        archivedProjectIds.remove(projectId)
+        UserDefaults.standard.set(Array(archivedProjectIds), forKey: "archivedProjects")
+    }
+
     @Published private(set) var machineError: String?
     @Published var notice: Notice?
     @Published private(set) var pairingBusy = false

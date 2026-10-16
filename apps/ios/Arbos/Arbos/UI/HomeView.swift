@@ -18,46 +18,74 @@ struct HomeView: View {
     private var projects: [Project] {
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
         let sorted = model.projects.sorted { lastActivity($0) > lastActivity($1) }
-        return q.isEmpty ? sorted : sorted.filter { $0.name.lowercased().contains(q) }
+        if q.isEmpty {
+            // Archived agents stay out of the home list until search (or open).
+            return sorted.filter { !model.isArchived($0.id) }
+        }
+        return sorted.filter { $0.name.lowercased().contains(q) }
     }
 
     var body: some View {
         NavigationStack(path: $model.path) {
             ZStack(alignment: .top) {
                 theme.bg.ignoresSafeArea()
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        Color.clear.frame(height: 66)
-                        if model.projects.isEmpty && model.peopleChats.isEmpty {
-                            emptyState
-                        } else {
-                            if query.isEmpty {
-                                ForEach(model.approvals) { device in
-                                    ApprovalCard(device: device)
-                                }
+                List {
+                    Color.clear.frame(height: 66)
+                        .listRowInsets(EdgeInsets())
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
+                        .accessibilityHidden(true)
+                    if model.projects.isEmpty && model.peopleChats.isEmpty {
+                        emptyState
+                            .listRowInsets(EdgeInsets())
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
+                    } else {
+                        if query.isEmpty {
+                            ForEach(model.approvals) { device in
+                                ApprovalCard(device: device)
+                                    .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
+                                    .listRowSeparator(.hidden)
+                                    .listRowBackground(theme.bg)
                             }
-                            ForEach(homeRows) { row in
-                                switch row {
-                                case .project(let project):
-                                    Button { model.open(project: project) } label: {
-                                        AgentRow(project: project, preview: preview(project), time: timeLabel(project),
-                                                 streaming: model.isStreaming(project: project.id),
-                                                 unread: model.chats(of: project.id).contains { $0.unread })
-                                    }
-                                    .buttonStyle(.plain)
-                                case .people(let chat):
-                                    Button { model.open(peopleChat: chat) } label: {
-                                        PeopleRow(chat: chat, preview: peoplePreview(chat), time: timeLabel(ms: peopleActivity(chat)),
-                                                  unread: model.peopleUnread.contains(chat.id) || model.unreadCount(for: chat) > 0,
-                                                  count: model.unreadCount(for: chat), me: model.user?.id)
-                                    }
-                                    .buttonStyle(.plain)
+                        }
+                        ForEach(homeRows) { row in
+                            switch row {
+                            case .project(let project):
+                                Button { model.open(project: project) } label: {
+                                    AgentRow(project: project, preview: preview(project), time: timeLabel(project),
+                                             streaming: model.isStreaming(project: project.id),
+                                             unread: model.chats(of: project.id).contains { $0.unread })
                                 }
+                                .buttonStyle(.plain)
+                                .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
+                                .listRowSeparator(.hidden)
+                                .listRowBackground(theme.bg)
+                                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                    Button {
+                                        withAnimation { model.archive(project.id) }
+                                    } label: {
+                                        Label("Archive", systemImage: "archivebox")
+                                    }
+                                    .tint(theme.muted)
+                                }
+                            case .people(let chat):
+                                Button { model.open(peopleChat: chat) } label: {
+                                    PeopleRow(chat: chat, preview: peoplePreview(chat), time: timeLabel(ms: peopleActivity(chat)),
+                                              unread: model.peopleUnread.contains(chat.id) || model.unreadCount(for: chat) > 0,
+                                              count: model.unreadCount(for: chat), me: model.user?.id)
+                                }
+                                .buttonStyle(.plain)
+                                .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
+                                .listRowSeparator(.hidden)
+                                .listRowBackground(theme.bg)
                             }
                         }
                     }
-                    .padding(.horizontal, 16)
                 }
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
+                .background(theme.bg)
                 .mask {
                     VStack(spacing: 0) {
                         LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom).frame(height: 100)
