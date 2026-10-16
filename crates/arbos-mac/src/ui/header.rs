@@ -8,7 +8,7 @@
 
 use gpui::{
     div, prelude::*, px, AnyElement, Context, Div, ElementId, Focusable as _, FontWeight,
-    SharedString, Stateful,
+    SharedString,
 };
 
 use crate::app::ProfilePage;
@@ -387,7 +387,7 @@ pub fn render(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
 /// (archives it), "+" for a new chat, and an "Archived" pill when there is
 /// something in it. With multi-chat off: the primary, groups and the
 /// Projects tab only, no "+", no "×", no Archived.
-fn agent_tabs(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option<Stateful<Div>> {
+fn agent_tabs(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option<Div> {
     let theme = Theme::of(cx).clone();
     let state = shell.state.read(cx);
     let multi_chat = state.multi_chat;
@@ -411,6 +411,7 @@ fn agent_tabs(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option
         return None;
     }
     let projects = state.projects.clone();
+    // The tabs scroll; "+" and "Archived" stay put after them.
     let mut row = div()
         .id("chat-tabs")
         .flex_1()
@@ -427,7 +428,7 @@ fn agent_tabs(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option
         let id = chat.id.clone();
         let close_id = chat.id.clone();
         let is_primary = primary_id.as_deref() == Some(&*chat.id);
-        let title = if chat.is_pinned || is_primary {
+        let title = if chat.is_pinned {
             "Main".to_string()
         } else {
             chat.title.clone()
@@ -500,8 +501,15 @@ fn agent_tabs(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option
         }
         row = row.child(pill);
     }
+    let mut strip = div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .child(row);
     if multi_chat {
-        row = row.child(
+        strip = strip.child(
             div()
                 .id("tab-new")
                 .flex_shrink_0()
@@ -521,7 +529,7 @@ fn agent_tabs(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option
         );
         if archived > 0 {
             let open = shell.archived_open;
-            row = row.child(
+            strip = strip.child(
                 div()
                     .id("tab-archived")
                     .flex_shrink_0()
@@ -554,7 +562,7 @@ fn agent_tabs(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option
             );
         }
     }
-    Some(row)
+    Some(strip)
 }
 
 /// The "Archived" dropdown: the agent's archived chats, each with "Unarchive".

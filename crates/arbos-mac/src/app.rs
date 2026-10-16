@@ -1247,9 +1247,10 @@ impl AppState {
         out
     }
 
-    /// The one chat of an agent. The relay's `primary_chat` wins when it names a
-    /// chat we have; otherwise the chat with the most messages, ties → earliest
-    /// created (ULID order). Groups and system tabs only when nothing else exists.
+    /// The one chat of an agent. The relay's `primary_chat_id` wins when it names
+    /// a chat we have; otherwise the pinned chat, else the plain chat with the
+    /// most messages, ties → earliest created (ULID order). Groups and system
+    /// tabs only when nothing else exists.
     pub fn primary_chat(&self, project_id: &str) -> Option<&Chat> {
         let tabs = self.tabs(project_id);
         if let Some(named) = self
@@ -1263,6 +1264,11 @@ impl AppState {
             .iter()
             .filter(|c| !c.is_group() && !c.is_system)
             .collect();
+        // No relay verdict: the pinned "Main" chat is the agent's chat (a new
+        // project's pinned chat is its primary from creation, §9b).
+        if let Some(pinned) = plain.iter().find(|c| c.is_pinned) {
+            return Some(pinned);
+        }
         let pool = if plain.is_empty() {
             tabs.iter().collect()
         } else {
