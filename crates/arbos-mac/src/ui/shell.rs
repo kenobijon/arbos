@@ -15,6 +15,7 @@ use crate::app::SignInMode;
 use crate::app::{AppState, DetailsTarget};
 use crate::model::{now_ms, Link, MachineState};
 use crate::ui::avatars;
+use crate::ui::callview;
 use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
 use crate::ui::composer::{Composer, ComposerEvent, ComposerInput};
 use crate::ui::connectors::{ConnectorsEvent, ConnectorsPanel};
@@ -633,8 +634,31 @@ impl Shell {
         if let Some(chips) = header::chips(self, &space, cx) {
             column = column.child(chips);
         }
+        // Calls v1: my call (bar, or the full screen below), or a live call to join.
+        let my_call = self.state.read(cx).my_call.clone();
+        let call_here = self.state.read(cx).calls_in_chat.get(&space.id).cloned();
+        let screen_open = my_call
+            .as_ref()
+            .map(|c| c.expanded && c.call.chat_id == space.id)
+            .unwrap_or(false);
+        if let Some(active) = my_call.as_ref().filter(|_| !screen_open) {
+            column = column.child(callview::bar(active, cx));
+        } else if let Some(call) = call_here.filter(|c| {
+            c.is_live()
+                && my_call
+                    .as_ref()
+                    .map(|m| m.call.call_id != c.call_id)
+                    .unwrap_or(true)
+        }) {
+            column = column.child(callview::join_bar(&call, cx));
+        }
         if let Some(banner) = self.render_banner(cx) {
             column = column.child(banner);
+        }
+        if screen_open {
+            if let Some(active) = my_call.as_ref() {
+                return column.child(callview::screen(self, active, cx));
+            }
         }
 
         if !dropped {
@@ -2293,6 +2317,10 @@ impl Render for Shell {
         }
         if self.feedback.read(cx).is_open() {
             root = root.child(self.feedback.clone());
+        }
+        let incoming = self.state.read(cx).incoming_call.clone();
+        if let Some((call, sender)) = incoming.as_ref() {
+            root = root.child(callview::ring_card(self, call, sender, cx));
         }
         if let Some(prompt) = self.render_notify_prompt(cx) {
             root = root.child(prompt);

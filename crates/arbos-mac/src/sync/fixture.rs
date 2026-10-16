@@ -16,7 +16,8 @@ use tokio::sync::mpsc;
 use tokio::time::sleep;
 
 use crate::model::{
-    AgentMember, Machine, MachineState, Person, ProjectDocView, ReplyPolicy, SpaceKind, ThreadInfo,
+    AgentMember, Call, CallEnded, CallKind, Machine, MachineState, Person, ProjectDocView,
+    ReplyPolicy, Sender, SpaceKind, ThreadInfo,
 };
 
 use super::doc::ChatDoc;
@@ -231,6 +232,70 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             *shared.open_chat.lock().unwrap() = Some(chat_id.clone());
             mark_read(shared, &chat_id);
         }
+        // Calls v1 against a local `livekit-server --dev` (devkey/secret):
+        // the fixture mints the join token itself.
+        ClientCommand::StartCall { chat_id, kind } => {
+            let call = fixture_call(&chat_id, kind);
+            let _ = shared.events.send(SyncEvent::CallReady {
+                call: call.clone(),
+                created: true,
+            });
+            // Sam picks up after a moment so the tile grid has someone in it.
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                sleep(Duration::from_millis(2500)).await;
+                let mut joined = call.clone();
+                joined.token = None;
+                joined.participants.push(sender_of(&sam()));
+                let _ = shared.events.send(SyncEvent::CallInfo(joined));
+            });
+        }
+        ClientCommand::JoinCall { call_id } => {
+            let chat_id = call_id
+                .strip_prefix("call_fixture_")
+                .unwrap_or(DM_SAM)
+                .to_string();
+            let _ = shared.events.send(SyncEvent::CallReady {
+                call: fixture_call(&chat_id, CallKind::Video),
+                created: false,
+            });
+        }
+        ClientCommand::LeaveCall { call_id } => {
+            let chat_id = call_id
+                .strip_prefix("call_fixture_")
+                .unwrap_or(DM_SAM)
+                .to_string();
+            let _ = shared.events.send(SyncEvent::CallEnded(CallEnded {
+                call_id,
+                chat_id,
+                project_id: "people".into(),
+                duration_s: 72,
+                reason: "last_left".into(),
+                writer_device: Some("fixture-device".into()),
+            }));
+        }
+        ClientCommand::FetchCall { call_id } => {
+            let chat_id = call_id
+                .strip_prefix("call_fixture_")
+                .unwrap_or(DM_SAM)
+                .to_string();
+            let mut call = fixture_call(&chat_id, CallKind::Voice);
+            call.token = None;
+            let _ = shared.events.send(SyncEvent::CallInfo(call));
+        }
+        ClientCommand::SystemLine {
+            chat_id,
+            text,
+            call_id,
+        } => {
+            let docs = shared.docs.lock().unwrap();
+            if let Some(doc) = docs.get(&chat_id) {
+                let mut msg = system_message(&chat_id, &text);
+                msg.call_id = call_id;
+                let _ = doc.insert_message(&msg);
+                doc.commit();
+            }
+        }
         ClientCommand::Send {
             chat_id,
             message_id,
@@ -354,6 +419,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         effort: None,
                         created_at: now_ms(),
                         completed_at: None,
+                        call_id: None,
                         pending: true,
                         parts: vec![Part::Text {
                             id: new_id(),
@@ -1128,6 +1194,7 @@ fn send_user(
                 effort: None,
                 created_at: now_ms(),
                 completed_at: None,
+                call_id: None,
                 pending: true,
                 parts,
                 hidden_parts: Vec::new(),
@@ -1425,6 +1492,7 @@ fn run_routine_now(shared: &Arc<Shared>, project_id: &str, routine_id: &str) {
                 effort: None,
                 created_at: now_ms(),
                 completed_at: None,
+                call_id: None,
                 pending: false,
                 parts: vec![Part::Text {
                     id: new_id(),
@@ -2000,6 +2068,7 @@ async fn run_turn(
             effort: Some(effort),
             created_at: now_ms(),
             completed_at: None,
+            call_id: None,
             pending: false,
             parts: vec![Part::Status {
                 id: new_id(),
@@ -2603,6 +2672,7 @@ async fn run_outcome_turn(
             effort: Some(effort),
             created_at: now_ms(),
             completed_at: None,
+            call_id: None,
             pending: false,
             parts: vec![empty_text()],
             hidden_parts: Vec::new(),
@@ -3064,6 +3134,7 @@ impl Seeder<'_> {
             effort: None,
             created_at: self.t,
             completed_at: Some(self.t),
+            call_id: None,
             pending: false,
             parts: extra,
             hidden_parts: Vec::new(),
@@ -3101,6 +3172,7 @@ impl Seeder<'_> {
             effort: Some(Effort::High),
             created_at: self.t,
             completed_at: Some(self.t + 9_000),
+            call_id: None,
             pending: false,
             parts,
             hidden_parts: Vec::new(),
@@ -3139,6 +3211,7 @@ fn project_message(chat_id: &str, project: &Project, text: &str, t: u64) -> Mess
         effort: None,
         created_at: t,
         completed_at: Some(t),
+        call_id: None,
         pending: false,
         parts: vec![Part::Text {
             id: new_id(),
@@ -3764,6 +3837,7 @@ fn human_message(chat_id: &str, who: &Person, text: &str, at: u64) -> Message {
         effort: None,
         created_at: at,
         completed_at: Some(at),
+        call_id: None,
         pending: false,
         parts: vec![text_part(text)],
         hidden_parts: Vec::new(),
@@ -4269,6 +4343,7 @@ async fn agent_reply(
             effort: None,
             created_at: now_ms(),
             completed_at: None,
+            call_id: None,
             pending: false,
             parts: vec![Part::Status {
                 id: new_id(),
@@ -4315,4 +4390,116 @@ async fn agent_reply(
         doc.commit();
     });
     mark_unread_if_hidden(shared, chat_id);
+}
+
+// ---------------------------------------------------------------------------
+// Calls v1 fixtures
+// ---------------------------------------------------------------------------
+
+fn sender_of(p: &Person) -> Sender {
+    Sender {
+        kind: "user".into(),
+        id: p.id.clone(),
+        name: p.name.clone().unwrap_or_default(),
+        handle: p.handle.clone(),
+        avatar: None,
+        avatar_color: None,
+        avatar_url: p.avatar_url.clone(),
+    }
+}
+
+/// `ARBOS_FIXTURE_LIVEKIT_URL` (default the dev server), identity
+/// `ARBOS_FIXTURE_IDENTITY` (so two fixture instances can share a room).
+fn fixture_call(chat_id: &str, kind: CallKind) -> Call {
+    let url =
+        std::env::var("ARBOS_FIXTURE_LIVEKIT_URL").unwrap_or_else(|_| "ws://127.0.0.1:7880".into());
+    let identity = std::env::var("ARBOS_FIXTURE_IDENTITY").unwrap_or_else(|_| format!("u_{ME_ID}"));
+    let me = me();
+    let room = format!("call_fixture_{chat_id}");
+    let metadata = serde_json::to_string(&sender_of(&me)).unwrap_or_default();
+    Call {
+        call_id: room.clone(),
+        chat_id: chat_id.to_string(),
+        project_id: "people".into(),
+        kind,
+        room: room.clone(),
+        livekit_url: url,
+        token: Some(dev_token(&room, &identity, &me.display_name(), &metadata)),
+        token_expires_at: Some(now_ms() + 3_600_000),
+        started_by: sender_of(&me),
+        started_at: now_ms(),
+        ended_at: None,
+        reason: None,
+        participants: vec![sender_of(&me)],
+    }
+}
+
+fn system_message(chat_id: &str, text: &str) -> Message {
+    Message {
+        id: new_id(),
+        chat_id: chat_id.to_string(),
+        role: Role::System,
+        sender: "system".into(),
+        sender_handle: None,
+        sender_name: None,
+        sender_avatar: None,
+        sender_avatar_color: None,
+        mentions: Vec::new(),
+        status: MessageStatus::Done,
+        turn: None,
+        decision: None,
+        subagent_id: None,
+        subagent_name: None,
+        in_reply_to: None,
+        routine_name: None,
+        sender_icon: None,
+        reply_to: None,
+        asked_by_handle: None,
+        owner_handle: None,
+        usage: None,
+        return_contract: None,
+        waiting_user: false,
+        waiting_approval: false,
+        model: None,
+        effort: None,
+        created_at: now_ms(),
+        completed_at: Some(now_ms()),
+        call_id: None,
+        pending: false,
+        parts: vec![Part::Text {
+            id: new_id(),
+            text: text.to_string(),
+        }],
+        hidden_parts: Vec::new(),
+    }
+}
+
+/// LiveKit access token for `livekit-server --dev` (API key `devkey`, secret
+/// `secret`): HS256 JWT with the video grant. Dev only.
+fn dev_token(room: &str, identity: &str, name: &str, metadata: &str) -> String {
+    use base64::Engine as _;
+    use sha2::{Digest, Sha256};
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let now = now_ms() / 1000;
+    let header = b64.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
+    let claims = json!({
+        "iss": "devkey",
+        "sub": identity,
+        "name": name,
+        "metadata": metadata,
+        "nbf": now - 10,
+        "exp": now + 3600,
+        "video": { "roomJoin": true, "room": room, "canPublish": true, "canSubscribe": true, "canPublishData": true },
+    });
+    let payload = b64.encode(claims.to_string());
+    let signing = format!("{header}.{payload}");
+    // HMAC-SHA256 by hand (one use; no extra crate).
+    let key = b"secret";
+    let mut k = [0u8; 64];
+    k[..key.len()].copy_from_slice(key);
+    let ipad: Vec<u8> = k.iter().map(|b| b ^ 0x36).collect();
+    let opad: Vec<u8> = k.iter().map(|b| b ^ 0x5c).collect();
+    let inner = Sha256::digest([ipad.as_slice(), signing.as_bytes()].concat());
+    let mac = Sha256::digest([opad.as_slice(), inner.as_slice()].concat());
+    format!("{signing}.{}", b64.encode(mac))
 }

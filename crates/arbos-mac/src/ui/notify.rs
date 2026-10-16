@@ -412,6 +412,72 @@ fn spawn_quiet(cmd: &mut Command) {
     }
 }
 
+/// Calls v1: the ringing banner — "<caller>" / "Incoming video call" with
+/// Accept and Decline (category `ARBOS_CALL`). Clicking the banner body
+/// accepts. The click lands in [`take_clicks`] as `call:accept:<id>` /
+/// `call:decline:<id>`.
+pub fn deliver_call(call_id: &str, chat_id: &str, title: &str, body: &str, image: Option<PathBuf>) {
+    if std::env::var_os("ARBOS_NOTIFY_DRY_RUN").is_some() {
+        eprintln!("notify: call {call_id} in {chat_id}: {title} — {body}");
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if mac::available() {
+            mac::deliver_call(call_id, chat_id, title, body, image.as_deref());
+            return;
+        }
+        let script = format!(
+            "display notification \"{}\" with title \"{}\"",
+            applescript_escape(body),
+            applescript_escape(title)
+        );
+        spawn_quiet(Command::new("osascript").arg("-e").arg(script));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mut cmd = Command::new("notify-send");
+        cmd.arg("--app-name=Arbos")
+            .arg("--expire-time=30000")
+            .arg("--urgency=critical");
+        if let Some(image) = &image {
+            cmd.arg(format!("--icon={}", image.display()));
+        }
+        cmd.arg("--action=accept=Accept")
+            .arg("--action=decline=Decline")
+            .arg("--wait")
+            .arg(title)
+            .arg(body);
+        let id = call_id.to_string();
+        spawn_then(&mut cmd, move |out| {
+            let choice = out.trim();
+            if choice == "accept" || choice == "default" {
+                push_click(format!("call:accept:{id}"));
+            } else if choice == "decline" {
+                push_click(format!("call:decline:{id}"));
+            }
+        });
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (title, body, image);
+    }
+}
+
+/// The call ended before it was answered: take the ringing banner down.
+pub fn withdraw_call(call_id: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        if mac::available() {
+            mac::withdraw_call(call_id);
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = call_id;
+    }
+}
+
 /// Run `cmd`, hand its stdout to `then` when it exits (notification clicks).
 #[cfg(target_os = "linux")]
 fn spawn_then(cmd: &mut Command, then: impl FnOnce(String) + Send + 'static) {
@@ -450,12 +516,14 @@ mod mac {
     use objc2::runtime::ProtocolObject;
     use objc2::{define_class, msg_send, MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::NSApplication;
+    use objc2_foundation::NSSet;
     use objc2_foundation::{
         NSArray, NSBundle, NSError, NSObject, NSObjectProtocol, NSString, NSURL,
     };
     use objc2_user_notifications::{
-        UNAuthorizationOptions, UNMutableNotificationContent, UNNotification,
-        UNNotificationAttachment, UNNotificationPresentationOptions, UNNotificationRequest,
+        UNAuthorizationOptions, UNMutableNotificationContent, UNNotification, UNNotificationAction,
+        UNNotificationActionOptions, UNNotificationAttachment, UNNotificationCategory,
+        UNNotificationCategoryOptions, UNNotificationPresentationOptions, UNNotificationRequest,
         UNNotificationResponse, UNNotificationSound, UNUserNotificationCenter,
         UNUserNotificationCenterDelegate,
     };
@@ -464,6 +532,11 @@ mod mac {
 
     /// Request identifiers carry the chat: `chat:<id>:<stamp>`.
     const CHAT_PREFIX: &str = "chat:";
+    /// Ringing banners: `call:<call_id>:<chat_id>`; category `ARBOS_CALL`.
+    const CALL_PREFIX: &str = "call:";
+    const CALL_CATEGORY: &str = "ARBOS_CALL";
+    const ACCEPT: &str = "ACCEPT";
+    const DECLINE: &str = "DECLINE";
 
     define_class!(
         // SAFETY: NSObject has no subclassing requirements and the type
@@ -501,6 +574,15 @@ mod mac {
                 if let Some(rest) = id.strip_prefix(CHAT_PREFIX) {
                     if let Some((chat, _stamp)) = rest.rsplit_once(':') {
                         super::push_click(chat.to_string());
+                    }
+                } else if let Some(rest) = id.strip_prefix(CALL_PREFIX) {
+                    let call_id = rest.split_once(':').map(|(c, _)| c).unwrap_or(rest);
+                    let action = response.actionIdentifier().to_string();
+                    if action == DECLINE {
+                        super::push_click(format!("call:decline:{call_id}"));
+                    } else {
+                        // ACCEPT, or the default action (a click on the banner).
+                        super::push_click(format!("call:accept:{call_id}"));
                     }
                 }
                 if let Some(mtm) = MainThreadMarker::new() {
@@ -550,6 +632,102 @@ mod mac {
         let center = UNUserNotificationCenter::currentNotificationCenter();
         center.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
         DELEGATE.with(|d| *d.borrow_mut() = Some(delegate));
+        // The ringing category: Accept (foreground) and Decline.
+        let accept = UNNotificationAction::actionWithIdentifier_title_options(
+            &NSString::from_str(ACCEPT),
+            &NSString::from_str("Accept"),
+            UNNotificationActionOptions::Foreground,
+        );
+        let decline = UNNotificationAction::actionWithIdentifier_title_options(
+            &NSString::from_str(DECLINE),
+            &NSString::from_str("Decline"),
+            UNNotificationActionOptions::Destructive,
+        );
+        let category =
+            UNNotificationCategory::categoryWithIdentifier_actions_intentIdentifiers_options(
+                &NSString::from_str(CALL_CATEGORY),
+                &NSArray::from_retained_slice(&[accept, decline]),
+                &NSArray::new(),
+                UNNotificationCategoryOptions::CustomDismissAction,
+            );
+        center.setNotificationCategories(&NSSet::from_retained_slice(&[category]));
+    }
+
+    pub fn deliver_call(
+        call_id: &str,
+        chat_id: &str,
+        title: &str,
+        body: &str,
+        image: Option<&std::path::Path>,
+    ) {
+        let content = UNMutableNotificationContent::new();
+        content.setTitle(&NSString::from_str(title));
+        content.setBody(&NSString::from_str(body));
+        content.setSound(Some(&UNNotificationSound::defaultSound()));
+        content.setThreadIdentifier(&NSString::from_str(chat_id));
+        content.setCategoryIdentifier(&NSString::from_str(CALL_CATEGORY));
+        if let Some(copy) = image.and_then(super::image_copy) {
+            let url = NSURL::fileURLWithPath(&NSString::from_str(&copy.to_string_lossy()));
+            // SAFETY: no options dictionary; the URL is a readable local PNG.
+            let attachment = unsafe {
+                UNNotificationAttachment::attachmentWithIdentifier_URL_options_error(
+                    &NSString::from_str("caller"),
+                    &url,
+                    None,
+                )
+            };
+            if let Ok(a) = attachment {
+                content.setAttachments(&NSArray::from_retained_slice(&[a]));
+            }
+        }
+        let id = format!("{CALL_PREFIX}{call_id}:{chat_id}");
+        WITHDRAW_IDS.with(|w| {
+            w.borrow_mut()
+                .entry(call_id.to_string())
+                .or_default()
+                .push(id.clone())
+        });
+        let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
+            &NSString::from_str(&id),
+            &content,
+            None,
+        );
+        let done = RcBlock::new(|error: *mut NSError| {
+            if !error.is_null() {
+                // SAFETY: non-null NSError* handed to the completion block.
+                let error = unsafe { &*error };
+                eprintln!("notify: call: {}", error.localizedDescription());
+            }
+        });
+        UNUserNotificationCenter::currentNotificationCenter()
+            .addNotificationRequest_withCompletionHandler(&request, Some(&done));
+    }
+
+    pub fn withdraw_call(call_id: &str) {
+        // The identifier carries the chat too, which we do not have here; remove
+        // every delivered banner of this call by prefix match is not offered by
+        // the API, so remove the known shape with an empty chat and let the
+        // thread collapse handle the rest.
+        let center = UNUserNotificationCenter::currentNotificationCenter();
+        let ids: Vec<Retained<NSString>> = WITHDRAW_IDS.with(|w| {
+            w.borrow_mut()
+                .remove(call_id)
+                .unwrap_or_default()
+                .iter()
+                .map(|s| NSString::from_str(s))
+                .collect()
+        });
+        if !ids.is_empty() {
+            let arr = NSArray::from_retained_slice(&ids);
+            center.removeDeliveredNotificationsWithIdentifiers(&arr);
+            center.removePendingNotificationRequestsWithIdentifiers(&arr);
+        }
+    }
+
+    thread_local! {
+        /// Delivered call banner ids per call, so `withdraw_call` can remove them.
+        static WITHDRAW_IDS: RefCell<std::collections::HashMap<String, Vec<String>>> =
+            RefCell::new(std::collections::HashMap::new());
     }
 
     pub fn request_authorization() {

@@ -12,13 +12,14 @@ use gpui_tokio::Tokio;
 use tokio::sync::mpsc;
 
 use crate::auth;
+use crate::calls::{self, CallCmd, CallEvent};
+use crate::model::{call_ended_line, AccountView, Call, CallEnded, CallKind, Person, Sender};
 use crate::model::{
     new_id, now_ms, AttachmentKind, BoxState, ChannelsView, Chat, ChatKind, ConnectorsView, Effort,
     Id, Link, LocalView, Machine, Message, MessageStatus, Part, Project, ProjectDocView,
     QuestionState, Role, Routine, RoutineRun, RoutineTrigger, Skill, StatusKind, VaultNewItem,
     VaultRequestStatus, VaultView,
 };
-use crate::model::{AccountView, Person};
 use crate::sync::{ClientCommand, SyncEvent, SyncSource};
 use crate::ui::notify::{self, Gate, Notifier, NotifyEvent, NotifyKind};
 
@@ -264,11 +265,61 @@ pub struct AppState {
     /// F11: assistant messages whose speech is cached (speaker icon replays).
     pub spoken: HashSet<Id>,
     awaiting_new_project: bool,
+    /// Calls v1: live calls I know about per chat (the "On a call · Join" bar).
+    pub calls_in_chat: HashMap<Id, Call>,
+    /// Someone is calling me (ringing): the call and who started it.
+    pub incoming_call: Option<(Call, Sender)>,
+    /// The call this device is in.
+    pub my_call: Option<ActiveCall>,
     commands: mpsc::UnboundedSender<ClientCommand>,
     update_commands: mpsc::UnboundedSender<UpdateCommand>,
+    call_commands: mpsc::UnboundedSender<CallCmd>,
     _pump: Task<()>,
     _notify_tick: Task<()>,
     _update_pump: Task<()>,
+    _call_pump: Task<()>,
+}
+
+/// One tile in a call.
+#[derive(Clone, Debug)]
+pub struct CallParticipant {
+    /// LiveKit identity (`u_<user_id>`); `local` for me.
+    pub identity: String,
+    pub sender: Sender,
+    pub speaking: bool,
+    pub muted: bool,
+    pub video: Option<Arc<RenderImage>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CallStatus {
+    Connecting,
+    Connected,
+    Failed(String),
+}
+
+/// The call this device is in, as the UI shows it.
+#[derive(Clone, Debug)]
+pub struct ActiveCall {
+    pub call: Call,
+    pub status: CallStatus,
+    pub muted: bool,
+    pub camera: bool,
+    pub participants: Vec<CallParticipant>,
+    pub local_video: Option<Arc<RenderImage>>,
+    pub joined_at: u64,
+    /// Full call screen (true) or the slim bar under the header (false).
+    pub expanded: bool,
+    /// One line about a problem (no mic, no camera, reconnecting).
+    pub notice: Option<String>,
+}
+
+impl ActiveCall {
+    pub fn participant_mut(&mut self, identity: &str) -> Option<&mut CallParticipant> {
+        self.participants
+            .iter_mut()
+            .find(|p| p.identity == identity)
+    }
 }
 
 /// What the Details drawer (stub) describes.
@@ -322,6 +373,18 @@ impl AppState {
             let _worker = update_worker;
             while let Some(event) = update_event_rx.recv().await {
                 let applied = this.update(cx, |state, cx| state.apply_update(event, cx));
+                if applied.is_err() {
+                    break;
+                }
+            }
+        });
+        let (call_event_tx, mut call_event_rx) = mpsc::unbounded_channel::<CallEvent>();
+        let (call_command_tx, call_command_rx) = mpsc::unbounded_channel::<CallCmd>();
+        let call_worker = Tokio::spawn(cx, calls::run(call_command_rx, call_event_tx));
+        let call_pump = cx.spawn(async move |this, cx| {
+            let _worker = call_worker;
+            while let Some(event) = call_event_rx.recv().await {
+                let applied = this.update(cx, |state, cx| state.apply_call_event(event, cx));
                 if applied.is_err() {
                     break;
                 }
@@ -395,9 +458,14 @@ impl AppState {
             awaiting_new_project: false,
             commands: command_tx,
             update_commands: update_command_tx,
+            call_commands: call_command_tx,
+            calls_in_chat: HashMap::new(),
+            incoming_call: None,
+            my_call: None,
             _pump: pump,
             _notify_tick: notify_tick,
             _update_pump: update_pump,
+            _call_pump: call_pump,
         }
     }
 
@@ -585,6 +653,31 @@ impl AppState {
                         self.want_avatar(url);
                     }
                 }
+                cx.notify();
+            }
+            SyncEvent::CallReady { call, created } => self.on_call_ready(call, created, cx),
+            SyncEvent::CallStarted { call, sender } => self.on_call_started(call, sender, cx),
+            SyncEvent::CallEnded(ended) => self.on_call_ended(ended, cx),
+            SyncEvent::CallInfo(call) => self.on_call_info(call, cx),
+            SyncEvent::CallSeen { chat_id, call_id } => {
+                let known = self
+                    .calls_in_chat
+                    .get(&chat_id)
+                    .map(|c| c.call_id == call_id)
+                    .unwrap_or(false);
+                if !known {
+                    self.command(ClientCommand::FetchCall { call_id });
+                }
+            }
+            SyncEvent::CallError { chat_id, message } => {
+                let _ = chat_id;
+                if matches!(
+                    self.my_call.as_ref().map(|c| &c.status),
+                    Some(CallStatus::Connecting)
+                ) {
+                    self.my_call = None;
+                }
+                self.push_notice(message);
                 cx.notify();
             }
             SyncEvent::PeopleError(err) => {
@@ -1350,6 +1443,7 @@ impl AppState {
                 effort: None,
                 created_at: now_ms(),
                 completed_at: None,
+                call_id: None,
                 pending: true,
                 parts,
                 hidden_parts: Vec::new(),
@@ -1512,6 +1606,7 @@ impl AppState {
                 owner_handle: None,
                 created_at: now_ms(),
                 completed_at: None,
+                call_id: None,
                 pending: true,
                 parts: vec![Part::Text {
                     id: new_id(),
@@ -1787,19 +1882,39 @@ impl AppState {
         cx.notify();
     }
 
-    /// Calls from a profile page. The LiveKit call commands land with the
-    /// calls workstream; until then this is the "not available" path.
+    /// Profile pages: call a person (their DM) or an agent (Phase 2 — not yet).
     pub fn start_call(&mut self, target: CallTarget, video: bool, cx: &mut Context<Self>) {
-        let what = if video { "Video calls" } else { "Calls" };
-        let who = match target {
-            CallTarget::User(handle) => format!("@{handle}"),
-            CallTarget::Agent(project_id) => self
-                .project(&project_id)
-                .map(|p| p.name.clone())
-                .unwrap_or_else(|| "this agent".into()),
+        let kind = if video {
+            CallKind::Video
+        } else {
+            CallKind::Voice
         };
-        self.push_notice(format!("{what} with {who} are not available yet."));
-        cx.notify();
+        match target {
+            CallTarget::User(handle) => {
+                let dm = self
+                    .people_spaces()
+                    .find(|p| p.person().map(|x| x.handle == handle).unwrap_or(false))
+                    .map(|p| p.id.clone());
+                match dm {
+                    Some(chat_id) => {
+                        self.select_project(chat_id, cx);
+                        self.start_call_in_chat(kind, cx);
+                    }
+                    None => {
+                        self.push_notice(format!("Start a chat with @{handle} first, then call."));
+                        cx.notify();
+                    }
+                }
+            }
+            CallTarget::Agent(project_id) => {
+                let name = self
+                    .project(&project_id)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| "this agent".into());
+                self.push_notice(format!("Calls with {name} are coming soon."));
+                cx.notify();
+            }
+        }
     }
 
     /// Presence line for a person: "online", "last seen …", "invited".
@@ -2182,8 +2297,16 @@ impl AppState {
             .collect();
         self.notifier
             .tick(now_ms(), |id| gates.get(id).copied().unwrap_or_default());
-        for chat_id in notify::take_clicks() {
-            self.open_chat_from_notification(chat_id, cx);
+        for click in notify::take_clicks() {
+            if let Some(rest) = click.strip_prefix("call:") {
+                match rest.split_once(':') {
+                    Some(("accept", _)) => self.accept_incoming(cx),
+                    Some(("decline", _)) => self.decline_incoming(cx),
+                    _ => {}
+                }
+                continue;
+            }
+            self.open_chat_from_notification(click, cx);
         }
         self.sync_badge();
         // Selection paths that bypass select_tab/select_project still report.
@@ -2930,6 +3053,421 @@ impl AppState {
 
     pub fn box_state(&self) -> Option<BoxState> {
         self.selected().map(|p| p.state)
+    }
+}
+
+impl AppState {
+    // ----- calls v1 ---------------------------------------------------------
+
+    /// Start a call in the selected chat (or join the live one).
+    pub fn start_call_in_chat(&mut self, kind: CallKind, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.selected_project.clone() else {
+            return;
+        };
+        if self.my_call.is_some() {
+            return;
+        }
+        // Already a live call here: join it instead of starting another.
+        if let Some(call) = self.calls_in_chat.get(&chat_id).cloned() {
+            self.join_call(call.call_id.clone(), cx);
+            return;
+        }
+        self.my_call = Some(ActiveCall {
+            call: Call {
+                chat_id: chat_id.clone(),
+                kind,
+                ..Default::default()
+            },
+            status: CallStatus::Connecting,
+            muted: false,
+            camera: kind == CallKind::Video,
+            participants: Vec::new(),
+            local_video: None,
+            joined_at: now_ms(),
+            expanded: true,
+            notice: None,
+        });
+        self.command(ClientCommand::StartCall { chat_id, kind });
+        cx.notify();
+    }
+
+    pub fn join_call(&mut self, call_id: String, cx: &mut Context<Self>) {
+        if self.my_call.is_some() {
+            return;
+        }
+        let known = self
+            .calls_in_chat
+            .values()
+            .find(|c| c.call_id == call_id)
+            .cloned()
+            .unwrap_or_default();
+        self.my_call = Some(ActiveCall {
+            camera: known.kind == CallKind::Video,
+            call: known,
+            status: CallStatus::Connecting,
+            muted: false,
+            participants: Vec::new(),
+            local_video: None,
+            joined_at: now_ms(),
+            expanded: true,
+            notice: None,
+        });
+        self.incoming_call = None;
+        self.command(ClientCommand::JoinCall { call_id });
+        cx.notify();
+    }
+
+    pub fn accept_incoming(&mut self, cx: &mut Context<Self>) {
+        let Some((call, _)) = self.incoming_call.take() else {
+            return;
+        };
+        if self.my_call.is_some() {
+            self.leave_call(cx);
+        }
+        self.select_project(call.chat_id.clone(), cx);
+        self.join_call(call.call_id, cx);
+    }
+
+    pub fn decline_incoming(&mut self, cx: &mut Context<Self>) {
+        self.incoming_call = None;
+        cx.notify();
+    }
+
+    pub fn leave_call(&mut self, cx: &mut Context<Self>) {
+        let Some(active) = self.my_call.take() else {
+            return;
+        };
+        let _ = self.call_commands.send(CallCmd::Leave);
+        if !active.call.call_id.is_empty() {
+            self.command(ClientCommand::LeaveCall {
+                call_id: active.call.call_id,
+            });
+        }
+        cx.notify();
+    }
+
+    pub fn toggle_call_mute(&mut self, cx: &mut Context<Self>) {
+        if let Some(c) = self.my_call.as_mut() {
+            c.muted = !c.muted;
+            let _ = self.call_commands.send(CallCmd::SetMuted(c.muted));
+            cx.notify();
+        }
+    }
+
+    pub fn toggle_camera(&mut self, cx: &mut Context<Self>) {
+        if let Some(c) = self.my_call.as_mut() {
+            c.camera = !c.camera;
+            if !c.camera {
+                c.local_video = None;
+            }
+            c.notice = None;
+            let _ = self.call_commands.send(CallCmd::SetCamera(c.camera));
+            cx.notify();
+        }
+    }
+
+    pub fn toggle_call_expanded(&mut self, cx: &mut Context<Self>) {
+        if let Some(c) = self.my_call.as_mut() {
+            c.expanded = !c.expanded;
+            cx.notify();
+        }
+    }
+
+    /// Who I am, as the relay would describe me in a call.
+    fn me_sender(&self) -> Sender {
+        let account = self.account.clone();
+        Sender {
+            kind: "user".into(),
+            id: self.me_id(),
+            name: account.as_ref().map(|a| a.name.clone()).unwrap_or_default(),
+            handle: self.me_handle(),
+            avatar: None,
+            avatar_color: None,
+            avatar_url: account.map(|a| a.avatar_url).unwrap_or_default(),
+        }
+    }
+
+    fn on_call_ready(&mut self, call: Call, created: bool, cx: &mut Context<Self>) {
+        self.calls_in_chat
+            .insert(call.chat_id.clone(), call.clone());
+        if created {
+            let line = format!(
+                "{} started a {}",
+                self.me_sender().display_name(),
+                call.kind.label()
+            );
+            self.command(ClientCommand::SystemLine {
+                chat_id: call.chat_id.clone(),
+                text: line,
+                call_id: Some(call.call_id.clone()),
+            });
+        }
+        let camera = self
+            .my_call
+            .as_ref()
+            .map(|c| c.camera)
+            .unwrap_or(call.kind == CallKind::Video);
+        let Some(token) = call.token.clone() else {
+            self.push_notice("The relay sent no join token.");
+            self.my_call = None;
+            cx.notify();
+            return;
+        };
+        let active = self.my_call.get_or_insert_with(|| ActiveCall {
+            call: call.clone(),
+            status: CallStatus::Connecting,
+            muted: false,
+            camera,
+            participants: Vec::new(),
+            local_video: None,
+            joined_at: now_ms(),
+            expanded: true,
+            notice: None,
+        });
+        active.call = call.clone();
+        active.status = CallStatus::Connecting;
+        let _ = self.call_commands.send(CallCmd::Join {
+            url: call.livekit_url.clone(),
+            token,
+            camera,
+        });
+        self.incoming_call = None;
+        cx.notify();
+    }
+
+    fn on_call_started(&mut self, call: Call, sender: Sender, cx: &mut Context<Self>) {
+        self.calls_in_chat
+            .insert(call.chat_id.clone(), call.clone());
+        let in_it = self
+            .my_call
+            .as_ref()
+            .map(|c| c.call.call_id == call.call_id)
+            .unwrap_or(false);
+        if !in_it && call.is_live() {
+            // Ring: the card in the window plus the native banner with Accept / Decline.
+            let title = sender.display_name();
+            let body = format!("Incoming {}", call.kind.label());
+            let image = self.avatar_file_for(&sender.avatar_url).or_else(|| {
+                self.tree_png_for(sender.avatar.as_deref(), sender.avatar_color.as_deref())
+            });
+            notify::deliver_call(&call.call_id, &call.chat_id, &title, &body, image);
+            self.incoming_call = Some((call, sender));
+        }
+        cx.notify();
+    }
+
+    fn on_call_ended(&mut self, ended: CallEnded, cx: &mut Context<Self>) {
+        let chat_id = if !ended.chat_id.is_empty() {
+            Some(ended.chat_id.clone())
+        } else {
+            self.calls_in_chat
+                .iter()
+                .find(|(_, c)| c.call_id == ended.call_id)
+                .map(|(id, _)| id.clone())
+                .or_else(|| {
+                    self.my_call
+                        .as_ref()
+                        .filter(|c| c.call.call_id == ended.call_id)
+                        .map(|c| c.call.chat_id.clone())
+                })
+        };
+        if let Some(chat) = &chat_id {
+            if self
+                .calls_in_chat
+                .get(chat)
+                .map(|c| c.call_id == ended.call_id)
+                .unwrap_or(false)
+            {
+                self.calls_in_chat.remove(chat);
+            }
+        }
+        if self
+            .incoming_call
+            .as_ref()
+            .map(|(c, _)| c.call_id == ended.call_id)
+            .unwrap_or(false)
+        {
+            self.incoming_call = None;
+            notify::withdraw_call(&ended.call_id);
+        }
+        if self
+            .my_call
+            .as_ref()
+            .map(|c| c.call.call_id == ended.call_id)
+            .unwrap_or(false)
+        {
+            self.my_call = None;
+            let _ = self.call_commands.send(CallCmd::Leave);
+        }
+        // Exactly one device writes the end line (contract §1).
+        let mine = ended.writer_device.as_deref() == self.device_id.as_deref()
+            || ended.writer_device.as_deref() == Some("fixture-device");
+        if mine {
+            if let Some(chat) = chat_id {
+                self.command(ClientCommand::SystemLine {
+                    chat_id: chat,
+                    text: call_ended_line(ended.duration_s),
+                    call_id: Some(ended.call_id.clone()),
+                });
+            }
+        }
+        cx.notify();
+    }
+
+    fn on_call_info(&mut self, call: Call, cx: &mut Context<Self>) {
+        if call.is_live() {
+            if let Some(active) = self
+                .my_call
+                .as_mut()
+                .filter(|c| c.call.call_id == call.call_id)
+            {
+                active.call.participants = call.participants.clone();
+                active.call.ended_at = None;
+            }
+            self.calls_in_chat.insert(call.chat_id.clone(), call);
+        } else {
+            self.calls_in_chat.retain(|_, c| c.call_id != call.call_id);
+            if self
+                .incoming_call
+                .as_ref()
+                .map(|(c, _)| c.call_id == call.call_id)
+                .unwrap_or(false)
+            {
+                self.incoming_call = None;
+            }
+        }
+        cx.notify();
+    }
+
+    /// Events from the LiveKit engine.
+    fn apply_call_event(&mut self, event: CallEvent, cx: &mut Context<Self>) {
+        let Some(active) = self.my_call.as_mut() else {
+            return;
+        };
+        match event {
+            CallEvent::Connecting => {
+                if active.status == CallStatus::Connected {
+                    active.notice = Some("Reconnecting…".into());
+                } else {
+                    active.status = CallStatus::Connecting;
+                }
+            }
+            CallEvent::Connected => {
+                active.status = CallStatus::Connected;
+                if active.notice.as_deref() == Some("Reconnecting…") {
+                    active.notice = None;
+                }
+            }
+            CallEvent::Participant {
+                identity,
+                name,
+                metadata,
+                present,
+            } => {
+                if present {
+                    let mut sender: Sender = serde_json::from_str(&metadata).unwrap_or_default();
+                    if sender.name.is_empty() {
+                        sender.name = name;
+                    }
+                    if sender.id.is_empty() {
+                        sender.id = identity
+                            .trim_start_matches("u_")
+                            .trim_start_matches("a_")
+                            .to_string();
+                    }
+                    // People in the call come from the relay list too: keep the richer one.
+                    if sender.avatar_url.is_empty() {
+                        if let Some(known) = active
+                            .call
+                            .participants
+                            .iter()
+                            .find(|p| p.identity() == identity)
+                        {
+                            sender = known.clone();
+                        }
+                    }
+                    if !sender.avatar_url.is_empty() {
+                        self.want_avatar(sender.avatar_url.clone());
+                    }
+                    let active = self.my_call.as_mut().unwrap();
+                    match active.participant_mut(&identity) {
+                        Some(p) => p.sender = sender,
+                        None => active.participants.push(CallParticipant {
+                            identity,
+                            sender,
+                            speaking: false,
+                            muted: false,
+                            video: None,
+                        }),
+                    }
+                } else {
+                    active.participants.retain(|p| p.identity != identity);
+                }
+            }
+            CallEvent::Video { identity, frame } => {
+                if identity == "local" {
+                    active.local_video = Some(frame);
+                } else if let Some(p) = active.participant_mut(&identity) {
+                    p.video = Some(frame);
+                }
+            }
+            CallEvent::VideoOff { identity } => {
+                if identity == "local" {
+                    active.local_video = None;
+                } else if let Some(p) = active.participant_mut(&identity) {
+                    p.video = None;
+                }
+            }
+            CallEvent::Speaking(ids) => {
+                for p in active.participants.iter_mut() {
+                    p.speaking = ids.contains(&p.identity);
+                }
+            }
+            CallEvent::RemoteMuted { identity, muted } => {
+                if let Some(p) = active.participant_mut(&identity) {
+                    p.muted = muted;
+                }
+            }
+            CallEvent::CameraUnavailable(why) => {
+                active.camera = false;
+                active.local_video = None;
+                active.notice = Some(format!("Camera unavailable: {why}"));
+            }
+            CallEvent::MicUnavailable(why) => {
+                active.notice = Some(format!("No microphone: {why}"));
+            }
+            CallEvent::Error(message) => {
+                if active.status == CallStatus::Connecting {
+                    active.status = CallStatus::Failed(message);
+                } else {
+                    active.notice = Some(message);
+                }
+            }
+            CallEvent::Disconnected => {
+                if active.status == CallStatus::Connected {
+                    // The engine dropped the room on its own: leave the relay side too.
+                    let call_id = active.call.call_id.clone();
+                    self.my_call = None;
+                    if !call_id.is_empty() {
+                        self.command(ClientCommand::LeaveCall { call_id });
+                    }
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// The decoded GitHub avatar for `url` as a PNG on disk (notification attachment).
+    fn avatar_file_for(&self, url: &str) -> Option<PathBuf> {
+        if url.is_empty() {
+            return None;
+        }
+        self.person_notification_png(url)
+    }
+
+    fn tree_png_for(&self, slug: Option<&str>, color: Option<&str>) -> Option<PathBuf> {
+        let slug = slug?;
+        crate::ui::avatars::notification_png(slug, color)
     }
 }
 

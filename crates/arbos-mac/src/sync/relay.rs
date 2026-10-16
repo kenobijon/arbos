@@ -29,11 +29,12 @@ use super::credentials::{self, DeviceCredentials};
 use super::doc::ChatDoc;
 use super::{ClientCommand, SyncEvent, SyncSource};
 use crate::model::{
-    new_id, now_ms, AccountView, AgentMember, Attachment, AttachmentKind, BoxState, ChannelBinding,
-    ChannelPairing, ChannelPlatform, ChannelsView, Chat, ChatKind, Connector, ConnectorProvider,
-    ConnectorsView, Effort, Id, Link, LocalDevice, LocalView, Machine, MachineState, Message,
-    MessageStatus, Part, Person, Project, ProjectDocView, ReplyPolicy, Role, Routine, RoutineRun,
-    Skill, SpaceKind, ThreadInfo, VaultItem, VaultRequest, VaultView,
+    new_id, now_ms, AccountView, AgentMember, Attachment, AttachmentKind, BoxState, Call,
+    CallEnded, CallLeft, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView, Chat,
+    ChatKind, Connector, ConnectorProvider, ConnectorsView, Effort, Id, Link, LocalDevice,
+    LocalView, Machine, MachineState, Message, MessageStatus, Part, Person, Project,
+    ProjectDocView, ReplyPolicy, Role, Routine, RoutineRun, Sender, Skill, SpaceKind, ThreadInfo,
+    VaultItem, VaultRequest, VaultView,
 };
 
 const HELLO_DEADLINE: Duration = Duration::from_secs(15);
@@ -110,6 +111,8 @@ struct Shared {
     /// The chat on screen in a focused window; presence frames carry it as
     /// `focused_chat` so the relay does not push this device for it (§7c).
     focused_chat: Mutex<Option<Id>>,
+    /// Calls v1: `in_call` on every presence frame while this device is in one (§8).
+    in_call: Mutex<Option<String>>,
 }
 
 fn project_doc_key(project_id: &str) -> String {
@@ -128,6 +131,9 @@ impl Shared {
         });
         if let Some(chat) = self.focused_chat.lock().unwrap().as_deref() {
             header["focused_chat"] = json!(chat);
+        }
+        if let Some(call) = self.in_call.lock().unwrap().as_deref() {
+            header["in_call"] = json!(call);
         }
         header
     }
@@ -351,6 +357,42 @@ impl Shared {
         }
     }
 
+    /// Like [`post_json`] but keeps the status (201 "created" vs 200 "joined" for calls).
+    async fn post_json_status(
+        self: &Arc<Self>,
+        path: &str,
+        body: Value,
+    ) -> Result<(reqwest::StatusCode, Value)> {
+        let mut refreshed = false;
+        loop {
+            let token = self.token();
+            let resp = self
+                .http
+                .post(format!("{}{}", self.http_url, path))
+                .bearer_auth(&token)
+                .json(&body)
+                .send()
+                .await
+                .with_context(|| format!("POST {path}"))?;
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            if Self::is_token_expired(status, &text) && !refreshed {
+                refreshed = true;
+                self.refresh_tokens(Some(&token)).await?;
+                continue;
+            }
+            if !status.is_success() {
+                return Err(anyhow!("POST {path}: HTTP {status} {text}"));
+            }
+            let value = if text.trim().is_empty() {
+                Value::Null
+            } else {
+                serde_json::from_str(&text).unwrap_or(Value::Null)
+            };
+            return Ok((status, value));
+        }
+    }
+
     async fn post_json(self: &Arc<Self>, path: &str, body: Value) -> Result<Value> {
         let mut refreshed = false;
         loop {
@@ -429,6 +471,7 @@ impl SyncSource for RelaySource {
                 docs: Mutex::new(HashMap::new()),
                 rooms: Mutex::new(HashMap::new()),
                 focused_chat: Mutex::new(None),
+                in_call: Mutex::new(None),
                 projects: Mutex::new(Vec::new()),
                 chats: Mutex::new(Vec::new()),
                 unacked: Mutex::new(HashSet::new()),
@@ -888,6 +931,26 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
             | "people_agent_removed"
             | "people_project_shared" => refresh = true,
             "people_message" if !shared.is_people(chat_id) => refresh = true,
+            "call_started" => {
+                let call = push.pointer("/payload/call").and_then(parse_call);
+                let sender: Sender = push
+                    .pointer("/payload/sender")
+                    .cloned()
+                    .and_then(|v| serde_json::from_value(v).ok())
+                    .unwrap_or_default();
+                if let Some(call) = call {
+                    let _ = shared.events.send(SyncEvent::CallStarted { call, sender });
+                }
+            }
+            "call_ended" => {
+                if let Some(ended) = push
+                    .get("payload")
+                    .cloned()
+                    .and_then(|v| serde_json::from_value::<CallEnded>(v).ok())
+                {
+                    let _ = shared.events.send(SyncEvent::CallEnded(ended));
+                }
+            }
             _ => {}
         }
     }
@@ -917,6 +980,81 @@ async fn fetch_avatar(shared: Arc<Shared>, url: String) {
             bytes: Arc::new(bytes.to_vec()),
         });
     }
+}
+
+/// Push a presence frame on the chat's room right away (focus / call changes).
+fn presence_now(shared: &Arc<Shared>, chat_id: &str) {
+    if let Some(room) = shared.rooms.lock().unwrap().get(chat_id) {
+        let _ = room.cmds.send(RoomCmd::Presence);
+    }
+}
+
+/// `{ call }` or a bare call object.
+fn parse_call(v: &Value) -> Option<Call> {
+    let obj = v.get("call").unwrap_or(v);
+    serde_json::from_value::<Call>(obj.clone())
+        .ok()
+        .filter(|c| !c.call_id.is_empty())
+}
+
+fn call_error(err: &anyhow::Error) -> String {
+    let text = people_error(err);
+    if text.contains("calls_off") || text.contains("HTTP 503") {
+        "Calls are not available on this relay yet.".into()
+    } else if text.contains("call_ended") || text.contains("HTTP 410") {
+        "That call has ended.".into()
+    } else if text.contains("call_full") || text.contains("HTTP 409") {
+        "The call is full (16 people).".into()
+    } else if text.contains("HTTP 404") {
+        "Calls are not available on this relay yet.".into()
+    } else {
+        text
+    }
+}
+
+/// Calls v1 (contract §1): the client writes the system lines. One Loro row,
+/// role `system`, text, `call_id`; the room syncs it like any message.
+fn write_system_line(shared: &Arc<Shared>, chat_id: &str, text: String, call_id: Option<String>) {
+    let docs = shared.docs.lock().unwrap();
+    let Some(doc) = docs.get(chat_id) else {
+        return;
+    };
+    let msg = Message {
+        id: new_id(),
+        chat_id: chat_id.to_string(),
+        role: Role::System,
+        sender: "system".into(),
+        sender_handle: None,
+        sender_name: None,
+        sender_avatar: None,
+        sender_avatar_color: None,
+        mentions: Vec::new(),
+        status: MessageStatus::Done,
+        turn: None,
+        decision: None,
+        subagent_id: None,
+        subagent_name: None,
+        in_reply_to: None,
+        routine_name: None,
+        sender_icon: None,
+        reply_to: None,
+        asked_by_handle: None,
+        owner_handle: None,
+        usage: None,
+        return_contract: None,
+        waiting_user: false,
+        waiting_approval: false,
+        model: None,
+        effort: None,
+        created_at: now_ms(),
+        completed_at: Some(now_ms()),
+        call_id,
+        pending: false,
+        parts: vec![Part::Text { id: new_id(), text }],
+        hidden_parts: Vec::new(),
+    };
+    let _ = doc.insert_message(&msg);
+    doc.commit();
 }
 
 fn people_error(err: &anyhow::Error) -> String {
@@ -1768,6 +1906,16 @@ async fn run_session(
                     FrameType::Presence => {
                         let h = &frame.header;
                         let mine = h.get("device").and_then(Value::as_str) == Some(shared.device_id().as_str());
+                        // Calls v1: another device of the chat says it is in a call →
+                        // fetch it so the "On a call · Join" bar can show (§8 presence).
+                        if let Some(call_id) = h.get("in_call").and_then(Value::as_str) {
+                            if !mine && shared.in_call.lock().unwrap().as_deref() != Some(call_id) {
+                                let _ = shared.events.send(SyncEvent::CallSeen {
+                                    chat_id: room_chat.to_string(),
+                                    call_id: call_id.to_string(),
+                                });
+                            }
+                        }
                         let handle = h.get("handle").and_then(Value::as_str).filter(|s| !s.is_empty());
                         if let (false, Some(handle)) = (mine, handle) {
                             let _ = shared.events.send(SyncEvent::Presence { handle: handle.to_string() });
@@ -2155,6 +2303,7 @@ async fn send_message(
             effort: None,
             created_at: now_ms(),
             completed_at: None,
+            call_id: None,
             pending: false,
             parts,
             hidden_parts: Vec::new(),
@@ -2704,6 +2853,119 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 shared.people.lock().unwrap().remove(&chat_id);
                 let _ = refresh_registry(&shared).await;
             });
+        }
+        ClientCommand::StartCall { chat_id, kind } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let path = if shared.is_people(&chat_id) {
+                    format!("/chats/{chat_id}/calls")
+                } else {
+                    let project = project_of(&shared, &chat_id).unwrap_or_default();
+                    format!("/projects/{project}/chats/{chat_id}/calls")
+                };
+                match shared
+                    .post_json_status(&path, json!({ "kind": kind }))
+                    .await
+                {
+                    Ok((status, v)) => match parse_call(&v) {
+                        Some(call) => {
+                            // 201 `{call, joined: false}` = I started it (and write the line).
+                            let joined = v.get("joined").and_then(Value::as_bool);
+                            let created = match joined {
+                                Some(j) => !j,
+                                None => status == reqwest::StatusCode::CREATED,
+                            };
+                            *shared.in_call.lock().unwrap() = Some(call.call_id.clone());
+                            presence_now(&shared, &call.chat_id);
+                            let _ = shared.events.send(SyncEvent::CallReady { call, created });
+                        }
+                        None => {
+                            let _ = shared.events.send(SyncEvent::CallError {
+                                chat_id,
+                                message: "The relay answered without a call.".into(),
+                            });
+                        }
+                    },
+                    Err(err) => {
+                        let _ = shared.events.send(SyncEvent::CallError {
+                            chat_id,
+                            message: call_error(&err),
+                        });
+                    }
+                }
+            });
+        }
+        ClientCommand::JoinCall { call_id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                match shared
+                    .post_json(&format!("/calls/{call_id}/join"), json!({}))
+                    .await
+                {
+                    Ok(v) => {
+                        if let Some(call) = parse_call(&v) {
+                            *shared.in_call.lock().unwrap() = Some(call.call_id.clone());
+                            presence_now(&shared, &call.chat_id);
+                            let _ = shared.events.send(SyncEvent::CallReady {
+                                call,
+                                created: false,
+                            });
+                        }
+                    }
+                    Err(err) => {
+                        let _ = shared.events.send(SyncEvent::CallError {
+                            chat_id: String::new(),
+                            message: call_error(&err),
+                        });
+                    }
+                }
+            });
+        }
+        ClientCommand::LeaveCall { call_id } => {
+            let shared = shared.clone();
+            *shared.in_call.lock().unwrap() = None;
+            for room in shared.rooms.lock().unwrap().values() {
+                let _ = room.cmds.send(RoomCmd::Presence);
+            }
+            tokio::spawn(async move {
+                match shared
+                    .post_json(&format!("/calls/{call_id}/leave"), json!({}))
+                    .await
+                {
+                    Ok(v) => {
+                        let left: CallLeft = serde_json::from_value(v).unwrap_or_default();
+                        if left.ended {
+                            // I am the writer of the end line (contract §1).
+                            let _ = shared.events.send(SyncEvent::CallEnded(CallEnded {
+                                call_id,
+                                chat_id: String::new(),
+                                project_id: String::new(),
+                                duration_s: left.duration_s,
+                                reason: "last_left".into(),
+                                writer_device: Some(shared.device_id()),
+                            }));
+                        }
+                    }
+                    Err(err) => shared.notice(format!("Leave call: {}", call_error(&err))),
+                }
+            });
+        }
+        ClientCommand::FetchCall { call_id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Ok(v) = shared.get_json(&format!("/calls/{call_id}")).await {
+                    if let Some(call) = parse_call(&v) {
+                        let _ = shared.events.send(SyncEvent::CallInfo(call));
+                    }
+                }
+            });
+        }
+        ClientCommand::SystemLine {
+            chat_id,
+            text,
+            call_id,
+        } => {
+            write_system_line(shared, &chat_id, text, call_id);
         }
         ClientCommand::BlockUser { handle } => {
             let shared = shared.clone();

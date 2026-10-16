@@ -198,6 +198,171 @@ impl Person {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Calls v1 (user↔user voice/video over LiveKit; internal/calls-v1-contract.md)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CallKind {
+    #[default]
+    Voice,
+    Video,
+}
+
+impl CallKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            CallKind::Voice => "voice call",
+            CallKind::Video => "video call",
+        }
+    }
+
+    pub fn label_title(self) -> &'static str {
+        match self {
+            CallKind::Voice => "Voice call",
+            CallKind::Video => "Video call",
+        }
+    }
+}
+
+/// The relay's `sender{}`: who started a call or sits in it (also the shape
+/// LiveKit participant metadata carries).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Sender {
+    /// `user` or `agent`.
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub id: String,
+    #[serde(default, deserialize_with = "null_to_empty")]
+    pub name: String,
+    #[serde(default, deserialize_with = "null_to_empty")]
+    pub handle: String,
+    /// Tree-character slug (agents, and users who picked one).
+    #[serde(default)]
+    pub avatar: Option<String>,
+    #[serde(default)]
+    pub avatar_color: Option<String>,
+    #[serde(default, deserialize_with = "null_to_empty")]
+    pub avatar_url: String,
+}
+
+impl Sender {
+    pub fn display_name(&self) -> String {
+        if !self.name.trim().is_empty() {
+            self.name.clone()
+        } else if !self.handle.is_empty() {
+            self.handle.clone()
+        } else {
+            "Someone".into()
+        }
+    }
+
+    pub fn as_person(&self) -> Person {
+        Person {
+            id: self.id.clone(),
+            handle: self.handle.clone(),
+            name: Some(self.name.clone()).filter(|n| !n.trim().is_empty()),
+            avatar_url: self.avatar_url.clone(),
+            status: "member".into(),
+            role: String::new(),
+            last_seen_at: None,
+            online: false,
+        }
+    }
+
+    /// LiveKit identity for this sender (`u_<user_id>` / `a_<project_id>`).
+    pub fn identity(&self) -> String {
+        if self.kind == "agent" {
+            format!("a_{}", self.id)
+        } else {
+            format!("u_{}", self.id)
+        }
+    }
+}
+
+/// One call as the relay describes it (`POST …/calls`, `GET /calls/{id}`, pushes).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Call {
+    #[serde(default)]
+    pub call_id: String,
+    #[serde(default)]
+    pub chat_id: Id,
+    /// `people` for DMs and groups.
+    #[serde(default)]
+    pub project_id: String,
+    #[serde(default)]
+    pub kind: CallKind,
+    #[serde(default)]
+    pub room: String,
+    #[serde(default)]
+    pub livekit_url: String,
+    /// Join token for this device; absent in pushes and after the call ended.
+    #[serde(default)]
+    pub token: Option<String>,
+    #[serde(default)]
+    pub token_expires_at: Option<u64>,
+    #[serde(default)]
+    pub started_by: Sender,
+    #[serde(default)]
+    pub started_at: u64,
+    #[serde(default)]
+    pub ended_at: Option<u64>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// Live participants.
+    #[serde(default)]
+    pub participants: Vec<Sender>,
+}
+
+impl Call {
+    pub fn is_live(&self) -> bool {
+        self.ended_at.is_none()
+    }
+}
+
+/// `POST /calls/{id}/leave` answer.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CallLeft {
+    #[serde(default)]
+    pub ended: bool,
+    #[serde(default)]
+    pub duration_s: u64,
+}
+
+/// `/me/pushes` `call_ended` payload.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CallEnded {
+    #[serde(default)]
+    pub call_id: String,
+    #[serde(default)]
+    pub chat_id: Id,
+    #[serde(default)]
+    pub project_id: String,
+    #[serde(default)]
+    pub duration_s: u64,
+    #[serde(default)]
+    pub reason: String,
+    /// The one device that writes the "Call ended" line.
+    #[serde(default)]
+    pub writer_device: Option<String>,
+}
+
+/// "Call ended · 12 min" ("Call ended" under a minute).
+pub fn call_ended_line(duration_s: u64) -> String {
+    if duration_s < 60 {
+        "Call ended".into()
+    } else {
+        let mins = duration_s / 60;
+        if mins >= 60 {
+            format!("Call ended · {} h {} min", mins / 60, mins % 60)
+        } else {
+            format!("Call ended · {mins} min")
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReplyPolicy {
@@ -796,6 +961,9 @@ pub struct Message {
     pub created_at: u64,
     #[serde(default)]
     pub completed_at: Option<u64>,
+    /// System lines about a call ("<name> started a video call") carry it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
     /// True until the relay `ACK`s the client's push (S3 faint echo). Client-only.
     #[serde(default)]
     pub pending: bool,

@@ -92,6 +92,10 @@ const ICONS: &[(&str, &str)] = &[
     icon!("cpu", "<rect x=\"6\" y=\"6\" width=\"12\" height=\"12\" rx=\"2\"/><rect x=\"10\" y=\"10\" width=\"4\" height=\"4\" fill=\"#000\" stroke=\"none\"/><path d=\"M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4\"/>"),
     icon!("window", "<rect x=\"3\" y=\"4\" width=\"18\" height=\"16\" rx=\"2\"/><path d=\"M3 9h18\"/>"),
     icon!("minus", "<path d=\"M5 12h14\"/>"),
+    icon!("camera", "<path d=\"M3 7h11a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H3z\" fill=\"#000\"/><path d=\"M16 10l5-3v10l-5-3z\" fill=\"#000\"/>"),
+    icon!("camera-off", "<path d=\"M3 7h9l6 6v2a2 2 0 0 1-2 2H3z\" fill=\"#000\"/><path d=\"M16 10l5-3v10\" fill=\"#000\"/><path d=\"M3 3l18 18\" stroke-width=\"2.4\"/>"),
+    icon!("mic-off", "<rect x=\"9\" y=\"3\" width=\"6\" height=\"11\" rx=\"3\"/><path d=\"M5 11a7 7 0 0 0 11.5 5.3M19 11a7 7 0 0 1-.9 3.4M12 18v3\"/><path d=\"M3 3l18 18\" stroke-width=\"2.4\"/>"),
+    icon!("phone-down", "<path d=\"M3 14c5-5 13-5 18 0l-2.5 2.5-3-1.5v-2.5a9 9 0 0 0-7 0V15l-3 1.5z\" fill=\"#000\"/>"),
 ];
 
 impl AssetSource for Assets {

@@ -968,7 +968,20 @@ pub fn build_rows(
                     queued = true;
                 }
             }
-            Role::Assistant | Role::System | Role::Project => {
+            Role::System => {
+                // Call lines and other system notes: one centred muted line.
+                let text = message.plain_text();
+                let line = text.lines().next().unwrap_or_default().trim().to_string();
+                if !line.is_empty() {
+                    rows.push(Row {
+                        version: hash_version(&line, false),
+                        id: format!("{}#system", message.id),
+                        message_id: message.id.clone(),
+                        kind: RowKind::Stamp { label: line },
+                    });
+                }
+            }
+            Role::Assistant | Role::Project => {
                 if streaming {
                     running = true;
                 }

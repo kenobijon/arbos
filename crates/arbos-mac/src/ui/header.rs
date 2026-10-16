@@ -11,8 +11,9 @@ use gpui::{
 };
 
 use crate::app::ProfilePage;
-use crate::model::{Chat, Project};
+use crate::model::{CallKind, Chat, Project};
 use crate::ui::avatars;
+use crate::ui::callview;
 use crate::ui::composer::{Composer, Picker};
 use crate::ui::glass;
 use crate::ui::groups;
@@ -33,6 +34,12 @@ pub fn render(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
     let in_call = shell.voice.read(cx).in_call();
     let menu_open = shell.menu_open;
     let panel_open = state.right_panel_open;
+    // Calls v1: start a voice / video call in a people chat or a shared project.
+    let in_call_here = state
+        .my_call
+        .as_ref()
+        .map(|c| c.call.chat_id == space.id)
+        .unwrap_or(false);
 
     // ----- left: avatar + name (click an agent to open its profile) -----------
     let mut title = div()
@@ -285,6 +292,27 @@ pub fn render(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
             ))
     };
     let mut right = div().flex().items_center().gap(px(2.0));
+    if callview::callable(space) && !in_call_here {
+        right = right
+            .child(
+                button("header-voice-call", "phone", false, &theme).on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.menu_open = false;
+                        this.state
+                            .update(cx, |s, cx| s.start_call_in_chat(CallKind::Voice, cx));
+                    },
+                )),
+            )
+            .child(
+                button("header-video-call", "camera", false, &theme).on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.menu_open = false;
+                        this.state
+                            .update(cx, |s, cx| s.start_call_in_chat(CallKind::Video, cx));
+                    },
+                )),
+            );
+    }
     if is_people {
         right = right.child(
             button("header-members", "person-plus", shell.members_open, &theme).on_mouse_down(

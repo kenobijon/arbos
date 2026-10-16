@@ -18,7 +18,7 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 use tokio::sync::mpsc;
 
-use crate::model::{AccountView, Person};
+use crate::model::{AccountView, Call, CallEnded, CallKind, Person, Sender};
 use crate::model::{
     BoxState, ChannelsView, Chat, ConnectorsView, Effort, Id, Link, LocalView, Machine, Message,
     Project, ProjectDocView, Routine, RoutineRun, RoutineTrigger, Skill, VaultNewItem, VaultView,
@@ -56,6 +56,31 @@ pub enum SyncEvent {
     },
     /// Error from a people-chat action (search, DM, members), shown inline.
     PeopleError(String),
+    /// Calls v1: `POST …/calls` or `/join` answered with a call (and my token).
+    /// `created` = 201: this device started it and writes the system line.
+    CallReady {
+        call: Call,
+        created: bool,
+    },
+    /// Someone else started a call in one of my chats (`call_started` push).
+    CallStarted {
+        call: Call,
+        sender: Sender,
+    },
+    /// A call ended (push, or my `leave` answered `ended: true`).
+    CallEnded(CallEnded),
+    /// `GET /calls/{id}` answer (live or ended).
+    CallInfo(Call),
+    /// A presence frame in a chat named a call this device is not in.
+    CallSeen {
+        chat_id: Id,
+        call_id: String,
+    },
+    /// A call request failed; shown as a notice and the call UI resets.
+    CallError {
+        chat_id: Id,
+        message: String,
+    },
     /// Pairing finished (or failed with a message).
     Paired {
         device_id: String,
@@ -229,6 +254,29 @@ pub enum ClientCommand {
     /// Fetch an avatar once (`SyncEvent::Avatar`).
     FetchAvatar {
         url: String,
+    },
+    /// Calls v1: `POST /chats/{id}/calls` (or the projects form) — start, or join the live one.
+    StartCall {
+        chat_id: Id,
+        kind: CallKind,
+    },
+    /// `POST /calls/{id}/join` → a fresh token.
+    JoinCall {
+        call_id: String,
+    },
+    /// `POST /calls/{id}/leave` → `{ended, duration_s}`.
+    LeaveCall {
+        call_id: String,
+    },
+    /// `GET /calls/{id}` (the "On a call · Join" bar, a push with no detail).
+    FetchCall {
+        call_id: String,
+    },
+    /// Write a system line into a chat's doc (call start / end, per the contract).
+    SystemLine {
+        chat_id: Id,
+        text: String,
+        call_id: Option<String>,
     },
     OpenChat {
         chat_id: Id,

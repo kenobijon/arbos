@@ -26,6 +26,7 @@ tokio-tungstenite.workspace = true
 reqwest.workspace = true
 ulid.workspace = true
 base64.workspace = true
+sha2.workspace = true
 chrono.workspace = true
 
 gpui = { git = "https://github.com/zeronsh/zui", rev = "361ff20b919fdfb80199ee6d9aed725300cb7d54" }
@@ -35,6 +36,9 @@ gpui_tokio = { git = "https://github.com/zeronsh/zui", rev = "361ff20b919fdfb801
 unicode-segmentation = "1"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 env_logger = "0.11"
+
+# Calls v1: LiveKit (user↔user voice/video); prebuilt libwebrtc is fetched by webrtc-sys at build time.
+livekit = { version = "0.9", default-features = false, features = ["native", "rustls-tls-webpki-roots"] }
 
 # Voice (F11): capture, playback, WAV in memory.
 cpal = "0.15"
@@ -46,7 +50,7 @@ hound = "3.5"
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 block2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSURL", "NSString", "NSError", "NSObject", "NSGeometry", "NSBundle", "NSArray"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSURL", "NSString", "NSError", "NSObject", "NSGeometry", "NSBundle", "NSArray", "NSSet", "NSEnumerator"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSWindow", "NSResponder", "NSDockTile"] }
-objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationAttachment", "UNNotificationSound", "UNNotificationTrigger"] }
+objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationAttachment", "UNNotificationSound", "UNNotificationTrigger", "UNNotificationAction", "UNNotificationCategory"] }
 objc2-authentication-services = { version = "0.3", default-features = false, features = ["std", "block2", "ASWebAuthenticationSession", "ASFoundation"] }

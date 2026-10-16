@@ -48,5 +48,10 @@
         </dict>
     </array>
     <!-- Sparkle (D42): SUFeedURL / SUPublicEDKey are added when the appcast ships. -->
+    <!-- Voice memos, voice chat with agents, and calls between people. -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Arbos uses the microphone for voice memos, voice chat with your agents, and calls with people.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>Arbos uses the camera for video calls with people.</string>
 </dict>
 </plist>
