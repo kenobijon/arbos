@@ -1031,7 +1031,7 @@ impl Agent {
         // Attachments (images, voice notes, files): fetched into the workspace; images ride
         // along as vision input, a voice note's transcript becomes the text when none was typed.
         let attachments = match &message_view {
-            Some(m) => self.turn_attachments(m).await,
+            Some(m) => self.turn_attachments(chat_id, m).await,
             None => crate::attachments::TurnAttachments::default(),
         };
         if user_text.trim().is_empty() {
