@@ -509,25 +509,26 @@ struct ChatView: View {
                         .onTapGesture { openHeaderProfile() }
                         .accessibilityAddTraits(.isButton)
                         .accessibilityHint("Opens the agent profile")
-                        if model.multiChatEnabled {
-                            Button { showThreads = true } label: {
-                                Image(systemName: "bubble.left.and.bubble.right")
-                                    .font(.system(size: 13, weight: .semibold))
-                                    .foregroundStyle(theme.muted)
-                                    .frame(width: 24, height: 22)
-                                    .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("Chats with \(project?.name ?? "this agent")")
-                        }
                     }
                 }
                 .padding(.leading, 10)
-                .padding(.trailing, isPeople ? 16 : 10)
+                .padding(.trailing, 16)
                 .frame(height: Theme.control)
                 .contentShape(Capsule())
             }
             Spacer()
+            if !isPeople && model.multiChatEnabled {
+                // Outside the agent pill, same trailing slot as the video-call button on group chats.
+                Button { showThreads = true } label: {
+                    GlassCircle {
+                        Image(systemName: "bubble.left.and.bubble.right")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(theme.text)
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Chats with \(project?.name ?? "this agent")")
+            }
             if isPeople || project?.shared == true {
                 Button {
                     startCall(.video)
@@ -612,7 +613,7 @@ struct ChatView: View {
     // MARK: Chat navigation swipes
 
     /// Swipe right goes back to Home (#916/#925). There is no swipe between
-    /// chats: the chats sheet (bubble icon beside the agent name) switches chats.
+    /// chats: the chats sheet (bubble icon to the right of the agent pill) switches chats.
     private var chatNavSwipe: some Gesture {
         DragGesture(minimumDistance: 50, coordinateSpace: .local)
             .onEnded { value in handleChatSwipe(value) }

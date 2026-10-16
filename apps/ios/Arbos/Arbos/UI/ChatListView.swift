@@ -1,4 +1,4 @@
-// The "Chats" bottom sheet of one agent (chat icon beside the agent name):
+// The "Chats" bottom sheet of one agent (chat icon to the right of the agent pill):
 // every chat the user has with the agent — title, last line, time, unread —
 // plus its agent-hosted groups (group icon). "+" starts a new chat. Swipe a
 // row to archive it: that hides it from this list only; history stays in the
