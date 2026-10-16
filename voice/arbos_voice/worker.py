@@ -68,6 +68,8 @@ from .relay import EventBatcher, Relay, RelayError, ToolPending
 log = logging.getLogger("arbos-voice")
 
 ATTENTION_WINDOW_S = 20.0
+# Group listeners: speech must last this long before it counts (and before it can barge in).
+GROUP_BARGE_MIN_SPEECH_S = 0.35
 # Until the owner's machine runs an agentd with the voice link (image roll), tools are off.
 NO_LINK_LINE = "I can't run that for you yet on this call."
 
@@ -538,7 +540,9 @@ class VoiceCall:
     async def start_group_listening(self) -> None:
         if self.listeners:
             return
-        vad = self.ctx.proc.userdata.get("vad") or silero.VAD.load()
+        vad = self.ctx.proc.userdata.get("group_vad") or silero.VAD.load(
+            min_speech_duration=GROUP_BARGE_MIN_SPEECH_S, activation_threshold=0.6, min_silence_duration=0.5
+        )
         stt = openai.STT(model=self.cfg.stt_model, api_key=self.cfg.openai_api_key, use_realtime=False)
         self.listeners = GroupListeners(
             self.ctx.room,
@@ -555,6 +559,9 @@ class VoiceCall:
         self.state.last_human_speech_at = at
         self.state.idle_asked = False
         if self.agent_speaking() and self.session:
+            # Only sustained speech interrupts (the listener's VAD waits GROUP_BARGE_MIN_SPEECH_S
+            # before reporting a start), so a cough, a door or the agent's own echo on someone's
+            # speaker does not cut it off mid-sentence.
             if self.state.barge_started_at is None:
                 self.state.barge_started_at = at
             log.info("barge-in by %s", identity)
@@ -778,7 +785,9 @@ class VoiceCall:
 
 
 def prewarm(proc: JobProcess) -> None:
-    proc.userdata["vad"] = silero.VAD.load(min_silence_duration=0.5, activation_threshold=0.5)
+    proc.userdata["group_vad"] = silero.VAD.load(
+        min_speech_duration=GROUP_BARGE_MIN_SPEECH_S, activation_threshold=0.6, min_silence_duration=0.5
+    )
 
 
 async def request_fnc(req: JobRequest) -> None:
