@@ -33,6 +33,8 @@ const RECENT_LINE_CHARS: usize = 400;
 /// Project memory in the voice prompt is clipped: the model hears, it does not read.
 const MEMORY_CHARS: usize = 3000;
 const INSTRUCTIONS_CHARS: usize = 4000;
+/// A turn that handed its work to a subagent: how long the caller waits for the outcome row.
+const SUBAGENT_WAIT: std::time::Duration = std::time::Duration::from_secs(150);
 
 /// Keep the link up for the life of the box (reconnect with backoff).
 pub fn spawn_voice_link(sup: Arc<Supervisor>) {
@@ -306,22 +308,55 @@ impl Agent {
         };
         tracing::info!(call = %call_id, chat = %chat_id, from = %speaker_label(speaker), "voice request → turn");
         let outcome = self.handle_command(chat_id, cmd).await;
-        let h = host.lock().await;
-        let replies: Vec<_> = h
-            .doc
-            .messages()
-            .into_iter()
-            .filter(|m| {
-                m.role == "assistant"
-                    && m.rest.get("inReplyTo").and_then(Value::as_str) == Some(msg_id.as_str())
-            })
-            .collect();
-        // The result row is the last one; the ack is spoken live by the worker already.
-        let result = replies
-            .iter()
-            .rev()
-            .find(|m| m.rest.get("turnRole").and_then(Value::as_str) != Some("ack"))
-            .or(replies.last());
+        let pick = |h: &crate::sync::DocHost| -> Option<arbos_core::doc::MessageView> {
+            let replies: Vec<_> = h
+                .doc
+                .messages()
+                .into_iter()
+                .filter(|m| {
+                    m.role == "assistant"
+                        && m.rest.get("inReplyTo").and_then(Value::as_str) == Some(msg_id.as_str())
+                        && m.rest.get("voice").and_then(Value::as_bool) != Some(true)
+                })
+                .collect();
+            // The result row is the last one; the ack is spoken live by the worker already.
+            replies
+                .iter()
+                .rev()
+                .find(|m| m.rest.get("turnRole").and_then(Value::as_str) != Some("ack"))
+                .or(replies.last())
+                .cloned()
+        };
+        let mut result = pick(&*host.lock().await);
+        // A turn that handed the work to a subagent ends after its ack; the outcome lands later
+        // as a separate assistant row. Wait for it (bounded) so the caller hears the answer.
+        if outcome.is_ok()
+            && result
+                .as_ref()
+                .is_some_and(|m| m.rest.get("turnRole").and_then(Value::as_str) == Some("ack"))
+        {
+            let ack_id = result.as_ref().map(|m| m.id.clone()).unwrap_or_default();
+            let deadline = std::time::Instant::now() + SUBAGENT_WAIT;
+            while std::time::Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                let h = host.lock().await;
+                let msgs = h.doc.messages();
+                let after_ack = msgs
+                    .iter()
+                    .position(|m| m.id == ack_id)
+                    .map(|i| &msgs[i + 1..])
+                    .unwrap_or(&[]);
+                if let Some(m) = after_ack.iter().rev().find(|m| {
+                    m.role == "assistant"
+                        && m.status == "done"
+                        && m.rest.get("voice").and_then(Value::as_bool) != Some(true)
+                        && !m.text().trim().is_empty()
+                }) {
+                    result = Some(m.clone());
+                    break;
+                }
+            }
+        }
         match (outcome, result) {
             (Ok(()), Some(m)) if m.status == "done" => Ok((m.text(), m.id.clone())),
             (Ok(()), Some(m)) if m.status == "error" => Err(anyhow!(
