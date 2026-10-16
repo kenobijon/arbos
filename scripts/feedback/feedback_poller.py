@@ -185,7 +185,8 @@ class Config:
         priority |= listed("FEEDBACK_ALLOWLIST", "FEEDBACK_ALLOWLIST_FILE", "/etc/arbos/feedback-allowlist.txt")
         blocklist = listed("FEEDBACK_BLOCKLIST", "FEEDBACK_BLOCKLIST_FILE", "/etc/arbos/feedback-blocklist.txt")
         # Deferred product areas: "<regex> :: <comment>" per line; matching feedback gets its issue,
-        # the label `deferred` and the comment, and no agent (e.g. multi-chat while it is behind a flag).
+        # the label `deferred` and the comment, and no agent (for a feature intentionally switched off).
+        # Empty by default; rules come and go with product decisions.
         deferred: list[tuple[str, str]] = []
         df = Path(env.get("FEEDBACK_DEFERRED_FILE", "/etc/arbos/feedback-deferred.txt"))
         if df.is_file():
