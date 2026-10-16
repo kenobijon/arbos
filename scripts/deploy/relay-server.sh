@@ -67,12 +67,20 @@ if [[ -n "$FROM_SOURCE" ]]; then
     COMMIT=$(git -C repo rev-parse -q --verify "origin/$REF^{commit}" 2>/dev/null \
           || git -C repo rev-parse -q --verify "$REF^{commit}" 2>/dev/null) \
       || { echo "cannot resolve $REF in unarbos/arbos" >&2; exit 1; }
+    # Never roll the relay back by accident: refuse a commit that is an ancestor of the one
+    # running now (ALLOW_OLDER=1 overrides, for a deliberate rollback).
+    CUR=$(cat /etc/arbos/relay.deployed-sha 2>/dev/null || true)
+    if [[ -n "$CUR" && "$CUR" != "$COMMIT" && "${ALLOW_OLDER:-}" != 1 ]] && git -C repo merge-base --is-ancestor "$COMMIT" "$CUR" 2>/dev/null; then
+      echo "refusing: $COMMIT is older than the deployed relay ($CUR); set ALLOW_OLDER=1 to roll back" >&2
+      exit 1
+    fi
     git -C repo checkout -q --detach "$COMMIT"
     echo "building $(git -C repo log --oneline -1)"
     cd repo && cargo build --release -p arbos-relay -p arbosctl 2>&1 | tail -3
   '
   install -m 0755 "$BUILD_DIR/repo/target/release/arbos-relay" /usr/local/bin/arbos-relay
   install -m 0755 "$BUILD_DIR/repo/target/release/arbosctl" /usr/local/bin/arbosctl
+  git -C "$BUILD_DIR/repo" rev-parse HEAD > /etc/arbos/relay.deployed-sha && chmod 0644 /etc/arbos/relay.deployed-sha
   echo "installed arbos-relay $(/usr/local/bin/arbos-relay --version | awk '{print $2}') from $FROM_SOURCE @ $(git -C "$BUILD_DIR/repo" rev-parse --short HEAD)"
 else
 if [[ -z "$RELAY_VERSION" ]]; then
