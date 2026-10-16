@@ -58,7 +58,7 @@ struct HomeView: View {
                                 Button { model.open(project: project) } label: {
                                     AgentRow(project: project, preview: preview(project), time: timeLabel(project),
                                              streaming: model.isStreaming(project: project.id),
-                                             unread: model.chats(of: project.id).contains { $0.unread })
+                                             unread: model.chats(of: project.id).contains { model.chatHasUnread($0) })
                                 }
                                 .buttonStyle(.plain)
                                 .contextMenu {

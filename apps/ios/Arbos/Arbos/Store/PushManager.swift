@@ -33,6 +33,8 @@ final class PushManager: NSObject, ObservableObject, UNUserNotificationCenterDel
     /// The chat on screen while the scene is active; banners for it are swallowed.
     /// Nil when backgrounded so a remote/local alert still shows a banner.
     var visibleChatId: () -> String? = { nil }
+    /// §9c: archived chats never show a banner here (the relay stops pushing them too).
+    var isChatArchived: (String) -> Bool = { _ in false }
     private var registeredToken: String?
 
     private let primerKey = "pushPrimerShown"
@@ -158,8 +160,8 @@ final class PushManager: NSObject, ObservableObject, UNUserNotificationCenterDel
             return []
         }
         let chatId = info["chat_id"] as? String
-        let onScreen = await MainActor.run { chatId != nil && chatId == visibleChatId() }
-        return onScreen ? [] : [.banner, .sound, .list, .badge]
+        let silent = await MainActor.run { chatId != nil && (chatId == visibleChatId() || isChatArchived(chatId!)) }
+        return silent ? [] : [.banner, .sound, .list, .badge]
     }
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
