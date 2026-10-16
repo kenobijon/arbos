@@ -48,7 +48,7 @@ Config comes from the environment (systemd EnvironmentFile=/etc/arbos/feedback.e
 
 Only the standard library plus `cryptography` (for the ES256 App Store Connect token).
 
-CLI:  feedback_poller.py [run] | status | set-cursor <ISO-8601> | inject <image> "<comment>" [ios|mac] | requeue <id>… | prioritize <id>… | confirm <id> [note]
+CLI:  feedback_poller.py [run] | status | set-cursor <ISO-8601> | inject <image> "<comment>" [ios|mac] | requeue <id>… | prioritize <id>… | confirm <id> [note] | handoff <id> [label]
 """
 
 from __future__ import annotations
@@ -83,7 +83,7 @@ GITHUB_API = "https://api.github.com"
 ASSET_RELEASE_TAG = "feedback-screenshots"
 USER_AGENT = "arbos-feedback-poller/1 (+https://github.com/unarbos/arbos)"
 
-TERMINAL = {"shipped", "failed", "ignored", "rejected", "duplicate", "no_change"}
+TERMINAL = {"shipped", "failed", "ignored", "rejected", "duplicate", "no_change", "handed_off"}
 
 # Fixes in these areas only count as shipped with device-level evidence (a real phone, the
 # tester's confirmation, or Jacob's OK): the simulator cannot show a silent ringback, a missing
@@ -1531,6 +1531,27 @@ def main(argv: list[str]) -> int:
             loop.gh.comment(st["issue"], f"Confirmed on a device: {note}.")
             loop.gh.set_labels(st["issue"], ["shipped"], ["shipped-unverified"])
         print(f"{fid}: shipped (device evidence: {note})")
+        return 0
+    if cmd == "handoff":
+        # A dedicated worker owns this item: cancel the agent run, stop tracking, label the issue.
+        store = Store(cfg)
+        loop = Loop(cfg)
+        fid, label = argv[2], (argv[3] if len(argv) > 3 else "in-progress")
+        st = store.state(fid)
+        if not st:
+            print(f"{fid}: unknown")
+            return 2
+        if st.get("status") == "running" and st.get("agent_id") and st.get("run_id"):
+            loop.cursor.cancel(st["agent_id"], st["run_id"])
+        st.update(status="handed_off", handed_off_to=label)
+        store.save_state(fid, st)
+        store.event(fid, "handed_off", label=label, previous_status=st.get("run_status"))
+        if st.get("issue"):
+            loop.gh.ensure_label(label, "5319E7", "Owned by a dedicated workstream; the loop does not patch it")
+            loop.gh.ensure_label("in-progress", "FBCA04", "Being built by a planned workstream")
+            loop.gh.comment(st["issue"], f"Handed off: a dedicated worker owns this ({label}); the automatic loop stops here.")
+            loop.gh.set_labels(st["issue"], [label, "in-progress"], ["shipped", "needs-human"])
+        print(f"{fid}: handed off ({label})")
         return 0
     if cmd == "prioritize":
         # Operator override: move an item to the priority tier (front of the queue, no per-tester cap).
