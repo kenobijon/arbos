@@ -52,6 +52,68 @@ fn price(model: &str) -> (f64, f64) {
     }
 }
 
+/// Leaf id of an OpenRouter-style `vendor/name` (or the bare id).
+fn model_leaf(model: &str) -> &str {
+    model.rsplit('/').next().unwrap_or(model)
+}
+
+/// GPT-5 / GPT-6 (and o-series) OpenAI reasoning models: OpenRouter lists no `temperature`,
+/// and OpenAI itself rejects `max_tokens` in favour of `max_completion_tokens`.
+fn is_openai_reasoning_model(model: &str) -> bool {
+    let leaf = model_leaf(model).to_ascii_lowercase();
+    leaf.starts_with("gpt-5")
+        || leaf.starts_with("gpt-6")
+        || leaf.starts_with("o1")
+        || leaf.starts_with("o3")
+        || leaf.starts_with("o4")
+}
+
+/// GPT-6 Astra and GPT-6.1 Sol (and GPT-5) refuse `reasoning_effort: none|minimal`.
+fn openai_requires_min_effort(model: &str) -> bool {
+    let leaf = model_leaf(model).to_ascii_lowercase();
+    leaf.contains("astra") || leaf.contains("6.1-sol") || leaf.starts_with("gpt-5")
+}
+
+fn bump_effort_if_needed(effort: &str) -> Option<&'static str> {
+    match effort.to_ascii_lowercase().as_str() {
+        "none" | "off" | "minimal" => Some("low"),
+        _ => None,
+    }
+}
+
+/// Rewrite a chat/completions or responses body so GPT-5/GPT-6 (incl. Astra) are accepted
+/// upstream: drop sampling params, prefer `max_completion_tokens`, and bump a forbidden
+/// `none`/`minimal` reasoning effort to `low`.
+fn normalize_openai_reasoning_body(model: &str, body: &mut Value) {
+    if !is_openai_reasoning_model(model) {
+        return;
+    }
+    if let Some(obj) = body.as_object_mut() {
+        for k in ["temperature", "top_p", "logprobs", "top_logprobs"] {
+            obj.remove(k);
+        }
+        if let Some(max) = obj.remove("max_tokens") {
+            obj.entry("max_completion_tokens").or_insert(max);
+        }
+        if openai_requires_min_effort(model) {
+            if let Some(effort) = obj.get("reasoning_effort").and_then(Value::as_str) {
+                if let Some(bumped) = bump_effort_if_needed(effort) {
+                    obj.insert("reasoning_effort".into(), json!(bumped));
+                }
+            }
+            if let Some(reasoning) = obj.get_mut("reasoning") {
+                if let Some(r) = reasoning.as_object_mut() {
+                    if let Some(effort) = r.get("effort").and_then(Value::as_str) {
+                        if let Some(bumped) = bump_effort_if_needed(effort) {
+                            r.insert("effort".into(), json!(bumped));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 impl Meter {
     fn usd(&self) -> f64 {
         if let Some(c) = self.cost {
@@ -241,19 +303,17 @@ async fn forward(
                 )
                     .into_response();
             };
-            if is_stream {
-                if let Some(v) = req_json.as_mut() {
+            if let Some(v) = req_json.as_mut() {
+                normalize_openai_reasoning_body(&model, v);
+                if is_stream {
                     v["stream_options"] = json!({ "include_usage": true });
                     if base.contains("openrouter") {
                         v["usage"] = json!({ "include": true });
                     }
-                    body = Bytes::from(v.to_string());
-                }
-            } else if base.contains("openrouter") {
-                if let Some(v) = req_json.as_mut() {
+                } else if base.contains("openrouter") {
                     v["usage"] = json!({ "include": true });
-                    body = Bytes::from(v.to_string());
                 }
+                body = Bytes::from(v.to_string());
             }
             (format!("{base}/{path_tail}"), key, "authorization")
         }
@@ -852,5 +912,63 @@ pub async fn openai_models(State(state): State<AppState>, _principal: Principal)
             (status, [("content-type", "application/json")], b).into_response()
         }
         Err(e) => (StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn astra_is_openai_reasoning_and_needs_min_effort() {
+        assert!(is_openai_reasoning_model("openai/gpt-6-astra"));
+        assert!(openai_requires_min_effort("openai/gpt-6-astra"));
+        assert!(openai_requires_min_effort("openai/gpt-6-astra-pro"));
+        assert!(openai_requires_min_effort("openai/gpt-6.1-sol"));
+        assert!(!openai_requires_min_effort("openai/gpt-6-luna"));
+        assert!(!is_openai_reasoning_model("anthropic/claude-sonnet-5.5"));
+    }
+
+    #[test]
+    fn normalize_strips_sampling_and_rewrites_max_tokens_for_astra() {
+        let mut body = json!({
+            "model": "openai/gpt-6-astra",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 1024,
+            "temperature": 0.2,
+            "top_p": 0.9,
+            "reasoning_effort": "none",
+        });
+        normalize_openai_reasoning_body("openai/gpt-6-astra", &mut body);
+        let obj = body.as_object().unwrap();
+        assert!(obj.get("temperature").is_none());
+        assert!(obj.get("top_p").is_none());
+        assert!(obj.get("max_tokens").is_none());
+        assert_eq!(obj.get("max_completion_tokens"), Some(&json!(1024)));
+        assert_eq!(obj.get("reasoning_effort"), Some(&json!("low")));
+    }
+
+    #[test]
+    fn normalize_bumps_nested_reasoning_effort() {
+        let mut body = json!({
+            "model": "openai/gpt-6-astra",
+            "reasoning": { "effort": "minimal" },
+            "max_completion_tokens": 512,
+        });
+        normalize_openai_reasoning_body("openai/gpt-6-astra", &mut body);
+        assert_eq!(body["reasoning"]["effort"], json!("low"));
+        assert_eq!(body["max_completion_tokens"], json!(512));
+    }
+
+    #[test]
+    fn normalize_leaves_anthropic_untouched() {
+        let mut body = json!({
+            "model": "anthropic/claude-sonnet-5.5",
+            "max_tokens": 1024,
+            "temperature": 0.2,
+        });
+        let before = body.clone();
+        normalize_openai_reasoning_body("anthropic/claude-sonnet-5.5", &mut body);
+        assert_eq!(body, before);
     }
 }

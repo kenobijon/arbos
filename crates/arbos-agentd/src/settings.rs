@@ -73,6 +73,27 @@ pub fn effort_to_thinking(effort: &str) -> &'static str {
     }
 }
 
+/// GPT-6 Astra / GPT-6.1 Sol / GPT-5 refuse thinking level `off`/`none`/`minimal`.
+fn openai_requires_min_effort(model: &str) -> bool {
+    let leaf = model
+        .rsplit('/')
+        .next()
+        .unwrap_or(model)
+        .to_ascii_lowercase();
+    leaf.contains("astra") || leaf.contains("6.1-sol") || leaf.starts_with("gpt-5")
+}
+
+fn clamp_effort_for_model(model: &str, effort: &str) -> String {
+    if openai_requires_min_effort(model) {
+        match effort.to_ascii_lowercase().as_str() {
+            "off" | "none" | "minimal" | "" => "low".into(),
+            other => other.to_owned(),
+        }
+    } else {
+        effort.to_owned()
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct SettingsState {
     pub name: String,
@@ -225,6 +246,10 @@ impl Agent {
         fix("the talking model", &mut out.talking, &talking_default);
         fix("the subagent model", &mut out.subagent, &subagent_default);
         fix("the decision model", &mut out.decision, &decision_default);
+        // OpenAI Astra (and kin) reject reasoning_effort none/off — bump before apply.
+        out.talking.effort = clamp_effort_for_model(&out.talking.id, &out.talking.effort);
+        out.subagent.effort = clamp_effort_for_model(&out.subagent.id, &out.subagent.effort);
+        out.decision.effort = clamp_effort_for_model(&out.decision.id, &out.decision.effort);
         (out, notes)
     }
 
