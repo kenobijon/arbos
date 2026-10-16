@@ -1971,6 +1971,8 @@ final class AppModel: ObservableObject {
     /// S8: the last assistant message asked a question and nothing was sent since.
     func chatNeedsAnswer(_ chatId: Id) -> Bool {
         guard let last = messages(of: chatId).last, last.role == .assistant, !last.isStreaming else { return false }
+        // A choice card is answered from its rows, so it does not switch the composer.
+        if let q = last.openQuestion { return !q.hasChoices }
         return last.askUserText != nil
     }
 
@@ -2086,11 +2088,42 @@ final class AppModel: ObservableObject {
         return cleaned.isEmpty ? "file" : cleaned
     }
 
+    /// Typed answer from the composer (S8). When the open question is a `question` part
+    /// the phone cannot draw as rows (text, date, form, or plain), the answer carries its
+    /// `questionId` so agentd flips the part to answered.
     func answer(chatId: Id, text: String) {
-        write(chatId: chatId, text: text, command: "answer", attachments: [])
+        var extra: [String: Any] = [:]
+        if let q = messages(of: chatId).last?.openQuestion, !q.hasChoices {
+            extra = ["questionId": q.questionId, "value": text]
+            markQuestionAnswered(chatId: chatId, questionId: q.questionId, answer: [text])
+        }
+        write(chatId: chatId, text: text, command: "answer", attachments: [], extra: extra)
     }
 
-    private func write(chatId: Id, text: String, command: String, attachments: [Attachment]) {
+    /// Answer from a question card row: the label becomes the user's bubble at once
+    /// (optimistic, same words as the Mac), the card flips to answered, and the structured
+    /// value travels in the `answer` command for agentd to render for the model.
+    func answerQuestion(chatId: Id, questionId: String, value: Any, label: String) {
+        let ids: [String] = (value as? [String]) ?? [(value as? String) ?? ""]
+        markQuestionAnswered(chatId: chatId, questionId: questionId, answer: ids)
+        write(chatId: chatId, text: "Answer: \(label)", command: "answer", attachments: [],
+              extra: ["questionId": questionId, "value": value])
+    }
+
+    private func markQuestionAnswered(chatId: Id, questionId: String, answer: [String]) {
+        guard var list = messages[chatId] else { return }
+        for i in list.indices {
+            for j in list[i].parts.indices {
+                guard case .question(let id, var q) = list[i].parts[j], q.questionId == questionId else { continue }
+                q.open = false
+                q.answer = answer
+                list[i].parts[j] = .question(id: id, question: q)
+            }
+        }
+        messages[chatId] = list
+    }
+
+    private func write(chatId: Id, text: String, command: String, attachments: [Attachment], extra: [String: Any] = [:]) {
         guard let doc = docs[chatId], let chat = chat(chatId) else {
             #if DEBUG
             if isFixture { fixtureAppend(chatId: chatId, text: text, attachments: attachments) }
@@ -2101,7 +2134,7 @@ final class AppModel: ObservableObject {
         markUnacked(chatId: chatId, messageId: messageId)
         do {
             try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: attachments)
-            try doc.pushCommand(command, payload: ["messageId": messageId], device: deviceId)
+            try doc.pushCommand(command, payload: extra.merging(["messageId": messageId]) { _, new in new }, device: deviceId)
             if !chat.isPinned && chat.title == "New chat" {
                 let title = AppModel.title(from: text)
                 try doc.pushCommand("retitle", payload: ["title": title], device: deviceId)

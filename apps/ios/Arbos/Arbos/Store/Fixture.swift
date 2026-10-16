@@ -80,7 +80,8 @@ extension AppModel {
             assistant("a5", a, "Pulled and added.", at: a0 - 9 * 60_000),
             attachment("a6", a, name: "Q3 board deck v5.pdf", mime: "application/pdf", at: a0 - 9 * 60_000 + 5_000),
             attachment("a7", a, name: "Walkthrough.m4a", mime: "audio/m4a", at: a0 - 8 * 60_000),
-            question("a8", a, "Should I send the deck to the whole team or just the board list?", at: a0 - 2 * 60_000),
+            question("a8", a, "Send the deck to the whole team or just the board list?",
+                     options: ["Whole team", "Board list only", "Hold off for now"], at: a0 - 2 * 60_000),
             stopped("a9", a, at: a0),
         ]
         chats = allChats
@@ -251,10 +252,14 @@ extension AppModel {
                 parts: [.attachment(id: "\(id)-a", attachment: Attachment(name: name, mime: mime, blobRef: "fixture-\(id)"))], hiddenCount: 0)
     }
 
-    private func question(_ id: Id, _ chat: Id, _ text: String, at: Int64) -> Message {
-        Message(id: id, chatId: chat, role: .assistant, sender: "agent", status: .done, turn: .reply, decision: "reply", subagentId: nil,
-                subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: at, completedAt: at, pending: false,
-                parts: [.status(id: "\(id)-q", code: .askUser, message: text)], hiddenCount: 0)
+    /// As agentd writes it: a `question` part with a choice widget plus the legacy
+    /// `waiting_user` status line (the card wins, the line is hidden).
+    private func question(_ id: Id, _ chat: Id, _ text: String, options: [String], at: Int64) -> Message {
+        let opts = options.enumerated().map { ChoiceOption(id: "opt-\($0.offset)", label: $0.element) }
+        let q = Question(questionId: "\(id)-question", question: text, options: opts, multi: false, widgetType: "choice", answer: [], open: true)
+        return Message(id: id, chatId: chat, role: .assistant, sender: "agent", status: .done, turn: .reply, decision: "reply", subagentId: nil,
+                       subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: at, completedAt: at, pending: false,
+                       parts: [.question(id: "\(id)-w", question: q), .status(id: "\(id)-q", code: .askUser, message: text)], hiddenCount: 0)
     }
 
     private func stopped(_ id: Id, _ chat: Id, at: Int64) -> Message {

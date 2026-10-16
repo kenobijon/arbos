@@ -26,7 +26,9 @@ enum RowKind: Equatable {
     case member(blocks: [Block], live: Bool, handle: String, avatar: String?, replyHandle: String?, replyPreview: String?)
     /// Centred muted line: hand-offs ("Messaged ◉ Affine"), stops, dates.
     case system(icon: String?, text: String, avatarProject: Id?)
-    case question(text: String)
+    /// Grok Bot question card: bold question, × top-right, lettered answer rows.
+    /// `questionId` is nil for a legacy `waiting_user` status line (no `question` part).
+    case question(questionId: String?, text: String, options: [ChoiceOption], multi: Bool, picked: [String], open: Bool)
     case file(name: String, subtitle: String, projectId: Id, ref: String?)
     case voiceMemo(name: String, projectId: Id, ref: String?, fromUser: Bool)
     case image(projectId: Id, ref: String?, fromUser: Bool)
@@ -143,7 +145,15 @@ enum Transcript {
                                              kind: .assistant(blocks: blocks, live: live, caption: nil)))
                         }
                     case .status(let id, .askUser, let text):
-                        chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant, kind: .question(text: text)))
+                        // agentd writes a `question` part and this status line; the part wins.
+                        if message.questions.isEmpty {
+                            chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
+                                             kind: .question(questionId: nil, text: text, options: [], multi: false, picked: [], open: true)))
+                        }
+                    case .question(let id, let q):
+                        chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
+                                         kind: .question(questionId: q.questionId, text: q.question, options: q.options,
+                                                         multi: q.multi, picked: q.answer, open: q.open)))
                     case .status(let id, .handoff, let text):
                         chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .system,
                                          kind: .system(icon: nil, text: handoffText(text), avatarProject: nil)))
@@ -429,21 +439,11 @@ struct RowView: View {
             .foregroundStyle(theme.muted)
             .frame(maxWidth: .infinity)
             .multilineTextAlignment(.center)
-        case .question(let text):
+        case .question(let questionId, let text, let options, let multi, let picked, let open):
             HStack {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Question")
-                        .font(.system(size: Theme.tiny, weight: .semibold))
-                        .foregroundStyle(theme.muted)
-                    Text(Markdown.inline(text))
-                        .font(.system(size: Theme.body))
-                        .foregroundStyle(theme.text)
-                }
-                .padding(.horizontal, Theme.bubbleHPad)
-                .padding(.vertical, Theme.bubbleVPad + 2)
-                .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
-                .overlay(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).strokeBorder(theme.warn.opacity(0.5), lineWidth: 1))
-                .frame(maxWidth: maxBubble, alignment: .leading)
+                QuestionCard(rowId: row.id, chatId: chatId, questionId: questionId, title: text, options: options,
+                             multi: multi, picked: picked, open: open)
+                    .frame(maxWidth: maxBubble, alignment: .leading)
                 Spacer(minLength: 0)
             }
         case .file(let name, let subtitle, let projectId, let ref):
