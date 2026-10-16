@@ -143,6 +143,8 @@ pub struct AppState {
     pub focus: crate::notify::Focus,
     /// (chat_id, sender user) → when the row-level fallback last notified for it.
     pub fallback_sent: Arc<Mutex<HashMap<(String, String), i64>>>,
+    /// Self-hosted LiveKit for calls (`LIVEKIT_*`); `None` = calls answer 503.
+    pub livekit: Option<crate::livekit::LiveKit>,
 }
 
 /// One running box upgrade.
@@ -374,6 +376,7 @@ pub(crate) mod test_support {
             push: Arc::new(crate::apns::Pusher::Capture(Mutex::new(Vec::new()))),
             focus: Arc::new(Mutex::new(HashMap::new())),
             fallback_sent: Arc::new(Mutex::new(HashMap::new())),
+            livekit: None,
         }
     }
 }

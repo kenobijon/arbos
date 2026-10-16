@@ -316,6 +316,7 @@ pub async fn announce(
                 device_token: t.token.clone(),
                 environment: t.environment.clone(),
                 push_type: "alert",
+                topic: None,
                 collapse_id: Some(format!("msg:{}", message_id)),
                 payload: alert_payload(chat, sender, message_id, &body, badge, title.as_deref()),
             };
@@ -339,6 +340,7 @@ pub async fn badge_refresh(state: &AppState, user_id: &str, except_device: &str)
             device_token: t.token.clone(),
             environment: t.environment.clone(),
             push_type: "alert",
+            topic: None,
             collapse_id: Some(format!("badge:{user_id}")),
             payload: json!({ "aps": { "badge": total } }),
         };

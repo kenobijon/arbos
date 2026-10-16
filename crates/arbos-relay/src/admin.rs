@@ -377,6 +377,7 @@ pub async fn push_test(
             device_token: t.token.clone(),
             environment: t.environment.clone(),
             push_type: "alert",
+            topic: None,
             collapse_id: Some(format!("test:{}", ulid())),
             payload: json!({
                 "aps": { "alert": { "title": title, "body": body }, "sound": "default" },
