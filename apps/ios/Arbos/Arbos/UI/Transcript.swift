@@ -330,17 +330,40 @@ enum Markdown {
         return (try? JSONSerialization.jsonObject(with: data)) != nil
     }
 
-    static func inline(_ text: String) -> AttributedString {
-        (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+    /// Inline markdown with Mac-parity link paint: accent colour + underline so
+    /// links stay visible under the bubble's body colour (and under the app's
+    /// text-coloured tint). Bare `http(s)://` URLs are linked too.
+    static func inline(_ text: String, color: Color, link: Color) -> AttributedString {
+        var attr = (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
             ?? AttributedString(text)
+        linkBareURLs(&attr)
+        for run in attr.runs {
+            let range = run.range
+            if run.link != nil {
+                attr[range].swiftUI.foregroundColor = link
+                attr[range].underlineStyle = .single
+            } else {
+                attr[range].swiftUI.foregroundColor = color
+            }
+        }
+        return attr
     }
 
-    /// Markdown `Text` ignores `.foregroundStyle` for many pasted runs, so bake
-    /// the colour into the attributed string (user bubbles are dark in light mode).
-    static func inline(_ text: String, color: Color) -> AttributedString {
-        var s = inline(text)
-        s.foregroundColor = color
-        return s
+    private static let linkDetector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+
+    private static func linkBareURLs(_ attr: inout AttributedString) {
+        guard let detector = linkDetector else { return }
+        let plain = String(attr.characters)
+        let ns = plain as NSString
+        for match in detector.matches(in: plain, range: NSRange(location: 0, length: ns.length)) {
+            guard let url = match.url,
+                  let scheme = url.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https",
+                  let range = Range(match.range, in: attr) else { continue }
+            if attr[range].link == nil {
+                attr[range].link = url
+            }
+        }
     }
 }
 
@@ -360,10 +383,10 @@ struct RowView: View {
         case .user(let text, let pending):
             HStack {
                 Spacer(minLength: 0)
-                Text(Markdown.inline(text, color: theme.userText))
+                Text(Markdown.inline(text, color: theme.userText, link: theme.accent))
                     .font(.system(size: Theme.body))
                     .lineSpacing(Theme.bodyLineSpacing)
-                    .foregroundStyle(theme.userText)
+                    .tint(theme.accent)
                     .textSelection(.enabled)
                     .padding(.horizontal, Theme.bubbleHPad)
                     .padding(.vertical, Theme.bubbleVPad)
@@ -383,10 +406,10 @@ struct RowView: View {
                         .font(.system(size: Theme.tiny, weight: .medium))
                         .foregroundStyle(theme.muted)
                         .padding(.leading, 4)
-                    Text(Markdown.inline(text))
+                    Text(Markdown.inline(text, color: theme.text, link: theme.accent))
                         .font(.system(size: Theme.body))
                         .lineSpacing(Theme.bodyLineSpacing)
-                        .foregroundStyle(theme.text)
+                        .tint(theme.accent)
                         .textSelection(.enabled)
                         .padding(.horizontal, Theme.bubbleHPad)
                         .padding(.vertical, Theme.bubbleVPad)
@@ -568,16 +591,16 @@ struct BlockView: View {
                 StreamingText(text: text, font: .system(size: Theme.body), color: theme.text)
                     .lineSpacing(Theme.bodyLineSpacing)
             } else {
-                Text(Markdown.inline(text))
+                Text(Markdown.inline(text, color: theme.text, link: theme.accent))
                     .font(.system(size: Theme.body))
                     .lineSpacing(Theme.bodyLineSpacing)
-                    .foregroundStyle(theme.text)
+                    .tint(theme.accent)
                     .textSelection(.enabled)
             }
         case .heading(_, let text):
-            Text(Markdown.inline(text))
+            Text(Markdown.inline(text, color: theme.text, link: theme.accent))
                 .font(.system(size: Theme.body, weight: .semibold))
-                .foregroundStyle(theme.text)
+                .tint(theme.accent)
         case .bullets(let items), .numbered(let items):
             let numbered: Bool = { if case .numbered = block { return true } else { return false } }()
             VStack(alignment: .leading, spacing: 4) {
@@ -590,9 +613,9 @@ struct BlockView: View {
                         if live && i == items.count - 1 {
                             StreamingText(text: item, font: .system(size: Theme.body), color: theme.text)
                         } else {
-                            Text(Markdown.inline(item))
+                            Text(Markdown.inline(item, color: theme.text, link: theme.accent))
                                 .font(.system(size: Theme.body))
-                                .foregroundStyle(theme.text)
+                                .tint(theme.accent)
                         }
                     }
                 }
