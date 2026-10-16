@@ -7,7 +7,8 @@
 #   udp  @RTC_PORT_START@-@RTC_PORT_END@   media (ICE/UDP), direct to the server
 #   tcp  7881                      ICE over TCP (UDP-blocked networks)
 #   udp  3478 / tcp 5349           embedded TURN (plain / TLS, cert from Caddy for @TURN_DOMAIN@)
-# TURN over TLS cannot sit on 443 on this IP; docs/self-host.md explains the second-IP option.
+#   tcp  443 (SNI @TURN_DOMAIN@)   LiveKit advertises turns:@TURN_DOMAIN@:443; the :443 Caddy (caddy-l4
+#                                  listener wrapper in scripts/deploy/Caddyfile) forwards that SNI to 5349.
 port: 7880
 log_level: info
 logging:

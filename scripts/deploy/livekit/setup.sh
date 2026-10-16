@@ -91,6 +91,9 @@ echo "wrote $LIVEKIT_DIR/{livekit.env,livekit.yaml,docker-compose.yml}"
 say "caddy"
 install -d -m 0755 "$SITES_D"
 sed -e "s#@LIVEKIT_HOST@#$LIVEKIT_HOST#g" -e "s#@TURN_HOST@#$TURN_DOMAIN#g" "$HERE/Caddyfile.livekit" > "$SITES_D/livekit.caddy"
+if ! "$WWW_DIR/bin/caddy" list-modules 2>/dev/null | grep -q "^layer4$"; then
+  echo "WARNING: $WWW_DIR/bin/caddy has no layer4 module — TURN/TLS on 443 will not work; run scripts/deploy/livekit/build-caddy.sh and restart arbos-www" >&2
+fi
 if ! grep -q "sites.d" "$WWW_DIR/Caddyfile" 2>/dev/null; then
   echo "WARNING: $WWW_DIR/Caddyfile does not import $SITES_D/*.caddy — redeploy the relay (scripts/deploy/relay-server.sh) first" >&2
 fi

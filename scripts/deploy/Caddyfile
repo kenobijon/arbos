@@ -5,6 +5,31 @@
 {
 	admin off
 	auto_https disable_redirects
+	# TURN over TLS for calls shares 443 with the sites: connections whose SNI is the TURN hostname are
+	# handed raw (no TLS termination here) to LiveKit's TURN/TLS listener; everything else is HTTPS as
+	# usual. Needs the caddy-l4 module (scripts/deploy/livekit/build-caddy.sh builds that binary) —
+	# a stock caddy rejects this block, so remove it when you do not run LiveKit.
+	servers :443 {
+		listener_wrappers {
+			layer4 {
+				# ACME TLS-ALPN challenges for the TURN name stay with Caddy (it owns the certificate).
+				@turn {
+					tls {
+						sni turn.arbos.life
+					}
+					not {
+						tls {
+							alpn acme-tls/1
+						}
+					}
+				}
+				route @turn {
+					proxy 127.0.0.1:5349
+				}
+			}
+			tls
+		}
+	}
 	storage file_system {
 		root @WWW_DIR@/caddy-data
 	}
