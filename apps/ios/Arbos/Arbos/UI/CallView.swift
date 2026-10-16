@@ -316,7 +316,7 @@ struct IncomingCallView: View {
                             Text("Decline").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
                         }
                         VStack(spacing: 8) {
-                            Button { Task { await calls.accept() } } label: {
+                            Button { calls.acceptFromUI() } label: {
                                 Circle().fill(theme.online).frame(width: 72, height: 72)
                                     .overlay(Image(systemName: inc.call.kind == .video ? "video.fill" : "phone.fill").font(.system(size: 26, weight: .semibold)).foregroundStyle(.white))
                             }
