@@ -115,14 +115,6 @@ struct HomeView: View {
                 }
                 .refreshable { await model.refreshRegistry() }
                 topBar
-                if offlineHint {
-                    Text("Offline · showing saved chats")
-                        .font(.system(size: Theme.small))
-                        .foregroundStyle(theme.muted)
-                        .padding(.top, 66)
-                        .transition(.opacity)
-                        .accessibilityIdentifier("offline-hint")
-                }
             }
             .task(id: model.link) {
                 // Quiet for 4 s after a from-disk launch → say so; live again → hide.
@@ -227,6 +219,18 @@ struct HomeView: View {
                 .transition(.opacity)
             } else {
                 Spacer()
+                    .overlay {
+                        // Between the account circle and the buttons, where nothing else lives.
+                        if offlineHint {
+                            Text("Offline · showing saved chats")
+                                .font(.system(size: Theme.small))
+                                .foregroundStyle(theme.muted)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.8)
+                                .transition(.opacity)
+                                .accessibilityIdentifier("offline-hint")
+                        }
+                    }
                 Button {
                     withAnimation(.easeOut(duration: 0.18)) { searching = true }
                     searchFocused = true
