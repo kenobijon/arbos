@@ -1211,8 +1211,22 @@ class Loop:
                     self.gh.comment(st["issue"], f"iOS build failed: {ios['html_url']}. Sent the errors back to the agent for one retry.\n\n"
                                     "```\n" + "\n".join(errors[:20]) + "\n```")
                     return
-                self.fail(fid, st, f"iOS build failed twice: {ios['html_url']}", extra="\n".join(errors))
-                return
+                # Fixed forward? A later green main build that contains the commit means the tree
+                # is fine now (the follow-up or someone else repaired it); ship with that build.
+                later = self.gh.later_ios_build(sha, st["pushed_at"])
+                if later:
+                    st["ios_superseded_by"] = later["head_sha"]
+                    prefix = next((m.group(1) for a in self.gh.run_artifacts(later["id"])
+                                   for m in [re.match(r"xcodebuild-logs-(\d{12,18})", a["name"])] if m), None)
+                    number = self.resolve_build_number(prefix, later["id"]) if prefix else None
+                    st.update(ios_done=True, ios_run=later["html_url"], ios_uploaded_at=later["updated_at"], testflight_build=number)
+                    self.store.save_state(fid, st)
+                    self.store.event(fid, "testflight_uploaded", build=number, run=later["html_url"], fixed_forward=True)
+                    self.gh.comment(st["issue"], f"The iOS build of this commit failed ({ios['html_url']}), but a later main build that "
+                                    f"contains it is green: {later['html_url']} — TestFlight build **{number or '?'}**.")
+                else:
+                    self.fail(fid, st, f"iOS build failed twice: {ios['html_url']}", extra="\n".join(errors))
+                    return
 
         if st.get("ios_done") and st.get("testflight_build") and not st.get("testflight_ready_at"):
             b = self.asc.build_state(st["testflight_build"])
