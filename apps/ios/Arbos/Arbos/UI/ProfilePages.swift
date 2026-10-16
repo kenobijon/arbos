@@ -252,6 +252,7 @@ struct ChatItem: Identifiable, Equatable {
 enum ChatMedia {
     private static let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
 
+    @MainActor
     static func items(messages: [Message], slot: String, model: AppModel) -> [ChatItem] {
         var out: [ChatItem] = []
         for m in messages {
@@ -321,7 +322,7 @@ struct ChatItemsList: View {
     private func rowView(_ item: ChatItem) -> some View {
         Group {
             if let url = item.url {
-                Link(destination: url) { rowLabel(item) }
+                SwiftUI.Link(destination: url) { rowLabel(item) }
             } else {
                 rowLabel(item)
             }
@@ -506,7 +507,9 @@ struct UserProfileView: View {
 
     private func call(_ kind: CallKind) {
         Task {
-            guard let chat = dm ?? (await model.openDM(handle: person.handle, navigate: false)) else { return }
+            var chat = dm
+            if chat == nil { chat = await model.openDM(handle: person.handle, navigate: false) }
+            guard let chat else { return }
             dismiss()
             await CallManager.shared.start(chatId: chat.id, projectId: nil, kind: kind, title: person.displayName)
         }
@@ -520,10 +523,12 @@ struct UserProfileView: View {
 
     private func openDM(search: Bool) {
         Task {
-            if let chat = dm ?? (await model.openDM(handle: person.handle, navigate: false)) {
+            var chat = dm
+            if chat == nil { chat = await model.openDM(handle: person.handle, navigate: false) }
+            if let chat {
                 dismiss()
-                model.open(peopleChat: chat)
                 if search { model.pendingSearchChat = chat.id }
+                model.open(peopleChat: chat)
             }
         }
     }

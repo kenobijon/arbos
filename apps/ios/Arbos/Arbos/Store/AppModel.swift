@@ -1318,6 +1318,31 @@ final class AppModel: ObservableObject {
 
     func showProfile(_ target: ProfileTarget) { profile = target }
 
+    /// A sender avatar was tapped: resolve the handle through the chat's members.
+    func openPersonProfile(handle: String, avatarUrl: String?, chatId: String) {
+        if let m = peopleChat(chatId)?.members.first(where: { $0.handle == handle && !$0.isAgent }) {
+            showProfile(.user(ProfilePerson(m)))
+        } else if let p = directory.first(where: { $0.handle == handle }) {
+            showProfile(.user(ProfilePerson(p)))
+        } else {
+            showProfile(.user(ProfilePerson(id: handle, handle: handle, name: nil, avatarUrl: avatarUrl)))
+        }
+    }
+
+    /// An agent that is not in my project list: the project carried by a
+    /// people-chat member row (someone else's agent in a DM).
+    func foreignAgent(_ projectId: Id) -> Project? {
+        for c in peopleChats {
+            if let a = c.agents.first(where: { $0.id == projectId }), var p = a.project {
+                if p.ownerHandle == nil { p.ownerHandle = a.ownerHandle }
+                p.shared = true
+                if p.description.isEmpty, let d = a.description { p.description = d }
+                return p
+            }
+        }
+        return nil
+    }
+
     func notePresence(_ header: [String: Any]) {
         guard let user = header["user"] as? String else { return }
         let at = (header["at"] as? NSNumber)?.int64Value ?? nowMs()

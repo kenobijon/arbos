@@ -58,6 +58,9 @@ struct HomeView: View {
                                              unread: model.chats(of: project.id).contains { $0.unread })
                                 }
                                 .buttonStyle(.plain)
+                                .contextMenu {
+                                    Button { model.showProfile(.agent(projectId: project.id)) } label: { Label("Profile", systemImage: "person.crop.circle") }
+                                }
                                 .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
                                 .listRowSeparator(.hidden)
                                 .listRowBackground(theme.bg)
@@ -76,6 +79,13 @@ struct HomeView: View {
                                               count: model.unreadCount(for: chat), me: model.user?.id)
                                 }
                                 .buttonStyle(.plain)
+                                .contextMenu {
+                                    if chat.kind == "dm", let other = chat.counterpart(me: model.user?.id) {
+                                        Button { model.showProfile(.user(ProfilePerson(other))) } label: { Label("Profile", systemImage: "person.crop.circle") }
+                                    } else {
+                                        Button { model.showProfile(.group(chatId: chat.id, projectId: nil)) } label: { Label("Group info", systemImage: "person.2") }
+                                    }
+                                }
                                 .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
                                 .listRowSeparator(.hidden)
                                 .listRowBackground(theme.bg)

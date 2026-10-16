@@ -40,7 +40,17 @@ struct ChatView: View {
     @State private var showMembers = false
     @State private var showShare = false
     @State private var showProfile = false
+    @State private var showSearch = false
+    @State private var searchText = ""
+    @FocusState private var searchFocused: Bool
     @ObservedObject private var calls = CallManager.shared
+
+    /// Rows after the in-chat search filter (profile "search").
+    private var visibleRows: [Row] {
+        let q = searchText.trimmingCharacters(in: .whitespaces)
+        guard showSearch, !q.isEmpty else { return rows }
+        return rows.filter { m_text($0).localizedCaseInsensitiveContains(q) }
+    }
 
     /// Who the CallKit card names: the other person, or the chat/project.
     private var callTitle: String {
@@ -48,10 +58,26 @@ struct ChatView: View {
         return project?.name ?? people?.title ?? name
     }
 
+    /// Header tap: DM → the other person; group / shared project → the group page; own agent → its page.
+    private func openHeaderProfile() {
+        if let people {
+            if people.kind == "dm", people.humans.count <= 2, let other = counterpart {
+                model.showProfile(.user(ProfilePerson(other)))
+            } else {
+                model.showProfile(.group(chatId: chatId, projectId: nil))
+            }
+        } else if project?.shared == true {
+            model.showProfile(.group(chatId: chatId, projectId: projectId))
+        } else {
+            model.showProfile(.agent(projectId: projectId))
+        }
+    }
+
     private var hasCallBar: Bool {
         guard let active = calls.activeByChat[chatId], !active.ended else { return false }
         return calls.call?.callId != active.callId || !calls.isPresented
     }
+    private var headerExtra: CGFloat { (hasCallBar ? 52 : 0) + (showSearch ? 46 : 0) }
 
     private func startCall(_ kind: CallKind) {
         Task { await calls.start(chatId: chatId, projectId: isPeople ? nil : projectId, kind: kind, title: callTitle) }
@@ -143,6 +169,23 @@ struct ChatView: View {
                 VStack(spacing: 8) {
                     header
                     if let people { memberChips(people).padding(.horizontal, 16) }
+                    if showSearch {
+                        HStack(spacing: 8) {
+                            Image(systemName: "magnifyingglass").font(.system(size: 15, weight: .medium)).foregroundStyle(theme.muted)
+                            TextField("", text: $searchText, prompt: Text("Search in chat").foregroundStyle(theme.placeholder))
+                                .font(.system(size: Theme.body)).foregroundStyle(theme.text)
+                                .focused($searchFocused)
+                                .autocorrectionDisabled()
+                            Button { showSearch = false; searchText = "" } label: {
+                                Image(systemName: "xmark.circle.fill").foregroundStyle(theme.muted)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.horizontal, 12).frame(height: 38)
+                        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
+                        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+                        .padding(.horizontal, 16)
+                    }
                     if let active = calls.activeByChat[chatId], !active.ended, calls.call?.callId != active.callId || !calls.isPresented {
                         CallBar(call: active) {
                             if calls.call?.callId == active.callId { calls.isPresented = true }
@@ -189,7 +232,7 @@ struct ChatView: View {
             }
         }
         .sheet(isPresented: $showProfile) {
-            AgentProfileView(projectId: projectId).environmentObject(model).environment(\.theme, theme)
+            AgentEditSheet(projectId: projectId).environmentObject(model).environment(\.theme, theme)
         }
         .fullScreenCover(isPresented: $showVoice, onDismiss: {
             callVideo = false
@@ -265,6 +308,11 @@ struct ChatView: View {
             model.markRead(chatId: chatId)
             model.visibleChatId = chatId
             if isPeople { model.markPeopleRead(chatId) }
+            if model.pendingSearchChat == chatId {
+                model.pendingSearchChat = nil
+                showSearch = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { searchFocused = true }
+            }
             if isPeople || project?.shared == true { Task { await model.refreshActiveCall(chatId: chatId, projectId: isPeople ? nil : projectId) } }
             if let show = DebugHooks.show {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
@@ -274,7 +322,10 @@ struct ChatView: View {
                     case "voice": showVoice = true
                     case "threads": showThreads = true
                     case "model": showModelPicker = true
-                    case "profile": showProfile = true
+                    case "profile": openHeaderProfile()
+                    case "edit": showProfile = true
+                    case "userprofile": if let c = counterpart { model.showProfile(.user(ProfilePerson(c))) }
+                    case "groupprofile": model.showProfile(.group(chatId: chatId, projectId: isPeople ? nil : projectId))
                     case "feedback": FeedbackCenter.shared.open(screen: "chat", chatId: chatId, projectId: isPeople ? nil : projectId)
                     case "call":
                         #if DEBUG
@@ -356,7 +407,7 @@ struct ChatView: View {
             }
             theme.bg.opacity(theme.isGlass ? 0.78 : 1)
         }
-        .frame(height: (isPeople ? 156 : 118) + (hasCallBar ? 52 : 0))
+        .frame(height: (isPeople ? 156 : 118) + headerExtra)
         .mask(LinearGradient(colors: [.black, .black, .clear], startPoint: .top, endPoint: .bottom))
         .ignoresSafeArea(edges: .top)
         .allowsHitTesting(false)
@@ -376,6 +427,7 @@ struct ChatView: View {
             GlassPill {
                 HStack(spacing: 6) {
                     if let people {
+                        HStack(spacing: 6) {
                         PersonAvatar(url: counterpart?.avatarUrl, handle: counterpart?.handle ?? "?", size: Theme.avatar)
                         VStack(alignment: .leading, spacing: 0) {
                             Text(counterpart?.displayName ?? people.title)
@@ -388,6 +440,11 @@ struct ChatView: View {
                                 Text("\(people.agents.count) agent\(people.agents.count == 1 ? "" : "s")").font(.system(size: 10)).foregroundStyle(theme.muted)
                             }
                         }
+                        }
+                        .contentShape(Rectangle())
+                        .onTapGesture { openHeaderProfile() }
+                        .accessibilityAddTraits(.isButton)
+                        .accessibilityHint("Opens the profile")
                     } else {
                         HStack(spacing: 8) {
                             if let project {
@@ -399,7 +456,7 @@ struct ChatView: View {
                                 .lineLimit(1)
                         }
                         .contentShape(Rectangle())
-                        .onTapGesture { showProfile = true }
+                        .onTapGesture { openHeaderProfile() }
                         .accessibilityAddTraits(.isButton)
                         .accessibilityHint("Opens the agent profile")
                         agentChatSwitcher
@@ -437,6 +494,8 @@ struct ChatView: View {
                 if isPeople {
                     Button { startCall(.video) } label: { Label("Video call", systemImage: "video") }
                     Button { startCall(.voice) } label: { Label("Voice call", systemImage: "phone") }
+                    Button { openHeaderProfile() } label: { Label(people?.kind == "dm" ? "Profile" : "Group info", systemImage: "person.crop.circle") }
+                    Button { showSearch = true; DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { searchFocused = true } } label: { Label("Search in chat", systemImage: "magnifyingglass") }
                     Button { showMembers = true } label: { Label("Members & agents", systemImage: "person.2") }
                     if let c = counterpart {
                         Button(role: .destructive) { model.block(c) } label: { Label("Block @\(c.handle)", systemImage: "hand.raised") }
@@ -536,7 +595,7 @@ struct ChatView: View {
                 // bottom safe-area inset, and LazyVStack can drop every visible row
                 // for a white transcript until the next layout pass.
                 VStack(alignment: .leading, spacing: 0) {
-                    Color.clear.frame(height: (isPeople ? 104 : 64) + (hasCallBar ? 52 : 0)).onAppear { scroller = proxy }
+                    Color.clear.frame(height: (isPeople ? 104 : 64) + headerExtra).onAppear { scroller = proxy }
                     if let banner = machineBannerText {
                         HStack(spacing: 6) {
                             if model.machine.state == .waking { ProgressView().controlSize(.mini).tint(theme.muted) }
@@ -554,7 +613,7 @@ struct ChatView: View {
                         // copy would say "Ask @handle anything…" which is wrong here.
                         emptyHint
                     }
-                    ForEach(Array(rows.enumerated()), id: \.element.id) { i, row in
+                    ForEach(Array(visibleRows.enumerated()), id: \.element.id) { i, row in
                         RowView(row: row, chatId: chatId, width: width)
                             .padding(.top, gap(before: i))
                             .id(row.id)
@@ -705,6 +764,11 @@ struct ChatView: View {
                         .overlay(Capsule().strokeBorder(selected ? theme.text.opacity(0.35) : Color.clear, lineWidth: 1))
                     }
                     .buttonStyle(.plain)
+                    .contextMenu {
+                        Button {
+                            if m.isAgent { model.showProfile(.agent(projectId: m.id)) } else { model.showProfile(.user(ProfilePerson(m))) }
+                        } label: { Label("Profile", systemImage: "person.crop.circle") }
+                    }
                     .accessibilityLabel(selected ? "Talking to \(m.displayName)" : "Talk to \(m.displayName)")
                 }
                 Button { showMembers = true } label: {

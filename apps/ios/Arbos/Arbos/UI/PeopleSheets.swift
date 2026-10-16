@@ -409,7 +409,7 @@ struct NewAgentLookView: View {
                 if TreeAvatars.shared.isEmpty {
                     Text("Colour").font(.system(size: Theme.body, weight: .medium)).foregroundStyle(theme.text)
                     HStack(spacing: 0) {
-                        ForEach(AgentProfileView.colorHexes, id: \.self) { hex in
+                        ForEach(AgentEditSheet.colorHexes, id: \.self) { hex in
                             let selected = hex.lowercased() == colorName.lowercased()
                             Button { colorName = hex } label: {
                                 ZStack {
@@ -615,7 +615,7 @@ struct MembersSheet: View {
                     Section {
                         ForEach(chat.humans) { m in
                             HStack(spacing: 12) {
-                                PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 40)
+                                Button { model.showProfile(.user(ProfilePerson(m))) } label: { PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 40) }.buttonStyle(.plain)
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(m.displayName).foregroundStyle(theme.text)
                                     Text("@\(m.handle)\(m.status == "invited" ? " · invited" : "")").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
@@ -644,7 +644,9 @@ struct MembersSheet: View {
                     Section {
                         ForEach(chat.agents) { a in
                             HStack(spacing: 12) {
-                                if let p = a.project { AgentAvatar(project: p, theme: theme, size: 40) }
+                                if let p = a.project {
+                                    Button { model.showProfile(.agent(projectId: p.id)) } label: { AgentAvatar(project: p, theme: theme, size: 40) }.buttonStyle(.plain)
+                                }
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(a.displayName).foregroundStyle(theme.text)
                                     Text("@\(mentionSlug(a.project?.name ?? a.handle)) · owned by @\(a.ownerHandle ?? "?")\(a.replyPolicy == "every_message" ? " · replies to everything" : "")")
@@ -864,7 +866,7 @@ struct ProjectMembersSheet: View {
                 Section("Members") {
                     ForEach(members) { m in
                         HStack(spacing: 12) {
-                            PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 40)
+                            Button { model.showProfile(.user(ProfilePerson(m))) } label: { PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 40) }.buttonStyle(.plain)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(m.name?.isEmpty == false ? m.name! : m.handle).foregroundStyle(theme.text)
                                 Text("@\(m.handle) · \(m.role)\(m.status == "invited" ? " · invited" : "")").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)

@@ -33,6 +33,7 @@
 		A19DEA501A654ADE6E17D7D0 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1838A1C2D1E07CD3A2A2B9D /* HomeView.swift */; };
 		A1269EB98439212913CF2C3D /* NotificationsPrimerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C4ED1C31C4AB3EBEA672F1 /* NotificationsPrimerView.swift */; };
 		A14163A2878D322C683399AE /* PeopleSheets.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DD76D0CC9EE00A9C5089B5 /* PeopleSheets.swift */; };
+		A136CC7A1B16DAA6EE6A41AA /* ProfilePages.swift in Sources */ = {isa = PBXBuildFile; fileRef = A17A2B0ACDD5E316BB8EA070 /* ProfilePages.swift */; };
 		A1EB042AE1EE736D57004E58 /* Recorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = A19B0E359DCB5FC76FD8B6CB /* Recorder.swift */; };
 		A1FF55551C48D291C2FD5310 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11C70AFBE2CFC9BD0EB0AC1 /* SettingsView.swift */; };
 		A16B7487AC090D4969019FDF /* SignInView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1947AC5E87D2B2E121B97A0 /* SignInView.swift */; };
@@ -109,6 +110,7 @@
 		A1838A1C2D1E07CD3A2A2B9D /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		A1C4ED1C31C4AB3EBEA672F1 /* NotificationsPrimerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationsPrimerView.swift; sourceTree = "<group>"; };
 		A1DD76D0CC9EE00A9C5089B5 /* PeopleSheets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PeopleSheets.swift; sourceTree = "<group>"; };
+		A17A2B0ACDD5E316BB8EA070 /* ProfilePages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfilePages.swift; sourceTree = "<group>"; };
 		A19B0E359DCB5FC76FD8B6CB /* Recorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Recorder.swift; sourceTree = "<group>"; };
 		A11C70AFBE2CFC9BD0EB0AC1 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		A1947AC5E87D2B2E121B97A0 /* SignInView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignInView.swift; sourceTree = "<group>"; };
@@ -258,6 +260,7 @@
 				A1838A1C2D1E07CD3A2A2B9D,
 				A1C4ED1C31C4AB3EBEA672F1,
 				A1DD76D0CC9EE00A9C5089B5,
+				A17A2B0ACDD5E316BB8EA070,
 				A19B0E359DCB5FC76FD8B6CB,
 				A11C70AFBE2CFC9BD0EB0AC1,
 				A1947AC5E87D2B2E121B97A0,
@@ -419,6 +422,7 @@
 				A19DEA501A654ADE6E17D7D0 /* HomeView.swift in Sources */,
 				A1269EB98439212913CF2C3D /* NotificationsPrimerView.swift in Sources */,
 				A14163A2878D322C683399AE /* PeopleSheets.swift in Sources */,
+				A136CC7A1B16DAA6EE6A41AA /* ProfilePages.swift in Sources */,
 				A1EB042AE1EE736D57004E58 /* Recorder.swift in Sources */,
 				A1FF55551C48D291C2FD5310 /* SettingsView.swift in Sources */,
 				A16B7487AC090D4969019FDF /* SignInView.swift in Sources */,

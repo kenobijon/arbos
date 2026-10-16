@@ -355,7 +355,11 @@ struct RowView: View {
             }
         case .other(let text, let handle, let avatar):
             HStack(alignment: .bottom, spacing: 8) {
-                PersonAvatar(url: avatar, handle: handle, size: 26)
+                Button { model.openPersonProfile(handle: handle, avatarUrl: avatar, chatId: chatId) } label: {
+                    PersonAvatar(url: avatar, handle: handle, size: 26)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("@\(handle), profile")
                 VStack(alignment: .leading, spacing: 3) {
                     Text("@\(handle)")
                         .font(.system(size: Theme.tiny, weight: .medium))

@@ -44,6 +44,22 @@ struct RootView: View {
         .sheet(isPresented: $showPrimer) {
             NotificationsPrimerView().environment(\.theme, theme)
         }
+        .sheet(item: $model.profile) { target in
+            Group {
+                switch target {
+                case .user(let p): UserProfileView(person: p)
+                case .group(let chatId, let projectId): GroupProfileView(chatId: chatId, projectId: projectId)
+                case .agent(let pid): AgentProfileView(projectId: pid, fallback: model.foreignAgent(pid))
+                }
+            }
+            .environmentObject(model)
+            .environment(\.theme, theme)
+            .presentationDetents([.large])
+            .presentationDragIndicator(.hidden)
+            .presentationBackground(theme.bg)
+            .presentationCornerRadius(28)
+            .preferredColorScheme(theme.isDark ? .dark : .light)
+        }
         .fullScreenCover(isPresented: $calls.isPresented) {
             CallScreen(expected: expectedPeer)
                 .environmentObject(model)

@@ -22,6 +22,8 @@ extension AppModel {
         let invoices = Project(id: "fx-invoices", name: "Invoice Collector", icon: "Ic", color: "#8E8E93", state: .awake, stateSince: now,
                                stateDetail: nil, model: "anthropic/claude-haiku-5.5", effort: .low, spendTodayUsd: 0, spendCapUsd: 25)
         var list = [comms, affine, hyper, scout, expense, invoices]
+        list[0].description = "Keeps your Discord and email in your voice: short, casual, no sign-offs. Drafts before it sends."
+        list[0].machineState = "awake"; list[0].machineClass = "daytona"; list[0].machineSnapshot = "arbos-agent-0.1.11"; list[0].machineAlwaysOn = true
         // Every agent is a coloured tree (D74); the colours differ so screenshots read well.
         let tints = ["fx-comms": "blue", "fx-affine": "green", "fx-hyper": "orange", "fx-expense": "pink", "fx-invoices": "teal", "fx-scout": "violet"]
         for i in list.indices { list[i].avatarColor = tints[list[i].id] }
@@ -83,11 +85,35 @@ extension AppModel {
                                   joinedAt: now - 40 * 60_000, project: nil, ownerId: nil, ownerHandle: nil, replyPolicy: nil)
         let unconst = ChatMember(id: "gh_32490803", kind: .user, member: "user:gh_32490803", role: "member", handle: "unconst",
                                  avatarUrl: "https://avatars.githubusercontent.com/u/32490803?v=4", name: "Unconst", status: "member",
-                                 joinedAt: now - 40 * 60_000, project: nil, ownerId: nil, ownerHandle: nil, replyPolicy: nil)
-        peopleChats = [PeopleChat(id: "fx-dm-unconst", kind: "dm", createdBy: "gh_32490803", createdAt: now - 40 * 60_000, title: "@unconst",
+                                 joinedAt: now - 40 * 60_000, project: nil, ownerId: nil, ownerHandle: nil, replyPolicy: nil,
+                                 lastSeenAt: now - 7 * 60_000, online: false)
+        // A small group too, for the group page.
+        let mira = ChatMember(id: "fx-u3", kind: .user, member: "user:fx-u3", role: "member", handle: "mira-k", avatarUrl: nil, name: "Mira Kaplan", status: "member",
+                              joinedAt: now - 3 * 86_400_000, project: nil, ownerId: nil, ownerHandle: nil, replyPolicy: nil, lastSeenAt: now - 30_000, online: true)
+        let sam = ChatMember(id: "fx-u4", kind: .user, member: "user:fx-u4", role: "member", handle: "sam", avatarUrl: nil, name: "Sam Okafor", status: "member",
+                             joinedAt: now - 3 * 86_400_000, project: nil, ownerId: nil, ownerHandle: nil, replyPolicy: nil, lastSeenAt: now - 2 * 86_400_000, online: false)
+        var meOwner = meMember; meOwner.role = "owner"
+        let commsAgent = ChatMember(id: "fx-comms", kind: .agent, member: "agent:fx-comms", role: "agent", handle: "comms", avatarUrl: nil, name: "Comms", status: "member",
+                                    joinedAt: now - 86_400_000, project: list.first { $0.id == "fx-comms" }, ownerId: "fx-me", ownerHandle: "you", replyPolicy: "mention")
+        let group = PeopleChat(id: "fx-group-launch", kind: "group", createdBy: "fx-me", createdAt: now - 3 * 86_400_000, title: "Launch week",
+                               pending: false, members: [meOwner, unconst, mira, sam, commsAgent], headSeq: 40, readSeq: 40, unread: false,
+                               lockState: "visible_to_agents", lastActivityAt: now - 50 * 60_000, myRole: "owner", muted: false)
+        peopleChats = [group, PeopleChat(id: "fx-dm-unconst", kind: "dm", createdBy: "gh_32490803", createdAt: now - 40 * 60_000, title: "@unconst",
                                   pending: false, members: [unconst, meMember], headSeq: 12, readSeq: 9, unread: true,
                                   lockState: "people_only", lastActivityAt: now - 7 * 60_000, myRole: "member", muted: false)]
         peopleUnread = ["fx-dm-unconst"]
+        messages["fx-group-launch"] = [
+            Message(id: "g1", chatId: "fx-group-launch", role: .user, sender: "user:fx-u3", status: .done, turn: nil, decision: nil, subagentId: nil,
+                    subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 3 * 3_600_000, completedAt: nil, pending: false,
+                    parts: [.text(id: "g1t", text: "Launch checklist is here: https://notion.so/arbos/launch-week")], hiddenCount: 0, senderHandle: "mira-k", senderName: "Mira Kaplan"),
+            Message(id: "g2", chatId: "fx-group-launch", role: .user, sender: "user:fx-u4", status: .done, turn: nil, decision: nil, subagentId: nil,
+                    subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 2 * 3_600_000, completedAt: nil, pending: false,
+                    parts: [.attachment(id: "g2a", attachment: Attachment(name: "press-kit-v3.pdf", mime: "application/pdf", blobRef: nil))], hiddenCount: 0, senderHandle: "sam", senderName: "Sam Okafor"),
+            Message(id: "g3", chatId: "fx-group-launch", role: .user, sender: "user:fx-u3", status: .done, turn: nil, decision: nil, subagentId: nil,
+                    subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 50 * 60_000, completedAt: nil, pending: false,
+                    parts: [.text(id: "g3t", text: "And the signup form: https://arbos.life/i/launch")], hiddenCount: 0, senderHandle: "mira-k", senderName: "Mira Kaplan"),
+        ]
+        caughtUp.insert("fx-group-launch")
         directory = [
             Person(id: "fx-u1", handle: "alex-rivera", avatarUrl: nil, name: "Alex Rivera", status: "member"),
             Person(id: "fx-u2", handle: "jacob", avatarUrl: nil, name: "Jacob Steeves", status: "member"),
