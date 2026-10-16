@@ -151,18 +151,13 @@ struct HomeView: View {
     private var topBar: some View {
         HStack(spacing: 10) {
             Button { showSettings = true } label: {
-                GlassCircle {
-                    ZStack(alignment: .bottomTrailing) {
-                        Image(systemName: "person.fill")
-                            .font(.system(size: 17))
-                            .foregroundStyle(theme.text)
-                        Circle()
-                            .fill(machineDotColor(model.machine.state, theme: theme))
-                            .frame(width: 11, height: 11)
-                            .overlay(Circle().strokeBorder(theme.bg, lineWidth: 2))
-                            .offset(x: 4, y: 4)
-                    }
-                    .frame(width: 24, height: 24)
+                ZStack(alignment: .bottomTrailing) {
+                    PersonAvatar(url: model.user?.avatarUrl, handle: model.user?.login ?? "?", size: Theme.control)
+                    Circle()
+                        .fill(machineDotColor(model.machine.state, theme: theme))
+                        .frame(width: 11, height: 11)
+                        .overlay(Circle().strokeBorder(theme.bg, lineWidth: 2))
+                        .offset(x: 2, y: 2)
                 }
             }
             .buttonStyle(.plain)
