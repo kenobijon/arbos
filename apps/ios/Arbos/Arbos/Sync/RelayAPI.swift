@@ -168,7 +168,8 @@ final class RelayAPI {
                 shared: p["shared"] as? Bool ?? false,
                 ownerHandle: p["owner_handle"] as? String,
                 avatar: (p["avatar"] as? String).flatMap { $0.isEmpty ? nil : $0 },
-                avatarColor: (p["avatar_color"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                avatarColor: (p["avatar_color"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+                instructions: (p["instructions"] as? String) ?? ""
             )
             let chats = ((detail["chats"] as? [Any]) ?? []).compactMap(RelayAPI.parseChat)
             out.append(RegistryProject(project: project, chats: chats))
@@ -543,6 +544,14 @@ final class RelayAPI {
 
     func removeMember(chatId: String, userId: String) async throws {
         _ = try await request("DELETE", "/chats/\(chatId)/members/\(userId)")
+    }
+
+    /// `PUT /chats/{id}/settings {read_receipts?, muted?}` per member.
+    func chatSettings(chatId: String, muted: Bool? = nil, readReceipts: Bool? = nil) async throws {
+        var body: [String: Any] = [:]
+        if let muted { body["muted"] = muted }
+        if let readReceipts { body["read_receipts"] = readReceipts }
+        _ = try await request("PUT", "/chats/\(chatId)/settings", body: body)
     }
 
     func block(handle: String) async throws { _ = try await request("POST", "/blocks", body: ["handle": handle]) }

@@ -710,6 +710,7 @@ final class AppModel: ObservableObject {
             self?.deviceId ?? "ios:unpaired"
         }
         room.onLink = { [weak self] l in self?.link = l }
+        room.presenceUser = { [weak self] in self?.user.map { ($0.id, $0.login) } }
         room.onBoxState = { [weak self] state, detail in
             self?.setProjectState(projectId, state, detail: detail)
         }
@@ -732,6 +733,7 @@ final class AppModel: ObservableObject {
         }
         if !isProjectDoc {
             room.onPresence = { [weak self] header in
+                self?.notePresence(header)
                 if let callId = header["in_call"] as? String { self?.peerInCall(callId, chatId: key) }
             }
         }
@@ -1085,12 +1087,12 @@ final class AppModel: ObservableObject {
     }
 
     /// Open (or create) the DM with a handle and navigate to it.
-    func openDM(handle: String) async -> PeopleChat? {
+    func openDM(handle: String, navigate: Bool = true) async -> PeopleChat? {
         do {
             let chat = try await api.openDM(handle: handle)
             if !peopleChats.contains(where: { $0.id == chat.id }) { peopleChats.insert(chat, at: 0) }
             ensureRoom(projectId: peopleSlot, key: chat.id, roomChat: chat.id)
-            path = [.chat(chatId: chat.id, projectId: peopleSlot)]
+            if navigate { path = [.chat(chatId: chat.id, projectId: peopleSlot)] }
             return chat
         } catch {
             notice = Notice(text: (error as? RelayError)?.type == "not_available" ? "You can't message this person." : "Could not open the chat: \(error.localizedDescription)")
@@ -1295,11 +1297,49 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func block(_ member: ChatMember) {
+    func block(_ member: ChatMember) { block(handle: member.handle) }
+
+    func block(handle: String) {
         Task {
-            do { try await api.block(handle: member.handle); blocked = (try? await api.blocks()) ?? blocked }
+            do { try await api.block(handle: handle); blocked = (try? await api.blocks()) ?? blocked }
             catch { notice = Notice(text: "Block failed: \(error.localizedDescription)") }
         }
+    }
+
+    // MARK: Profile pages
+
+    /// The profile page the root view presents (person, group or agent).
+    @Published var profile: ProfileTarget?
+    /// A chat the next ChatView should open with its search bar up (profile "search").
+    var pendingSearchChat: String?
+    /// Last presence time per user id, from room presence frames this session.
+    @Published private(set) var lastSeen: [String: Int64] = [:]
+
+    func showProfile(_ target: ProfileTarget) { profile = target }
+
+    func notePresence(_ header: [String: Any]) {
+        guard let user = header["user"] as? String else { return }
+        let at = (header["at"] as? NSNumber)?.int64Value ?? nowMs()
+        if (lastSeen[user] ?? 0) < at { lastSeen[user] = at }
+    }
+
+    /// `PUT /chats/{id}/settings {muted}` per member; local flag updated first.
+    func setMuted(chatId: String, muted: Bool) {
+        if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i].muted = muted }
+        guard !isFixture else { return }
+        Task { try? await api.chatSettings(chatId: chatId, muted: muted) }
+    }
+
+    /// Projects of mine (or shared with me) that this person is a member of.
+    func sharedProjects(with person: ProfilePerson) async -> [Project] {
+        guard !isFixture else { return projects.filter { $0.shared } }
+        var out: [Project] = []
+        for p in projects.prefix(24) {
+            if p.ownerHandle == person.handle { out.append(p); continue }
+            let members = await projectMembers(p.id)
+            if members.contains(where: { $0.id == person.id || $0.handle == person.handle }) { out.append(p) }
+        }
+        return out
     }
 
     func unblock(_ person: Person) {

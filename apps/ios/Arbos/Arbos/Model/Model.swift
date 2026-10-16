@@ -173,6 +173,8 @@ struct Project: Identifiable, Equatable {
     var avatar: String? = nil
     /// Colour set name from the manifest (`avatar_color` on the relay); nil → mono.
     var avatarColor: String? = nil
+    /// The owner's standing instructions — the agent's "description".
+    var instructions: String = ""
 
     var shortModel: String { Project.shortModel(model) }
 

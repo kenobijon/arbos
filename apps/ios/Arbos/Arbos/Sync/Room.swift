@@ -18,6 +18,8 @@ final class Room {
     var onAcked: (() -> Void)?
     /// Another peer's presence header (typing, `in_call`, …).
     var onPresence: (([String: Any]) -> Void)?
+    /// My user id + handle, carried in presence so peers can show "online / last seen".
+    var presenceUser: () -> (id: String, handle: String)? = { nil }
     /// The call id this device is in for this chat; sent as `in_call` in presence.
     var inCall: String? {
         didSet { if inCall != oldValue { Task { [weak self] in await self?.sendPresence() } } }
@@ -222,6 +224,7 @@ final class Room {
 
     private func sendPresence() async {
         var header: [String: Any] = ["device": deviceId(), "at": nowMs()]
+        if let u = presenceUser() { header["user"] = u.id; header["handle"] = u.handle }
         if focused { header["focused_chat"] = roomChat }
         if let inCall { header["in_call"] = inCall }
         try? await send(Frame(.presence, header: header))
