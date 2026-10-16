@@ -132,11 +132,15 @@ if command -v op >/dev/null 2>&1 && [[ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; th
   : "${ARBOS_JWT_KEY:=$(opread 'op://Arbos/3f4ks7535m2riceop42hyohlaq/credential')}"
   : "${ARBOS_GITHUB_CLIENT_ID:=$(opread 'op://Arbos/Arbos GitHub OAuth app/ARBOS_GITHUB_CLIENT_ID')}"
   : "${ARBOS_GITHUB_CLIENT_SECRET:=$(opread 'op://Arbos/Arbos GitHub OAuth app/ARBOS_GITHUB_CLIENT_SECRET')}"
+  # Calls (LiveKit, scripts/deploy/livekit): absent until the SFU is set up; the relay keeps calls off without them.
+  : "${LIVEKIT_URL:=$(opread 'op://Arbos/ypyfs6fm7dtkzphirv6ep7lfjq/LIVEKIT_URL')}"
+  : "${LIVEKIT_API_KEY:=$(opread 'op://Arbos/ypyfs6fm7dtkzphirv6ep7lfjq/LIVEKIT_API_KEY')}"
+  : "${LIVEKIT_API_SECRET:=$(opread 'op://Arbos/ypyfs6fm7dtkzphirv6ep7lfjq/LIVEKIT_API_SECRET')}"
 fi
 # keep values already in the env file when nothing new was supplied
 if [[ -f "$ENV_FILE" ]]; then
   keep() { local k=$1; [[ -n "${!k:-}" ]] || printf -v "$k" '%s' "$(sed -n "s/^$k=//p" "$ENV_FILE" | head -1)"; }
-  for k in OPENROUTER_API_KEY OPENAI_API_KEY DAYTONA_API_KEY ARBOS_RELAY_ADMIN_TOKEN ARBOS_RELAY_KEY ARBOS_JWT_KEY ARBOS_GITHUB_CLIENT_ID ARBOS_GITHUB_CLIENT_SECRET ARBOS_DAYTONA_SNAPSHOT; do keep "$k"; done
+  for k in OPENROUTER_API_KEY OPENAI_API_KEY DAYTONA_API_KEY ARBOS_RELAY_ADMIN_TOKEN ARBOS_RELAY_KEY ARBOS_JWT_KEY ARBOS_GITHUB_CLIENT_ID ARBOS_GITHUB_CLIENT_SECRET ARBOS_DAYTONA_SNAPSHOT LIVEKIT_URL LIVEKIT_API_KEY LIVEKIT_API_SECRET; do keep "$k"; done
 fi
 [[ -n "${DAYTONA_API_KEY:-}" ]] || echo "WARNING: DAYTONA_API_KEY is empty — new projects will get process boxes"
 [[ -n "${OPENROUTER_API_KEY:-}${OPENAI_API_KEY:-}" ]] || echo "WARNING: no model provider key"
@@ -168,6 +172,10 @@ EOF
 # clap takes an empty env value literally. Export ARBOS_DAYTONA_SNAPSHOT for one run to set it; it
 # is kept on later runs.
 [[ -z "${ARBOS_DAYTONA_SNAPSHOT:-}" ]] || echo "ARBOS_DAYTONA_SNAPSHOT=$ARBOS_DAYTONA_SNAPSHOT" >> "$ENV_FILE"
+# LiveKit (calls): only when configured, so a relay without an SFU keeps calls disabled.
+if [[ -n "${LIVEKIT_API_KEY:-}" && -n "${LIVEKIT_API_SECRET:-}" ]]; then
+  printf 'LIVEKIT_URL=%s\nLIVEKIT_API_KEY=%s\nLIVEKIT_API_SECRET=%s\n' "${LIVEKIT_URL:-wss://livekit.arbos.life}" "$LIVEKIT_API_KEY" "$LIVEKIT_API_SECRET" >> "$ENV_FILE"
+fi
 chmod 0600 "$ENV_FILE"; chown root:root "$ENV_FILE"
 umask 022
 
@@ -239,6 +247,7 @@ install -m 0755 "$REPO_DIR/scripts/deploy/refresh-mac-download.sh" /usr/local/bi
 if [[ -f "$WWW_DIR/Caddyfile" ]] && ! cmp -s "$REPO_DIR/scripts/deploy/Caddyfile" "$WWW_DIR/Caddyfile"; then
   cp -a "$WWW_DIR/Caddyfile" "$WWW_DIR/Caddyfile.bak-$(date -u +%Y%m%dT%H%M%SZ)"
 fi
+install -d -m 0755 /etc/arbos/sites.d   # per-service vhosts (scripts/deploy/livekit); the glob import tolerates an empty dir
 sed -e "s#@WWW_DIR@#$WWW_DIR#g" -e "s#@RELAY_LISTEN@#$LISTEN#g" "$REPO_DIR/scripts/deploy/Caddyfile" > "$WWW_DIR/Caddyfile"
 chown "$WWW_USER:$WWW_USER" "$WWW_DIR/Caddyfile"
 CADDY_BIN="$WWW_DIR/bin/caddy"; [[ -x "$CADDY_BIN" ]] || CADDY_BIN=$(command -v caddy)

@@ -1,0 +1,25 @@
+# LiveKit SFU for Arbos calls, next to the relay. Installed to /etc/livekit/docker-compose.yml by
+# scripts/deploy/livekit/setup.sh and run by the livekit.service systemd unit it writes (docker compose
+# up/down), so it restarts with the box and with Docker.
+#
+# host networking: WebRTC needs the UDP media range and TURN ports to reach the process directly;
+# the only public listeners are the ones ufw opens (7881/tcp, 3478/udp, 5349/tcp, the UDP range).
+# 7880 (signaling + HTTP API) stays reachable only through Caddy (ufw keeps it closed from outside).
+services:
+  livekit:
+    image: livekit/livekit-server:v1.13.10
+    container_name: livekit
+    restart: unless-stopped
+    network_mode: host
+    command: ["--config", "/etc/livekit/livekit.yaml"]
+    volumes:
+      - /etc/livekit:/etc/livekit:ro
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"

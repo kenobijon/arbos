@@ -167,3 +167,21 @@ Put TLS in front of port 7880 as `wss://livekit.example.com` (Caddy: `reverse_pr
 
 3. Call tokens are good for an hour, rooms are named `call_<ulid>`, at most 16 people. A call ends when the last person leaves, when LiveKit reports `room_finished`, or when nobody has been in it for a minute (the relay then closes the LiveKit room too). Ringing on iPhones that are closed needs the APNs key above (PushKit VoIP push, same key).
 
+### 9.1 The arbos.life deployment (`scripts/deploy/livekit/`)
+
+Our own LiveKit runs on the relay host in Docker; `scripts/deploy/livekit/setup.sh` (root, idempotent) reproduces it and is the reference for a self-hoster who wants the same shape:
+
+| piece | where | notes |
+|---|---|---|
+| server | `livekit/livekit-server:v1.13.10`, `docker-compose.yml`, host networking, `restart: unless-stopped`, json logs rotated 5×20 MiB | wrapped by `livekit.service` (systemd, after Docker) |
+| config | `/etc/livekit/livekit.yaml` from `livekit.yaml.tmpl`; keys + hostnames in `/etc/livekit/livekit.env` (root only) | `node_ip` is the public IP because the host sits behind 1:1 NAT |
+| signaling + API | `wss://livekit.arbos.life` → Caddy → `127.0.0.1:7880` (`Caddyfile.livekit`, imported from `/etc/arbos/sites.d/`) | one hostname serves the WebSocket and the HTTP (`/twirp`) API the relay calls |
+| media | UDP 50000–50200 and TCP 7881 straight to the server | sized for ~20 concurrent participants; widen the range for more |
+| TURN | embedded: `turn:204.12.171.6:3478?transport=udp`, `turns:turn.arbos.life:443?transport=tcp` (443 via the Caddy layer4 SNI route → LiveKit's 5349 listener) | certificate comes from Caddy's `turn.arbos.life` vhost, copied by `arbos-livekit-sync-cert.timer` (daily; restarts LiveKit when it changes) |
+| firewall | ufw: 7881/tcp, 3478/udp, 5349/tcp, 50000–50200/udp; 7880 stays closed (Caddy only) | 5349 stays open for clients that honour a custom port; LiveKit itself points them at 443 |
+| webhook | `https://relay.arbos.life/livekit/webhook`, signed with the API key | |
+| secrets | vault item **Arbos LiveKit** (`LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`); `relay-server.sh` carries them into `/etc/arbos/relay.env` | |
+
+**TURN/TLS on 443 with one IP.** Caddy owns 443 for the sites, and LiveKit always advertises its TURN/TLS server as `turns:<turn.domain>:443` (the `tls_port` only chooses the local listener). So the :443 Caddy is built with the [caddy-l4](https://github.com/mholt/caddy-l4) module (`scripts/deploy/livekit/build-caddy.sh`, xcaddy) and its global `servers :443 { listener_wrappers { layer4 … } }` block hands every TLS connection whose SNI is `turn.arbos.life` — except ACME `acme-tls/1` challenges, which Caddy keeps so it can renew that certificate — untouched to LiveKit's TURN/TLS listener on 127.0.0.1:5349; LiveKit terminates TLS with the certificate `arbos-livekit-sync-cert` copied from Caddy. Everything else on 443 is HTTPS as before (HTTP/3 on UDP 443 is unaffected). Verified from an outside host with every other port to the server dropped by iptables: a publisher and a subscriber joined over `turns:turn.arbos.life:443` alone with 0% loss. DNS: `livekit` and `turn` are DNS-only A records (no Cloudflare proxy) — the TLS-ALPN challenge and TURN both need the real address.
+
+Checks after `setup.sh`: `curl https://livekit.arbos.life/` prints `OK`; `lk room list --url wss://livekit.arbos.life --api-key … --api-secret …` works from anywhere; `lk load-test --room t --publishers 1 --subscribers 1` joins two participants; the relay log says `LiveKit calls on` after its restart.

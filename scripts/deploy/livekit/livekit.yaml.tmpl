@@ -1,0 +1,49 @@
+# LiveKit server config for the Arbos calls SFU (rendered by scripts/deploy/livekit/setup.sh into
+# /etc/livekit/livekit.yaml). Placeholders: @API_KEY@ @API_SECRET@ @TURN_DOMAIN@ @WEBHOOK_URL@
+# @NODE_IP@ @RTC_PORT_START@ @RTC_PORT_END@.
+#
+# Network shape on the relay host: Caddy owns 443 (TCP+UDP) for arbos.life/relay.arbos.life, so
+#   wss://livekit.arbos.life      signaling + HTTP API, Caddy -> 127.0.0.1:7880
+#   udp  @RTC_PORT_START@-@RTC_PORT_END@   media (ICE/UDP), direct to the server
+#   tcp  7881                      ICE over TCP (UDP-blocked networks)
+#   udp  3478 / tcp 5349           embedded TURN (plain / TLS, cert from Caddy for @TURN_DOMAIN@)
+#   tcp  443 (SNI @TURN_DOMAIN@)   LiveKit advertises turns:@TURN_DOMAIN@:443; the :443 Caddy (caddy-l4
+#                                  listener wrapper in scripts/deploy/Caddyfile) forwards that SNI to 5349.
+port: 7880
+log_level: info
+logging:
+  json: true
+  level: info
+
+rtc:
+  tcp_port: 7881
+  port_range_start: @RTC_PORT_START@
+  port_range_end: @RTC_PORT_END@
+  # The host sits behind 1:1 NAT (private address on eth0); advertise the public IP in ICE candidates.
+  node_ip: @NODE_IP@
+  use_external_ip: false
+  # ICE lite keeps the SFU side simple; clients do full ICE.
+  use_ice_lite: true
+
+turn:
+  enabled: true
+  domain: @TURN_DOMAIN@
+  cert_file: /etc/livekit/certs/@TURN_DOMAIN@.crt
+  key_file: /etc/livekit/certs/@TURN_DOMAIN@.key
+  tls_port: 5349
+  udp_port: 3478
+  external_tls: false
+
+room:
+  auto_create: true
+  empty_timeout: 300
+  departure_timeout: 20
+  max_participants: 16
+
+keys:
+  @API_KEY@: @API_SECRET@
+
+webhook:
+  api_key: @API_KEY@
+  urls:
+    - @WEBHOOK_URL@
