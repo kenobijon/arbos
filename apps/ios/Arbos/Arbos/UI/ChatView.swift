@@ -756,10 +756,10 @@ struct ChatView: View {
 
     /// Max height for the growing composer field.
     ///
-    /// A vertical `TextField` can report a huge intrinsic height while wrapping
-    /// (especially around the first line break). That inflates the bottom
-    /// `safeAreaInset` until it covers the transcript — a white screen that
-    /// clears on the next layout pass. Cap at 8 lines (Grok's 22 pt body pitch).
+    /// A vertical `TextField` fills the height its parent proposes (up to
+    /// `lineLimit`), so an empty field inside `safeAreaInset` was stretching to
+    /// eight lines and covering the transcript. Hug content with `fixedSize`,
+    /// and still cap at 8 lines (Grok's 22 pt body pitch) for wrap glitches.
     private var composerFieldMaxHeight: CGFloat {
         Theme.fieldHeight + 7 * 22
     }
@@ -768,6 +768,8 @@ struct ChatView: View {
         HStack(spacing: 8) {
             TextField("", text: $draft, prompt: Text(composerPrompt).foregroundStyle(theme.placeholder), axis: .vertical)
                 .lineLimit(1...8)
+                // Size to the typed text (one line when empty), not the offered height.
+                .fixedSize(horizontal: false, vertical: true)
                 .font(.system(size: Theme.body))
                 .foregroundStyle(theme.text)
                 .tint(Color(hex: "#1084FE")!)
@@ -813,7 +815,8 @@ struct ChatView: View {
             .padding(.trailing, 3)
         }
         // Hard max so a TextField layout glitch cannot paint over the transcript.
-        .frame(minHeight: Theme.fieldHeight, maxHeight: composerFieldMaxHeight)
+        .frame(minHeight: Theme.fieldHeight, maxHeight: composerFieldMaxHeight, alignment: .bottom)
+        .fixedSize(horizontal: false, vertical: true)
         .background(RoundedRectangle(cornerRadius: Theme.fieldHeight / 2, style: .continuous).fill(theme.field))
         .overlay(
             RoundedRectangle(cornerRadius: Theme.fieldHeight / 2, style: .continuous)
