@@ -152,14 +152,14 @@ pub fn jev_questions(room: &Room) -> Value {
             json!({
                 "type": "noul",
                 "instructions": format!(
-                    "Should the agent \"{name}\" reply to `message`? Judge from the agent's name and role in `agents`, from `recent_messages`, and from who `message` is from and what it asks."
+                    "Should the agent \"{name}\" reply to `message`? Several agents may reply to one message; judge {name} on its own, from its name and role in `agents`, from `recent_messages`, and from who `message` is from and what it asks."
                 ),
                 "criteria": {
                     "true": format!(
-                        "`message` asks {name} for something, names or mentions {name}, continues a thread {name} was just speaking in, or needs help that fits {name}'s role better than the other agents' roles."
+                        "`message` asks {name} for something, directly or as part of a request to several agents; names or mentions {name}; continues a thread {name} was just speaking in; answers a question {name} asked; or asks for work that belongs to {name}'s role."
                     ),
                     "false": format!(
-                        "`message` is for a person or for another agent, {name}'s role does not fit it, it is only a remark or acknowledgement that needs no agent reply, or another agent is clearly the better fit."
+                        "`message` is addressed only to people or only to other agents; nothing in it belongs to {name}'s role; or it is only a remark, reaction or acknowledgement that needs no agent reply."
                     ),
                 },
             }),
@@ -318,7 +318,9 @@ pub async fn decide_llm(
 ) -> anyhow::Result<ResponderDecision> {
     let user = llm_user(room);
     let hash = input_hash(&Value::String(user.clone()));
-    let (v, ms) = llm.complete_json(model, LLM_SYSTEM, &user, 600).await?;
+    let (v, ms, usage) = llm
+        .complete_json_with_usage(model, LLM_SYSTEM, &user, 600)
+        .await?;
     let chosen = llm_pick(&v, room);
     Ok(ResponderDecision {
         chosen,
@@ -326,9 +328,15 @@ pub async fn decide_llm(
         provider: "llm",
         model: model.to_owned(),
         latency_ms: ms,
-        input_tokens: 0,
-        output_tokens: 0,
-        cost_usd: None,
+        input_tokens: usage
+            .get("prompt_tokens")
+            .and_then(Value::as_i64)
+            .unwrap_or(0),
+        output_tokens: usage
+            .get("completion_tokens")
+            .and_then(Value::as_i64)
+            .unwrap_or(0),
+        cost_usd: usage.get("cost").and_then(Value::as_f64),
         input_hash: hash,
         threshold,
         reason: v

@@ -1,0 +1,83 @@
+{
+  "about": "Labelled group-chat messages for the responder decision (who replies). Run: arbos-agentd eval-responders --fixture crates/arbos-agentd/tests/fixtures/group-responders.json. `expected` is the set of agent ids that should reply (empty = nobody). Rosters: project groups (the user with several of their Projects) and people groups (people and the agents they added).",
+  "rosters": {
+    "launch": {
+      "kind": "project_group",
+      "title": "Launch week",
+      "agents": [
+        { "id": "research", "name": "Research", "role": "Finds, checks and summarizes facts, numbers, papers and sources. Writes short briefs with citations.", "host": true },
+        { "id": "design", "name": "Design", "role": "Visual design: mockups, slides, brand assets, Figma files, icons and layout feedback.", "host": false },
+        { "id": "ops", "name": "Ops", "role": "Deployments, servers, CI pipelines, monitoring, incidents and infrastructure costs.", "host": false }
+      ]
+    },
+    "duo": {
+      "kind": "project_group",
+      "title": "Side project",
+      "agents": [
+        { "id": "writer", "name": "Writer", "role": "", "host": true },
+        { "id": "coder", "name": "Coder", "role": "", "host": false }
+      ]
+    },
+    "people2": {
+      "kind": "people_group",
+      "title": "group",
+      "agents": [
+        { "id": "p_research", "name": "@research", "role": "Jacob's research agent: literature search, web research, fact checking, summaries.", "host": false },
+        { "id": "p_coder", "name": "@coder", "role": "Sam's coding agent: writes, reviews and debugs code; runs tests; opens pull requests.", "host": false }
+      ]
+    },
+    "people3": {
+      "kind": "people_group",
+      "title": "group",
+      "agents": [
+        { "id": "p_planner", "name": "@planner", "role": "Trip planning: itineraries, flights, hotels, visas, packing lists.", "host": false },
+        { "id": "p_chef", "name": "@chef", "role": "Recipes, meal plans, grocery lists, cooking technique.", "host": false },
+        { "id": "p_budget", "name": "@budget", "role": "Personal finance: budgets, splitting costs, currency, expense tracking.", "host": false }
+      ]
+    }
+  },
+  "cases": [
+    { "id": "c01", "roster": "launch", "from": "the user", "text": "Research, can you double-check the market-size numbers in the deck?", "recent": [], "expected": ["research"], "note": "named agent" },
+    { "id": "c02", "roster": "launch", "from": "the user", "text": "The landing page hero looks cramped on mobile, can someone fix the spacing?", "recent": [], "expected": ["design"], "note": "role fit, no name" },
+    { "id": "c03", "roster": "launch", "from": "the user", "text": "Is prod still on the old image? The deploy from this morning should have gone out.", "recent": [], "expected": ["ops"], "note": "role fit, no name" },
+    { "id": "c04", "roster": "launch", "from": "the user", "text": "Everyone: give me a one-line status for the launch checklist.", "recent": [], "expected": ["research", "design", "ops"], "note": "all" },
+    { "id": "c05", "roster": "launch", "from": "the user", "text": "ok thanks", "recent": [{ "from": "Project Ops", "text": "Rolled back to 0.1.13; error rate is normal again." }], "expected": [], "note": "acknowledgement, nobody" },
+    { "id": "c06", "roster": "launch", "from": "the user", "text": "Design and Ops, sync on the status-page colours before Tuesday.", "recent": [], "expected": ["design", "ops"], "note": "two named" },
+    { "id": "c07", "roster": "launch", "from": "the user", "text": "And add the 2025 figures too, same source.", "recent": [{ "from": "the user", "text": "Research, pull the 2024 revenue numbers for the three competitors." }, { "from": "Project Research", "text": "Done: Acme $12M, Beta $8M, Gamma $5M (annual reports, 2024)." }], "expected": ["research"], "note": "thread continuation" },
+    { "id": "c08", "roster": "launch", "from": "the user", "text": "Note to self: book the launch dinner.", "recent": [], "expected": [], "note": "note, nobody" },
+    { "id": "c09", "roster": "launch", "from": "the user", "text": "Who owns the CI cache? Builds got 3x slower since yesterday.", "recent": [], "expected": ["ops"], "note": "role fit via CI" },
+    { "id": "c10", "roster": "launch", "from": "the user", "text": "Can we get a chart of the survey results for slide 7? Research has the data, Design should make it pretty.", "recent": [], "expected": ["research", "design"], "note": "two by role" },
+    { "id": "c11", "roster": "launch", "from": "the user", "text": "Don't deploy anything until I say so.", "recent": [], "expected": ["ops"], "note": "instruction to ops" },
+    { "id": "c12", "roster": "launch", "from": "the user", "text": "lol that meme was great", "recent": [{ "from": "Project Design", "text": "Here is the launch meme draft (attached)." }], "expected": [], "note": "reaction, nobody" },
+    { "id": "c13", "roster": "launch", "from": "the user", "text": "What does GDPR say about storing IP addresses for analytics?", "recent": [], "expected": ["research"], "note": "research question" },
+    { "id": "c14", "roster": "launch", "from": "the user", "text": "Ops, ignore the Design thread above, it's not for you. Research: anything new on the competitor pricing?", "recent": [{ "from": "the user", "text": "Design, new icon set please." }, { "from": "Project Design", "text": "On it." }], "expected": ["research"], "note": "explicit exclusion + named" },
+    { "id": "c15", "roster": "launch", "from": "the user", "text": "Status page is down, 502s everywhere!", "recent": [], "expected": ["ops"], "note": "incident" },
+    { "id": "c16", "roster": "launch", "from": "the user", "text": "Which font did we settle on for headings?", "recent": [], "expected": ["design"], "note": "design memory question" },
+    { "id": "c17", "roster": "launch", "from": "the user", "text": "I'll be offline tomorrow morning.", "recent": [], "expected": [], "note": "FYI, nobody" },
+    { "id": "c18", "roster": "launch", "from": "the user", "text": "Can all three of you tell me what you still need from me before Tuesday?", "recent": [], "expected": ["research", "design", "ops"], "note": "all, phrased indirectly" },
+    { "id": "c19", "roster": "launch", "from": "the user", "text": "yes, go ahead", "recent": [{ "from": "Project Ops", "text": "Shall I bump the database plan to the next tier? It is +$40/month." }], "expected": ["ops"], "note": "answer to an agent's question" },
+    { "id": "c20", "roster": "launch", "from": "the user", "text": "yes, go ahead", "recent": [{ "from": "Project Design", "text": "Want me to export the deck as PDF as well?" }, { "from": "Project Ops", "text": "FYI nightly backup succeeded." }], "expected": ["design"], "note": "answer to the agent that asked, not the last speaker" },
+    { "id": "c21", "roster": "duo", "from": "the user", "text": "Coder, the login test is flaky again.", "recent": [], "expected": ["coder"], "note": "named, no roles" },
+    { "id": "c22", "roster": "duo", "from": "the user", "text": "Draft a blog post announcing v2, friendly tone, 300 words.", "recent": [], "expected": ["writer"], "note": "role from name only" },
+    { "id": "c23", "roster": "duo", "from": "the user", "text": "Both of you: what did you finish this week?", "recent": [], "expected": ["writer", "coder"], "note": "both" },
+    { "id": "c24", "roster": "duo", "from": "the user", "text": "brb", "recent": [], "expected": [], "note": "nobody" },
+    { "id": "c25", "roster": "duo", "from": "the user", "text": "Fix the null pointer in parser.rs line 88, then Writer can update the changelog.", "recent": [], "expected": ["coder", "writer"], "note": "two, sequential" },
+    { "id": "c26", "roster": "duo", "from": "the user", "text": "Make it shorter.", "recent": [{ "from": "the user", "text": "Writer, give me a tagline for the landing page." }, { "from": "Project Writer", "text": "\"Your agents, one chat.\" or \"Talk to your projects.\"" }], "expected": ["writer"], "note": "continuation, no name" },
+    { "id": "c27", "roster": "people2", "from": "@sam", "text": "@jacob are you around for a call at 3?", "recent": [], "expected": [], "note": "person to person" },
+    { "id": "c28", "roster": "people2", "from": "@jacob", "text": "@research what's the latest on the Strands Decider paper?", "recent": [], "expected": ["p_research"], "note": "named agent" },
+    { "id": "c29", "roster": "people2", "from": "@sam", "text": "The build fails on main with a borrow checker error in sync.rs, can someone look?", "recent": [], "expected": ["p_coder"], "note": "role fit" },
+    { "id": "c30", "roster": "people2", "from": "@jacob", "text": "haha yes", "recent": [{ "from": "@sam", "text": "we should name the next release 'definitely final'" }], "expected": [], "note": "banter" },
+    { "id": "c31", "roster": "people2", "from": "@sam", "text": "and open a PR for it please", "recent": [{ "from": "@sam", "text": "@coder fix the flaky test in auth_test.rs" }, { "from": "@coder (agent)", "text": "Fixed: the test depended on wall-clock time. Patch is on branch fix/auth-flaky." }], "expected": ["p_coder"], "note": "continuation with agent in thread" },
+    { "id": "c32", "roster": "people2", "from": "@jacob", "text": "Can you two agents each summarize what you did today?", "recent": [], "expected": ["p_research", "p_coder"], "note": "both agents" },
+    { "id": "c33", "roster": "people2", "from": "@sam", "text": "Found three papers on calibrated classifiers; is any of them worth reading in full?", "recent": [], "expected": ["p_research"], "note": "research fit" },
+    { "id": "c34", "roster": "people2", "from": "@jacob", "text": "@sam I merged your PR, thanks", "recent": [], "expected": [], "note": "person, mentions PR but addressed to a human" },
+    { "id": "c35", "roster": "people3", "from": "@ana", "text": "What should we cook for the group on Friday? 6 people, one vegetarian.", "recent": [], "expected": ["p_chef"], "note": "role fit" },
+    { "id": "c36", "roster": "people3", "from": "@ben", "text": "@planner can we do Lisbon instead of Porto for the first two nights?", "recent": [], "expected": ["p_planner"], "note": "named" },
+    { "id": "c37", "roster": "people3", "from": "@ana", "text": "Who paid for the car rental? I want to settle up.", "recent": [], "expected": ["p_budget"], "note": "budget fit" },
+    { "id": "c38", "roster": "people3", "from": "@cem", "text": "@ben @ana I land at 10:40", "recent": [], "expected": [], "note": "people only" },
+    { "id": "c39", "roster": "people3", "from": "@ben", "text": "Plan the Lisbon days and keep the food budget under 30 euro a day each.", "recent": [], "expected": ["p_planner", "p_budget"], "note": "two by role" },
+    { "id": "c40", "roster": "people3", "from": "@ana", "text": "ok, go with the second option", "recent": [{ "from": "@chef (agent)", "text": "Two menu options: (1) paella, (2) a mezze spread with falafel for the vegetarian." }, { "from": "@ben", "text": "either works for me" }], "expected": ["p_chef"], "note": "choice answers the agent's question" },
+    { "id": "c41", "roster": "people3", "from": "@cem", "text": "All agents: anything I should prepare before the trip?", "recent": [], "expected": ["p_planner", "p_chef", "p_budget"], "note": "all" },
+    { "id": "c42", "roster": "launch", "from": "the user", "text": "Research, you can stop the competitor scan, we have enough. Design, where is the new logo?", "recent": [], "expected": ["research", "design"], "note": "two named, one is a stop" }
+  ]
+}

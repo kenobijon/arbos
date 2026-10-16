@@ -122,6 +122,18 @@ impl Llm {
         })
     }
 
+    /// A client for explicit endpoints (the `eval-responders` subcommand talks to the relay proxy
+    /// or to OpenRouter directly): `chat_base` ends in `/v1`.
+    pub fn with_endpoints(chat_base: &str, decisions_url: &str, token: &str) -> Self {
+        Self {
+            http: reqwest::Client::new(),
+            base: chat_base.trim_end_matches('/').to_owned(),
+            decisions_url: decisions_url.to_owned(),
+            token: token.to_owned(),
+            project_id: String::new(),
+        }
+    }
+
     /// One non-streaming chat completion. Returns `(text, latency_ms)`.
     pub async fn complete(
         &self,
@@ -130,6 +142,21 @@ impl Llm {
         user: &str,
         max_tokens: u32,
     ) -> Result<(String, i64)> {
+        let (text, ms, _) = self
+            .complete_with_usage(model, system, user, max_tokens)
+            .await?;
+        Ok((text, ms))
+    }
+
+    /// `complete` plus the upstream `usage` object (`prompt_tokens`, `completion_tokens`, and
+    /// `cost` in USD when the relay proxy asked OpenRouter for it).
+    pub async fn complete_with_usage(
+        &self,
+        model: &str,
+        system: &str,
+        user: &str,
+        max_tokens: u32,
+    ) -> Result<(String, i64, Value)> {
         let t0 = Instant::now();
         let body = json!({
             "model": model,
@@ -154,7 +181,8 @@ impl Llm {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_owned();
-        Ok((text, t0.elapsed().as_millis() as i64))
+        let usage = v.get("usage").cloned().unwrap_or(Value::Null);
+        Ok((text, t0.elapsed().as_millis() as i64, usage))
     }
 
     /// A forced-JSON call: strips code fences and parses the first JSON object.
@@ -165,8 +193,22 @@ impl Llm {
         user: &str,
         max_tokens: u32,
     ) -> Result<(Value, i64)> {
-        let (text, ms) = self
-            .complete(
+        let (v, ms, _) = self
+            .complete_json_with_usage(model, system, user, max_tokens)
+            .await?;
+        Ok((v, ms))
+    }
+
+    /// `complete_json` plus the upstream `usage` object.
+    pub async fn complete_json_with_usage(
+        &self,
+        model: &str,
+        system: &str,
+        user: &str,
+        max_tokens: u32,
+    ) -> Result<(Value, i64, Value)> {
+        let (text, ms, usage) = self
+            .complete_with_usage(
                 model,
                 &format!("{system}\nAnswer with one JSON object and nothing else."),
                 user,
@@ -179,7 +221,7 @@ impl Llm {
                 text.chars().take(200).collect::<String>()
             )
         })?;
-        Ok((v, ms))
+        Ok((v, ms, usage))
     }
 }
 

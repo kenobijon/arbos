@@ -765,7 +765,8 @@ mod tests {
         assert_eq!(ctx.len(), 5);
         assert_eq!(ctx[0]["text"], "line 7");
         assert_eq!(ctx[4]["text"], "line 11");
-        assert_eq!(ctx[4]["handle"], "bob");
+        assert_eq!(ctx[4]["from"], "@bob (agent)");
+        assert_eq!(ctx[3]["from"], "@sam");
         // Unknown id → everything, still capped.
         let all = recent_people_context(&lines, "missing", 3);
         assert_eq!(all.len(), 3);

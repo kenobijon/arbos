@@ -70,6 +70,7 @@ All optional unless noted.
 | `ARBOS_RELAY_KEY` | AES-256-GCM key for connector tokens and vault values; generated once into the `meta` table when unset |
 | `OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | provider keys for the model proxy (never reach a machine) |
 | `ARBOS_OPENAI_BASE`, `ARBOS_ANTHROPIC_BASE` | upstreams, default OpenRouter |
+| `ARBOS_DECISION_PROVIDER` (`jev`), `ARBOS_DECISION_SCORER` (`typesafe/jev-1.14`), `ARBOS_DECISION_THRESHOLD` (0.5) | agentd defaults (read in the box's environment; Daytona machines use the built-in values) for who replies in group chats: `jev` asks a decision model through the relay's `/proxy/decisions` (OpenRouter Decisions API, needs `OPENROUTER_API_KEY`) for one calibrated yes/no probability per agent and picks those at or above the threshold; `llm` keeps the chat-model JSON router on `decision_model.id`. Per project: `PATCH /projects/{id} {"models": {"decision_model": {"id": …, "provider": "jev", "scorer": …, "threshold": 0.5}}}`. Jev fails open to `llm`, then to the previous default |
 | `ARBOS_OPENAI_AUDIO_BASE`, `ARBOS_VOICE_MOCK` | speech-to-text / text-to-speech upstream (default `https://api.openai.com/v1`, needs `OPENAI_API_KEY`); `ARBOS_VOICE_MOCK=1` answers without a key |
 | `ARBOS_OPENAI_IMAGES_BASE`, `ARBOS_IMAGE_MODEL`, `ARBOS_IMAGE_MOCK` | image generation upstream and model; `ARBOS_IMAGE_MOCK=1` returns a labelled placeholder PNG |
 | `DAYTONA_API_KEY`, `DAYTONA_API_URL`, `DAYTONA_ORG_ID` | Daytona access; without a key new projects get process boxes |

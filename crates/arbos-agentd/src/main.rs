@@ -5,6 +5,7 @@ mod attachments;
 mod channels;
 mod config;
 mod connectors;
+mod eval;
 mod groups;
 mod harness;
 mod hooks;
@@ -48,6 +49,35 @@ enum Cmd {
     Boot,
     /// Print the effective configuration (secrets masked).
     Config,
+    /// Run the labelled group-chat fixture through the responder decision (Jev decision model
+    /// and the LLM router) and report accuracy, latency, tokens and cost. Needs
+    /// OPENROUTER_API_KEY, or ARBOS_RELAY_URL + ARBOS_BOX_TOKEN for the relay proxy.
+    EvalResponders {
+        /// Fixture path (default: crates/arbos-agentd/tests/fixtures/group-responders.json).
+        #[arg(
+            long,
+            default_value = "crates/arbos-agentd/tests/fixtures/group-responders.json"
+        )]
+        fixture: String,
+        /// `jev`, `llm`, or `both`.
+        #[arg(long, default_value = "both")]
+        provider: String,
+        /// Decision-model id (default typesafe/jev-1.14).
+        #[arg(long)]
+        scorer: Option<String>,
+        /// Chat model for the `llm` router.
+        #[arg(long, default_value = "anthropic/claude-haiku-5.5")]
+        llm_model: String,
+        /// Yes-probability threshold for `jev` (default 0.5).
+        #[arg(long)]
+        threshold: Option<f64>,
+        /// Run every case this many times (latency spread).
+        #[arg(long, default_value_t = 1)]
+        repeat: usize,
+        /// Write the JSON report here instead of stdout.
+        #[arg(long)]
+        out: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -73,6 +103,26 @@ async fn main() -> Result<()> {
                 json!({ "user_id": cfg.user_id, "relay_url": cfg.relay_url, "work_root": cfg.work_root, "port": cfg.port, "local_box": cfg.local_box, "box_token": mask(&cfg.box_token), "mcp_token": mask(&cfg.mcp_token), "default_talking_model": cfg.default_talking_model, "default_subagent_model": cfg.default_subagent_model, "legacy_project_id": cfg.legacy_project_id })
             );
             Ok(())
+        }
+        Cmd::EvalResponders {
+            fixture,
+            provider,
+            scorer,
+            llm_model,
+            threshold,
+            repeat,
+            out,
+        } => {
+            eval::run(eval::EvalArgs {
+                fixture,
+                provider,
+                scorer,
+                llm_model,
+                threshold,
+                repeat,
+                out,
+            })
+            .await
         }
     }
 }
