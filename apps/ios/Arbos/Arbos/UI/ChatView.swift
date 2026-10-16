@@ -117,6 +117,14 @@ struct ChatView: View {
     @State private var talkTo: String?
     /// True while a swipe-left is creating the next agent chat (avoids double create).
     @State private var swipeCreating = false
+    /// Live cue while a nav swipe is arming (archive up, next/new left).
+    @State private var swipeHint: ChatSwipeHint = .none
+
+    private enum ChatSwipeHint: Equatable {
+        case none
+        case archive
+        case nextOrNew
+    }
 
     private var project: Project? { model.project(projectId) }
     private var chat: Chat? { model.chat(chatId) }
@@ -227,6 +235,7 @@ struct ChatView: View {
                         .padding(.horizontal, 16)
                     }
                 }
+                chatSwipeHintOverlay
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -587,10 +596,86 @@ struct ChatView: View {
 
     // MARK: Chat navigation swipes
 
+    /// Left swipe at the end of the thread list will create a chat (else opens the next).
+    private var swipeCreatesNew: Bool {
+        let list = agentChats
+        guard let i = list.firstIndex(where: { $0.id == chatId }) else { return true }
+        return i + 1 >= list.count
+    }
+
+    /// Archive (up) or next/new (left) badge while the finger is still down.
+    @ViewBuilder
+    private var chatSwipeHintOverlay: some View {
+        Group {
+            switch swipeHint {
+            case .none:
+                Color.clear
+            case .archive:
+                VStack {
+                    Spacer()
+                    swipeHintBadge(systemImage: "archivebox")
+                        .padding(.bottom, 100)
+                }
+            case .nextOrNew:
+                VStack {
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        swipeHintBadge(systemImage: swipeCreatesNew ? "square.and.pencil" : "chevron.right")
+                            .padding(.trailing, 28)
+                    }
+                    Spacer()
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .transition(.opacity.combined(with: .scale(scale: 0.85)))
+        .allowsHitTesting(false)
+    }
+
+    private func swipeHintBadge(systemImage: String) -> some View {
+        Image(systemName: systemImage)
+            .font(.system(size: 22, weight: .semibold))
+            .foregroundStyle(theme.text)
+            .frame(width: 56, height: 56)
+            .background {
+                ZStack {
+                    if theme.isGlass { Circle().fill(.ultraThinMaterial) }
+                    Circle().fill(theme.muted.opacity(theme.isDark ? 0.4 : 0.22))
+                }
+            }
+            .accessibilityHidden(true)
+    }
+
     /// Right → previous chat with this agent (Home when on the first); left → next (create if none); up → close and open previous.
     private var chatNavSwipe: some Gesture {
         DragGesture(minimumDistance: 50, coordinateSpace: .local)
-            .onEnded { value in handleChatSwipe(value) }
+            .onChanged { value in updateSwipeHint(value) }
+            .onEnded { value in
+                handleChatSwipe(value)
+                withAnimation(.easeOut(duration: 0.15)) { swipeHint = .none }
+            }
+    }
+
+    /// Soft thresholds so the cue appears before the gesture commits.
+    private func updateSwipeHint(_ value: DragGesture.Value) {
+        guard !isPeople else {
+            if swipeHint != .none { withAnimation(.easeOut(duration: 0.12)) { swipeHint = .none } }
+            return
+        }
+        let dx = value.translation.width
+        let dy = value.translation.height
+        let absX = abs(dx), absY = abs(dy)
+        let next: ChatSwipeHint
+        if absX > 50, absX > absY * 1.1, dx < 0 {
+            next = .nextOrNew
+        } else if dy < -80, absY > absX * 1.5 {
+            next = .archive
+        } else {
+            next = .none
+        }
+        guard next != swipeHint else { return }
+        withAnimation(.easeOut(duration: 0.12)) { swipeHint = next }
     }
 
     private func handleChatSwipe(_ value: DragGesture.Value) {
