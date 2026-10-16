@@ -1124,6 +1124,18 @@ class Loop:
                         f"Files: {', '.join(f'`{f}`' for f in files) or '—'}\n\n"
                         f"Agent summary: {summary}")
 
+    def resolve_build_number(self, prefix: str, run_id: int) -> str:
+        """The CFBundleVersion Apple knows: the artifact's 12 digits plus the run id's last 6 digits
+        (Fastfile since bf4f8b9b), or the bare 12 digits for older builds — whichever Apple has."""
+        candidates = [f"{prefix}{str(run_id)[-6:]}", prefix] if len(prefix) == 12 else [prefix]
+        for cand in candidates:
+            try:
+                if self.asc.build_state(cand):
+                    return cand
+            except HttpError:
+                pass
+        return candidates[0]
+
     @staticmethod
     def summary_line(result: str) -> str:
         m = re.search(r"^SUMMARY:\s*(.+)$", result, re.M)
@@ -1159,8 +1171,9 @@ class Loop:
                 ios = None
         if st.get("expects_ios") and ios and ios["status"] == "completed" and not st.get("ios_done"):
             if ios["conclusion"] == "success":
-                number = next((m.group(1) for a in self.gh.run_artifacts(ios["id"])
-                               for m in [re.match(r"xcodebuild-logs-(\d{12})", a["name"])] if m), None)
+                prefix = next((m.group(1) for a in self.gh.run_artifacts(ios["id"])
+                               for m in [re.match(r"xcodebuild-logs-(\d{12,18})", a["name"])] if m), None)
+                number = self.resolve_build_number(prefix, ios["id"]) if prefix else None
                 st.update(ios_done=True, ios_run=ios["html_url"], ios_uploaded_at=ios["updated_at"], testflight_build=number)
                 self.store.save_state(fid, st)
                 self.store.event(fid, "testflight_uploaded", build=number, run=ios["html_url"])
@@ -1230,6 +1243,14 @@ class Loop:
                 st.update(release_done=True, release_run=rel["html_url"], release_failed=True)
                 self.store.event(fid, "release_failed", run=rel["html_url"])
                 self.gh.comment(st["issue"], f"Release workflow failed: {rel['html_url']} (the iOS build is unaffected).")
+        if st.get("expects_ci") and ci and ci["status"] == "completed" and ci["conclusion"] in ("cancelled", "skipped") and not st.get("ci_superseded_by"):
+            later = self.gh.later_run("ci.yml", "push", sha, st["pushed_at"])
+            if later:
+                ci = later
+                st["ci_superseded_by"] = later["head_sha"]
+                by_name["CI"] = later
+            else:
+                ci = None
         if st.get("expects_ci") and ci and ci["status"] == "completed" and ci["conclusion"] != "success" and not st.get("ci_failed_noted"):
             errors = self.gh.run_error_lines(ci["id"])
             if st.get("retries", 0) < 1 and not (self.rate_limit_reason() or "").endswith("already today"):
