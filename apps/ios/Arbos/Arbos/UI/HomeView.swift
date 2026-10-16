@@ -19,13 +19,20 @@ struct HomeView: View {
     @FocusState private var searchFocused: Bool
 
     private var projects: [Project] {
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        let q = searchQuery
         let sorted = model.projects.sorted { lastActivity($0) > lastActivity($1) }
         if q.isEmpty {
             // Archived agents stay out of the home list until search (or open).
             return sorted.filter { !model.isArchived($0.id) }
         }
-        return sorted.filter { $0.name.lowercased().contains(q) }
+        return sorted.filter { matchesProject($0, q: q) }
+    }
+
+    /// Trimmed, lowercased query; leading `@` stripped so "@robert" finds the row.
+    private var searchQuery: String {
+        query.trimmingCharacters(in: .whitespaces)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "@"))
+            .lowercased()
     }
 
     var body: some View {
@@ -43,8 +50,18 @@ struct HomeView: View {
                             .listRowInsets(EdgeInsets())
                             .listRowSeparator(.hidden)
                             .listRowBackground(Color.clear)
+                    } else if homeRows.isEmpty, !searchQuery.isEmpty {
+                        Text("No conversations match \"\(query.trimmingCharacters(in: .whitespaces))\"")
+                            .font(.system(size: Theme.small))
+                            .foregroundStyle(theme.muted)
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 80)
+                            .listRowInsets(EdgeInsets())
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
+                            .accessibilityIdentifier("home-search-empty")
                     } else {
-                        if query.isEmpty {
+                        if searchQuery.isEmpty {
                             ForEach(model.approvals) { device in
                                 ApprovalCard(device: device)
                                     .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
@@ -199,18 +216,23 @@ struct HomeView: View {
             if searching {
                 HStack(spacing: 8) {
                     Image(systemName: "magnifyingglass").foregroundStyle(theme.icon)
-                    TextField("Search", text: $query)
+                    TextField("", text: $query, prompt: Text("Search").foregroundStyle(theme.placeholder))
                         .font(.system(size: Theme.body))
                         .foregroundStyle(theme.text)
                         .focused($searchFocused)
                         .submitLabel(.search)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .accessibilityIdentifier("home-search-field")
                     Button {
                         query = ""
                         searching = false
+                        searchFocused = false
                     } label: {
                         Image(systemName: "xmark.circle.fill").foregroundStyle(theme.icon)
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("Clear search")
                 }
                 .padding(.horizontal, 14)
                 .frame(height: Theme.control)
@@ -233,7 +255,8 @@ struct HomeView: View {
                     }
                 Button {
                     withAnimation(.easeOut(duration: 0.18)) { searching = true }
-                    searchFocused = true
+                    // Focus after the field is in the tree (same pattern as in-chat search).
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { searchFocused = true }
                 } label: {
                     GlassCircle {
                         Image(systemName: "magnifyingglass")
@@ -242,6 +265,7 @@ struct HomeView: View {
                     }
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Search conversations")
                 Button { showNewChat = true } label: {
                     GlassCircle {
                         Image(systemName: "plus")
@@ -254,6 +278,7 @@ struct HomeView: View {
         }
         .padding(.horizontal, 16)
         .padding(.top, 6)
+        .zIndex(1)
     }
 
     // MARK: Empty / error
@@ -322,12 +347,30 @@ struct HomeView: View {
 
     /// Projects and DMs in one list, newest activity first.
     private var homeRows: [HomeRow] {
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        let q = searchQuery
         var rows: [(Int64, HomeRow)] = projects.map { (lastActivity($0), .project($0)) }
-        for c in model.peopleChats where q.isEmpty || c.title.lowercased().contains(q) || c.humans.contains { $0.handle.lowercased().contains(q) } {
+        for c in model.peopleChats where matchesPeople(c, q: q) {
             rows.append((peopleActivity(c), .people(c)))
         }
         return rows.sorted { $0.0 > $1.0 }.map(\.1)
+    }
+
+    /// Match the names shown on the row (agent name, person name/@handle, group title).
+    private func matchesProject(_ p: Project, q: String) -> Bool {
+        p.name.lowercased().contains(q)
+    }
+
+    private func matchesPeople(_ c: PeopleChat, q: String) -> Bool {
+        if q.isEmpty { return true }
+        if c.title.lowercased().contains(q) { return true }
+        if c.humans.contains(where: {
+            $0.handle.lowercased().contains(q) || $0.displayName.lowercased().contains(q)
+        }) { return true }
+        // Shared chats also list agents on the row badge — find those by name too.
+        if c.agents.contains(where: {
+            ($0.project?.name ?? $0.handle).lowercased().contains(q)
+        }) { return true }
+        return false
     }
 
     private func chatActivity(_ c: Chat) -> Int64 {
