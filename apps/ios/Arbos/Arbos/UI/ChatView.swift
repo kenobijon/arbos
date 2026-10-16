@@ -1041,7 +1041,9 @@ struct ChatView: View {
         }
     }
 
-    /// Replaces the field while recording: red dot, live bars, timer, confirm/cancel.
+    /// Replaces the field while recording: red dot, live bars, timer, stop/send/cancel.
+    /// Checkmark stops into the draft; send finishes and posts the transcript. Neither
+    /// attaches the audio file — STT turns the memo into text only.
     private var recordingField: some View {
         HStack(spacing: 10) {
             Button { recorder.cancel() } label: {
@@ -1059,13 +1061,26 @@ struct ChatView: View {
             Text(recorder.timeLabel)
                 .font(.system(size: Theme.small, design: .monospaced))
                 .foregroundStyle(theme.text)
+            // Stop: transcript lands in the draft; user sends when ready.
             Button {
                 if let memo = recorder.stop() {
-                    finishMemo(.init(name: memo.name, mime: "audio/m4a", data: memo.data))
+                    stopMemo(.init(name: memo.name, mime: "audio/m4a", data: memo.data))
+                }
+            } label: {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(theme.icon)
+                    .frame(width: Theme.voiceButton, height: Theme.voiceButton)
+            }
+            .buttonStyle(.plain)
+            // Finish: transcribe and send at once (text only, no voice file).
+            Button {
+                if let memo = recorder.stop() {
+                    sendMemo(.init(name: memo.name, mime: "audio/m4a", data: memo.data))
                 }
             } label: {
                 Circle().fill(theme.primary).frame(width: Theme.voiceButton, height: Theme.voiceButton)
-                    .overlay(Image(systemName: "checkmark").font(.system(size: 16, weight: .bold)).foregroundStyle(theme.onPrimary))
+                    .overlay(Image(systemName: "arrow.up").font(.system(size: 16, weight: .bold)).foregroundStyle(theme.onPrimary))
             }
             .buttonStyle(.plain)
             .padding(.trailing, 3)
@@ -1149,10 +1164,9 @@ struct ChatView: View {
         return effectiveTalkTo
     }
 
-    /// Finish dictation without sending: attach the memo, fill the draft with the
-    /// transcript, and leave the send button for the user to confirm.
-    private func finishMemo(_ memo: AppModel.PendingAttachment) {
-        pending.append(memo)
+    /// Stop dictation without sending: fill the draft with the transcript. The audio
+    /// is only used for STT — it is not attached to the chat.
+    private func stopMemo(_ memo: AppModel.PendingAttachment) {
         transcribing = true
         Task {
             // People chats have no Project row; meter STT on the people blob slot (same as uploads).
@@ -1167,6 +1181,36 @@ struct ChatView: View {
                 }
             }
             composerFocused = true
+        }
+    }
+
+    /// Finish dictation and send: transcript (plus any typed draft) goes out as text.
+    /// The audio is only used for STT — it is not attached to the chat.
+    private func sendMemo(_ memo: AppModel.PendingAttachment) {
+        let typed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let extras = pending
+        let reply = replyTo?.id
+        let address = sendAddress(for: typed)
+        pending.removeAll()
+        draft = ""
+        replyTo = nil
+        mentionQuery = nil
+        pinTalkTo(afterSending: address)
+        sentOnce = true
+        transcribing = true
+        Task {
+            let sttProject: Id? = project?.id ?? (isPeople ? "\(peopleSlot):\(chatId)" : nil)
+            let transcript = await model.transcribe(projectId: sttProject, memo: memo)
+            transcribing = false
+            let text = [typed, transcript ?? ""].filter { !$0.isEmpty }.joined(separator: "\n\n")
+            guard !text.isEmpty || !extras.isEmpty else { return }
+            if isPeople {
+                model.sendPeople(chatId: chatId, text: text, replyTo: reply, address: address, attachments: extras)
+            } else if needsAnswer && extras.isEmpty {
+                model.answer(chatId: chatId, text: text)
+            } else {
+                model.send(chatId: chatId, text: text, attachments: extras)
+            }
         }
     }
 

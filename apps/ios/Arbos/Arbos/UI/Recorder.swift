@@ -1,5 +1,6 @@
 // Hold-to-record voice memo: AVAudioRecorder to .m4a with live metering for
-// the waveform in the composer. The result is sent as an audio attachment.
+// the waveform in the composer. Callers run STT on the file and send or draft
+// the transcript; the audio itself is not posted to the chat.
 
 import AVFoundation
 import Foundation

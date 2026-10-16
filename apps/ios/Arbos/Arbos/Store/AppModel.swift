@@ -2061,9 +2061,9 @@ final class AppModel: ObservableObject {
         return nil
     }
 
-    /// Voice memo → text through the relay, so the agent reads what was said (the audio
-    /// still travels as an attachment). `nil` when the relay cannot transcribe; the user
-    /// sees why and the memo is sent as audio only.
+    /// Voice memo → text through the relay. The audio is only an STT input; callers send
+    /// the transcript (or put it in the draft) and do not attach the file. `nil` when the
+    /// relay cannot transcribe; the user sees why.
     func transcribe(projectId: Id?, memo: PendingAttachment) async -> String? {
         if isFixture { return nil }
         do {
