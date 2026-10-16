@@ -120,10 +120,14 @@ final class Room {
             "proto": protoVersion,
         ]))
 
+        // A local push can race the handshake (user sends while we reconnect).
+        // Apply ACKs here so a batch is not left in `pending` forever when the
+        // only ACK arrived before STATE and the relay later treats a resend as dup.
         let state = try await withTimeout(Room.helloDeadline) { [self] in
             while true {
                 let frame = try await self.receive(ws)
                 if frame.type == .state { return frame }
+                if frame.type == .ack { self.applyAck(frame) }
             }
         }
         if let b = state.string("box").flatMap(BoxState.fromWire) {
@@ -175,10 +179,7 @@ final class Room {
                 onLink?(.live)
                 onCaughtUp?()
             case .ack:
-                let batchId = frame.string("batchId") ?? ""
-                pending.removeAll { $0.0 == batchId }
-                cursor = max(cursor, frame.int("seq") ?? cursor)
-                onAcked?()
+                applyAck(frame)
             case .status:
                 if let b = frame.string("box").flatMap(BoxState.fromWire) {
                     onBoxState?(b, frame.string("detail"))
@@ -221,6 +222,13 @@ final class Room {
         try await ws.send(.data(frame.encode()))
     }
 
+    private func applyAck(_ frame: Frame) {
+        let batchId = frame.string("batchId") ?? ""
+        pending.removeAll { $0.0 == batchId }
+        cursor = max(cursor, frame.int("seq") ?? cursor)
+        onAcked?()
+    }
+
     private func push(_ bytes: Data) {
         if bytes.count > rowMax {
             NSLog("relay room \(roomChat): local update \(bytes.count) bytes exceeds row cap; dropped")
@@ -230,7 +238,17 @@ final class Room {
         pending.append((batchId, bytes))
         let frame = Frame(.push, header: ["batchId": batchId], payload: bytes)
         Task { [weak self] in
-            try? await self?.send(frame)
+            guard let self else { return }
+            do {
+                try await self.send(frame)
+            } catch {
+                // Keep the batch in `pending` and drop the socket so `run()`
+                // reconnects and re-sends it. A silent `try?` left messages
+                // stuck faint (S3 pending) until some other read error reconnects.
+                NSLog("relay room \(self.roomChat): push failed: \(error.localizedDescription)")
+                self.socket?.cancel(with: .goingAway, reason: nil)
+                self.socket = nil
+            }
         }
     }
 

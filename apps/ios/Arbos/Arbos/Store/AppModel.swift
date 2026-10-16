@@ -151,8 +151,9 @@ final class AppModel: ObservableObject {
     private var api: RelayAPI
     private var docs: [Id: ChatDoc] = [:]
     private var rooms: [Id: Room] = [:]
-    /// Client-minted message ids whose push the relay has not `ACK`ed (S3).
-    private var unacked: Set<Id> = []
+    /// Client-minted message ids whose push the relay has not `ACK`ed (S3),
+    /// keyed by chat id so one room's ACK cannot leave another chat's bubble faint.
+    private var unacked: [Id: Set<Id>] = [:]
     private var registryTask: Task<Void, Never>?
 
     var appearance: Appearance { Appearance(rawValue: appearanceSetting) ?? .system }
@@ -487,7 +488,7 @@ final class AppModel: ObservableObject {
         chats = [:]
         messages = [:]
         caughtUp = []
-        unacked = []
+        unacked = [:]
         peopleChats = []
         peopleUnread = []
         if forget, let creds = credentials {
@@ -622,9 +623,12 @@ final class AppModel: ObservableObject {
             }
         }
         room.onAcked = { [weak self] in
-            guard let self, !self.unacked.isEmpty else { return }
-            self.unacked.removeAll()
-            if !isProjectDoc { self.emitSnapshot(key) }
+            // Project-doc writes are not user bubbles; clearing a global set here
+            // used to leave people-chat messages stuck at pending opacity.
+            guard let self, !isProjectDoc else { return }
+            guard self.unacked[key] != nil else { return }
+            self.unacked[key] = nil
+            self.emitSnapshot(key)
         }
         rooms[key] = room
         room.start()
@@ -633,8 +637,9 @@ final class AppModel: ObservableObject {
     private func emitSnapshot(_ chatId: Id) {
         guard let doc = docs[chatId] else { return }
         var list = doc.readAll()
+        let pendingIds = unacked[chatId] ?? []
         for i in list.indices where list[i].role == .user {
-            list[i].pending = unacked.contains(list[i].id)
+            list[i].pending = pendingIds.contains(list[i].id)
         }
         messages[chatId] = list
     }
@@ -643,9 +648,10 @@ final class AppModel: ObservableObject {
         guard let doc = docs[chatId] else { return }
         var list = messages[chatId] ?? []
         var needSnapshot = false
+        let pendingIds = unacked[chatId] ?? []
         for ix in indexes.sorted() {
             guard var m = doc.readMessage(ix) else { continue }
-            if m.role == .user { m.pending = unacked.contains(m.id) }
+            if m.role == .user { m.pending = pendingIds.contains(m.id) }
             if ix < list.count, list[ix].id == m.id {
                 list[ix] = m
             } else if ix == list.count {
@@ -659,6 +665,16 @@ final class AppModel: ObservableObject {
         } else {
             messages[chatId] = list
         }
+    }
+
+    private func markUnacked(chatId: Id, messageId: Id) {
+        unacked[chatId, default: []].insert(messageId)
+    }
+
+    private func clearUnacked(chatId: Id, messageId: Id) {
+        guard var set = unacked[chatId] else { return }
+        set.remove(messageId)
+        unacked[chatId] = set.isEmpty ? nil : set
     }
 
     private func markActivity(chatId: Id) {
@@ -1010,7 +1026,15 @@ final class AppModel: ObservableObject {
         }
         let author = ChatDoc.Author(sender: "user:\(me.id)", handle: me.login, name: me.name, avatar: me.avatarUrl)
         let messageId = newId()
-        unacked.insert(messageId)
+        // Text-only: write on this turn (same as project `write`) so the push leaves
+        // before we return. Deferring every send into a Task left bubbles faint when
+        // the room ACK raced a still-queued commit.
+        if attachments.isEmpty {
+            commitPeople(chatId: chatId, doc: doc, messageId: messageId, text: text, author: author,
+                         mentions: mentions, reply: reply, attachments: [])
+            return
+        }
+        markUnacked(chatId: chatId, messageId: messageId)
         Task {
             var uploaded: [Attachment] = []
             for a in attachments {
@@ -1022,19 +1046,30 @@ final class AppModel: ObservableObject {
                     notice = Notice(text: "Attachment upload failed: \(error.localizedDescription)")
                 }
             }
-            do {
-                try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: uploaded,
-                                          author: author, mentions: mentions, replyTo: reply)
-                try doc.pushCommand("send", payload: ["messageId": messageId], device: deviceId)
-            } catch {
-                notice = Notice(text: "Could not write the message: \(error.localizedDescription)")
-                return
-            }
-            doc.commit()
-            announce(chatId: chatId, projectId: nil, messageId: messageId, text: text)
-            if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i].lastActivityAt = nowMs() }
-            peopleChats.sort { $0.lastActivityAt > $1.lastActivityAt }
+            commitPeople(chatId: chatId, doc: doc, messageId: messageId, text: text, author: author,
+                         mentions: mentions, reply: reply, attachments: uploaded, alreadyUnacked: true)
         }
+    }
+
+    /// Insert + pushCommand + commit for a people chat. `alreadyUnacked` when the caller
+    /// reserved the id before an attachment upload.
+    private func commitPeople(chatId: String, doc: ChatDoc, messageId: Id, text: String,
+                              author: ChatDoc.Author, mentions: [String], reply: String?,
+                              attachments: [Attachment], alreadyUnacked: Bool = false) {
+        if !alreadyUnacked { markUnacked(chatId: chatId, messageId: messageId) }
+        do {
+            try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: attachments,
+                                      author: author, mentions: mentions, replyTo: reply)
+            try doc.pushCommand("send", payload: ["messageId": messageId], device: deviceId)
+        } catch {
+            clearUnacked(chatId: chatId, messageId: messageId)
+            notice = Notice(text: "Could not write the message: \(error.localizedDescription)")
+            return
+        }
+        doc.commit()
+        announce(chatId: chatId, projectId: nil, messageId: messageId, text: text)
+        if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i].lastActivityAt = nowMs() }
+        peopleChats.sort { $0.lastActivityAt > $1.lastActivityAt }
     }
 
     /// `@slug` tokens that name a member: agents by their mention slug, people by handle.
@@ -1140,6 +1175,7 @@ final class AppModel: ObservableObject {
     func leavePeopleChat(_ chatId: String) {
         peopleChats.removeAll { $0.id == chatId }
         rooms[chatId]?.stop(); rooms[chatId] = nil; docs[chatId] = nil; messages[chatId] = nil
+        unacked[chatId] = nil
         path = []
         Task { try? await api.leaveChat(chatId) }
     }
@@ -1147,6 +1183,7 @@ final class AppModel: ObservableObject {
     func deletePeopleChat(_ chatId: String) {
         peopleChats.removeAll { $0.id == chatId }
         rooms[chatId]?.stop(); rooms[chatId] = nil; docs[chatId] = nil; messages[chatId] = nil
+        unacked[chatId] = nil
         path = []
         Task {
             do { try await api.deleteChat(chatId) } catch { notice = Notice(text: "Delete failed: \(error.localizedDescription)") }
@@ -1391,7 +1428,7 @@ final class AppModel: ObservableObject {
             return
         }
         let messageId = newId()
-        unacked.insert(messageId)
+        markUnacked(chatId: chatId, messageId: messageId)
         do {
             try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: attachments)
             try doc.pushCommand(command, payload: ["messageId": messageId], device: deviceId)
@@ -1401,6 +1438,7 @@ final class AppModel: ObservableObject {
                 retitleLocally(chatId: chatId, title: title)
             }
         } catch {
+            clearUnacked(chatId: chatId, messageId: messageId)
             notice = Notice(text: "Could not write the message: \(error.localizedDescription)")
             return
         }
