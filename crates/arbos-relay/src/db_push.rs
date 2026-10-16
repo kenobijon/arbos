@@ -27,6 +27,10 @@ CREATE TABLE IF NOT EXISTS chat_user_reads (
   user_id TEXT NOT NULL, chat_id TEXT NOT NULL, event_id INTEGER NOT NULL, at INTEGER NOT NULL,
   PRIMARY KEY (user_id, chat_id)
 );
+CREATE TABLE IF NOT EXISTS chat_user_archive (
+  user_id TEXT NOT NULL, chat_id TEXT NOT NULL, archived_at INTEGER NOT NULL,
+  PRIMARY KEY (user_id, chat_id)
+);
 "#;
 
 /// Keep the event log a month deep; unread counts older than that are noise.
@@ -189,6 +193,50 @@ impl Db {
         })
     }
 
+    // ---- archive (per user, per chat; hides only) ---------------------------------------------
+
+    /// Archive or unarchive a chat for a user. Returns the new `archived_at` (`None` = not archived).
+    pub fn set_chat_archived(
+        &self,
+        user_id: &str,
+        chat_id: &str,
+        archived: bool,
+    ) -> Result<Option<i64>> {
+        self.with(|c| {
+            if archived {
+                let now = now_ms();
+                c.execute(
+                    "INSERT INTO chat_user_archive(user_id, chat_id, archived_at) VALUES (?1, ?2, ?3)
+                     ON CONFLICT(user_id, chat_id) DO NOTHING",
+                    params![user_id, chat_id, now],
+                )?;
+                c.query_row(
+                    "SELECT archived_at FROM chat_user_archive WHERE user_id = ?1 AND chat_id = ?2",
+                    params![user_id, chat_id],
+                    |r| r.get::<_, i64>(0),
+                )
+                .map(Some)
+            } else {
+                c.execute(
+                    "DELETE FROM chat_user_archive WHERE user_id = ?1 AND chat_id = ?2",
+                    params![user_id, chat_id],
+                )?;
+                Ok(None)
+            }
+        })
+    }
+
+    pub fn chat_archived_at(&self, user_id: &str, chat_id: &str) -> Result<Option<i64>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT archived_at FROM chat_user_archive WHERE user_id = ?1 AND chat_id = ?2",
+                params![user_id, chat_id],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()
+        })
+    }
+
     /// Everything in the chat up to now is read for this user.
     pub fn mark_chat_read(&self, user_id: &str, chat_id: &str) -> Result<()> {
         self.with(|c| {
@@ -236,6 +284,7 @@ fn unread_query(c: &Connection, user_id: &str) -> rusqlite::Result<Vec<UnreadCha
         "SELECT e.chat_id, e.project_id, COUNT(*) FROM chat_events e
          WHERE e.id > COALESCE((SELECT r.event_id FROM chat_user_reads r WHERE r.user_id = ?1 AND r.chat_id = e.chat_id), 0)
            AND (e.sender_user IS NULL OR e.sender_user != ?1)
+           AND NOT EXISTS (SELECT 1 FROM chat_user_archive a WHERE a.user_id = ?1 AND a.chat_id = e.chat_id)
            AND (
              e.chat_id IN (SELECT chat_id FROM people_members WHERE member = ?2 AND left_at IS NULL)
              OR e.project_id IN (SELECT id FROM projects WHERE user_id = ?1)

@@ -324,6 +324,16 @@ pub async fn announce(
         if !state.push.is_on() {
             continue;
         }
+        // Archived = hidden on purpose: no banner, no badge (unread excludes it too).
+        if state
+            .db
+            .chat_archived_at(&user, &chat.chat_id)
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            continue;
+        }
         let tokens = state.db.push_tokens_of_user(&user).unwrap_or_default();
         if tokens.is_empty() {
             continue;
@@ -841,5 +851,240 @@ mod tests {
         let b = brief(&long);
         assert_eq!(b.chars().count(), BODY_MAX);
         assert!(b.ends_with('…'));
+    }
+}
+
+#[cfg(test)]
+mod archive_tests {
+    //! D78: archive hides only — per user across devices, other devices are told, archived chats
+    //! neither badge nor alert, unarchive brings everything back.
+
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+    use axum::Json;
+
+    use arbos_core::ids::ulid;
+
+    use super::*;
+    use crate::db_push::PushToken;
+    use crate::people::tests_support::{dm, person, project_of};
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    fn dev_id(p: &Principal) -> String {
+        match p {
+            Principal::Device { id, .. } => id.clone(),
+            Principal::Box { .. } | Principal::Admin => unreachable!(),
+        }
+    }
+
+    fn second_device(state: &AppState, user: &str) -> Principal {
+        let id = ulid();
+        state
+            .db
+            .insert_device(&id, "d2", &ulid(), user, "github")
+            .unwrap();
+        Principal::Device {
+            id,
+            token: String::new(),
+            user_id: user.to_owned(),
+        }
+    }
+
+    async fn body(r: Response) -> Value {
+        let b = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+        serde_json::from_slice(&b).unwrap_or(Value::Null)
+    }
+
+    #[tokio::test]
+    async fn archive_is_per_user_hides_only_and_silences() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let bob_dev2 = second_device(&state, &bob);
+        let chat = dm(&state, &alice, &bob);
+        let project = project_of(&state, &alice, "Research");
+        let pchat = ulid();
+        state
+            .db
+            .insert_chat(&crate::db::Chat {
+                id: pchat.clone(),
+                project_id: project.clone(),
+                title: "Plan".into(),
+                is_pinned: true,
+                position: 0,
+                created_at: now_ms(),
+                doc_epoch: 1,
+                kind: "chat".into(),
+                participants: Vec::new(),
+            })
+            .unwrap();
+        for (p, u) in [(&bob_dev, &bob), (&bob_dev2, &bob)] {
+            state
+                .db
+                .upsert_push_token(&PushToken {
+                    device_id: dev_id(p),
+                    user_id: u.clone(),
+                    platform: "ios".into(),
+                    token: format!(
+                        "{:0<64}",
+                        dev_id(p)
+                            .to_ascii_lowercase()
+                            .chars()
+                            .filter(|c| c.is_ascii_hexdigit())
+                            .collect::<String>()
+                    ),
+                    environment: "development".into(),
+                    bundle_id: crate::apns::DEFAULT_TOPIC.into(),
+                    app_version: "1".into(),
+                    updated_at: now_ms(),
+                })
+                .unwrap();
+        }
+
+        // Bob archives the DM from his phone: the response says so, his Mac is told, Alice is not.
+        let r = crate::people::chat_settings(
+            State(state.clone()),
+            bob_dev.clone(),
+            Path(chat.clone()),
+            Json(crate::people::ChatSettingsBody {
+                read_receipts: None,
+                muted: None,
+                archived: Some(true),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let v = body(r).await;
+        assert!(v["archived_at"].is_i64());
+        assert_eq!(v["me"]["archived_at"], v["archived_at"]);
+        let mac: Vec<_> = state.db.take_user_pushes(&dev_id(&bob_dev2)).unwrap();
+        assert_eq!(mac.len(), 1);
+        assert_eq!(mac[0].1, "chat_archived");
+        assert_eq!(mac[0].2["chat_id"], chat);
+        assert_eq!(mac[0].2["project_id"], "people");
+        assert!(mac[0].2["archived_at"].is_i64());
+        assert!(
+            state
+                .db
+                .take_user_pushes(&dev_id(&bob_dev))
+                .unwrap()
+                .is_empty(),
+            "the archiving device already knows"
+        );
+        assert!(
+            state
+                .db
+                .take_user_pushes(&dev_id(&alice_dev))
+                .unwrap()
+                .is_empty(),
+            "archive is private"
+        );
+        // Alice's own view of the chat is not archived.
+        let cm = crate::db_people::ChatWithMembers {
+            chat: state.db.people_chat(&chat).unwrap().unwrap(),
+            members: state.db.members_of(&chat).unwrap(),
+        };
+        assert!(
+            crate::people::chat_json(&state, &cm, &alice, &dev_id(&alice_dev))["archived_at"]
+                .is_null()
+        );
+
+        // A message from Alice: recorded, but Bob gets no alert and no unread/badge from it.
+        announce(
+            &state,
+            &ChatRef::people(&chat),
+            &Sender::user(&state, &alice),
+            "m1",
+            "hi",
+        )
+        .await;
+        assert!(
+            state.push.captured().await.is_empty(),
+            "archived chats do not alert"
+        );
+        assert_eq!(
+            state.db.unread_total(&bob).unwrap(),
+            0,
+            "archived chats do not badge"
+        );
+        // people_message is not queued for an archived chat either.
+        let _ = crate::people::on_room_push(&state, &alice_dev, &chat);
+        assert!(state
+            .db
+            .take_user_pushes(&dev_id(&bob_dev))
+            .unwrap()
+            .iter()
+            .all(|(_, k, _, _)| k != "people_message"));
+
+        // The project chat form (plain chat, Alice's own project) works through the same endpoint.
+        let r = crate::people::chat_settings(
+            State(state.clone()),
+            alice_dev.clone(),
+            Path(pchat.clone()),
+            Json(crate::people::ChatSettingsBody {
+                read_receipts: None,
+                muted: None,
+                archived: Some(true),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let v = body(r).await;
+        assert_eq!(v["kind"], "chat");
+        assert!(v["archived_at"].is_i64());
+        let listed = crate::api::chat_json_for(
+            &state,
+            &state.db.chat(&project, &pchat).unwrap().unwrap(),
+            Some(&alice),
+        );
+        assert!(listed["archived_at"].is_i64());
+        assert!(crate::api::chat_json_for(
+            &state,
+            &state.db.chat(&project, &pchat).unwrap().unwrap(),
+            None
+        )["archived_at"]
+            .is_null());
+        // A stranger cannot archive someone else's project chat.
+        let r = crate::people::chat_settings(
+            State(state.clone()),
+            bob_dev.clone(),
+            Path(pchat.clone()),
+            Json(crate::people::ChatSettingsBody {
+                read_receipts: None,
+                muted: None,
+                archived: Some(true),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+
+        // Unarchive: alerts and unread return (the earlier message now counts).
+        let r = crate::people::chat_settings(
+            State(state.clone()),
+            bob_dev.clone(),
+            Path(chat.clone()),
+            Json(crate::people::ChatSettingsBody {
+                read_receipts: None,
+                muted: None,
+                archived: Some(false),
+            }),
+        )
+        .await;
+        assert!(body(r).await["archived_at"].is_null());
+        assert_eq!(state.db.unread_total(&bob).unwrap(), 1);
+        announce(
+            &state,
+            &ChatRef::people(&chat),
+            &Sender::user(&state, &alice),
+            "m2",
+            "there?",
+        )
+        .await;
+        assert_eq!(
+            state.push.captured().await.len(),
+            2,
+            "both of Bob's devices alert again"
+        );
     }
 }

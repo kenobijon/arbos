@@ -357,12 +357,16 @@ pub async fn get_project(
     if !state.allows(&principal, &p.id) {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
+    let viewer = match &principal {
+        Principal::Device { user_id, .. } => Some(user_id.clone()),
+        Principal::Box { .. } | Principal::Admin => None,
+    };
     let chats: Vec<Value> = state
         .db
         .list_chats(&p.id)
         .map_err(internal)?
         .iter()
-        .map(chat_json)
+        .map(|c| chat_json_for(&state, c, viewer.as_deref()))
         .collect();
     let (bs, since) = state.box_state(&p.user_id).await;
     let today = state
@@ -706,6 +710,16 @@ pub(crate) fn chat_json(c: &Chat) -> Value {
     json!({ "id": c.id, "project_id": c.project_id, "title": c.title, "is_pinned": c.is_pinned, "is_system": c.kind == "projects",
             "kind": c.kind, "participants": c.participants,
             "position": c.position, "created_at": c.created_at, "doc_epoch": c.doc_epoch, "room": format!("/room/{}/{}", c.project_id, c.id) })
+}
+
+/// The chat as one person sees it: `archived_at` (and `me.archived_at`) are theirs alone;
+/// boxes and the admin see `null`.
+pub(crate) fn chat_json_for(state: &AppState, c: &Chat, user: Option<&str>) -> Value {
+    let mut v = chat_json(c);
+    let archived_at = user.and_then(|u| state.db.chat_archived_at(u, &c.id).ok().flatten());
+    v["archived_at"] = json!(archived_at);
+    v["me"] = json!({ "archived_at": archived_at });
+    v
 }
 
 fn start_of_day() -> i64 {
@@ -1126,13 +1140,17 @@ pub async fn list_chats(
     if !state.allows(&principal, &p.id) {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
+    let viewer = match &principal {
+        Principal::Device { user_id, .. } => Some(user_id.clone()),
+        Principal::Box { .. } | Principal::Admin => None,
+    };
     Ok(Json(
         state
             .db
             .list_chats(&p.id)
             .map_err(internal)?
             .iter()
-            .map(chat_json)
+            .map(|c| chat_json_for(&state, c, viewer.as_deref()))
             .collect::<Vec<_>>(),
     )
     .into_response())
