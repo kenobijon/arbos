@@ -3,8 +3,10 @@
 // frames are ~130 bytes every 120 ms, so there is nothing to move off it.
 
 import Foundation
+import Combine
 import SwiftUI
 import UIKit
+import os
 
 enum Appearance: String, CaseIterable, Identifiable {
     case system, dark, light
@@ -33,6 +35,8 @@ struct Notice: Identifiable, Equatable {
     let id = UUID()
     var text: String
 }
+
+private let pushLog = Logger(subsystem: "com.unarbos.arbos.ios", category: "pushes")
 
 @MainActor
 final class AppModel: ObservableObject {
@@ -292,10 +296,16 @@ final class AppModel: ObservableObject {
         calls.writeSystemLine = { [weak self] chatId, projectId, text, callId in
             self?.writeSystemLine(chatId: chatId, projectId: projectId, text: text, callId: callId)
         }
+        // Presence carries `in_call` for the chat we are talking in.
+        callSink = calls.$call.receive(on: DispatchQueue.main).sink { [weak self] c in
+            guard let self else { return }
+            for (key, room) in self.rooms { room.inCall = (c?.chatId == key) ? c?.callId : nil }
+        }
         guard !isFixture else { return }
         calls.prepareVoip()
         Task { await calls.sendVoipTokenIfNeeded(force: true) }
     }
+    private var callSink: AnyCancellable?
 
     /// A system row in a chat doc (call start/end lines). Fixture: local append.
     func writeSystemLine(chatId: Id, projectId: Id, text: String, callId: String) {
@@ -331,7 +341,14 @@ final class AppModel: ObservableObject {
     private func peerInCall(_ callId: String, chatId: Id) {
         guard CallManager.shared.activeByChat[chatId]?.callId != callId else { return }
         Task {
-            if let c = try? await api.call(callId) { CallManager.shared.noteActive(c, chatId: chatId) }
+            if let c = try? await api.call(callId) {
+                CallManager.shared.noteActive(c, chatId: chatId)
+                #if DEBUG
+                if DebugHooks.autoJoinCall, !c.ended, !CallManager.shared.isActive, visibleChatId == chatId {
+                    await CallManager.shared.join(c, title: peopleChat(chatId)?.title ?? "Call")
+                }
+                #endif
+            }
         }
     }
 
@@ -1318,6 +1335,7 @@ final class AppModel: ObservableObject {
         var needChats = false
         for p in items where !notifiedPushIds.contains(p.id) {
             notifiedPushIds.insert(p.id)
+            pushLog.notice("push kind=\(p.kind, privacy: .public) keys=\(Array(p.raw.keys).sorted().joined(separator: ","), privacy: .public)")
             switch p.kind {
             case "people_message":
                 if let cid = p.payload["chat_id"], !isWatching(cid) {
