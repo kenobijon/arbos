@@ -1,0 +1,7 @@
+[
+  {"say": "Hi, can you hear me?"},
+  {"say": "Tell me in two sentences what you can help me with on this call."},
+  {"barge": "Sorry to interrupt. Quick question: how many messages are in this chat? Check it.", "after_ms": 1200, "max": 60},
+  {"say": "Great, thanks. Bye for now."},
+  {"hangup": true}
+]

@@ -845,6 +845,7 @@ mod tests {
             box_http_seen: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             voice: Arc::new(crate::voice::VoiceCfg::default()),
             voice_conns: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            voice_dispatched: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 

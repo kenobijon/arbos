@@ -482,6 +482,7 @@ async fn start_or_join(
     };
     if let Ok(Some(existing)) = state.db.active_call_in_chat(&chat.chat_id) {
         let _ = state.db.call_join(&existing.id, &me);
+        crate::voice::ensure_agents(state, &existing).await;
         return Json(json!({ "call": call_json(state, &existing, Some(&me)), "joined": true }))
             .into_response();
     }
@@ -701,6 +702,7 @@ pub async fn join_call(
         return api_error(StatusCode::CONFLICT, "call_full", "this call is full");
     }
     let _ = state.db.call_join(&call.id, &me);
+    crate::voice::ensure_agents(&state, &call).await;
     Json(json!({ "call": call_json(&state, &call, Some(&me)) })).into_response()
 }
 

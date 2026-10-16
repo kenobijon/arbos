@@ -322,15 +322,44 @@ pub fn agent_participants_json(state: &AppState, call_id: &str) -> Vec<Value> {
 
 // ---- dispatch -----------------------------------------------------------------------------------
 
+/// A dispatch younger than this still counts as "on its way" (the worker joins within ~1 s).
+const DISPATCH_FRESH_MS: i64 = 30_000;
+
 /// A call began in a chat with agents: ask LiveKit to send the voice worker for each of them.
 /// Returns the agents dispatched (as `sender{}`), for the start response.
 pub async fn dispatch_agents(state: &AppState, call: &CallRow) -> Vec<Value> {
+    dispatch_missing(state, call).await
+}
+
+/// Someone joined a live call: any agent of the chat that is not in the room (it left when it
+/// was alone, or its job died) is dispatched again.
+pub async fn ensure_agents(state: &AppState, call: &CallRow) {
+    if call.active() {
+        let _ = dispatch_missing(state, call).await;
+    }
+}
+
+async fn dispatch_missing(state: &AppState, call: &CallRow) -> Vec<Value> {
     let (Some(lk), true) = (&state.livekit, state.voice.enabled) else {
         return Vec::new();
     };
     let chat = chat_ref_of(call);
+    let live = state.db.call_agents_live(&call.id).unwrap_or_default();
+    let now = now_ms();
     let mut out = Vec::new();
     for project in agents_in_chat(state, &chat) {
+        if live.contains(&project.id) {
+            continue;
+        }
+        let key = format!("{}:{}", call.id, project.id);
+        {
+            let mut recent = state.voice_dispatched.lock().await;
+            recent.retain(|_, at| now - *at < DISPATCH_FRESH_MS);
+            if recent.contains_key(&key) {
+                continue;
+            }
+            recent.insert(key, now);
+        }
         let payer = project.user_id.clone();
         if let Err(stop) = stops_for(state, &payer, &call.id, &project.id) {
             tracing::info!(call = %call.id, project = %project.id, stop, "voice: agent not dispatched (cost stop)");
@@ -748,13 +777,14 @@ pub async fn call_usage(
         Err(r) => return *r,
     };
     let payer = project.user_id.clone();
-    let row = match state
-        .db
-        .voice_usage_upsert(&call.id, &project.id, &payer, &b.usage)
-    {
-        Ok(r) => r,
-        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
-    };
+    let row =
+        match state
+            .db
+            .voice_usage_upsert(&call.id, &project.id, &payer, call.started_at, &b.usage)
+        {
+            Ok(r) => r,
+            Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+        };
     let delta = row.usage.usd - row.usd_charged;
     if delta > 0.000_001 {
         let reference = format!("call:{}", call.id);

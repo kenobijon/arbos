@@ -805,6 +805,7 @@ def main() -> None:
             api_secret=CONFIG.livekit_api_secret,
             num_idle_processes=1,
             load_threshold=0.9,
+            host="127.0.0.1",
         )
     )
 

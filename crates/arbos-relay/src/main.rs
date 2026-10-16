@@ -290,6 +290,7 @@ async fn main() -> anyhow::Result<()> {
         box_http_seen: Arc::new(Mutex::new(HashMap::new())),
         voice: Arc::new(voice::cfg_from_env()),
         voice_conns: Arc::new(Mutex::new(HashMap::new())),
+        voice_dispatched: Arc::new(Mutex::new(HashMap::new())),
     };
     tracing::info!(auth_mode = auth_mode.as_str(), public_url = %state.cfg.public_url, "sign-in");
     if state.cfg.connectors_mock {

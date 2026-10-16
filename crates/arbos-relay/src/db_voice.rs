@@ -129,14 +129,15 @@ impl Db {
         call_id: &str,
         project_id: &str,
         payer: &str,
+        started_at: i64,
         u: &VoiceUsage,
     ) -> Result<VoiceCallRow> {
         let now = now_ms();
         self.with(|c| {
             c.execute(
-                "INSERT INTO voice_calls(call_id, project_id, payer, started_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)
+                "INSERT INTO voice_calls(call_id, project_id, payer, started_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT(call_id, project_id) DO NOTHING",
-                params![call_id, project_id, payer, now],
+                params![call_id, project_id, payer, started_at, now],
             )?;
             c.execute(
                 "UPDATE voice_calls SET mode = COALESCE(?3, mode), updated_at = ?4,

@@ -159,6 +159,8 @@ pub struct AppState {
     pub voice: Arc<crate::voice::VoiceCfg>,
     /// user_id → the box's `WS /box/voice` link (tool calls and transcript rows to agentd).
     pub voice_conns: crate::voice::VoiceConns,
+    /// `call:project` → when the voice worker was last dispatched for it (no double dispatch).
+    pub voice_dispatched: Arc<Mutex<HashMap<String, i64>>>,
 }
 
 /// The agent's current activity as the box last reported it.
@@ -408,6 +410,7 @@ pub(crate) mod test_support {
             box_http_seen: Arc::new(Mutex::new(HashMap::new())),
             voice: Arc::new(crate::voice::VoiceCfg::default()),
             voice_conns: Arc::new(Mutex::new(HashMap::new())),
+            voice_dispatched: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
