@@ -69,7 +69,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Linux libraries for arbos-mac (GPUI)
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb-xkb-dev libasound2-dev libssl-dev libgl1-mesa-dev libfontconfig-dev libstdc++-14-dev
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb-xkb-dev libasound2-dev libssl-dev libgl1-mesa-dev libfontconfig-dev libstdc++-14-dev libglib2.0-dev
       # Calls v1: the `livekit` crate links a prebuilt libwebrtc whose hermetic libc++
       # needs clang ≥ 21 to compile the cxx bridge (webrtc-sys refuses GCC / older clang).
       - name: clang 21 for webrtc-sys
