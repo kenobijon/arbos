@@ -27,6 +27,13 @@ CREATE TABLE IF NOT EXISTS voip_tokens (
 CREATE INDEX IF NOT EXISTS voip_tokens_user ON voip_tokens(user_id);
 "#;
 
+/// Columns added after the first calls release (ALTER is idempotent through the error).
+pub fn migrate_calls(c: &Connection) {
+    for col in ["started_device TEXT", "platform TEXT", "app_version TEXT"] {
+        let _ = c.execute(&format!("ALTER TABLE calls ADD COLUMN {col}"), []);
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct CallRow {
     pub id: String,
@@ -41,6 +48,11 @@ pub struct CallRow {
     pub end_reason: Option<String>,
     /// Last join/leave/webhook touch; the sweeper ends calls that went quiet.
     pub last_activity_at: i64,
+    /// The device that started it, and what it said it was (`X-Arbos-Client`, else its push
+    /// registration): the call-log answer to "which app version placed this call?".
+    pub started_device: Option<String>,
+    pub platform: Option<String>,
+    pub app_version: Option<String>,
 }
 
 impl CallRow {
@@ -50,7 +62,7 @@ impl CallRow {
 }
 
 const CALL_COLS: &str =
-    "id, chat_id, project_id, kind, room, started_by, started_at, ended_at, end_reason, last_activity_at";
+    "id, chat_id, project_id, kind, room, started_by, started_at, ended_at, end_reason, last_activity_at, started_device, platform, app_version";
 
 fn call_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<CallRow> {
     Ok(CallRow {
@@ -64,6 +76,9 @@ fn call_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<CallRow> {
         ended_at: r.get(7)?,
         end_reason: r.get(8)?,
         last_activity_at: r.get(9)?,
+        started_device: r.get(10)?,
+        platform: r.get(11)?,
+        app_version: r.get(12)?,
     })
 }
 
@@ -101,9 +116,9 @@ impl Db {
     pub fn insert_call(&self, c: &CallRow) -> Result<()> {
         self.with(|conn| {
             conn.execute(
-                "INSERT INTO calls(id, chat_id, project_id, kind, room, started_by, started_at, last_activity_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![c.id, c.chat_id, c.project_id, c.kind, c.room, c.started_by, c.started_at, c.last_activity_at],
+                "INSERT INTO calls(id, chat_id, project_id, kind, room, started_by, started_at, last_activity_at, started_device, platform, app_version)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![c.id, c.chat_id, c.project_id, c.kind, c.room, c.started_by, c.started_at, c.last_activity_at, c.started_device, c.platform, c.app_version],
             )
             .map(|_| ())
         })
@@ -324,6 +339,45 @@ impl Db {
                 "SELECT device_id, user_id, token, environment, bundle_id, updated_at FROM voip_tokens ORDER BY updated_at DESC",
             )?;
             let rows = st.query_map([], voip_from_row)?;
+            rows.collect()
+        })
+    }
+
+    /// A user's live devices with what the relay knows about their app: `(id, name, kind,
+    /// last_seen_at, push platform, push app_version, has_voip_token)`.
+    #[allow(clippy::type_complexity)]
+    pub fn device_reach_rows(
+        &self,
+        user_id: &str,
+    ) -> Result<
+        Vec<(
+            String,
+            String,
+            String,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+            bool,
+        )>,
+    > {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT d.id, d.name, d.kind, d.last_seen_at, p.platform, p.app_version,
+                        EXISTS (SELECT 1 FROM voip_tokens v WHERE v.device_id = d.id)
+                 FROM devices d LEFT JOIN push_tokens p ON p.device_id = d.id
+                 WHERE d.user_id = ?1 AND d.revoked_at IS NULL ORDER BY COALESCE(d.last_seen_at, d.created_at) DESC",
+            )?;
+            let rows = st.query_map(params![user_id], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get::<_, i64>(6)? != 0,
+                ))
+            })?;
             rows.collect()
         })
     }

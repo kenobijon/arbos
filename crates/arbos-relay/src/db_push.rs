@@ -123,6 +123,17 @@ impl Db {
         })
     }
 
+    pub fn push_token(&self, device_id: &str) -> Result<Option<PushToken>> {
+        self.with(|c| {
+            c.query_row(
+                &format!("SELECT {TOKEN_COLS} FROM push_tokens WHERE device_id = ?1"),
+                params![device_id],
+                token_from_row,
+            )
+            .optional()
+        })
+    }
+
     /// Every registered token (admin view).
     pub fn all_push_tokens(&self) -> Result<Vec<PushToken>> {
         self.with(|c| {
