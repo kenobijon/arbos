@@ -1005,8 +1005,9 @@ final class AppModel: ObservableObject {
     }
 
     /// Agent profile: rename / recolour a project (`PATCH /projects/{id}`).
-    func updateProject(_ projectId: Id, name: String? = nil, color: String? = nil, icon: String? = nil, avatar: String? = nil, avatarColor: String? = nil) {
+    func updateProject(_ projectId: Id, name: String? = nil, color: String? = nil, icon: String? = nil, avatar: String? = nil, avatarColor: String? = nil, description: String? = nil) {
         if let i = projects.firstIndex(where: { $0.id == projectId }) {
+            if let description { projects[i].description = description }
             if let name { projects[i].name = name }
             if let color { projects[i].color = color }
             if let icon { projects[i].icon = icon }
@@ -1016,7 +1017,7 @@ final class AppModel: ObservableObject {
         }
         guard !isFixture else { return }
         Task {
-            do { try await api.patchProject(projectId, name: name, color: color, icon: icon, avatar: avatar, avatarColor: avatarColor) }
+            do { try await api.patchProject(projectId, name: name, color: color, icon: icon, avatar: avatar, avatarColor: avatarColor, description: description) }
             catch { notice = Notice(text: "Could not save: \(error.localizedDescription)") }
         }
     }
@@ -1328,6 +1329,12 @@ final class AppModel: ObservableObject {
         if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i].muted = muted }
         guard !isFixture else { return }
         Task { try? await api.chatSettings(chatId: chatId, muted: muted) }
+    }
+
+    /// `GET /users/{id}` for a fresh presence line on a profile page.
+    func fetchUser(_ id: String) async -> Person? {
+        guard credentials != nil, !isFixture else { return nil }
+        return (try? await api.user(id)) ?? nil
     }
 
     /// Projects of mine (or shared with me) that this person is a member of.

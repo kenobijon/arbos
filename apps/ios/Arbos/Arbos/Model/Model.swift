@@ -173,8 +173,20 @@ struct Project: Identifiable, Equatable {
     var avatar: String? = nil
     /// Colour set name from the manifest (`avatar_color` on the relay); nil → mono.
     var avatarColor: String? = nil
-    /// The owner's standing instructions — the agent's "description".
+    /// Private standing instructions (owner only).
     var instructions: String = ""
+    /// §9 public one-paragraph description (≤500), `PATCH {description}`.
+    var description: String = ""
+    /// §9 owner as sender{} with presence.
+    var ownerName: String? = nil
+    var ownerAvatarUrl: String? = nil
+    var ownerLastSeenAt: Int64? = nil
+    var ownerOnline: Bool = false
+    /// §9 machine summary: awake|waking|asleep|error, class, snapshot, always_on.
+    var machineState: String? = nil
+    var machineClass: String? = nil
+    var machineSnapshot: String? = nil
+    var machineAlwaysOn: Bool = false
 
     var shortModel: String { Project.shortModel(model) }
 

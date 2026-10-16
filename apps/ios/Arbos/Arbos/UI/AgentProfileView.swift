@@ -1,11 +1,12 @@
-// Agent profile (Grok Bot style): the big blob, an editable name, its
-// @mention, then colour, model, chats and sharing. Opened by tapping the
-// agent pill at the top of a chat. Name and colour save with
-// `PATCH /projects/{id}`; the model goes through the model picker.
+// Agent pages. `AgentProfileView` is the Telegram-style profile (avatar,
+// name, status, action tiles, info card, Media/Files/Links) opened from
+// anywhere an agent shows; its Edit button opens `AgentEditSheet` — the
+// original editor: tap-to-rename, colour, character picker, model, chats,
+// sharing. Name/colour/avatar/description save with `PATCH /projects/{id}`.
 
 import SwiftUI
 
-struct AgentProfileView: View {
+struct AgentEditSheet: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
@@ -193,8 +194,8 @@ struct AgentProfileView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Colour").font(.system(size: Theme.body, weight: .medium)).foregroundStyle(theme.text)
             HStack(spacing: 0) {
-                let current = AgentProfileView.currentHex(project)
-                ForEach(AgentProfileView.colorHexes, id: \.self) { hex in
+                let current = AgentEditSheet.currentHex(project)
+                ForEach(AgentEditSheet.colorHexes, id: \.self) { hex in
                     let selected = hex.lowercased() == current
                     Button {
                         guard !project.shared else { return }
@@ -268,6 +269,152 @@ struct AgentProfileView: View {
         case .idle: return "Idle"
         case .error: return "Error"
         case .unknown: return model.machine.reported ? "Not set up yet" : "—"
+        }
+    }
+}
+
+
+// MARK: - Telegram-style agent profile
+
+struct AgentProfileView: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    @Environment(\.dismiss) private var dismiss
+    let projectId: Id
+    /// For an agent that is not in my project list (someone else's agent in a DM).
+    var fallback: Project? = nil
+    @State private var tab = "Media"
+    @State private var showEdit = false
+    @State private var showDescription = false
+    @State private var descriptionDraft = ""
+    @State private var muted = false
+
+    private var project: Project? { model.project(projectId) ?? fallback }
+    private var isMine: Bool { model.project(projectId) != nil && project?.shared != true }
+    private var items: [ChatItem] {
+        let msgs = model.chats(of: projectId).flatMap { model.messages(of: $0.id) }
+        return ChatMedia.items(messages: msgs, slot: projectId, model: model)
+    }
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            theme.bg.ignoresSafeArea()
+            ScrollView {
+                if let project {
+                    VStack(spacing: 18) {
+                        Color.clear.frame(height: 70)
+                        ProfileHeader(name: project.name, status: statusLine(project), statusOnline: model.isStreaming(project: project.id)) {
+                            AgentAvatar(project: project, theme: theme, size: 112, working: model.isStreaming(project: project.id))
+                        }
+                        ProfileActionRow(actions: [
+                            ProfileAction(icon: "phone.fill", label: "call", enabled: false, soon: true) { },
+                            ProfileAction(icon: "waveform", label: "voice", enabled: false, soon: true) { },
+                            ProfileAction(icon: muted ? "bell.slash.fill" : "bell.fill", label: muted ? "unmute" : "mute") { muted.toggle() },
+                            ProfileAction(icon: "magnifyingglass", label: "search") { search(project) },
+                            ProfileAction(icon: "ellipsis", label: "more") { showEdit = true },
+                        ])
+                        ProfileCard {
+                            ProfileInfoRow(label: "agent", value: "@\(mentionSlug(project.name))", tint: Color(hex: "#1084FE")!)
+                                .onTapGesture { UIPasteboard.general.string = "@\(mentionSlug(project.name))" }
+                            ProfileRowDivider()
+                            ownerRow(project)
+                            ProfileRowDivider()
+                            ProfileInfoRow(label: "machine", value: machineLine(project))
+                            ProfileRowDivider()
+                            ProfileInfoRow(label: "model", value: "\(project.shortModel) · \(project.effort.label)")
+                            ProfileRowDivider()
+                            if project.description.isEmpty {
+                                if isMine {
+                                    ProfileLinkRow(title: "Add a description") { descriptionDraft = ""; showDescription = true }
+                                } else {
+                                    ProfileInfoRow(label: "description", value: "—")
+                                }
+                            } else {
+                                ProfileInfoRow(label: "description", value: project.description)
+                                    .onTapGesture { if isMine { descriptionDraft = project.description; showDescription = true } }
+                            }
+                        }
+                        ProfileTabs(tabs: ["Media", "Files", "Links"], selected: $tab)
+                        switch tab {
+                        case "Media": ChatItemsList(items: items, kind: .media, empty: "No photos or videos in \(project.name)'s chats yet.")
+                        case "Files": ChatItemsList(items: items, kind: .file, empty: "No files in \(project.name)'s chats yet.")
+                        default: ChatItemsList(items: items, kind: .link, empty: "No links in \(project.name)'s chats yet.")
+                        }
+                        Color.clear.frame(height: 40)
+                    }
+                } else {
+                    Text("This agent is gone.").foregroundStyle(theme.muted).padding(.top, 120)
+                }
+            }
+            ProfileTopBar {
+                if isMine {
+                    Button("Edit") { showEdit = true }
+                        .font(.system(size: Theme.body, weight: .medium)).foregroundStyle(theme.text)
+                        .padding(.horizontal, 14).frame(height: Theme.control)
+                        .background(Capsule().fill(theme.field))
+                }
+            }
+        }
+        .sheet(isPresented: $showEdit) {
+            AgentEditSheet(projectId: projectId).environmentObject(model).environment(\.theme, theme)
+        }
+        .alert("Description", isPresented: $showDescription) {
+            TextField("One paragraph about this agent", text: $descriptionDraft)
+            Button("Save") { model.updateProject(projectId, description: descriptionDraft.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            Button("Cancel", role: .cancel) { }
+        } message: { Text("Shown to everyone who can see this agent (up to 500 characters).") }
+    }
+
+    private func statusLine(_ p: Project) -> String {
+        if model.isStreaming(project: p.id) { return "working" }
+        switch p.machineState ?? "" {
+        case "awake": return "idle · machine awake"
+        case "waking": return "machine waking"
+        case "asleep": return "machine asleep"
+        case "error": return "machine needs attention"
+        default: return p.workspace == .active ? "idle · running" : "idle"
+        }
+    }
+
+    private func machineLine(_ p: Project) -> String {
+        var parts: [String] = []
+        if let s = p.machineState { parts.append(s) }
+        if let c = p.machineClass, c != "none" { parts.append(c) }
+        if let snap = p.machineSnapshot, !snap.isEmpty { parts.append(snap) }
+        if p.machineAlwaysOn { parts.append("always on") }
+        if parts.isEmpty { return model.machine.reported ? model.machine.label.lowercased() : "—" }
+        return parts.joined(separator: " · ")
+    }
+
+    private func ownerRow(_ p: Project) -> some View {
+        let handle = p.ownerHandle ?? model.user?.login ?? ""
+        let person = ProfilePerson(id: p.ownerHandle == nil ? (model.user?.id ?? handle) : handle, handle: handle, name: p.ownerName ?? (p.ownerHandle == nil ? model.user?.name : nil),
+                                   avatarUrl: p.ownerAvatarUrl ?? (p.ownerHandle == nil ? model.user?.avatarUrl : nil),
+                                   lastSeenAt: p.ownerLastSeenAt, online: p.ownerOnline)
+        let status = p.ownerHandle == nil ? ("you", false) : lastSeenLine(person.lastSeenAt, online: person.online)
+        return Button { if p.ownerHandle != nil { model.showProfile(.user(person)) } } label: {
+            HStack(spacing: 12) {
+                PersonAvatar(url: person.avatarUrl, handle: handle, size: 36)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("owner").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                    HStack(spacing: 6) {
+                        Text("@\(handle)").font(.system(size: Theme.body)).foregroundStyle(theme.text)
+                        Text(status.0).font(.system(size: Theme.tiny)).foregroundStyle(status.1 ? Color(hex: "#1084FE")! : theme.muted)
+                    }
+                }
+                Spacer()
+                if p.ownerHandle != nil { Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.muted.opacity(0.7)) }
+            }
+            .padding(.horizontal, 16).padding(.vertical, 10).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func search(_ p: Project) {
+        dismiss()
+        if let chat = model.mainChat(of: p.id) {
+            model.pendingSearchChat = chat.id
+            model.open(chat: chat)
         }
     }
 }

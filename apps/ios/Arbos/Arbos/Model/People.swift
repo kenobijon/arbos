@@ -10,13 +10,17 @@ struct Person: Identifiable, Equatable, Hashable {
     var name: String?
     /// member (signed in) | invited (DM opened, never signed in) | github (not on Arbos yet)
     var status: String
+    /// §9 presence: last seen (ms, minute-floored; nil = never) and online (< 90 s).
+    var lastSeenAt: Int64? = nil
+    var online: Bool = false
 
     var displayName: String { name?.isEmpty == false ? name! : handle }
 
     static func parse(_ raw: Any) -> Person? {
         guard let d = raw as? [String: Any], let id = d["id"] as? String, let handle = d["handle"] as? String else { return nil }
         return Person(id: id, handle: handle, avatarUrl: d["avatar_url"] as? String, name: d["name"] as? String,
-                      status: d["status"] as? String ?? "member")
+                      status: d["status"] as? String ?? "member",
+                      lastSeenAt: (d["last_seen_at"] as? NSNumber)?.int64Value, online: (d["online"] as? NSNumber)?.boolValue ?? false)
     }
 }
 
@@ -38,6 +42,10 @@ struct ChatMember: Identifiable, Equatable {
     var ownerId: String?
     var ownerHandle: String?
     var replyPolicy: String?
+    /// §9 presence for people; agents carry `description` instead.
+    var lastSeenAt: Int64? = nil
+    var online: Bool = false
+    var description: String? = nil
 
     var isAgent: Bool { kind == .agent }
     var displayName: String { kind == .agent ? (project?.name ?? handle) : (name?.isEmpty == false ? name! : handle) }
@@ -56,11 +64,15 @@ struct ChatMember: Identifiable, Equatable {
         }
         let settings = d["settings"] as? [String: Any]
         let joinedAt = (d["joined_at"] as? NSNumber)?.int64Value ?? (d["joined_at"] as? Int64) ?? 0
-        return ChatMember(id: id, kind: isAgent ? .agent : .user, member: member, role: d["role"] as? String ?? "member",
+        var m = ChatMember(id: id, kind: isAgent ? .agent : .user, member: member, role: d["role"] as? String ?? "member",
                           handle: d["handle"] as? String ?? (isAgent ? "agent" : "someone"), avatarUrl: d["avatar_url"] as? String,
                           name: d["name"] as? String, status: d["status"] as? String ?? "member", joinedAt: joinedAt,
                           project: project, ownerId: d["owner"] as? String, ownerHandle: d["owner_handle"] as? String,
                           replyPolicy: settings?["reply_policy"] as? String)
+        m.lastSeenAt = (d["last_seen_at"] as? NSNumber)?.int64Value
+        m.online = (d["online"] as? NSNumber)?.boolValue ?? false
+        m.description = (d["description"] as? String) ?? ((d["project"] as? [String: Any])?["description"] as? String)
+        return m
     }
 }
 
@@ -112,11 +124,14 @@ struct ProjectMember: Identifiable, Equatable {
     var name: String?
     var status: String
     var role: String
+    var lastSeenAt: Int64? = nil
+    var online: Bool = false
 
     static func parse(_ raw: Any) -> ProjectMember? {
-        guard let d = raw as? [String: Any], let id = d["user_id"] as? String else { return nil }
+        guard let d = raw as? [String: Any], let id = (d["user_id"] as? String) ?? (d["id"] as? String) else { return nil }
         return ProjectMember(id: id, handle: d["handle"] as? String ?? "", avatarUrl: d["avatar_url"] as? String, name: d["name"] as? String,
-                             status: d["status"] as? String ?? "member", role: d["role"] as? String ?? "member")
+                             status: d["status"] as? String ?? "member", role: d["role"] as? String ?? "member",
+                             lastSeenAt: (d["last_seen_at"] as? NSNumber)?.int64Value, online: (d["online"] as? NSNumber)?.boolValue ?? false)
     }
 }
 

@@ -13,15 +13,18 @@ struct ProfilePerson: Identifiable, Equatable, Hashable {
     var handle: String
     var name: String?
     var avatarUrl: String?
+    /// §9 presence as last reported by the relay for this row.
+    var lastSeenAt: Int64? = nil
+    var online: Bool = false
 
     var displayName: String { name?.isEmpty == false ? name! : "@\(handle)" }
 
-    init(id: String, handle: String, name: String?, avatarUrl: String?) {
-        self.id = id; self.handle = handle; self.name = name; self.avatarUrl = avatarUrl
+    init(id: String, handle: String, name: String?, avatarUrl: String?, lastSeenAt: Int64? = nil, online: Bool = false) {
+        self.id = id; self.handle = handle; self.name = name; self.avatarUrl = avatarUrl; self.lastSeenAt = lastSeenAt; self.online = online
     }
-    init(_ m: ChatMember) { self.init(id: m.id, handle: m.handle, name: m.name, avatarUrl: m.avatarUrl) }
-    init(_ p: Person) { self.init(id: p.id, handle: p.handle, name: p.name, avatarUrl: p.avatarUrl) }
-    init(_ p: ProjectMember) { self.init(id: p.id, handle: p.handle, name: p.name, avatarUrl: p.avatarUrl) }
+    init(_ m: ChatMember) { self.init(id: m.id, handle: m.handle, name: m.name, avatarUrl: m.avatarUrl, lastSeenAt: m.lastSeenAt, online: m.online) }
+    init(_ p: Person) { self.init(id: p.id, handle: p.handle, name: p.name, avatarUrl: p.avatarUrl, lastSeenAt: p.lastSeenAt, online: p.online) }
+    init(_ p: ProjectMember) { self.init(id: p.id, handle: p.handle, name: p.name, avatarUrl: p.avatarUrl, lastSeenAt: p.lastSeenAt, online: p.online) }
 }
 
 /// What the root view presents.
@@ -216,8 +219,10 @@ struct ProfileTabs: View {
     }
 }
 
-/// Last-seen text from presence: online (< 90 s), else the age, else "last seen recently".
-func lastSeenLine(_ at: Int64?, now: Int64 = nowMs()) -> (text: String, online: Bool) {
+/// Last-seen text: the relay's `online`/`last_seen_at` (§9) merged with the
+/// presence frames seen this session; "last seen recently" when unknown.
+func lastSeenLine(_ at: Int64?, online: Bool = false, now: Int64 = nowMs()) -> (text: String, online: Bool) {
+    if online { return ("online", true) }
     guard let at, at > 0 else { return ("last seen recently", false) }
     let age = max(0, now - at) / 1000
     if age < 90 { return ("online", true) }
@@ -393,7 +398,10 @@ struct UserProfileView: View {
     private var dm: PeopleChat? {
         model.peopleChats.first { $0.kind == "dm" && $0.humans.contains { $0.id == person.id } }
     }
-    private var status: (text: String, online: Bool) { lastSeenLine(model.lastSeen[person.id]) }
+    @State private var fresh: Person?
+    private var status: (text: String, online: Bool) {
+        lastSeenLine(max(fresh?.lastSeenAt ?? 0, person.lastSeenAt ?? 0, model.lastSeen[person.id] ?? 0), online: fresh?.online ?? person.online)
+    }
     private var isMe: Bool { person.id == model.user?.id }
     private var items: [ChatItem] {
         guard let dm else { return [] }
@@ -450,6 +458,7 @@ struct UserProfileView: View {
         } message: { Text("They cannot message you or add you to chats.") }
         .task {
             muted = dm?.muted ?? false
+            fresh = await model.fetchUser(person.id)
             sharedProjects = await model.sharedProjects(with: person)
         }
     }
@@ -637,7 +646,8 @@ struct GroupProfileView: View {
                 } label: {
                     MemberStatusRow(person: r.person,
                                     status: r.agent != nil ? (model.isStreaming(project: r.agent!.id) ? "working" : "idle", false)
-                                        : (r.person.id == model.user?.id ? ("online", true) : lastSeenLine(model.lastSeen[r.person.id])),
+                                        : (r.person.id == model.user?.id ? ("online", true)
+                                           : lastSeenLine(max(r.person.lastSeenAt ?? 0, model.lastSeen[r.person.id] ?? 0), online: r.person.online)),
                                     badge: r.role == "owner" ? "owner" : (r.role == "admin" ? "admin" : nil),
                                     isMe: r.person.id == model.user?.id, agent: r.agent)
                 }

@@ -169,7 +169,16 @@ final class RelayAPI {
                 ownerHandle: p["owner_handle"] as? String,
                 avatar: (p["avatar"] as? String).flatMap { $0.isEmpty ? nil : $0 },
                 avatarColor: (p["avatar_color"] as? String).flatMap { $0.isEmpty ? nil : $0 },
-                instructions: (p["instructions"] as? String) ?? ""
+                instructions: (p["instructions"] as? String) ?? "",
+                description: (p["description"] as? String) ?? "",
+                ownerName: (p["owner"] as? [String: Any])?["name"] as? String,
+                ownerAvatarUrl: (p["owner"] as? [String: Any])?["avatar_url"] as? String,
+                ownerLastSeenAt: ((p["owner"] as? [String: Any])?["last_seen_at"] as? NSNumber)?.int64Value,
+                ownerOnline: ((p["owner"] as? [String: Any])?["online"] as? NSNumber)?.boolValue ?? false,
+                machineState: (p["machine"] as? [String: Any])?["state"] as? String,
+                machineClass: (p["machine"] as? [String: Any])?["class"] as? String,
+                machineSnapshot: (p["machine"] as? [String: Any])?["snapshot"] as? String,
+                machineAlwaysOn: ((p["machine"] as? [String: Any])?["always_on"] as? NSNumber)?.boolValue ?? false
             )
             let chats = ((detail["chats"] as? [Any]) ?? []).compactMap(RelayAPI.parseChat)
             out.append(RegistryProject(project: project, chats: chats))
@@ -449,6 +458,12 @@ final class RelayAPI {
 
     // MARK: People chats (D72)
 
+    /// `GET /users/{id}` → one person with presence (§9); nil on 404.
+    func user(_ id: String) async throws -> Person? {
+        do { return Person.parse(try await json("GET", "/users/\(id)")) }
+        catch let e as RelayError where e.status == 404 { return nil }
+    }
+
     /// `GET /users?offset&limit` → the directory (members and invited people
     /// except me), alphabetical, paged by `next_offset`.
     func users() async throws -> [Person] {
@@ -481,8 +496,9 @@ final class RelayAPI {
         return chat
     }
 
-    func patchProject(_ projectId: Id, name: String?, color: String?, icon: String?, avatar: String? = nil, avatarColor: String? = nil) async throws {
+    func patchProject(_ projectId: Id, name: String?, color: String?, icon: String?, avatar: String? = nil, avatarColor: String? = nil, description: String? = nil) async throws {
         var body: [String: Any] = [:]
+        if let description { body["description"] = String(description.prefix(500)) }
         if let name { body["name"] = name }
         if let color { body["color"] = color }
         if let icon { body["icon"] = icon }
