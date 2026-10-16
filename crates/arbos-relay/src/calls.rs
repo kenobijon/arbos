@@ -1335,12 +1335,10 @@ mod tests {
                 "the caller and a member who joined never get call_missed"
             );
         }
-        // Carol's phone got the APNs alert for the missed call too (capture transport).
+        // The only APNs token belongs to Bob, who joined: a "started" alert went out, no "missed".
         let alerts = state.push.captured().await;
-        assert!(
-            alerts.iter().all(|o| o.payload["event"] != "missed")
-                || alerts.iter().any(|o| o.payload["event"] == "missed")
-        );
+        assert!(alerts.iter().any(|o| o.payload["event"] == "started"));
+        assert!(alerts.iter().all(|o| o.payload["event"] != "missed"));
     }
 
     #[tokio::test]
