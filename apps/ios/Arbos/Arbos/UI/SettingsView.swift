@@ -148,12 +148,10 @@ struct SettingsView: View {
                 if !model.isFixture {
                     Section {
                         LabeledContent("On this iPhone", value: storageLine)
-                        Button("Clear saved chats") { model.clearStore() }
-                            .disabled(model.storeUsage.docs == 0)
                     } header: {
                         Text("Storage")
                     } footer: {
-                        Text("Chats and agents are kept on this iPhone so the app opens instantly and works offline. Clearing them streams everything from the relay again.")
+                        Text("Chats and agents are kept on this iPhone so the app opens instantly and works offline. Signing out removes them.")
                     }
                     .listRowBackground(theme.card)
                 }

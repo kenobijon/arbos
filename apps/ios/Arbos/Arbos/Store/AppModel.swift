@@ -874,12 +874,6 @@ final class AppModel: ObservableObject {
         if !keys.isEmpty { storeUsage = store.usage() }
     }
 
-    /// Settings → Storage: forget saved chats (they stream again from the relay).
-    func clearStore() {
-        store?.clearAll()
-        storeUsage = store?.usage() ?? DeviceStore.Usage()
-    }
-
     private func forgetDoc(_ key: Id) {
         dirtyDocs.remove(key)
         store?.deleteDoc(key)

@@ -302,16 +302,6 @@ final class DeviceStore {
         }
     }
 
-    /// Everything except the account itself: used by "Clear saved chats".
-    func clearAll() {
-        queue.async { [self] in
-            _ = exec("DELETE FROM docs")
-            _ = exec("DELETE FROM pending")
-            _ = exec("DELETE FROM kv")
-            _ = exec("VACUUM")
-        }
-    }
-
     /// Flush queued writes and close; the file is deleted when `wipe` is set.
     func close(wipe: Bool) {
         queue.sync { [self] in
