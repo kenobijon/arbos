@@ -1,7 +1,7 @@
-// Home, Grok Bot layout: top bar with the account circle (left) and search +
-// "+" circles (right), then the chat list (avatar, name, time, preview) —
-// nothing between the bar and the list. One machine: its state is the small
-// dot on the account circle; the machine details live in Settings.
+// Home, Grok Bot layout: top bar with the account circle (GitHub avatar, left)
+// and search + "+" circles (right), then the chat list (avatar, name, time,
+// preview) — nothing between the bar and the list. One machine: its state is
+// the small dot on the account circle; the machine details live in Settings.
 
 import SwiftUI
 
@@ -159,6 +159,7 @@ struct HomeView: View {
                         .overlay(Circle().strokeBorder(theme.bg, lineWidth: 2))
                         .offset(x: 2, y: 2)
                 }
+                .frame(width: Theme.control, height: Theme.control)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Account and machine · \(model.machine.label)")
