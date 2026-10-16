@@ -1089,7 +1089,7 @@ impl Agent {
         let mut skip_host_group_turn = false;
         if let Some(gt) = self.group_turn_context(chat_id, host, &user_msg_id).await {
             if let Some(text) = &gt.fan_out_user_text {
-                let responders = self.decide_group_responders(&gt, text).await;
+                let responders = self.decide_group_responders(&gt, &user_msg_id, text).await;
                 let host_id = self.cfg.project_id.as_str();
                 let others: Vec<String> = responders
                     .iter()

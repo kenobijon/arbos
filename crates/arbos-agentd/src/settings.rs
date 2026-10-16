@@ -22,11 +22,52 @@ pub struct Slot {
     pub effort: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Who makes the "which agents reply" decision in group chats (`decision_model.provider`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecisionProvider {
+    /// A System One decision model (TypeSafe Jev through OpenRouter's Decisions API): one
+    /// calibrated yes/no probability per agent, thresholded. Falls open to `Llm`.
+    Jev,
+    /// The previous router: the `decision_model.id` chat model answering with JSON.
+    Llm,
+}
+
+impl DecisionProvider {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "jev" | "decider" | "decision" => Some(Self::Jev),
+            "llm" | "chat" => Some(Self::Llm),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Jev => "jev",
+            Self::Llm => "llm",
+        }
+    }
+}
+
+/// The responder decision's settings, carried inside the `decision_model` slot JSON next to
+/// `id`/`effort` (`provider`, `scorer`, `threshold`) so the relay registry and the project doc
+/// keep them without a schema change.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecisionConfig {
+    pub provider: DecisionProvider,
+    /// Decision-model id on the Decisions API (not a chat model; never validated against the
+    /// chat catalog).
+    pub scorer: String,
+    /// An agent replies when its yes-probability is at or above this.
+    pub threshold: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Models {
     pub talking: Slot,
     pub subagent: Slot,
     pub decision: Slot,
+    pub decision_cfg: DecisionConfig,
 }
 
 impl Models {
@@ -43,10 +84,30 @@ impl Models {
                 .unwrap_or(&f.effort)
                 .to_owned(),
         };
+        let d = &fallback.decision_cfg;
+        let decision_cfg = DecisionConfig {
+            provider: v
+                .pointer("/decision_model/provider")
+                .and_then(Value::as_str)
+                .and_then(DecisionProvider::parse)
+                .unwrap_or(d.provider),
+            scorer: v
+                .pointer("/decision_model/scorer")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or(&d.scorer)
+                .to_owned(),
+            threshold: v
+                .pointer("/decision_model/threshold")
+                .and_then(Value::as_f64)
+                .filter(|t| (0.0..=1.0).contains(t))
+                .unwrap_or(d.threshold),
+        };
         Models {
             talking: slot("talking_model", &fallback.talking),
             subagent: slot("subagent_model", &fallback.subagent),
             decision: slot("decision_model", &fallback.decision),
+            decision_cfg,
         }
     }
 
@@ -54,7 +115,12 @@ impl Models {
         json!({
             "talking_model": { "id": self.talking.id, "effort": self.talking.effort },
             "subagent_model": { "id": self.subagent.id, "effort": self.subagent.effort },
-            "decision_model": { "id": self.decision.id, "effort": self.decision.effort },
+            "decision_model": {
+                "id": self.decision.id, "effort": self.decision.effort,
+                "provider": self.decision_cfg.provider.as_str(),
+                "scorer": self.decision_cfg.scorer,
+                "threshold": self.decision_cfg.threshold,
+            },
         })
     }
 }
@@ -150,6 +216,7 @@ impl Settings {
                 id: cfg.decision_model.clone(),
                 effort: "off".into(),
             },
+            decision_cfg: cfg.decision_cfg.clone(),
         };
         Self {
             models: RwLock::new(models.clone()),
@@ -373,7 +440,9 @@ impl Agent {
             "name": st.name, "icon": st.icon, "color": st.color, "avatar": st.avatar, "avatarColor": st.avatar_color, "instructions": st.instructions,
             "agentModel": m.talking.id, "agentEffort": m.talking.effort,
             "defaultSubagentModel": m.subagent.id, "defaultSubagentEffort": m.subagent.effort,
-            "decisionModel": m.decision.id, "spendCapUsd": st.spend_cap_usd,
+            "decisionModel": m.decision.id, "decisionProvider": m.decision_cfg.provider.as_str(),
+            "decisionScorer": m.decision_cfg.scorer, "decisionThreshold": m.decision_cfg.threshold,
+            "spendCapUsd": st.spend_cap_usd,
             "modelNote": st.model_note,
         });
         if self.settings.state.read().await.last_doc_write.as_ref() == Some(&v) {
@@ -464,6 +533,7 @@ impl Agent {
                 effort: sub_effort,
             },
             decision: current.decision.clone(),
+            decision_cfg: current.decision_cfg.clone(),
         };
         if wanted == current {
             return;

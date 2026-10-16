@@ -22,18 +22,11 @@ use arbos_core::doc::MessageView;
 use arbos_core::ids::now_ms;
 
 use crate::agent::Agent;
+use crate::responders::{Candidate, Room};
 use crate::sync::SharedHost;
 
 /// The relay's project slot for people rooms.
 pub const PEOPLE_PROJECT: &str = "people";
-
-const RESPOND_SYSTEM: &str = r#"You are the reply gate for one agent in a group chat with people and possibly other agents.
-Decide whether THIS agent should reply to the latest human message, using the recent chat context.
-
-Reply when the message is aimed at this agent, continues a thread this agent was just in, asks for help this agent can give, or clearly needs an agent and this one is the best fit among those listed.
-Stay quiet when people are talking to each other, the message is for another agent, another agent should continue the thread, or no agent reply is needed.
-
-Output: {"respond":bool,"reason":"one line","confidence":0-1}"#;
 
 /// How many prior messages the reply gate sees (oldest → newest).
 const RESPOND_RECENT_MAX: usize = 12;
@@ -65,18 +58,6 @@ impl PeopleChatInfo {
 
     fn is_group(&self) -> bool {
         self.kind == "group" || self.agents() > 1
-    }
-
-    fn agent_labels(&self) -> Vec<String> {
-        self.members
-            .iter()
-            .filter_map(|m| {
-                let member = m["member"].as_str()?;
-                let id = member.strip_prefix("agent:")?;
-                let handle = m["handle"].as_str().unwrap_or(id);
-                Some(format!("@{handle} ({id})"))
-            })
-            .collect()
     }
 
     fn handle_of(&self, user_id: &str) -> String {
@@ -194,7 +175,8 @@ pub fn addressed(
     (!slug.is_empty() && has(slug)) || (only_agent && has("arbos"))
 }
 
-/// Recent user/assistant lines before `up_to` for the reply-gate prompt.
+/// Recent human and agent lines before `up_to` as `[{from, text}]`, oldest first, for the
+/// responder decision.
 fn recent_people_context(messages: &[MessageView], up_to: &str, max: usize) -> Vec<Value> {
     let mut out = Vec::new();
     for m in messages {
@@ -217,7 +199,12 @@ fn recent_people_context(messages: &[MessageView], up_to: &str, max: usize) -> V
             } else {
                 "user"
             });
-        out.push(json!({ "role": m.role, "handle": handle, "text": text }));
+        let from = if m.role == "assistant" {
+            format!("@{handle} (agent)")
+        } else {
+            format!("@{handle}")
+        };
+        out.push(json!({ "from": from, "text": text }));
     }
     if out.len() > max {
         out.drain(0..out.len() - max);
@@ -396,8 +383,12 @@ impl Agent {
             .await
     }
 
-    /// Decision-model gate for an unaddressed human message in a people group.
-    /// Uses recent transcript so the right agent continues a thread (or stays quiet).
+    /// Responder decision for an unaddressed human message in a people group (`responders.rs`):
+    /// one state naming every agent in the chat (handle + description) with the recent
+    /// transcript, one yes/no probability per agent; this agent replies when its own answer
+    /// reaches the threshold. Every box in the chat asks the same question over the same state,
+    /// so the agents agree on who continues the thread. Fail-open: the LLM router, then stay quiet
+    /// (the previous default for an unaddressed message).
     async fn people_decide_respond(
         &self,
         chat_id: &str,
@@ -414,60 +405,49 @@ impl Agent {
             .get("senderHandle")
             .and_then(Value::as_str)
             .unwrap_or("someone");
-        let user = json!({
-            "chat_id": chat_id,
-            "kind": info.kind,
-            "this_agent": { "project_id": self.cfg.project_id, "slug": info.slug },
-            "agents_here": info.agent_labels(),
-            "recent": recent,
-            "from": asker,
-            "text": text,
-        })
-        .to_string();
-        let model = self.settings.models.read().await.decision.id.clone();
-        let (v, ms) = match self
-            .llm
-            .complete_json(&model, RESPOND_SYSTEM, &user, 400)
-            .await
-        {
-            Ok(x) => x,
-            Err(e) => {
-                tracing::warn!(chat = %chat_id, error = %e, "people: respond decision failed");
-                let _ = self.store.log_decision(
-                    "respond",
-                    Some(&msg.id),
-                    Some(&json!({ "error": e.to_string() })),
-                    Some("SKIP"),
-                    &[],
-                    Some("decision model failed"),
-                    None,
-                    Some(&model),
-                    None,
-                );
-                return false;
-            }
+        let me = self.cfg.project_id.as_str();
+        let candidates: Vec<Candidate> = info
+            .members
+            .iter()
+            .filter_map(|m| {
+                let id = m["member"].as_str()?.strip_prefix("agent:")?;
+                let handle = m["handle"].as_str().unwrap_or(id);
+                let role = m["description"]
+                    .as_str()
+                    .filter(|d| !d.trim().is_empty())
+                    .or_else(|| m["project"]["description"].as_str())
+                    .unwrap_or("")
+                    .to_owned();
+                Some(Candidate {
+                    id: id.to_owned(),
+                    name: format!("@{handle}"),
+                    role,
+                    host: false,
+                })
+            })
+            .collect();
+        if !candidates.iter().any(|c| c.id == me) {
+            return false;
+        }
+        let room = Room {
+            kind: "people_group",
+            chat_id: chat_id.to_owned(),
+            title: info.kind.clone(),
+            from: format!("@{asker}"),
+            text,
+            recent: recent.to_vec(),
+            candidates,
         };
-        let respond = v.get("respond").and_then(Value::as_bool).unwrap_or(false);
-        let reason = v.get("reason").and_then(Value::as_str);
-        let confidence = v.get("confidence").and_then(Value::as_f64);
-        let _ = self.store.log_decision(
-            "respond",
-            Some(&msg.id),
-            Some(&v),
-            Some(if respond { "REPLY" } else { "SKIP" }),
-            &[],
-            reason,
-            confidence,
-            Some(&model),
-            Some(ms),
-        );
-        tracing::info!(
-            chat = %chat_id,
-            respond,
-            reason = reason.unwrap_or(""),
-            "people: respond decision"
-        );
-        respond
+        match self.decide_responders(&room).await {
+            Ok(d) => {
+                self.log_responder_decision(&room, &msg.id, Ok(&d), None);
+                d.chose(me)
+            }
+            Err(errors) => {
+                self.log_responder_decision(&room, &msg.id, Err(&errors), Some(("SKIP", &[])));
+                false
+            }
+        }
     }
 
     /// Prelude for the prompt and the asker for attribution, when `chat_id` is a people chat.

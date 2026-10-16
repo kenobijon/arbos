@@ -19,6 +19,20 @@ use crate::state::AppState;
 enum Api {
     OpenAi,
     Anthropic,
+    /// OpenRouter's Decisions API (`POST /api/alpha/decisions`): typed yes/no, choice and score
+    /// answers from a decision model such as TypeSafe Jev. Never streams; billed on input tokens.
+    Decisions,
+}
+
+/// OpenRouter's API root (`https://openrouter.ai/api`) for endpoints outside `/v1`, derived from
+/// the configured OpenAI-compatible base so a self-hoster's custom OpenRouter base still works.
+fn openrouter_root(openai_base: &str) -> String {
+    let base = openai_base.trim_end_matches('/');
+    if base.contains("openrouter") {
+        base.strip_suffix("/v1").unwrap_or(base).to_owned()
+    } else {
+        "https://openrouter.ai/api".to_owned()
+    }
 }
 
 #[derive(Default, Debug)]
@@ -152,6 +166,19 @@ impl Meter {
         }
     }
 
+    /// Decisions API usage: `{ input_tokens, output_tokens, cost }` (cost in USD, output free).
+    fn absorb_decisions_usage(&mut self, u: &Value) {
+        if let Some(n) = u.get("input_tokens").and_then(Value::as_i64) {
+            self.input = n;
+        }
+        if let Some(n) = u.get("output_tokens").and_then(Value::as_i64) {
+            self.output = n;
+        }
+        if let Some(c) = u.get("cost").and_then(Value::as_f64) {
+            self.cost = Some(c);
+        }
+    }
+
     fn absorb_anthropic_usage(&mut self, u: &Value) {
         if let Some(n) = u.get("input_tokens").and_then(Value::as_i64) {
             self.input = n;
@@ -198,6 +225,11 @@ impl Meter {
                     }
                     if let Some(u) = v.get("usage").filter(|u| u.is_object()) {
                         self.absorb_anthropic_usage(u);
+                    }
+                }
+                Api::Decisions => {
+                    if let Some(u) = v.get("usage").filter(|u| u.is_object()) {
+                        self.absorb_decisions_usage(u);
                     }
                 }
             }
@@ -339,6 +371,17 @@ async fn forward(
                 (format!("{base}/{path_tail}"), key, "x-api-key")
             }
         }
+        Api::Decisions => {
+            let Some(key) = state.cfg.openrouter_key.clone() else {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    "relay has no OpenRouter key (decision models are served by OpenRouter)",
+                )
+                    .into_response();
+            };
+            let root = openrouter_root(&state.cfg.openai_base);
+            (format!("{root}/alpha/decisions"), key, "authorization")
+        }
     };
 
     let mut req = state.http.post(&url).body(body);
@@ -381,6 +424,7 @@ async fn forward(
     let api_name = match api {
         Api::OpenAi => "openai",
         Api::Anthropic => "anthropic",
+        Api::Decisions => "decisions",
     };
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(64);
     let db = state.db.clone();
@@ -502,6 +546,31 @@ pub async fn anthropic(
         headers,
         Api::Anthropic,
         &tail,
+        body,
+        project_override,
+    )
+    .await
+}
+
+/// `POST /proxy/decisions` → OpenRouter `POST /api/alpha/decisions` (TypeSafe Jev and other
+/// decision models). Same box-token auth, spend cap, credits and usage metering as chat calls;
+/// `usage.cost` from the upstream is the charged amount.
+pub async fn decisions(
+    State(state): State<AppState>,
+    principal: Principal,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let project_override = headers
+        .get("x-arbos-project")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    forward(
+        state,
+        principal,
+        headers,
+        Api::Decisions,
+        "alpha/decisions",
         body,
         project_override,
     )

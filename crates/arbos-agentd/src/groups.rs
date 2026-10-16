@@ -17,19 +17,12 @@ use arbos_core::doc::{CommandView, MessageView};
 use arbos_core::ids::{now_ms, ulid};
 
 use crate::agent::Agent;
+use crate::responders::{Candidate, Room};
 use crate::sync::SharedHost;
 
 /// Title the relay gives the system tab that collects group traffic on a participant box.
 pub const PROJECTS_TAB_TITLE: &str = "Projects ⇄";
 const PRELUDE_RECENT_MAX: usize = 12;
-
-const GROUP_RESPOND_SYSTEM: &str = r#"You are the reply router for a group chat with the user and several project agents.
-Decide which agents (if any) should reply to the user's message. You may pick none, one, several, or all.
-
-Pick an agent when the message asks for their help or fits their name/role. Pick none when the user is only noting something that needs no agent reply. Pick several when more than one should speak.
-
-Output: {"responders":["project_id",...],"reason":"one line","confidence":0-1}
-Use the project ids from the participant list. An empty responders list means nobody replies."#;
 
 #[derive(Default)]
 pub struct GroupState {
@@ -54,8 +47,12 @@ pub struct GroupTurn {
     pub fan_out_user_text: Option<String>,
     /// Participant project ids (host included), for the reply-router decision.
     pub participant_ids: Vec<String>,
-    /// `[{id, name}, …]` for the decision prompt.
+    /// `[{id, name, description}, …]` for the responder decision.
     pub participants_detail: Vec<Value>,
+    pub title: String,
+    /// Host side: what was said in the group before this message (`[{from, text}]`, oldest
+    /// first), for the responder decision.
+    pub recent: Vec<Value>,
 }
 
 fn str_field(v: &Value, k: &str) -> Option<String> {
@@ -118,6 +115,45 @@ fn recent_project_messages<'a>(
         }
     }
     out.reverse();
+    out
+}
+
+/// The last `max` messages before `current_id` as `[{from, text}]`, oldest first, for the
+/// responder decision: the user, the host's own agent (`assistant`), and the other Projects.
+fn recent_group_context(
+    messages: &[MessageView],
+    current_id: &str,
+    participants: &[Value],
+    host_name: &str,
+    max: usize,
+) -> Vec<Value> {
+    let mut out = Vec::new();
+    for m in messages {
+        if m.id == current_id {
+            break;
+        }
+        let text: String = m.text().split_whitespace().collect::<Vec<_>>().join(" ");
+        if text.trim().is_empty() {
+            continue;
+        }
+        let from = match m.role.as_str() {
+            "user" => "the user".to_owned(),
+            "assistant" => format!("Project {host_name}"),
+            "project" => str_field(&m.rest, "senderName")
+                .map(|n| format!("Project {n}"))
+                .unwrap_or_else(|| {
+                    sender_label(
+                        participants,
+                        &str_field(&m.rest, "sender").unwrap_or_default(),
+                    )
+                }),
+            _ => continue,
+        };
+        out.push(json!({ "from": from, "text": text.chars().take(500).collect::<String>() }));
+    }
+    if out.len() > max {
+        out.drain(0..out.len() - max);
+    }
     out
 }
 
@@ -215,6 +251,8 @@ impl Agent {
                 fan_out_user_text: None,
                 participant_ids: ids,
                 participants_detail: participants,
+                title,
+                recent: Vec::new(),
             });
         }
         if self.chat_kind(chat_id).as_deref() != Some("group") {
@@ -251,6 +289,13 @@ impl Agent {
         prelude.push('\n');
         let is_user = msg.role == "user" && from == "user";
         let ids = participant_ids(&participants);
+        let recent = recent_group_context(
+            &messages,
+            user_msg_id,
+            &participants,
+            &self.cfg.project_name,
+            PRELUDE_RECENT_MAX,
+        );
         Some(GroupTurn {
             host_project_id: me,
             group_chat_id: chat_id.to_owned(),
@@ -261,6 +306,8 @@ impl Agent {
             fan_out_user_text: is_user.then(|| msg.text()),
             participant_ids: ids,
             participants_detail: participants,
+            title,
+            recent,
         })
     }
 
@@ -340,90 +387,59 @@ impl Agent {
         });
     }
 
-    /// Decision model: which participant project ids should answer this user message.
-    /// On failure, falls open to every participant (previous behaviour).
-    pub async fn decide_group_responders(&self, gt: &GroupTurn, text: &str) -> Vec<String> {
+    /// Which participant project ids should answer this user message: the responder decision
+    /// (`responders.rs`; Jev per-agent probabilities, then the LLM router). When every provider
+    /// fails, falls open to every participant (previous behaviour).
+    pub async fn decide_group_responders(
+        &self,
+        gt: &GroupTurn,
+        user_msg_id: &str,
+        text: &str,
+    ) -> Vec<String> {
         let known = &gt.participant_ids;
         if known.is_empty() {
             return vec![self.cfg.project_id.clone()];
         }
-        let text: String = text.chars().take(4000).collect();
-        let roster: Vec<Value> = gt
+        let candidates: Vec<Candidate> = gt
             .participants_detail
             .iter()
             .filter_map(|p| {
                 let id = p.get("id").and_then(Value::as_str)?;
-                let name = p.get("name").and_then(Value::as_str).unwrap_or(id);
-                Some(json!({
-                    "project_id": id,
-                    "name": name,
-                    "host": id == gt.host_project_id,
-                }))
+                Some(Candidate {
+                    id: id.to_owned(),
+                    name: p
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or(id)
+                        .to_owned(),
+                    role: p
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_owned(),
+                    host: id == gt.host_project_id,
+                })
             })
             .collect();
-        let user = json!({
-            "group_chat_id": gt.group_chat_id,
-            "host_project_id": gt.host_project_id,
-            "participants": roster,
-            "text": text,
-        })
-        .to_string();
-        let model = self.settings.models.read().await.decision.id.clone();
-        let (v, ms) = match self
-            .llm
-            .complete_json(&model, GROUP_RESPOND_SYSTEM, &user, 600)
-            .await
-        {
-            Ok(x) => x,
-            Err(e) => {
-                tracing::warn!(group = %gt.group_chat_id, error = %e, "group: respond decision failed");
-                let _ = self.store.log_decision(
-                    "respond",
-                    Some(&gt.group_chat_id),
-                    Some(&json!({ "error": e.to_string() })),
-                    Some("ALL"),
-                    known,
-                    Some("decision model failed; fan out to all"),
-                    None,
-                    Some(&model),
-                    None,
-                );
-                return known.clone();
-            }
+        let room = Room {
+            kind: "project_group",
+            chat_id: gt.group_chat_id.clone(),
+            title: gt.title.clone(),
+            from: "the user".into(),
+            text: text.to_owned(),
+            recent: gt.recent.clone(),
+            candidates,
         };
-        let mut picked: Vec<String> = v
-            .get("responders")
-            .and_then(Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(|x| x.as_str().map(str::to_owned))
-                    .filter(|id| known.iter().any(|k| k == id))
-                    .collect()
-            })
-            .unwrap_or_default();
-        // Dedup while keeping order.
-        let mut seen = std::collections::HashSet::new();
-        picked.retain(|id| seen.insert(id.clone()));
-        let reason = v.get("reason").and_then(Value::as_str);
-        let confidence = v.get("confidence").and_then(Value::as_f64);
-        let _ = self.store.log_decision(
-            "respond",
-            Some(&gt.group_chat_id),
-            Some(&v),
-            Some(if picked.is_empty() { "NONE" } else { "REPLY" }),
-            &picked,
-            reason,
-            confidence,
-            Some(&model),
-            Some(ms),
-        );
-        tracing::info!(
-            group = %gt.group_chat_id,
-            ?picked,
-            reason = reason.unwrap_or(""),
-            "group: respond decision"
-        );
-        picked
+        match self.decide_responders(&room).await {
+            Ok(d) => {
+                self.log_responder_decision(&room, user_msg_id, Ok(&d), None);
+                d.chosen
+            }
+            Err(errors) => {
+                self.log_responder_decision(&room, user_msg_id, Err(&errors), Some(("ALL", known)));
+                known.clone()
+            }
+        }
     }
 
     /// The `group_send` MCP tool: the main agent's words to the other participants of the group

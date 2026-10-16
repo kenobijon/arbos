@@ -11,7 +11,32 @@ use crate::config::Config;
 pub struct Llm {
     http: reqwest::Client,
     base: String,
+    /// `POST {relay}/proxy/decisions` → OpenRouter's Decisions API (decision models such as Jev).
+    decisions_url: String,
     token: String,
+    project_id: String,
+}
+
+/// One answer of a decision model. `noul` questions answer with the yes-probability; `choice`
+/// and `score` questions with the pick plus a probability per option and a confidence.
+#[derive(Debug, Clone)]
+pub struct DecisionAnswer {
+    pub kind: String,
+    /// `noul`: P(yes). `choice`/`score`: the confidence in the pick.
+    pub probability: f64,
+    pub raw: Value,
+}
+
+/// A whole Decisions-API response: answers keyed by the question ids the caller chose, the
+/// exact model build that answered, usage, and the round-trip time.
+#[derive(Debug, Clone)]
+pub struct Decision {
+    pub answers: std::collections::BTreeMap<String, DecisionAnswer>,
+    pub model: String,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cost_usd: Option<f64>,
+    pub latency_ms: i64,
 }
 
 impl Llm {
@@ -19,8 +44,82 @@ impl Llm {
         Self {
             http: reqwest::Client::new(),
             base: format!("{}/proxy/v1", cfg.relay_url),
+            decisions_url: format!("{}/proxy/decisions", cfg.relay_url),
             token: cfg.box_token.clone(),
+            project_id: cfg.project_id.clone(),
         }
+    }
+
+    /// Ask a decision model typed questions about `state` (Decisions API: `noul` = yes/no
+    /// probability, `choice`, `score`). All questions are answered in parallel in one request
+    /// and cannot see each other. No text is generated; the answer is calibrated probabilities.
+    pub async fn decide(
+        &self,
+        model: &str,
+        state: &Value,
+        questions: &Value,
+        timeout: std::time::Duration,
+    ) -> Result<Decision> {
+        let t0 = Instant::now();
+        let body = json!({ "model": model, "state": state, "questions": questions });
+        let resp = self
+            .http
+            .post(&self.decisions_url)
+            .bearer_auth(&self.token)
+            .header("x-arbos-project", &self.project_id)
+            .timeout(timeout)
+            .json(&body)
+            .send()
+            .await?;
+        let status = resp.status();
+        let v: Value = resp.json().await?;
+        if !status.is_success() {
+            return Err(anyhow!("decision call failed: HTTP {status}: {}", v));
+        }
+        let mut answers = std::collections::BTreeMap::new();
+        let Some(obj) = v.get("answers").and_then(Value::as_object) else {
+            return Err(anyhow!("decision response without answers: {v}"));
+        };
+        for (id, a) in obj {
+            let kind = a
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            let probability = match kind.as_str() {
+                "noul" => a.get("noul").and_then(Value::as_f64),
+                "choice" | "score" => a.get("confidence").and_then(Value::as_f64),
+                _ => None,
+            }
+            .ok_or_else(|| anyhow!("decision answer {id} has an unexpected shape: {a}"))?;
+            answers.insert(
+                id.clone(),
+                DecisionAnswer {
+                    kind,
+                    probability,
+                    raw: a.clone(),
+                },
+            );
+        }
+        let usage = v.get("usage").cloned().unwrap_or(Value::Null);
+        Ok(Decision {
+            answers,
+            model: v
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or(model)
+                .to_owned(),
+            input_tokens: usage
+                .get("input_tokens")
+                .and_then(Value::as_i64)
+                .unwrap_or(0),
+            output_tokens: usage
+                .get("output_tokens")
+                .and_then(Value::as_i64)
+                .unwrap_or(0),
+            cost_usd: usage.get("cost").and_then(Value::as_f64),
+            latency_ms: t0.elapsed().as_millis() as i64,
+        })
     }
 
     /// One non-streaming chat completion. Returns `(text, latency_ms)`.

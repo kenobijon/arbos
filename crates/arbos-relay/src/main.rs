@@ -552,6 +552,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/proxy/v1/audio/speech", post(proxy::audio_speech))
         .route("/proxy/v1/{*tail}", post(proxy::openai))
         .route("/proxy/anthropic/{*tail}", post(proxy::anthropic))
+        .route("/proxy/decisions", post(proxy::decisions))
         .route("/connectors", get(connectors::list))
         .route("/connectors/catalog", get(connectors::catalog))
         .route("/connectors/outbox", get(connectors::outbox))

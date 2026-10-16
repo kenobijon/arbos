@@ -826,10 +826,31 @@ impl Store {
         model: Option<&str>,
         latency_ms: Option<i64>,
     ) -> Result<()> {
+        self.log_decision_with_usage(
+            side, event_id, gate, action, target_ids, reason, confidence, model, latency_ms, None,
+        )
+    }
+
+    /// `log_decision` plus the call's usage (`{input_tokens, output_tokens, cost_usd, provider}`),
+    /// which the responder decision records per call.
+    #[allow(clippy::too_many_arguments)]
+    pub fn log_decision_with_usage(
+        &self,
+        side: &str,
+        event_id: Option<&str>,
+        gate: Option<&Value>,
+        action: Option<&str>,
+        target_ids: &[String],
+        reason: Option<&str>,
+        confidence: Option<f64>,
+        model: Option<&str>,
+        latency_ms: Option<i64>,
+        usage: Option<&Value>,
+    ) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO memory_decision_log(id, side, event_id, gate, action, target_ids, reason, confidence, model, latency_ms, created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
-                params![ulid(), side, event_id, gate.map(|g| g.to_string()), action, serde_json::to_string(target_ids).unwrap_or_default(), reason, confidence, model, latency_ms, now_ms()],
+                "INSERT INTO memory_decision_log(id, side, event_id, gate, action, target_ids, reason, confidence, model, latency_ms, usage, created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                params![ulid(), side, event_id, gate.map(|g| g.to_string()), action, serde_json::to_string(target_ids).unwrap_or_default(), reason, confidence, model, latency_ms, usage.map(|u| u.to_string()), now_ms()],
             )
             .map(|_| ())
         })

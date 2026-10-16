@@ -8,6 +8,13 @@ use std::path::PathBuf;
 use serde_json::Value;
 
 use crate::isolation::RunAs;
+use crate::settings::{DecisionConfig, DecisionProvider};
+
+/// Decision model the group-chat responder decision uses unless the project says otherwise
+/// (`ARBOS_DECISION_SCORER`); TypeSafe Jev on OpenRouter's Decisions API.
+pub const DEFAULT_DECISION_SCORER: &str = "typesafe/jev-1.14";
+/// Yes-probability at or above which an agent replies (`ARBOS_DECISION_THRESHOLD`).
+pub const DEFAULT_DECISION_THRESHOLD: f64 = 0.5;
 
 fn env_or(k: &str, d: &str) -> String {
     std::env::var(k)
@@ -129,6 +136,7 @@ impl BoxConfig {
             proxy_port: base + 3,
             browser_stream_port: 9223 + index,
             decision_model: slot("decision_model", &talking),
+            decision_cfg: decision_cfg_of(&models),
             talking_model: talking,
             subagent_model: slot("subagent_model", &self.default_subagent_model),
             instructions: project
@@ -154,6 +162,37 @@ impl BoxConfig {
     }
 }
 
+/// The responder-decision settings of a project's `models.decision_model` slot, with the box
+/// environment (`ARBOS_DECISION_PROVIDER` = `jev` | `llm`, `ARBOS_DECISION_SCORER`,
+/// `ARBOS_DECISION_THRESHOLD`) as the defaults.
+fn decision_cfg_of(models: &Value) -> DecisionConfig {
+    let env_provider = DecisionProvider::parse(&env_or("ARBOS_DECISION_PROVIDER", "jev"))
+        .unwrap_or(DecisionProvider::Jev);
+    let env_threshold = env_or("ARBOS_DECISION_THRESHOLD", "")
+        .parse::<f64>()
+        .ok()
+        .filter(|t| (0.0..=1.0).contains(t))
+        .unwrap_or(DEFAULT_DECISION_THRESHOLD);
+    DecisionConfig {
+        provider: models
+            .pointer("/decision_model/provider")
+            .and_then(Value::as_str)
+            .and_then(DecisionProvider::parse)
+            .unwrap_or(env_provider),
+        scorer: models
+            .pointer("/decision_model/scorer")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| env_or("ARBOS_DECISION_SCORER", DEFAULT_DECISION_SCORER)),
+        threshold: models
+            .pointer("/decision_model/threshold")
+            .and_then(Value::as_f64)
+            .filter(|t| (0.0..=1.0).contains(t))
+            .unwrap_or(env_threshold),
+    }
+}
+
 /// One workspace (= one project) as the agent code sees it.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -172,6 +211,8 @@ pub struct Config {
     pub talking_model: String,
     pub subagent_model: String,
     pub decision_model: String,
+    /// Responder decision: provider switch, decision-model id, threshold (`decision_model` slot).
+    pub decision_cfg: DecisionConfig,
     pub instructions: String,
     pub pi_bin: String,
     pub prime_bin: String,

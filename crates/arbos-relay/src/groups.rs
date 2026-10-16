@@ -55,7 +55,7 @@ fn participant_details(state: &AppState, chat: &Chat) -> Vec<Value> {
     chat.participants
         .iter()
         .filter_map(|id| state.db.project(id).ok().flatten())
-        .map(|p| json!({ "id": p.id, "name": p.name, "icon": p.icon, "color": p.color, "state": p.state }))
+        .map(|p| json!({ "id": p.id, "name": p.name, "description": p.description, "icon": p.icon, "color": p.color, "state": p.state }))
         .collect()
 }
 
@@ -66,7 +66,7 @@ async fn group_json(state: &AppState, chat: &Chat) -> Value {
         if let Ok(Some(p)) = state.db.project(id) {
             let (bs, _) = state.box_state(&p.user_id).await;
             details.push(
-                json!({ "id": p.id, "name": p.name, "icon": p.icon, "color": p.color, "box": bs }),
+                json!({ "id": p.id, "name": p.name, "description": p.description, "icon": p.icon, "color": p.color, "box": bs }),
             );
         }
     }
