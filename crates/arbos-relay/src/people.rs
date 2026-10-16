@@ -192,6 +192,21 @@ async fn find_person(state: &AppState, handle: &str) -> Option<Value> {
 
 // ---- JSON shapes --------------------------------------------------------------------------------
 
+/// A person counts as online while a device of theirs talked to the relay this recently
+/// (presence frames come every 15 s; HTTP polls every 30 s).
+pub const ONLINE_MS: i64 = 90_000;
+
+/// Add `last_seen_at` (floored to the minute) and `online` to a user JSON that has an `id`.
+pub fn with_presence(state: &AppState, mut v: Value) -> Value {
+    let Some(uid) = v["id"].as_str().or_else(|| v["user_id"].as_str()) else {
+        return v;
+    };
+    let seen = state.db.user_last_seen(uid).ok().flatten();
+    v["last_seen_at"] = json!(seen.map(|t| t - t % 60_000));
+    v["online"] = json!(seen.is_some_and(|t| now_ms() - t < ONLINE_MS));
+    v
+}
+
 fn member_json(state: &AppState, m: &Membership) -> Value {
     let mut v = json!({
         "member": m.member, "role": m.role, "added_by": m.added_by, "joined_at": m.joined_at,
@@ -203,6 +218,8 @@ fn member_json(state: &AppState, m: &Membership) -> Value {
             v["name"] = card["name"].clone();
             v["status"] = card["status"].clone();
         }
+        v["user_id"] = json!(uid);
+        v = with_presence(state, v);
         v["read_receipts"] = json!(m
             .settings
             .get("read_receipts")
@@ -221,7 +238,13 @@ fn member_json(state: &AppState, m: &Membership) -> Value {
             });
             v["avatar"] = json!(avatar);
             v["avatar_color"] = json!(avatar_color);
-            v["project"] = json!({ "id": p.id, "name": p.name, "icon": p.icon, "color": p.color, "avatar": avatar, "avatar_color": avatar_color });
+            v["project"] = json!({
+                "id": p.id, "name": p.name, "icon": p.icon, "color": p.color, "avatar": avatar, "avatar_color": avatar_color,
+                "description": p.description,
+                "model": p.models.get("talking_model").and_then(|m| m.get("id")).cloned().unwrap_or(Value::Null),
+                "owner": with_presence(state, crate::notify::Sender::user(state, &p.user_id).json()),
+            });
+            v["description"] = json!(p.description);
             v["owner"] = json!(p.user_id);
             v["owner_handle"] = state
                 .db
@@ -405,7 +428,28 @@ pub async fn users_search(
             }
         }
     }
+    let found: Vec<Value> = found
+        .into_iter()
+        .map(|u| with_presence(&state, u))
+        .collect();
     Json(found).into_response()
+}
+
+/// `GET /users/{id}` — one person's card for a profile page: handle, name, avatar, status,
+/// `last_seen_at` (to the minute) and `online`; any signed-in device may read members.
+pub async fn user_profile(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+) -> Response {
+    if let Err(r) = user_of(&principal) {
+        return *r;
+    }
+    match state.db.user_card(&id) {
+        Ok(Some(card)) => Json(with_presence(&state, card)).into_response(),
+        Ok(None) => api_error(StatusCode::NOT_FOUND, "not_found", "no such user"),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    }
 }
 
 #[derive(Deserialize)]
@@ -431,6 +475,10 @@ pub async fn users_directory(
     let limit = q.limit.unwrap_or(100).clamp(1, 500);
     match state.db.list_directory(&me, offset, limit) {
         Ok((users, total)) => {
+            let users: Vec<Value> = users
+                .into_iter()
+                .map(|u| with_presence(&state, u))
+                .collect();
             let next = offset + users.len() as i64;
             Json(json!({
                 "users": users,
@@ -1285,7 +1333,7 @@ fn project_members_json(state: &AppState, project: &crate::db::Project) -> Value
         v["user_id"] = json!(project.user_id);
         v["role"] = json!("owner");
         v["joined_at"] = json!(project.created_at);
-        v
+        with_presence(state, v)
     }];
     for (uid, added_by, joined_at) in state.db.project_members(&project.id).unwrap_or_default() {
         let mut v = state
@@ -1298,7 +1346,7 @@ fn project_members_json(state: &AppState, project: &crate::db::Project) -> Value
         v["role"] = json!("member");
         v["added_by"] = json!(added_by);
         v["joined_at"] = json!(joined_at);
-        members.push(v);
+        members.push(with_presence(state, v));
     }
     json!({ "project_id": project.id, "owner": project.user_id, "members": members })
 }
@@ -2283,6 +2331,7 @@ pub(crate) mod tests_support {
             workspace_state: "stopped".into(),
             avatar: None,
             avatar_color: None,
+            description: String::new(),
         };
         state.db.insert_project(&project).expect("project");
         state

@@ -145,6 +145,8 @@ pub struct AppState {
     pub fallback_sent: Arc<Mutex<HashMap<(String, String), i64>>>,
     /// Self-hosted LiveKit for calls (`LIVEKIT_*`); `None` = calls answer 503.
     pub livekit: Option<crate::livekit::LiveKit>,
+    /// device_id → last presence frame that was written to `devices.last_seen_at`.
+    pub presence_seen: Arc<Mutex<HashMap<String, i64>>>,
 }
 
 /// One running box upgrade.
@@ -377,6 +379,7 @@ pub(crate) mod test_support {
             focus: Arc::new(Mutex::new(HashMap::new())),
             fallback_sent: Arc::new(Mutex::new(HashMap::new())),
             livekit: None,
+            presence_seen: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }

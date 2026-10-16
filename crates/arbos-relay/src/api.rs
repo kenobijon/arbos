@@ -138,6 +138,21 @@ pub struct CreateProjectBody {
     /// Avatar colour slug; default = the deterministic pick, deduped with the tree.
     #[serde(default)]
     pub avatar_color: Option<String>,
+    /// Short public blurb for the agent's profile (≤ 500 chars).
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// Profile blurbs are short and single-paragraph.
+fn clean_description(d: &str) -> Result<String, (StatusCode, String)> {
+    let d = d.trim();
+    if d.chars().count() > 500 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "description must be 500 characters or fewer".into(),
+        ));
+    }
+    Ok(d.to_owned())
 }
 
 fn default_models() -> Value {
@@ -236,6 +251,7 @@ pub async fn create_project(
         workspace_state: "stopped".into(),
         avatar: Some(avatar),
         avatar_color: Some(avatar_color),
+        description: clean_description(b.description.as_deref().unwrap_or_default())?,
     };
     if state
         .db
@@ -388,6 +404,9 @@ pub struct PatchProjectBody {
     /// Avatar colour slug; `null` resets to the deterministic default.
     #[serde(default, deserialize_with = "deserialize_double_option")]
     pub avatar_color: Option<Option<String>>,
+    /// Profile blurb (≤ 500 chars; empty string clears it).
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 fn deserialize_double_option<'de, D>(d: D) -> Result<Option<Option<String>>, D::Error>
@@ -473,6 +492,10 @@ pub async fn patch_project(
             Some(Some(c.to_owned()))
         }
     };
+    let description = match &b.description {
+        Some(d) => Some(clean_description(d)?),
+        None => None,
+    };
     state
         .db
         .update_project(
@@ -485,6 +508,7 @@ pub async fn patch_project(
             b.spend_cap_daily,
             avatar_patch.as_ref().map(|a| a.as_deref()),
             color_patch.as_ref().map(|a| a.as_deref()),
+            description.as_deref(),
         )
         .map_err(internal)?;
     let p = state
@@ -616,6 +640,34 @@ pub(crate) async fn project_json(state: &AppState, p: &Project) -> Value {
         "models": p.models,
         "spend_today_usd": today, "spend_cap_usd": p.spend_cap_daily,
         "created_at": p.created_at, "last_active_at": p.last_active_at,
+        "description": p.description,
+        "owner": crate::people::with_presence(state, crate::notify::Sender::user(state, &p.user_id).json()),
+        "model": p.models.get("talking_model").and_then(|m| m.get("id")).cloned().unwrap_or(Value::Null),
+        "machine": machine_profile(state, &p.user_id, bs, since),
+    })
+}
+
+/// The agent's machine as a profile line: state, since when, and what kind of machine.
+fn machine_profile(
+    state: &AppState,
+    user_id: &str,
+    bs: arbos_core::wire::BoxState,
+    since: i64,
+) -> Value {
+    let sb = state.db.user_box(user_id).ok().flatten();
+    let class = match sb.as_ref().map(|s| s.provider.as_str()) {
+        Some("daytona") => "daytona",
+        Some("docker") => "docker",
+        Some(_) => "process",
+        None => "none",
+    };
+    json!({
+        "state": bs,
+        "since": since,
+        "class": class,
+        "snapshot": sb.as_ref().and_then(|s| s.snapshot.clone()),
+        "image_outdated": sb.as_ref().is_some_and(|s| crate::upgrade::image_outdated(state, s)),
+        "always_on": state.cfg.always_on,
     })
 }
 

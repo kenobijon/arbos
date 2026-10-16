@@ -289,6 +289,13 @@ async fn handle_frame(
             if let Principal::Device { id, .. } = principal {
                 let focused = f.header.get("focused_chat").and_then(|v| v.as_str());
                 crate::notify::set_focus(state, id, focused).await;
+                // Presence counts as "seen" (last_seen_at / online), at most one write a minute.
+                let now = arbos_core::ids::now_ms();
+                let mut seen = state.presence_seen.lock().await;
+                if seen.get(id).is_none_or(|t| now - t >= 60_000) {
+                    seen.insert(id.clone(), now);
+                    let _ = state.db.touch_device(id);
+                }
             }
             let out = Frame::new(FrameType::Presence, f.header, f.payload).encode();
             let _ = room.tx.send(RoomBroadcast {

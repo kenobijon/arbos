@@ -279,6 +279,7 @@ async fn main() -> anyhow::Result<()> {
         focus: Arc::new(Mutex::new(HashMap::new())),
         fallback_sent: Arc::new(Mutex::new(HashMap::new())),
         livekit: livekit::from_env(),
+        presence_seen: Arc::new(Mutex::new(HashMap::new())),
     };
     tracing::info!(auth_mode = auth_mode.as_str(), public_url = %state.cfg.public_url, "sign-in");
     if state.cfg.connectors_mock {
@@ -361,6 +362,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/users/search", get(people::users_search))
         .route("/users", get(people::users_directory))
+        .route("/users/{id}", get(people::user_profile))
         .route(
             "/chats",
             get(people::chats_list).post(people::chats_create_group),

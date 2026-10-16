@@ -775,6 +775,7 @@ mod tests {
             focus: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             fallback_sent: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             livekit: None,
+            presence_seen: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -812,6 +813,7 @@ mod tests {
             workspace_state: "stopped".into(),
             avatar: None,
             avatar_color: None,
+            description: String::new(),
         };
         state.db.insert_project(&project).unwrap();
         state

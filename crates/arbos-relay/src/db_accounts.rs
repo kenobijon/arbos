@@ -451,6 +451,17 @@ impl Db {
         })
     }
 
+    /// When any of the user's live devices last talked to the relay (HTTP call or presence).
+    pub fn user_last_seen(&self, user_id: &str) -> Result<Option<i64>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT MAX(last_seen_at) FROM devices WHERE user_id = ?1 AND revoked_at IS NULL",
+                params![user_id],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+        })
+    }
+
     pub fn devices_of_user(&self, user_id: &str) -> Result<Vec<serde_json::Value>> {
         self.with(|c| {
             let mut st = c.prepare(
