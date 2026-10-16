@@ -49,6 +49,7 @@ from livekit.agents.voice.events import (
     AgentStateChangedEvent,
     ConversationItemAddedEvent,
     MetricsCollectedEvent,
+    SpeechCreatedEvent,
     UserInputTranscribedEvent,
     UserStateChangedEvent,
 )
@@ -302,13 +303,11 @@ class VoiceCall:
             self.event("system", text=line)
             await self.wait_for_silence()
             self.session.say(line, allow_interruptions=True)
-            self.meter.turns_spoken += 1
         else:
             self.event("system", text=f"{self.agent_name} joined the call")
             self.session.generate_reply(
                 instructions="Greet the person in one short sentence (say hi and ask what they need). No more than twelve words."
             )
-            self.meter.turns_spoken += 1
 
     async def finish(self, reason: str) -> None:
         if self.state.leaving:
@@ -414,6 +413,10 @@ class VoiceCall:
             self.transcript(None, text, truncated=bool(getattr(item, "interrupted", False)))
             self.state.window.append({"from": f"{self.agent_name} (agent)", "text": text})
             self.state.window = self.state.window[-12:]
+
+        @session.on("speech_created")
+        def _speech(ev: SpeechCreatedEvent) -> None:
+            self.meter.turns_spoken += 1
 
         @session.on("metrics_collected")
         def _metrics(ev: MetricsCollectedEvent) -> None:
@@ -608,7 +611,6 @@ class VoiceCall:
             else:
                 instr = f"Answer {label} out loud in one or two short sentences. If the answer needs the computer, files or recent data, use ask_agent instead."
             self.state.pending_ttfa_from = u.ended_at
-            self.meter.turns_spoken += 1
             self.session.generate_reply(user_input=user_input, instructions=instr)
 
     async def kill_word(self, action: str) -> None:
@@ -701,7 +703,6 @@ class VoiceCall:
         label = label_of(speaker) if speaker else "them"
         async with self._speak_lock:
             await self.wait_for_silence()
-            self.meter.turns_spoken += 1
             self.session.generate_reply(
                 instructions=f"Your earlier task for {label} finished. Tell {label} what matters in one or two spoken sentences (the full text is in the chat). Result:\n{text[:3000]}"
             )

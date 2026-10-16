@@ -10,9 +10,10 @@ Script = JSON list of steps, run in order:
                                           answered and gone quiet (TTFA is measured from the end
                                           of our audio to the agent's first audio)
     {"say": "text", "wait": false}        speak and move on at once
-    {"barge": "text", "after_ms": 900}    wait for the agent to start speaking, let it talk for
-                                          `after_ms`, then speak over it; measures how fast the
-                                          agent's audio stops
+    {"barge": "text", "ask": "q", "after_ms": 900}
+                                          say `ask` (something with a long answer), wait for the
+                                          agent to start speaking, let it talk for `after_ms`,
+                                          then speak over it; measures how fast its audio stops
     {"sleep": 2.5}                        say nothing for a while
     {"wait_quiet": 20}                    wait (max s) until the agent has been silent for 1.5 s
     {"hangup": true}                      leave the call (POST /calls/{id}/leave)
@@ -78,9 +79,9 @@ async def tts(text: str, voice: str, cache: Path, api_key: str) -> np.ndarray:
 class Participant:
     def __init__(self, args: argparse.Namespace):
         self.args = args
-        self.room = rtc.Room()
-        self.source = rtc.AudioSource(SAMPLE_RATE, 1)
-        self.track = rtc.LocalAudioTrack.create_audio_track("mic", self.source)
+        self.room: rtc.Room | None = None
+        self.source: rtc.AudioSource | None = None
+        self.track: rtc.LocalAudioTrack | None = None
         self.out = Path(args.out)
         self.out.mkdir(parents=True, exist_ok=True)
         self.events = open(self.out / "events.jsonl", "a")
@@ -166,13 +167,19 @@ class Participant:
         pcm = await tts(text, self.args.voice, Path(self.args.cache), os.environ["OPENAI_API_KEY"])
         self.event("say", text=text, seconds=round(len(pcm) / SAMPLE_RATE, 2))
         t_start = self.now()
-        for i in range(0, len(pcm), FRAME_SAMPLES):
+        start = time.monotonic()
+        for n, i in enumerate(range(0, len(pcm), FRAME_SAMPLES)):
             chunk = pcm[i : i + FRAME_SAMPLES]
             if len(chunk) < FRAME_SAMPLES:
                 chunk = np.concatenate([chunk, np.zeros(FRAME_SAMPLES - len(chunk), dtype="<i2")])
             frame = rtc.AudioFrame(data=chunk.tobytes(), sample_rate=SAMPLE_RATE, num_channels=1, samples_per_channel=FRAME_SAMPLES)
             await self.source.capture_frame(frame)
             self.mix.append((self.now(), chunk.copy(), "me"))
+            # Real-time pacing: a microphone delivers 20 ms every 20 ms.
+            due = start + (n + 1) * FRAME_MS / 1000
+            delay = due - time.monotonic()
+            if delay > 0:
+                await asyncio.sleep(delay)
         self.event("said", seconds=round(self.now() - t_start, 2))
         if record_end:
             self.our_speech_ended_at = self.now()
@@ -196,7 +203,9 @@ class Participant:
                 return
             await asyncio.sleep(0.05)
 
-    async def barge(self, text: str, after_ms: int) -> None:
+    async def barge(self, text: str, after_ms: int, ask: str | None = None) -> None:
+        if ask:
+            await self.say(ask)
         deadline = time.monotonic() + 30
         while not self.agent_speaking and time.monotonic() < deadline:
             await asyncio.sleep(0.01)
@@ -223,6 +232,10 @@ class Participant:
 
     async def run(self) -> None:
         a = self.args
+        # LiveKit objects bind to the running loop: create them here, not in __init__.
+        self.room = rtc.Room()
+        self.source = rtc.AudioSource(SAMPLE_RATE, 1)
+        self.track = rtc.LocalAudioTrack.create_audio_track("mic", self.source)
         async with aiohttp.ClientSession() as http:
             self.call = await self.start_call(http)
             self.room.on("track_subscribed", self.on_track)
@@ -231,6 +244,7 @@ class Participant:
             await self.room.connect(self.call["livekit_url"], self.call["token"], options=rtc.RoomOptions(auto_subscribe=True))
             self.event("connected", room=self.room.name, identity=self.room.local_participant.identity)
             await self.room.local_participant.publish_track(self.track, rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE))
+            self.event("published")
             if a.wait_agent:
                 deadline = time.monotonic() + 20
                 while time.monotonic() < deadline and not any(p.identity.startswith("a_") for p in self.room.remote_participants.values()):
@@ -250,7 +264,7 @@ class Participant:
                     if step.get("wait", True):
                         await self.wait_agent_turn(step.get("max", 25.0))
                 elif "barge" in step:
-                    await self.barge(step["barge"], int(step.get("after_ms", 900)))
+                    await self.barge(step["barge"], int(step.get("after_ms", 900)), ask=step.get("ask"))
                     await self.wait_agent_turn(step.get("max", 25.0))
                 elif "sleep" in step:
                     await asyncio.sleep(float(step["sleep"]))
