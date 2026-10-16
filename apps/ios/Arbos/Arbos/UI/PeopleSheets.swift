@@ -598,9 +598,11 @@ struct MembersSheet: View {
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
     let chatId: String
+    @State private var showAddPerson = false
     @State private var showAddAgent = false
     @State private var confirmDelete = false
     @State private var confirmLeave = false
+    @State private var detent: PresentationDetent = .medium
 
     private var chat: PeopleChat? { model.peopleChat(chatId) }
     private var myProjects: [Project] { model.projects.filter { !$0.shared } }
@@ -627,11 +629,12 @@ struct MembersSheet: View {
                                 }
                             }
                         }
-                        // Push (not a nested sheet): a sheet-in-sheet often fails to present on iOS.
-                        NavigationLink {
-                            PersonPicker(excludeIds: memberIds) { person in
-                                model.addPerson(chatId: chatId, handle: person.handle)
-                            }
+                        // Push via navigationDestination (not NavigationLink / nested sheet):
+                        // List NavigationLinks are flaky in a medium detent sheet, and dismiss()
+                        // from a pushed picker can close Members instead of popping.
+                        Button {
+                            detent = .large
+                            showAddPerson = true
                         } label: {
                             Label("Add person", systemImage: "plus.circle").foregroundStyle(theme.text)
                         }
@@ -683,6 +686,12 @@ struct MembersSheet: View {
             .navigationTitle("Members")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
+            .navigationDestination(isPresented: $showAddPerson) {
+                PersonPicker(excludeIds: memberIds) { person in
+                    model.addPerson(chatId: chatId, handle: person.handle)
+                    showAddPerson = false
+                }
+            }
             .sheet(isPresented: $showAddAgent) {
                 AgentPicker(projects: myProjects) { p in
                     model.addAgent(chatId: chatId, projectId: p.id)
@@ -696,16 +705,15 @@ struct MembersSheet: View {
                 Button("Delete chat", role: .destructive) { model.deletePeopleChat(chatId); dismiss() }
             } message: { Text("Messages, files and the sync log are removed for every member.") }
         }
-        .presentationDetents([.medium, .large])
+        .presentationDetents([.medium, .large], selection: $detent)
     }
 }
 
 /// Pick a person (directory + GitHub search) who is not already in the chat.
-/// Pushed onto Members (same pattern as New agent / New group on New Message).
+/// Pushed onto Members via navigationDestination (same idea as New agent → look).
 struct PersonPicker: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
-    @Environment(\.dismiss) private var dismiss
     let excludeIds: Set<String>
     let onPick: (Person) -> Void
     @State private var query = ""
@@ -747,7 +755,6 @@ struct PersonPicker: View {
                 ForEach(people) { p in
                     Button {
                         onPick(p)
-                        dismiss()
                     } label: {
                         PersonRow(person: p)
                     }
@@ -761,7 +768,6 @@ struct PersonPicker: View {
                     if trimmed.count >= 2, !searching {
                         Button {
                             onPick(Person(id: "github:\(trimmed.lowercased())", handle: trimmed, avatarUrl: nil, name: nil, status: "github"))
-                            dismiss()
                         } label: {
                             Text("Invite @\(trimmed)")
                                 .font(.system(size: Theme.small, weight: .semibold))
