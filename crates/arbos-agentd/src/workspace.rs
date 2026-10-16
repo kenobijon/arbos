@@ -113,6 +113,7 @@ impl Supervisor {
             if let Some(owner) = project.get("user_id").and_then(Value::as_str) {
                 w.agent.people.set_project_owner(owner);
             }
+            w.agent.note_project_chat_policy(project);
             // Settings and chats change without a restart.
             if let Err(e) = w.agent.settings_from_relay(project, chats).await {
                 tracing::warn!(project = %project_id, error = %e, "settings from relay");
@@ -216,6 +217,7 @@ impl Supervisor {
         if let Some(owner) = project.get("user_id").and_then(Value::as_str) {
             agent.people.set_project_owner(owner);
         }
+        agent.note_project_chat_policy(project);
         if let Err(e) = agent.settings_from_relay(project, chats).await {
             tracing::warn!(project = %project_id, error = %e, "settings from relay");
         }
