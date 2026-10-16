@@ -360,6 +360,17 @@ pub enum ClientCommand {
         project_id: Id,
         slug: String,
     },
+    /// Agent page: `PATCH /projects/{id} {description}` (API §9; `""` clears).
+    SetDescription {
+        project_id: Id,
+        description: String,
+    },
+    /// Profile pages: `PUT /chats/{id}/settings {muted}` for a people chat (syncs
+    /// across devices); projects keep the local mute list.
+    SetMuted {
+        space_id: Id,
+        muted: bool,
+    },
     /// Avatar picker colour row: `PATCH /projects/{id} {avatar_color: id}` (mirrored into the doc).
     SetAvatarColor {
         project_id: Id,

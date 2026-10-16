@@ -119,7 +119,7 @@ pub(super) fn page(
         &person.display_name(),
         &status,
         if online {
-            theme.online
+            super::presence_blue()
         } else {
             theme.text_muted
         },

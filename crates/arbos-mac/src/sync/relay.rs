@@ -889,6 +889,10 @@ fn people_space_from(shared: &Shared, v: &Value) -> Option<(Project, Chat)> {
         description: None,
         owner_person: None,
         machine_info: None,
+        muted: v
+            .pointer("/me/muted")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     };
     let previous_unread = shared
         .chats
@@ -1251,6 +1255,7 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
                 .and_then(|m| {
                     serde_json::from_value::<crate::model::ProjectMachine>(m.clone()).ok()
                 }),
+            muted: previous.as_ref().is_some_and(|x| x.muted),
         });
         let chats: Vec<Chat> = detail
             .get("chats")
@@ -3320,6 +3325,58 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     if !format!("{err:#}").contains("HTTP 400") {
                         shared.notice(format!("Avatar colour: {err:#}"));
                     }
+                }
+            });
+        }
+        ClientCommand::SetDescription {
+            project_id,
+            description,
+        } => {
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
+                    p.description = Some(description.clone()).filter(|d| !d.trim().is_empty());
+                }
+                let snapshot = projects.clone();
+                drop(projects);
+                let _ = shared.events.send(SyncEvent::Projects(snapshot));
+            }
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared
+                    .patch_json(
+                        &format!("/projects/{project_id}"),
+                        json!({ "description": description }),
+                    )
+                    .await
+                {
+                    shared.notice(format!("Description: {err:#}"));
+                }
+            });
+        }
+        ClientCommand::SetMuted { space_id, muted } => {
+            if !shared.is_people(&space_id) {
+                return;
+            }
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == space_id) {
+                    p.muted = muted;
+                }
+                let snapshot = projects.clone();
+                drop(projects);
+                let _ = shared.events.send(SyncEvent::Projects(snapshot));
+            }
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared
+                    .put_json(
+                        &format!("/chats/{space_id}/settings"),
+                        json!({ "muted": muted }),
+                    )
+                    .await
+                {
+                    shared.notice(format!("Mute: {err:#}"));
                 }
             });
         }

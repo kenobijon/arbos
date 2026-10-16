@@ -616,6 +616,27 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             }
             emit_projects(shared);
         }
+        ClientCommand::SetDescription {
+            project_id,
+            description,
+        } => {
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
+                    p.description = Some(description).filter(|d| !d.trim().is_empty());
+                }
+            }
+            emit_projects(shared);
+        }
+        ClientCommand::SetMuted { space_id, muted } => {
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == space_id) {
+                    p.muted = muted;
+                }
+            }
+            emit_projects(shared);
+        }
         ClientCommand::MachineRestart => {
             set_machine(shared, MachineState::Stopped, Some("Restarting…"), None);
             let shared = shared.clone();
@@ -664,6 +685,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 description: None,
                 owner_person: None,
                 machine_info: None,
+                muted: false,
             });
             let chat_id = new_id();
             shared.chats.lock().unwrap().push(Chat {
@@ -2806,6 +2828,7 @@ fn seed_projects() -> Vec<Project> {
             description: None,
             owner_person: None,
             machine_info: None,
+            muted: false,
         },
         Project {
             id: PROJECT_COMMS.into(),
@@ -2830,6 +2853,7 @@ fn seed_projects() -> Vec<Project> {
             description: None,
             owner_person: None,
             machine_info: None,
+            muted: false,
         },
         Project {
             id: PROJECT_ARBOS.into(),
@@ -2854,6 +2878,7 @@ fn seed_projects() -> Vec<Project> {
             description: None,
             owner_person: None,
             machine_info: None,
+            muted: false,
         },
     ]
 }
@@ -3746,6 +3771,7 @@ fn people_space(id: &str, other: Person, agents: Vec<AgentMember>) -> Project {
         description: None,
         owner_person: None,
         machine_info: None,
+        muted: false,
     }
 }
 
@@ -3777,6 +3803,7 @@ fn seed_people_projects() -> Vec<Project> {
             description: None,
             owner_person: None,
             machine_info: None,
+            muted: false,
         },
     ]
 }

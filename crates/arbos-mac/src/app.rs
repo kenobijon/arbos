@@ -67,6 +67,39 @@ fn save_muted(muted: &HashSet<Id>) {
     }
 }
 
+/// Telegram wording, shared with the iPhone: "last seen 3 min ago" (< 1 h),
+/// "last seen today at 14:05" (same day), "last seen N days ago", and
+/// "last seen recently" when the stamp is older than a month.
+pub fn last_seen_text(at_ms: u64) -> String {
+    use chrono::{Datelike, Local, TimeZone};
+    let now = now_ms();
+    let ago = now.saturating_sub(at_ms);
+    if ago < 60_000 {
+        return "last seen just now".into();
+    }
+    if ago < 3_600_000 {
+        return format!("last seen {} min ago", ago / 60_000);
+    }
+    let (Some(t), Some(n)) = (
+        Local.timestamp_millis_opt(at_ms as i64).single(),
+        Local.timestamp_millis_opt(now as i64).single(),
+    ) else {
+        return "last seen recently".into();
+    };
+    if t.date_naive() == n.date_naive() {
+        return format!("last seen today at {}", t.format("%H:%M"));
+    }
+    let days = (n.date_naive() - t.date_naive()).num_days().max(1);
+    if days == 1 {
+        return format!("last seen yesterday at {}", t.format("%H:%M"));
+    }
+    if days <= 30 {
+        return format!("last seen {days} days ago");
+    }
+    let _ = t.year();
+    "last seen recently".into()
+}
+
 /// "3 min ago", "2 h ago", "yesterday", "5 days ago".
 pub fn ago_text(ms: u64) -> String {
     let s = ms / 1000;
@@ -245,6 +278,8 @@ pub struct AppState {
     pub profile_picker_open: bool,
     /// Agent page / user page "more" menu is open.
     pub profile_more_open: bool,
+    /// Agent page: the owner is editing the description inline.
+    pub profile_editing_description: bool,
     /// Spaces whose notifications are muted (`<config>/muted.json`).
     pub muted: HashSet<Id>,
     /// Last presence frame seen per handle (ms): "online" while fresh.
@@ -446,6 +481,7 @@ impl AppState {
             profile_tab: 0,
             profile_picker_open: false,
             profile_more_open: false,
+            profile_editing_description: false,
             muted: load_muted(),
             presence_seen: HashMap::new(),
             notify_prompt_answered: false,
@@ -1841,6 +1877,26 @@ impl AppState {
         self.profile_tab = 0;
         self.profile_picker_open = false;
         self.profile_more_open = false;
+        self.profile_editing_description = false;
+        cx.notify();
+    }
+
+    pub fn set_profile_editing_description(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.profile_editing_description = on;
+        cx.notify();
+    }
+
+    /// Agent page: save the description (`""` clears) — optimistic, then PATCH.
+    pub fn set_description(&mut self, project_id: Id, description: String, cx: &mut Context<Self>) {
+        let description = description.trim().chars().take(500).collect::<String>();
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
+            p.description = Some(description.clone()).filter(|d| !d.is_empty());
+        }
+        self.profile_editing_description = false;
+        self.command(ClientCommand::SetDescription {
+            project_id,
+            description,
+        });
         cx.notify();
     }
 
@@ -1870,15 +1926,30 @@ impl AppState {
         cx.notify();
     }
 
+    /// Muted: the relay's `me.muted` for a people chat (synced across devices),
+    /// else the local list (projects have no relay-side setting yet).
     pub fn is_muted(&self, space_id: &str) -> bool {
-        self.muted.contains(space_id)
+        self.project(space_id).is_some_and(|p| p.muted) || self.muted.contains(space_id)
     }
 
     pub fn toggle_mute(&mut self, space_id: Id, cx: &mut Context<Self>) {
-        if !self.muted.remove(&space_id) {
-            self.muted.insert(space_id);
+        let now_muted = !self.is_muted(&space_id);
+        let people = self.project(&space_id).is_some_and(|p| p.is_people());
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == space_id) {
+            p.muted = now_muted;
+        }
+        if now_muted {
+            self.muted.insert(space_id.clone());
+        } else {
+            self.muted.remove(&space_id);
         }
         save_muted(&self.muted);
+        if people {
+            self.command(ClientCommand::SetMuted {
+                space_id,
+                muted: now_muted,
+            });
+        }
         cx.notify();
     }
 
@@ -1927,12 +1998,11 @@ impl AppState {
         if self.is_online(person) {
             return "online".into();
         }
-        let now = now_ms();
         let seen_frame = self.presence_seen.get(&person.handle).copied();
         let relay = person.last_seen_at.filter(|t| *t > 0).map(|t| t as u64);
         match seen_frame.into_iter().chain(relay).max() {
-            Some(at) => format!("last seen {}", ago_text(now.saturating_sub(at))),
-            None => "last seen a long time ago".into(),
+            Some(at) => last_seen_text(at),
+            None => "last seen recently".into(),
         }
     }
 
