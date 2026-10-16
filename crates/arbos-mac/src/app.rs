@@ -33,6 +33,8 @@ const NOTIFY_TICK_MS: u64 = 5_000;
 const RING_TIMEOUT_MS: u64 = 45_000;
 /// An outgoing call nobody answers is hung up after this long.
 const RINGBACK_TIMEOUT_MS: u64 = 60_000;
+/// How long a `call_missed` push waits for its chat to load before it is dropped.
+const MISSED_PENDING_MS: u64 = 120_000;
 /// Presence frames come every 15 s; three missed = offline (relay §7c uses 45 s too).
 const PRESENCE_ONLINE_MS: u64 = 45_000;
 
@@ -319,6 +321,11 @@ pub struct AppState {
     ringback_tone: Option<TonePlayer>,
     /// `call_missed` ids whose "Missed call from …" line this device wrote.
     missed_written: HashSet<String>,
+    /// `call_missed` pushes that arrived before their chat was loaded (with when).
+    missed_pending: Vec<(CallMissed, u64)>,
+    /// Call ids whose "Call ended" line this device wrote (the leave answer and
+    /// the `call_ended` push can both name this device as the writer).
+    ended_written: HashSet<String>,
     /// The call this device is in.
     pub my_call: Option<ActiveCall>,
     commands: mpsc::UnboundedSender<ClientCommand>,
@@ -522,6 +529,8 @@ impl AppState {
             ring_tone: None,
             ringback_tone: None,
             missed_written: HashSet::new(),
+            missed_pending: Vec::new(),
+            ended_written: HashSet::new(),
             my_call: None,
             _pump: pump,
             _notify_tick: notify_tick,
@@ -3274,6 +3283,15 @@ impl AppState {
     /// Every notify tick: stop ringing after `RING_TIMEOUT_MS`, give up on an
     /// unanswered outgoing call after `RINGBACK_TIMEOUT_MS`.
     fn tick_calls(&mut self, cx: &mut Context<Self>) {
+        if !self.missed_pending.is_empty() {
+            let now = now_ms();
+            let pending = std::mem::take(&mut self.missed_pending);
+            for (missed, since) in pending {
+                if now.saturating_sub(since) <= MISSED_PENDING_MS {
+                    self.on_call_missed(missed, cx);
+                }
+            }
+        }
         if let Some(since) = self.incoming_since {
             if now_ms().saturating_sub(since) > RING_TIMEOUT_MS {
                 self.decline_incoming(cx);
@@ -3478,14 +3496,18 @@ impl AppState {
             self.my_call = None;
             let _ = self.call_commands.send(CallCmd::Leave);
         }
-        // Exactly one device writes the end line (contract §1).
+        // Exactly one device writes the end line (contract §1) — and once: the
+        // leave answer and the `call_ended` push may both name this device.
         if ended.writer_is_me {
             if let Some(chat) = chat_id {
-                self.command(ClientCommand::SystemLine {
-                    chat_id: chat,
-                    text: call_ended_line(ended.duration_s),
-                    call_id: Some(ended.call_id.clone()),
-                });
+                let already = self.chat_has_call_line(&chat, &ended.call_id, "Call ended");
+                if !already && self.ended_written.insert(ended.call_id.clone()) {
+                    self.command(ClientCommand::SystemLine {
+                        chat_id: chat,
+                        text: call_ended_line(ended.duration_s),
+                        call_id: Some(ended.call_id.clone()),
+                    });
+                }
             }
         }
         if self.incoming_call.is_none() {
@@ -3493,6 +3515,20 @@ impl AppState {
         }
         self.sync_tones();
         cx.notify();
+    }
+
+    /// A system line for `call_id` starting with `prefix` is already in the chat.
+    fn chat_has_call_line(&self, chat_id: &str, call_id: &str, prefix: &str) -> bool {
+        self.messages
+            .get(chat_id)
+            .map(|list| {
+                list.iter().any(|m| {
+                    m.role == Role::System
+                        && m.call_id.as_deref() == Some(call_id)
+                        && m.plain_text().starts_with(prefix)
+                })
+            })
+            .unwrap_or(false)
     }
 
     /// `call_missed` (contract §8): the system line once per call, and a
@@ -3513,17 +3549,18 @@ impl AppState {
             self.incoming_since = None;
             notify::withdraw_call(&missed.call_id);
         }
-        let already = self
-            .messages
-            .get(&missed.chat_id)
-            .map(|list| {
-                list.iter().any(|m| {
-                    m.role == Role::System
-                        && m.call_id.as_deref() == Some(missed.call_id.as_str())
-                        && m.plain_text().starts_with("Missed call")
-                })
-            })
-            .unwrap_or(false);
+        if !self.messages.contains_key(&missed.chat_id) {
+            // The push beat the chat's doc (app just opened): write once it is here.
+            if !self
+                .missed_pending
+                .iter()
+                .any(|(m, _)| m.call_id == missed.call_id)
+            {
+                self.missed_pending.push((missed, now_ms()));
+            }
+            return;
+        }
+        let already = self.chat_has_call_line(&missed.chat_id, &missed.call_id, "Missed call");
         if !already && self.missed_written.insert(missed.call_id.clone()) {
             self.command(ClientCommand::SystemLine {
                 chat_id: missed.chat_id.clone(),
