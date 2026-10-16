@@ -10,6 +10,7 @@ use gpui::{
     SharedString,
 };
 
+use crate::app::ProfilePage;
 use crate::model::{Chat, Project};
 use crate::ui::avatars;
 use crate::ui::composer::{Composer, Picker};
@@ -44,8 +45,31 @@ pub fn render(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
         .pr(px(10.0))
         .rounded(px(9.0))
         .min_w_0();
-    if let Some(person) = space.person().filter(|_| is_people) {
+    if let Some(person) = space
+        .person()
+        .filter(|_| is_people && !space.is_people_group())
+    {
         let image = state.avatar(&person.avatar_url);
+        let handle = person.handle.clone();
+        let sid = space.id.clone();
+        title = title
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.surface_2))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.menu_open = false;
+                this.members_open = false;
+                this.add_agent_open = false;
+                let (handle, sid) = (handle.clone(), sid.clone());
+                this.state.update(cx, |s, cx| {
+                    s.open_profile(
+                        ProfilePage::User {
+                            handle,
+                            space_id: Some(sid),
+                        },
+                        cx,
+                    )
+                });
+            }));
         let sub = if space.pending {
             Some("Invited · opens when they sign in".to_string())
         } else if !space.agents.is_empty() {
@@ -83,6 +107,59 @@ pub fn render(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
                         )
                     }),
             );
+    } else if space.is_people_group() {
+        // A people group: stacked avatars, name, member count → group page.
+        let stack: Vec<(
+            crate::model::Person,
+            Option<std::sync::Arc<gpui::RenderImage>>,
+        )> = space
+            .people
+            .iter()
+            .take(3)
+            .map(|p| (p.clone(), state.avatar(&p.avatar_url)))
+            .collect();
+        let sid = space.id.clone();
+        let members = space.people.len() + 1;
+        title = title
+            .child(people::avatar_stack(&stack, AVATAR_HEADER * 0.8, 3, &theme))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .text_size(px(TEXT_BODY))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.text)
+                            .truncate()
+                            .child(space.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(TEXT_TINY - 1.0))
+                            .text_color(theme.text_muted)
+                            .truncate()
+                            .child(format!(
+                                "{members} members{}",
+                                match space.agents.len() {
+                                    0 => String::new(),
+                                    n => format!(" · {n} agent{}", if n == 1 { "" } else { "s" }),
+                                }
+                            )),
+                    ),
+            )
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.surface_2))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.menu_open = false;
+                this.members_open = false;
+                this.add_agent_open = false;
+                let sid = sid.clone();
+                this.state.update(cx, |s, cx| {
+                    s.open_profile(ProfilePage::Group { space_id: sid }, cx)
+                });
+            }));
     } else {
         let slug = state.avatar_slug(space);
         let avatar_state = state.avatar_state(&space.id);
@@ -163,18 +240,25 @@ pub fn render(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
         if avatar_state != avatars::AvatarState::Idle {
             PulseClock::request(cx);
         }
-        if !space.is_guest() {
-            title = title
-                .cursor_pointer()
-                .hover(|s| s.bg(theme.surface_2))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.menu_open = false;
-                    this.members_open = false;
-                    this.add_agent_open = false;
-                    let p = pid.clone();
-                    this.state.update(cx, |s, cx| s.toggle_avatar_picker(p, cx));
-                }));
-        }
+        // A group chat or a project with other people: the group page; my
+        // own solo agent: its profile (with the tree + colour picker).
+        let groupish = space.is_groupish();
+        title = title
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.surface_2))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.menu_open = false;
+                this.members_open = false;
+                this.add_agent_open = false;
+                let p = pid.clone();
+                this.state.update(cx, |s, cx| {
+                    if groupish {
+                        s.open_profile(ProfilePage::Group { space_id: p }, cx);
+                    } else {
+                        s.toggle_avatar_picker(p, cx);
+                    }
+                });
+            }));
     }
 
     // ----- right: icon buttons --------------------------------------------------

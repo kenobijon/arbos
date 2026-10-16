@@ -376,20 +376,42 @@ impl Transcript {
                         .items_start()
                         .gap(px(3.0))
                         .py(px(6.0))
-                        .child(
+                        .child({
+                            // Click the caption → the person's profile page.
+                            let open_state = self.state.clone();
+                            let handle = person.handle.clone();
+                            let sid = self.chat_id.as_ref().and_then(|c| {
+                                self.state.read(cx).chats.iter().find_map(|(pid, tabs)| {
+                                    tabs.iter().any(|t| &t.id == c).then(|| pid.clone())
+                                })
+                            });
                             div()
+                                .id(SharedString::from(format!("{}#who", row.id)))
                                 .flex()
                                 .items_center()
                                 .gap(px(6.0))
                                 .pl(px(2.0))
+                                .cursor_pointer()
                                 .child(people::avatar(image, &person, 20.0, &theme))
                                 .child(
                                     div()
                                         .text_size(px(TEXT_TINY))
                                         .text_color(theme.text_muted)
                                         .child(format!("@{}", person.handle)),
-                                ),
-                        )
+                                )
+                                .on_click(move |_, _, cx| {
+                                    let (handle, sid) = (handle.clone(), sid.clone());
+                                    open_state.update(cx, |s, cx| {
+                                        s.open_profile(
+                                            crate::app::ProfilePage::User {
+                                                handle,
+                                                space_id: sid,
+                                            },
+                                            cx,
+                                        )
+                                    });
+                                })
+                        })
                         .child(
                             bubble
                                 .bg(theme.bubble_assistant)
@@ -682,6 +704,12 @@ impl Transcript {
                     .or_else(|| seed.strip_prefix("project:"))
                     .map(|pid| state.avatar_state(pid))
                     .unwrap_or(crate::ui::avatars::AvatarState::Idle);
+                // Click the chip → the agent's profile page.
+                let agent_pid = seed
+                    .strip_prefix("agent:")
+                    .or_else(|| seed.strip_prefix("project:"))
+                    .map(str::to_string);
+                let open_state = self.state.clone();
                 let chip = groups::sender_chip_with(
                     &name,
                     icon.as_deref(),
@@ -690,7 +718,20 @@ impl Transcript {
                     avatar_color.as_deref(),
                     avatar_state,
                     &theme,
-                );
+                )
+                .id(SharedString::from(format!("{}#chip", row.id)))
+                .when(agent_pid.is_some(), |el| {
+                    el.cursor_pointer().on_click(move |_, _, cx| {
+                        if let Some(pid) = agent_pid.clone() {
+                            open_state.update(cx, |s, cx| {
+                                s.open_profile(
+                                    crate::app::ProfilePage::Agent { project_id: pid },
+                                    cx,
+                                )
+                            });
+                        }
+                    })
+                });
                 match note {
                     Some(note) => chip
                         .child(
@@ -891,6 +932,8 @@ pub fn build_rows(
                         avatar_url: message.sender_avatar.clone().unwrap_or_default(),
                         status: "member".into(),
                         role: String::new(),
+                        last_seen_at: None,
+                        online: false,
                     })
                 } else {
                     None

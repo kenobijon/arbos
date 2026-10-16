@@ -8,9 +8,10 @@ pub use arbos_core::widget::{ChoiceOption, FieldKind, FormField, QuestionState, 
 
 pub type Id = String;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BoxState {
+    #[default]
     Awake,
     Waking,
     HibernatedLight,
@@ -28,7 +29,7 @@ impl BoxState {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Project {
     pub id: Id,
     pub name: String,
@@ -69,6 +70,32 @@ pub struct Project {
     /// `None` = mono.
     #[serde(default)]
     pub avatar_color: Option<String>,
+    /// API §9: the agent's one-paragraph description (≤ 500 chars).
+    #[serde(default)]
+    pub description: Option<String>,
+    /// API §9: the owner with presence (`owner: sender{}`), when the relay sends it.
+    #[serde(default)]
+    pub owner_person: Option<Person>,
+    /// API §9: `machine {state, class, snapshot, always_on, …}` of the agent's box.
+    #[serde(default)]
+    pub machine_info: Option<ProjectMachine>,
+}
+
+/// API §9 `project.machine`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProjectMachine {
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub since: Option<i64>,
+    #[serde(default)]
+    pub class: String,
+    #[serde(default)]
+    pub snapshot: Option<String>,
+    #[serde(default)]
+    pub image_outdated: bool,
+    #[serde(default)]
+    pub always_on: bool,
 }
 
 impl Project {
@@ -89,6 +116,16 @@ impl Project {
 
     pub fn is_people(&self) -> bool {
         matches!(self.kind, SpaceKind::Dm | SpaceKind::Group)
+    }
+
+    /// A people group chat (several humans, no project).
+    pub fn is_people_group(&self) -> bool {
+        self.kind == SpaceKind::Group
+    }
+
+    /// Shown as a group page: a people group or a project with other humans in it.
+    pub fn is_groupish(&self) -> bool {
+        self.is_people_group() || (!self.is_people() && (self.shared || !self.people.is_empty()))
     }
 
     /// The other person of a DM.
@@ -136,6 +173,12 @@ pub struct Person {
     /// Project members: `owner` or `member`.
     #[serde(default)]
     pub role: String,
+    /// API §9: last activity (ms, minute-floored); `None` = never.
+    #[serde(default)]
+    pub last_seen_at: Option<i64>,
+    /// API §9: seen within the last 90 s.
+    #[serde(default)]
+    pub online: bool,
 }
 
 impl Person {
@@ -181,12 +224,21 @@ pub struct AgentMember {
     pub avatar: Option<String>,
     #[serde(default)]
     pub avatar_color: Option<String>,
+    /// API §9: the agent's description and talking model.
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    /// API §9: `project.owner` with presence.
+    #[serde(default)]
+    pub owner: Option<Person>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Effort {
     Low,
+    #[default]
     Medium,
     High,
 }

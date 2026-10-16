@@ -398,6 +398,8 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
                     avatar_url: a.avatar_url.clone(),
                     status: String::new(),
                     role: String::new(),
+                    last_seen_at: None,
+                    online: false,
                 };
                 let img = s.avatar(&a.avatar_url);
                 (who, Some(person), img)

@@ -24,6 +24,63 @@ use crate::ui::notify::{self, Gate, Notifier, NotifyEvent, NotifyKind};
 
 /// How often held notification batches are re-checked.
 const NOTIFY_TICK_MS: u64 = 5_000;
+/// Presence frames come every 15 s; three missed = offline (relay §7c uses 45 s too).
+const PRESENCE_ONLINE_MS: u64 = 45_000;
+
+/// Which profile sheet is open.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProfilePage {
+    /// A person, by handle; `space_id` = the chat it was opened from.
+    User {
+        handle: String,
+        space_id: Option<Id>,
+    },
+    /// A people group chat or a shared project.
+    Group { space_id: Id },
+    /// An agent (one of my projects or a shared one).
+    Agent { project_id: Id },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CallTarget {
+    User(String),
+    Agent(Id),
+}
+
+fn muted_path() -> PathBuf {
+    crate::sync::credentials::config_dir().join("muted.json")
+}
+
+fn load_muted() -> HashSet<Id> {
+    std::fs::read_to_string(muted_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_muted(muted: &HashSet<Id>) {
+    let dir = crate::sync::credentials::config_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(json) = serde_json::to_string(&muted.iter().collect::<Vec<_>>()) {
+        let _ = std::fs::write(muted_path(), json);
+    }
+}
+
+/// "3 min ago", "2 h ago", "yesterday", "5 days ago".
+pub fn ago_text(ms: u64) -> String {
+    let s = ms / 1000;
+    if s < 60 {
+        "just now".into()
+    } else if s < 3_600 {
+        format!("{} min ago", s / 60)
+    } else if s < 86_400 {
+        format!("{} h ago", s / 3_600)
+    } else if s < 2 * 86_400 {
+        "yesterday".into()
+    } else {
+        format!("{} days ago", s / 86_400)
+    }
+}
 /// A chat's first snapshot only announces messages younger than this.
 const SNAPSHOT_FRESH_MS: u64 = 30_000;
 use crate::update::{self, UpdateCommand, UpdateEvent, UpdatePhase, UpdateState};
@@ -180,6 +237,17 @@ pub struct AppState {
     pub window_active: bool,
     /// One-time explainer before the OS asks for notification permission.
     pub notify_prompt: bool,
+    /// Telegram-style profile sheet (user / group / agent) and its tab.
+    pub profile: Option<ProfilePage>,
+    pub profile_tab: usize,
+    /// Agent page: the Appearance (tree + colour) section is unfolded.
+    pub profile_picker_open: bool,
+    /// Agent page / user page "more" menu is open.
+    pub profile_more_open: bool,
+    /// Spaces whose notifications are muted (`<config>/muted.json`).
+    pub muted: HashSet<Id>,
+    /// Last presence frame seen per handle (ms): "online" while fresh.
+    pub presence_seen: HashMap<String, u64>,
     /// Answered this session: never re-arm it on a later sync, even when the
     /// marker file could not be written.
     notify_prompt_answered: bool,
@@ -311,6 +379,12 @@ impl AppState {
             notifier: Notifier::new(),
             window_active: true,
             notify_prompt: false,
+            profile: None,
+            profile_tab: 0,
+            profile_picker_open: false,
+            profile_more_open: false,
+            muted: load_muted(),
+            presence_seen: HashMap::new(),
             notify_prompt_answered: false,
             focus_sent: None,
             channels: ChannelsView::default(),
@@ -518,6 +592,12 @@ impl AppState {
                 self.people_error = Some(err);
                 self.awaiting_dm = None;
                 cx.notify();
+            }
+            SyncEvent::Presence { handle } => {
+                self.presence_seen.insert(handle, now_ms());
+                if self.profile.is_some() {
+                    cx.notify();
+                }
             }
             SyncEvent::Typing {
                 chat_id,
@@ -1645,12 +1725,120 @@ impl AppState {
         cx.notify();
     }
 
+    /// The agent's profile page (which holds the tree + colour picker).
     pub fn toggle_avatar_picker(&mut self, project_id: Id, cx: &mut Context<Self>) {
-        self.avatar_picker = match &self.avatar_picker {
-            Some(id) if *id == project_id => None,
-            _ => Some(project_id),
+        match &self.profile {
+            Some(ProfilePage::Agent { project_id: open }) if *open == project_id => {
+                self.close_profile(cx);
+            }
+            _ => self.open_profile(ProfilePage::Agent { project_id }, cx),
+        }
+    }
+
+    // ----- profile pages ------------------------------------------------------
+
+    pub fn open_profile(&mut self, page: ProfilePage, cx: &mut Context<Self>) {
+        self.avatar_picker = match &page {
+            ProfilePage::Agent { project_id } => Some(project_id.clone()),
+            _ => None,
         };
+        self.profile = Some(page);
+        self.profile_tab = 0;
+        self.profile_picker_open = false;
+        self.profile_more_open = false;
         cx.notify();
+    }
+
+    /// Closes the sheet; `true` when one was open.
+    pub fn close_profile(&mut self, cx: &mut Context<Self>) -> bool {
+        self.avatar_picker = None;
+        self.profile_more_open = false;
+        let was = self.profile.take().is_some();
+        if was {
+            cx.notify();
+        }
+        was
+    }
+
+    pub fn set_profile_tab(&mut self, tab: usize, cx: &mut Context<Self>) {
+        self.profile_tab = tab;
+        cx.notify();
+    }
+
+    pub fn toggle_profile_picker(&mut self, cx: &mut Context<Self>) {
+        self.profile_picker_open = !self.profile_picker_open;
+        cx.notify();
+    }
+
+    pub fn toggle_profile_more(&mut self, cx: &mut Context<Self>) {
+        self.profile_more_open = !self.profile_more_open;
+        cx.notify();
+    }
+
+    pub fn is_muted(&self, space_id: &str) -> bool {
+        self.muted.contains(space_id)
+    }
+
+    pub fn toggle_mute(&mut self, space_id: Id, cx: &mut Context<Self>) {
+        if !self.muted.remove(&space_id) {
+            self.muted.insert(space_id);
+        }
+        save_muted(&self.muted);
+        cx.notify();
+    }
+
+    /// Calls from a profile page. The LiveKit call commands land with the
+    /// calls workstream; until then this is the "not available" path.
+    pub fn start_call(&mut self, target: CallTarget, video: bool, cx: &mut Context<Self>) {
+        let what = if video { "Video calls" } else { "Calls" };
+        let who = match target {
+            CallTarget::User(handle) => format!("@{handle}"),
+            CallTarget::Agent(project_id) => self
+                .project(&project_id)
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| "this agent".into()),
+        };
+        self.push_notice(format!("{what} with {who} are not available yet."));
+        cx.notify();
+    }
+
+    /// Presence line for a person: "online", "last seen …", "invited".
+    /// The relay's `online` / `last_seen_at` (API §9) first; a presence frame
+    /// seen in a shared room this session can only make it fresher.
+    pub fn presence_text(&self, person: &Person) -> String {
+        if person.status == "invited" {
+            return "invited · not signed in yet".into();
+        }
+        if self.is_online(person) {
+            return "online".into();
+        }
+        let now = now_ms();
+        let seen_frame = self.presence_seen.get(&person.handle).copied();
+        let relay = person.last_seen_at.filter(|t| *t > 0).map(|t| t as u64);
+        match seen_frame.into_iter().chain(relay).max() {
+            Some(at) => format!("last seen {}", ago_text(now.saturating_sub(at))),
+            None => "last seen a long time ago".into(),
+        }
+    }
+
+    /// Online right now: the relay said so, or their device sent a presence
+    /// frame in a room we share within the last 45 s.
+    pub fn is_online(&self, person: &Person) -> bool {
+        person.online
+            || self
+                .presence_seen
+                .get(&person.handle)
+                .is_some_and(|at| now_ms().saturating_sub(*at) < PRESENCE_ONLINE_MS)
+    }
+
+    /// A person by handle, from any space's member list or the directory.
+    pub fn person_by_handle(&self, handle: &str) -> Option<Person> {
+        self.projects
+            .iter()
+            .flat_map(|p| p.people.iter())
+            .chain(self.people_results.iter())
+            .find(|p| p.handle == handle)
+            .cloned()
     }
 
     pub fn machine_restart(&mut self, cx: &mut Context<Self>) {
@@ -1693,7 +1881,9 @@ impl AppState {
         };
         Gate {
             streaming: self.project_is_streaming(project_id),
-            visible: self.window_active && project_shown && chat_shown,
+            // Muted spaces are treated as "already seen": dropped, not queued.
+            visible: (self.window_active && project_shown && chat_shown)
+                || self.muted.contains(project_id),
         }
     }
 

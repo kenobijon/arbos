@@ -16,7 +16,7 @@ pub mod markdown;
 pub mod motion;
 pub mod notify;
 pub mod people;
-pub mod profile;
+pub mod profiles;
 pub mod routines;
 pub mod shell;
 pub mod sidebar;

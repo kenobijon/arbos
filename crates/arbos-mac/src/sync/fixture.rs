@@ -594,6 +594,9 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 owner_handle: None,
                 avatar: None,
                 avatar_color: None,
+                description: None,
+                owner_person: None,
+                machine_info: None,
             });
             let chat_id = new_id();
             shared.chats.lock().unwrap().push(Chat {
@@ -2729,6 +2732,9 @@ fn seed_projects() -> Vec<Project> {
             owner_handle: None,
             avatar: None,
             avatar_color: Some("teal".into()),
+            description: None,
+            owner_person: None,
+            machine_info: None,
         },
         Project {
             id: PROJECT_COMMS.into(),
@@ -2750,6 +2756,9 @@ fn seed_projects() -> Vec<Project> {
             owner_handle: None,
             avatar: None,
             avatar_color: Some("violet".into()),
+            description: None,
+            owner_person: None,
+            machine_info: None,
         },
         Project {
             id: PROJECT_ARBOS.into(),
@@ -2771,6 +2780,9 @@ fn seed_projects() -> Vec<Project> {
             owner_handle: None,
             avatar: None,
             avatar_color: Some("amber".into()),
+            description: None,
+            owner_person: None,
+            machine_info: None,
         },
     ]
 }
@@ -3607,6 +3619,13 @@ fn person(id: &str, handle: &str, name: Option<&str>, status: &str) -> Person {
         avatar_url: format!("fixture://avatar/{handle}"),
         status: status.into(),
         role: "member".into(),
+        // Sam is "online" in the demo; the rest were seen a while ago.
+        last_seen_at: Some(if handle == "sam" {
+            now_ms() as i64
+        } else {
+            now_ms() as i64 - 3 * 3_600_000
+        }),
+        online: handle == "sam",
     }
 }
 
@@ -3650,6 +3669,9 @@ fn people_space(id: &str, other: Person, agents: Vec<AgentMember>) -> Project {
         owner_handle: None,
         avatar: None,
         avatar_color: None,
+        description: None,
+        owner_person: None,
+        machine_info: None,
     }
 }
 
@@ -3678,6 +3700,9 @@ fn seed_people_projects() -> Vec<Project> {
             owner_handle: Some("sam".into()),
             avatar: None,
             avatar_color: Some("cyan".into()),
+            description: None,
+            owner_person: None,
+            machine_info: None,
         },
     ]
 }
@@ -3975,6 +4000,9 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                         reply_policy: ReplyPolicy::Mention,
                         avatar: p.avatar.clone(),
                         avatar_color: p.avatar_color.clone(),
+                        description: None,
+                        model: None,
+                        owner: None,
                     })
             };
             if let Some(agent) = agent {
@@ -4075,6 +4103,9 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                                 reply_policy: ReplyPolicy::EveryMessage,
                                 avatar: p.avatar.clone(),
                                 avatar_color: p.avatar_color.clone(),
+                                description: None,
+                                model: None,
+                                owner: None,
                             })
                     };
                     if let Some(agent) = agent {

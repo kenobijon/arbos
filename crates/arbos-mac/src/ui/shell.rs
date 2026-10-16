@@ -27,7 +27,7 @@ use crate::ui::icons::icon;
 use crate::ui::local::{LocalEvent, LocalPanel};
 use crate::ui::motion::{ease_out_cubic, PulseClock, COMPOSER_DROP_MS, SHAKE_MS};
 use crate::ui::people;
-use crate::ui::profile;
+use crate::ui::profiles;
 use crate::ui::routines::{RoutinesEvent, RoutinesPanel};
 use crate::ui::sidebar;
 use crate::ui::skills::SkillsPanel;
@@ -346,9 +346,8 @@ impl Shell {
                 s.close_new_chat(cx);
                 closed = true;
             }
-            if s.avatar_picker.take().is_some() {
+            if s.close_profile(cx) {
                 closed = true;
-                cx.notify();
             }
         });
         if closed {
@@ -1281,6 +1280,8 @@ impl Shell {
                 avatar_url: account.avatar_url.clone(),
                 status: String::new(),
                 role: String::new(),
+                last_seen_at: None,
+                online: false,
             };
             let mut group = glass::group(&theme).child(
                 div()
@@ -2127,7 +2128,6 @@ impl Render for Shell {
         let people_space = state.selected().filter(|p| p.is_people()).cloned();
         let project_space = state.selected().filter(|p| !p.is_people()).cloned();
         let selected = state.selected().cloned();
-        let avatar_picker = state.avatar_picker.clone();
 
         let mut root = div()
             .id("shell-root")
@@ -2256,8 +2256,10 @@ impl Render for Shell {
                     cx,
                 )));
             }
-            if avatar_picker.as_deref() == Some(project.id.as_str()) {
-                root = root.child(profile::sheet(&project, &self.state, cx));
+        }
+        if let Some(page) = self.state.read(cx).profile.clone() {
+            if let Some(sheet) = profiles::sheet(&page, self, cx) {
+                root = root.child(sheet);
             }
         }
         if self.connectors.read(cx).is_open() {

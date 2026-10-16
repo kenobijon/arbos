@@ -120,7 +120,12 @@ impl Shared {
     /// `{device, at, focused_chat?}` — every presence frame (15 s tick, typing,
     /// focus change) says which chat this device is looking at, if any.
     fn presence_header(&self) -> Value {
-        let mut header = json!({ "device": self.device_id(), "at": now_ms() });
+        let mut header = json!({
+            "device": self.device_id(),
+            "at": now_ms(),
+            "user": self.me_id(),
+            "handle": self.me_handle(),
+        });
         if let Some(chat) = self.focused_chat.lock().unwrap().as_deref() {
             header["focused_chat"] = json!(chat);
         }
@@ -725,6 +730,8 @@ fn people_space_from(shared: &Shared, v: &Value) -> Option<(Project, Chat)> {
                     .and_then(Value::as_str)
                     .unwrap_or("owner")
                     .to_string(),
+                last_seen_at: m.get("last_seen_at").and_then(Value::as_i64),
+                online: m.get("online").and_then(Value::as_bool).unwrap_or(false),
             });
         } else if let Some(pid) = member.strip_prefix("agent:") {
             let project = m.get("project").cloned().unwrap_or(Value::Null);
@@ -761,6 +768,21 @@ fn people_space_from(shared: &Shared, v: &Value) -> Option<(Project, Chat)> {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string(),
+                description: m
+                    .get("description")
+                    .or_else(|| project.get("description"))
+                    .and_then(Value::as_str)
+                    .filter(|d| !d.is_empty())
+                    .map(str::to_string),
+                model: project
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .filter(|d| !d.is_empty())
+                    .map(str::to_string),
+                owner: project
+                    .get("owner")
+                    .filter(|o| o.is_object())
+                    .and_then(|o| serde_json::from_value::<Person>(o.clone()).ok()),
                 reply_policy: match m.pointer("/settings/reply_policy").and_then(Value::as_str) {
                     Some("every_message") => ReplyPolicy::EveryMessage,
                     _ => ReplyPolicy::Mention,
@@ -821,6 +843,9 @@ fn people_space_from(shared: &Shared, v: &Value) -> Option<(Project, Chat)> {
         owner_handle: None,
         avatar: None,
         avatar_color: None,
+        description: None,
+        owner_person: None,
+        machine_info: None,
     };
     let previous_unread = shared
         .chats
@@ -1034,6 +1059,8 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
                                     .unwrap_or("")
                                     .to_string(),
                                 status: "member".into(),
+                                last_seen_at: m.get("last_seen_at").and_then(Value::as_i64),
+                                online: m.get("online").and_then(Value::as_bool).unwrap_or(false),
                                 role: m
                                     .get("role")
                                     .and_then(Value::as_str)
@@ -1066,6 +1093,24 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
                 .or_else(|| previous.as_ref().and_then(|x| x.avatar_color.clone()))
                 // A relay that sends no colour still gets a coloured tree (D74).
                 .or_else(|| crate::ui::avatars::default_color_for(id)),
+            description: p
+                .get("description")
+                .or_else(|| item.get("description"))
+                .and_then(Value::as_str)
+                .filter(|d| !d.is_empty())
+                .map(str::to_string),
+            owner_person: p
+                .get("owner")
+                .or_else(|| item.get("owner"))
+                .filter(|o| o.is_object())
+                .and_then(|o| serde_json::from_value::<Person>(o.clone()).ok()),
+            machine_info: p
+                .get("machine")
+                .or_else(|| item.get("machine"))
+                .filter(|m| m.is_object())
+                .and_then(|m| {
+                    serde_json::from_value::<crate::model::ProjectMachine>(m.clone()).ok()
+                }),
         });
         let chats: Vec<Chat> = detail
             .get("chats")
@@ -1721,13 +1766,13 @@ async fn run_session(
                         }
                     }
                     FrameType::Presence => {
-                        if is_people {
-                            let h = &frame.header;
-                            if let (Some(typing), Some(handle)) = (
-                                h.get("typing").and_then(Value::as_bool),
-                                h.get("handle").and_then(Value::as_str),
-                            ) {
-                                if h.get("device").and_then(Value::as_str) != Some(shared.device_id().as_str()) {
+                        let h = &frame.header;
+                        let mine = h.get("device").and_then(Value::as_str) == Some(shared.device_id().as_str());
+                        let handle = h.get("handle").and_then(Value::as_str).filter(|s| !s.is_empty());
+                        if let (false, Some(handle)) = (mine, handle) {
+                            let _ = shared.events.send(SyncEvent::Presence { handle: handle.to_string() });
+                            if is_people {
+                                if let Some(typing) = h.get("typing").and_then(Value::as_bool) {
                                     let _ = shared.events.send(SyncEvent::Typing {
                                         chat_id: room_chat.to_string(),
                                         handle: handle.to_string(),
@@ -1768,8 +1813,6 @@ async fn run_session(
                     RoomCmd::Typing(active) => {
                         let mut header = shared.presence_header();
                         header["typing"] = json!(active);
-                        header["handle"] = json!(shared.me_handle());
-                        header["user"] = json!(shared.me_id());
                         tx.send(binary(Frame::new(FrameType::Presence, header, Vec::new()))).await?;
                     }
                     RoomCmd::Presence => {
