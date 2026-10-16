@@ -27,6 +27,14 @@ use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, PANEL_RADIUS, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
 pub const SHEET_WIDTH: f32 = 480.0;
+/// "online" text, shared with the iPhone pages.
+pub(super) fn presence_blue() -> Hsla {
+    gpui::rgb(0x1084fe).into()
+}
+/// The "owner" capsule.
+pub(super) fn owner_purple() -> Hsla {
+    gpui::rgb(0x8b7cf6).into()
+}
 pub const SHEET_MAX_HEIGHT: f32 = 780.0;
 const HERO_AVATAR: f32 = 112.0;
 

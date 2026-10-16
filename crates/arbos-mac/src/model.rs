@@ -79,6 +79,9 @@ pub struct Project {
     /// API §9: `machine {state, class, snapshot, always_on, …}` of the agent's box.
     #[serde(default)]
     pub machine_info: Option<ProjectMachine>,
+    /// People chats: my `me.muted` on the relay (synced across devices).
+    #[serde(default)]
+    pub muted: bool,
 }
 
 /// API §9 `project.machine`.

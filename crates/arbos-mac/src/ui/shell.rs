@@ -74,6 +74,8 @@ pub struct Shell {
     pub(crate) menu_open: bool,
     /// People chats (D72): the @search field, the header pickers.
     pub people_input: Entity<ComposerInput>,
+    /// Agent profile page: inline description editor.
+    pub(crate) description_input: Entity<ComposerInput>,
     pub add_agent_open: bool,
     pub members_open: bool,
     /// ⌘⇧F "Send feedback" sheet (self-contained in `ui::feedback`).
@@ -156,6 +158,12 @@ impl Shell {
         cx.observe(&pairing_input, |_, _, cx| cx.notify()).detach();
         cx.observe(&project_input, |_, _, cx| cx.notify()).detach();
         cx.observe(&search_input, |_, _, cx| cx.notify()).detach();
+        let description_input = cx.new(ComposerInput::new);
+        description_input.update(cx, |input, _| {
+            input.set_placeholder("What does this agent do?")
+        });
+        cx.observe(&description_input, |_, _, cx| cx.notify())
+            .detach();
         let people_input = cx.new(ComposerInput::new);
         {
             let weak = cx.entity().downgrade();
@@ -266,6 +274,7 @@ impl Shell {
             signing_in: false,
             menu_open: false,
             people_input,
+            description_input,
             add_agent_open: false,
             members_open: false,
             feedback,

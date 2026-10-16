@@ -125,6 +125,7 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
     let tab = state.profile_tab;
     let more_open = state.profile_more_open;
     let picker_open = state.profile_picker_open;
+    let editing = state.profile_editing_description && mine;
     let muted = state.is_muted(&project.id);
     let content = collect(state, &chats_of(state, &project.id));
     let fallback = groups::project_color(&project.color, theme.accent);
@@ -282,21 +283,94 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
         .child(info_row("owner", owner_text, &theme))
         .child(info_row("machine", machine_text, &theme))
         .child(info_row("model", model_text, &theme));
-    if let Some(d) = project
-        .description
-        .as_deref()
-        .filter(|d| !d.trim().is_empty())
-    {
-        info = info.child(info_row("about", d.to_string(), &theme));
-    } else if mine {
+    let description = project.description.clone().filter(|d| !d.trim().is_empty());
+    if editing {
+        // Inline editor: the owner types, Save → PATCH {description}.
+        let p_save = pid.clone();
         info = info.child(
             div()
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
                 .px(px(16.0))
                 .py(px(10.0))
-                .text_size(px(TEXT_TINY))
-                .text_color(theme.text_faint)
-                .child("No description yet."),
+                .child(
+                    div()
+                        .text_size(px(TEXT_TINY))
+                        .text_color(theme.text_muted)
+                        .child("about"),
+                )
+                .child(
+                    div()
+                        .min_h(px(60.0))
+                        .px(px(10.0))
+                        .py(px(8.0))
+                        .rounded(px(10.0))
+                        .bg(theme.field)
+                        .border_1()
+                        .border_color(theme.field_border)
+                        .text_size(px(TEXT_BODY))
+                        .child(shell.description_input.clone()),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap(px(8.0))
+                        .child(
+                            glass::quiet_button("profile-desc-cancel", "Cancel", &theme)
+                                .h(px(32.0))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.state.update(cx, |s, cx| {
+                                        s.set_profile_editing_description(false, cx)
+                                    });
+                                })),
+                        )
+                        .child(
+                            glass::primary_button("profile-desc-save", "Save", &theme)
+                                .h(px(32.0))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    let text = this.description_input.read(cx).text().to_string();
+                                    let p = p_save.clone();
+                                    this.state
+                                        .update(cx, |s, cx| s.set_description(p, text, cx));
+                                })),
+                        ),
+                ),
         );
+    } else {
+        let row = info_row(
+            "about",
+            description.clone().unwrap_or_else(|| {
+                if mine {
+                    "Add a description".into()
+                } else {
+                    "—".into()
+                }
+            }),
+            &theme,
+        );
+        if mine {
+            let current = description.clone().unwrap_or_default();
+            info = info.child(
+                div()
+                    .id("profile-desc-edit")
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.surface_2))
+                    .child(row)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        let current = current.clone();
+                        this.description_input
+                            .update(cx, |input, cx| input.set_text(current, cx));
+                        this.state
+                            .update(cx, |s, cx| s.set_profile_editing_description(true, cx));
+                        let handle = this.description_input.read(cx).focus_handle(cx);
+                        window.focus(&handle, cx);
+                    })),
+            );
+        } else {
+            info = info.child(row);
+        }
     }
 
     // ----- appearance (mine only): the tree + colour picker, folded ----------
@@ -362,7 +436,24 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
         .children(appearance)
         .child(tabs)
         .child(body_tab);
-    Some(frame(body, None, &theme, cx))
+    // "Edit" opens the agent editor: the header menu (model, effort, members, avatar).
+    let edit = mine.then(|| {
+        let p = pid.clone();
+        glass::sheet_button("profile-edit", "Edit", &theme).on_click(cx.listener(
+            move |this, _, _, cx| {
+                let p = p.clone();
+                this.state.update(cx, |s, cx| {
+                    s.close_profile(cx);
+                    s.select_project(p, cx);
+                });
+                this.members_open = false;
+                this.add_agent_open = false;
+                this.menu_open = true;
+                cx.notify();
+            },
+        ))
+    });
+    Some(frame(body, edit, &theme, cx))
 }
 
 fn heading(text: &str, theme: &Theme) -> Div {

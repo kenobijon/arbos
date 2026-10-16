@@ -301,8 +301,8 @@ pub(super) fn page(space_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> Op
             for (i, p) in people.iter().enumerate() {
                 let (status, online) = statuses[i].clone();
                 let is_me = p.handle == me_handle;
-                let trailing =
-                    (p.role == "owner").then(|| badge("owner", theme.primary).into_any_element());
+                let trailing = (p.role == "owner")
+                    .then(|| badge("owner", super::owner_purple()).into_any_element());
                 let title = if is_me {
                     format!("{} (you)", p.display_name())
                 } else {
@@ -317,7 +317,7 @@ pub(super) fn page(space_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> Op
                         title,
                         status,
                         if online {
-                            theme.online
+                            super::presence_blue()
                         } else {
                             theme.text_muted
                         },
