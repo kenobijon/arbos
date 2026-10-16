@@ -726,22 +726,7 @@ struct ImageBubble: View {
         .task(id: blobRef) { await load() }
         .fullScreenCover(isPresented: $showFull) {
             if let image {
-                ZStack(alignment: .topTrailing) {
-                    Color.black.ignoresSafeArea()
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFit()
-                        .ignoresSafeArea()
-                    Button { showFull = false } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .frame(width: 36, height: 36)
-                            .background(Circle().fill(Color.white.opacity(0.18)))
-                    }
-                    .buttonStyle(.plain)
-                    .padding(16)
-                }
+                ZoomableImageViewer(image: image, onClose: { showFull = false })
             }
         }
     }
@@ -766,6 +751,93 @@ struct ImageBubble: View {
         } catch {
             failed = true
         }
+    }
+}
+
+/// Full-screen image: pinch to zoom, drag to pan when zoomed, double-tap to toggle.
+private struct ZoomableImageViewer: View {
+    let image: UIImage
+    let onClose: () -> Void
+
+    @State private var scale: CGFloat = 1
+    @State private var baseScale: CGFloat = 1
+    @State private var offset: CGSize = .zero
+    @State private var baseOffset: CGSize = .zero
+
+    private let minScale: CGFloat = 1
+    private let maxScale: CGFloat = 5
+    private let doubleTapScale: CGFloat = 2.5
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Color.black.ignoresSafeArea()
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFit()
+                .scaleEffect(scale)
+                .offset(offset)
+                .ignoresSafeArea()
+                .gesture(magnifyGesture)
+                .simultaneousGesture(panGesture)
+                .onTapGesture(count: 2, perform: toggleZoom)
+                .accessibilityLabel("Image")
+                .accessibilityHint("Pinch to zoom, double tap to zoom in or out")
+            Button(action: onClose) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 36, height: 36)
+                    .background(Circle().fill(Color.white.opacity(0.18)))
+            }
+            .buttonStyle(.plain)
+            .padding(16)
+            .accessibilityLabel("Close")
+        }
+    }
+
+    private var magnifyGesture: some Gesture {
+        MagnifyGesture()
+            .onChanged { value in
+                scale = min(max(baseScale * value.magnification, minScale), maxScale)
+            }
+            .onEnded { _ in
+                baseScale = scale
+                if scale <= minScale + 0.01 {
+                    withAnimation(.easeOut(duration: 0.2)) { reset() }
+                }
+            }
+    }
+
+    private var panGesture: some Gesture {
+        DragGesture()
+            .onChanged { value in
+                guard scale > minScale else { return }
+                offset = CGSize(
+                    width: baseOffset.width + value.translation.width,
+                    height: baseOffset.height + value.translation.height
+                )
+            }
+            .onEnded { _ in
+                baseOffset = offset
+            }
+    }
+
+    private func toggleZoom() {
+        withAnimation(.easeOut(duration: 0.2)) {
+            if scale > minScale {
+                reset()
+            } else {
+                scale = doubleTapScale
+                baseScale = doubleTapScale
+            }
+        }
+    }
+
+    private func reset() {
+        scale = minScale
+        baseScale = minScale
+        offset = .zero
+        baseOffset = .zero
     }
 }
 
