@@ -364,8 +364,9 @@ pub struct ActiveCall {
     pub notice: Option<String>,
     /// I started this call: ringback plays until someone else is in the room.
     pub outgoing: bool,
-    /// From the 201 start response: "Robert's Arbos isn't open" / "Ringing
-    /// Robert's iPhone" while nobody has picked up (`None` = they are live).
+    /// From the 201 start response: "Robert's Arbos isn't open — they'll see a
+    /// missed call" / "Ringing Robert's iPhone" while nobody has picked up
+    /// (`None` = they are live).
     pub reachable: Option<String>,
 }
 

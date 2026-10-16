@@ -450,7 +450,10 @@ impl Reachable {
         match (self.any_live, self.any_voip) {
             (true, _) => None,
             (false, true) => Some(format!("Ringing {}'s iPhone", self.first_name())),
-            (false, false) => Some(format!("{}'s Arbos isn't open", self.first_name())),
+            (false, false) => Some(format!(
+                "{}'s Arbos isn't open — they'll see a missed call",
+                self.first_name()
+            )),
         }
     }
 }
