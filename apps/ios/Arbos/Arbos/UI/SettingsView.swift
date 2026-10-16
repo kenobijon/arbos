@@ -201,6 +201,11 @@ struct SettingsView: View {
             }
             .onAppear { relayUrl = model.relayUrl }
         }
+        // Form headers/footers/LabeledContent/segmented pickers use system
+        // label colours. Without this, Light appearance paints theme.card white
+        // while the sheet stays on dark-mode system text (white-on-white).
+        .preferredColorScheme(theme.isDark ? .dark : .light)
+        .presentationBackground(theme.bg)
     }
 
     private var linkLabel: String {
