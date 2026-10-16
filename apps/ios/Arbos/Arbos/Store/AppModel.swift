@@ -196,6 +196,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var pairingBusy = false
     @Published private(set) var pairingError: String?
     @Published private(set) var registryError: String?
+    /// Settings → Connectors (Google Gmail/Calendar, …). Empty until first refresh.
+    @Published private(set) var connectors = ConnectorsView()
+    @Published private(set) var connectorsBusy = false
 
     private var api: RelayAPI
     private var docs: [Id: ChatDoc] = [:]
@@ -700,6 +703,8 @@ final class AppModel: ObservableObject {
         }
         credentials = nil
         link = .connecting
+        connectors = ConnectorsView()
+        connectorsBusy = false
     }
 
     private func startAfterPairing() {
@@ -1230,6 +1235,74 @@ final class AppModel: ObservableObject {
             }
             await refreshMachine()
         }
+    }
+
+    // MARK: Connectors (F1)
+
+    /// Load the relay's connector catalog + connected accounts for Settings.
+    func refreshConnectors() {
+        guard credentials != nil, !isFixture else { return }
+        Task {
+            do {
+                connectors = try await api.connectors()
+            } catch let e as RelayError where e.status == 404 {
+                // Older relays have no connectors route.
+                connectors = ConnectorsView(loaded: true)
+            } catch {
+                notice = Notice(text: "Connectors: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Start Google OAuth in Safari; the relay finishes the callback, then we poll.
+    func connectConnector(provider: String) {
+        guard !connectorsBusy, credentials != nil, !isFixture else { return }
+        connectorsBusy = true
+        Task {
+            defer { connectorsBusy = false }
+            do {
+                if let urlStr = try await api.connectConnector(provider: provider),
+                   let url = URL(string: urlStr) {
+                    UIApplication.shared.open(url)
+                }
+                for wait in [0, 4, 8, 15, 30] as [UInt64] {
+                    if wait > 0 { try? await Task.sleep(nanoseconds: wait * 1_000_000_000) }
+                    do {
+                        connectors = try await api.connectors()
+                    } catch { break }
+                    if connectors.connector(for: provider)?.status == .connected { break }
+                }
+            } catch {
+                notice = Notice(text: "Connect \(provider): \(error.localizedDescription)")
+                await refreshConnectorsOnce()
+            }
+        }
+    }
+
+    func disconnectConnector(id: Id) {
+        guard !connectorsBusy, credentials != nil, !isFixture else { return }
+        connectorsBusy = true
+        var next = connectors
+        next.items.removeAll { $0.id == id }
+        connectors = next
+        Task {
+            defer { connectorsBusy = false }
+            do {
+                try await api.disconnectConnector(id: id)
+            } catch {
+                notice = Notice(text: "Disconnect: \(error.localizedDescription)")
+            }
+            await refreshConnectorsOnce()
+        }
+    }
+
+    private func refreshConnectorsOnce() async {
+        guard credentials != nil, !isFixture else { return }
+        do {
+            connectors = try await api.connectors()
+        } catch let e as RelayError where e.status == 404 {
+            connectors = ConnectorsView(loaded: true)
+        } catch {}
     }
 
     // MARK: People chats (D72)

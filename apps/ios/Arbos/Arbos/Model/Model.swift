@@ -551,6 +551,66 @@ enum DocJSON {
     }
 }
 
+/// `connectors.status` as the relay reports it (F1).
+enum ConnectorStatus: String, Equatable {
+    case connected
+    case needsAuth = "needs_auth"
+    case error
+    case other
+
+    init(wire: String) {
+        switch wire {
+        case "connected": self = .connected
+        case "needs_auth": self = .needsAuth
+        case "error": self = .error
+        default: self = .other
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .connected: return "Connected"
+        case .needsAuth: return "Needs sign-in"
+        case .error: return "Error"
+        case .other: return "Unknown"
+        }
+    }
+}
+
+/// One connected account (`GET /connectors` item). Never carries a token.
+struct Connector: Identifiable, Equatable {
+    var id: Id
+    var provider: String
+    var label: String
+    var status: ConnectorStatus
+    var lastError: String?
+    var mock: Bool
+}
+
+/// One catalog entry (`GET /connectors/catalog`).
+struct ConnectorProvider: Identifiable, Equatable {
+    var id: String { provider }
+    var provider: String
+    var label: String
+    /// `oauth | oauth_or_token | token`.
+    var connect: String
+    var oauthConfigured: Bool
+
+    var hasOauth: Bool { connect == "oauth" || connect == "oauth_or_token" }
+}
+
+/// Settings → Connectors state.
+struct ConnectorsView: Equatable {
+    var mock = false
+    var providers: [ConnectorProvider] = []
+    var items: [Connector] = []
+    var loaded = false
+
+    func connector(for provider: String) -> Connector? {
+        items.first { $0.provider == provider }
+    }
+}
+
 func newId() -> Id {
     ULID.generate()
 }
