@@ -355,9 +355,11 @@ struct HomeView: View {
         return rows.sorted { $0.0 > $1.0 }.map(\.1)
     }
 
-    /// Match the names shown on the row (agent name, person name/@handle, group title).
+    /// Match the names shown on the row (agent name, person name/@handle, group title)
+    /// or any loaded message text in that conversation.
     private func matchesProject(_ p: Project, q: String) -> Bool {
-        p.name.lowercased().contains(q)
+        if p.name.lowercased().contains(q) { return true }
+        return model.chats(of: p.id).contains { messagesMatch($0.id, q: q) }
     }
 
     private func matchesPeople(_ c: PeopleChat, q: String) -> Bool {
@@ -370,7 +372,11 @@ struct HomeView: View {
         if c.agents.contains(where: {
             ($0.project?.name ?? $0.handle).lowercased().contains(q)
         }) { return true }
-        return false
+        return messagesMatch(c.id, q: q)
+    }
+
+    private func messagesMatch(_ chatId: Id, q: String) -> Bool {
+        model.messages(of: chatId).contains { $0.plainText.lowercased().contains(q) }
     }
 
     private func chatActivity(_ c: Chat) -> Int64 {
