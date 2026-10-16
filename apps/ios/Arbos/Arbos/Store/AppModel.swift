@@ -227,6 +227,7 @@ final class AppModel: ObservableObject {
     var relayUrl: String { api.endpoint.httpUrl }
 
     init() {
+        LaunchClock.mark("app-init")
         var saved = UserDefaults.standard.string(forKey: "relayUrl") ?? AppModel.defaultRelayUrl
         var creds: DeviceCredentials?
         #if DEBUG
@@ -783,6 +784,7 @@ final class AppModel: ObservableObject {
             unreadCounts = counts
         }
         if !projects.isEmpty || !peopleChats.isEmpty { contentOrigin = "store" }
+        LaunchClock.mark("kv-loaded", detail: "projects=\(projects.count) people=\(peopleChats.count)")
     }
 
     /// Import every saved room off the main thread (last opened first), then
