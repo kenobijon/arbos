@@ -11,6 +11,7 @@ pub mod credentials;
 pub mod doc;
 pub mod fixture;
 pub mod relay;
+pub mod store;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -84,6 +85,17 @@ pub enum SyncEvent {
     CallError {
         chat_id: Id,
         message: String,
+    },
+    /// Cold launch from the on-device store (#929): reopen what was on
+    /// screen when the app last ran. Sent once, after the stored `Projects`.
+    RestoreSelection {
+        project_id: Id,
+        chat_id: Id,
+    },
+    /// Bytes and chat count kept on this Mac (Settings → About).
+    StoreUsage {
+        bytes: i64,
+        chats: i64,
     },
     /// Pairing finished (or failed with a message).
     Paired {

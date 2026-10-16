@@ -258,6 +258,8 @@ pub struct AppState {
     pub browser_frames_seen: u64,
     pub notices: Vec<Notice>,
     pub selected_project: Option<Id>,
+    /// Bytes and chats kept on this Mac by the on-device store (Settings → About).
+    pub store_usage: (i64, i64),
     pub active_tab: HashMap<Id, Id>,
     pub link: Link,
     pub rail_collapsed: bool,
@@ -490,6 +492,7 @@ impl AppState {
             browser_frames_seen: 0,
             notices: Vec::new(),
             selected_project: None,
+            store_usage: (0, 0),
             active_tab: HashMap::new(),
             link: Link::Connecting,
             rail_collapsed: false,
@@ -949,6 +952,23 @@ impl AppState {
             }
             SyncEvent::Machine(machine) => {
                 self.machine = machine;
+                cx.notify();
+            }
+            SyncEvent::RestoreSelection {
+                project_id,
+                chat_id,
+            } => {
+                // Cold launch from the on-device store: back to the chat that
+                // was open, instead of the default pick.
+                if self.projects.iter().any(|p| p.id == project_id) {
+                    if self.tabs(&project_id).iter().any(|c| c.id == chat_id) {
+                        self.active_tab.insert(project_id.clone(), chat_id);
+                    }
+                    self.select_project(project_id, cx);
+                }
+            }
+            SyncEvent::StoreUsage { bytes, chats } => {
+                self.store_usage = (bytes, chats);
                 cx.notify();
             }
             SyncEvent::ProjectStatus {

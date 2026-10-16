@@ -1231,6 +1231,7 @@ impl Shell {
         let account_image = account.as_ref().and_then(|a| state.avatar(&a.avatar_url));
         let notify_on = state.notifier.enabled;
         let skill_count = state.skills.len();
+        let store_usage = state.store_usage;
         let update = state.update.clone();
         let update_failed = matches!(update.phase, crate::update::UpdatePhase::Failed { .. });
         let update_action: Option<(&'static str, &'static str, bool)> = match &update.phase {
@@ -1799,6 +1800,19 @@ impl Shell {
                 glass::row("Version", &theme)
                     .child(value(update.current_version.to_string(), &theme)),
             )
+            .child(glass::row("On this Mac", &theme).child(value(
+                if store_usage.1 == 0 {
+                    "Nothing saved yet".to_string()
+                } else {
+                    format!(
+                        "{} · {} chat{}",
+                        human_bytes(store_usage.0),
+                        store_usage.1,
+                        if store_usage.1 == 1 { "" } else { "s" }
+                    )
+                },
+                &theme,
+            )))
             .child(glass::row("Relay", &theme).border_b_0().child(value(
                 format!(
                     "{source} · {}{}",
@@ -2338,5 +2352,19 @@ impl Render for Shell {
             root = root.child(notices);
         }
         root.into_any_element()
+    }
+}
+
+/// "12.4 MB" for the on-device store line.
+fn human_bytes(bytes: i64) -> String {
+    let b = bytes.max(0) as f64;
+    if b < 1_000.0 {
+        format!("{bytes} B")
+    } else if b < 1_000_000.0 {
+        format!("{:.0} KB", b / 1_000.0)
+    } else if b < 1_000_000_000.0 {
+        format!("{:.1} MB", b / 1_000_000.0)
+    } else {
+        format!("{:.2} GB", b / 1_000_000_000.0)
     }
 }

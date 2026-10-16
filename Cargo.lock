@@ -399,6 +399,7 @@ dependencies = [
  "objc2-user-notifications",
  "reqwest",
  "rodio",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",

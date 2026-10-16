@@ -27,6 +27,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use super::credentials::{self, DeviceCredentials};
 use super::doc::ChatDoc;
+use super::store::{self, Store};
 use super::{ClientCommand, SyncEvent, SyncSource};
 use crate::model::{
     new_id, now_ms, AccountView, AgentMember, Attachment, AttachmentKind, BoxState, Call,
@@ -114,6 +115,10 @@ struct Shared {
     focused_chat: Mutex<Option<Id>>,
     /// Calls v1: `in_call` on every presence frame while this device is in one (§8).
     in_call: Mutex<Option<String>>,
+    /// On-device store (#929); `None` without credentials or with `ARBOS_NO_STORE=1`.
+    store: Mutex<Option<Store>>,
+    /// Room keys whose doc or cursor changed since the last save.
+    dirty: Mutex<HashSet<Id>>,
 }
 
 fn project_doc_key(project_id: &str) -> String {
@@ -309,11 +314,38 @@ impl Shared {
     /// Forget the tokens and show the sign-in screen.
     fn sign_out_locally(&self) {
         credentials::clear(&self.http_url);
+        self.drop_store(true);
         *self.creds.write().unwrap() = None;
         let _ = self.events.send(SyncEvent::Account(None));
         let _ = self.events.send(SyncEvent::NeedsPairing {
             relay_url: self.http_url.clone(),
         });
+    }
+
+    /// Run `f` against the store when there is one.
+    fn with_store<R>(&self, f: impl FnOnce(&Store) -> R) -> Option<R> {
+        self.store.lock().unwrap().as_ref().map(f)
+    }
+
+    /// A room's doc or cursor changed: the flusher saves it on its next tick.
+    fn mark_dirty(&self, key: &str) {
+        if self.store.lock().unwrap().is_some() {
+            self.dirty.lock().unwrap().insert(key.to_string());
+        }
+    }
+
+    /// Close the store; `wipe` also deletes the file (sign-out, revoked token).
+    fn drop_store(&self, wipe: bool) {
+        let taken = self.store.lock().unwrap().take();
+        if let (true, Some(s)) = (wipe, taken) {
+            let path = s.path().clone();
+            drop(s);
+            for suffix in ["", "-wal", "-shm", "-journal"] {
+                let mut p = path.as_os_str().to_owned();
+                p.push(suffix);
+                let _ = std::fs::remove_file(PathBuf::from(p));
+            }
+        }
     }
 
     fn is_token_expired(status: reqwest::StatusCode, body: &str) -> bool {
@@ -488,6 +520,8 @@ impl SyncSource for RelaySource {
                 room_seq: Mutex::new(HashMap::new()),
                 avatars_done: Mutex::new(HashSet::new()),
                 me: Mutex::new(None),
+                store: Mutex::new(None),
+                dirty: Mutex::new(HashSet::new()),
             });
             let _ = events.send(SyncEvent::Link(Link::Connecting));
 
@@ -625,6 +659,9 @@ fn start_token_refresher(shared: &Arc<Shared>) {
 
 fn start_after_pairing(shared: &Arc<Shared>) {
     start_token_refresher(shared);
+    open_store(shared);
+    load_store(shared);
+    start_store_flusher(shared);
     {
         let shared = shared.clone();
         tokio::spawn(async move { refresh_me(&shared).await });
@@ -687,6 +724,7 @@ fn start_after_pairing(shared: &Arc<Shared>) {
                 let text = format!("{err:#}");
                 if text.contains("HTTP 401") {
                     // Token revoked or relay re-initialised: pair again.
+                    shared.drop_store(true);
                     *shared.creds.write().unwrap() = None;
                     let _ = shared.events.send(SyncEvent::NeedsPairing {
                         relay_url: shared.http_url.clone(),
@@ -696,6 +734,180 @@ fn start_after_pairing(shared: &Arc<Shared>) {
                 shared.notice(format!("Relay: {text}"));
                 let _ = shared.events.send(SyncEvent::Link(Link::Reconnecting));
             }
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// On-device store (#929)
+// ---------------------------------------------------------------------------
+
+/// How often dirty rooms are written (coalesces streaming frames).
+const STORE_FLUSH_EVERY: Duration = Duration::from_millis(1500);
+
+fn open_store(shared: &Arc<Shared>) {
+    let device_id = shared.device_id();
+    let mut slot = shared.store.lock().unwrap();
+    if slot.is_none() {
+        *slot = Store::open(&shared.http_url, &device_id);
+    }
+}
+
+/// Paint everything the last run saved — rail, tabs, people, every transcript,
+/// the open chat — before any request leaves. Rooms then dial with their
+/// saved cursor and only backfill what is new.
+fn load_store(shared: &Arc<Shared>) {
+    let started = std::time::Instant::now();
+    let Some((projects, chats, people, docs, pending, selection)) = shared.with_store(|s| {
+        (
+            s.get_json::<Vec<Project>>(store::KEY_PROJECTS).unwrap_or_default(),
+            s.get_json::<Vec<Chat>>(store::KEY_CHATS).unwrap_or_default(),
+            s.get_json::<Vec<Id>>(store::KEY_PEOPLE).unwrap_or_default(),
+            s.load_docs(),
+            s.load_pending(),
+            s.get_json::<(Id, Id)>(store::KEY_SELECTION),
+        )
+    }) else {
+        return;
+    };
+    if projects.is_empty() {
+        return;
+    }
+    shared.people.lock().unwrap().extend(people);
+    *shared.projects.lock().unwrap() = projects.clone();
+    *shared.chats.lock().unwrap() = chats;
+    let _ = shared.events.send(SyncEvent::Projects(projects.clone()));
+    emit_chats(shared);
+    let mut pending = pending;
+    let mut restored = 0usize;
+    for saved in docs {
+        let doc = ChatDoc::empty(&saved.key);
+        if let Err(err) = doc.doc.import(&saved.snapshot) {
+            eprintln!("store: snapshot for {} unreadable: {err}", saved.key);
+            shared.with_store(|s| s.delete_doc(&saved.key));
+            continue;
+        }
+        // A doc the registry no longer lists (closed elsewhere) is dropped.
+        let known = saved.room_chat == PROJECT_DOC_CHAT_ID && projects.iter().any(|p| p.id == saved.project_id)
+            || shared.chats.lock().unwrap().iter().any(|c| c.id == saved.key);
+        if !known {
+            shared.with_store(|s| s.delete_doc(&saved.key));
+            continue;
+        }
+        let pending = pending.remove(&saved.key).unwrap_or_default();
+        ensure_room_with(
+            shared,
+            &saved.project_id,
+            &saved.key,
+            &saved.room_chat,
+            Some(Restored {
+                doc,
+                cursor: saved.cursor,
+                pending,
+            }),
+        );
+        restored += 1;
+    }
+    if let Some((project_id, chat_id)) = selection {
+        if projects.iter().any(|p| p.id == project_id) {
+            let _ = shared.events.send(SyncEvent::RestoreSelection { project_id, chat_id });
+        }
+    }
+    emit_store_usage(shared);
+    eprintln!(
+        "store: restored {} projects, {restored} docs in {} ms",
+        projects.len(),
+        started.elapsed().as_millis()
+    );
+}
+
+/// Registry JSON after every successful refresh.
+fn save_registry(shared: &Arc<Shared>) {
+    let projects = shared.projects.lock().unwrap().clone();
+    let chats = shared.chats.lock().unwrap().clone();
+    let people: Vec<Id> = shared.people.lock().unwrap().iter().cloned().collect();
+    shared.with_store(|s| {
+        if projects.is_empty() {
+            s.remove(store::KEY_PROJECTS);
+            s.remove(store::KEY_CHATS);
+        } else {
+            s.put_json(store::KEY_PROJECTS, &projects);
+            s.put_json(store::KEY_CHATS, &chats);
+        }
+        s.put_json(store::KEY_PEOPLE, &people);
+    });
+}
+
+fn emit_store_usage(shared: &Arc<Shared>) {
+    if let Some(u) = shared.with_store(|s| s.usage()) {
+        let _ = shared.events.send(SyncEvent::StoreUsage {
+            bytes: u.bytes,
+            chats: u.docs,
+        });
+    }
+}
+
+/// Every 1.5 s: write each dirty room's snapshot with its cursor. The cursor
+/// is read before the export, so a saved snapshot always covers its cursor.
+fn start_store_flusher(shared: &Arc<Shared>) {
+    let shared = shared.clone();
+    tokio::spawn(async move {
+        let mut tick = interval(STORE_FLUSH_EVERY);
+        let mut since_caps = 0u32;
+        loop {
+            tick.tick().await;
+            if shared.store.lock().unwrap().is_none() {
+                if shared.creds.read().unwrap().is_none() {
+                    return;
+                }
+                continue;
+            }
+            let keys: Vec<Id> = shared.dirty.lock().unwrap().drain().collect();
+            if keys.is_empty() {
+                continue;
+            }
+            let rooms: HashMap<Id, (Id, String)> = {
+                let projects = shared.projects.lock().unwrap();
+                let chats = shared.chats.lock().unwrap();
+                keys.iter()
+                    .filter_map(|k| {
+                        if let Some(pid) = k.strip_prefix("proj:") {
+                            projects
+                                .iter()
+                                .any(|p| p.id == pid)
+                                .then(|| (k.clone(), (pid.to_string(), PROJECT_DOC_CHAT_ID.to_string())))
+                        } else {
+                            chats
+                                .iter()
+                                .find(|c| &c.id == k)
+                                .map(|c| (k.clone(), (c.project_id.clone(), c.id.clone())))
+                        }
+                    })
+                    .collect()
+            };
+            for (key, (project_id, room_chat)) in rooms {
+                let cursor = shared.room_seq.lock().unwrap().get(&key).copied().unwrap_or(0);
+                let snapshot = {
+                    let docs = shared.docs.lock().unwrap();
+                    let Some(doc) = docs.get(&key) else { continue };
+                    if doc.doc.oplog_frontiers().is_empty() {
+                        continue;
+                    }
+                    doc.doc.export(loro::ExportMode::Snapshot)
+                };
+                match snapshot {
+                    Ok(bytes) => {
+                        shared.with_store(|s| s.save_doc(&key, &project_id, &room_chat, cursor, &bytes));
+                    }
+                    Err(err) => eprintln!("store: export {key}: {err}"),
+                }
+            }
+            since_caps += 1;
+            if since_caps >= 20 {
+                since_caps = 0;
+                shared.with_store(|s| s.enforce_caps());
+            }
+            emit_store_usage(&shared);
         }
     });
 }
@@ -1338,6 +1550,7 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
     *shared.projects.lock().unwrap() = projects.clone();
     let _ = shared.events.send(SyncEvent::Projects(projects.clone()));
     emit_chats(shared);
+    save_registry(shared);
     for p in projects.iter().filter(|p| !p.is_people()) {
         ensure_room(shared, &p.id, &project_doc_key(&p.id), PROJECT_DOC_CHAT_ID);
     }
@@ -1440,10 +1653,32 @@ fn view_settings_note(doc: &loro::LoroDoc) -> String {
 
 /// Open a room once; `key` is the docs map key, `room_chat` the URL segment.
 fn ensure_room(shared: &Arc<Shared>, project_id: &str, key: &str, room_chat: &str) {
+    ensure_room_with(shared, project_id, key, room_chat, None);
+}
+
+/// A doc restored from the on-device store with the relay cursor it was saved
+/// at and the pushes the relay never ACKed.
+struct Restored {
+    doc: ChatDoc,
+    cursor: i64,
+    pending: Vec<(String, Vec<u8>)>,
+}
+
+fn ensure_room_with(
+    shared: &Arc<Shared>,
+    project_id: &str,
+    key: &str,
+    room_chat: &str,
+    restored: Option<Restored>,
+) {
     if shared.rooms.lock().unwrap().contains_key(key) {
         return;
     }
-    let doc = ChatDoc::empty(key);
+    let from_store = restored.is_some();
+    let (doc, cursor, pending) = match restored {
+        Some(r) => (r.doc, r.cursor, r.pending),
+        None => (ChatDoc::empty(key), 0, Vec::new()),
+    };
     let (local_tx, local_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let (change_tx, change_rx) = mpsc::unbounded_channel::<super::doc::Touched>();
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<RoomCmd>();
@@ -1464,6 +1699,16 @@ fn ensure_room(shared: &Arc<Shared>, project_id: &str, key: &str, room_chat: &st
         subs.push(local_sub);
     }
     shared.docs.lock().unwrap().insert(key.to_string(), doc);
+    if from_store {
+        // Paint from disk now; the room's backfill only adds what is new.
+        shared.room_seq.lock().unwrap().insert(key.to_string(), cursor);
+        if is_project_doc {
+            emit_project_doc(shared, project_id);
+            apply_project_doc_status(shared, project_id);
+        } else {
+            emit_snapshot(shared, key);
+        }
+    }
 
     let shared2 = shared.clone();
     let key2 = key.to_string();
@@ -1477,7 +1722,7 @@ fn ensure_room(shared: &Arc<Shared>, project_id: &str, key: &str, room_chat: &st
     let key3 = key.to_string();
     let room_chat = room_chat.to_string();
     let task = tokio::spawn(async move {
-        room_loop(shared3, project, key3, room_chat, local_rx, cmd_rx).await;
+        room_loop(shared3, project, key3, room_chat, cursor, pending, local_rx, cmd_rx).await;
     });
     shared
         .rooms
@@ -1494,6 +1739,7 @@ async fn forward_changes(
     mut rx: mpsc::UnboundedReceiver<super::doc::Touched>,
 ) {
     while let Some(touched) = rx.recv().await {
+        shared.mark_dirty(&key);
         if is_project_doc {
             emit_project_doc(&shared, &project_id);
             apply_project_doc_status(&shared, &project_id);
@@ -1731,17 +1977,22 @@ fn set_project_state(shared: &Shared, project_id: &str, state: BoxState, detail:
 }
 
 /// Dial, handshake, backfill, then stream — forever, with backoff (§8.6).
+#[allow(clippy::too_many_arguments)]
 async fn room_loop(
     shared: Arc<Shared>,
     project_id: Id,
     key: Id,
     room_chat: String,
+    saved_cursor: i64,
+    saved_pending: Vec<(String, Vec<u8>)>,
     mut local_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     mut cmd_rx: mpsc::UnboundedReceiver<RoomCmd>,
 ) {
-    let mut cursor: i64 = 0;
+    // Restored from the on-device store: HELLO with this cursor so the relay
+    // only sends rows after it; a fresh room starts at 0.
+    let mut cursor: i64 = saved_cursor;
     let mut backoff = BACKOFF_MIN;
-    let mut pending: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut pending: Vec<(String, Vec<u8>)> = saved_pending;
     loop {
         let connected_at = Instant::now();
         let outcome = run_session(
@@ -1832,23 +2083,32 @@ async fn run_session(
             (Some(_), None) | (None, _) => false,
         }
     };
-    if state.checkpoint_seq > 0 && (!contained || *cursor < state.checkpoint_seq) {
-        match fetch_checkpoint(shared, &room).await {
-            Ok((seq, bytes)) => {
-                let docs = shared.docs.lock().unwrap();
-                if let Some(doc) = docs.get(key) {
-                    match doc.doc.import(&bytes) {
-                        Ok(_) => *cursor = (*cursor).max(seq.max(state.checkpoint_seq)),
-                        Err(err) => eprintln!("relay room {room}: checkpoint import failed: {err}"),
+    // A replica restored from the on-device store usually contains the
+    // frontier already: the rows the relay compacted away are ours, so only
+    // rows after `max(cursor, checkpointSeq)` are needed (§7.3).
+    if state.checkpoint_seq > 0 {
+        if contained {
+            *cursor = (*cursor).max(state.checkpoint_seq);
+        } else {
+            match fetch_checkpoint(shared, &room).await {
+                Ok((seq, bytes)) => {
+                    let docs = shared.docs.lock().unwrap();
+                    if let Some(doc) = docs.get(key) {
+                        match doc.doc.import(&bytes) {
+                            Ok(_) => *cursor = (*cursor).max(seq.max(state.checkpoint_seq)),
+                            Err(err) => eprintln!("relay room {room}: checkpoint import failed: {err}"),
+                        }
                     }
                 }
+                Err(err) => eprintln!("relay room {room}: checkpoint fetch failed: {err:#}"),
             }
-            Err(err) => eprintln!("relay room {room}: checkpoint fetch failed: {err:#}"),
         }
+        shared.room_seq.lock().unwrap().insert(key.to_string(), *cursor);
+        shared.mark_dirty(key);
     }
-    // The replica lives in memory, so after a relaunch our own device's rows
-    // are needed too (the relay's `excludeOwn` filters by device, not by
-    // connection). Loro drops the duplicates on a same-process reconnect.
+    // Own rows are requested too: a row pushed by this device but saved before
+    // its ACK is only on the relay (the relay's `excludeOwn` filters by device,
+    // not by connection). Loro drops the duplicates.
     tx.send(binary(Frame::new(
         FrameType::RowsReq,
         serde_json::to_value(RowsReq {
@@ -1890,6 +2150,8 @@ async fn run_session(
                     FrameType::RowsDone => {
                         let head_seq = frame.header.get("headSeq").and_then(Value::as_i64).unwrap_or(*cursor);
                         *cursor = (*cursor).max(head_seq);
+                        shared.room_seq.lock().unwrap().insert(key.to_string(), *cursor);
+                        shared.mark_dirty(key);
                         let _ = shared.events.send(SyncEvent::Link(Link::Live));
                         if room_chat == PROJECT_DOC_CHAT_ID {
                             emit_project_doc(shared, project_id);
@@ -1899,8 +2161,14 @@ async fn run_session(
                     }
                     FrameType::Ack => {
                         let header: Ack = serde_json::from_value(frame.header)?;
+                        let before = pending.len();
                         pending.retain(|(id, _)| *id != header.batch_id);
+                        if pending.len() != before {
+                            shared.with_store(|s| s.save_pending(key, pending));
+                        }
                         *cursor = (*cursor).max(header.seq);
+                        shared.room_seq.lock().unwrap().insert(key.to_string(), *cursor);
+                        shared.mark_dirty(key);
                         let had: Vec<Id> = shared.unacked.lock().unwrap().drain().collect();
                         if !had.is_empty() && room_chat != PROJECT_DOC_CHAT_ID {
                             emit_snapshot(shared, key);
@@ -1963,12 +2231,13 @@ async fn run_session(
                     continue;
                 }
                 let batch_id = new_id();
+                pending.push((batch_id.clone(), bytes.clone()));
+                shared.with_store(|s| s.save_pending(key, pending));
                 tx.send(binary(Frame::new(
                     FrameType::Push,
                     json!({ "batchId": batch_id }),
-                    bytes.clone(),
+                    bytes,
                 ))).await?;
-                pending.push((batch_id, bytes));
             }
             cmd = cmd_rx.recv() => {
                 let Some(cmd) = cmd else { anyhow::bail!("room closed") };
@@ -2726,6 +2995,13 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     c.unread = false;
                 }
             }
+            // Next cold launch reopens this chat first (and evicts it last).
+            if let Some(project_id) = project_of(shared, &chat_id) {
+                shared.with_store(|s| {
+                    s.touch_doc(&chat_id);
+                    s.put_json(store::KEY_SELECTION, &(project_id, chat_id.clone()));
+                });
+            }
             if shared.is_people(&chat_id) {
                 let seq = shared
                     .room_seq
@@ -2874,6 +3150,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         .send(SyncEvent::PeopleError(people_error(&err)));
                 }
                 shared.people.lock().unwrap().remove(&chat_id);
+                shared.with_store(|s| s.delete_doc(&chat_id));
                 let _ = refresh_registry(&shared).await;
             });
         }
@@ -3277,6 +3554,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                                 drop(room);
                             }
                             shared.docs.lock().unwrap().remove(&chat_id);
+                            shared.with_store(|s| s.delete_doc(&chat_id));
                         }
                         Ok(r) if r.status().as_u16() == 409 => {
                             shared.notice("The pinned chat cannot be closed");
