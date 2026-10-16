@@ -852,6 +852,11 @@ struct ChatView: View {
                         RowView(row: row, chatId: chatId, width: width)
                             .padding(.top, gap(before: i))
                             .id(row.id)
+                            .background(
+                                model.highlightedMessage == row.messageId
+                                    ? theme.warn.opacity(0.18)
+                                    : Color.clear
+                            )
                             .contextMenu {
                                 if isPeople, let m = messages.first(where: { $0.id == row.messageId }) {
                                     Button {
@@ -898,8 +903,11 @@ struct ChatView: View {
                     Color.black
                 }
             }
-            .onAppear { settleToBottom(proxy) }
+            .onAppear {
+                if !revealSearchHit(proxy) { settleToBottom(proxy) }
+            }
             .onChange(of: rows.last?.id) { old, _ in
+                if revealSearchHit(proxy) { return }
                 if old == nil {
                     settleToBottom(proxy)
                 } else {
@@ -907,11 +915,13 @@ struct ChatView: View {
                 }
             }
             .onChange(of: rows.count) { old, new in
+                if revealSearchHit(proxy) { return }
                 // The first snapshot can land as many rows at once after the
                 // view is up (tap-open before the room's backfill, debug hook).
                 if old == 0, new > 0 { settleToBottom(proxy) }
             }
             .onChange(of: model.caughtUp.contains(chatId)) { _, ready in
+                if revealSearchHit(proxy) { return }
                 if ready { settleToBottom(proxy) }
             }
             .onChange(of: streaming) { _, _ in
@@ -923,7 +933,18 @@ struct ChatView: View {
                     withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo("bottom", anchor: .bottom) }
                 }
             }
+            .onChange(of: model.scrollTarget) { _, _ in
+                _ = revealSearchHit(proxy)
+            }
         }
+    }
+
+    /// A search hit named this chat: scroll to its message instead of the tail.
+    private func revealSearchHit(_ proxy: ScrollViewProxy) -> Bool {
+        guard let target = model.scrollTarget, target.chatId == chatId,
+              let row = rows.first(where: { $0.messageId == target.messageId }) else { return false }
+        withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(row.id, anchor: .center) }
+        return true
     }
 
     /// Pin the transcript to its end once the rows have a height: the first

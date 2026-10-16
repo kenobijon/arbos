@@ -218,6 +218,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
     match cmd {
         // Handled above; listed so a new variant still fails to compile here.
         ClientCommand::SearchPeople { .. }
+        | ClientCommand::SearchChats { .. }
         | ClientCommand::StartDm { .. }
         | ClientCommand::SetTyping { .. }
         | ClientCommand::AddAgent { .. }
@@ -4152,6 +4153,18 @@ fn emit_people_seed(shared: &Shared) {
 
 fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
     match cmd {
+        ClientCommand::SearchChats {
+            query, generation, ..
+        } => {
+            let _ = shared.events.send(SyncEvent::ChatSearch {
+                query: query.clone(),
+                generation: *generation,
+                hits: Vec::new(),
+                waking: false,
+                error: None,
+            });
+            true
+        }
         ClientCommand::SearchPeople { query } => {
             let q = query.trim().trim_start_matches('@').to_lowercase();
             let results: Vec<Person> = if q.is_empty() {

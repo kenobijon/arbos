@@ -33,8 +33,8 @@ use super::{ClientCommand, SyncEvent, SyncSource};
 use crate::model::{
     new_id, now_ms, AccountView, AgentMember, Attachment, AttachmentKind, BoxState, Call,
     CallEnded, CallLeft, CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView,
-    Chat, ChatKind, Connector, ConnectorProvider, ConnectorsView, Effort, Id, Link, LocalDevice,
-    LocalView, Machine, MachineState, Message, MessageStatus, Part, Person, Project,
+    Chat, ChatHit, ChatKind, Connector, ConnectorProvider, ConnectorsView, Effort, Id, Link,
+    LocalDevice, LocalView, Machine, MachineState, Message, MessageStatus, Part, Person, Project,
     ProjectDocView, Reachable, ReplyPolicy, Role, Routine, RoutineRun, Sender, Skill, SpaceKind,
     ThreadInfo, VaultItem, VaultRequest, VaultView,
 };
@@ -2422,6 +2422,125 @@ fn project_asleep(shared: &Shared, project_id: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn hit_from_row(project_id: &str, row: &Value) -> Option<ChatHit> {
+    let chat_id = row
+        .get("chat_id")
+        .or_else(|| row.get("thread_id"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())?
+        .to_owned();
+    Some(ChatHit {
+        id: row
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned(),
+        project_id: row
+            .get("project_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(project_id)
+            .to_owned(),
+        project_name: String::new(),
+        chat_id,
+        chat_title: row
+            .get("chat_title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned(),
+        message_id: row
+            .get("message_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned),
+        kind: row
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("user")
+            .to_owned(),
+        snippet: row
+            .get("snippet")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .replace(['[', ']'], ""),
+        at: row.get("at").and_then(|v| v.as_i64()).unwrap_or(0),
+    })
+}
+
+fn asleep_error(err: &anyhow::Error) -> bool {
+    let msg = err.to_string();
+    msg.contains("HTTP 409") || msg.contains("asleep") || msg.contains("no url")
+}
+
+async fn search_one(shared: &Arc<Shared>, project_id: &str, query: &str) -> Result<Vec<ChatHit>> {
+    let path = format!(
+        "/projects/{}/search?q={}&limit=20",
+        project_id,
+        crate::auth::url_encode(query)
+    );
+    let v = shared.get_json(&path).await?;
+    let hits = v
+        .get("hits")
+        .and_then(|h| h.as_array())
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| hit_from_row(project_id, row))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(hits)
+}
+
+async fn search_chats(shared: Arc<Shared>, query: String, projects: Vec<Id>, generation: u64) {
+    let mut hits = Vec::new();
+    let mut missed: Vec<Id> = Vec::new();
+    let mut error: Option<String> = None;
+    for id in &projects {
+        match search_one(&shared, id, &query).await {
+            Ok(mut rows) => hits.append(&mut rows),
+            Err(err) if asleep_error(&err) => missed.push(id.clone()),
+            Err(err) => {
+                if error.is_none() {
+                    error = Some(err.to_string());
+                }
+            }
+        }
+    }
+    let send = |hits: Vec<ChatHit>, waking: bool, error: Option<String>| {
+        let _ = shared.events.send(SyncEvent::ChatSearch {
+            query: query.clone(),
+            generation,
+            hits,
+            waking,
+            error,
+        });
+    };
+    if missed.is_empty() {
+        send(hits, false, error);
+        return;
+    }
+    if let Some(id) = missed.first() {
+        let _ = shared
+            .post_json(&format!("/projects/{id}/wake"), json!({}))
+            .await;
+    }
+    send(hits.clone(), true, None);
+    sleep(Duration::from_millis(1500)).await;
+    let mut still = false;
+    for id in &missed {
+        match search_one(&shared, id, &query).await {
+            Ok(mut rows) => hits.append(&mut rows),
+            Err(err) if asleep_error(&err) => still = true,
+            Err(err) => {
+                if error.is_none() {
+                    error = Some(err.to_string());
+                }
+            }
+        }
+    }
+    send(hits, still, error);
+}
+
 fn send_wake(shared: &Arc<Shared>, project_id: &str, reason: &'static str) {
     {
         let rooms = shared.rooms.lock().unwrap();
@@ -3100,6 +3219,16 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     });
                 }
             }
+        }
+        ClientCommand::SearchChats {
+            query,
+            projects,
+            generation,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                search_chats(shared, query, projects, generation).await;
+            });
         }
         ClientCommand::SearchPeople { query } => {
             let shared = shared.clone();

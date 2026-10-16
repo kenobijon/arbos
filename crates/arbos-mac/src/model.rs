@@ -1759,6 +1759,149 @@ pub fn new_id() -> Id {
     ulid::Ulid::new().to_string()
 }
 
+/// One chat-search hit, from the box (`GET /projects/{id}/search`) or from
+/// messages already on this device.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatHit {
+    pub id: String,
+    pub project_id: Id,
+    pub project_name: String,
+    pub chat_id: Id,
+    pub chat_title: String,
+    pub message_id: Option<Id>,
+    pub kind: String,
+    pub snippet: String,
+    pub at: i64,
+}
+
+/// What the sidebar search is waiting on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChatSearchStatus {
+    Idle,
+    Searching,
+    Waking,
+    Failed(String),
+}
+
+/// A loaded message the local search can see without waking the box.
+pub struct LocalMsg<'a> {
+    pub project_id: &'a str,
+    pub project_name: &'a str,
+    pub chat_id: &'a str,
+    pub chat_title: &'a str,
+    pub message_id: &'a str,
+    pub role: &'a str,
+    pub at: i64,
+    pub text: &'a str,
+}
+
+/// Case-insensitive matches in loaded user/assistant/project messages.
+/// Tool transcripts stay on the box (`kind=all`); this pass stays quiet.
+pub fn local_message_hits(items: &[LocalMsg<'_>], query: &str, limit: usize) -> Vec<ChatHit> {
+    let q = query.trim();
+    if q.chars().count() < 2 || limit == 0 {
+        return Vec::new();
+    }
+    let needle = q.to_lowercase();
+    let mut hits = Vec::new();
+    for m in items {
+        if !matches!(m.role, "user" | "assistant" | "project") {
+            continue;
+        }
+        let text = m.text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let Some(snippet) = snippet_around(text, &needle) else {
+            continue;
+        };
+        hits.push(ChatHit {
+            id: format!("local:{}:{}", m.chat_id, m.message_id),
+            project_id: m.project_id.to_owned(),
+            project_name: m.project_name.to_owned(),
+            chat_id: m.chat_id.to_owned(),
+            chat_title: m.chat_title.to_owned(),
+            message_id: Some(m.message_id.to_owned()),
+            kind: m.role.to_owned(),
+            snippet,
+            at: m.at,
+        });
+        if hits.len() == limit {
+            break;
+        }
+    }
+    hits
+}
+
+/// Box hits win when they name the same message (their snippet is the FTS one).
+pub fn merge_hits(local: Vec<ChatHit>, remote: &[ChatHit], limit: usize) -> Vec<ChatHit> {
+    let mut out = Vec::new();
+    for h in remote {
+        if out.len() == limit {
+            break;
+        }
+        if out.iter().any(|e| e.id == h.id) {
+            continue;
+        }
+        out.push(h.clone());
+    }
+    for h in local {
+        if out.len() == limit {
+            break;
+        }
+        let same_message = h.message_id.as_ref().is_some_and(|id| {
+            out.iter()
+                .any(|e| e.chat_id == h.chat_id && e.message_id.as_deref() == Some(id.as_str()))
+        });
+        if same_message || out.iter().any(|e| e.id == h.id) {
+            continue;
+        }
+        out.push(h);
+    }
+    out
+}
+
+fn snippet_around(text: &str, needle_lower: &str) -> Option<String> {
+    let folded = text.to_lowercase();
+    let at = folded.find(needle_lower)?;
+    let at = if folded.len() == text.len() { at } else { 0 };
+    let start = floor_char(text, at.saturating_sub(36));
+    let end = ceil_char(text, (at + needle_lower.len() + 48).min(text.len()));
+    let mut s = String::new();
+    if start > 0 {
+        s.push('…');
+    }
+    let slice = text[start..end]
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    s.push_str(&slice);
+    if end < text.len() {
+        s.push('…');
+    }
+    Some(s)
+}
+
+fn floor_char(s: &str, mut i: usize) -> usize {
+    if i > s.len() {
+        i = s.len();
+    }
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+fn ceil_char(s: &str, mut i: usize) -> usize {
+    if i > s.len() {
+        return s.len();
+    }
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
+}
+
 #[cfg(test)]
 mod null_avatar_tests {
     use super::*;
@@ -1772,5 +1915,62 @@ mod null_avatar_tests {
         assert_eq!(p.handle, "mactest-a");
         assert!(p.avatar_url.is_empty());
         assert_eq!(p.initial(), "M");
+    }
+}
+
+#[cfg(test)]
+mod chat_search_tests {
+    use super::*;
+
+    fn msg<'a>(
+        project: &'a str,
+        chat: &'a str,
+        id: &'a str,
+        role: &'a str,
+        text: &'a str,
+    ) -> LocalMsg<'a> {
+        LocalMsg {
+            project_id: project,
+            project_name: "Ada",
+            chat_id: chat,
+            chat_title: "Main",
+            message_id: id,
+            role,
+            at: 10,
+            text,
+        }
+    }
+
+    #[test]
+    fn local_search_skips_short_queries_tools_and_merges() {
+        let items = [
+            msg("p", "c", "m1", "user", "The quarterly report is ready"),
+            msg("p", "c", "m2", "assistant", "Filed the quarterly report"),
+            msg("p", "c", "m3", "system", "quarterly report system line"),
+            msg("p", "c2", "m4", "user", "weather tomorrow"),
+        ];
+        assert!(local_message_hits(&items, "q", 10).is_empty());
+        let hits = local_message_hits(&items, "Quarterly", 10);
+        assert_eq!(hits.len(), 2);
+        assert!(hits
+            .iter()
+            .all(|h| h.snippet.to_lowercase().contains("quarterly")));
+        assert!(hits.iter().all(|h| h.message_id.is_some()));
+
+        let remote = vec![ChatHit {
+            id: "t3".into(),
+            project_id: "p".into(),
+            project_name: "Ada".into(),
+            chat_id: "c".into(),
+            chat_title: "Main".into(),
+            message_id: Some("m1".into()),
+            kind: "user".into(),
+            snippet: "box snippet".into(),
+            at: 11,
+        }];
+        let merged = merge_hits(hits, &remote, 20);
+        assert_eq!(merged[0].snippet, "box snippet");
+        assert_eq!(merged.len(), 2);
+        assert!(merged.iter().any(|h| h.message_id.as_deref() == Some("m2")));
     }
 }

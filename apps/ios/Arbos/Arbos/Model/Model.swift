@@ -215,6 +215,26 @@ struct Chat: Identifiable, Equatable, Codable {
     var isSystem: Bool { kind == "projects" }
 }
 
+/// One chat-search hit. `id` is the box turn id, or `local:<chat>:<message>` for a
+/// message already on the phone. `messageId` opens the transcript at that message.
+struct ChatHit: Identifiable, Equatable {
+    var id: String
+    var projectId: String
+    var projectName: String
+    var chatId: String
+    var chatTitle: String
+    var messageId: String?
+    var kind: String
+    var snippet: String
+    var at: Int64
+}
+
+/// Where a search hit should scroll the open transcript.
+struct ScrollTarget: Equatable {
+    var chatId: Id
+    var messageId: Id
+}
+
 enum Role: String, Codable {
     case user, assistant, system, project
 }

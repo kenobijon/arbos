@@ -157,7 +157,12 @@ impl Shell {
         search_input.update(cx, |input, _| input.set_placeholder("Search"));
         cx.observe(&pairing_input, |_, _, cx| cx.notify()).detach();
         cx.observe(&project_input, |_, _, cx| cx.notify()).detach();
-        cx.observe(&search_input, |_, _, cx| cx.notify()).detach();
+        cx.observe(&search_input, |this, input, cx| {
+            let text = input.read(cx).text();
+            this.state.update(cx, |s, cx| s.set_chat_query(text, cx));
+            cx.notify();
+        })
+        .detach();
         let description_input = cx.new(ComposerInput::new);
         description_input.update(cx, |input, _| {
             input.set_placeholder("What does this agent do?")

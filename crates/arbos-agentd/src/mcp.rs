@@ -177,7 +177,7 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
                     let n = hits.len() as i64;
                     let items: Vec<Value> = hits
                         .into_iter()
-                        .map(|(r, score, snip)| json!({ "id": r.id, "thread_id": r.thread_id, "subagent_id": r.subagent_id, "kind": r.kind, "at": r.at, "score": -score, "snippet": clip(&snip, 300) }))
+                        .map(|h| json!({ "id": h.row.id, "thread_id": h.row.thread_id, "subagent_id": h.row.subagent_id, "kind": h.row.kind, "at": h.row.at, "score": -h.score, "snippet": clip(&h.snippet, 300), "message_id": h.message_id }))
                         .collect();
                     let next = if n == limit {
                         Some((offset + n).to_string())

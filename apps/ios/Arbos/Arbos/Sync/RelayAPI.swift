@@ -244,6 +244,36 @@ final class RelayAPI {
         _ = try await json("POST", "/projects/\(projectId)/wake", body: [String: Any]())
     }
 
+    /// `GET /projects/{id}/search?q=`. The box must be awake (409 when it isn't).
+    /// Default hits are user and assistant turns; `all` includes tool transcripts.
+    func searchMessages(projectId: Id, query: String, chatId: Id? = nil, all: Bool = false) async throws -> [ChatHit] {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty, let enc = q.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return [] }
+        var path = "/projects/\(projectId)/search?q=\(enc)&limit=20"
+        if all { path += "&kind=all" }
+        if let chatId, let encChat = chatId.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
+            path += "&chat=\(encChat)"
+        }
+        guard let obj = try await json("GET", path) as? [String: Any] else { return [] }
+        return ((obj["hits"] as? [Any]) ?? []).compactMap { raw in
+            guard let m = raw as? [String: Any] else { return nil }
+            let chat = (m["chat_id"] as? String) ?? (m["thread_id"] as? String) ?? ""
+            guard !chat.isEmpty else { return nil }
+            let snippet = (m["snippet"] as? String ?? "").replacingOccurrences(of: "[", with: "").replacingOccurrences(of: "]", with: "")
+            return ChatHit(
+                id: m["id"] as? String ?? "hit-\(chat)",
+                projectId: m["project_id"] as? String ?? projectId,
+                projectName: "",
+                chatId: chat,
+                chatTitle: m["chat_title"] as? String ?? "",
+                messageId: m["message_id"] as? String,
+                kind: m["kind"] as? String ?? "user",
+                snippet: snippet,
+                at: (m["at"] as? NSNumber)?.int64Value ?? 0
+            )
+        }
+    }
+
     // MARK: Machine (D70: one box per user, projects are workspaces on it)
 
     /// `GET /machine` → the caller's one box and its workspaces.

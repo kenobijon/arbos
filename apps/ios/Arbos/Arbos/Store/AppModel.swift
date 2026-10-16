@@ -1799,6 +1799,173 @@ final class AppModel: ObservableObject {
 
     func messages(of chatId: Id) -> [Message] { messages[chatId] ?? [] }
 
+    // MARK: Chat search
+
+    /// Box FTS hits for the sidebar query. Local matches are computed separately.
+    @Published var boxChatHits: [ChatHit] = []
+    /// "Searching…" or "Waking…" while the box search is in flight.
+    @Published var chatSearchNote: String? = nil
+    /// The open transcript scrolls here after a hit is chosen.
+    @Published var scrollTarget: ScrollTarget? = nil
+    @Published var highlightedMessage: Id? = nil
+    private var chatSearchTask: Task<Void, Never>?
+    private var chatSearchGen = 0
+    /// When set, search only this project's box (the chat list). Nil searches every agent.
+    private var chatSearchProject: Id? = nil
+
+    func searchChats(_ raw: String, only projectId: Id? = nil) {
+        let q = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        chatSearchGen += 1
+        let gen = chatSearchGen
+        chatSearchProject = projectId
+        chatSearchTask?.cancel()
+        if q.count < 2 {
+            boxChatHits = []
+            chatSearchNote = nil
+            return
+        }
+        boxChatHits = []
+        chatSearchNote = machine.state == .waking || machine.state.isAsleep ? "Waking…" : "Searching…"
+        chatSearchTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 280_000_000)
+            guard let self, !Task.isCancelled, gen == self.chatSearchGen else { return }
+            await self.runChatSearch(q, gen: gen, only: projectId)
+        }
+    }
+
+    func mergedChatHits(_ query: String) -> [ChatHit] {
+        // Box hits first: their snippet is the FTS one, and they win on a shared message.
+        var hits: [ChatHit] = []
+        for h in boxChatHits {
+            if hits.contains(where: { $0.id == h.id }) { continue }
+            hits.append(h)
+            if hits.count == 20 { return hits }
+        }
+        for h in localChatHits(query) {
+            let same = h.messageId != nil && hits.contains { $0.chatId == h.chatId && $0.messageId == h.messageId }
+            if same || hits.contains(where: { $0.id == h.id }) { continue }
+            hits.append(h)
+            if hits.count == 20 { break }
+        }
+        return hits
+    }
+
+    func localChatHits(_ query: String) -> [ChatHit] {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard q.count >= 2 else { return [] }
+        var out: [ChatHit] = []
+        let only = chatSearchProject
+        for p in projects where only == nil || only == p.id {
+            for chat in chats(of: p.id) {
+                out += messageHits(chatId: chat.id, projectId: p.id, projectName: p.name, chatTitle: chat.title, query: q)
+            }
+        }
+        if only == nil {
+            for c in peopleChats {
+                out += messageHits(chatId: c.id, projectId: c.id, projectName: c.title, chatTitle: c.title, query: q)
+            }
+        }
+        return Array(out.prefix(20))
+    }
+
+    private func messageHits(chatId: Id, projectId: Id, projectName: String, chatTitle: String, query: String) -> [ChatHit] {
+        let needle = query.lowercased()
+        var out: [ChatHit] = []
+        for m in messages(of: chatId) {
+            guard m.role == .user || m.role == .assistant || m.role == .project else { continue }
+            let text = m.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty, text.lowercased().contains(needle) else { continue }
+            out.append(ChatHit(
+                id: "local:\(chatId):\(m.id)",
+                projectId: projectId,
+                projectName: projectName,
+                chatId: chatId,
+                chatTitle: chatTitle,
+                messageId: m.id,
+                kind: m.role.rawValue,
+                snippet: snippet(text, around: needle),
+                at: m.createdAt
+            ))
+        }
+        return out
+    }
+
+    private func snippet(_ text: String, around needle: String) -> String {
+        let folded = text.lowercased()
+        guard let range = folded.range(of: needle) else { return String(text.prefix(80)) }
+        let start = folded.distance(from: folded.startIndex, to: range.lowerBound)
+        let from = min(text.count, max(0, start - 36))
+        let to = min(text.count, max(from, start + needle.count + 48))
+        let i = text.index(text.startIndex, offsetBy: from)
+        let j = text.index(text.startIndex, offsetBy: to)
+        var s = String(text[i..<j]).replacingOccurrences(of: "\n", with: " ")
+        if from > 0 { s = "…" + s }
+        if to < text.count { s += "…" }
+        return s
+    }
+
+    func openHit(_ hit: ChatHit) {
+        if let chat = chat(hit.chatId) {
+            open(chat: chat)
+        } else if let people = peopleChat(hit.chatId) {
+            open(peopleChat: people)
+        } else if let p = project(hit.projectId) {
+            open(project: p)
+        }
+        if let mid = hit.messageId {
+            scrollTarget = ScrollTarget(chatId: hit.chatId, messageId: mid)
+            highlightedMessage = mid
+        }
+    }
+
+    private func runChatSearch(_ q: String, gen: Int, only projectId: Id?) async {
+        let targets = projects.filter { projectId == nil || $0.id == projectId }
+        var hits: [ChatHit] = []
+        var missed: [Id] = []
+        var note: String? = nil
+        for p in targets {
+            do {
+                var rows = try await api.searchMessages(projectId: p.id, query: q)
+                for i in rows.indices {
+                    if rows[i].projectName.isEmpty { rows[i].projectName = p.name }
+                    if rows[i].chatTitle.isEmpty {
+                        rows[i].chatTitle = chat(rows[i].chatId)?.title ?? ""
+                    }
+                }
+                hits += rows
+            } catch let e as RelayError where e.status == 409 {
+                missed.append(p.id)
+            } catch {
+                if note == nil { note = error.localizedDescription }
+            }
+            if Task.isCancelled || gen != chatSearchGen { return }
+        }
+        if !missed.isEmpty {
+            await MainActor.run { if gen == self.chatSearchGen { self.chatSearchNote = "Waking…" } }
+            if let id = missed.first { try? await api.wake(projectId: id) }
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard !Task.isCancelled, gen == chatSearchGen else { return }
+            var still = false
+            for id in missed {
+                do {
+                    var rows = try await api.searchMessages(projectId: id, query: q)
+                    if let name = project(id)?.name {
+                        for i in rows.indices where rows[i].projectName.isEmpty { rows[i].projectName = name }
+                    }
+                    hits += rows
+                } catch let e as RelayError where e.status == 409 {
+                    still = true
+                } catch {
+                    if note == nil { note = error.localizedDescription }
+                }
+            }
+            if still { note = note ?? "Waking…" }
+        }
+        guard gen == chatSearchGen else { return }
+        boxChatHits = hits
+        chatSearchNote = note
+    }
+
     /// S8: the last assistant message asked a question and nothing was sent since.
     func chatNeedsAnswer(_ chatId: Id) -> Bool {
         guard let last = messages(of: chatId).last, last.role == .assistant, !last.isStreaming else { return false }

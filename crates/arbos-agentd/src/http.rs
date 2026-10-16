@@ -102,6 +102,28 @@ async fn history_legacy(
     }
 }
 
+/// Kinds the box search keeps. Absent or blank → user and assistant (quiet).
+/// `all` or `*` → every kind, including tool transcripts.
+fn search_kinds(raw: Option<&str>) -> Option<String> {
+    match raw.map(str::trim).filter(|s| !s.is_empty()) {
+        None => Some("user,assistant".to_owned()),
+        Some("all") | Some("*") => None,
+        Some(k) => {
+            let joined = k
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(",");
+            if joined.is_empty() {
+                Some("user,assistant".to_owned())
+            } else {
+                Some(joined)
+            }
+        }
+    }
+}
+
 async fn t3_search(
     State(b): State<B>,
     Path(project): Path<String>,
@@ -110,9 +132,47 @@ async fn t3_search(
     let Some(w) = b.get(&project).await else {
         return (StatusCode::NOT_FOUND, "no such workspace").into_response();
     };
-    let query = q.get("q").cloned().unwrap_or_default();
-    match w.store.t3_search(&query, None, None, 20, 0) {
-        Ok(hits) => Json(hits.into_iter().map(|(r, s, snip)| json!({ "id": r.id, "thread_id": r.thread_id, "kind": r.kind, "score": -s, "snippet": snip })).collect::<Vec<_>>()).into_response(),
+    let query = q.get("q").map(|s| s.trim().to_owned()).unwrap_or_default();
+    if query.is_empty() {
+        return Json(Vec::<serde_json::Value>::new()).into_response();
+    }
+    let limit = q
+        .get("limit")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(20)
+        .clamp(1, 50);
+    let offset = q
+        .get("offset")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(0)
+        .max(0);
+    let thread = q
+        .get("thread_id")
+        .cloned()
+        .or_else(|| q.get("chat").cloned())
+        .filter(|s| !s.is_empty());
+    let kind = search_kinds(q.get("kind").map(String::as_str));
+    match w
+        .store
+        .t3_search(&query, thread.as_deref(), kind.as_deref(), limit, offset)
+    {
+        Ok(hits) => Json(
+            hits.into_iter()
+                .map(|h| {
+                    json!({
+                        "id": h.row.id,
+                        "thread_id": h.row.thread_id,
+                        "kind": h.row.kind,
+                        "role": h.row.role,
+                        "at": h.row.at,
+                        "score": -h.score,
+                        "snippet": h.snippet,
+                        "message_id": h.message_id,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -304,4 +364,26 @@ pub fn stub_router(agent: Arc<Agent>) -> Router {
     Router::new()
         .route("/{*path}", any(stub_forward))
         .with_state(agent)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::search_kinds;
+
+    #[test]
+    fn search_kinds_defaults_to_prose() {
+        assert_eq!(search_kinds(None).as_deref(), Some("user,assistant"));
+        assert_eq!(search_kinds(Some("")).as_deref(), Some("user,assistant"));
+        assert_eq!(search_kinds(Some("  ")).as_deref(), Some("user,assistant"));
+        assert_eq!(search_kinds(Some("all")), None);
+        assert_eq!(search_kinds(Some("*")), None);
+        assert_eq!(
+            search_kinds(Some("user, assistant")).as_deref(),
+            Some("user,assistant")
+        );
+        assert_eq!(
+            search_kinds(Some("tool_output")).as_deref(),
+            Some("tool_output")
+        );
+    }
 }

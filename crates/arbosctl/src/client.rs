@@ -114,10 +114,15 @@ impl Relay {
     }
 
     pub async fn get(&self, path: &str) -> Result<Value> {
+        self.get_query(path, &[]).await
+    }
+
+    pub async fn get_query(&self, path: &str, query: &[(&str, &str)]) -> Result<Value> {
         self.need_token()?;
         Self::finish(
             self.http
                 .get(format!("{}{}", self.base, path))
+                .query(query)
                 .bearer_auth(&self.token)
                 .send()
                 .await?,

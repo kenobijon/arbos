@@ -21,8 +21,9 @@ use tokio::sync::mpsc;
 
 use crate::model::{AccountView, Call, CallEnded, CallKind, CallMissed, Person, Reachable, Sender};
 use crate::model::{
-    BoxState, ChannelsView, Chat, ConnectorsView, Effort, Id, Link, LocalView, Machine, Message,
-    Project, ProjectDocView, Routine, RoutineRun, RoutineTrigger, Skill, VaultNewItem, VaultView,
+    BoxState, ChannelsView, Chat, ChatHit, ConnectorsView, Effort, Id, Link, LocalView, Machine,
+    Message, Project, ProjectDocView, Routine, RoutineRun, RoutineTrigger, Skill, VaultNewItem,
+    VaultView,
 };
 
 /// Something the source learned; the UI applies it to its mirror.
@@ -38,6 +39,15 @@ pub enum SyncEvent {
     PeopleSearch {
         query: String,
         results: Vec<Person>,
+    },
+    /// `GET /projects/{id}/search` across the user's agents. `generation` drops a
+    /// stale reply when the field has moved on. `waking` means the box was asleep.
+    ChatSearch {
+        query: String,
+        generation: u64,
+        hits: Vec<ChatHit>,
+        waking: bool,
+        error: Option<String>,
     },
     /// Someone in a people chat started/stopped typing (room presence).
     /// Someone's device sent a presence frame in a room we share (API §7c
@@ -224,6 +234,12 @@ pub enum ClientCommand {
     /// New-chat sheet: `GET /users/search?q=`.
     SearchPeople {
         query: String,
+    },
+    /// Sidebar search: `GET /projects/{id}/search` for each agent project.
+    SearchChats {
+        query: String,
+        projects: Vec<Id>,
+        generation: u64,
     },
     /// `POST /chats/dm {handle}`; the chat lands in the next `Projects` event.
     StartDm {

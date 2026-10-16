@@ -9,12 +9,31 @@ struct ChatListView: View {
     @Environment(\.dismiss) private var dismiss
     let projectId: Id
     @State private var creating = false
+    @State private var search = ""
 
     private var project: Project? { model.project(projectId) }
 
     var body: some View {
         NavigationStack {
             List {
+                if !search.trimmingCharacters(in: .whitespaces).isEmpty {
+                    let hits = model.mergedChatHits(search).filter { $0.projectId == projectId }
+                    if let note = model.chatSearchNote, hits.isEmpty || note == "Waking…" {
+                        Text(note)
+                            .font(.system(size: Theme.small))
+                            .foregroundStyle(theme.muted)
+                            .listRowBackground(theme.bg)
+                    }
+                    ForEach(hits) { hit in
+                        Button {
+                            model.openHit(hit)
+                            dismiss()
+                        } label: {
+                            ChatHitRow(hit: hit)
+                        }
+                        .listRowBackground(theme.bg)
+                    }
+                }
                 ForEach(model.chats(of: projectId)) { chat in
                     Button {
                         model.open(chat: chat)
@@ -36,6 +55,8 @@ struct ChatListView: View {
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
             .background(theme.bg)
+            .searchable(text: $search, prompt: "Search messages")
+            .onChange(of: search) { _, q in model.searchChats(q, only: projectId) }
             .navigationTitle(project?.name ?? "Chats")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

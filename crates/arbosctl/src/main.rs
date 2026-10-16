@@ -405,6 +405,20 @@ enum ChatCmd {
         project: String,
         chat: String,
     },
+    /// Search this project's chat history on the box (user and assistant turns).
+    /// The box must be awake. `--all` includes tool transcripts.
+    Search {
+        project: String,
+        query: String,
+        /// Include tool transcripts and other turn kinds.
+        #[arg(long)]
+        all: bool,
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+        /// Only this chat.
+        #[arg(long)]
+        chat: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -690,6 +704,54 @@ async fn main() -> Result<()> {
                 let project = resolve_project(&relay, &project).await?;
                 room::reset(&cfg, &project, &chat)?;
                 println!("reset local replica for {project}/{chat}");
+            }
+            ChatCmd::Search {
+                project,
+                query,
+                all,
+                limit,
+                chat,
+            } => {
+                let project = resolve_project(&relay, &project).await?;
+                let limit_s = limit.clamp(1, 50).to_string();
+                let mut pairs = vec![("q", query.as_str()), ("limit", limit_s.as_str())];
+                if all {
+                    pairs.push(("kind", "all"));
+                }
+                if let Some(chat) = chat.as_deref() {
+                    pairs.push(("chat", chat));
+                }
+                let v = relay
+                    .get_query(&format!("/projects/{project}/search"), &pairs)
+                    .await?;
+                if args.json {
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                } else if let Some(hits) = v.get("hits").and_then(|h| h.as_array()) {
+                    if hits.is_empty() {
+                        println!("no matches");
+                    }
+                    for h in hits {
+                        let who = h.get("kind").and_then(|k| k.as_str()).unwrap_or("?");
+                        let title = h
+                            .get("chat_title")
+                            .and_then(|t| t.as_str())
+                            .filter(|t| !t.is_empty())
+                            .unwrap_or_else(|| {
+                                h.get("chat_id").and_then(|c| c.as_str()).unwrap_or("")
+                            });
+                        let snippet = h.get("snippet").and_then(|s| s.as_str()).unwrap_or("");
+                        let message = h.get("message_id").and_then(|m| m.as_str()).unwrap_or("");
+                        println!("{who}  {title}");
+                        if !snippet.is_empty() {
+                            println!("  {snippet}");
+                        }
+                        if !message.is_empty() {
+                            println!("  message {message}");
+                        }
+                    }
+                } else {
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
             }
         },
         Cmd::Box { cmd } => match cmd {

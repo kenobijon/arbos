@@ -106,6 +106,36 @@ struct HomeView: View {
                                 .listRowBackground(theme.bg)
                             }
                         }
+                        if !query.trimmingCharacters(in: .whitespaces).isEmpty {
+                            let hits = model.mergedChatHits(query)
+                            if let note = model.chatSearchNote, hits.isEmpty || note == "Waking…" {
+                                Text(note)
+                                    .font(.system(size: Theme.small))
+                                    .foregroundStyle(theme.muted)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.top, 8)
+                                    .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
+                                    .listRowSeparator(.hidden)
+                                    .listRowBackground(theme.bg)
+                            }
+                            if !hits.isEmpty {
+                                Text("Messages")
+                                    .font(.system(size: Theme.tiny, weight: .semibold))
+                                    .foregroundStyle(theme.muted)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.top, 12)
+                                    .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
+                                    .listRowSeparator(.hidden)
+                                    .listRowBackground(theme.bg)
+                            }
+                            ForEach(hits) { hit in
+                                Button { model.openHit(hit) } label: { ChatHitRow(hit: hit) }
+                                    .buttonStyle(.plain)
+                                    .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
+                                    .listRowSeparator(.hidden)
+                                    .listRowBackground(theme.bg)
+                            }
+                        }
                         // Launch timing: the populated list is on screen.
                         Color.clear.frame(height: 1)
                             .listRowInsets(EdgeInsets())
@@ -126,6 +156,7 @@ struct HomeView: View {
                     .ignoresSafeArea()
                 }
                 .refreshable { await model.refreshRegistry() }
+                .onChange(of: query) { _, q in model.searchChats(q) }
                 topBar
             }
             .task(id: model.link) {
@@ -639,5 +670,56 @@ struct AgentGroupRow: View {
         }
         .padding(.vertical, 12)
         .contentShape(Rectangle())
+    }
+}
+
+struct ChatHitRow: View {
+    @Environment(\.theme) private var theme
+    let hit: ChatHit
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack {
+                Text(title)
+                    .font(.system(size: Theme.small, weight: .semibold))
+                    .foregroundStyle(theme.text)
+                    .lineLimit(1)
+                Spacer()
+                if !when.isEmpty {
+                    Text(when)
+                        .font(.system(size: Theme.tiny))
+                        .foregroundStyle(theme.muted)
+                }
+            }
+            Text("\(who): \(hit.snippet)")
+                .font(.system(size: Theme.small))
+                .foregroundStyle(theme.muted)
+                .lineLimit(2)
+        }
+        .padding(.vertical, 8)
+        .contentShape(Rectangle())
+    }
+
+    private var title: String {
+        if hit.chatTitle.isEmpty || hit.chatTitle == hit.projectName { return hit.projectName }
+        if hit.projectName.isEmpty { return hit.chatTitle }
+        return "\(hit.projectName) · \(hit.chatTitle)"
+    }
+
+    private var who: String {
+        switch hit.kind {
+        case "user": return "You"
+        case "assistant": return hit.projectName.isEmpty ? "Agent" : hit.projectName
+        default: return hit.kind
+        }
+    }
+
+    private var when: String {
+        guard hit.at > 0 else { return "" }
+        let date = Date(timeIntervalSince1970: Double(hit.at) / 1000)
+        if Calendar.current.isDateInToday(date) {
+            return date.formatted(date: .omitted, time: .shortened)
+        }
+        return date.formatted(.dateTime.month(.abbreviated).day())
     }
 }

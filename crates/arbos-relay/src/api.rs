@@ -614,6 +614,117 @@ pub async fn chat_history(
     }
 }
 
+/// `GET /projects/{id}/search?q=&limit=&kind=&chat=`: full-text search of the project's
+/// turns on the box (`GET /w/{id}/t3/search`). Same auth and awake-box rules as
+/// [`chat_history`]. The box defaults to user and assistant turns; `kind=all` includes
+/// tool transcripts. Hits carry `message_id` when the turn recorded one, so a client
+/// can open that chat at the message.
+pub async fn chat_search(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> ApiResult {
+    let id = resolve_project_id(&state, &id)?;
+    if !state.allows(&principal, &id) {
+        return Err((StatusCode::FORBIDDEN, "not your project".into()));
+    }
+    let query = q.get("q").map(|s| s.trim().to_owned()).unwrap_or_default();
+    if query.is_empty() {
+        return Ok(Json(json!({ "q": "", "hits": [] })).into_response());
+    }
+    let sb = state
+        .db
+        .box_for_project(&id)
+        .map_err(internal)?
+        .ok_or((StatusCode::NOT_FOUND, "no box".to_owned()))?;
+    let Some(url) = sb.box_url else {
+        return Err((StatusCode::CONFLICT, "box has no url yet".into()));
+    };
+    let limit = q
+        .get("limit")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(20)
+        .clamp(1, 50);
+    let mut params: Vec<(&str, String)> = vec![("q", query.clone()), ("limit", limit.to_string())];
+    if let Some(kind) = q.get("kind").map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        params.push(("kind", kind.to_owned()));
+    }
+    if let Some(chat) = q
+        .get("chat")
+        .or_else(|| q.get("thread_id"))
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        params.push(("thread_id", chat.to_owned()));
+    }
+    if let Some(offset) = q.get("offset").filter(|s| !s.is_empty()) {
+        params.push(("offset", offset.clone()));
+    }
+    let mut req = state
+        .http
+        .get(format!("{url}/w/{id}/t3/search"))
+        .query(&params);
+    if let Some(t) = &sb.preview_token {
+        req = req.header("x-daytona-preview-token", t);
+    }
+    let bytes = match req.send().await {
+        Ok(r) if r.status().is_success() => r.bytes().await.unwrap_or_default(),
+        Ok(r) => {
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                format!("box answered {}", r.status()),
+            ))
+        }
+        Err(e) => {
+            return Err((
+                StatusCode::CONFLICT,
+                format!("box unreachable (asleep?): {e}"),
+            ))
+        }
+    };
+    let raw: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    let rows = raw
+        .as_array()
+        .or_else(|| raw.get("hits").and_then(Value::as_array))
+        .cloned()
+        .ok_or((
+            StatusCode::BAD_GATEWAY,
+            "box search did not return a list".into(),
+        ))?;
+    let hits: Vec<Value> = rows
+        .into_iter()
+        .map(|row| {
+            let thread = row
+                .get("thread_id")
+                .or_else(|| row.get("chat_id"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            let title = state
+                .db
+                .chat(&id, &thread)
+                .ok()
+                .flatten()
+                .map(|c| c.title)
+                .filter(|t| !t.is_empty());
+            json!({
+                "id": row.get("id").cloned().unwrap_or(Value::Null),
+                "chat_id": thread,
+                "chat_title": title,
+                "project_id": id,
+                "kind": row.get("kind").cloned().unwrap_or(Value::Null),
+                "role": row.get("role").cloned().unwrap_or(Value::Null),
+                "at": row.get("at").cloned().unwrap_or(Value::Null),
+                "score": row.get("score").cloned().unwrap_or(Value::Null),
+                "snippet": row.get("snippet").cloned().unwrap_or(Value::Null),
+                "message_id": row.get("message_id").cloned().unwrap_or(Value::Null),
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "q": query, "hits": hits })).into_response())
+}
+
 /// Accept a project id or name in the path and return the id.
 pub(crate) fn resolve_project_id(
     state: &AppState,
@@ -1679,5 +1790,239 @@ mod primary_chat_tests {
             .unwrap()
             .iter()
             .any(|c| c.kind == "projects"));
+    }
+}
+
+#[cfg(test)]
+mod chat_search_tests {
+    use std::collections::HashMap;
+
+    use axum::body::to_bytes;
+    use axum::extract::{Path, Query, State};
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::response::IntoResponse;
+    use axum::routing::get;
+    use axum::{Json, Router};
+    use serde_json::{json, Value};
+
+    use arbos_core::ids::now_ms;
+
+    use super::chat_search;
+    use crate::auth::Principal;
+    use crate::db::{Chat, Sandbox};
+    use crate::people::tests_support::{person, project_of};
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    fn box_at(state: &crate::state::AppState, user: &str, url: Option<&str>, token: Option<&str>) {
+        state
+            .db
+            .upsert_box(&Sandbox {
+                user_id: user.to_owned(),
+                provider: "process".into(),
+                sandbox_id: None,
+                daytona_state: None,
+                device_id: "dev".into(),
+                box_token_hash: String::new(),
+                mcp_token: String::new(),
+                snapshot: None,
+                last_started_at: None,
+                last_stopped_at: None,
+                last_seen_at: None,
+                box_url: url.map(str::to_owned),
+                preview_token: token.map(str::to_owned),
+                local_pid: None,
+                migrated_from: Vec::new(),
+            })
+            .unwrap();
+    }
+
+    async fn call(
+        state: &crate::state::AppState,
+        principal: Principal,
+        project: &str,
+        q: HashMap<String, String>,
+    ) -> (StatusCode, Value) {
+        let resp = match chat_search(
+            State(state.clone()),
+            principal,
+            Path(project.to_owned()),
+            Query(q),
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err((status, msg)) => (status, msg).into_response(),
+        };
+        let status = resp.status();
+        let bytes = to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap_or_default();
+        let v = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into()));
+        (status, v)
+    }
+
+    /// A stand-in for the box's `GET /w/{project}/t3/search`.
+    async fn mock_box() -> String {
+        let app = Router::new().route(
+            "/w/{project}/t3/search",
+            get(
+                |Path(_project): Path<String>,
+                 Query(q): Query<HashMap<String, String>>,
+                 headers: HeaderMap| async move {
+                    let token = headers
+                        .get("x-daytona-preview-token")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("")
+                        .to_owned();
+                    if token != "preview-tok" {
+                        return (StatusCode::UNAUTHORIZED, "bad token").into_response();
+                    }
+                    if q.get("q").map(String::as_str) == Some("boom") {
+                        return (StatusCode::INTERNAL_SERVER_ERROR, "nope").into_response();
+                    }
+                    Json(json!([{
+                        "id": "t3-1",
+                        "thread_id": q.get("thread_id").cloned().unwrap_or_else(|| "chat-x".into()),
+                        "kind": "assistant",
+                        "role": "assistant",
+                        "at": 1_700_000_000_000i64,
+                        "score": 2.5,
+                        "snippet": format!(
+                            "q={} kind={}",
+                            q.get("q").cloned().unwrap_or_default(),
+                            q.get("kind").cloned().unwrap_or_default()
+                        ),
+                        "message_id": "msg-1",
+                    }]))
+                    .into_response()
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        tokio::task::yield_now().await;
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn search_is_authed_and_forwards_to_the_box() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 11);
+        let (_bob, bob_dev) = person(&state, 12);
+        let project = project_of(&state, &alice, "Research");
+        let chat_id = "01CHATSEARCH0000000000000001";
+        state
+            .db
+            .insert_chat(&Chat {
+                id: chat_id.into(),
+                project_id: project.clone(),
+                title: "Quarterly".into(),
+                is_pinned: false,
+                position: 1,
+                created_at: now_ms(),
+                doc_epoch: 1,
+                kind: "chat".into(),
+                participants: Vec::new(),
+            })
+            .unwrap();
+
+        let (status, body) = call(
+            &state,
+            bob_dev,
+            &project,
+            HashMap::from([("q".into(), "quarterly".into())]),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+        let (status, body) = call(&state, alice_dev.clone(), &project, HashMap::new()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["hits"], json!([]));
+
+        let (status, body) = call(
+            &state,
+            alice_dev.clone(),
+            &project,
+            HashMap::from([("q".into(), "quarterly".into())]),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+        box_at(&state, &alice, None, None);
+        let (status, body) = call(
+            &state,
+            alice_dev.clone(),
+            &project,
+            HashMap::from([("q".into(), "quarterly".into())]),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body.as_str().unwrap_or("").contains("no url"));
+
+        box_at(
+            &state,
+            &alice,
+            Some("http://127.0.0.1:9"),
+            Some("preview-tok"),
+        );
+        let (status, body) = call(
+            &state,
+            alice_dev.clone(),
+            &project,
+            HashMap::from([("q".into(), "quarterly".into())]),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body.as_str().unwrap_or("").contains("asleep"), "{body}");
+
+        let url = mock_box().await;
+        box_at(&state, &alice, Some(&url), Some("preview-tok"));
+        let (status, body) = call(
+            &state,
+            alice_dev.clone(),
+            &project,
+            HashMap::from([
+                ("q".into(), "quarterly".into()),
+                ("chat".into(), chat_id.into()),
+            ]),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["q"], json!("quarterly"));
+        let hit = &body["hits"][0];
+        assert_eq!(hit["chat_id"], json!(chat_id));
+        assert_eq!(hit["chat_title"], json!("Quarterly"));
+        assert_eq!(hit["project_id"], json!(project));
+        assert_eq!(hit["message_id"], json!("msg-1"));
+        assert_eq!(hit["kind"], json!("assistant"));
+        assert_eq!(hit["snippet"], json!("q=quarterly kind="));
+
+        let (status, body) = call(
+            &state,
+            alice_dev.clone(),
+            &project,
+            HashMap::from([
+                ("q".into(), "quarterly".into()),
+                ("kind".into(), "all".into()),
+                ("chat".into(), chat_id.into()),
+            ]),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["hits"][0]["snippet"], json!("q=quarterly kind=all"));
+
+        let (status, _) = call(
+            &state,
+            alice_dev,
+            &project,
+            HashMap::from([("q".into(), "boom".into())]),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
     }
 }

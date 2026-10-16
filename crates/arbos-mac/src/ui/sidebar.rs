@@ -359,18 +359,66 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
                         .child(line),
                 ),
         );
-    } else if rows.is_empty() {
+    }
+    let hits = if query.chars().count() >= 2 {
+        state.chat_results()
+    } else {
+        Vec::new()
+    };
+    let search_note = match &state.chat_search_status {
+        crate::model::ChatSearchStatus::Searching if hits.is_empty() => Some("Searching…"),
+        crate::model::ChatSearchStatus::Waking => Some("Waking…"),
+        crate::model::ChatSearchStatus::Failed(err) => Some(err.as_str()),
+        _ => None,
+    };
+    if rows.is_empty() && hits.is_empty() && !empty {
+        let line = match search_note {
+            Some(note) => note.to_string(),
+            None => format!("Nothing matches “{query}”."),
+        };
         list = list.child(
             div()
                 .pt(px(40.0))
                 .text_center()
                 .text_size(px(TEXT_SMALL))
                 .text_color(theme.text_muted)
-                .child(format!("Nothing matches “{query}”.")),
+                .child(line),
         );
     }
     for (_, row) in rows {
         list = list.child(render_row(row, &theme, cx));
+    }
+    if !hits.is_empty() || (search_note.is_some() && !rows.is_empty()) {
+        list = list.child(
+            div()
+                .px(px(10.0))
+                .pt(px(14.0))
+                .pb(px(4.0))
+                .text_size(px(TEXT_TINY))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.text_faint)
+                .child("Messages"),
+        );
+        if let Some(note) = search_note {
+            if hits.is_empty()
+                || matches!(
+                    state.chat_search_status,
+                    crate::model::ChatSearchStatus::Waking
+                )
+            {
+                list = list.child(
+                    div()
+                        .px(px(10.0))
+                        .py(px(6.0))
+                        .text_size(px(TEXT_SMALL))
+                        .text_color(theme.text_muted)
+                        .child(note.to_string()),
+                );
+            }
+        }
+        for hit in hits {
+            list = list.child(render_hit(hit, &theme, cx));
+        }
     }
 
     // ----- bottom: Update pill (only when a newer build exists) and the account row --
@@ -492,6 +540,78 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         column = column.child(div().px(px(12.0)).pb(px(8.0)).child(update));
     }
     column.child(account_row)
+}
+
+fn render_hit(
+    hit: crate::model::ChatHit,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> impl IntoElement {
+    let id = hit.id.clone();
+    let title = if hit.chat_title.is_empty() || hit.chat_title == hit.project_name {
+        hit.project_name.clone()
+    } else if hit.project_name.is_empty() {
+        hit.chat_title.clone()
+    } else {
+        format!("{} · {}", hit.project_name, hit.chat_title)
+    };
+    let who = match hit.kind.as_str() {
+        "user" => "You",
+        "assistant" => hit.project_name.as_str(),
+        "project" => "Agent",
+        other => other,
+    };
+    let opened = hit.clone();
+    div()
+        .id(ElementId::Name(SharedString::from(format!("hit-{id}"))))
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .px(px(10.0))
+        .py(px(8.0))
+        .rounded(px(PANEL_RADIUS - 4.0))
+        .cursor_pointer()
+        .hover(|s| s.bg(theme.surface_1))
+        .on_click(cx.listener(move |this, _, window, cx| {
+            this.menu_open = false;
+            let hit = opened.clone();
+            this.state.update(cx, |s, cx| s.open_chat_hit(hit, cx));
+            Composer::focus(&this.composer, window, cx);
+        }))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(TEXT_SMALL))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.text)
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_size(px(TEXT_TINY))
+                        .text_color(theme.text_faint)
+                        .child(if hit.at > 0 {
+                            time_label(hit.at as u64)
+                        } else {
+                            String::new()
+                        }),
+                ),
+        )
+        .child(
+            div()
+                .text_size(px(TEXT_SMALL))
+                .text_color(theme.text_muted)
+                .truncate()
+                .child(format!("{who}: {}", hit.snippet)),
+        )
 }
 
 fn render_row(row: RowView, theme: &Theme, cx: &mut Context<Shell>) -> impl IntoElement {

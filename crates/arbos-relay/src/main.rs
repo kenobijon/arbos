@@ -443,6 +443,7 @@ async fn main() -> anyhow::Result<()> {
             get(browser::browser_stream),
         )
         .route("/projects/{id}/history/{chat}", get(api::chat_history))
+        .route("/projects/{id}/search", get(api::chat_search))
         .route("/projects/{id}/status", get(api::project_status))
         .route(
             "/projects/{id}/chats",

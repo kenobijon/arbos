@@ -18,10 +18,10 @@ use crate::model::{
     Reachable, Sender,
 };
 use crate::model::{
-    new_id, now_ms, AttachmentKind, BoxState, ChannelsView, Chat, ChatKind, ConnectorsView, Effort,
-    Id, Link, LocalView, Machine, Message, MessageStatus, Part, Project, ProjectDocView,
-    QuestionState, Role, Routine, RoutineRun, RoutineTrigger, Skill, StatusKind, VaultNewItem,
-    VaultRequestStatus, VaultView,
+    new_id, now_ms, AttachmentKind, BoxState, ChannelsView, Chat, ChatHit, ChatKind,
+    ChatSearchStatus, ConnectorsView, Effort, Id, Link, LocalMsg, LocalView, Machine, Message,
+    MessageStatus, Part, Project, ProjectDocView, QuestionState, Role, Routine, RoutineRun,
+    RoutineTrigger, Skill, StatusKind, VaultNewItem, VaultRequestStatus, VaultView,
 };
 use crate::sync::{ClientCommand, SyncEvent, SyncSource};
 use crate::ui::notify::{self, Gate, Notifier, NotifyEvent, NotifyKind};
@@ -238,6 +238,18 @@ pub struct AppState {
     pub people_results: Vec<Person>,
     pub people_busy: bool,
     pub people_error: Option<String>,
+    /// Sidebar chat search. Local hits are derived; these are the box's FTS hits.
+    pub chat_query: String,
+    pub chat_hits: Vec<ChatHit>,
+    pub chat_search_status: ChatSearchStatus,
+    chat_search_gen: u64,
+    chat_search_wait: Task<()>,
+    /// The chat a search hit opened, kept visible even when single-chat would hide it.
+    search_chat: Option<Id>,
+    /// Scroll the transcript to this message once its rows exist.
+    pub reveal_message: Option<(Id, Id)>,
+    /// Brief highlight on the message a search hit opened.
+    pub highlight_message: Option<Id>,
     /// handle → until (ms) per chat; shown as "@sam is typing…".
     pub typing: HashMap<Id, (String, u64)>,
     /// Decoded avatars by `avatar_url`; `None` while a fetch is in flight.
@@ -487,6 +499,14 @@ impl AppState {
             people_results: Vec::new(),
             people_busy: false,
             people_error: None,
+            chat_query: String::new(),
+            chat_hits: Vec::new(),
+            chat_search_status: ChatSearchStatus::Idle,
+            chat_search_gen: 0,
+            chat_search_wait: cx.spawn(async move |_, _| {}),
+            search_chat: None,
+            reveal_message: None,
+            highlight_message: None,
             typing: HashMap::new(),
             avatars: HashMap::new(),
             awaiting_dm: None,
@@ -728,6 +748,42 @@ impl AppState {
                 self.account = account;
                 if self.account.is_some() {
                     self.maybe_prompt_notifications();
+                }
+                cx.notify();
+            }
+            SyncEvent::ChatSearch {
+                query,
+                generation,
+                hits,
+                waking,
+                error,
+            } => {
+                if generation == self.chat_search_gen && query == self.chat_query {
+                    let mut hits = hits;
+                    for h in &mut hits {
+                        if h.project_name.is_empty() {
+                            if let Some(p) = self.projects.iter().find(|p| p.id == h.project_id) {
+                                h.project_name = p.name.clone();
+                            }
+                        }
+                        if h.chat_title.is_empty() {
+                            if let Some(c) = self
+                                .chats
+                                .get(&h.project_id)
+                                .and_then(|cs| cs.iter().find(|c| c.id == h.chat_id))
+                            {
+                                h.chat_title = c.title.clone();
+                            }
+                        }
+                    }
+                    self.chat_hits = hits;
+                    self.chat_search_status = if waking {
+                        ChatSearchStatus::Waking
+                    } else if let Some(err) = error {
+                        ChatSearchStatus::Failed(err)
+                    } else {
+                        ChatSearchStatus::Idle
+                    };
                 }
                 cx.notify();
             }
@@ -1255,10 +1311,10 @@ impl AppState {
         let Some(primary) = self.primary_chat(project_id).map(|c| c.id.clone()) else {
             return false;
         };
-        let active_visible = self
-            .active_tab
-            .get(project_id)
-            .is_some_and(|a| self.visible_tabs(project_id).iter().any(|c| &c.id == a));
+        let active_visible = self.active_tab.get(project_id).is_some_and(|a| {
+            self.visible_tabs(project_id).iter().any(|c| &c.id == a)
+                || self.search_chat.as_deref() == Some(a.as_str())
+        });
         if active_visible {
             return false;
         }
@@ -1377,6 +1433,9 @@ impl AppState {
     }
 
     pub fn select_project(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        if self.selected_project.as_deref() != Some(project_id.as_str()) {
+            self.search_chat = None;
+        }
         self.selected_project = Some(project_id.clone());
         if self.enforce_single_chat(&project_id) {
             self.sync_focus();
@@ -1394,15 +1453,28 @@ impl AppState {
         cx.notify();
     }
 
+    fn role_name(role: Role) -> &'static str {
+        match role {
+            Role::User => "user",
+            Role::Assistant => "assistant",
+            Role::Project => "project",
+            Role::System => "system",
+        }
+    }
+
     pub fn select_tab(&mut self, chat_id: Id, cx: &mut Context<Self>) {
         let Some(project_id) = self.selected_project.clone() else {
             return;
         };
+        if self.search_chat.as_deref() != Some(chat_id.as_str()) {
+            self.search_chat = None;
+        }
         // Single-chat: an agent has one chat, whichever one was asked for.
         let chat_id = if self
             .visible_tabs(&project_id)
             .iter()
             .any(|c| c.id == chat_id)
+            || self.search_chat.as_deref() == Some(chat_id.as_str())
         {
             chat_id
         } else {
@@ -2803,6 +2875,131 @@ impl AppState {
             }
             None => self.start_dm(handle, cx),
         }
+    }
+
+    /// Sidebar field. Two or more characters search loaded messages immediately
+    /// and the box (debounced). Shorter text only filters the chat list by name.
+    pub fn set_chat_query(&mut self, query: String, cx: &mut Context<Self>) {
+        let query = query.trim().to_string();
+        if query == self.chat_query {
+            return;
+        }
+        self.chat_query = query.clone();
+        self.chat_search_gen = self.chat_search_gen.wrapping_add(1);
+        let gen = self.chat_search_gen;
+        self.chat_hits.clear();
+        self.reveal_message = None;
+        self.highlight_message = None;
+        if query.chars().count() < 2 {
+            self.chat_search_status = ChatSearchStatus::Idle;
+            self.chat_search_wait = cx.spawn(async move |_, _| {});
+            cx.notify();
+            return;
+        }
+        self.chat_search_status = if self.machine.state == crate::model::MachineState::Waking
+            || self.machine.state.is_down()
+        {
+            ChatSearchStatus::Waking
+        } else {
+            ChatSearchStatus::Searching
+        };
+        self.chat_search_wait = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(280))
+                .await;
+            let _ = this.update(cx, |state, cx| {
+                if state.chat_search_gen != gen {
+                    return;
+                }
+                let projects: Vec<Id> = state
+                    .projects
+                    .iter()
+                    .filter(|p| !p.is_people())
+                    .map(|p| p.id.clone())
+                    .collect();
+                state.command(ClientCommand::SearchChats {
+                    query,
+                    projects,
+                    generation: gen,
+                });
+                cx.notify();
+            });
+        });
+        cx.notify();
+    }
+
+    /// Open the chat a search hit came from and scroll to its message.
+    pub fn open_chat_hit(&mut self, hit: ChatHit, cx: &mut Context<Self>) {
+        self.search_chat = Some(hit.chat_id.clone());
+        self.selected_project = Some(hit.project_id.clone());
+        self.active_tab
+            .insert(hit.project_id.clone(), hit.chat_id.clone());
+        if let Some(chat) = self
+            .chats
+            .values_mut()
+            .flat_map(|v| v.iter_mut())
+            .find(|c| c.id == hit.chat_id)
+        {
+            chat.unread = false;
+        }
+        self.command(ClientCommand::OpenChat {
+            chat_id: hit.chat_id.clone(),
+        });
+        self.highlight_message = hit.message_id.clone();
+        self.reveal_message = hit.message_id.clone().map(|m| (hit.chat_id.clone(), m));
+        self.sync_focus();
+        cx.notify();
+    }
+
+    /// Loaded messages plus the box's FTS hits, box first when both name a message.
+    pub fn chat_results(&self) -> Vec<ChatHit> {
+        let q = self.chat_query.trim();
+        if q.chars().count() < 2 {
+            return Vec::new();
+        }
+        let mut items = Vec::new();
+        for p in &self.projects {
+            let chats = self.chats.get(&p.id).map(|c| c.as_slice()).unwrap_or(&[]);
+            for chat in chats {
+                for m in self.messages_of(&chat.id) {
+                    if !matches!(m.role, Role::User | Role::Assistant | Role::Project) {
+                        continue;
+                    }
+                    let text = m.plain_text();
+                    if text.trim().is_empty() {
+                        continue;
+                    }
+                    items.push((
+                        p.id.clone(),
+                        p.name.clone(),
+                        chat.id.clone(),
+                        chat.title.clone(),
+                        m.id.clone(),
+                        Self::role_name(m.role),
+                        m.created_at as i64,
+                        text,
+                    ));
+                }
+            }
+        }
+        let refs: Vec<LocalMsg<'_>> = items
+            .iter()
+            .map(|i| LocalMsg {
+                project_id: &i.0,
+                project_name: &i.1,
+                chat_id: &i.2,
+                chat_title: &i.3,
+                message_id: &i.4,
+                role: i.5,
+                at: i.6,
+                text: &i.7,
+            })
+            .collect();
+        crate::model::merge_hits(
+            crate::model::local_message_hits(&refs, q, 20),
+            &self.chat_hits,
+            20,
+        )
     }
 
     pub fn search_people(&mut self, query: String, cx: &mut Context<Self>) {

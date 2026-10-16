@@ -143,6 +143,26 @@ pub struct T3Row {
     pub size: i64,
 }
 
+/// One FTS hit. `score` is bm25 (lower is better). `message_id` is the chat-doc
+/// message when the turn recorded one (`source.message_id`).
+#[derive(Debug, Clone)]
+pub struct T3Hit {
+    pub row: T3Row,
+    pub score: f64,
+    pub snippet: String,
+    pub message_id: Option<String>,
+}
+
+fn message_id_of(source: Option<String>) -> Option<String> {
+    let raw = source?;
+    let v: Value = serde_json::from_str(&raw).ok()?;
+    v.get("message_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryRow {
     pub id: String,
@@ -590,6 +610,8 @@ impl Store {
         Ok(id)
     }
 
+    /// Full-text search over T3. `kind` is one kind, or a comma-separated list
+    /// (`user,assistant`). `None` searches every kind.
     pub fn t3_search(
         &self,
         query: &str,
@@ -597,19 +619,32 @@ impl Store {
         kind: Option<&str>,
         limit: i64,
         offset: i64,
-    ) -> Result<Vec<(T3Row, f64, String)>> {
+    ) -> Result<Vec<T3Hit>> {
+        if query.trim().is_empty() {
+            return Ok(Vec::new());
+        }
         let q = fts_query(query);
         self.with(|c| {
             let mut st = c.prepare(
                 "SELECT t.id, t.thread_id, t.subagent_id, t.session_id, t.kind, t.role, t.at, t.text, t.size, bm25(t3_fts) AS score,
-                        snippet(t3_fts, 0, '[', ']', '…', 24)
+                        snippet(t3_fts, 0, '[', ']', '…', 24), t.source
                  FROM t3_fts JOIN t3 t ON t.id = t3_fts.id
-                 WHERE t3_fts MATCH ?1 AND (?2 IS NULL OR t.thread_id = ?2) AND (?3 IS NULL OR t.kind = ?3)
+                 WHERE t3_fts MATCH ?1 AND (?2 IS NULL OR t.thread_id = ?2)
+                   AND (
+                     ?3 IS NULL
+                     OR (
+                       CASE
+                         WHEN instr(?3, ',') > 0 THEN instr(',' || ?3 || ',', ',' || t.kind || ',') > 0
+                         ELSE t.kind = ?3
+                       END
+                     )
+                   )
                  ORDER BY score LIMIT ?4 OFFSET ?5",
             )?;
             let rows = st.query_map(params![q, thread_id, kind, limit, offset], |r| {
-                Ok((
-                    T3Row {
+                let source: Option<String> = r.get(11)?;
+                Ok(T3Hit {
+                    row: T3Row {
                         id: r.get(0)?,
                         thread_id: r.get(1)?,
                         subagent_id: r.get(2)?,
@@ -620,9 +655,10 @@ impl Store {
                         text: r.get(7)?,
                         size: r.get(8)?,
                     },
-                    r.get::<_, f64>(9)?,
-                    r.get::<_, String>(10)?,
-                ))
+                    score: r.get(9)?,
+                    snippet: r.get(10)?,
+                    message_id: message_id_of(source),
+                })
             })?;
             rows.collect()
         })
@@ -1152,5 +1188,86 @@ mod tests {
         assert!(s.contains("[REDACTED:openrouter-key]"));
         assert!(s.contains("Authorization: Bearer [REDACTED:bearer]"));
         assert!(s.contains("OPENAI_API_KEY=[REDACTED:env]"));
+    }
+
+    #[test]
+    fn t3_search_keeps_prose_and_returns_message_id() {
+        let dir = std::env::temp_dir().join(format!("t3-search-{}", ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("box.db")).unwrap();
+        let user = store
+            .t3_append(
+                "chatA",
+                None,
+                None,
+                "user",
+                Some("user"),
+                "the quarterly report is ready",
+                Some(&json!({ "message_id": "msg-user" })),
+            )
+            .unwrap();
+        store
+            .t3_append(
+                "chatA",
+                None,
+                None,
+                "assistant",
+                Some("assistant"),
+                "I filed the quarterly report under finance",
+                Some(&json!({ "message_id": "msg-asst" })),
+            )
+            .unwrap();
+        store
+            .t3_append(
+                "chatA",
+                None,
+                None,
+                "tool_output",
+                Some("tool"),
+                "quarterly report tool dump with secrets",
+                None,
+            )
+            .unwrap();
+        store
+            .t3_append(
+                "chatB",
+                None,
+                None,
+                "user",
+                Some("user"),
+                "unrelated weather tomorrow",
+                Some(&json!({ "message_id": "msg-other" })),
+            )
+            .unwrap();
+
+        let quiet = store
+            .t3_search("quarterly", None, Some("user,assistant"), 20, 0)
+            .unwrap();
+        assert!(quiet.len() >= 2, "{quiet:?}");
+        assert!(quiet
+            .iter()
+            .all(|h| h.row.kind == "user" || h.row.kind == "assistant"));
+        assert!(quiet
+            .iter()
+            .any(|h| h.message_id.as_deref() == Some("msg-user")));
+        assert!(quiet
+            .iter()
+            .any(|h| h.message_id.as_deref() == Some("msg-asst")));
+        assert!(quiet.iter().all(|h| !h.snippet.is_empty()));
+
+        let all = store.t3_search("quarterly", None, None, 20, 0).unwrap();
+        assert!(all.iter().any(|h| h.row.kind == "tool_output"));
+
+        let one = store
+            .t3_search("quarterly", Some("chatA"), Some("user"), 20, 0)
+            .unwrap();
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].row.id, user);
+        assert_eq!(one[0].message_id.as_deref(), Some("msg-user"));
+
+        assert!(store
+            .t3_search("   ", None, None, 20, 0)
+            .unwrap()
+            .is_empty());
     }
 }
