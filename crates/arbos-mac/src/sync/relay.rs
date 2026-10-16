@@ -7,7 +7,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context as _, Result};
@@ -496,6 +497,7 @@ impl SyncSource for RelaySource {
         mut commands: mpsc::UnboundedReceiver<ClientCommand>,
     ) -> BoxFuture<'static, Result<()>> {
         Box::pin(async move {
+            let _ = SOURCE_START.set(Instant::now());
             let shared = Arc::new(Shared {
                 http: reqwest::Client::builder()
                     .timeout(Duration::from_secs(30))
@@ -745,6 +747,20 @@ fn start_after_pairing(shared: &Arc<Shared>) {
 /// How often dirty rooms are written (coalesces streaming frames).
 const STORE_FLUSH_EVERY: Duration = Duration::from_millis(1500);
 
+/// When the source started (≈ process start): launch timing for the log.
+static SOURCE_START: OnceLock<Instant> = OnceLock::new();
+static FIRST_PAINT_LOGGED: AtomicBool = AtomicBool::new(false);
+
+/// `launch: first-content <ms> ms source=store|relay` once per process, when
+/// the first non-empty project list goes to the UI.
+fn log_first_paint(source: &str, projects: usize) {
+    if projects == 0 || FIRST_PAINT_LOGGED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let ms = SOURCE_START.get().map(|t| t.elapsed().as_millis()).unwrap_or(0);
+    eprintln!("launch: first-content {ms} ms source={source} projects={projects}");
+}
+
 fn open_store(shared: &Arc<Shared>) {
     let device_id = shared.device_id();
     let mut slot = shared.store.lock().unwrap();
@@ -777,6 +793,7 @@ fn load_store(shared: &Arc<Shared>) {
     *shared.projects.lock().unwrap() = projects.clone();
     *shared.chats.lock().unwrap() = chats;
     let _ = shared.events.send(SyncEvent::Projects(projects.clone()));
+    log_first_paint("store", projects.len());
     emit_chats(shared);
     let mut pending = pending;
     let mut restored = 0usize;
@@ -1549,6 +1566,7 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
     }
     *shared.projects.lock().unwrap() = projects.clone();
     let _ = shared.events.send(SyncEvent::Projects(projects.clone()));
+    log_first_paint("relay", projects.len());
     emit_chats(shared);
     save_registry(shared);
     for p in projects.iter().filter(|p| !p.is_people()) {
