@@ -1538,7 +1538,7 @@ impl Tree {
             return None;
         }
         Some(format!(
-            "[Memory retrieved from your earlier chats, tool results and subagent sessions for this message. Raw records, oldest first; if two records conflict, the newest one is true, and what the user stated outranks what you guessed earlier. When you rely on this, say in a few words what you checked; if the records show the question's premise is wrong, say so. If nothing here answers the question, say you have no record of it rather than guessing. You can read more with context_search / context_open / context_around.]\n{}\n[End of retrieved memory]",
+            "[Memory retrieved from your earlier chats, tool results and subagent sessions for this message. Raw records, oldest first. Rules: what the user told you about themselves (their name, preferences, facts) is true and outranks anything you said before and any handle or label you see; between two user statements the newer wins; if the records show the question's premise is wrong, say so. Answer from these records directly and say in a few words what you checked. If nothing here answers the question, say you have no record of it rather than guessing. You can read more with context_search / context_open / context_around.]\n{}\n[End of retrieved memory]",
             pack.text
         ))
     }
