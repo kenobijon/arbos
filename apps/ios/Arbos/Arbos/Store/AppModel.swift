@@ -816,7 +816,7 @@ final class AppModel: ObservableObject {
         directory = seen.values.sorted { $0.handle.lowercased() < $1.handle.lowercased() }
     }
 
-    /// People group (v2 on the relay; the app is ready for it).
+    /// People group: `POST /chats {kind: group, members}`.
     func createGroup(handles: [String]) async -> Bool {
         do {
             let chat = try await api.createGroup(handles: handles)
@@ -825,8 +825,7 @@ final class AppModel: ObservableObject {
             path = [.chat(chatId: chat.id, projectId: peopleSlot)]
             return true
         } catch {
-            let e = error as? RelayError
-            notice = Notice(text: (e?.status == 404 || e?.status == 405 || e?.status == 501) ? "Groups are not on this relay yet — DMs work today." : "Could not create the group: \(error.localizedDescription)")
+            notice = Notice(text: "Could not create the group: \(error.localizedDescription)")
             return false
         }
     }

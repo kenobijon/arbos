@@ -444,13 +444,126 @@ pub async fn users_directory(
     }
 }
 
-/// `POST /chats` — people groups are v2; say so instead of a bare 404.
-pub async fn chats_create_group() -> Response {
-    api_error(
-        StatusCode::NOT_IMPLEMENTED,
-        "not_implemented",
-        "people groups (POST /chats {kind: group, members}) are not available yet; open a DM with POST /chats/dm",
-    )
+#[derive(Deserialize)]
+pub struct CreateGroupBody {
+    pub kind: String,
+    /// GitHub handles of the other people (the caller is added as owner).
+    pub members: Vec<String>,
+}
+
+/// `POST /chats {kind: "group", members: [handles…]}` — a new people group. The caller is the
+/// owner; each handle becomes a member (invited via GitHub if they are not on Arbos yet). Always
+/// a fresh chat — unlike a DM, it does not reuse an existing 1:1.
+pub async fn chats_create_group(
+    State(state): State<AppState>,
+    principal: Principal,
+    Json(b): Json<CreateGroupBody>,
+) -> Response {
+    let me = match user_of(&principal) {
+        Ok(u) => u,
+        Err(r) => return *r,
+    };
+    if b.kind != "group" {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "bad_kind",
+            "kind must be \"group\"",
+        );
+    }
+    let mut other_ids: Vec<String> = Vec::new();
+    for raw in &b.members {
+        let Some(handle) = normalize_handle(raw) else {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "bad_handle",
+                "that is not a GitHub login",
+            );
+        };
+        let Some(other) = find_person(&state, &handle).await else {
+            return api_error(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "no GitHub account with that login",
+            );
+        };
+        let other_id = other["id"].as_str().unwrap_or_default().to_owned();
+        if other_id.is_empty() || other_id == me {
+            continue;
+        }
+        if other_ids.iter().any(|id| id == &other_id) {
+            continue;
+        }
+        if state.db.blocked_either_way(&me, &other_id).unwrap_or(false) {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "not_available",
+                "this person is not available",
+            );
+        }
+        if state
+            .db
+            .blocked_by_any(&other_id, &other_ids)
+            .unwrap_or(false)
+        {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "not_available",
+                "this person is not available",
+            );
+        }
+        other_ids.push(other_id);
+    }
+    if other_ids.is_empty() {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "need_members",
+            "add at least one other person",
+        );
+    }
+    let limit = if young_account(&state, &me) {
+        NEW_CHATS_PER_DAY / 2
+    } else {
+        NEW_CHATS_PER_DAY
+    };
+    let today = crate::proxy::start_of_utc_day_ms();
+    if state.db.people_chats_created_since(&me, today).unwrap_or(0) >= limit {
+        return rate_limited(((today + 86_400_000 - now_ms()) / 1000).max(1));
+    }
+    let chat = PeopleChat {
+        id: ulid(),
+        kind: "group".into(),
+        created_by: me.clone(),
+        created_at: now_ms(),
+    };
+    if let Err(e) = state.db.insert_people_chat(&chat) {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+    }
+    if let Err(e) = state
+        .db
+        .add_member(&chat.id, &format!("user:{me}"), "owner", &me, &json!({}))
+    {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+    }
+    for uid in &other_ids {
+        if let Err(e) =
+            state
+                .db
+                .add_member(&chat.id, &format!("user:{uid}"), "member", &me, &json!({}))
+        {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+        }
+        let _ = state.db.push_user(
+            uid,
+            "people_chat_created",
+            &json!({ "chat_id": chat.id, "by": format!("user:{me}"), "by_handle": handle_of(&state, &me) }),
+            Some(&chat.id),
+        );
+    }
+    tracing::info!(chat = %chat.id, %me, members = other_ids.len(), "people group created");
+    match load_chat(&state, &chat.id) {
+        Ok(cm) => Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response(),
+        Err(r) => *r,
+    }
 }
 
 #[derive(Deserialize)]
@@ -1956,6 +2069,69 @@ mod agent_tests {
             },
             &format!("{PEOPLE_ACL_PREFIX}{chat}")
         ));
+    }
+
+    #[tokio::test]
+    async fn create_group_adds_members_and_keeps_dm_separate() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 31);
+        let (bob, _bob_dev) = person(&state, 32);
+        let (carol, carol_dev) = person(&state, 33);
+        let existing_dm = dm(&state, &alice, &bob);
+
+        let r = chats_create_group(
+            State(state.clone()),
+            alice_dev.clone(),
+            Json(CreateGroupBody {
+                kind: "group".into(),
+                members: vec!["user32".into(), "@user33".into(), "user32".into()],
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+
+        let groups: Vec<_> = state
+            .db
+            .chats_of_member(&format!("user:{alice}"))
+            .unwrap()
+            .into_iter()
+            .filter(|cm| cm.chat.kind == "group")
+            .collect();
+        assert_eq!(groups.len(), 1);
+        let cm = &groups[0];
+        assert_ne!(cm.chat.id, existing_dm, "group must not reuse the DM");
+        assert_eq!(
+            state.db.dm_between(&alice, &bob).unwrap().unwrap().id,
+            existing_dm
+        );
+        assert_eq!(cm.chat.created_by, alice);
+        let humans: Vec<_> = cm
+            .members
+            .iter()
+            .filter_map(|m| m.user_id().map(str::to_owned))
+            .collect();
+        assert!(humans.contains(&alice) && humans.contains(&bob) && humans.contains(&carol));
+        assert_eq!(humans.len(), 3, "duplicate handles are collapsed");
+        assert!(cm
+            .members
+            .iter()
+            .any(|m| m.user_id() == Some(alice.as_str()) && m.role == "owner"));
+        assert!(cm
+            .members
+            .iter()
+            .any(|m| m.user_id() == Some(bob.as_str()) && m.role == "member"));
+        assert!(state.allows(&carol_dev, &format!("{PEOPLE_ACL_PREFIX}{}", cm.chat.id)));
+
+        let r = chats_create_group(
+            State(state.clone()),
+            alice_dev,
+            Json(CreateGroupBody {
+                kind: "group".into(),
+                members: vec![],
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
     }
 }
 

@@ -450,7 +450,6 @@ struct NewAgentLookView: View {
 }
 
 /// New group: pick people from the directory (or search), then create.
-/// Groups are v2 on the relay; the model turns a 404/405 into a notice.
 struct NewGroupView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -533,9 +532,17 @@ struct NewGroupView: View {
         .toolbarBackground(.visible, for: .navigationBar)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Button(creating ? "Creating…" : "Create") { create() }
-                    .font(.system(size: Theme.body, weight: .semibold))
-                    .disabled(picked.isEmpty || creating)
+                Button { create() } label: {
+                    Text(creating ? "Creating…" : "Create")
+                        .font(.system(size: Theme.small, weight: .semibold))
+                        .foregroundStyle(theme.onPrimary)
+                        .padding(.horizontal, 12)
+                        .frame(height: 32)
+                        .background(Capsule().fill(theme.primary))
+                }
+                .buttonStyle(.plain)
+                .disabled(picked.isEmpty || creating)
+                .opacity(picked.isEmpty || creating ? 0.45 : 1)
             }
         }
         .task { await model.loadDirectory() }
