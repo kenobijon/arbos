@@ -1151,6 +1151,11 @@ class Loop:
 
     def check_ship(self, fid: str, st: dict) -> None:
         sha = st["commit"]
+        if not st.get("commit_date"):
+            # Superseding-run searches start at the commit's own time, not at a (possibly reset) pushed_at.
+            with contextlib.suppress(HttpError, KeyError):
+                st["commit_date"] = self.gh.commit(sha)["commit"]["committer"]["date"]
+        since = st.get("commit_date") or st["pushed_at"]
         runs = self.gh.runs_for_sha(sha)
         by_name: dict[str, dict] = {}
         for r in runs:
@@ -1163,7 +1168,7 @@ class Loop:
         # iOS: TestFlight. A run GitHub cancelled while queued (a newer push took its slot) is not a
         # failure: the fix is in the newer commit's build, so wait for that one.
         if st.get("expects_ios") and ios and ios["status"] == "completed" and ios["conclusion"] in ("cancelled", "skipped") and not st.get("ios_done"):
-            later = self.gh.later_ios_build(sha, st["pushed_at"])
+            later = self.gh.later_ios_build(sha, since)
             if later:
                 ios = later
                 st["ios_superseded_by"] = later["head_sha"]
@@ -1213,7 +1218,7 @@ class Loop:
                     return
                 # Fixed forward? A later green main build that contains the commit means the tree
                 # is fine now (the follow-up or someone else repaired it); ship with that build.
-                later = self.gh.later_ios_build(sha, st["pushed_at"])
+                later = self.gh.later_ios_build(sha, since)
                 if later:
                     st["ios_superseded_by"] = later["head_sha"]
                     prefix = next((m.group(1) for a in self.gh.run_artifacts(later["id"])
@@ -1241,7 +1246,7 @@ class Loop:
         # took the slot) → the next successful Release that contains the commit is the one.
         if st.get("expects_ci") and not st.get("release_done") and ci and ci["status"] == "completed" and ci["conclusion"] == "success" \
                 and (rel is None or (rel["status"] == "completed" and rel["conclusion"] in ("cancelled", "skipped"))):
-            later = self.gh.later_release(sha, st["pushed_at"])
+            later = self.gh.later_release(sha, since)
             if later:
                 rel = later
                 st["release_superseded_by"] = later["head_sha"]
@@ -1258,7 +1263,7 @@ class Loop:
                 self.store.event(fid, "release_failed", run=rel["html_url"])
                 self.gh.comment(st["issue"], f"Release workflow failed: {rel['html_url']} (the iOS build is unaffected).")
         if st.get("expects_ci") and ci and ci["status"] == "completed" and ci["conclusion"] in ("cancelled", "skipped") and not st.get("ci_superseded_by"):
-            later = self.gh.later_run("ci.yml", "push", sha, st["pushed_at"])
+            later = self.gh.later_run("ci.yml", "push", sha, since)
             if later:
                 ci = later
                 st["ci_superseded_by"] = later["head_sha"]
