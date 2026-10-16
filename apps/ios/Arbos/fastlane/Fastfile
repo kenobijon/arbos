@@ -182,12 +182,30 @@ platform :ios do
       distribute.call(true)
       UI.success("Build #{number} is in #{groups.join(', ')} and submitted for Beta App Review")
     rescue StandardError => e
-      # Apple allows one build per version train in Beta App Review at a time.
-      # The group still gets the build; it goes out once the pending review clears.
+      # Apple allows one build per version train in Beta App Review at a time. The group gets
+      # the build now; external testers only see it once it is submitted and approved, so wait
+      # for the pending review to clear (auto-approval takes seconds once the app has passed
+      # Beta App Review) and submit then. A build left unsubmitted never reaches the public link.
       raise unless e.message.include?("Another build is in review")
-      UI.important("Another build is already in Beta App Review; adding #{number} to #{groups.join(', ')} without a new submission")
+      UI.important("Another build is already in Beta App Review; adding #{number} to #{groups.join(', ')} now and submitting when the review clears")
       distribute.call(false)
-      UI.success("Build #{number} is in #{groups.join(', ')} (review submission skipped: another build is in review)")
+      submitted = false
+      15.times do |attempt|
+        sleep(60)
+        begin
+          distribute.call(true)
+          submitted = true
+          break
+        rescue StandardError => again
+          raise unless again.message.include?("Another build is in review")
+          UI.message("Review still busy (#{attempt + 1}/15); waiting")
+        end
+      end
+      if submitted
+        UI.success("Build #{number} is in #{groups.join(', ')} and submitted for Beta App Review (after the earlier review cleared)")
+      else
+        UI.important("Build #{number} is in #{groups.join(', ')} but NOT submitted for Beta App Review: another build stayed in review for 15 min. Submit it in App Store Connect → TestFlight, or re-run `fastlane distribute`.")
+      end
     end
   end
 end
