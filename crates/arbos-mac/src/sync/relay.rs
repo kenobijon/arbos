@@ -1197,6 +1197,11 @@ fn people_space_from(shared: &Shared, v: &Value) -> Option<(Project, Chat)> {
         participants: Vec::new(),
         unread: previous_unread.unwrap_or(unread),
         last_message_at: last,
+        archived_at: v
+            .get("archived_at")
+            .and_then(Value::as_i64)
+            .filter(|t| *t > 0)
+            .map(|t| t as u64),
     };
     Some((space, chat))
 }
@@ -1231,6 +1236,36 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
                 if let Some(call) = call {
                     let _ = shared.events.send(SyncEvent::CallStarted { call, sender });
                 }
+            }
+            "chat_archived" => {
+                let payload = push.get("payload").cloned().unwrap_or(Value::Null);
+                let chat_id = payload
+                    .get("chat_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                if chat_id.is_empty() {
+                    continue;
+                }
+                let archived_at = payload
+                    .get("archived_at")
+                    .and_then(Value::as_i64)
+                    .filter(|t| *t > 0)
+                    .map(|t| t as u64);
+                if let Some(c) = shared
+                    .chats
+                    .lock()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|c| c.id == chat_id)
+                {
+                    c.archived_at = archived_at;
+                }
+                cache_archived(shared, &chat_id, archived_at.is_some());
+                let _ = shared.events.send(SyncEvent::ChatArchived {
+                    chat_id,
+                    archived_at,
+                });
             }
             "call_missed" => {
                 if let Some(missed) = push
@@ -1282,6 +1317,18 @@ async fn fetch_avatar(shared: Arc<Shared>, url: String) {
             bytes: Arc::new(bytes.to_vec()),
         });
     }
+}
+
+/// Keep the store's offline copy of my archived chat ids in step.
+fn cache_archived(shared: &Arc<Shared>, chat_id: &str, archived: bool) {
+    shared.with_store(|s| {
+        let mut ids: Vec<Id> = s.get_json(store::KEY_ARCHIVED_CHATS).unwrap_or_default();
+        ids.retain(|c| c != chat_id);
+        if archived {
+            ids.push(chat_id.to_string());
+        }
+        s.put_json(store::KEY_ARCHIVED_CHATS, &ids);
+    });
 }
 
 /// Push a presence frame on the chat's room right away (focus / call changes).
@@ -1405,6 +1452,11 @@ fn parse_chat(v: &Value) -> Option<Chat> {
             .unwrap_or_default(),
         unread: false,
         last_message_at: v.get("created_at").and_then(Value::as_i64).unwrap_or(0) as u64,
+        archived_at: v
+            .get("archived_at")
+            .and_then(Value::as_i64)
+            .filter(|t| *t > 0)
+            .map(|t| t as u64),
     })
 }
 
@@ -1610,6 +1662,16 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
         }
     }
     let _ = people_ids;
+    migrate_local_archive(shared, &mut all_chats).await;
+    // The relay's archive state is the truth; the store keeps an offline copy.
+    shared.with_store(|s| {
+        let ids: Vec<Id> = all_chats
+            .iter()
+            .filter(|c| c.archived_at.is_some())
+            .map(|c| c.id.clone())
+            .collect();
+        s.put_json(store::KEY_ARCHIVED_CHATS, &ids);
+    });
     // Keep local-only tabs (minted, not yet created) and unread flags.
     {
         let mut local = shared.chats.lock().unwrap();
@@ -1639,6 +1701,77 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
         ensure_room(shared, &c.project_id, &c.id, &c.id);
     }
     Ok(())
+}
+
+/// §9c, once after the update: chats archived on this Mac before archive state
+/// lived on the relay are pushed up as a union (one PUT each), then the local
+/// list is only a cache of the relay's answer.
+async fn migrate_local_archive(shared: &Arc<Shared>, all_chats: &mut [Chat]) {
+    let Some((done, local)) = shared.with_store(|s| {
+        (
+            s.get_json::<bool>(store::KEY_ARCHIVE_MIGRATED)
+                .unwrap_or(false),
+            s.get_json::<Vec<Id>>(store::KEY_ARCHIVED_CHATS)
+                .unwrap_or_default(),
+        )
+    }) else {
+        return;
+    };
+    if done {
+        return;
+    }
+    let mut all_ok = true;
+    for chat in all_chats
+        .iter_mut()
+        .filter(|c| c.archived_at.is_none() && local.contains(&c.id))
+    {
+        match set_archived(shared, &chat.project_id, &chat.id, true).await {
+            Ok(at) => chat.archived_at = Some(at.unwrap_or_else(now_ms)),
+            Err(err) => {
+                all_ok = false;
+                // A relay without §9c yet answers 404: try again on a later refresh, quietly.
+                if err.to_string().contains("HTTP 404") {
+                    break;
+                }
+                shared.notice(format!("Archive sync: {}", people_error(&err)));
+            }
+        }
+    }
+    if all_ok {
+        shared.with_store(|s| s.put_json(store::KEY_ARCHIVE_MIGRATED, &true));
+    }
+}
+
+/// `PUT /chats/{id}/settings {archived}` (§9c). Answers the stored
+/// `archived_at` when the relay echoes the chat; `Ok(None)` when it does not.
+async fn set_archived(
+    shared: &Arc<Shared>,
+    project_id: &str,
+    chat_id: &str,
+    archived: bool,
+) -> Result<Option<u64>> {
+    let body = json!({ "archived": archived });
+    let v = match shared
+        .put_json(&format!("/chats/{chat_id}/settings"), body.clone())
+        .await
+    {
+        Ok(v) => v,
+        // Older relays route project chats under the project.
+        Err(err) if err.to_string().contains("HTTP 404") && !shared.is_people(chat_id) => {
+            shared
+                .put_json(
+                    &format!("/projects/{project_id}/chats/{chat_id}/settings"),
+                    body,
+                )
+                .await?
+        }
+        Err(err) => return Err(err),
+    };
+    Ok(v.get("archived_at")
+        .or_else(|| v.pointer("/chat/archived_at"))
+        .and_then(Value::as_i64)
+        .filter(|t| *t > 0)
+        .map(|t| t as u64))
 }
 
 fn emit_chats(shared: &Shared) {
@@ -3627,13 +3760,45 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             });
         }
         ClientCommand::ArchiveChat { chat_id, archived } => {
-            shared.with_store(|s| {
-                let mut ids: Vec<Id> = s.get_json(store::KEY_ARCHIVED_CHATS).unwrap_or_default();
-                ids.retain(|c| c != &chat_id);
-                if archived {
-                    ids.push(chat_id.clone());
+            cache_archived(shared, &chat_id, archived);
+            let project_id = shared
+                .chats
+                .lock()
+                .unwrap()
+                .iter_mut()
+                .find(|c| c.id == chat_id)
+                .map(|c| {
+                    c.archived_at = archived.then(now_ms);
+                    c.project_id.clone()
+                });
+            let Some(project_id) = project_id else {
+                return;
+            };
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                match set_archived(&shared, &project_id, &chat_id, archived).await {
+                    Ok(at) => {
+                        if archived {
+                            if let Some(at) = at {
+                                if let Some(c) = shared
+                                    .chats
+                                    .lock()
+                                    .unwrap()
+                                    .iter_mut()
+                                    .find(|c| c.id == chat_id)
+                                {
+                                    c.archived_at = Some(at);
+                                }
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        // Older relay without §9c: the Mac keeps its local archive.
+                        if !err.to_string().contains("HTTP 404") {
+                            shared.notice(format!("Archive: {}", people_error(&err)));
+                        }
+                    }
                 }
-                s.put_json(store::KEY_ARCHIVED_CHATS, &ids);
             });
         }
         ClientCommand::SetAvatar { project_id, slug } => {

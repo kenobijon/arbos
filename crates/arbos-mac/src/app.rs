@@ -280,8 +280,9 @@ pub struct AppState {
     pub multi_chat: bool,
     /// The chat last opened per agent on this Mac (on-device store).
     pub last_chats: HashMap<Id, Id>,
-    /// Chats archived on this Mac: off the tab strip, listed under "Archived",
-    /// still open on the relay (history in context, memory and search).
+    /// Chats archived for me (§9c, synced through the relay; the store keeps an
+    /// offline copy): off the tab strip, listed under "Archived", still open on
+    /// the relay (history in context, memory and search), never badge or notify.
     pub archived_chats: HashSet<Id>,
     pub link: Link,
     pub rail_collapsed: bool,
@@ -1059,8 +1060,51 @@ impl AppState {
                     }
                     _ => chats,
                 };
+                // §9c: the relay's `archived_at` is the truth once it has one;
+                // a chat it now lists as not archived leaves the local set only
+                // when it was archived on the relay before (older relays never set it).
+                for c in &chats {
+                    match c.archived_at {
+                        Some(_) => {
+                            self.archived_chats.insert(c.id.clone());
+                        }
+                        None => {
+                            let was_remote = self
+                                .chats
+                                .get(&project_id)
+                                .and_then(|cur| cur.iter().find(|x| x.id == c.id))
+                                .is_some_and(|x| x.archived_at.is_some());
+                            if was_remote {
+                                self.archived_chats.remove(&c.id);
+                            }
+                        }
+                    }
+                }
                 self.chats.insert(project_id.clone(), chats);
                 self.enforce_tab(&project_id);
+                cx.notify();
+            }
+            SyncEvent::ChatArchived {
+                chat_id,
+                archived_at,
+            } => {
+                // Another device archived / unarchived it: the tab goes or returns.
+                if archived_at.is_some() {
+                    self.archived_chats.insert(chat_id.clone());
+                } else {
+                    self.archived_chats.remove(&chat_id);
+                }
+                if let Some(c) = self
+                    .chats
+                    .values_mut()
+                    .flat_map(|v| v.iter_mut())
+                    .find(|c| c.id == chat_id)
+                {
+                    c.archived_at = archived_at;
+                }
+                if let Some(project_id) = self.project_of_chat(&chat_id).map(|p| p.id.clone()) {
+                    self.enforce_tab(&project_id);
+                }
                 cx.notify();
             }
             SyncEvent::ChatSnapshot { chat_id, messages } => {
@@ -1318,6 +1362,13 @@ impl AppState {
             return;
         }
         self.archived_chats.insert(chat_id.clone());
+        if let Some(c) = self
+            .chats
+            .get_mut(&project_id)
+            .and_then(|v| v.iter_mut().find(|c| c.id == chat_id))
+        {
+            c.archived_at = Some(now_ms());
+        }
         self.command(ClientCommand::ArchiveChat {
             chat_id,
             archived: true,
@@ -1330,6 +1381,14 @@ impl AppState {
     pub fn unarchive_chat(&mut self, chat_id: Id, cx: &mut Context<Self>) {
         if !self.archived_chats.remove(&chat_id) {
             return;
+        }
+        if let Some(c) = self
+            .chats
+            .values_mut()
+            .flat_map(|v| v.iter_mut())
+            .find(|c| c.id == chat_id)
+        {
+            c.archived_at = None;
         }
         self.command(ClientCommand::ArchiveChat {
             chat_id: chat_id.clone(),
@@ -1575,6 +1634,7 @@ impl AppState {
                     participants: Vec::new(),
                     unread: false,
                     last_message_at: now_ms(),
+                    archived_at: None,
                 },
             );
         }
@@ -1638,6 +1698,7 @@ impl AppState {
                 participants: vec![project_id.clone(), participant.clone()],
                 unread: false,
                 last_message_at: now_ms(),
+                archived_at: None,
             });
         self.messages.insert(chat_id.clone(), Vec::new());
         self.chat_ui.insert(chat_id.clone(), ChatUi::default());

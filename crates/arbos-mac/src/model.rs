@@ -576,6 +576,9 @@ pub struct Chat {
     pub is_system: bool,
     pub unread: bool,
     pub last_message_at: u64,
+    /// §9c: archived for me (per user, synced by the relay); `None` = not archived.
+    #[serde(default)]
+    pub archived_at: Option<u64>,
     #[serde(default)]
     pub kind: ChatKind,
     /// Group chats: participant project ids, host first.
