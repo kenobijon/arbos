@@ -801,9 +801,7 @@ struct ChatView: View {
             } else if let project {
                 AgentAvatar(project: project, theme: theme, size: 26, working: true)
             }
-            Text("\(workingName) is working")
-                .font(.system(size: Theme.small))
-                .foregroundStyle(theme.muted)
+            WorkingStatusText(text: "\(workingName) is working", color: theme.muted)
             Spacer(minLength: 0)
         }
         .padding(.leading, 12)
@@ -1152,6 +1150,51 @@ struct ChatView: View {
 
     private func stop() {
         model.stop(chatId: chatId)
+    }
+}
+
+/// Soft fade + streaming shimmer on "<name> is working" (Mac `working_line`).
+private struct WorkingStatusText: View {
+    let text: String
+    let color: Color
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        if reduceMotion {
+            label(color)
+        } else {
+            TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
+                let t = context.date.timeIntervalSinceReferenceDate
+                // Triangle wave 0…1 over 1.1 s — same period as Mac PulseClock.
+                let cycle = t.truncatingRemainder(dividingBy: 1.1) / 1.1
+                let pulse = cycle < 0.5 ? cycle * 2.0 : 2.0 - cycle * 2.0
+                let fade = 0.55 + 0.45 * pulse
+                // Bright band streams left → right across the label.
+                let stream = t.truncatingRemainder(dividingBy: 1.8) / 1.8
+                label(color.opacity(fade))
+                    .overlay {
+                        GeometryReader { geo in
+                            let width = geo.size.width
+                            let band = max(width * 0.5, 1)
+                            LinearGradient(
+                                colors: [.clear, color, .clear],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                            .frame(width: band)
+                            .offset(x: stream * (width + band) - band)
+                        }
+                        .mask(label(color))
+                        .allowsHitTesting(false)
+                    }
+            }
+        }
+    }
+
+    private func label<S: ShapeStyle>(_ style: S) -> some View {
+        Text(text)
+            .font(.system(size: Theme.small))
+            .foregroundStyle(style)
     }
 }
 
