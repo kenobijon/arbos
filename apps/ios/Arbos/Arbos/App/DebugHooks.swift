@@ -13,6 +13,9 @@ enum DebugHooks {
     static var autoJoinCall: Bool { value("ARBOS_AUTO_JOIN") == "1" }
     /// Accept an incoming call automatically (two-simulator relay tests).
     static var autoAcceptCall: Bool { value("ARBOS_AUTO_ACCEPT") == "1" }
+    /// Headless simulators have no audio device: WAV files dropped into this directory are sent
+    /// as the microphone (LiveKit manual-rendering mode), in file-name order, once each.
+    static var micDir: String? { value("ARBOS_MIC_DIR") }
     /// Join a LiveKit room directly (dev server + locally minted token), bypassing the relay.
     static var callUrl: String? { value("ARBOS_CALL_URL") }
     static var callToken: String? { value("ARBOS_CALL_TOKEN") }
