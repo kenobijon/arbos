@@ -1762,8 +1762,10 @@ final class AppModel: ObservableObject {
     /// ("main") chat, else the first.
     func primaryChat(of projectId: Id) -> Chat? {
         let all = chats(of: projectId)
-        // Agent-hosted group chats are their own rows on Home; the primary is a plain thread.
-        let list = all.filter { !$0.isGroup && $0.kind != "projects" }.isEmpty ? all : all.filter { !$0.isGroup && $0.kind != "projects" }
+        // Agent-hosted group chats are their own rows on Home and the "projects"
+        // system chat is in the menu; the primary is a plain thread (§9b).
+        let plain = all.filter { !$0.isGroup && !$0.isSystem }
+        let list = plain.isEmpty ? all : plain
         guard !list.isEmpty else { return nil }
         if let pid = project(projectId)?.primaryChatId, let c = list.first(where: { $0.id == pid }) { return c }
         let counted = list.map { ($0, messages(of: $0.id).count) }

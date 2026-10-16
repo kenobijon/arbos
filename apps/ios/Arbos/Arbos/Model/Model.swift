@@ -211,6 +211,8 @@ struct Chat: Identifiable, Equatable, Codable {
     var participants: [Id] = []
 
     var isGroup: Bool { kind == "group" }
+    /// The agent's "projects" system chat (§9b: shown even with multi-chat off).
+    var isSystem: Bool { kind == "projects" }
 }
 
 enum Role: String, Codable {

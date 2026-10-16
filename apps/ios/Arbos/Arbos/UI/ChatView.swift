@@ -140,6 +140,7 @@ struct ChatView: View {
     private var name: String {
         if let people { return counterpart.map { "@\($0.handle)" } ?? people.title }
         if let chat, chat.isGroup, !chat.title.isEmpty { return chat.title }
+        if let chat, chat.isSystem { return "\(project?.name ?? "Arbos") · Projects" }
         return project?.name ?? "Arbos"
     }
     /// Who is working: the streaming agent's handle in a people chat.
@@ -562,6 +563,17 @@ struct ChatView: View {
                         Button {
                             Task { if let c = await model.newChat(projectId: projectId) { model.open(chat: c) } }
                         } label: { Label("New chat", systemImage: "square.and.pencil") }
+                    } else {
+                        // §9b: the agent's "projects" system chat and its group chats stay reachable; plain extra threads do not.
+                        if let sys = model.chats(of: projectId).first(where: { $0.isSystem }), sys.id != chatId {
+                            Button { model.open(chat: sys) } label: { Label("Projects", systemImage: "square.grid.2x2") }
+                        }
+                        if chat?.isGroup == true || chat?.isSystem == true, let primary = model.primaryChat(of: projectId), primary.id != chatId {
+                            Button { model.open(chat: primary) } label: { Label("Chat with \(project?.name ?? "agent")", systemImage: "bubble.left") }
+                        }
+                        ForEach(model.chats(of: projectId).filter { $0.isGroup && $0.id != chatId }) { g in
+                            Button { model.open(chat: g) } label: { Label(g.title.isEmpty ? "Group" : g.title, systemImage: "person.2") }
+                        }
                     }
                     Button { showModelPicker = true } label: { Label("Model · \(project?.shortModel ?? "")", systemImage: "cpu") }
                     if project?.shared == true {
