@@ -1472,10 +1472,10 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func createProject(name: String) {
+    func createProject(name: String, avatar: String? = nil, avatarColor: String? = nil, color: String? = nil) {
         Task {
             do {
-                try await api.createProject(name: name)
+                try await api.createProject(name: name, avatar: avatar, avatarColor: avatarColor, color: color)
                 await refreshRegistry()
             } catch {
                 notice = Notice(text: "New project failed: \(error.localizedDescription)")

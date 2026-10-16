@@ -202,8 +202,12 @@ final class RelayAPI {
         _ = try await request("DELETE", "/projects/\(projectId)/chats/\(chatId)")
     }
 
-    func createProject(name: String) async throws {
-        _ = try await json("POST", "/projects", body: ["name": name])
+    func createProject(name: String, avatar: String? = nil, avatarColor: String? = nil, color: String? = nil) async throws {
+        var body: [String: Any] = ["name": name]
+        if let avatar { body["avatar"] = avatar }
+        if let avatarColor { body["avatar_color"] = avatarColor }
+        if let color { body["color"] = color }
+        _ = try await json("POST", "/projects", body: body)
     }
 
     func setModel(projectId: Id, model: String, effort: Effort) async throws {
