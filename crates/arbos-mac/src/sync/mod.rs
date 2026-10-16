@@ -13,6 +13,7 @@ pub mod fixture;
 pub mod relay;
 pub mod store;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -101,6 +102,12 @@ pub enum SyncEvent {
     RestoreSelection {
         project_id: Id,
         chat_id: Id,
+    },
+    /// From the on-device store, once at launch: the chat last used per agent
+    /// and the chats archived on this Mac.
+    ChatPrefs {
+        last_chats: HashMap<Id, Id>,
+        archived: Vec<Id>,
     },
     /// Bytes and chat count kept on this Mac (Settings → About).
     StoreUsage {
@@ -363,8 +370,11 @@ pub enum ClientCommand {
         chat_id: Id,
         participant: Id,
     },
-    CloseChat {
+    /// Archive (hide from the tab strip) or unarchive a chat on this Mac only;
+    /// the relay keeps it open, history stays in context, memory and search.
+    ArchiveChat {
         chat_id: Id,
+        archived: bool,
     },
     MarkRead {
         chat_id: Id,

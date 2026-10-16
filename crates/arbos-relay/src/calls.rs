@@ -89,12 +89,14 @@ async fn reachability(state: &AppState, callees: &[String]) -> Vec<Value> {
                 .into_iter()
                 .map(|(id, name, kind, seen, platform, app_version, voip)| {
                     let seen = seen.into_iter().chain(presence.get(&id).copied()).max();
+                    let has_push = platform.as_ref().is_some_and(|p| !p.is_empty());
                     json!({
                         "device_id": id, "name": name, "kind": kind,
                         "platform": platform, "app_version": app_version,
                         "polled_within_30s": seen.is_some_and(|t| now - t < LIVE_WINDOW_MS),
                         "last_seen_at": seen,
                         "voip_token": voip,
+                        "push_token": has_push,
                     })
                 })
                 .collect();
@@ -103,6 +105,10 @@ async fn reachability(state: &AppState, callees: &[String]) -> Vec<Value> {
                 "user_id": u, "handle": card.handle, "name": card.name,
                 "any_live": devices.iter().any(|d| d["polled_within_30s"] == true),
                 "any_voip": devices.iter().any(|d| d["voip_token"] == true),
+                // Regular APNs can still pop an Incoming-call banner (and wake
+                // a backgrounded iPhone via content-available) when PushKit is
+                // missing — do not tell the caller "they'll see a missed call".
+                "any_push": devices.iter().any(|d| d["push_token"] == true),
                 "devices": devices,
             })
         })
@@ -276,6 +282,8 @@ async fn announce_started(state: &AppState, call: &CallRow, starter: &Sender) {
             .await;
         }
         for t in state.db.push_tokens_of_user(&user).unwrap_or_default() {
+            // content-available wakes a backgrounded (not force-quit) iPhone so
+            // it can report CallKit — WhatsApp-style ring without the app open.
             let payload = json!({
                 "aps": {
                     "alert": { "title": title, "body": format!("Incoming {what}") },
@@ -283,6 +291,8 @@ async fn announce_started(state: &AppState, call: &CallRow, starter: &Sender) {
                     "thread-id": call.chat_id,
                     "category": CATEGORY,
                     "mutable-content": 1,
+                    "content-available": 1,
+                    "interruption-level": "time-sensitive",
                 },
                 "event": "started",
                 "chat_id": call.chat_id,
@@ -490,12 +500,14 @@ async fn start_or_join(
     let _ = state.db.call_join(&call.id, &me);
     tracing::info!(call = %call.id, chat = %call.chat_id, kind, by = %me, platform = ?call.platform, app_version = ?call.app_version, "call started");
     let starter = Sender::user(state, &me);
-    announce_started(state, &call, &starter).await;
+    // Reachability before announce: a failed VoIP push may delete the token
+    // (TokenGone), and the caller must still see "Ringing …" for this attempt.
     let callees: Vec<String> = members(state, &chat)
         .into_iter()
         .filter(|u| *u != me)
         .collect();
     let reachable = reachability(state, &callees).await;
+    announce_started(state, &call, &starter).await;
     (
         StatusCode::CREATED,
         Json(json!({ "call": call_json(state, &call, Some(&me)), "joined": false, "reachable": reachable })),
@@ -1298,11 +1310,14 @@ mod tests {
         let for_carol = reach.iter().find(|r| r["user_id"] == carol).unwrap();
         assert_eq!(for_bob["any_live"], true);
         assert_eq!(for_bob["any_voip"], true);
+        assert_eq!(for_bob["any_push"], true);
         assert_eq!(for_bob["devices"][0]["polled_within_30s"], true);
         assert_eq!(for_bob["devices"][0]["voip_token"], true);
+        assert_eq!(for_bob["devices"][0]["push_token"], true);
         assert_eq!(for_bob["devices"][0]["app_version"], "1.0.0 (202610161326)");
         assert_eq!(for_carol["any_live"], false);
         assert_eq!(for_carol["any_voip"], false);
+        assert_eq!(for_carol["any_push"], false);
         assert_eq!(for_carol["devices"][0]["polled_within_30s"], false);
 
         // Bob joins, Alice and Bob hang up; Carol never answered → only Carol gets call_missed.

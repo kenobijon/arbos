@@ -353,16 +353,16 @@ final class CallManager: NSObject, ObservableObject {
     /// `reachable[]` from the 201 start when we have it, else §9 presence.
     var calleeUnreachable: Bool {
         if let c = call, !c.reachable.isEmpty {
-            return c.reachable.allSatisfy { !$0.anyLive && !$0.anyVoip }
+            return c.reachable.allSatisfy { !$0.anyLive && !$0.canRingClosed }
         }
         guard let c = call, let peer = calleePresence?(c.chatId) else { return false }
         return !peer.online && (peer.lastSeenAt.map { nowMs() - $0 > 90_000 } ?? true)
     }
 
-    /// "Ringing Robert's iPhone": nobody has Arbos open but a VoIP token can ring them.
+    /// "Ringing Robert's iPhone": nobody has Arbos open but PushKit or APNs can still ring them.
     var calleeRingingByPush: CallReachability? {
         guard let c = call, !c.reachable.isEmpty else { return nil }
-        return c.reachable.first { !$0.anyLive && $0.anyVoip }
+        return c.reachable.first { !$0.anyLive && $0.canRingClosed }
     }
 
     /// Missed-call lines already written on this device (`call_missed` arrives once per device, but the alert may repeat it).

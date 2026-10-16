@@ -50,13 +50,20 @@ struct CallReachability: Equatable {
     var name: String?
     var anyLive: Bool
     var anyVoip: Bool
+    /// Regular APNs token — they still get an Incoming-call banner / background wake.
+    var anyPush: Bool
 
     var displayName: String { name?.isEmpty == false ? name! : "@\(handle)" }
+    /// PushKit or a normal alert can reach them while Arbos is closed.
+    var canRingClosed: Bool { anyVoip || anyPush }
 
     static func parse(_ raw: Any?) -> CallReachability? {
         guard let d = raw as? [String: Any], let id = d["user_id"] as? String else { return nil }
+        func flag(_ k: String) -> Bool {
+            (d[k] as? Bool) ?? (d[k] as? NSNumber)?.boolValue ?? false
+        }
         return CallReachability(userId: id, handle: d["handle"] as? String ?? id, name: d["name"] as? String,
-                                anyLive: (d["any_live"] as? NSNumber)?.boolValue ?? false, anyVoip: (d["any_voip"] as? NSNumber)?.boolValue ?? false)
+                                anyLive: flag("any_live"), anyVoip: flag("any_voip"), anyPush: flag("any_push"))
     }
 }
 

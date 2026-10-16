@@ -225,9 +225,16 @@ impl Apns {
                     "10"
                 },
             )
+            // VoIP must expire immediately (Apple): a late delivery after the
+            // call ended makes CallKit report a ghost ring, and repeated misses
+            // stop PushKit delivery entirely.
             .header(
                 "apns-expiration",
-                ((now_ms() / 1000) + 24 * 3600).to_string(),
+                if out.push_type == "voip" {
+                    "0".to_owned()
+                } else {
+                    ((now_ms() / 1000) + 24 * 3600).to_string()
+                },
             )
             .json(&out.payload);
         if let Some(id) = &out.collapse_id {

@@ -31,7 +31,9 @@ const MESSAGE_MAX_CHARS: usize = 4000;
 const LLM_SYSTEM: &str = r#"You are the reply router for a group chat with people and several agents.
 Decide which agents (if any) should reply to the latest message. You may pick none, one, several, or all.
 
-Pick an agent when the message asks for their help, names or mentions them, continues a thread they were just in, or fits their role better than the other agents'. Pick none when people are talking to each other or the message is only a remark that needs no agent reply. Pick several when more than one should speak.
+Pick an agent when the message asks for their help, names or mentions them, continues a thread they were just in, or fits their role better than the other agents'. Pick several when more than one should speak (for example "all agents…" or "both of you agents…").
+
+Pick none when people are talking to each other; when the message addresses only humans or people (for example "all humans…", "humans say…", "people only…") even if an agent just spoke; or when the message is only a remark that needs no agent reply. Staying quiet means an empty responders list — do not pick an agent so it can announce it will stay quiet.
 
 Output: {"responders":["agent_id",...],"reason":"one line","confidence":0-1}
 Use the agent ids from the list. An empty responders list means nobody replies."#;
@@ -152,14 +154,14 @@ pub fn jev_questions(room: &Room) -> Value {
             json!({
                 "type": "noul",
                 "instructions": format!(
-                    "Should the agent \"{name}\" reply to `message`? Several agents may reply to one message; judge {name} on its own, from its name and role in `agents`, from `recent_messages`, and from who `message` is from and what it asks."
+                    "Should the agent \"{name}\" reply to `message`? Several agents may reply to one message; judge {name} on its own, from its name and role in `agents`, from `recent_messages`, and from who `message` is from and what it asks. Prefer false when `message` is for humans or people rather than agents — staying quiet means no reply at all, not a reply that says you will stay quiet."
                 ),
                 "criteria": {
                     "true": format!(
-                        "`message` asks {name} for something, directly or as part of a request to several agents; names or mentions {name}; continues a thread {name} was just speaking in; answers a question {name} asked; or asks for work that belongs to {name}'s role."
+                        "`message` asks {name} for something, directly or as part of a request to several or all agents (for example \"all agents…\"); names or mentions {name}; continues a thread {name} was just speaking in, unless this `message` is now addressed only to humans or people; answers a question {name} asked; or asks for work that belongs to {name}'s role."
                     ),
                     "false": format!(
-                        "`message` is addressed only to people or only to other agents; nothing in it belongs to {name}'s role; or it is only a remark, reaction or acknowledgement that needs no agent reply."
+                        "`message` addresses only humans or people (for example \"all humans…\", \"humans say…\", \"people only…\") even if {name} just spoke; is addressed only to other agents; nothing in it belongs to {name}'s role; or it is only a remark, reaction or acknowledgement that needs no agent reply."
                     ),
                 },
             }),

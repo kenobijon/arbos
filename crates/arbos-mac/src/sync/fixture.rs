@@ -228,7 +228,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::BlockUser { .. }
         | ClientCommand::InviteToProject { .. }
         | ClientCommand::RemoveProjectMember { .. }
-        | ClientCommand::FetchAvatar { .. } => {}
+        | ClientCommand::FetchAvatar { .. }
+        | ClientCommand::ArchiveChat { .. } => {}
         ClientCommand::OpenChat { chat_id } => {
             *shared.open_chat.lock().unwrap() = Some(chat_id.clone());
             mark_read(shared, &chat_id);
@@ -567,14 +568,6 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     }
                 }
             }
-            emit_chats(shared);
-        }
-        ClientCommand::CloseChat { chat_id } => {
-            shared
-                .chats
-                .lock()
-                .unwrap()
-                .retain(|c| c.id != chat_id || c.is_pinned);
             emit_chats(shared);
         }
         ClientCommand::MarkRead { chat_id } => mark_read(shared, &chat_id),

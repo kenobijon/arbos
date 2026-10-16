@@ -1,6 +1,7 @@
 //! Attachments on a user message reach the agent. A client uploads the bytes to the relay blob
 //! store (`PUT /blob/{project}/{ref}`) and writes an `attachment` part `{ name, mime, ref }` on
-//! the message. For each one the box:
+//! the message. People chats use the slot `people:{chat_id}` (same as iOS/Mac); project chats use
+//! the project id. For each one the box:
 //!   - downloads the blob into `<workspace>/in/<ref>-<name>` so tools can open it;
 //!   - images: also hands the bytes to the model as an image input (vision) on the pi prompt;
 //!   - audio: transcribes through the relay (`/proxy/v1/audio/transcriptions`) and uses the
@@ -63,8 +64,8 @@ fn safe_name(name: &str) -> String {
 
 impl Agent {
     /// Download and prepare every attachment of the message. Never fails the turn: a file that
-    /// cannot be fetched becomes a note saying so.
-    pub async fn turn_attachments(&self, msg: &MessageView) -> TurnAttachments {
+    /// cannot be fetched becomes a note saying so. `chat_id` picks the blob slot (people vs project).
+    pub async fn turn_attachments(&self, chat_id: &str, msg: &MessageView) -> TurnAttachments {
         let mut out = TurnAttachments::default();
         let parts = attachment_parts(msg);
         if parts.is_empty() {
@@ -72,6 +73,7 @@ impl Agent {
         }
         let in_dir = self.cfg.work_dir.join("in");
         let _ = std::fs::create_dir_all(&in_dir);
+        let blob_slot = self.blob_slot(chat_id);
         for a in parts {
             let name = a
                 .get("name")
@@ -89,10 +91,10 @@ impl Agent {
                 ));
                 continue;
             };
-            let bytes = match self.fetch_blob(blob_ref).await {
+            let bytes = match self.fetch_blob(&blob_slot, blob_ref).await {
                 Ok(b) => b,
                 Err(e) => {
-                    tracing::warn!(error = %e, blob_ref, "attachment download");
+                    tracing::warn!(error = %e, blob_ref, blob_slot, "attachment download");
                     out.notes.push(format!(
                         "[Attachment \"{name}\" ({mime}) could not be fetched from the relay: {e}.]"
                     ));
@@ -162,12 +164,12 @@ impl Agent {
         out
     }
 
-    async fn fetch_blob(&self, blob_ref: &str) -> Result<Vec<u8>> {
+    async fn fetch_blob(&self, blob_slot: &str, blob_ref: &str) -> Result<Vec<u8>> {
         let r = self
             .http_client()
             .get(format!(
                 "{}/blob/{}/{}",
-                self.cfg.relay_url, self.cfg.project_id, blob_ref
+                self.cfg.relay_url, blob_slot, blob_ref
             ))
             .bearer_auth(&self.cfg.box_token)
             .send()

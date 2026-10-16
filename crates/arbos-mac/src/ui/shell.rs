@@ -78,6 +78,8 @@ pub struct Shell {
     pub(crate) description_input: Entity<ComposerInput>,
     pub add_agent_open: bool,
     pub members_open: bool,
+    /// The agent's "Archived" chats list (header strip / "…" menu).
+    pub(crate) archived_open: bool,
     /// ⌘⇧F "Send feedback" sheet (self-contained in `ui::feedback`).
     feedback: Entity<FeedbackSheet>,
 }
@@ -271,6 +273,7 @@ impl Shell {
             focus_handle: cx.focus_handle(),
             settings_open: false,
             group_picker_open: false,
+            archived_open: false,
             routines,
             routines_open: false,
             channels,
@@ -379,11 +382,17 @@ impl Shell {
 
     /// Everything that floats closes on a click elsewhere.
     fn close_popovers(&mut self, cx: &mut Context<Self>) {
-        if self.menu_open || self.members_open || self.add_agent_open || self.group_picker_open {
+        if self.menu_open
+            || self.members_open
+            || self.add_agent_open
+            || self.group_picker_open
+            || self.archived_open
+        {
             self.menu_open = false;
             self.members_open = false;
             self.add_agent_open = false;
             self.group_picker_open = false;
+            self.archived_open = false;
             cx.notify();
         }
         if self.composer.read(cx).open_picker.is_some() {
@@ -2257,6 +2266,11 @@ impl Render for Shell {
         if self.menu_open {
             if let Some(space) = selected.as_ref() {
                 root = root.child(glass::popover(header::menu(self, space, cx)));
+            }
+        }
+        if self.archived_open {
+            if let Some(space) = selected.as_ref() {
+                root = root.child(glass::popover(header::archived_list(self, space, cx)));
             }
         }
         if self.group_picker_open {

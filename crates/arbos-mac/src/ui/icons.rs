@@ -47,6 +47,10 @@ const ICONS: &[(&str, &str)] = &[
     icon!("arrow-up", "<path d=\"M12 19V5M5 12l7-7 7 7\" stroke-width=\"2.6\"/>"),
     icon!("xmark", "<path d=\"M6 6l12 12M18 6L6 18\"/>"),
     icon!(
+        "archivebox",
+        "<rect x=\"3\" y=\"4\" width=\"18\" height=\"4\" rx=\"1\"/><path d=\"M5 8v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8M10 12h4\"/>"
+    ),
+    icon!(
         "square-pencil",
         "<path d=\"M12 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6\"/><path d=\"M18 3l3 3-9 9H9v-3z\"/>"
     ),

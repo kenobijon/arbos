@@ -445,6 +445,16 @@ impl Agent {
         &self.http
     }
 
+    /// Relay blob mirror slot for a chat (`PUT/GET /blob/{slot}/{key}`).
+    /// People chats use `people:{chat_id}`; project chats use this project's id.
+    pub fn blob_slot(&self, chat_id: &str) -> String {
+        if self.people.is_people_chat(chat_id) {
+            format!("people:{chat_id}")
+        } else {
+            self.cfg.project_id.clone()
+        }
+    }
+
     pub fn new(
         cfg: Arc<Config>,
         store: Store,
@@ -1031,7 +1041,7 @@ impl Agent {
         // Attachments (images, voice notes, files): fetched into the workspace; images ride
         // along as vision input, a voice note's transcript becomes the text when none was typed.
         let attachments = match &message_view {
-            Some(m) => self.turn_attachments(m).await,
+            Some(m) => self.turn_attachments(chat_id, m).await,
             None => crate::attachments::TurnAttachments::default(),
         };
         if user_text.trim().is_empty() {

@@ -175,15 +175,19 @@ async fn target(a: &Agent, session_id: Option<&str>) -> Option<(String, String)>
         .cloned()
 }
 
-async fn upload(a: &Arc<Agent>, bytes: Vec<u8>, mime: &str) -> anyhow::Result<String> {
+async fn upload(
+    a: &Arc<Agent>,
+    chat_id: &str,
+    bytes: Vec<u8>,
+    mime: &str,
+) -> anyhow::Result<String> {
     use sha2::Digest;
     let key = hex::encode(sha2::Sha256::digest(&bytes));
+    // Same slot clients read: people chats live under `people:{chat}`, not the project id.
+    let slot = a.blob_slot(chat_id);
     let r = a
         .http_client()
-        .put(format!(
-            "{}/blob/{}/{}",
-            a.cfg.relay_url, a.cfg.project_id, key
-        ))
+        .put(format!("{}/blob/{}/{}", a.cfg.relay_url, slot, key))
         .bearer_auth(&a.cfg.box_token)
         .header("content-type", mime)
         .body(bytes)
@@ -243,7 +247,7 @@ pub async fn deliver(
     };
     let bytes = tokio::fs::read(&p).await?;
     let size = bytes.len() as u64;
-    let key = upload(a, bytes, mime).await?;
+    let key = upload(a, &chat_id, bytes, mime).await?;
     let attachment = json!({
         "name": name, "mime": mime, "ref": key, "bytes": size, "kind": kind, "title": title,
     });

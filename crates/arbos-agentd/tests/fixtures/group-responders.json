@@ -78,6 +78,10 @@
     { "id": "c39", "roster": "people3", "from": "@ben", "text": "Plan the Lisbon days and keep the food budget under 30 euro a day each.", "recent": [], "expected": ["p_planner", "p_budget"], "note": "two by role" },
     { "id": "c40", "roster": "people3", "from": "@ana", "text": "ok, go with the second option", "recent": [{ "from": "@chef (agent)", "text": "Two menu options: (1) paella, (2) a mezze spread with falafel for the vegetarian." }, { "from": "@ben", "text": "either works for me" }], "expected": ["p_chef"], "note": "choice answers the agent's question" },
     { "id": "c41", "roster": "people3", "from": "@cem", "text": "All agents: anything I should prepare before the trip?", "recent": [], "expected": ["p_planner", "p_chef", "p_budget"], "note": "all" },
-    { "id": "c42", "roster": "launch", "from": "the user", "text": "Research, you can stop the competitor scan, we have enough. Design, where is the new logo?", "recent": [], "expected": ["research", "design"], "note": "two named, one is a stop" }
+    { "id": "c42", "roster": "launch", "from": "the user", "text": "Research, you can stop the competitor scan, we have enough. Design, where is the new logo?", "recent": [], "expected": ["research", "design"], "note": "two named, one is a stop" },
+    { "id": "c43", "roster": "people3", "from": "@cem", "text": "All humans say hi", "recent": [], "expected": [], "note": "humans only, nobody" },
+    { "id": "c44", "roster": "people3", "from": "@cem", "text": "All humans say hi", "recent": [{ "from": "@cem", "text": "All agents say hi" }, { "from": "@planner (agent)", "text": "Hi — planner here." }], "expected": [], "note": "humans only after an agent just spoke" },
+    { "id": "c45", "roster": "people2", "from": "@jacob", "text": "All agents say hi", "recent": [], "expected": ["p_research", "p_coder"], "note": "all agents greeting" },
+    { "id": "c46", "roster": "people2", "from": "@jacob", "text": "All humans say hi", "recent": [{ "from": "@jacob", "text": "All agents say hi" }, { "from": "@research (agent)", "text": "Hi everyone — research here." }], "expected": [], "note": "humans only; prior agent greeting must not continue" }
   ]
 }
