@@ -1045,6 +1045,20 @@ impl AppState {
                         self.active_tab.insert(project_id.clone(), first.id.clone());
                     }
                 }
+                // Keep the order the strip already shows (a new chat sits after
+                // "Main"); chats the relay no longer lists leave, new ones append.
+                let chats = match self.chats.get(&project_id) {
+                    Some(current) if !current.is_empty() => {
+                        let mut merged: Vec<Chat> = current
+                            .iter()
+                            .filter_map(|c| chats.iter().find(|n| n.id == c.id).cloned())
+                            .collect();
+                        let known: HashSet<Id> = merged.iter().map(|m| m.id.clone()).collect();
+                        merged.extend(chats.iter().filter(|n| !known.contains(&n.id)).cloned());
+                        merged
+                    }
+                    _ => chats,
+                };
                 self.chats.insert(project_id.clone(), chats);
                 self.enforce_tab(&project_id);
                 cx.notify();
@@ -1540,20 +1554,30 @@ impl AppState {
             return;
         };
         let chat_id = new_id();
-        self.chats
-            .entry(project_id.clone())
-            .or_default()
-            .push(Chat {
-                id: chat_id.clone(),
-                project_id: project_id.clone(),
-                title: "New chat".into(),
-                is_pinned: false,
-                is_system: false,
-                kind: ChatKind::Chat,
-                participants: Vec::new(),
-                unread: false,
-                last_message_at: now_ms(),
-            });
+        {
+            // Right after "Main", where the strip shows it without scrolling.
+            let tabs = self.chats.entry(project_id.clone()).or_default();
+            let at = tabs
+                .iter()
+                .position(|c| c.is_pinned)
+                .map(|i| i + 1)
+                .unwrap_or(0)
+                .min(tabs.len());
+            tabs.insert(
+                at,
+                Chat {
+                    id: chat_id.clone(),
+                    project_id: project_id.clone(),
+                    title: "New chat".into(),
+                    is_pinned: false,
+                    is_system: false,
+                    kind: ChatKind::Chat,
+                    participants: Vec::new(),
+                    unread: false,
+                    last_message_at: now_ms(),
+                },
+            );
+        }
         self.messages.insert(chat_id.clone(), Vec::new());
         self.chat_ui.insert(chat_id.clone(), ChatUi::default());
         self.active_tab.insert(project_id.clone(), chat_id.clone());
