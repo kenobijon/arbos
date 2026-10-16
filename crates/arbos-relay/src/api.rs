@@ -1065,10 +1065,12 @@ pub async fn create_chat(
         }
     };
     let existing = state.db.list_chats(&p.id).map_err(internal)?;
-    // Single-chat product (ARBOS_MULTI_CHAT off): an agent's box never opens another chat or
-    // tab; it is handed the primary chat instead. People's devices are not gated here — the apps
-    // hide the new-tab affordance themselves.
-    if !state.cfg.multi_chat && matches!(principal, Principal::Box { .. }) {
+    // Single-chat product (ARBOS_MULTI_CHAT off): an agent's box never opens another plain chat;
+    // it is handed the primary chat instead. The "Projects ⇄" system tab (one per project, where
+    // a participant box collects agent-hosted group traffic) and group chats
+    // (`POST /projects/{id}/groups`) are not gated. People's devices are not gated here either —
+    // the apps hide the new-tab affordance themselves.
+    if !state.cfg.multi_chat && kind == "chat" && matches!(principal, Principal::Box { .. }) {
         if let Some(primary) =
             primary_chat_id(&state, &p).and_then(|id| existing.iter().find(|c| c.id == id))
         {
@@ -1245,7 +1247,11 @@ fn workspace_json(state: &AppState, p: &Project) -> Result<Value, (StatusCode, S
     let mut project = serde_json::to_value(p).unwrap_or(Value::Null);
     project["skills_rev"] = json!(state.db.skills_rev(Some(&p.id)).map_err(internal)?);
     project["primary_chat_id"] = json!(primary_chat_id(state, p));
-    project["multi_chat"] = json!(state.cfg.multi_chat);
+    // Always true for the box: agentd 0.1.16 (85fd0b4e) read this as "may I open my Projects ⇄
+    // tab" and otherwise spilled agent-hosted group traffic into the owner's primary chat. The
+    // relay enforces the single-chat rule itself in `create_chat` (plain chats only), so the box
+    // needs no gate; newer agentd ignores the field.
+    project["multi_chat"] = json!(true);
     Ok(json!({
         "project": project,
         "chats": chats,
@@ -1613,8 +1619,26 @@ mod primary_chat_tests {
         let p = state.db.project(&project).unwrap().unwrap();
         assert_eq!(primary_chat_id(&state, &p).as_deref(), Some(newer.as_str()));
 
-        // A box asking for a new chat (or the Projects tab) gets the primary one, nothing new.
+        // A box asking for a new plain chat gets the primary one, nothing new …
         let before = state.db.list_chats(&project).unwrap().len();
+        let r = create_chat(
+            State(state.clone()),
+            Principal::Box {
+                user_id: alice.clone(),
+            },
+            Path(project.clone()),
+            Json(CreateChatBody {
+                title: None,
+                kind: None,
+            }),
+        )
+        .await
+        .map(|r| r.status())
+        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(r, StatusCode::OK);
+        assert_eq!(state.db.list_chats(&project).unwrap().len(), before);
+        // … but the Projects ⇄ system tab (agent-hosted groups, F6) is still served: here the
+        // existing one, and created when a project has none.
         let r = create_chat(
             State(state.clone()),
             Principal::Box {
@@ -1627,9 +1651,33 @@ mod primary_chat_tests {
             }),
         )
         .await
-        .map(|r| r.status())
-        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(r, StatusCode::OK);
+        .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["chat"]["kind"], "projects");
+        assert_eq!(v["chat"]["id"], json!(_tab));
         assert_eq!(state.db.list_chats(&project).unwrap().len(), before);
+        let fresh = project_of(&state, &alice, "Second");
+        let r = create_chat(
+            State(state.clone()),
+            Principal::Box {
+                user_id: alice.clone(),
+            },
+            Path(fresh.clone()),
+            Json(CreateChatBody {
+                title: None,
+                kind: Some("projects".into()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        assert!(state
+            .db
+            .list_chats(&fresh)
+            .unwrap()
+            .iter()
+            .any(|c| c.kind == "projects"));
     }
 }

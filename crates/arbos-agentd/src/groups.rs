@@ -30,10 +30,6 @@ pub struct GroupState {
     /// its chat is a group.
     kinds: Mutex<HashMap<String, String>>,
     projects_tab: Mutex<Option<String>>,
-    /// The project's primary chat and whether the relay allows more than one chat per agent
-    /// (`primary_chat_id` / `multi_chat` on the registry project; D77 single-chat product).
-    primary_chat: Mutex<Option<String>>,
-    multi_chat: std::sync::atomic::AtomicBool,
 }
 
 /// The group a turn belongs to: the host side (the chat itself is a group) or the participant
@@ -164,43 +160,6 @@ fn recent_group_context(
 impl Agent {
     /// Remember each chat's kind and participants from the registry list (`chats` of
     /// `GET /projects/{id}`), called on every chats-index write.
-    /// Remember the relay's single-chat decision for this project (every registry poll).
-    pub fn note_project_chat_policy(&self, project: &Value) {
-        if let Some(id) = str_field(project, "primary_chat_id") {
-            *self.groups.primary_chat.lock().expect("groups") = Some(id);
-        }
-        let multi = project
-            .get("multi_chat")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-            || self.cfg.multi_chat;
-        self.groups
-            .multi_chat
-            .store(multi, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    /// May this agent open chats or tabs of its own? Off unless the relay or
-    /// `ARBOS_MULTI_CHAT=1` says so. Subagent threads are internal and never affected.
-    pub fn multi_chat(&self) -> bool {
-        self.groups
-            .multi_chat
-            .load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    /// The chat everything lands in when the agent may not open another: the relay's primary
-    /// chat, else the pinned one, else the oldest.
-    pub fn primary_chat_id(&self) -> Option<String> {
-        if let Some(id) = self.groups.primary_chat.lock().expect("groups").clone() {
-            return Some(id);
-        }
-        let chats = self.store.chats().unwrap_or_default();
-        chats
-            .iter()
-            .find(|c| c.is_pinned)
-            .or(chats.first())
-            .map(|c| c.id.clone())
-    }
-
     pub fn note_chats_index(&self, chats: &[Value]) {
         let mut map = HashMap::new();
         for c in chats {
@@ -634,12 +593,9 @@ impl Agent {
         if let Some(id) = self.groups.projects_tab.lock().expect("groups").clone() {
             return Ok(id);
         }
-        // Single-chat product: no new tab; group traffic lands in the agent's one chat.
-        if !self.multi_chat() {
-            return self
-                .primary_chat_id()
-                .ok_or_else(|| anyhow!("no chat to deliver group traffic to"));
-        }
+        // The "Projects ⇄" system tab is not a plain extra chat: agent-hosted groups (F6) keep
+        // working with multi-chat off, and their traffic must not spill into the owner's one
+        // chat, so the tab is created regardless of the flag (the relay serves it too).
         let r = self
             .http_client()
             .post(format!(

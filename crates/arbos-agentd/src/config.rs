@@ -131,10 +131,6 @@ impl BoxConfig {
             relay_url: self.relay_url.clone(),
             box_token: self.box_token.clone(),
             mcp_token: self.mcp_token.clone(),
-            multi_chat: matches!(
-                std::env::var("ARBOS_MULTI_CHAT").as_deref(),
-                Ok("1") | Ok("true") | Ok("yes") | Ok("on")
-            ),
             mcp_port: base + 1,
             hook_port: base + 2,
             proxy_port: base + 3,
@@ -202,9 +198,6 @@ fn decision_cfg_of(models: &Value) -> DecisionConfig {
 pub struct Config {
     pub project_id: String,
     pub project_name: String,
-    /// `ARBOS_MULTI_CHAT=1` on the box: the agent may open chats/tabs even when the relay does
-    /// not say so (dev override; the relay's `multi_chat` is the normal source).
-    pub multi_chat: bool,
     pub relay_url: String,
     pub box_token: String,
     pub mcp_token: String,
