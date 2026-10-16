@@ -689,12 +689,18 @@ final class MemoPlayer: ObservableObject {
     private var totalSeconds: Double = 0
 
     /// Resolve the memo length as soon as the bubble appears (not only on play).
+    /// Remote `AVURLAsset` often returns no duration for m4a until the whole file is
+    /// buffered (moov at the end), so download then probe with `AVAudioPlayer`.
     func loadDuration(url: URL, headers: [String: String]) {
         guard totalSeconds <= 0 else { return }
-        let asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
         Task {
-            guard let duration = try? await asset.load(.duration) else { return }
-            let d = duration.seconds
+            var req = URLRequest(url: url)
+            for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
+            guard let (data, response) = try? await URLSession.shared.data(for: req),
+                  let http = response as? HTTPURLResponse, (200..<400).contains(http.statusCode),
+                  !data.isEmpty,
+                  let audio = try? AVAudioPlayer(data: data) else { return }
+            let d = audio.duration
             guard d.isFinite, d > 0 else { return }
             totalSeconds = d
             if !playing { durationLabel = Self.format(d) }
