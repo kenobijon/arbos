@@ -61,16 +61,34 @@ final class AppModel: ObservableObject {
     /// Every Arbos user the relay knows (members + invited), for the New Message sheet.
     @Published var directory: [Person] = []
     private var directoryLoadedAt: Int64 = 0
-    /// The people chat currently on screen; pushes for it never notify.
+    /// The chat currently on screen; pushes for it never notify while the
+    /// scene is active (Mac: `window_active`). Background / lock clears focus
+    /// so a reply still pushes a banner.
     var visibleChatId: String? {
         didSet {
             guard visibleChatId != oldValue else { return }
             if let old = oldValue { rooms[old]?.focused = false }
             if let new = visibleChatId {
-                rooms[new]?.focused = true
+                rooms[new]?.focused = appActive
                 PushManager.shared.clearDelivered(chatId: new)
             }
         }
+    }
+    /// Scene is `.active`. Focus and in-app banner suppression only apply then.
+    private var appActive = true
+
+    /// Called from the root scene: leaving `.active` drops `focused_chat` on
+    /// the relay (and stops swallowing banners) so APNs can fire.
+    func setAppActive(_ active: Bool) {
+        guard appActive != active else { return }
+        appActive = active
+        if let id = visibleChatId { rooms[id]?.focused = active }
+    }
+
+    /// Chat on screen *and* the app is in the foreground — the only case where
+    /// a message notification is suppressed.
+    private func isWatching(_ chatId: String) -> Bool {
+        appActive && visibleChatId == chatId
     }
     /// Per-chat unread counts from `GET /me/unread` (empty on relays without it).
     @Published private(set) var unreadCounts: [String: Int] = [:]
@@ -197,7 +215,10 @@ final class AppModel: ObservableObject {
             startAfterPairing()
         }
         Task { await probeAuthMode() }
-        PushManager.shared.visibleChatId = { [weak self] in self?.visibleChatId }
+        PushManager.shared.visibleChatId = { [weak self] in
+            guard let self, self.appActive else { return nil }
+            return self.visibleChatId
+        }
         NotificationCenter.default.addObserver(forName: PushManager.openChat, object: nil, queue: .main) { [weak self] n in
             guard let self, let cid = n.userInfo?["chat_id"] as? String else { return }
             let pid = (n.userInfo?["project_id"] as? String) ?? peopleSlot
@@ -1232,7 +1253,7 @@ final class AppModel: ObservableObject {
             notifiedPushIds.insert(p.id)
             switch p.kind {
             case "people_message":
-                if let cid = p.payload["chat_id"], cid != visibleChatId {
+                if let cid = p.payload["chat_id"], !isWatching(cid) {
                     peopleUnread.insert(cid)
                     let from = p.sender["handle"] ?? p.payload["from_handle"] ?? "someone"
                     // §7c sender{} first; the chat's member list fills any gap.

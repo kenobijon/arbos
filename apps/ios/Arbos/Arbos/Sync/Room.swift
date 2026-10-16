@@ -28,8 +28,9 @@ final class Room {
     private var wakeQueue: [String] = []
     private let session: URLSession
 
-    /// The chat is on screen: presence carries `focused_chat` so the relay
-    /// does not push a notification for it. Sent at once on change.
+    /// The chat is on screen *and* the app is active: presence carries
+    /// `focused_chat` so the relay does not push a notification for it.
+    /// Cleared when the scene leaves `.active` (lock / home) so APNs can fire.
     var focused = false {
         didSet {
             guard focused != oldValue else { return }

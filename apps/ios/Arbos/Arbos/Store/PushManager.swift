@@ -26,7 +26,8 @@ final class PushManager: NSObject, ObservableObject, UNUserNotificationCenterDel
     @Published var relayPushEnabled: Bool?
     /// Who to send the token to; set by AppModel once signed in.
     var register: ((String, String) async -> Void)?
-    /// The chat currently on screen; banners for it are swallowed.
+    /// The chat on screen while the scene is active; banners for it are swallowed.
+    /// Nil when backgrounded so a remote/local alert still shows a banner.
     var visibleChatId: () -> String? = { nil }
     private var registeredToken: String?
 

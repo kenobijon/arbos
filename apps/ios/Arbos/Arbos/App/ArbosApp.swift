@@ -55,6 +55,9 @@ struct RootView: View {
         .onChange(of: model.isPaired, initial: true) { _, paired in schedulePrimer(paired) }
         .onChange(of: push.status) { _, _ in schedulePrimer(model.isPaired) }
         .onChange(of: scenePhase) { _, phase in
+            // Match Mac `window_active`: only suppress push while the scene is
+            // active. Background / lock clears focused_chat so APNs banners fire.
+            model.setAppActive(phase == .active)
             if phase == .active { Task { await push.refreshStatus(); await model.refreshUnread() } }
         }
     }
