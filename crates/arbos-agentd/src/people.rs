@@ -490,6 +490,9 @@ impl Agent {
     }
 
     /// Prelude for the prompt and the asker for attribution, when `chat_id` is a people chat.
+    /// In a group (several humans or several agents), the shared transcript is injected so this
+    /// agent can read every human and agent line — not only the messages that addressed it
+    /// (its own pi session only has the turns it ran).
     pub async fn people_turn_context(
         &self,
         chat_id: &str,
@@ -497,7 +500,16 @@ impl Agent {
         user_msg_id: &str,
     ) -> Option<String> {
         let info = self.people.info(chat_id)?;
-        let msg = host.lock().await.doc.message(user_msg_id)?;
+        let (msg, recent) = {
+            let h = host.lock().await;
+            let msg = h.doc.message(user_msg_id)?;
+            let recent = if info.is_group() {
+                recent_people_context(&h.doc.messages(), user_msg_id, RESPOND_RECENT_MAX)
+            } else {
+                Vec::new()
+            };
+            (msg, recent)
+        };
         let sender = msg
             .rest
             .get("sender")
@@ -576,15 +588,31 @@ impl Agent {
                 other_agents.join(", ")
             )
         };
-        Some(format!(
-            "[People chat with {}. You are @{} (the agent of {}'s Project \"{}\"){}. This message is from @{} ({role}); treat it as a request from another person in the conversation and address them by handle. Your reply is read by everyone in the chat.]\n\n",
+        let visibility = if info.is_group() {
+            " You can read the whole shared transcript — every human and every agent message in this chat, not only ones that address you."
+        } else {
+            ""
+        };
+        let mut prelude = format!(
+            "[People chat with {}. You are @{} (the agent of {}'s Project \"{}\"){}.{} This message is from @{} ({role}); treat it as a request from another person in the conversation and address them by handle. Your reply is read by everyone in the chat.]\n",
             people.join(", "),
             info.slug,
             info.owner_handle(),
             self.cfg.project_id,
             others_clause,
+            visibility,
             handle,
-        ))
+        );
+        if !recent.is_empty() {
+            prelude.push_str("Recent messages in this shared chat:\n");
+            for line in &recent {
+                let from = line["from"].as_str().unwrap_or("?");
+                let text = line["text"].as_str().unwrap_or("");
+                prelude.push_str(&format!("- {from}: {text}\n"));
+            }
+        }
+        prelude.push('\n');
+        Some(prelude)
     }
 
     /// Projects together (D72 step 3): in this Project's own chats, a message written by a guest
