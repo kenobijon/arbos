@@ -453,9 +453,13 @@ final class CallManager: NSObject, ObservableObject {
         if let dir = DebugHooks.micDir {
             // No audio device on a headless simulator: the engine renders without one and the
             // "microphone" is whatever MicInjector feeds from `dir`.
-            if DebugHooks.micManual { try? AudioManager.shared.setManualRenderingMode(true) }
+            LiveKitSDK.setLogLevel(.debug)
+            if DebugHooks.micManual {
+                do { try AudioManager.shared.setManualRenderingMode(true) } catch { audioLog.error("manual rendering: \(error.localizedDescription, privacy: .public)") }
+            }
             AudioManager.shared.mixer.micVolume = 0
             AudioManager.shared.mixer.appVolume = 1
+            do { try AudioManager.shared.startLocalRecording() } catch { audioLog.error("startLocalRecording: \(error.localizedDescription, privacy: .public)") }
             micInjector = MicInjector(directory: dir)
         }
         #endif
