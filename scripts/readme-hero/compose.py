@@ -6,7 +6,7 @@ Inputs (both real captures, 2x):
             Retina (2x) display: rounded corners are transparent, no shadow.
   --iphone  `xcrun simctl io <udid> screenshot` of the iPhone app (3x, no device frame).
 
-Output: a 2x PNG (default 2400x1500, shown at half size by GitHub), quantized with pngquant
+Output: a 2x PNG (default 2560x1500, shown at half size by GitHub), quantized with pngquant
 when it is installed so the file stays small (target < 1 MB).
 
     python3 scripts/readme-hero/compose.py --mac mac.png --iphone iphone.png \
@@ -18,7 +18,6 @@ Needs Pillow (`pip install pillow`). See capture-mac.sh / capture-iphone.sh for 
 from __future__ import annotations
 
 import argparse
-import math
 import shutil
 import subprocess
 import sys
@@ -112,14 +111,17 @@ def iphone(path: Path, target_height: int) -> tuple[Image.Image, int]:
 def compose(mac_path: Path, iphone_path: Path, width: int, height: int) -> Image.Image:
     canvas = backdrop(width, height).convert("RGBA")
 
-    win, win_radius = mac_window(mac_path, target_width=round(width * 0.80))
-    win_x = round(width * 0.05)
+    phone, phone_radius = iphone(iphone_path, target_height=round(height * 0.70))
+    phone_x = width - phone.width - round(width * 0.045)
+    phone_y = height - phone.height - round(height * 0.05)
+
+    # The window runs under the phone by only `overlap` px: the transcript's right padding,
+    # so the phone never hides the end of a right-aligned message bubble.
+    overlap = round(width * 0.012)
+    win_x = round(width * 0.04)
+    win, win_radius = mac_window(mac_path, target_width=phone_x + overlap - win_x)
     win_y = round(height * 0.075)
     paste_with_shadow(canvas, win, (win_x, win_y), radius=win_radius, blur=round(width * 0.02), alpha=170, offset_y=round(height * 0.02))
-
-    phone, phone_radius = iphone(iphone_path, target_height=round(height * 0.72))
-    phone_x = width - phone.width - round(width * 0.045)
-    phone_y = height - phone.height - round(height * 0.045)
     paste_with_shadow(canvas, phone, (phone_x, phone_y), radius=phone_radius, blur=round(width * 0.018), alpha=200, offset_y=round(height * 0.015))
 
     return canvas.convert("RGB")
@@ -145,13 +147,12 @@ def main() -> None:
     ap.add_argument("--mac", required=True, type=Path, help="Mac window capture (2x, transparent corners)")
     ap.add_argument("--iphone", required=True, type=Path, help="iPhone simulator screenshot")
     ap.add_argument("--out", default=Path("docs/assets/hero.png"), type=Path)
-    ap.add_argument("--width", type=int, default=2400, help="canvas width in px (2x)")
-    ap.add_argument("--height", type=int, default=0, help="canvas height in px; default keeps 16:10")
+    ap.add_argument("--width", type=int, default=2560, help="canvas width in px (2x)")
+    ap.add_argument("--height", type=int, default=1500, help="canvas height in px (2x)")
     ap.add_argument("--no-quantize", action="store_true", help="keep the full-colour PNG")
     args = ap.parse_args()
 
-    height = args.height or math.floor(args.width * 10 / 16)
-    image = compose(args.mac, args.iphone, args.width, height)
+    image = compose(args.mac, args.iphone, args.width, args.height)
     write_optimized(image, args.out, quantize=not args.no_quantize)
 
 
