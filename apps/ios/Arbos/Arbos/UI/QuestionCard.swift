@@ -1,6 +1,6 @@
 // The Grok Bot question card, measured from internal/refs/grokbot-question-card-light.jpg
 // (@3x): one rounded card in the assistant-bubble grey (24 pt radius, 14 pt padding),
-// a bold 18 pt question, a thin grey × top-right, and a white (dark: slightly lighter)
+// a semibold 17.5 pt question, a thin grey × top-right, and a white (dark: slightly lighter)
 // inner list (14 pt radius) of 41 pt rows — a 24 pt grey lettered badge, 17 pt text,
 // hairline separators. Nothing else: no icons, chips, coloured buttons or hints.
 //
@@ -54,7 +54,7 @@ struct QuestionCard: View {
     private var header: some View {
         HStack(alignment: .top, spacing: 10) {
             Text(title)
-                .font(.system(size: 18, weight: .semibold))
+                .font(.system(size: 17.5, weight: .semibold))
                 .foregroundStyle(theme.text)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.leading, 1)
@@ -64,7 +64,7 @@ struct QuestionCard: View {
                     withAnimation(.easeOut(duration: 0.15)) { dismissed = true }
                 } label: {
                     CloseGlyph(color: palette.close)
-                        .frame(width: 11, height: 11)
+                        .frame(width: 12, height: 12)
                         .frame(width: 28, height: 22)
                         .contentShape(Rectangle())
                 }
@@ -193,7 +193,7 @@ private struct CloseGlyph: View {
             path.addLine(to: CGPoint(x: size.width, y: size.height))
             path.move(to: CGPoint(x: size.width, y: 0))
             path.addLine(to: CGPoint(x: 0, y: size.height))
-            ctx.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+            ctx.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: 1.4, lineCap: .round))
         }
     }
 }
