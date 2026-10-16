@@ -122,7 +122,9 @@ chown -R arbos:arbos "$DATA_DIR"; chmod 0750 "$DATA_DIR"
 # ---- 3. env file (secrets) -------------------------------------------------------------------------
 say "env file"
 # Items are referenced by id: `op read` rejects titles with parentheses ("invalid character in secret reference").
-opread() { op read "$1" 2>/dev/null || true; }
+# Run as root under `sudo -E`: HOME is still the invoking user's, and op refuses a ~/.config/op it does not own,
+# so point it at root's config (the service-account token in the environment is all it needs).
+opread() { HOME=/root XDG_CONFIG_HOME=/root/.config op read "$1" 2>/dev/null </dev/null || true; }
 if command -v op >/dev/null 2>&1 && [[ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; then
   : "${OPENROUTER_API_KEY:=$(opread 'op://Arbos/xbirrctuljw2m6aieoway2szom/credential')}"
   : "${OPENAI_API_KEY:=$(opread 'op://Arbos/6k3kuhvc3xxwpgao4mblskj45e/notesPlain' | tr -d '[:space:]')}"

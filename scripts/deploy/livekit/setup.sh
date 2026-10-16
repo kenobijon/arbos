@@ -50,8 +50,9 @@ fi
 
 # ---- API key pair -----------------------------------------------------------------------------------
 if [[ -z "${LIVEKIT_API_KEY:-}" || -z "${LIVEKIT_API_SECRET:-}" ]] && command -v op >/dev/null 2>&1 && [[ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; then
-  LIVEKIT_API_KEY=$(op read 'op://Arbos/ypyfs6fm7dtkzphirv6ep7lfjq/LIVEKIT_API_KEY' 2>/dev/null </dev/null || true)
-  LIVEKIT_API_SECRET=$(op read 'op://Arbos/ypyfs6fm7dtkzphirv6ep7lfjq/LIVEKIT_API_SECRET' 2>/dev/null </dev/null || true)
+  # under sudo -E HOME is the invoking user's; op needs a config dir it owns
+  LIVEKIT_API_KEY=$(HOME=/root XDG_CONFIG_HOME=/root/.config op read 'op://Arbos/ypyfs6fm7dtkzphirv6ep7lfjq/LIVEKIT_API_KEY' 2>/dev/null </dev/null || true)
+  LIVEKIT_API_SECRET=$(HOME=/root XDG_CONFIG_HOME=/root/.config op read 'op://Arbos/ypyfs6fm7dtkzphirv6ep7lfjq/LIVEKIT_API_SECRET' 2>/dev/null </dev/null || true)
 fi
 GENERATED=0
 if [[ -z "${LIVEKIT_API_KEY:-}" || -z "${LIVEKIT_API_SECRET:-}" ]]; then
