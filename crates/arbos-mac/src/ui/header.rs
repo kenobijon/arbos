@@ -385,13 +385,12 @@ pub fn chips(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option<
             people::member_chips(space, shell.add_agent_open, &theme, cx).into_any_element(),
         );
     }
-    // One chat per agent unless the multi-chat flag is on: no chips, no "+".
-    if !state.multi_chat {
-        return None;
-    }
+    // Multi-chat off: chips only when the agent hosts group chats next to its
+    // one chat — and then without "+" or "×" (no new / closed chats).
+    let multi_chat = state.multi_chat;
     let tabs: Vec<(Chat, bool, bool)> = state
-        .tabs(&space.id)
-        .iter()
+        .visible_tabs(&space.id)
+        .into_iter()
         .map(|c| {
             (
                 c.clone(),
@@ -419,7 +418,8 @@ pub fn chips(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option<
         let phase = PulseClock::phase(cx, 1200);
         let id = chat.id.clone();
         let close_id = chat.id.clone();
-        let title = if chat.is_pinned {
+        // With multi-chat off the agent's one chat is simply "Main".
+        let title = if chat.is_pinned || (!multi_chat && !chat.is_group()) {
             "Main".to_string()
         } else {
             chat.title.clone()
@@ -466,7 +466,7 @@ pub fn chips(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option<
                     .bg(Theme::with_alpha(theme.warn, 0.4 + 0.6 * phase)),
             );
         }
-        if !chat.is_pinned {
+        if multi_chat && !chat.is_pinned {
             chipel = chipel.child(
                 div()
                     .id(ElementId::Name(SharedString::from(format!(
@@ -490,24 +490,26 @@ pub fn chips(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option<
         }
         row = row.child(chipel);
     }
-    row = row.child(
-        div()
-            .id("chip-new")
-            .flex_shrink_0()
-            .size(px(30.0))
-            .rounded_full()
-            .bg(theme.bubble_assistant)
-            .flex()
-            .items_center()
-            .justify_center()
-            .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
-            .child(icon("plus", 13.0, theme.text_muted))
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.state.update(cx, |s, cx| s.new_tab(cx));
-                Composer::focus(&this.composer, window, cx);
-            })),
-    );
+    if multi_chat {
+        row = row.child(
+            div()
+                .id("chip-new")
+                .flex_shrink_0()
+                .size(px(30.0))
+                .rounded_full()
+                .bg(theme.bubble_assistant)
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.surface_2))
+                .child(icon("plus", 13.0, theme.text_muted))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.state.update(cx, |s, cx| s.new_tab(cx));
+                    Composer::focus(&this.composer, window, cx);
+                })),
+        );
+    }
     Some(row.into_any_element())
 }
 

@@ -1201,14 +1201,21 @@ impl AppState {
     }
 
     /// The chats the UI may show for a space: all of them with multi-chat on,
-    /// or for a people chat; just the primary chat of an agent otherwise.
+    /// or for a people chat; for an agent otherwise its primary chat plus the
+    /// group chats it hosts (those stay visible and working with the flag off).
     pub fn visible_tabs(&self, project_id: &str) -> Vec<&Chat> {
         let is_people = self.project(project_id).is_some_and(|p| p.is_people());
         if self.multi_chat || is_people {
-            self.tabs(project_id).iter().collect()
-        } else {
-            self.primary_chat(project_id).into_iter().collect()
+            return self.tabs(project_id).iter().collect();
         }
+        let primary = self.primary_chat(project_id);
+        let mut out: Vec<&Chat> = primary.into_iter().collect();
+        out.extend(
+            self.tabs(project_id)
+                .iter()
+                .filter(|c| c.is_group() && primary.is_none_or(|p| p.id != c.id)),
+        );
+        out
     }
 
     /// The one chat of an agent. The relay's `primary_chat` wins when it names a
@@ -1238,8 +1245,9 @@ impl AppState {
         })
     }
 
-    /// Single-chat mode: the active tab of an agent is always its primary chat.
-    /// Returns true when the active tab changed (and the chat was opened).
+    /// Single-chat mode: the active tab of an agent is one of its visible chats
+    /// (the primary chat or a group it hosts); anything else falls back to the
+    /// primary. Returns true when the active tab changed (and the chat was opened).
     fn enforce_single_chat(&mut self, project_id: &str) -> bool {
         if self.multi_chat || self.project(project_id).is_none_or(|p| p.is_people()) {
             return false;
@@ -1247,7 +1255,11 @@ impl AppState {
         let Some(primary) = self.primary_chat(project_id).map(|c| c.id.clone()) else {
             return false;
         };
-        if self.active_tab.get(project_id) == Some(&primary) {
+        let active_visible = self
+            .active_tab
+            .get(project_id)
+            .is_some_and(|a| self.visible_tabs(project_id).iter().any(|c| &c.id == a));
+        if active_visible {
             return false;
         }
         self.active_tab
