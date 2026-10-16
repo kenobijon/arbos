@@ -334,6 +334,14 @@ enum Markdown {
         (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
             ?? AttributedString(text)
     }
+
+    /// Markdown `Text` ignores `.foregroundStyle` for many pasted runs, so bake
+    /// the colour into the attributed string (user bubbles are dark in light mode).
+    static func inline(_ text: String, color: Color) -> AttributedString {
+        var s = inline(text)
+        s.foregroundColor = color
+        return s
+    }
 }
 
 // MARK: - Row views
@@ -352,7 +360,7 @@ struct RowView: View {
         case .user(let text, let pending):
             HStack {
                 Spacer(minLength: 0)
-                Text(Markdown.inline(text))
+                Text(Markdown.inline(text, color: theme.userText))
                     .font(.system(size: Theme.body))
                     .lineSpacing(Theme.bodyLineSpacing)
                     .foregroundStyle(theme.userText)
