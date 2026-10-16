@@ -26,8 +26,10 @@ pub struct Outgoing {
     pub device_token: String,
     /// `development` → sandbox host, anything else → production.
     pub environment: String,
-    /// `alert` or `background`.
+    /// `alert`, `background`, or `voip` (PushKit).
     pub push_type: &'static str,
+    /// Overrides the client's topic: VoIP pushes go to `<bundle_id>.voip`.
+    pub topic: Option<String>,
     /// APNs `apns-collapse-id`; later notifications with the same id replace earlier ones.
     pub collapse_id: Option<String>,
     pub payload: Value,
@@ -213,11 +215,15 @@ impl Apns {
             .http
             .post(&url)
             .bearer_auth(token)
-            .header("apns-topic", &self.topic)
+            .header("apns-topic", out.topic.as_deref().unwrap_or(&self.topic))
             .header("apns-push-type", out.push_type)
             .header(
                 "apns-priority",
-                if out.push_type == "alert" { "10" } else { "5" },
+                if out.push_type == "background" {
+                    "5"
+                } else {
+                    "10"
+                },
             )
             .header(
                 "apns-expiration",

@@ -84,6 +84,8 @@ All optional unless noted.
 | `ARBOS_MEDIA_VENV` | python with the document libraries for process boxes (`scripts/box-media-deps.sh` prints the export) |
 | `ARBOS_GOOGLE_CLIENT_ID/SECRET`, `ARBOS_SLACK_CLIENT_ID/SECRET`, `ARBOS_GITHUB_CLIENT_ID/SECRET`, `ARBOS_OAUTH_REDIRECT_URL`, `ARBOS_HARNESS_COMMS_URL`, `ARBOS_CONNECTORS_MOCK` | connector OAuth apps (redirect `{public_url}/connectors/oauth/callback`); `ARBOS_CONNECTORS_MOCK=1` returns canned data |
 | `ARBOS_SLACK_SIGNING_SECRET`, `ARBOS_SLACK_BOT_TOKEN`, `ARBOS_TELEGRAM_BOT_TOKEN`, `ARBOS_TELEGRAM_WEBHOOK_SECRET`, `ARBOS_TELEGRAM_POLL`, `ARBOS_WHATSAPP_TOKEN`, `ARBOS_WHATSAPP_PHONE_ID`, `ARBOS_WHATSAPP_VERIFY_TOKEN`, `ARBOS_WHATSAPP_APP_SECRET`, `ARBOS_BEEPER_POLL_S`, `ARBOS_CHANNELS_MOCK` | channel adapters (Slack Events API at `{public_url}/channels/slack/events`, Telegram webhook or long polling, WhatsApp Cloud API webhook, Beeper via Harness Comms); `ARBOS_CHANNELS_MOCK=1` turns every platform into a mock |
+| `APNS_KEY_P8`, `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_TOPIC` | iPhone notifications and VoIP call pushes over APNs (token auth; the `.p8` as text or a path); without them push is off and the relay says so once |
+| `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `LIVEKIT_WEBHOOK_SECRET` | voice/video calls on your own LiveKit (§9); without them the call endpoints answer 503 `calls_off` |
 | `ARBOS_VAULT_MOCK` | seeds two demo vault items and a local egress echo target |
 | `RUST_LOG` | e.g. `info,arbos_relay=debug` |
 
@@ -133,3 +135,35 @@ While no production snapshot is registered, point the relay at the dev image ins
 ## 8. Updates
 
 Self-built relays update by rebuilding. The Mac app updates itself from the appcast of the channel it was built on (`ARBOS_UPDATE_CHANNEL=stable|edge`, `ARBOS_UPDATE_FEED=<url>` to point at your own feed, `ARBOS_UPDATE_DISABLE=1` to turn it off). `scripts/bundle-mac.sh` builds a universal `dist/Arbos.app`, the DMG and the updater tarball, signing and notarizing when the credentials are present and saying what it skipped otherwise.
+
+## 9. Calls (LiveKit)
+
+Voice and video calls between people run on a [LiveKit](https://github.com/livekit/livekit) server you host next to the relay. The relay decides who may be in a call, mints the join tokens, and keeps the call log; media goes LiveKit ↔ apps and never through the relay.
+
+1. Run `livekit-server` with a key pair and a webhook pointing at the relay (`livekit.yaml`):
+
+```yaml
+port: 7880
+rtc:
+  tcp_port: 7881
+  port_range_start: 50000
+  port_range_end: 60000
+  use_external_ip: true
+keys:
+  <LIVEKIT_API_KEY>: <LIVEKIT_API_SECRET>
+turn:
+  enabled: true
+  domain: livekit.example.com
+  tls_port: 5349
+webhook:
+  api_key: <LIVEKIT_API_KEY>
+  urls:
+    - https://relay.example.com/livekit/webhook
+```
+
+Put TLS in front of port 7880 as `wss://livekit.example.com` (Caddy: `reverse_proxy localhost:7880`), open UDP 50000–60000 and TCP 7881, and give TURN a certificate (or terminate TURN/TLS on 443 so strict networks work). LiveKit signs each webhook with the API key pair; the relay verifies it with `LIVEKIT_API_SECRET` (set `LIVEKIT_WEBHOOK_SECRET` only when the webhook uses a different key).
+
+2. Give the relay `LIVEKIT_URL=wss://livekit.example.com`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` and restart it; the log says `LiveKit calls on`. `arbosctl admin calls` shows the configuration, live calls, and the last ended ones.
+
+3. Call tokens are good for an hour, rooms are named `call_<ulid>`, at most 16 people. A call ends when the last person leaves, when LiveKit reports `room_finished`, or when nobody has been in it for a minute (the relay then closes the LiveKit room too). Ringing on iPhones that are closed needs the APNs key above (PushKit VoIP push, same key).
+

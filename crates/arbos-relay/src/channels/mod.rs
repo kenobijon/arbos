@@ -774,6 +774,7 @@ mod tests {
             ))),
             focus: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             fallback_sent: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            livekit: None,
         }
     }
 

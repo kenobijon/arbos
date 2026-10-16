@@ -471,6 +471,8 @@ enum AdminCmd {
     /// Stop and delete a user's sandbox and clear the box row (a signed-in user gets a fresh box
     /// within a minute; a test user stays without one).
     DeleteBox { user: String },
+    /// Calls: LiveKit configured?, live calls with participants, the last 20 ended calls.
+    Calls,
     /// iOS push: `status` lists whether APNs is configured and every registered device token;
     /// `test --user <id> | --device <id>` sends one plain alert and prints APNs' answer.
     Push {
@@ -883,6 +885,10 @@ async fn main() -> Result<()> {
                     let v = admin.delete(&format!("/admin/users/{user}/box")).await?;
                     println!("{}", serde_json::to_string_pretty(&v)?);
                 }
+                AdminCmd::Calls => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&admin.get("/admin/calls").await?)?
+                ),
                 AdminCmd::Push {
                     action,
                     user,

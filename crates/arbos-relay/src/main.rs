@@ -6,17 +6,20 @@ mod avatar;
 mod blobs;
 mod boxes;
 mod browser;
+mod calls;
 mod channels;
 mod connectors;
 mod credits;
 mod daytona;
 mod db;
 mod db_accounts;
+mod db_calls;
 mod db_people;
 mod db_push;
 mod feedback;
 mod groups;
 mod images;
+mod livekit;
 mod local;
 mod migrate;
 mod notify;
@@ -275,6 +278,7 @@ async fn main() -> anyhow::Result<()> {
         push: apns::from_env().unwrap_or_else(|| Arc::new(apns::Pusher::Off)),
         focus: Arc::new(Mutex::new(HashMap::new())),
         fallback_sent: Arc::new(Mutex::new(HashMap::new())),
+        livekit: livekit::from_env(),
     };
     tracing::info!(auth_mode = auth_mode.as_str(), public_url = %state.cfg.public_url, "sign-in");
     if state.cfg.connectors_mock {
@@ -310,6 +314,7 @@ async fn main() -> anyhow::Result<()> {
     credits::spawn_meter(state.clone()).await;
     boxes::spawn_always_on(state.clone()).await;
     upgrade::spawn_history_sweeper(state.clone()).await;
+    calls::spawn_sweeper(state.clone()).await;
     boxes::spawn_project_purge(state.clone()).await;
 
     let app = Router::new()
@@ -326,6 +331,25 @@ async fn main() -> anyhow::Result<()> {
         .route("/me", get(signin::me))
         .route("/me/pushes", get(people::me_pushes))
         .route("/me/unread", get(notify::me_unread))
+        .route("/chats/{id}/calls", post(calls::start_people_call))
+        .route("/chats/{id}/call", get(calls::people_chat_call))
+        .route(
+            "/projects/{project_id}/chats/{chat_id}/calls",
+            post(calls::start_project_call),
+        )
+        .route(
+            "/projects/{project_id}/chats/{chat_id}/call",
+            get(calls::project_chat_call),
+        )
+        .route("/calls/{id}", get(calls::get_call))
+        .route("/calls/{id}/join", post(calls::join_call))
+        .route("/calls/{id}/leave", post(calls::leave_call))
+        .route(
+            "/devices/{id}/voip",
+            post(calls::register_voip).delete(calls::unregister_voip),
+        )
+        .route("/livekit/webhook", post(calls::livekit_webhook))
+        .route("/admin/calls", get(calls::admin_calls))
         .route(
             "/devices/{id}/push",
             post(notify::register_push).delete(notify::unregister_push),
