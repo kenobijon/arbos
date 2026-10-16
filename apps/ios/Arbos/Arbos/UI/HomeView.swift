@@ -522,7 +522,8 @@ struct AgentRow: View {
     }
 }
 
-/// A DM in the home list: round avatar (vs the agents' blobs), name + @handle.
+/// A people chat in the home list: DMs show the other person; groups show the
+/// chat title (custom name, or member handles from the relay) and a member count.
 struct PeopleRow: View {
     @Environment(\.theme) private var theme
     let chat: PeopleChat
@@ -535,10 +536,34 @@ struct PeopleRow: View {
 
     private var other: ChatMember? { chat.counterpart(me: me) }
 
+    /// Groups name the chat, not the first other human (same rule as CallKit).
+    private var title: String {
+        if chat.isGroup { return chat.title.isEmpty ? "Group" : chat.title }
+        return other?.displayName ?? chat.title
+    }
+
+    /// Same-line muted label: @handle for a DM, member count for a group.
+    private var label: String {
+        if chat.isGroup {
+            let n = chat.humans.count
+            return "\(n) member\(n == 1 ? "" : "s")"
+        }
+        return "@\(other?.handle ?? chat.title)"
+    }
+
     var body: some View {
         HStack(spacing: 14) {
             ZStack(alignment: .bottomTrailing) {
-                PersonAvatar(url: other?.avatarUrl, handle: other?.handle ?? "?", size: 46)
+                if chat.isGroup {
+                    ZStack {
+                        Circle().fill(theme.card).frame(width: 46, height: 46)
+                        Image(systemName: "person.2.fill")
+                            .font(.system(size: 17, weight: .medium))
+                            .foregroundStyle(theme.muted)
+                    }
+                } else {
+                    PersonAvatar(url: other?.avatarUrl, handle: other?.handle ?? "?", size: 46)
+                }
                 if let a = chat.agents.first?.project {
                     AgentAvatar(project: a, theme: theme, size: 18, still: true)
                         .overlay(Circle().strokeBorder(theme.bg, lineWidth: 2))
@@ -547,11 +572,11 @@ struct PeopleRow: View {
             }
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline) {
-                    Text(other?.displayName ?? chat.title)
+                    Text(title)
                         .font(.system(size: Theme.body, weight: .semibold))
                         .foregroundStyle(theme.text)
                         .lineLimit(1)
-                    Text("@\(other?.handle ?? chat.title)")
+                    Text(label)
                         .font(.system(size: Theme.tiny))
                         .foregroundStyle(theme.muted)
                         .lineLimit(1)
