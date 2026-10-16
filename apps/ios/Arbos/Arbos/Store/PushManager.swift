@@ -18,6 +18,10 @@ final class PushManager: NSObject, ObservableObject, UNUserNotificationCenterDel
     /// Posted with `chat_id` and `project_id` when a notification is tapped.
     static let openChat = Notification.Name("arbos.openChat")
     static let category = "ARBOS_MESSAGE"
+    /// Incoming call alert (relay `ARBOS_CALL`); Accept / Decline like WhatsApp's banner.
+    static let callCategory = "ARBOS_CALL"
+    static let callAcceptAction = "ACCEPT"
+    static let callDeclineAction = "DECLINE"
 
     @Published private(set) var status: UNAuthorizationStatus = .notDetermined
     /// Hex APNs token from the system; re-registered on every launch.
@@ -41,7 +45,11 @@ final class PushManager: NSObject, ObservableObject, UNUserNotificationCenterDel
         UNUserNotificationCenter.current().delegate = self
         let messageCategory = UNNotificationCategory(identifier: PushManager.category, actions: [], intentIdentifiers: ["INSendMessageIntent"],
                                                      options: [.customDismissAction])
-        UNUserNotificationCenter.current().setNotificationCategories([messageCategory])
+        let accept = UNNotificationAction(identifier: PushManager.callAcceptAction, title: "Accept", options: [.foreground])
+        let decline = UNNotificationAction(identifier: PushManager.callDeclineAction, title: "Decline", options: [.destructive])
+        let callCategory = UNNotificationCategory(identifier: PushManager.callCategory, actions: [accept, decline],
+                                                  intentIdentifiers: [], options: [.customDismissAction])
+        UNUserNotificationCenter.current().setNotificationCategories([messageCategory, callCategory])
         Task { await refreshStatus() }
     }
 
@@ -144,7 +152,7 @@ final class PushManager: NSObject, ObservableObject, UNUserNotificationCenterDel
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
         let info = notification.request.content.userInfo
-        if notification.request.content.categoryIdentifier == "ARBOS_CALL" {
+        if notification.request.content.categoryIdentifier == PushManager.callCategory {
             // In the foreground the ringing screen takes over; no banner on top of it.
             await MainActor.run { CallManager.shared.handleCallAlert(info) }
             return []
@@ -156,8 +164,16 @@ final class PushManager: NSObject, ObservableObject, UNUserNotificationCenterDel
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
         let info = response.notification.request.content.userInfo
-        if response.notification.request.content.categoryIdentifier == "ARBOS_CALL" {
+        if response.notification.request.content.categoryIdentifier == PushManager.callCategory {
+            let action = response.actionIdentifier
+            if action == PushManager.callDeclineAction {
+                await MainActor.run { CallManager.shared.handleCallDecline(info) }
+                return
+            }
             await MainActor.run { CallManager.shared.handleCallAlert(info) }
+            if action == PushManager.callAcceptAction {
+                await CallManager.shared.accept()
+            }
         }
         let chatId = (info["chat_id"] as? String) ?? ""
         let projectId = (info["project_id"] as? String) ?? "people"

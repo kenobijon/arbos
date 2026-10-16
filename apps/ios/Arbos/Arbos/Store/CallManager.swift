@@ -177,8 +177,12 @@ final class CallManager: NSObject, ObservableObject {
     }
 
     /// Ring: a `call_started` push while the app is open, or a VoIP push.
-    func ring(_ incomingCall: Call, from: CallPerson?, viaVoip: Bool) {
-        guard !isActive, incoming == nil, call?.callId != incomingCall.callId else { return }
+    /// `onCallKitReported` runs from CallKit's report callback (PushKit must finish there).
+    func ring(_ incomingCall: Call, from: CallPerson?, viaVoip: Bool, onCallKitReported: (() -> Void)? = nil) {
+        guard !isActive, incoming == nil, call?.callId != incomingCall.callId else {
+            onCallKitReported?()
+            return
+        }
         incoming = (incomingCall, from)
         #if DEBUG
         if DebugHooks.autoAcceptCall {
@@ -199,14 +203,17 @@ final class CallManager: NSObject, ObservableObject {
         update.supportsDTMF = false
         provider.reportNewIncomingCall(with: uuid, update: update) { [weak self] err in
             // CallKit rings (system ringtone + vibration, honouring the ring/silent
-            // switch like a phone call). If it refuses, ring in-app instead.
-            Task { @MainActor in
-                if err != nil { self?.startIncomingRingFallback() } else { audioLog.notice("incoming: CallKit is ringing") }
-            }
+            // switch like a phone call). If it refuses, keep the incoming state and
+            // ring in-app — clearing it dropped the only fallback and made VoIP
+            // look like "they'll see a missed call" after Apple stopped delivering.
+            // PushKit's completion must run here (not inside a later Task).
             if let err {
                 log.error("reportNewIncomingCall: \(err.localizedDescription, privacy: .public)")
-                Task { @MainActor in self?.incoming = nil; self?.phase = .idle }
+                Task { @MainActor in self?.startIncomingRingFallback() }
+            } else {
+                audioLog.notice("incoming: CallKit is ringing")
             }
+            onCallKitReported?()
         }
         ringTimeout?.cancel()
         ringTimeout = Task { [weak self] in
@@ -759,6 +766,17 @@ final class CallManager: NSObject, ObservableObject {
             ring(c, from: CallPerson.parse(info["sender"]) ?? c.startedBy, viaVoip: false)
         }
     }
+
+    /// Notification Decline on an `ARBOS_CALL` alert (no Accept).
+    func handleCallDecline(_ info: [AnyHashable: Any]) {
+        let c = Call.parse(info["call"])
+        let callId = c?.callId ?? info["call_id"] as? String
+        if let callId, incoming?.call.callId == callId {
+            decline()
+        } else if incoming != nil, callId == nil {
+            decline()
+        }
+    }
 }
 
 // MARK: - LiveKit
@@ -884,7 +902,9 @@ extension CallManager: PKPushRegistryDelegate {
     }
 
     /// Payload `{call_id, chat_id, project_id, kind, room, livekit_url, caller: sender{}, started_at}`.
-    /// CallKit must be told before this returns; the join token comes from POST /calls/{id}/join on accept.
+    /// CallKit must be told before the PushKit completion runs; the join token comes from
+    /// POST /calls/{id}/join on accept. `PKPushRegistry(queue: .main)` delivers on the main
+    /// queue — do not wrap this in `Task` or iOS stops VoIP delivery (WhatsApp-style ring dies).
     nonisolated func pushRegistry(_ registry: PKPushRegistry, didReceiveIncomingPushWith payload: PKPushPayload, for type: PKPushType, completion: @escaping () -> Void) {
         let dict = payload.dictionaryPayload
         var d: [String: Any] = [:]
@@ -893,9 +913,10 @@ extension CallManager: PKPushRegistryDelegate {
         var callDict = d
         callDict["started_by"] = d["caller"] ?? d["sender"]
         let parsed = Call.parse(callDict)
-        Task { @MainActor in
+
+        let report: @MainActor () -> Void = {
             if let parsed {
-                self.ring(parsed, from: caller, viaVoip: true)
+                self.ring(parsed, from: caller, viaVoip: true, onCallKitReported: completion)
             } else {
                 // Report something anyway: iOS terminates apps that take a VoIP push and report no call.
                 let uuid = UUID()
@@ -903,9 +924,14 @@ extension CallManager: PKPushRegistryDelegate {
                 update.remoteHandle = CXHandle(type: .generic, value: "Arbos")
                 self.provider.reportNewIncomingCall(with: uuid, update: update) { _ in
                     self.provider.reportCall(with: uuid, endedAt: Date(), reason: .failed)
+                    completion()
                 }
             }
-            completion()
+        }
+        if Thread.isMainThread {
+            MainActor.assumeIsolated(report)
+        } else {
+            DispatchQueue.main.async { MainActor.assumeIsolated(report) }
         }
     }
 }
