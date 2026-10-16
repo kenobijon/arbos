@@ -73,6 +73,14 @@ struct ChatView: View {
         }
     }
 
+    /// Profile "search" tile: raise the in-chat search bar once for this chat.
+    private func openPendingSearchIfNeeded() {
+        guard model.pendingSearchChat == chatId else { return }
+        model.pendingSearchChat = nil
+        showSearch = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { searchFocused = true }
+    }
+
     /// Tokenised blob URL for a custom group picture, if the chat has one.
     private func groupImageURL(_ people: PeopleChat) -> String? {
         guard let key = people.imageKey, !key.isEmpty else { return nil }
@@ -335,11 +343,7 @@ struct ChatView: View {
             model.markRead(chatId: chatId)
             model.visibleChatId = chatId
             if isPeople { model.markPeopleRead(chatId) }
-            if model.pendingSearchChat == chatId {
-                model.pendingSearchChat = nil
-                showSearch = true
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { searchFocused = true }
-            }
+            openPendingSearchIfNeeded()
             if isPeople || project?.shared == true { Task { await model.refreshActiveCall(chatId: chatId, projectId: isPeople ? nil : projectId) } }
             if let show = DebugHooks.show {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
@@ -376,6 +380,9 @@ struct ChatView: View {
             }
         }
         .onDisappear { if model.visibleChatId == chatId { model.visibleChatId = nil } }
+        // Profile "search" sets pendingSearchChat while this chat is already on screen
+        // (sheet over us), so onAppear alone never sees it — watch the published flag.
+        .onChange(of: model.pendingSearchChat) { _, _ in openPendingSearchIfNeeded() }
         .onChange(of: messages, initial: true) { _, _ in
             refreshRows()
             model.markRead(chatId: chatId)

@@ -1572,7 +1572,7 @@ final class AppModel: ObservableObject {
     /// The profile page the root view presents (person, group or agent).
     @Published var profile: ProfileTarget?
     /// A chat the next ChatView should open with its search bar up (profile "search").
-    var pendingSearchChat: String?
+    @Published var pendingSearchChat: String?
     /// Last presence time per user id, from room presence frames this session.
     @Published private(set) var lastSeen: [String: Int64] = [:]
 

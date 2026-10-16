@@ -607,9 +607,18 @@ struct GroupProfileView: View {
                     }
                     ProfileActionRow(actions: [
                         ProfileAction(icon: muted ? "bell.slash.fill" : "bell.fill", label: muted ? "unmute" : "mute") { toggleMute() },
-                        ProfileAction(icon: "magnifyingglass", label: "search") { dismiss(); model.pendingSearchChat = chatId },
+                        ProfileAction(icon: "magnifyingglass", label: "search") {
+                            model.pendingSearchChat = chatId
+                            dismiss()
+                        },
                         ProfileAction(icon: "rectangle.portrait.and.arrow.right", label: "leave", enabled: people != nil || project?.shared == true) { confirmLeave = true },
-                        ProfileAction(icon: "ellipsis", label: "more") { },
+                        ProfileAction(icon: "ellipsis", label: "more") {
+                            if people != nil {
+                                showEdit = true
+                            } else if let projectId {
+                                model.showProfile(.agent(projectId: projectId))
+                            }
+                        },
                     ])
                     ProfileTabs(tabs: ["Members", "Media", "Files", "Voice", "Links"], selected: $tab)
                     switch tab {
