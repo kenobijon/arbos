@@ -30,9 +30,9 @@ use crate::skills::{self, SkillsIndex};
 use crate::store::Store;
 use crate::sync::{SharedHost, SyncHub};
 
-/// Streams the `reply` string out of the `route` tool's partial JSON arguments.
-#[derive(Default)]
+/// Streams one string field (`reply`, `ack`) out of the `route` tool's partial JSON arguments.
 pub struct ReplyExtractor {
+    key: &'static str,
     buf: String,
     pos: usize,
     in_string: bool,
@@ -40,8 +40,41 @@ pub struct ReplyExtractor {
     pending_escape: Option<String>,
 }
 
+impl Default for ReplyExtractor {
+    fn default() -> Self {
+        Self::for_key("reply")
+    }
+}
+
 impl ReplyExtractor {
-    /// Feed one `toolcall_delta`; returns newly decoded reply text.
+    pub fn for_key(key: &'static str) -> Self {
+        Self {
+            key,
+            buf: String::new(),
+            pos: 0,
+            in_string: false,
+            done: false,
+            pending_escape: None,
+        }
+    }
+
+    /// The string closed (or was null): nothing more will come.
+    pub fn is_done(&self) -> bool {
+        self.done
+    }
+
+    /// The `action` value seen so far in the same arguments, when it has streamed already.
+    pub fn action_seen(&self) -> Option<&str> {
+        let k = self.buf.find("\"action\"")?;
+        let after = &self.buf[k + 8..];
+        let colon = after.find(':')?;
+        let rest = after[colon + 1..].trim_start();
+        let rest = rest.strip_prefix('"')?;
+        let end = rest.find('"')?;
+        Some(&rest[..end])
+    }
+
+    /// Feed one `toolcall_delta`; returns newly decoded text of the field.
     pub fn feed(&mut self, delta: &str) -> String {
         if self.done {
             return String::new();
@@ -49,10 +82,11 @@ impl ReplyExtractor {
         self.buf.push_str(delta);
         let mut out = String::new();
         if !self.in_string {
-            let Some(k) = self.buf.find("\"reply\"") else {
+            let needle = format!("\"{}\"", self.key);
+            let Some(k) = self.buf.find(&needle) else {
                 return out;
             };
-            let after = &self.buf[k + 7..];
+            let after = &self.buf[k + needle.len()..];
             let Some(colon) = after.find(':') else {
                 return out;
             };
@@ -336,6 +370,18 @@ pub struct TurnState {
     /// call id → args from `tool_execution_start`, so the tool part records the real input.
     pub tool_inputs: HashMap<String, Value>,
     pub reply_extractor: ReplyExtractor,
+    /// Streams `route.ack` into the first row of the turn (agent-flow contract §1).
+    pub ack_extractor: ReplyExtractor,
+    /// The acknowledgement sentence written so far.
+    pub ack_text: String,
+    /// The ack row was closed; `assistant_msg_id` now names the result row (or none, see `row_closed`).
+    pub ack_split: bool,
+    /// No live row right now (a `new`/`wake` turn ended on its ack): the next text opens one.
+    pub row_closed: bool,
+    /// Progress bubbles sent with `send_message` this turn.
+    pub progress_texts: Vec<String>,
+    /// The `activity` currently on the live row, so unchanged labels are not rewritten.
+    pub activity: Option<String>,
     /// Boilerplate filter on everything the main agent says in this turn.
     pub prose: ProseFilter,
     /// Act turns: prose is held here and only the text after the last tool call reaches the doc;
@@ -1114,6 +1160,7 @@ impl Agent {
             turn.route,
             Some(ValidRoute::New { .. }) | Some(ValidRoute::Wake { .. })
         ) && turn.streamed_text.trim().is_empty()
+            && turn.ack_text.trim().is_empty()
         {
             let mut h = host.lock().await;
             if let Some(p) = h.doc.add_text_part(&assistant_msg_id, "text") {
@@ -1370,6 +1417,12 @@ impl Agent {
             act_transcript: Vec::new(),
             tool_inputs: HashMap::new(),
             reply_extractor: ReplyExtractor::default(),
+            ack_extractor: ReplyExtractor::for_key("ack"),
+            ack_text: String::new(),
+            ack_split: false,
+            row_closed: false,
+            progress_texts: Vec::new(),
+            activity: None,
             prose: ProseFilter::default(),
             act_buffer: String::new(),
             route_call_id: None,
@@ -1405,6 +1458,9 @@ impl Agent {
         let Some(turn) = turn else {
             return Err(anyhow!("turn state vanished mid-turn"));
         };
+        // After an ack or progress bubble the live row is a later one than the row this turn
+        // opened with; everything below finalizes the row the turn ended on.
+        let assistant_msg_id = turn.assistant_msg_id.clone();
         let total_ms = turn.started.elapsed().as_millis() as i64;
         let route_name = turn
             .route
@@ -1427,6 +1483,9 @@ impl Agent {
             if let Some(e) = &err_text {
                 h.doc.add_error_part(&assistant_msg_id, "turn_failed", e);
             }
+            if turn.activity.is_some() {
+                h.doc.set_activity(&assistant_msg_id, None);
+            }
             h.doc.set_message_fields(
                 &assistant_msg_id,
                 &[
@@ -1436,11 +1495,35 @@ impl Agent {
                     ("usage", turn.metrics.usage.clone().unwrap_or(Value::Null)),
                 ],
             );
+            if turn.ack_split && !turn.row_closed {
+                h.doc
+                    .set_message_fields(&assistant_msg_id, &[("turnRole", json!("result"))]);
+            }
             h.doc.finish_message(&assistant_msg_id, final_status);
             room_name = h.room.clone();
         }
-        if matches!(final_status, MessageStatus::Done) && !turn.streamed_text.trim().is_empty() {
-            self.announce_reply(&room_name, &assistant_msg_id, &turn.streamed_text);
+        if turn.activity.is_some() {
+            self.post_activity(chat_id, None);
+        }
+        // One notification per turn: the result, or the ack when the turn ended on it.
+        let announce = if turn.streamed_text.trim().is_empty() {
+            turn.ack_text.as_str()
+        } else {
+            turn.streamed_text.as_str()
+        };
+        if matches!(final_status, MessageStatus::Done) && !announce.trim().is_empty() {
+            self.announce_reply(&room_name, &assistant_msg_id, announce);
+        }
+        if !turn.ack_text.trim().is_empty() {
+            let _ = self.store.t3_append(
+                chat_id,
+                None,
+                Some(chat_id),
+                "assistant",
+                Some("assistant"),
+                turn.ack_text.trim(),
+                Some(&json!({ "ack": true, "route": route_name, "turn": turn_kind })),
+            );
         }
         if !turn.streamed_text.trim().is_empty() {
             let _ = self.store.t3_append(
@@ -1851,6 +1934,16 @@ impl Agent {
                         content_index: _,
                     } => {
                         if t.route_call_id.is_some() && t.route.is_none() {
+                            // The ack streams first (schema order) and becomes its own bubble;
+                            // a short `reply` streams into the same row as today.
+                            let ack = t.ack_extractor.feed(delta);
+                            if !ack.is_empty() {
+                                if t.metrics.ttft_ms.is_none() {
+                                    t.metrics.ttft_ms = Some(elapsed);
+                                }
+                                self.write_ack(host, t, &ack).await;
+                            }
+                            self.maybe_split_ack(host, t, false).await;
                             let text = t.reply_extractor.feed(delta);
                             if !text.is_empty() {
                                 self.append_text(host, t, &text).await;
@@ -1883,9 +1976,14 @@ impl Agent {
                 tool_name,
                 args,
             } => {
-                if tool_name == "route" {
+                // Talking to the user is not a tool step: no tool part, no count, no activity.
+                if tool_name == "route" || tool_name == "send_message" {
                     return Ok(false);
                 }
+                // A tool is about to run: the ack sentence (if any) is complete by now.
+                self.maybe_split_ack(host, t, true).await;
+                self.set_activity(host, t, crate::activity::label(tool_name, args))
+                    .await;
                 t.tool_inputs.insert(tool_call_id.clone(), args.clone());
                 t.metrics.tool_calls += 1;
                 let one_line = args.to_string().chars().take(120).collect::<String>();
@@ -1930,9 +2028,12 @@ impl Agent {
                     if t.metrics.route_ms.is_none() {
                         t.metrics.route_ms = Some(elapsed);
                     }
-                    if t.route.is_none() && !t.route_failed {
-                        // A route the hook never saw (no agentd reachable): validate from the result args is impossible; treat as reply.
-                    }
+                    // The route is validated (hook) by now: an ack that streamed becomes its
+                    // own bubble, and an act turn gets its result row.
+                    self.maybe_split_ack(host, t, true).await;
+                    return Ok(false);
+                }
+                if tool_name == "send_message" {
                     return Ok(false);
                 }
                 let output = result
@@ -2013,8 +2114,193 @@ impl Agent {
     async fn append_text(&self, host: &SharedHost, t: &mut TurnState, delta: &str) {
         let out = t.prose.feed(delta);
         if !out.is_empty() {
+            // The model is talking now, not running a tool.
+            self.set_activity(host, t, None).await;
             self.stage_text(host, t, &out).await;
         }
+    }
+
+    /// The `route.ack` sentence streams straight into the live row (no filter: it is one
+    /// sentence the model wrote for the user), agent-flow contract §1.
+    async fn write_ack(&self, host: &SharedHost, t: &mut TurnState, delta: &str) {
+        if t.row_closed {
+            self.open_row(host, t, "ack").await;
+        }
+        let mut h = host.lock().await;
+        h.doc
+            .append_text(&t.assistant_msg_id, &t.text_part_id, delta);
+        t.ack_text.push_str(delta);
+    }
+
+    /// Once the ack is complete and the action is known: `act` → the ack row closes and a
+    /// result row opens; `new`/`wake` → the ack row closes and the turn has nothing more to
+    /// show; `reply` → one row, as before. `force` treats a still-open ack string as complete
+    /// (the arguments have finished streaming by the time a tool runs).
+    async fn maybe_split_ack(&self, host: &SharedHost, t: &mut TurnState, force: bool) {
+        if t.ack_split || t.ack_text.trim().is_empty() {
+            return;
+        }
+        if !t.ack_extractor.is_done() && !force {
+            return;
+        }
+        let action: Option<String> = match &t.route {
+            Some(r) => Some(route_name(r).to_owned()),
+            None => t.ack_extractor.action_seen().map(str::to_owned),
+        };
+        let action = match (action, force) {
+            (Some(a), _) => a,
+            (None, true) => "act".to_owned(),
+            (None, false) => return,
+        };
+        t.ack_split = true;
+        match action.as_str() {
+            "reply" => {}
+            "act" => {
+                self.close_row(host, t, "ack").await;
+                self.open_row(host, t, "result").await;
+            }
+            _ => self.close_row(host, t, "ack").await,
+        }
+        tracing::info!(chat_id = %t.chat_id, action, ack_chars = t.ack_text.chars().count(), "ack bubble");
+    }
+
+    /// Open a fresh streaming assistant row for this turn (after an ack or a progress bubble).
+    async fn open_row(&self, host: &SharedHost, t: &mut TurnState, role: &str) {
+        let id = ulid();
+        let mut h = host.lock().await;
+        let pid = h
+            .doc
+            .start_assistant_message(&id, &t.user_msg_id, &self.cfg.device_id);
+        h.doc.add_status_part(&id, "working", "Working…");
+        h.doc.set_message_fields(&id, &[("turnRole", json!(role))]);
+        if let Some(attr) = self.people_reply_fields(&t.chat_id) {
+            h.doc.set_message_fields(&id, &attr.fields);
+        }
+        if let Some(a) = &t.activity {
+            h.doc.set_activity(&id, Some(a));
+        }
+        t.assistant_msg_id = id;
+        t.text_part_id = pid;
+        t.text_part_dirty = false;
+        t.row_closed = false;
+    }
+
+    /// Close the live row as a finished prose bubble (ack or progress).
+    async fn close_row(&self, host: &SharedHost, t: &mut TurnState, role: &str) {
+        let mut h = host.lock().await;
+        if t.activity.is_some() {
+            h.doc.set_activity(&t.assistant_msg_id, None);
+        }
+        h.doc
+            .set_message_fields(&t.assistant_msg_id, &[("turnRole", json!(role))]);
+        h.doc
+            .finish_message(&t.assistant_msg_id, MessageStatus::Done);
+        t.row_closed = true;
+    }
+
+    /// The working line's text (agent-flow contract §2): on the live row and mirrored to the relay.
+    async fn set_activity(&self, host: &SharedHost, t: &mut TurnState, activity: Option<String>) {
+        if t.activity == activity {
+            return;
+        }
+        t.activity = activity.clone();
+        if !t.row_closed {
+            let mut h = host.lock().await;
+            h.doc.set_activity(&t.assistant_msg_id, activity.as_deref());
+        }
+        self.post_activity(&t.chat_id, activity);
+    }
+
+    /// `POST /projects/{id}/activity` so lists and sidebars can show it without the chat doc.
+    /// Fire-and-forget: the doc field is the source of truth.
+    pub fn post_activity(&self, chat_id: &str, activity: Option<String>) {
+        let url = format!(
+            "{}/projects/{}/activity",
+            self.cfg.relay_url, self.cfg.project_id
+        );
+        let body = json!({ "chat_id": chat_id, "text": activity });
+        let http = self.http.clone();
+        let token = self.cfg.box_token.clone();
+        tokio::spawn(async move {
+            if let Err(e) = http
+                .post(url)
+                .bearer_auth(token)
+                .json(&body)
+                .timeout(Duration::from_secs(5))
+                .send()
+                .await
+            {
+                tracing::debug!(error = %e, "post activity to relay failed");
+            }
+        });
+    }
+
+    /// `send_message(text, activity?)` from the main agent: a progress bubble now, as its own
+    /// row, while the turn keeps running (agent-flow contract §1).
+    pub async fn hook_send_message(
+        &self,
+        text: &str,
+        activity: Option<&str>,
+    ) -> Result<(), String> {
+        let text = text.trim();
+        if text.is_empty() && activity.is_none() {
+            return Err("nothing to send".into());
+        }
+        let mut tl = self.turn.lock().await;
+        let Some(t) = tl.as_mut() else {
+            return Err("no turn is running".into());
+        };
+        let Some(host) = self.sync.host(&t.chat_id).await else {
+            return Err("no room for this chat".into());
+        };
+        if !text.is_empty() {
+            self.maybe_split_ack(&host, t, true).await;
+            // Narration the act turn held back is not the message: it stays in T3 only.
+            let mut interim = std::mem::take(&mut t.act_buffer);
+            interim.push_str(&t.prose.flush());
+            if !interim.trim().is_empty() {
+                let _ = self.store.t3_append(
+                    &t.chat_id,
+                    None,
+                    Some(&t.chat_id),
+                    "interim",
+                    Some("assistant"),
+                    interim.trim(),
+                    Some(&json!({ "before": "send_message" })),
+                );
+            }
+            if t.row_closed {
+                self.open_row(&host, t, "progress").await;
+            }
+            {
+                let mut h = host.lock().await;
+                if t.text_part_dirty {
+                    if let Some(p) = h.doc.add_text_part(&t.assistant_msg_id, "text") {
+                        t.text_part_id = p;
+                    }
+                    t.text_part_dirty = false;
+                }
+                h.doc
+                    .append_text(&t.assistant_msg_id, &t.text_part_id, text);
+            }
+            t.progress_texts.push(text.to_owned());
+            self.close_row(&host, t, "progress").await;
+            self.open_row(&host, t, "result").await;
+            let _ = self.store.t3_append(
+                &t.chat_id,
+                None,
+                Some(&t.chat_id),
+                "assistant",
+                Some("assistant"),
+                text,
+                Some(&json!({ "message_id": t.assistant_msg_id, "progress": true })),
+            );
+            tracing::info!(chat_id = %t.chat_id, chars = text.chars().count(), "progress bubble");
+        }
+        if let Some(a) = activity {
+            self.set_activity(&host, t, Some(a.to_owned())).await;
+        }
+        Ok(())
     }
 
     /// Reply turns stream straight into the doc; act turns hold the text until the turn settles
@@ -2028,6 +2314,10 @@ impl Agent {
     }
 
     async fn write_text(&self, host: &SharedHost, t: &mut TurnState, delta: &str) {
+        if t.row_closed {
+            // The turn said it was over (ack only) but the model kept talking: give it a row.
+            self.open_row(host, t, "result").await;
+        }
         let mut h = host.lock().await;
         if t.text_part_dirty {
             // A tool part landed since the last text: open a new text part so order is kept.

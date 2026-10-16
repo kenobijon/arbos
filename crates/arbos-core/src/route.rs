@@ -51,6 +51,10 @@ pub struct Route {
     pub data_heavy: bool,
     #[serde(default)]
     pub reply: Option<String>,
+    /// act/new/wake: one short sentence to the user, streamed out as its own bubble before any
+    /// tool runs (agent-flow contract §1). Ignored for `reply`.
+    #[serde(default)]
+    pub ack: Option<String>,
 }
 
 /// A validated route. Each variant carries exactly the fields its action needs.
@@ -77,7 +81,7 @@ pub enum ValidRoute {
 }
 
 /// JSON schema served to the model as the `route` tool parameters. Byte-stable (design §6.9).
-pub const ROUTE_SCHEMA_JSON: &str = r#"{"type":"object","properties":{"action":{"type":"string","enum":["reply","act","wake","new"],"description":"reply: answer now. act: do it yourself in <=8 tool calls / 60s. wake: continue an existing subagent. new: start a subagent."},"subagent_id":{"type":["string","null"],"description":"required for wake"},"name":{"type":["string","null"],"description":"short-name-if-new, e.g. rail-layout"},"purpose":{"type":["string","null"],"description":"one sentence if new"},"brief":{"type":["string","null"],"description":"the exact prompt to send to the subagent, if wake or new"},"plan":{"type":["string","null"],"description":"<= 3 lines: the tool calls you expect to make, if act"},"harness":{"type":["string","null"],"enum":["prime","claude_code","pi",null]},"isolate":{"type":"boolean","default":false},"data_heavy":{"type":"boolean","default":false},"reply":{"type":["string","null"],"description":"the text to stream, if reply"}},"required":["action"],"additionalProperties":false}"#;
+pub const ROUTE_SCHEMA_JSON: &str = r#"{"type":"object","properties":{"action":{"type":"string","enum":["reply","act","wake","new"],"description":"reply: answer now. act: do it yourself in <=8 tool calls / 60s. wake: continue an existing subagent. new: start a subagent."},"ack":{"type":["string","null"],"description":"act/new/wake: one short sentence to the user saying what you are about to do; shown at once"},"subagent_id":{"type":["string","null"],"description":"required for wake"},"name":{"type":["string","null"],"description":"short-name-if-new, e.g. rail-layout"},"purpose":{"type":["string","null"],"description":"one sentence if new"},"brief":{"type":["string","null"],"description":"the exact prompt to send to the subagent, if wake or new"},"plan":{"type":["string","null"],"description":"<= 3 lines: the tool calls you expect to make, if act"},"harness":{"type":["string","null"],"enum":["prime","claude_code","pi",null]},"isolate":{"type":"boolean","default":false},"data_heavy":{"type":"boolean","default":false},"reply":{"type":["string","null"],"description":"the text to stream, if reply"}},"required":["action"],"additionalProperties":false}"#;
 
 fn non_empty(v: &Option<String>) -> Option<String> {
     v.as_deref()

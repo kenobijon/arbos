@@ -147,7 +147,20 @@ pub struct AppState {
     pub livekit: Option<crate::livekit::LiveKit>,
     /// device_id → last presence frame that was written to `devices.last_seen_at`.
     pub presence_seen: Arc<Mutex<HashMap<String, i64>>>,
+    /// project_id → what its agent is doing right now (agent-flow contract §3), in memory only.
+    pub activity: Arc<Mutex<HashMap<String, ProjectActivity>>>,
 }
+
+/// The agent's current activity as the box last reported it.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ProjectActivity {
+    pub chat_id: String,
+    pub text: String,
+    pub at: i64,
+}
+
+/// An activity older than this is stale (the box died mid-turn) and is not shown.
+pub const ACTIVITY_TTL_MS: i64 = 20 * 60 * 1000;
 
 /// One running box upgrade.
 #[derive(Debug, Clone)]
@@ -380,6 +393,7 @@ pub(crate) mod test_support {
             fallback_sent: Arc::new(Mutex::new(HashMap::new())),
             livekit: None,
             presence_seen: Arc::new(Mutex::new(HashMap::new())),
+            activity: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }

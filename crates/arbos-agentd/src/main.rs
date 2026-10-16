@@ -1,3 +1,4 @@
+mod activity;
 mod agent;
 mod approval;
 mod attachments;
