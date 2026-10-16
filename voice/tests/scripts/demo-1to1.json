@@ -1,7 +1,7 @@
 [
   {"say": "Hi! Quick question: in one sentence, what can you help me with on this call?"},
   {"barge": "Sorry, stop there. Instead, check how many files are in my project folder, and name the biggest one.", "ask": "Tell me the full story of how lighthouses were invented, with lots of detail.", "after_ms": 2600, "max": 75},
-  {"say": "Perfect, thanks. Alpha Lab, leave the call.", "max": 20},
+  {"say": "Perfect, thanks. Forest, leave the call.", "max": 20},
   {"sleep": 3},
   {"hangup": true}
 ]
