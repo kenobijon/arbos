@@ -268,6 +268,7 @@ final class AppModel: ObservableObject {
             guard let self, self.appActive else { return nil }
             return self.visibleChatId
         }
+        PushManager.shared.isChatArchived = { [weak self] id in self?.archivedChatIds.contains(id) ?? false }
         NotificationCenter.default.addObserver(forName: PushManager.openChat, object: nil, queue: .main) { [weak self] n in
             guard let self, let cid = n.userInfo?["chat_id"] as? String else { return }
             let pid = (n.userInfo?["project_id"] as? String) ?? peopleSlot
@@ -451,10 +452,20 @@ final class AppModel: ObservableObject {
 
     /// Everything unread: people chats by sequence, project chats by flag.
     var unreadTotal: Int {
-        if !unreadCounts.isEmpty { return unreadCounts.values.reduce(0, +) }
+        // Archived agent chats never badge (§9c).
+        if !unreadCounts.isEmpty {
+            return unreadCounts.reduce(0) { $0 + (archivedChatIds.contains($1.key) ? 0 : $1.value) }
+        }
         let people = peopleChats.reduce(0) { $0 + unreadCount(for: $1) }
-        let projects = chats.values.flatMap { $0 }.filter(\.unread).count
+        let projects = chats.values.flatMap { $0 }.filter { $0.unread && !archivedChatIds.contains($0.id) }.count
         return people + projects
+    }
+
+    /// Unread rows of one agent chat for its dot: none while archived.
+    func chatHasUnread(_ chat: Chat) -> Bool {
+        if archivedChatIds.contains(chat.id) { return false }
+        if chat.unread { return true }
+        return (unreadCounts[chat.id] ?? 0) > 0 && chat.id != visibleChatId
     }
 
     func unreadCount(for chat: PeopleChat) -> Int {
@@ -743,7 +754,9 @@ final class AppModel: ObservableObject {
             }
             projects = newProjects.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
             chats = newChats
+            adoptRelayArchiveState(newChats)
             saveRegistryCache()
+            await flushArchiveWrites()
             await refreshMachine()
             for p in newProjects {
                 ensureRoom(projectId: p.id, key: projectDocKey(p.id), roomChat: projectDocChatId)
@@ -1729,6 +1742,8 @@ final class AppModel: ObservableObject {
                 await refreshRegistry()
             case "project_member_removed":
                 await refreshRegistry()
+            case "chat_archived":
+                applyArchivePush(p)
             default:
                 break
             }
@@ -1773,23 +1788,121 @@ final class AppModel: ObservableObject {
         didSet { UserDefaults.standard.set(multiChatEnabled, forKey: "multiChatEnabled") }
     }
 
-    // MARK: Chat archive (device-local, nothing deleted)
+    // MARK: Chat archive (§9c: per user, synced through the relay; nothing deleted)
 
-    /// Archived chats hide from the chats sheet's main list only. History stays
-    /// in the agent's context/memory tree and searchable history; nothing is
-    /// sent to the relay or agentd.
+    /// Archived chats hide from the chats sheet's main list and never badge or
+    /// notify here. History stays in the agent's context/memory tree and
+    /// searchable history; nothing goes to agentd. The relay keeps the flag per
+    /// user per chat (`archived_at`): the sheet writes it with
+    /// `PUT /chats/{id}/settings {archived}`, every listing seeds it and the
+    /// `chat_archived` push updates it live. The UserDefaults copy is only an
+    /// offline cache plus the writes that have not reached the relay yet.
     @Published private(set) var archivedChatIds: Set<Id> = Set(UserDefaults.standard.stringArray(forKey: "archivedChats") ?? [])
+
+    /// Archive writes the relay has not confirmed (offline, or a relay without §9c yet).
+    private var pendingArchiveWrites: [Id: Bool] {
+        get { (UserDefaults.standard.dictionary(forKey: "archivePendingWrites") as? [String: Bool]) ?? [:] }
+        set { UserDefaults.standard.set(newValue, forKey: "archivePendingWrites") }
+    }
+    private var archiveFlushing = false
 
     func isChatArchived(_ chatId: Id) -> Bool { archivedChatIds.contains(chatId) }
 
-    func archiveChat(_ chatId: Id) {
-        archivedChatIds.insert(chatId)
+    func archiveChat(_ chatId: Id) { setArchived(chatId, true) }
+
+    func unarchiveChat(_ chatId: Id) { setArchived(chatId, false) }
+
+    private func setArchived(_ chatId: Id, _ archived: Bool) {
+        if archived { archivedChatIds.insert(chatId) } else { archivedChatIds.remove(chatId) }
+        setChatArchivedAt(chatId, archived ? Int64(Date().timeIntervalSince1970 * 1000) : nil)
+        saveArchiveCache()
+        if archived {
+            PushManager.shared.clearDelivered(chatId: chatId)
+            applyBadge()
+        }
+        var pending = pendingArchiveWrites
+        pending[chatId] = archived
+        pendingArchiveWrites = pending
+        Task { await flushArchiveWrites() }
+    }
+
+    private func saveArchiveCache() {
         UserDefaults.standard.set(Array(archivedChatIds), forKey: "archivedChats")
     }
 
-    func unarchiveChat(_ chatId: Id) {
-        archivedChatIds.remove(chatId)
-        UserDefaults.standard.set(Array(archivedChatIds), forKey: "archivedChats")
+    private func setChatArchivedAt(_ chatId: Id, _ at: Int64?) {
+        for (pid, list) in chats {
+            guard let i = list.firstIndex(where: { $0.id == chatId }) else { continue }
+            var updated = list
+            updated[i].archivedAt = at
+            chats[pid] = updated
+        }
+    }
+
+    /// Send pending archive writes to the relay; a write that fails stays
+    /// pending (the local state already shows it) and is retried on the next
+    /// registry refresh. 404/405 means the relay has no §9c yet: keep local.
+    func flushArchiveWrites() async {
+        guard !archiveFlushing, credentials != nil, !isFixture else { return }
+        let pending = pendingArchiveWrites
+        guard !pending.isEmpty else { return }
+        archiveFlushing = true
+        defer { archiveFlushing = false }
+        for (chatId, archived) in pending {
+            // The user may have flipped it again meanwhile: send the current value.
+            let want = pendingArchiveWrites[chatId] ?? archived
+            do {
+                let at = try await api.setChatArchived(chatId: chatId, archived: want)
+                if want, let at { setChatArchivedAt(chatId, at) }
+                var p = pendingArchiveWrites
+                if p[chatId] == want { p[chatId] = nil }
+                pendingArchiveWrites = p
+            } catch {
+                pushLog.notice("archive write \(chatId, privacy: .public)=\(want) failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    /// First launch after the §9c update: the chats this device had archived
+    /// locally go UP to the relay (union), after which the relay is the source
+    /// of truth and the local list is only a cache.
+    private func migrateLocalArchiveToRelay() {
+        let key = "archiveMigratedToRelay"
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+        var pending = pendingArchiveWrites
+        for id in archivedChatIds where pending[id] == nil { pending[id] = true }
+        pendingArchiveWrites = pending
+        UserDefaults.standard.set(true, forKey: key)
+    }
+
+    /// A relay listing with `archived_at` seeds the set: relay state, plus the
+    /// writes still on their way up (so a flip made offline does not snap back).
+    private func adoptRelayArchiveState(_ lists: [Id: [Chat]]) {
+        let all = lists.values.flatMap { $0 }
+        guard all.contains(where: { $0.archiveSynced }) else { return }
+        migrateLocalArchiveToRelay()
+        var next = archivedChatIds
+        let pending = pendingArchiveWrites
+        for c in all where c.archiveSynced && pending[c.id] == nil {
+            if c.archivedAt != nil { next.insert(c.id) } else { next.remove(c.id) }
+        }
+        if next != archivedChatIds {
+            archivedChatIds = next
+            saveArchiveCache()
+            applyBadge()
+        }
+    }
+
+    /// `chat_archived {chat_id, project_id, archived_at}` from another device.
+    private func applyArchivePush(_ p: PushItem) {
+        guard let chatId = p.payload["chat_id"] else { return }
+        let at = (p.raw["archived_at"] as? NSNumber)?.int64Value
+        if pendingArchiveWrites[chatId] != nil { return }
+        if at != nil { archivedChatIds.insert(chatId) } else { archivedChatIds.remove(chatId) }
+        setChatArchivedAt(chatId, at)
+        saveArchiveCache()
+        if at != nil { PushManager.shared.clearDelivered(chatId: chatId) }
+        applyBadge()
     }
 
     /// The chat the user last opened per agent on this device (tapping the agent returns there).
