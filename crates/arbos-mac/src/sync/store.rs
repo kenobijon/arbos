@@ -25,6 +25,7 @@ pub const TOTAL_CAP_BYTES: i64 = 250_000_000;
 pub const KEY_PROJECTS: &str = "projects";
 pub const KEY_CHATS: &str = "chats";
 pub const KEY_PEOPLE: &str = "people";
+pub const KEY_ACCOUNT: &str = "account";
 pub const KEY_SELECTION: &str = "selection";
 
 #[derive(Clone, Debug)]
