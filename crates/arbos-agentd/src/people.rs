@@ -72,6 +72,39 @@ impl PeopleChatInfo {
     fn owner_handle(&self) -> String {
         self.handle_of(&self.owner_user)
     }
+
+    /// Human members as `@handle`, for the responder decision's people roster.
+    fn people_labels(&self) -> Vec<String> {
+        self.members
+            .iter()
+            .filter(|m| m["member"].as_str().is_some_and(|s| s.starts_with("user:")))
+            .map(|m| {
+                let h = m["handle"].as_str().unwrap_or("?");
+                format!("@{h}")
+            })
+            .collect()
+    }
+}
+
+/// True when the message names at least one person and no agent (chip or `@handle`).
+/// Those lines are for humans; the reply gate must not wake an agent to answer them.
+fn addressed_only_to_people(msg: &MessageView) -> bool {
+    let Some(mentions) = msg.rest.get("mentions").and_then(Value::as_array) else {
+        return false;
+    };
+    let mut saw_person = false;
+    for m in mentions {
+        let Some(s) = m.as_str() else {
+            continue;
+        };
+        if s.starts_with("agent:") {
+            return false;
+        }
+        if s.starts_with("user:") {
+            saw_person = true;
+        }
+    }
+    saw_person
 }
 
 /// What a reply in a people chat carries: message fields for the clients.
@@ -376,6 +409,11 @@ impl Agent {
         ) {
             return true;
         }
+        // A person chip / @handle with no agent address is for humans — stay quiet even in a
+        // group (the decision model must not wake an agent to decline a call meant for Ken).
+        if addressed_only_to_people(&msg) {
+            return false;
+        }
         if !info.is_group() {
             return false;
         }
@@ -437,6 +475,7 @@ impl Agent {
             text,
             recent: recent.to_vec(),
             candidates,
+            people: info.people_labels(),
         };
         match self.decide_responders(&room).await {
             Ok(d) => {
@@ -746,6 +785,20 @@ mod tests {
         let mut assistant = msg("@research", json!({}));
         assistant.role = "assistant".into();
         assert!(!addressed(&assistant, P, "research", true, true, true));
+        // Person-only mentions (chip / @handle) — for humans, not agents.
+        assert!(addressed_only_to_people(&msg(
+            "Call?",
+            json!({ "mentions": ["user:gh_ken"] })
+        )));
+        assert!(!addressed_only_to_people(&msg(
+            "Call?",
+            json!({ "mentions": ["user:gh_ken", "agent:01HPROJ"] })
+        )));
+        assert!(!addressed_only_to_people(&msg("Call?", json!({}))));
+        assert!(!addressed_only_to_people(&msg(
+            "hey",
+            json!({ "mentions": ["agent:01HPROJ"] })
+        )));
     }
 
     #[test]

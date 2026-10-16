@@ -436,6 +436,7 @@ impl Agent {
             text: text.to_owned(),
             recent: gt.recent.clone(),
             candidates,
+            people: Vec::new(),
         };
         match self.decide_responders(&room).await {
             Ok(d) => {

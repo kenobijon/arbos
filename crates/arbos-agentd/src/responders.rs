@@ -33,7 +33,7 @@ Decide which agents (if any) should reply to the latest message. You may pick no
 
 Pick an agent when the message asks for their help, names or mentions them, continues a thread they were just in, or fits their role better than the other agents'. Pick several when more than one should speak (for example "all agents…" or "both of you agents…").
 
-Pick none when people are talking to each other; when the message addresses only humans or people (for example "all humans…", "humans say…", "people only…") even if an agent just spoke; or when the message is only a remark that needs no agent reply. Staying quiet means an empty responders list — do not pick an agent so it can announce it will stay quiet.
+Pick none when people are talking to each other — including short pings by first name or @handle ("Yo Jen", "Ken"), inviting humans to a call or meet-up ("Call?", "you free?"), or continuing that human thread after such a ping; when the message addresses only humans or people (for example "all humans…", "humans say…", "people only…") even if an agent just spoke; or when the message is only a remark that needs no agent reply. Use `people` (when present) to tell humans from agents. Staying quiet means an empty responders list — do not pick an agent so it can announce it will stay quiet.
 
 Output: {"responders":["agent_id",...],"reason":"one line","confidence":0-1}
 Use the agent ids from the list. An empty responders list means nobody replies."#;
@@ -62,6 +62,9 @@ pub struct Room {
     /// Earlier messages, oldest first: `[{ "from": label, "text": … }]`.
     pub recent: Vec<Value>,
     pub candidates: Vec<Candidate>,
+    /// Human members as `@handle` (people groups). Empty for project groups. Lets the decision
+    /// tell a first-name ping or call invite aimed at people from a request to an agent.
+    pub people: Vec<String>,
 }
 
 /// What the decision concluded and how.
@@ -130,18 +133,27 @@ pub fn jev_state(room: &Room) -> Value {
             Value::Object(a)
         })
         .collect();
-    json!({
-        "chat": {
+    let mut state = Map::new();
+    state.insert(
+        "chat".into(),
+        json!({
             "kind": match room.kind {
                 "people_group" => "group chat between people and the agents they added",
                 _ => "group chat between the user and several of their project agents",
             },
             "title": room.title,
-        },
-        "agents": agents,
-        "recent_messages": room.recent,
-        "message": { "from": room.from, "text": clip(&room.text, MESSAGE_MAX_CHARS) },
-    })
+        }),
+    );
+    if !room.people.is_empty() {
+        state.insert("people".into(), json!(room.people));
+    }
+    state.insert("agents".into(), json!(agents));
+    state.insert("recent_messages".into(), json!(room.recent));
+    state.insert(
+        "message".into(),
+        json!({ "from": room.from, "text": clip(&room.text, MESSAGE_MAX_CHARS) }),
+    );
+    Value::Object(state)
 }
 
 /// One `noul` question per candidate, phrased with the agent's name so the criteria are specific.
@@ -154,14 +166,14 @@ pub fn jev_questions(room: &Room) -> Value {
             json!({
                 "type": "noul",
                 "instructions": format!(
-                    "Should the agent \"{name}\" reply to `message`? Several agents may reply to one message; judge {name} on its own, from its name and role in `agents`, from `recent_messages`, and from who `message` is from and what it asks. Prefer false when `message` is for humans or people rather than agents — staying quiet means no reply at all, not a reply that says you will stay quiet."
+                    "Should the agent \"{name}\" reply to `message`? Several agents may reply to one message; judge {name} on its own, from its name and role in `agents`, from `people` (the humans in the room, when listed), from `recent_messages`, and from who `message` is from and what it asks. Prefer false when `message` is for humans or people rather than agents — including short name pings and call invites between people — staying quiet means no reply at all, not a reply that says you will stay quiet."
                 ),
                 "criteria": {
                     "true": format!(
                         "`message` asks {name} for something, directly or as part of a request to several or all agents (for example \"all agents…\"); names or mentions {name}; continues a thread {name} was just speaking in, unless this `message` is now addressed only to humans or people; answers a question {name} asked; or asks for work that belongs to {name}'s role."
                     ),
                     "false": format!(
-                        "`message` addresses only humans or people (for example \"all humans…\", \"humans say…\", \"people only…\") even if {name} just spoke; is addressed only to other agents; nothing in it belongs to {name}'s role; or it is only a remark, reaction or acknowledgement that needs no agent reply."
+                        "`message` is people talking to each other (greeting or pinging someone by first name or @handle, inviting humans to a call or meet-up, or continuing that thread — for example \"Yo Jen\", \"Ken\", \"Call?\" after naming a person) even if short or informal; addresses only humans or people (for example \"all humans…\", \"humans say…\", \"people only…\") even if {name} just spoke; is addressed only to other agents; nothing in it belongs to {name}'s role; or it is only a remark, reaction or acknowledgement that needs no agent reply."
                     ),
                 },
             }),
@@ -201,13 +213,21 @@ pub fn llm_user(room: &Room) -> String {
             })
         })
         .collect();
-    json!({
-        "chat": { "kind": room.kind, "id": room.chat_id, "title": room.title },
-        "agents": agents,
-        "recent_messages": room.recent,
-        "message": { "from": room.from, "text": clip(&room.text, MESSAGE_MAX_CHARS) },
-    })
-    .to_string()
+    let mut body = Map::new();
+    body.insert(
+        "chat".into(),
+        json!({ "kind": room.kind, "id": room.chat_id, "title": room.title }),
+    );
+    if !room.people.is_empty() {
+        body.insert("people".into(), json!(room.people));
+    }
+    body.insert("agents".into(), json!(agents));
+    body.insert("recent_messages".into(), json!(room.recent));
+    body.insert(
+        "message".into(),
+        json!({ "from": room.from, "text": clip(&room.text, MESSAGE_MAX_CHARS) }),
+    );
+    Value::Object(body).to_string()
 }
 
 /// Pick the agents whose yes-probability reaches the threshold.

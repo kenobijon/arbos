@@ -84,6 +84,14 @@ fn load_cases(path: &Path) -> Result<Vec<Case>> {
                 text: c["text"].as_str().unwrap_or("").to_owned(),
                 recent: c["recent"].as_array().cloned().unwrap_or_default(),
                 candidates,
+                people: roster["people"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             },
             expected: c["expected"]
                 .as_array()
