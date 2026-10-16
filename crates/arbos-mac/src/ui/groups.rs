@@ -59,7 +59,23 @@ fn glyph(icon: &str, color: Hsla, size: f32, theme: &Theme) -> Div {
 pub fn tab_glyphs(chat: &Chat, projects: &[Project], theme: &Theme) -> Option<Div> {
     match chat.kind {
         ChatKind::Group => {
-            let mut row = div().flex().items_center().flex_shrink_0();
+            // Overlapping heads: laid out absolutely inside a row of a known
+            // width, so the chip's title starts after them (negative margins
+            // left the row measuring as zero-wide).
+            let shown = chat.participants.len().min(MAX_GLYPHS);
+            let step = GLYPH - 5.0;
+            let width = if shown == 0 {
+                0.0
+            } else {
+                GLYPH + step * (shown as f32 - 1.0)
+            };
+            let mut row = div()
+                .relative()
+                .flex()
+                .items_center()
+                .flex_shrink_0()
+                .w(px(width))
+                .h(px(GLYPH));
             for (i, id) in chat.participants.iter().take(MAX_GLYPHS).enumerate() {
                 let found = projects.iter().find(|p| &p.id == id);
                 let (icon, color) = found
@@ -78,16 +94,23 @@ pub fn tab_glyphs(chat: &Chat, projects: &[Project], theme: &Theme) -> Option<Di
                     ),
                     None => glyph(&icon, color, GLYPH, theme),
                 };
-                row = row.child(head.when(i > 0, |el| el.ml(px(-5.0))));
+                row = row.child(head.absolute().left(px(step * i as f32)).top(px(0.0)));
             }
             let extra = chat.participants.len().saturating_sub(MAX_GLYPHS);
             if extra > 0 {
-                row = row.child(
+                return Some(
                     div()
-                        .ml(px(3.0))
-                        .text_size(px(10.0))
-                        .text_color(theme.text_faint)
-                        .child(format!("+{extra}")),
+                        .flex()
+                        .items_center()
+                        .flex_shrink_0()
+                        .gap(px(3.0))
+                        .child(row)
+                        .child(
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(theme.text_faint)
+                                .child(format!("+{extra}")),
+                        ),
                 );
             }
             Some(row)
