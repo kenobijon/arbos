@@ -6,6 +6,7 @@
 
 import PhotosUI
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
 
 struct ChatView: View {
@@ -163,6 +164,8 @@ struct ChatView: View {
         }
         .toolbar(.hidden, for: .navigationBar)
         .navigationBarBackButtonHidden(true)
+        // Hiding the system back button also disables the edge-swipe pop; re-enable it.
+        .background(InteractivePopGestureEnabler())
         .sheet(isPresented: $showModelPicker, onDismiss: demoDismissed) {
             if let project {
                 ModelPickerView(project: project).environmentObject(model).environment(\.theme, theme)
@@ -1028,6 +1031,46 @@ struct ChatView: View {
 
     private func stop() {
         model.stop(chatId: chatId)
+    }
+}
+
+/// `.navigationBarBackButtonHidden(true)` turns off the system edge-swipe
+/// back gesture; this turns it back on for the enclosing UINavigationController.
+private struct InteractivePopGestureEnabler: UIViewControllerRepresentable {
+    func makeUIViewController(context: Context) -> Controller { Controller() }
+    func updateUIViewController(_ uiViewController: Controller, context: Context) {}
+
+    final class Controller: UIViewController, UIGestureRecognizerDelegate {
+        override func viewDidAppear(_ animated: Bool) {
+            super.viewDidAppear(animated)
+            guard let nav = enclosingNavigationController(),
+                  let pop = nav.interactivePopGestureRecognizer else { return }
+            pop.isEnabled = true
+            pop.delegate = self
+        }
+
+        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            (enclosingNavigationController()?.viewControllers.count ?? 0) > 1
+        }
+
+        /// Background representables sometimes have a nil `navigationController`;
+        /// walk parents / the responder chain to find the stack that pushed chat.
+        private func enclosingNavigationController() -> UINavigationController? {
+            if let nav = navigationController { return nav }
+            var parent = self.parent
+            while let current = parent {
+                if let nav = current as? UINavigationController { return nav }
+                if let nav = current.navigationController { return nav }
+                parent = current.parent
+            }
+            var responder: UIResponder? = view
+            while let current = responder {
+                if let nav = current as? UINavigationController { return nav }
+                if let vc = current as? UIViewController, let nav = vc.navigationController { return nav }
+                responder = current.next
+            }
+            return nil
+        }
     }
 }
 
