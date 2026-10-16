@@ -386,6 +386,9 @@ pub fn screen(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> Di
     }
     let sub = if let Some(notice) = active.notice.clone() {
         Some(notice)
+    } else if n == 0 && active.reachable.is_some() {
+        // "Robert's Arbos isn't open" / "Ringing Robert's iPhone" (contract §8).
+        active.reachable.clone()
     } else if waiting {
         Some("Waiting for others to join…".into())
     } else if let CallStatus::Failed(_) = active.status {

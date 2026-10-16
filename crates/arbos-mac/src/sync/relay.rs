@@ -30,12 +30,13 @@ use super::doc::ChatDoc;
 use super::{ClientCommand, SyncEvent, SyncSource};
 use crate::model::{
     new_id, now_ms, AccountView, AgentMember, Attachment, AttachmentKind, BoxState, Call,
-    CallEnded, CallLeft, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView, Chat,
-    ChatKind, Connector, ConnectorProvider, ConnectorsView, Effort, Id, Link, LocalDevice,
+    CallEnded, CallLeft, CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView,
+    Chat, ChatKind, Connector, ConnectorProvider, ConnectorsView, Effort, Id, Link, LocalDevice,
     LocalView, Machine, MachineState, Message, MessageStatus, Part, Person, Project,
-    ProjectDocView, ReplyPolicy, Role, Routine, RoutineRun, Sender, Skill, SpaceKind, ThreadInfo,
-    VaultItem, VaultRequest, VaultView,
+    ProjectDocView, Reachable, ReplyPolicy, Role, Routine, RoutineRun, Sender, Skill, SpaceKind,
+    ThreadInfo, VaultItem, VaultRequest, VaultView,
 };
+use crate::update;
 
 const HELLO_DEADLINE: Duration = Duration::from_secs(15);
 const PRESENCE_EVERY: Duration = Duration::from_secs(15);
@@ -357,23 +358,26 @@ impl Shared {
         }
     }
 
-    /// Like [`post_json`] but keeps the status (201 "created" vs 200 "joined" for calls).
+    /// Like [`post_json`] but keeps the status (201 "created" vs 200 "joined" for calls)
+    /// and sends `extra` headers (`X-Arbos-Client` on `POST …/calls`, contract §8).
     async fn post_json_status(
         self: &Arc<Self>,
         path: &str,
         body: Value,
+        extra: &[(&str, String)],
     ) -> Result<(reqwest::StatusCode, Value)> {
         let mut refreshed = false;
         loop {
             let token = self.token();
-            let resp = self
+            let mut req = self
                 .http
                 .post(format!("{}{}", self.http_url, path))
                 .bearer_auth(&token)
-                .json(&body)
-                .send()
-                .await
-                .with_context(|| format!("POST {path}"))?;
+                .json(&body);
+            for (name, value) in extra {
+                req = req.header(*name, value);
+            }
+            let resp = req.send().await.with_context(|| format!("POST {path}"))?;
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             if Self::is_token_expired(status, &text) && !refreshed {
@@ -944,6 +948,16 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
                     .unwrap_or_default();
                 if let Some(call) = call {
                     let _ = shared.events.send(SyncEvent::CallStarted { call, sender });
+                }
+            }
+            "call_missed" => {
+                if let Some(missed) = push
+                    .get("payload")
+                    .cloned()
+                    .and_then(|v| serde_json::from_value::<CallMissed>(v).ok())
+                    .filter(|m| !m.call_id.is_empty())
+                {
+                    let _ = shared.events.send(SyncEvent::CallMissed(missed));
                 }
             }
             "call_ended" => {
@@ -2872,21 +2886,35 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     let project = project_of(&shared, &chat_id).unwrap_or_default();
                     format!("/projects/{project}/chats/{chat_id}/calls")
                 };
+                let client = [("X-Arbos-Client", update::client_header())];
                 match shared
-                    .post_json_status(&path, json!({ "kind": kind }))
+                    .post_json_status(&path, json!({ "kind": kind }), &client)
                     .await
                 {
                     Ok((status, v)) => match parse_call(&v) {
                         Some(call) => {
-                            // 201 `{call, joined: false}` = I started it (and write the line).
+                            // 201 `{call, joined: false, reachable}` = I started it
+                            // (and write the line).
                             let joined = v.get("joined").and_then(Value::as_bool);
                             let created = match joined {
                                 Some(j) => !j,
                                 None => status == reqwest::StatusCode::CREATED,
                             };
+                            let reachable = if created {
+                                v.get("reachable")
+                                    .cloned()
+                                    .and_then(|r| serde_json::from_value::<Vec<Reachable>>(r).ok())
+                                    .unwrap_or_default()
+                            } else {
+                                Vec::new()
+                            };
                             *shared.in_call.lock().unwrap() = Some(call.call_id.clone());
                             presence_now(&shared, &call.chat_id);
-                            let _ = shared.events.send(SyncEvent::CallReady { call, created });
+                            let _ = shared.events.send(SyncEvent::CallReady {
+                                call,
+                                created,
+                                reachable,
+                            });
                         }
                         None => {
                             let _ = shared.events.send(SyncEvent::CallError {
@@ -2918,6 +2946,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                             let _ = shared.events.send(SyncEvent::CallReady {
                                 call,
                                 created: false,
+                                reachable: Vec::new(),
                             });
                         }
                     }

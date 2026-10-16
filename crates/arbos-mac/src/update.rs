@@ -31,6 +31,17 @@ pub fn current_version() -> String {
     }
 }
 
+/// `X-Arbos-Client` on `POST …/calls` (people-chats API §8): `mac/0.6.1 (461)`,
+/// or `mac/0.6.1` when no build number was baked in.
+pub fn client_header() -> String {
+    match option_env!("ARBOS_BUILD") {
+        Some(build) if !build.is_empty() => {
+            format!("mac/{} ({build})", env!("CARGO_PKG_VERSION"))
+        }
+        _ => format!("mac/{}", env!("CARGO_PKG_VERSION")),
+    }
+}
+
 pub const EDGE_FEED_URL: &str =
     "https://github.com/unarbos/arbos/releases/download/edge/appcast.xml";
 pub const STABLE_FEED_URL: &str = arbos_update::DEFAULT_FEED_URL;

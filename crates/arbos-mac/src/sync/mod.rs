@@ -18,7 +18,7 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 use tokio::sync::mpsc;
 
-use crate::model::{AccountView, Call, CallEnded, CallKind, Person, Sender};
+use crate::model::{AccountView, Call, CallEnded, CallKind, CallMissed, Person, Reachable, Sender};
 use crate::model::{
     BoxState, ChannelsView, Chat, ConnectorsView, Effort, Id, Link, LocalView, Machine, Message,
     Project, ProjectDocView, Routine, RoutineRun, RoutineTrigger, Skill, VaultNewItem, VaultView,
@@ -57,10 +57,12 @@ pub enum SyncEvent {
     /// Error from a people-chat action (search, DM, members), shown inline.
     PeopleError(String),
     /// Calls v1: `POST …/calls` or `/join` answered with a call (and my token).
-    /// `created` = 201: this device started it and writes the system line.
+    /// `created` = 201: this device started it and writes the system line;
+    /// `reachable` (201 only) says per callee whether anyone can pick up.
     CallReady {
         call: Call,
         created: bool,
+        reachable: Vec<Reachable>,
     },
     /// Someone else started a call in one of my chats (`call_started` push).
     CallStarted {
@@ -69,6 +71,8 @@ pub enum SyncEvent {
     },
     /// A call ended (push, or my `leave` answered `ended: true`).
     CallEnded(CallEnded),
+    /// A call in one of my chats ended and I never joined (`call_missed` push).
+    CallMissed(CallMissed),
     /// `GET /calls/{id}` answer (live or ended).
     CallInfo(Call),
     /// A presence frame in a chat named a call this device is not in.
