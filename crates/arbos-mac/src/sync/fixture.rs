@@ -272,6 +272,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 duration_s: 72,
                 reason: "last_left".into(),
                 writer_device: Some("fixture-device".into()),
+                writer_is_me: true,
             }));
         }
         ClientCommand::FetchCall { call_id } => {

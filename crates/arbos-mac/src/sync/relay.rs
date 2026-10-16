@@ -943,11 +943,13 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
                 }
             }
             "call_ended" => {
-                if let Some(ended) = push
+                if let Some(mut ended) = push
                     .get("payload")
                     .cloned()
                     .and_then(|v| serde_json::from_value::<CallEnded>(v).ok())
                 {
+                    ended.writer_is_me =
+                        ended.writer_device.as_deref() == Some(shared.device_id().as_str());
                     let _ = shared.events.send(SyncEvent::CallEnded(ended));
                 }
             }
@@ -2943,6 +2945,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                                 duration_s: left.duration_s,
                                 reason: "last_left".into(),
                                 writer_device: Some(shared.device_id()),
+                                writer_is_me: true,
                             }));
                         }
                     }

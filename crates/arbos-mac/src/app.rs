@@ -3300,9 +3300,7 @@ impl AppState {
             let _ = self.call_commands.send(CallCmd::Leave);
         }
         // Exactly one device writes the end line (contract §1).
-        let mine = ended.writer_device.as_deref() == self.device_id.as_deref()
-            || ended.writer_device.as_deref() == Some("fixture-device");
-        if mine {
+        if ended.writer_is_me {
             if let Some(chat) = chat_id {
                 self.command(ClientCommand::SystemLine {
                     chat_id: chat,

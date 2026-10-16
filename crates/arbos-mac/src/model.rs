@@ -347,6 +347,9 @@ pub struct CallEnded {
     /// The one device that writes the "Call ended" line.
     #[serde(default)]
     pub writer_device: Option<String>,
+    /// Set by the sync layer: `writer_device` is this device.
+    #[serde(skip)]
+    pub writer_is_me: bool,
 }
 
 /// "Call ended · 12 min" ("Call ended" under a minute).
