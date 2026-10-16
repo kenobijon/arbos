@@ -986,7 +986,12 @@ class Loop:
             "Progress is posted as comments; the fix lands on `main` as `fix(feedback): … [feedback " + fid + "]`._",
         ]
         labels = ["feedback"] + (["flagged"] if verdict == "malicious" else [])
-        issue = self.gh.create_issue(self.issue_title(fid, info), "\n".join(body_lines), labels)
+        if st.get("issue"):
+            issue = {"number": st["issue"], "html_url": st["issue_url"]}
+            if verdict == "malicious":
+                self.gh.set_labels(issue["number"], ["flagged"], [])
+        else:
+            issue = self.gh.create_issue(self.issue_title(fid, info), "\n".join(body_lines), labels)
         st.update(issue=issue["number"], issue_url=issue["html_url"], screenshot_urls=asset_urls, screen=f"{verdict}: {why}")
         self.store.save_state(fid, st)
         if verdict == "malicious":
@@ -1294,12 +1299,19 @@ def main(argv: list[str]) -> int:
                 print(f"{fid}: unknown")
                 continue
             info = store.submission(fid)
-            for k in ("issue", "issue_url", "agent_id", "agent_url", "run_id", "commit", "error", "deferred_reason", "duplicate_of"):
+            # The issue stays: a second attempt continues the same thread.
+            for k in ("agent_id", "agent_url", "run_id", "commit", "commit_url", "pushed_at", "files", "runs", "error",
+                      "deferred_reason", "duplicate_of", "ios_done", "ios_run", "testflight_build", "release_done",
+                      "ci_failed_noted", "screen"):
                 st.pop(k, None)
             tier = loop.tier(info)
             st.update(status="queued", retries=0, tier=tier, tester=loop.tester_label(info, tier), tester_key=loop.tester_key(info))
             store.save_state(fid, st)
             store.event(fid, "requeued", tier=tier, tester=st["tester"])
+            if st.get("issue"):
+                with contextlib.suppress(HttpError):
+                    loop.gh.comment(st["issue"], "Requeued by the operator; a new agent run follows.")
+                    loop.gh.set_labels(st["issue"], [], ["needs-human"])
             print(f"{fid}: queued ({tier}, {st['tester']})")
         return 0
     if cmd == "prioritize":
