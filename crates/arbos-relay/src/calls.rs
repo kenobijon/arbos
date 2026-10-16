@@ -1033,6 +1033,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn online_member_looking_at_the_chat_still_gets_call_started() {
+        let mut state = test_state(AuthMode::Github);
+        with_livekit(&mut state);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let chat = dm(&state, &alice, &bob);
+        let Principal::Device { id: bob_device, .. } = &bob_dev else {
+            unreachable!()
+        };
+        // Bob's app is open: fresh presence, focused on this very chat, device just seen.
+        state.db.touch_device(bob_device).unwrap();
+        notify::set_focus(&state, bob_device, Some(&chat)).await;
+        let card = crate::people::with_presence(&state, json!({ "id": bob }));
+        assert_eq!(card["online"], true);
+
+        let r = start_people_call(State(state.clone()), alice_dev, Path(chat.clone()), None).await;
+        assert_eq!(r.status(), StatusCode::CREATED);
+        let kinds: Vec<String> = pushes_of(&state, &bob_dev)
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["call_started".to_owned()],
+            "ringing is never suppressed by focus or presence"
+        );
+    }
+
+    #[tokio::test]
     async fn calls_are_off_without_livekit() {
         let state = test_state(AuthMode::Github);
         let (alice, alice_dev) = person(&state, 1);

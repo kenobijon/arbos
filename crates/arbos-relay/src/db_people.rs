@@ -815,18 +815,99 @@ impl Db {
     /// Public profile fields for a user id (for member lists).
     pub fn user_card(&self, user_id: &str) -> Result<Option<Value>> {
         self.with(|c| {
-            c.query_row(
-                "SELECT id, login, avatar_url, name, status, created_at FROM users WHERE id = ?1",
-                params![user_id],
-                |r| {
-                    Ok(serde_json::json!({
-                        "id": r.get::<_, String>(0)?, "handle": r.get::<_, Option<String>>(1)?,
-                        "avatar_url": r.get::<_, Option<String>>(2)?, "name": r.get::<_, Option<String>>(3)?,
-                        "status": r.get::<_, String>(4)?, "created_at": r.get::<_, i64>(5)?,
-                    }))
-                },
-            )
-            .optional()
+            let card = c
+                .query_row(
+                    "SELECT id, login, avatar_url, name, status, created_at FROM users WHERE id = ?1",
+                    params![user_id],
+                    |r| {
+                        Ok(serde_json::json!({
+                            "id": r.get::<_, String>(0)?, "handle": r.get::<_, Option<String>>(1)?,
+                            "avatar_url": r.get::<_, Option<String>>(2)?, "name": r.get::<_, Option<String>>(3)?,
+                            "status": r.get::<_, String>(4)?, "created_at": r.get::<_, i64>(5)?,
+                        }))
+                    },
+                )
+                .optional()?;
+            let Some(mut card) = card else {
+                return Ok(None);
+            };
+            // Legacy device-token accounts have no GitHub login: show them by the name of the
+            // device they used most recently (stable, and what their owner recognises).
+            if card["handle"].as_str().is_none_or(str::is_empty) {
+                let device_name: Option<String> = c
+                    .query_row(
+                        "SELECT name FROM devices WHERE user_id = ?1 AND revoked_at IS NULL
+                         ORDER BY COALESCE(last_seen_at, created_at) DESC LIMIT 1",
+                        params![user_id],
+                        |r| r.get(0),
+                    )
+                    .optional()?
+                    .filter(|n: &String| !n.trim().is_empty());
+                let fallback_name = device_name
+                    .unwrap_or_else(|| user_id.trim_start_matches("u_").to_owned());
+                card["handle"] = Value::String(legacy_handle(&fallback_name));
+                if card["name"].as_str().is_none_or(str::is_empty) {
+                    card["name"] = Value::String(fallback_name);
+                }
+            }
+            Ok(Some(card))
         })
+    }
+}
+
+/// A handle-shaped slug for an account without a login: `"Jacob's Mac"` → `jacobs-mac`.
+pub fn legacy_handle(name: &str) -> String {
+    let mut out = String::new();
+    let mut dash = false;
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            dash = false;
+        } else if ch == '\'' || ch == '\u{2019}' {
+            // apostrophes vanish: "jacobs", not "jacob-s"
+        } else if !dash && !out.is_empty() {
+            out.push('-');
+            dash = true;
+        }
+    }
+    let out = out.trim_end_matches('-').to_owned();
+    if out.is_empty() {
+        "someone".to_owned()
+    } else {
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! A legacy device-token account (no GitHub login) is shown by its device's name.
+
+    use super::*;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    #[test]
+    fn legacy_user_card_falls_back_to_the_device_name() {
+        assert_eq!(legacy_handle("Jacob's Mac"), "jacobs-mac");
+        assert_eq!(legacy_handle("  "), "someone");
+        let state = test_state(AuthMode::Github);
+        state
+            .db
+            .with(|c| {
+                c.execute(
+                    "INSERT INTO users(id, snapshot, spend_cap_usd, created_at) VALUES ('u_mac', NULL, 0, 1)",
+                    [],
+                )
+            })
+            .expect("legacy user");
+        state
+            .db
+            .insert_device("dev-mac", "Jacob's Mac", "tok", "u_mac", "paircode")
+            .expect("device");
+        let card = state.db.user_card("u_mac").unwrap().unwrap();
+        assert_eq!(card["handle"], "jacobs-mac");
+        assert_eq!(card["name"], "Jacob's Mac");
+        let sender = crate::notify::Sender::user(&state, "u_mac");
+        assert_eq!(sender.title(), "@jacobs-mac");
     }
 }

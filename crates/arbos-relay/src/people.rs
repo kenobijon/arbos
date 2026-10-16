@@ -885,7 +885,7 @@ pub async fn me_pushes(State(state): State<AppState>, principal: Principal) -> R
         Ok(items) => Json(
             items
                 .into_iter()
-                .map(|(id, kind, payload, at)| json!({ "id": id, "kind": kind, "payload": payload, "created_at": at }))
+                .map(|(id, kind, payload, at)| json!({ "id": id.to_string(), "kind": kind, "payload": payload, "created_at": at }))
                 .collect::<Vec<_>>(),
         )
         .into_response(),
