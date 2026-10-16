@@ -256,7 +256,9 @@ class Participant:
                     await self.room.disconnect()
                     self.save()
                     sys.exit("the agent did not join within 20 s")
+                # Let the agent finish its greeting before the script starts talking.
                 await asyncio.sleep(a.settle)
+                await self.wait_quiet(10.0)
             script = json.loads(Path(a.script).read_text()) if a.script else []
             for step in script:
                 if "say" in step:
@@ -312,7 +314,7 @@ def main() -> None:
     ap.add_argument("--voice", default="alloy", help="OpenAI TTS voice for this participant")
     ap.add_argument("--out", default="/tmp/sim-run")
     ap.add_argument("--cache", default="/tmp/sim-tts-cache")
-    ap.add_argument("--settle", type=float, default=2.5, help="seconds to wait after the agent joins before the script")
+    ap.add_argument("--settle", type=float, default=1.0, help="seconds to wait after the agent joins before the script (then until its greeting ends)")
     ap.add_argument("--tail", type=float, default=2.0, help="seconds to keep recording after the script")
     ap.add_argument("--no-wait-agent", dest="wait_agent", action="store_false")
     ap.add_argument("--stay", action="store_true", help="do not leave the call at the end (another participant ends it)")
