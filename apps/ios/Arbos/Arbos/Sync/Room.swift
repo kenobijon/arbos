@@ -16,6 +16,9 @@ final class Room {
     var onBoxState: ((BoxState, String?) -> Void)?
     var onCaughtUp: (() -> Void)?
     var onAcked: (() -> Void)?
+    /// The doc gained history (checkpoint import) before ROWS_DONE — paint
+    /// the transcript so home search can match message text immediately.
+    var onDocPaint: (() -> Void)?
     /// Another peer's presence header (typing, `in_call`, …).
     var onPresence: (([String: Any]) -> Void)?
     /// My user id + handle, carried in presence so peers can show "online / last seen".
@@ -161,11 +164,15 @@ final class Room {
         if checkpointSeq > 0 {
             if doc.contains(frontier: state.payload) {
                 cursor = max(cursor, checkpointSeq)
+                // Store-restored replica already has the compacted history —
+                // paint it now so search does not wait on ROWS_DONE.
+                if !doc.isEmpty { onDocPaint?() }
             } else {
                 do {
                     let (seq, bytes) = try await api.checkpoint(room: room)
                     try doc.importUpdate(bytes)
                     cursor = max(cursor, max(seq, checkpointSeq))
+                    onDocPaint?()
                 } catch {
                     NSLog("relay room \(room): checkpoint failed: \(error.localizedDescription)")
                 }

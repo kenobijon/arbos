@@ -955,6 +955,10 @@ final class AppModel: ObservableObject {
                     }
                 } else if !touched.messages.isEmpty {
                     self.emitMessages(key, indexes: touched.messages)
+                } else if self.messages[key] == nil, let doc = self.docs[key], doc.count > 0 {
+                    // Checkpoint / bulk import sometimes reports no list path —
+                    // still paint so home search can see the transcript.
+                    self.emitSnapshot(key)
                 }
             }
         }
@@ -974,6 +978,10 @@ final class AppModel: ObservableObject {
         room.presenceUser = { [weak self] in self?.user.map { ($0.id, $0.login) } }
         room.onBoxState = { [weak self] state, detail in
             self?.setProjectState(projectId, state, detail: detail)
+        }
+        room.onDocPaint = { [weak self] in
+            guard let self, !isProjectDoc else { return }
+            self.emitSnapshot(key)
         }
         room.onCaughtUp = { [weak self] in
             guard let self else { return }
@@ -2050,6 +2058,32 @@ final class AppModel: ObservableObject {
     func chats(of projectId: Id) -> [Chat] { chats[projectId] ?? [] }
 
     func messages(of chatId: Id) -> [Message] { messages[chatId] ?? [] }
+
+    /// Paint any room doc that already has rows but no published transcript yet
+    /// (checkpoint landed, catch-up still in flight). Home search reads
+    /// `messages`, so this must run when the search field becomes active.
+    func paintTranscriptsForSearch() {
+        for (key, doc) in docs {
+            guard rooms[key]?.roomChat != projectDocChatId else { continue }
+            if messages[key] == nil, doc.count > 0 {
+                emitSnapshot(key)
+            }
+        }
+    }
+
+    /// Lowercased blob of every loaded message in a chat (for home search).
+    /// Falls back to a one-shot doc read when the published array is still nil.
+    func searchableMessageText(of chatId: Id) -> String {
+        let list: [Message]
+        if let published = messages[chatId] {
+            list = published
+        } else if let doc = docs[chatId], doc.count > 0 {
+            list = doc.readAll()
+        } else {
+            list = []
+        }
+        return list.map(\.plainText).joined(separator: "\n").lowercased()
+    }
 
     /// S8: the last assistant message asked a question and nothing was sent since.
     func chatNeedsAnswer(_ chatId: Id) -> Bool {

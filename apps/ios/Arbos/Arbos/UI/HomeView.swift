@@ -72,7 +72,7 @@ struct HomeView: View {
                         ForEach(homeRows) { row in
                             switch row {
                             case .project(let project):
-                                Button { model.open(project: project) } label: {
+                                Button { openSearchHit(project) } label: {
                                     AgentRow(project: project, preview: preview(project), time: timeLabel(project),
                                              streaming: model.isStreaming(project: project.id),
                                              unread: model.chats(of: project.id).contains { model.chatHasUnread($0) })
@@ -194,6 +194,11 @@ struct HomeView: View {
                 model.open(peopleChat: c)
             }
         }
+        .onChange(of: query) { _, _ in
+            // Rooms may finish a checkpoint while the field is focused — paint
+            // any still-unpublished transcripts so message search can see them.
+            if searching, !searchQuery.isEmpty { model.paintTranscriptsForSearch() }
+        }
     }
 
     // MARK: Top bar
@@ -254,6 +259,7 @@ struct HomeView: View {
                         }
                     }
                 Button {
+                    model.paintTranscriptsForSearch()
                     withAnimation(.easeOut(duration: 0.18)) { searching = true }
                     // Focus after the field is in the tree (same pattern as in-chat search).
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { searchFocused = true }
@@ -355,11 +361,13 @@ struct HomeView: View {
         return rows.sorted { $0.0 > $1.0 }.map(\.1)
     }
 
-    /// Match the names shown on the row (agent name, person name/@handle, group title)
-    /// or any loaded message text in that conversation.
+    /// Match the names shown on the row (agent name, person name/@handle, group title),
+    /// a chat title under the agent, or any loaded message text in that conversation.
     private func matchesProject(_ p: Project, q: String) -> Bool {
         if p.name.lowercased().contains(q) { return true }
-        return model.chats(of: p.id).contains { messagesMatch($0.id, q: q) }
+        return model.chats(of: p.id).contains {
+            $0.title.lowercased().contains(q) || messagesMatch($0.id, q: q)
+        }
     }
 
     private func matchesPeople(_ c: PeopleChat, q: String) -> Bool {
@@ -376,7 +384,21 @@ struct HomeView: View {
     }
 
     private func messagesMatch(_ chatId: Id, q: String) -> Bool {
-        model.messages(of: chatId).contains { $0.plainText.lowercased().contains(q) }
+        model.searchableMessageText(of: chatId).contains(q)
+    }
+
+    /// Open the chat that matched the query (title or message), else the agent's landing chat.
+    private func openSearchHit(_ project: Project) {
+        let q = searchQuery
+        if !q.isEmpty {
+            let chats = model.chats(of: project.id)
+            if let hit = chats.first(where: { $0.title.lowercased().contains(q) })
+                ?? chats.first(where: { messagesMatch($0.id, q: q) }) {
+                model.open(chat: hit)
+                return
+            }
+        }
+        model.open(project: project)
     }
 
     private func chatActivity(_ c: Chat) -> Int64 {
