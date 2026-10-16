@@ -87,6 +87,8 @@ The quickest full stack with no cloud account is the **process box**: the relay 
 - **Skills** — Markdown how-tos shared across projects; the agent picks up to three relevant ones per turn and can save new ones. `arbosctl skills list|show|add`; Settings → Skills.
 - **Channels** — talk to an agent from Slack, Telegram, WhatsApp or Beeper: mint a code in Settings → Channels and send `/pair <code>` from that chat. Unpaired senders get one hint and never reach a machine.
 - **People** — direct messages and shared projects with other Arbos users; invite someone to a project and their devices join its chats, or add a project's agent to a DM.
+- **Voice and video calls between people (self-hosted LiveKit)** — start a call from the header of a DM or a shared project; the relay decides who may join and mints the tokens, media goes through [your own LiveKit server](docs/self-host.md#9-calls-livekit) and never through the relay.
+- **Telegram-style profile pages** — tap a person, an agent or a group to open its page: who it is, members, and the groups you have in common.
 - **Group chats** — one chat shared by several projects' agents, with loop guards (depth, cycles, rate). `arbosctl group create --host Alpha --with Beta,Gamma`.
 - **Vault** — logins and API keys the agent may *use* but never *see*: values are encrypted on the relay, the agent only handles `arbos-secret://` placeholders, and every use is a request you approve. Settings → Vault.
 - **Your computer** — `arbos-local` runs on your own machine so an agent can run a command or read a file there, each behind an approval card. Settings → This Mac.
