@@ -131,7 +131,7 @@ struct Machine: Equatable {
 }
 
 /// `status.workspace.state` of a project doc: the project's workspace on the machine.
-enum WorkspaceState: String, Equatable {
+enum WorkspaceState: String, Codable, Equatable {
     case active, idle, error
     case unknown
 
@@ -146,7 +146,7 @@ enum WorkspaceState: String, Equatable {
     }
 }
 
-struct Project: Identifiable, Equatable {
+struct Project: Identifiable, Equatable, Codable {
     var id: Id
     var name: String
     /// One glyph (or two-letter monogram), drawn in the tile.
@@ -195,7 +195,7 @@ struct Project: Identifiable, Equatable {
     }
 }
 
-struct Chat: Identifiable, Equatable {
+struct Chat: Identifiable, Equatable, Codable {
     var id: Id
     var projectId: Id
     var title: String

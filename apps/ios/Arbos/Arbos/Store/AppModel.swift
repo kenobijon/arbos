@@ -36,6 +36,13 @@ struct Notice: Identifiable, Equatable {
     var text: String
 }
 
+/// Last successful home registry, kept on device so reopening the app does not
+/// flash "Loading your agents…" while the relay round-trip finishes.
+private struct RegistryCache: Codable {
+    var projects: [Project]
+    var chats: [Id: [Chat]]
+}
+
 private let pushLog = Logger(subsystem: "com.unarbos.arbos.ios", category: "pushes")
 
 @MainActor
@@ -600,8 +607,9 @@ final class AppModel: ObservableObject {
         unacked = [:]
         peopleChats = []
         peopleUnread = []
-        if forget, let creds = credentials {
-            Keychain.delete(relayUrl: creds.relayUrl)
+        if let creds = credentials {
+            clearRegistryCache(for: creds)
+            if forget { Keychain.delete(relayUrl: creds.relayUrl) }
         }
         credentials = nil
         link = .connecting
@@ -609,6 +617,10 @@ final class AppModel: ObservableObject {
 
     private func startAfterPairing() {
         link = .connecting
+        // Show the last home list immediately; refreshRegistry replaces it.
+        if let creds = credentials, projects.isEmpty {
+            loadRegistryCache(for: creds)
+        }
         hookPush()
         Task {
             if let ids = try? await api.models(), !ids.isEmpty {
@@ -665,6 +677,7 @@ final class AppModel: ObservableObject {
             }
             projects = newProjects.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
             chats = newChats
+            saveRegistryCache()
             await refreshMachine()
             for p in newProjects {
                 ensureRoom(projectId: p.id, key: projectDocKey(p.id), roomChat: projectDocChatId)
@@ -684,6 +697,44 @@ final class AppModel: ObservableObject {
             registryError = error.localizedDescription
             link = .reconnecting
         }
+    }
+
+    // MARK: Registry cache (device-local)
+
+    private func registryCacheKey(for creds: DeviceCredentials) -> String {
+        "registryCache.\(creds.relayUrl).\(creds.deviceId)"
+    }
+
+    /// Paint the home list from the last successful fetch so reopen is instant.
+    private func loadRegistryCache(for creds: DeviceCredentials) {
+        guard let data = UserDefaults.standard.data(forKey: registryCacheKey(for: creds)),
+              let cached = try? JSONDecoder().decode(RegistryCache.self, from: data),
+              !cached.projects.isEmpty else { return }
+        projects = cached.projects
+        chats = cached.chats
+        for p in cached.projects {
+            ensureRoom(projectId: p.id, key: projectDocKey(p.id), roomChat: projectDocChatId)
+        }
+        for list in cached.chats.values {
+            for c in list {
+                ensureRoom(projectId: c.projectId, key: c.id, roomChat: c.id)
+            }
+        }
+    }
+
+    private func saveRegistryCache() {
+        guard let creds = credentials, !isFixture else { return }
+        if projects.isEmpty {
+            clearRegistryCache(for: creds)
+            return
+        }
+        let cached = RegistryCache(projects: projects, chats: chats)
+        guard let data = try? JSONEncoder().encode(cached) else { return }
+        UserDefaults.standard.set(data, forKey: registryCacheKey(for: creds))
+    }
+
+    private func clearRegistryCache(for creds: DeviceCredentials) {
+        UserDefaults.standard.removeObject(forKey: registryCacheKey(for: creds))
     }
 
     static func sorted(_ chats: [Chat]) -> [Chat] {
