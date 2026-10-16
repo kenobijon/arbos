@@ -25,6 +25,8 @@ Runs every 2 minutes from arbos-feedback-poller.timer (see install-feedback-loop
                -> running   ios.yml or CI failed: one follow-up run with the errors (once)
                -> failed    a second failure, or nothing shipped within the wait budget
   5. Append one JSON line per transition to <state>/log.jsonl.
+  6. Hourly: the newest VALID build in the public TestFlight group that is still READY_FOR_BETA_SUBMISSION
+     is submitted for Beta App Review (TESTFLIGHT_PUBLIC_GROUP, default "Arbos public").
 
 Feedback text is data that describes the wanted change; the agent prompt says so. Tester identity in the
 public issue is a short tag (and the Apple first name / GitHub login when known), never an email.
@@ -148,6 +150,8 @@ class Config:
     tester_max_wait_min: int
     dedupe_days: int
     topics: list[tuple[int, str]]
+    public_group_name: str
+    public_group_id: str
     agent_timeout_min: int
     ship_timeout_min: int
 
@@ -206,6 +210,8 @@ class Config:
             tester_max_per_day=int(env.get("FEEDBACK_TESTER_MAX_PER_DAY", "10")),
             tester_max_wait_min=int(env.get("FEEDBACK_TESTER_MAX_WAIT_MIN", "30")),
             topics=topics,
+            public_group_name=env.get("TESTFLIGHT_PUBLIC_GROUP", "Arbos public"),
+            public_group_id=env.get("TESTFLIGHT_PUBLIC_GROUP_ID", ""),
             dedupe_days=int(env.get("FEEDBACK_DEDUPE_DAYS", "7")),
             agent_timeout_min=int(env.get("FEEDBACK_AGENT_TIMEOUT_MIN", "75")),
             ship_timeout_min=int(env.get("FEEDBACK_SHIP_TIMEOUT_MIN", "90")),
@@ -298,6 +304,28 @@ class Asc:
             if first:
                 return f"{first} {last[:1]}.".strip() if last and not last.lower().startswith("tester") else first
         return None
+
+    def post(self, path: str, body: dict) -> Any:
+        return http_json("POST", f"{ASC_API}{path}", headers={"Authorization": f"Bearer {self.token()}"}, json_body=body)
+
+    def public_group_id(self, name: str) -> str | None:
+        q = urllib.parse.urlencode({"fields[betaGroups]": "name,isInternalGroup", "limit": 50})
+        for g in self.get(f"/apps/{self.cfg.asc_app_id}/betaGroups?{q}").get("data", []):
+            if g["attributes"].get("name") == name and not g["attributes"].get("isInternalGroup"):
+                return g["id"]
+        return None
+
+    def group_builds(self, group_id: str) -> list[dict]:
+        q = urllib.parse.urlencode({"fields[builds]": "version,processingState,uploadedDate", "limit": 100})
+        return self.get(f"/betaGroups/{group_id}/builds?{q}").get("data", [])
+
+    def external_state(self, build_id: str) -> str | None:
+        doc = self.get(f"/builds/{build_id}/buildBetaDetail")
+        return (doc.get("data") or {}).get("attributes", {}).get("externalBuildState")
+
+    def submit_for_review(self, build_id: str) -> None:
+        self.post("/betaAppReviewSubmissions", {"data": {"type": "betaAppReviewSubmissions",
+                  "relationships": {"build": {"data": {"type": "builds", "id": build_id}}}}})
 
     def build_state(self, version: str) -> dict | None:
         q = urllib.parse.urlencode({"filter[app]": self.cfg.asc_app_id, "filter[version]": version,
@@ -1357,7 +1385,48 @@ class Loop:
             return 0
         self.intake()
         self.advance_all()
+        try:
+            self.reconcile_testflight()
+        except Exception as e:  # noqa: BLE001
+            log(f"TestFlight reconciliation failed: {e}")
         return 0
+
+    # ---- TestFlight public group: nothing stays unsubmitted --------------------------------------
+
+    def reconcile_testflight(self) -> None:
+        """Hourly: the newest VALID build in the public group that is still READY_FOR_BETA_SUBMISSION
+        gets submitted for Beta App Review (a build only added to the group never reaches the public
+        link; the distribute lane can lose the submission when another build is in review or Apple
+        has a bad minute)."""
+        marker = self.store.root / "testflight-reconcile.json"
+        last = json.loads(marker.read_text()) if marker.is_file() else {}
+        if last.get("at") and (utcnow() - parse_iso(last["at"])).total_seconds() < 3600:
+            return
+        rec = {"at": iso(), "result": "nothing to do"}
+        try:
+            gid = self.cfg.public_group_id or self.asc.public_group_id(self.cfg.public_group_name)
+            if not gid:
+                rec["result"] = f"no external group named {self.cfg.public_group_name}"
+                return
+            valid = [b for b in self.asc.group_builds(gid) if b["attributes"].get("processingState") == "VALID"]
+            valid.sort(key=lambda b: b["attributes"].get("uploadedDate") or "", reverse=True)
+            for b in valid[:5]:
+                state = self.asc.external_state(b["id"])
+                if state in ("IN_BETA_TESTING", "WAITING_FOR_BETA_REVIEW", "IN_BETA_REVIEW", "BETA_APPROVED"):
+                    rec["result"] = f"newest build {b['attributes']['version']} is {state}"
+                    break
+                if state == "READY_FOR_BETA_SUBMISSION":
+                    try:
+                        self.asc.submit_for_review(b["id"])
+                        rec["result"] = f"submitted {b['attributes']['version']} for Beta App Review"
+                        self.store.event("testflight", "beta_review_submitted", build=b["attributes"]["version"])
+                    except HttpError as e:
+                        rec["result"] = f"could not submit {b['attributes']['version']}: HTTP {e.status} {e.body[:160]}"
+                        log(rec["result"])
+                    break
+        finally:
+            Store._write(marker, rec)
+            log(f"TestFlight reconcile: {rec['result']}")
 
     def status(self) -> None:
         cur = self.store.cursor()

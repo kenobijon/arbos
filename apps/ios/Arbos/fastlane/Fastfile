@@ -72,6 +72,32 @@ def xcodebuild_logged(name, command)
   log
 end
 
+# Apple's upload and TestFlight APIs have bad minutes ("temporary issue on TestFlight",
+# "No build_beta_detail included", timeouts, 5xx). Those are retried with a backoff of
+# 1, 2, 4, 8, 15 minutes; anything else fails at once.
+TRANSIENT = /temporary issue|build_beta_detail|timed out|time out|Timeout|Service Unavailable|Bad Gateway|Internal Server Error|\b50[0-4]\b|\b429\b|ECONNRESET|Connection reset|SSL_connect|OpenTimeout|EOFError|unexpected error occurred/i
+
+def transient?(text)
+  TRANSIENT.match?(text.to_s)
+end
+
+def with_transient_retry(name, log_path: nil)
+  delays = [60, 120, 240, 480, 900]
+  attempt = 0
+  begin
+    yield
+  rescue StandardError => e
+    detail = e.message.dup
+    detail << "\n" << File.read(log_path) if log_path && File.exist?(log_path)
+    raise unless transient?(detail) && attempt < delays.size
+    wait = delays[attempt]
+    attempt += 1
+    UI.important("#{name}: Apple side hiccup (#{e.message.lines.first.to_s.strip[0, 160]}); retry #{attempt}/#{delays.size} in #{wait / 60} min")
+    sleep(wait)
+    retry
+  end
+end
+
 platform :ios do
   desc "Debug build for the iOS simulator (no signing)"
   lane :sim do
@@ -134,11 +160,13 @@ platform :ios do
         </plist>
       PLIST
       export_path = "#{out_dir}/TestFlightExport"
-      xcodebuild_logged("export",
-        "xcodebuild -exportArchive -archivePath '#{archive_path}' -exportPath '#{export_path}' " \
-        "-exportOptionsPlist '#{options}' -allowProvisioningUpdates " \
-        "-authenticationKeyPath '#{key_path}' -authenticationKeyID '#{key_id}' " \
-        "-authenticationKeyIssuerID '#{issuer_id}'")
+      with_transient_retry("TestFlight upload", log_path: "#{out_dir}/xcodebuild-export.log") do
+        xcodebuild_logged("export",
+          "xcodebuild -exportArchive -archivePath '#{archive_path}' -exportPath '#{export_path}' " \
+          "-exportOptionsPlist '#{options}' -allowProvisioningUpdates " \
+          "-authenticationKeyPath '#{key_path}' -authenticationKeyID '#{key_id}' " \
+          "-authenticationKeyIssuerID '#{issuer_id}'")
+      end
       UI.success("Uploaded Arbos build #{number} to TestFlight (bundle com.unarbos.arbos.ios)")
     ensure
       FileUtils.rm_rf(tmp)
@@ -162,6 +190,7 @@ platform :ios do
     changelog = "Build #{number}." if changelog.empty?
     api_key = app_store_connect_api_key(key_id: key_id, issuer_id: issuer_id, key_filepath: key_path, in_house: false)
     distribute = lambda do |submit|
+      with_transient_retry("TestFlight distribute") do
       upload_to_testflight(
         api_key: api_key,
         app_identifier: "com.unarbos.arbos.ios",
@@ -177,6 +206,7 @@ platform :ios do
         wait_processing_interval: 30,
         wait_processing_timeout_duration: 1500
       )
+      end
     end
     begin
       distribute.call(true)
