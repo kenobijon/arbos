@@ -153,6 +153,8 @@ pub struct Transcript {
     /// Set by the scroll callback; the next frame re-pins when the user
     /// stopped within `STICK_THRESHOLD_PX` of the end.
     repin_check_pending: bool,
+    /// The working line's current text and when it changed (fade on swap).
+    activity_shown: Option<(String, Instant)>,
 }
 
 impl Transcript {
@@ -184,6 +186,7 @@ impl Transcript {
             pinned_to_bottom: true,
             spring: StickSpring::default(),
             repin_check_pending: false,
+            activity_shown: None,
         }
     }
 
@@ -587,6 +590,16 @@ impl Transcript {
                 .into_any_element(),
             RowKind::Indicator { queued, activity } => {
                 PulseClock::request(cx);
+                // A new activity fades in over 260 ms.
+                let key = activity.clone().unwrap_or_default();
+                let since = match &self.activity_shown {
+                    Some((shown, at)) if *shown == key => *at,
+                    _ => {
+                        self.activity_shown = Some((key, now));
+                        now
+                    }
+                };
+                let fade = (since.elapsed().as_millis() as f32 / 260.0).clamp(0.0, 1.0);
                 // "<name> is working" with the worker's picture (Grok's one line).
                 let state = self.state.read(cx);
                 let (name, picture): (String, Option<gpui::Div>) = match state.selected() {
@@ -624,6 +637,7 @@ impl Transcript {
                     None => ("Agent".into(), None),
                 };
                 cards::working_line(&name, picture, queued, activity.as_deref(), &theme, cx)
+                    .opacity(fade)
                     .into_any_element()
             }
             RowKind::Sender {

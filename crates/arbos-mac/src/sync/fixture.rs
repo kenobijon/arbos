@@ -1887,6 +1887,9 @@ enum Script {
     /// `ask_user`: lead sentence, question, optional typed widget (design §10).
     Ask(&'static str, &'static str, Option<Widget>),
     Fail(&'static str, &'static str),
+    /// Grok Bot reply flow (agent-flow contract): an ack bubble, a working
+    /// line whose `activity` swaps, a milestone bubble, then the result.
+    Flow,
     /// S18: a draft that waits for approval before anything is sent.
     Draft {
         lead: &'static str,
@@ -1896,6 +1899,22 @@ enum Script {
         body: &'static str,
     },
 }
+
+const FLOW_ACK: &str = "On it — cloning RaoFoundation/subtensor and reading it before I summarise.";
+/// (activity, how long it shows)
+const FLOW_ACTIVITIES: &[(&str, u64)] = &[
+    ("Cloning RaoFoundation/subtensor", 1600),
+    ("Reading README.md and Cargo.toml", 1400),
+    ("Counting crates and modules", 1200),
+    ("Scanning the runtime and pallets", 1300),
+];
+const FLOW_MILESTONE: &str =
+    "Cloned. 38 crates, 412 Rust files; the node, the runtime and the pallets are the big three.";
+const FLOW_RESULT: &[&str] = &[
+    "**subtensor** is the Substrate chain behind Bittensor: a node binary, a runtime, and a set of pallets that register subnets, weigh validators and pay out emissions.",
+    "- `node/` boots the chain and talks to peers.\n- `runtime/` wires the pallets into one state machine.\n- `pallets/subtensor/` holds the registration, weights and emission logic — about two thirds of the code.",
+    "Want me to go one level deeper on the emission schedule, or set up a local devnet so you can poke at it?",
+];
 
 const REPLY_DEFAULT: &[&str] = &[
     "Here is how I would approach it.",
@@ -1966,6 +1985,9 @@ fn pick_script(text: &str, force_reply: bool) -> Script {
     let t = text.to_lowercase();
     if force_reply {
         return Script::Reply(REPLY_ANSWERED);
+    }
+    if t.contains("clone") || t.contains("repo") || t.contains("summar") {
+        return Script::Flow;
     }
     if t.contains("draft") || t.contains("email") || t.contains("send ") {
         return Script::Draft {
@@ -2119,7 +2141,7 @@ async fn run_turn(
     let script = pick_script(text, force_reply);
     let turn = match &script {
         Script::Reply(_) | Script::Ask(_, _, _) | Script::Fail(_, _) => TurnKind::Reply,
-        Script::Act { .. } | Script::Draft { .. } => TurnKind::Act,
+        Script::Act { .. } | Script::Draft { .. } | Script::Flow => TurnKind::Act,
         Script::Browse { .. } => TurnKind::Spawn,
     };
     with_doc(shared, chat_id, |doc| {
@@ -2128,6 +2150,64 @@ async fn run_turn(
     });
 
     let finished = match script {
+        Script::Flow => {
+            // 1. The running row becomes the ack bubble at once.
+            with_doc(shared, chat_id, |doc| {
+                let _ = doc.replace_part(ix, 0, &text_part(FLOW_ACK));
+                let _ = doc.set_status(ix, MessageStatus::Done);
+                doc.commit();
+            });
+            // 2. A new running row with no prose: only the working line shows,
+            //    its text swapping through the activities.
+            let work_ix = insert_running_row(shared, chat_id, project_id, TurnKind::Act);
+            let mut cancelled = false;
+            for (activity, ms) in FLOW_ACTIVITIES {
+                if stop.load(Ordering::SeqCst) {
+                    cancelled = true;
+                    break;
+                }
+                with_doc(shared, chat_id, |doc| {
+                    let _ = doc.set_field(work_ix, "activity", json!(activity));
+                    doc.commit();
+                });
+                sleep(Duration::from_millis(*ms)).await;
+            }
+            if cancelled {
+                finish_cancelled(shared, chat_id, work_ix);
+                return;
+            }
+            // 3. Milestone: that row turns into a bubble and finishes.
+            with_doc(shared, chat_id, |doc| {
+                let _ = doc.set_field(work_ix, "activity", json!(null));
+                let _ = doc.replace_part(work_ix, 0, &text_part(FLOW_MILESTONE));
+                let _ = doc.set_status(work_ix, MessageStatus::Done);
+                doc.commit();
+            });
+            sleep(Duration::from_millis(500)).await;
+            // 4. The result: a third row that streams in.
+            let result_ix = insert_running_row(shared, chat_id, project_id, TurnKind::Reply);
+            with_doc(shared, chat_id, |doc| {
+                let _ = doc.set_field(result_ix, "activity", json!("Writing the summary"));
+                doc.commit();
+            });
+            sleep(Duration::from_millis(900)).await;
+            with_doc(shared, chat_id, |doc| {
+                let _ = doc.set_field(result_ix, "activity", json!(null));
+                let _ = doc.replace_part(result_ix, 0, &empty_text());
+                doc.commit();
+            });
+            let ok = stream_blocks(shared, chat_id, result_ix, 0, FLOW_RESULT, &stop).await;
+            if ok {
+                with_doc(shared, chat_id, |doc| {
+                    let _ = doc.set_status(result_ix, MessageStatus::Done);
+                    doc.commit();
+                });
+                mark_unread_if_hidden(shared, chat_id);
+            } else {
+                finish_cancelled(shared, chat_id, result_ix);
+            }
+            return;
+        }
         Script::Reply(blocks) => {
             with_doc(shared, chat_id, |doc| {
                 let _ = doc.replace_part(ix, 0, &empty_text());
@@ -2541,6 +2621,61 @@ async fn group_replies(shared: &Arc<Shared>, chat_id: &str, _text: &str, stop: &
         });
         mark_unread_if_hidden(shared, chat_id);
     }
+}
+
+/// A fresh assistant row in `streaming`, no prose yet: only the working line shows.
+fn insert_running_row(
+    shared: &Arc<Shared>,
+    chat_id: &str,
+    project_id: &str,
+    turn: TurnKind,
+) -> usize {
+    let (model, effort) = project_model(shared, project_id);
+    with_doc(shared, chat_id, |doc| {
+        let msg = Message {
+            id: new_id(),
+            chat_id: chat_id.to_string(),
+            role: Role::Assistant,
+            sender: "agent".into(),
+            status: MessageStatus::Streaming,
+            turn: Some(turn),
+            decision: None,
+            subagent_id: None,
+            subagent_name: None,
+            in_reply_to: None,
+            routine_name: None,
+            sender_name: None,
+            sender_icon: None,
+            sender_handle: None,
+            sender_avatar: None,
+            sender_avatar_color: None,
+            mentions: Vec::new(),
+            reply_to: None,
+            asked_by_handle: None,
+            owner_handle: None,
+            usage: None,
+            return_contract: None,
+            waiting_user: false,
+            waiting_approval: false,
+            model: Some(model),
+            effort: Some(effort),
+            created_at: now_ms(),
+            completed_at: None,
+            call_id: None,
+            activity: None,
+            pending: false,
+            parts: vec![Part::Status {
+                id: new_id(),
+                code: StatusKind::Working,
+                message: String::new(),
+            }],
+            hidden_parts: Vec::new(),
+        };
+        let ix = doc.insert_message(&msg).unwrap_or(0);
+        doc.commit();
+        ix
+    })
+    .unwrap_or(0)
 }
 
 fn empty_text() -> Part {
