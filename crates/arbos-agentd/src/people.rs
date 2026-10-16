@@ -5,12 +5,12 @@
 //! Mention to reply (default): a human message is for this agent when its `mentions` carry
 //! `agent:<project>`, or the text says `@<slug>` (the Project's name as a handle), or it replies to
 //! one of this agent's messages, or it says `@arbos` and this is the only agent in the chat; the
-//! owner can switch the agent to "every message". In a people **group** (`kind: group`), when
-//! nothing addresses this agent, the decision model chooses whether it should still reply (or stay
-//! quiet) so agents do not always answer every line. Each human message is labelled with the
-//! author's handle and role (`owner` | `guest`) in the prompt — attribution only; in the
-//! permissive v1 a guest gets everything the owner gets. The owner's credits pay; audit lines
-//! carry `asked_by`.
+//! owner can switch the agent to "every message". In a people **group** (`kind: group`, or more
+//! than one agent), when nothing addresses this agent, the decision model reads recent chat
+//! context and chooses whether this agent should reply (or stay quiet) so the right agent
+//! continues the thread — or none do. Each human message is labelled with the author's handle
+//! and role (`owner` | `guest`) in the prompt — attribution only; in the permissive v1 a guest
+//! gets everything the owner gets. The owner's credits pay; audit lines carry `asked_by`.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -28,12 +28,15 @@ use crate::sync::SharedHost;
 pub const PEOPLE_PROJECT: &str = "people";
 
 const RESPOND_SYSTEM: &str = r#"You are the reply gate for one agent in a group chat with people and possibly other agents.
-Decide whether THIS agent should reply to the latest human message.
+Decide whether THIS agent should reply to the latest human message, using the recent chat context.
 
-Reply when the message asks for help this agent can give, is aimed at agents in general, continues work this agent was doing, or clearly needs an agent and this one is a fair choice.
-Stay quiet when people are talking to each other, the message is for another agent, or no agent reply is needed.
+Reply when the message is aimed at this agent, continues a thread this agent was just in, asks for help this agent can give, or clearly needs an agent and this one is the best fit among those listed.
+Stay quiet when people are talking to each other, the message is for another agent, another agent should continue the thread, or no agent reply is needed.
 
 Output: {"respond":bool,"reason":"one line","confidence":0-1}"#;
+
+/// How many prior messages the reply gate sees (oldest → newest).
+const RESPOND_RECENT_MAX: usize = 12;
 
 #[derive(Debug, Clone, Default)]
 pub struct PeopleChatInfo {
@@ -191,6 +194,37 @@ pub fn addressed(
     (!slug.is_empty() && has(slug)) || (only_agent && has("arbos"))
 }
 
+/// Recent user/assistant lines before `up_to` for the reply-gate prompt.
+fn recent_people_context(messages: &[MessageView], up_to: &str, max: usize) -> Vec<Value> {
+    let mut out = Vec::new();
+    for m in messages {
+        if m.id == up_to {
+            break;
+        }
+        if m.role != "user" && m.role != "assistant" {
+            continue;
+        }
+        let text: String = m.text().chars().take(500).collect();
+        if text.trim().is_empty() {
+            continue;
+        }
+        let handle = m
+            .rest
+            .get("senderHandle")
+            .and_then(Value::as_str)
+            .unwrap_or(if m.role == "assistant" {
+                "agent"
+            } else {
+                "user"
+            });
+        out.push(json!({ "role": m.role, "handle": handle, "text": text }));
+    }
+    if out.len() > max {
+        out.drain(0..out.len() - max);
+    }
+    out
+}
+
 impl Agent {
     /// The relay's list of people chats this agent is in (`people_chats` of `/box/projects`, or a
     /// single chat after an `people_agent_added` push): remember members and settings, open the
@@ -318,12 +352,13 @@ impl Agent {
 
     /// Should this `send` command drive a turn here? People chats route by mention; a message
     /// not for this agent is left alone (its command stays pending for whoever it is for). In a
-    /// group, an unaddressed message still asks the decision model whether this agent should reply.
+    /// group, an unaddressed message still asks the decision model — with recent chat context —
+    /// whether this agent should reply.
     pub async fn people_wants(&self, chat_id: &str, host: &SharedHost, user_msg_id: &str) -> bool {
         let Some(info) = self.people.info(chat_id) else {
             return true;
         };
-        let (msg, replied_to_mine) = {
+        let (msg, replied_to_mine, recent) = {
             let h = host.lock().await;
             let Some(msg) = h.doc.message(user_msg_id) else {
                 return false;
@@ -340,7 +375,8 @@ impl Agent {
                             && m.rest.get("deviceId").and_then(Value::as_str)
                                 == Some(self.cfg.device_id.as_str()))
                 });
-            (msg, replied_to_mine)
+            let recent = recent_people_context(&h.doc.messages(), user_msg_id, RESPOND_RECENT_MAX);
+            (msg, replied_to_mine, recent)
         };
         let every = info.settings["reply_policy"].as_str() == Some("every_message");
         if addressed(
@@ -356,15 +392,18 @@ impl Agent {
         if !info.is_group() {
             return false;
         }
-        self.people_decide_respond(chat_id, &info, &msg).await
+        self.people_decide_respond(chat_id, &info, &msg, &recent)
+            .await
     }
 
     /// Decision-model gate for an unaddressed human message in a people group.
+    /// Uses recent transcript so the right agent continues a thread (or stays quiet).
     async fn people_decide_respond(
         &self,
         chat_id: &str,
         info: &PeopleChatInfo,
         msg: &MessageView,
+        recent: &[Value],
     ) -> bool {
         let text: String = msg.text().chars().take(4000).collect();
         if text.trim().is_empty() {
@@ -380,6 +419,7 @@ impl Agent {
             "kind": info.kind,
             "this_agent": { "project_id": self.cfg.project_id, "slug": info.slug },
             "agents_here": info.agent_labels(),
+            "recent": recent,
             "from": asker,
             "text": text,
         })
@@ -726,5 +766,29 @@ mod tests {
         let mut assistant = msg("@research", json!({}));
         assistant.role = "assistant".into();
         assert!(!addressed(&assistant, P, "research", true, true, true));
+    }
+
+    #[test]
+    fn recent_context_stops_at_current_and_caps() {
+        let mut lines = Vec::new();
+        for i in 0..15 {
+            let mut m = msg(&format!("line {i}"), json!({}));
+            m.id = format!("m{i}");
+            m.rest["senderHandle"] = json!(if i % 2 == 0 { "sam" } else { "bob" });
+            if i % 2 == 1 {
+                m.role = "assistant".into();
+            }
+            lines.push(m);
+        }
+        // Context for "m12": lines m0…m11, capped to the last 5.
+        let ctx = recent_people_context(&lines, "m12", 5);
+        assert_eq!(ctx.len(), 5);
+        assert_eq!(ctx[0]["text"], "line 7");
+        assert_eq!(ctx[4]["text"], "line 11");
+        assert_eq!(ctx[4]["handle"], "bob");
+        // Unknown id → everything, still capped.
+        let all = recent_people_context(&lines, "missing", 3);
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[2]["text"], "line 14");
     }
 }

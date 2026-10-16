@@ -1222,10 +1222,12 @@ struct ChatView: View {
         }
     }
 
-    /// After a send, keep the agent chip selected so the next line stays with them;
-    /// clear a one-shot "everyone" address.
+    /// After a send in a DM, keep the agent chip selected so the next line stays with them.
+    /// In a group, clear the chip so the next line is unaddressed and the decision model
+    /// picks who replies from chat context (an explicit chip tap still addresses that send).
+    /// Always clear a one-shot "everyone" address.
     private func pinTalkTo(afterSending address: String?) {
-        if address == "everyone" {
+        if address == "everyone" || people?.kind == "group" {
             talkTo = nil
         } else if let address, address.hasPrefix("agent:") {
             talkTo = address

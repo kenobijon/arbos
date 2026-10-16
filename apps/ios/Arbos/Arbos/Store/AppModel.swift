@@ -1112,25 +1112,29 @@ final class AppModel: ObservableObject {
     func sendPeople(chatId: String, text: String, replyTo: String?, address: String? = nil, attachments: [PendingAttachment] = []) {
         guard let doc = docs[chatId], let chat = peopleChat(chatId), let me = user else { return }
         var mentions = AppModel.mentions(in: text, members: chat.members)
-        if mentions.isEmpty, let address {
+        // Only agent @mentions count as an address. A person @handle (e.g. "@jo") must not
+        // block the chip / talk-to target — otherwise "Message @bob" + "can you see @jo?"
+        // reaches nobody and the decision model never sees the intended agent.
+        let addressedAgent = mentions.contains { $0.hasPrefix("agent:") }
+        if !addressedAgent, let address {
             if address == "everyone" {
-                mentions = chat.agents.map(\.member)
-            } else if chat.members.contains(where: { $0.member == address }) {
-                mentions = [address]
+                mentions.append(contentsOf: chat.agents.map(\.member).filter { !mentions.contains($0) })
+            } else if chat.members.contains(where: { $0.member == address }), !mentions.contains(address) {
+                mentions.append(address)
             }
         }
-        // In a DM, carry on with the agent who last spoke when nothing was addressed.
-        // In a group, leave the message unaddressed so the box decision model can choose
-        // which agent replies (or none) instead of always pinging the last speaker.
+        // In a DM, carry on with the agent who last spoke when no agent was addressed.
+        // In a group, leave the message unaddressed (unless a chip / @agent set one) so the
+        // box decision model can choose which agent replies from chat context.
         var reply = replyTo
-        if chat.kind != "group", mentions.isEmpty && reply == nil,
+        if chat.kind != "group", !mentions.contains(where: { $0.hasPrefix("agent:") }), reply == nil,
            let last = messages(of: chatId).last(where: { $0.role == .assistant }) {
             reply = last.id
             if let h = last.senderHandle?.lowercased(),
                let agent = chat.agents.first(where: {
                    mentionSlug($0.project?.name ?? "").lowercased() == h || $0.handle.lowercased() == h
                }) {
-                mentions = [agent.member]
+                mentions.append(agent.member)
             }
         }
         let author = ChatDoc.Author(sender: "user:\(me.id)", handle: me.login, name: me.name, avatar: me.avatarUrl)
