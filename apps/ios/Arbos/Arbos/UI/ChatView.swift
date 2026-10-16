@@ -152,18 +152,24 @@ struct ChatView: View {
             callVideo = false
             demoDismissed()
         }) {
-            if let project {
-                VoiceModeView(project: project, video: callVideo)
-                    .environmentObject(model).environment(\.theme, theme)
-            } else if isPeople {
-                VoiceModeView(
-                    peerName: counterpart?.displayName ?? people?.title ?? "Chat",
-                    peerHandle: counterpart?.handle ?? "",
-                    peerAvatarUrl: counterpart?.avatarUrl,
-                    video: callVideo
-                )
-                .environmentObject(model).environment(\.theme, theme)
+            // Always emit a real view. A ViewBuilder that falls through to
+            // EmptyView presents a blank white full-screen cover (no Hang up).
+            Group {
+                if let project {
+                    VoiceModeView(project: project, video: callVideo)
+                } else {
+                    VoiceModeView(
+                        peerName: counterpart?.displayName ?? people?.title ?? name,
+                        peerHandle: counterpart?.handle ?? "",
+                        peerAvatarUrl: counterpart?.avatarUrl,
+                        video: callVideo
+                    )
+                }
             }
+            .environmentObject(model)
+            .environment(\.theme, theme)
+            .preferredColorScheme(theme.isDark ? .dark : .light)
+            .presentationBackground(theme.bg)
         }
         .task {
             guard DebugHooks.liveDemo, !model.demoStarted, DebugHooks.openChat == chatId || DebugHooks.openChat == nil, let text = DebugHooks.autoSend else { return }
