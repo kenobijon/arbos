@@ -518,7 +518,12 @@ final class RelayAPI {
     }
 
     func peopleChats() async throws -> [PeopleChat] {
-        ((try await json("GET", "/chats")) as? [Any] ?? []).compactMap(PeopleChat.parse)
+        try await peopleChatsJSON().compactMap(PeopleChat.parse)
+    }
+
+    /// The relay's `GET /chats` array as received, so the app can keep it on device.
+    func peopleChatsJSON() async throws -> [Any] {
+        (try await json("GET", "/chats")) as? [Any] ?? []
     }
 
     func peopleChat(_ id: String) async throws -> PeopleChat {

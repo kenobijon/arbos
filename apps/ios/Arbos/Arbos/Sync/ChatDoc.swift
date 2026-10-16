@@ -48,6 +48,15 @@ final class ChatDoc {
         return doc.oplogVv().includesVv(other: vv)
     }
 
+    /// Bytes for the on-device store. A replica loaded from a shallow relay
+    /// checkpoint stays shallow; otherwise this is the full snapshot.
+    func exportSnapshot() throws -> Data {
+        try doc.export(mode: .snapshot)
+    }
+
+    /// Nothing imported or written yet (a fresh replica is not worth saving).
+    var isEmpty: Bool { doc.oplogFrontiers().isEmpty() }
+
     // MARK: Reading
 
     func readMessage(_ ix: Int) -> Message? {

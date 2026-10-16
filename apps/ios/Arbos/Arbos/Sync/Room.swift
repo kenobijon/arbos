@@ -27,9 +27,16 @@ final class Room {
 
     private let api: RelayAPI
     private let deviceId: () -> String
-    private var cursor: Int64 = 0
-    /// Pushes the relay has not `ACK`ed yet: `(batchId, bytes)`.
+    /// Last relay seq applied to the doc; restored from the on-device store
+    /// so a relaunch asks only for rows after it.
+    private(set) var cursor: Int64 = 0
+    /// Pushes the relay has not `ACK`ed yet: `(batchId, bytes)`. Persisted so
+    /// a message written just before the app was killed still reaches the relay.
     private var pending: [(String, Data)] = []
+    /// The pending list changed (push or ACK): the owner persists it.
+    var onPendingChanged: (([(String, Data)]) -> Void)?
+    /// The cursor moved without a doc change (ROWS_DONE, ACK): save point.
+    var onCursorMoved: (() -> Void)?
     private var socket: URLSessionWebSocketTask?
     private var loop: Task<Void, Never>?
     private var presence: Task<Void, Never>?
@@ -52,12 +59,15 @@ final class Room {
     private static let backoffMax: Double = 16
     private static let backoffResetAfter: Double = 30
 
-    init(projectId: Id, key: Id, roomChat: String, doc: ChatDoc, api: RelayAPI, deviceId: @escaping () -> String) {
+    init(projectId: Id, key: Id, roomChat: String, doc: ChatDoc, api: RelayAPI,
+         cursor: Int64 = 0, pending: [(String, Data)] = [], deviceId: @escaping () -> String) {
         self.projectId = projectId
         self.key = key
         self.roomChat = roomChat
         self.doc = doc
         self.api = api
+        self.cursor = cursor
+        self.pending = pending
         self.deviceId = deviceId
         let config = URLSessionConfiguration.default
         config.waitsForConnectivity = true
@@ -144,20 +154,26 @@ final class Room {
         }
         let checkpointSeq = state.int("checkpointSeq") ?? 0
 
-        // Checkpoint-on-connect (§7.3): fetch when the replica does not contain
-        // the checkpoint frontier, or when our cursor is below it.
-        if checkpointSeq > 0 && (!doc.contains(frontier: state.payload) || cursor < checkpointSeq) {
-            do {
-                let (seq, bytes) = try await api.checkpoint(room: room)
-                try doc.importUpdate(bytes)
-                cursor = max(cursor, max(seq, checkpointSeq))
-            } catch {
-                NSLog("relay room \(room): checkpoint failed: \(error.localizedDescription)")
+        // Checkpoint-on-connect (§7.3). A replica restored from the on-device
+        // store usually already contains the checkpoint frontier: then the rows
+        // the relay compacted away are ours already and only rows after
+        // `max(cursor, checkpointSeq)` are needed. Otherwise fetch the checkpoint.
+        if checkpointSeq > 0 {
+            if doc.contains(frontier: state.payload) {
+                cursor = max(cursor, checkpointSeq)
+            } else {
+                do {
+                    let (seq, bytes) = try await api.checkpoint(room: room)
+                    try doc.importUpdate(bytes)
+                    cursor = max(cursor, max(seq, checkpointSeq))
+                } catch {
+                    NSLog("relay room \(room): checkpoint failed: \(error.localizedDescription)")
+                }
             }
         }
 
-        // Own rows are requested too: without a local store they are the only
-        // copy of what this device wrote (a people chat has no box to re-publish them).
+        // Own rows are requested too: a row pushed by this device but saved
+        // before its ACK is only on the relay (a people chat has no box to re-publish them).
         try await send(Frame(.rowsReq, header: ["after": cursor, "excludeOwn": false]))
         for (batchId, bytes) in pending {
             try await send(Frame(.push, header: ["batchId": batchId], payload: bytes))
@@ -187,6 +203,7 @@ final class Room {
                 cursor = max(cursor, frame.int("headSeq") ?? cursor)
                 onLink?(.live)
                 onCaughtUp?()
+                onCursorMoved?()
             case .ack:
                 applyAck(frame)
             case .status:
@@ -237,9 +254,12 @@ final class Room {
 
     private func applyAck(_ frame: Frame) {
         let batchId = frame.string("batchId") ?? ""
+        let before = pending.count
         pending.removeAll { $0.0 == batchId }
         cursor = max(cursor, frame.int("seq") ?? cursor)
         onAcked?()
+        if pending.count != before { onPendingChanged?(pending) }
+        onCursorMoved?()
     }
 
     private func push(_ bytes: Data) {
@@ -249,6 +269,7 @@ final class Room {
         }
         let batchId = newId()
         pending.append((batchId, bytes))
+        onPendingChanged?(pending)
         let frame = Frame(.push, header: ["batchId": batchId], payload: bytes)
         Task { [weak self] in
             guard let self else { return }

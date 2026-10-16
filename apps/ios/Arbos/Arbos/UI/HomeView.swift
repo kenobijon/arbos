@@ -13,6 +13,9 @@ struct HomeView: View {
     @State private var searching = false
     @State private var query = ""
     @State private var slowConnect = false
+    /// "Offline · saved chats": the list came from the on-device store and the
+    /// relay has not answered for a few seconds (#929).
+    @State private var offlineHint = false
     @FocusState private var searchFocused: Bool
 
     private var projects: [Project] {
@@ -91,6 +94,13 @@ struct HomeView: View {
                                 .listRowBackground(theme.bg)
                             }
                         }
+                        // Launch timing: the populated list is on screen.
+                        Color.clear.frame(height: 1)
+                            .listRowInsets(EdgeInsets())
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
+                            .accessibilityHidden(true)
+                            .onAppear { LaunchClock.mark("first-content", detail: "source=\(model.contentOrigin) rows=\(homeRows.count)") }
                     }
                 }
                 .listStyle(.plain)
@@ -105,6 +115,25 @@ struct HomeView: View {
                 }
                 .refreshable { await model.refreshRegistry() }
                 topBar
+                if offlineHint {
+                    Text("Offline · showing saved chats")
+                        .font(.system(size: Theme.small))
+                        .foregroundStyle(theme.muted)
+                        .padding(.top, 66)
+                        .transition(.opacity)
+                        .accessibilityIdentifier("offline-hint")
+                }
+            }
+            .task(id: model.link) {
+                // Quiet for 4 s after a from-disk launch → say so; live again → hide.
+                guard model.showingSavedCopy else {
+                    withAnimation(.easeOut(duration: 0.2)) { offlineHint = false }
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                if !Task.isCancelled, model.showingSavedCopy {
+                    withAnimation(.easeOut(duration: 0.2)) { offlineHint = true }
+                }
             }
             .toolbar(.hidden, for: .navigationBar)
             .navigationDestination(for: AppModel.Route.self) { route in

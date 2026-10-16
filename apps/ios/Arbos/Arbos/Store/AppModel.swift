@@ -36,11 +36,20 @@ struct Notice: Identifiable, Equatable {
     var text: String
 }
 
-/// Last successful home registry, kept on device so reopening the app does not
-/// flash "Loading your agents…" while the relay round-trip finishes.
+/// Last successful home registry, kept in the on-device store so reopening the
+/// app paints the agent list before the relay round-trip finishes.
 private struct RegistryCache: Codable {
     var projects: [Project]
     var chats: [Id: [Chat]]
+}
+
+/// Keys in the store's `kv` table.
+private enum StoreKey {
+    static let registry = "registry"
+    static let people = "people"
+    static let me = "me"
+    static let unread = "unread"
+    static let lastChat = "lastChat"
 }
 
 private let pushLog = Logger(subsystem: "com.unarbos.arbos.ios", category: "pushes")
@@ -94,6 +103,8 @@ final class AppModel: ObservableObject {
         guard appActive != active else { return }
         appActive = active
         if let id = visibleChatId { rooms[id]?.focused = active }
+        // Leaving the foreground is the last safe moment to write before a kill.
+        if !active { flushStore(all: true) }
     }
 
     /// Chat on screen *and* the app is in the foreground — the only case where
@@ -126,7 +137,15 @@ final class AppModel: ObservableObject {
     /// `machine.always_on` as last reported by `GET /me` (nil = field absent).
     private var meAlwaysOn: Bool?
     /// Navigation: home → chat. Shared so menus anywhere can open a chat.
-    @Published var path: [Route] = []
+    @Published var path: [Route] = [] {
+        didSet {
+            // The open chat is loaded first next launch and evicted last.
+            if case .chat(let chatId, _)? = path.last, let store {
+                store.touchDoc(chatId)
+                store.put(StoreKey.lastChat, Data(chatId.utf8))
+            }
+        }
+    }
     /// True when the Debug fixture replaced the relay (screenshots).
     var isFixture = false
     /// Debug demo tours run once per process, whichever view instance starts them.
@@ -184,6 +203,23 @@ final class AppModel: ObservableObject {
     /// keyed by chat id so one room's ACK cannot leave another chat's bubble faint.
     private var unacked: [Id: Set<Id>] = [:]
     private var registryTask: Task<Void, Never>?
+
+    // MARK: On-device store (#929)
+
+    /// SQLite under Application Support, one file per relay + device; nil in
+    /// the fixture, before sign-in, or with `ARBOS_NO_STORE=1` (launch timing A/B).
+    private var store: DeviceStore?
+    /// Rooms whose doc or cursor changed since the last save.
+    private var dirtyDocs: Set<Id> = []
+    private var flushTask: Task<Void, Never>?
+    /// Where the first populated home list came from: "store" or "relay" (launch log).
+    private(set) var contentOrigin = "relay"
+    /// Keys the store loader has handed to `ensureRoom` (or decided to skip).
+    private var storeDocsLoaded = false
+    @Published private(set) var storeUsage = DeviceStore.Usage()
+    /// Set when the first home list came from disk and the relay is not live yet.
+    var showingSavedCopy: Bool { contentOrigin == "store" && link != .live }
+    private static let flushDelayNs: UInt64 = 1_500_000_000
 
     var appearance: Appearance { Appearance(rawValue: appearanceSetting) ?? .system }
     var surface: Surface { Surface(rawValue: surfaceSetting) ?? .matte }
@@ -395,6 +431,7 @@ final class AppModel: ObservableObject {
         guard credentials != nil, !isFixture else { applyBadge(); return }
         if let r = (try? await api.unread()) ?? nil {
             unreadCounts = r.chats
+            saveUnreadCache()
         }
         applyBadge()
     }
@@ -486,6 +523,7 @@ final class AppModel: ObservableObject {
         if let (who, cr, summary) = try? await api.me() {
             user = who
             credits = cr
+            saveAccountCache()
             if let on = (summary["always_on"] as? NSNumber)?.boolValue {
                 meAlwaysOn = on
                 if let held = (summary["held"] as? NSNumber)?.boolValue { machine.held = held }
@@ -607,8 +645,17 @@ final class AppModel: ObservableObject {
         unacked = [:]
         peopleChats = []
         peopleUnread = []
+        unreadCounts = [:]
+        dirtyDocs = []
+        flushTask?.cancel()
+        flushTask = nil
+        storeDocsLoaded = false
+        // Sign-out wipes everything this account had on the device.
+        store?.close(wipe: true)
+        store = nil
+        storeUsage = DeviceStore.Usage()
         if let creds = credentials {
-            clearRegistryCache(for: creds)
+            UserDefaults.standard.removeObject(forKey: "registryCache.\(creds.relayUrl).\(creds.deviceId)")
             if forget { Keychain.delete(relayUrl: creds.relayUrl) }
         }
         credentials = nil
@@ -617,9 +664,10 @@ final class AppModel: ObservableObject {
 
     private func startAfterPairing() {
         link = .connecting
-        // Show the last home list immediately; refreshRegistry replaces it.
-        if let creds = credentials, projects.isEmpty {
-            loadRegistryCache(for: creds)
+        openStore()
+        // Paint the last home list and every saved transcript before any network.
+        if let store, projects.isEmpty, peopleChats.isEmpty {
+            loadStoreKV(store)
         }
         hookPush()
         Task {
@@ -629,6 +677,10 @@ final class AppModel: ObservableObject {
         }
         registryTask?.cancel()
         registryTask = Task { [weak self] in
+            // Saved docs first, so their rooms dial with a cursor instead of
+            // the registry opening them empty (one checkpoint download each).
+            if let self, let store = self.store { await self.loadStoreDocs(store) }
+            self?.storeDocsLoaded = true
             while !Task.isCancelled {
                 guard let self else { return }
                 await self.refreshRegistry()
@@ -699,42 +751,136 @@ final class AppModel: ObservableObject {
         }
     }
 
-    // MARK: Registry cache (device-local)
+    // MARK: On-device store (#929): open, load, save, flush
 
-    private func registryCacheKey(for creds: DeviceCredentials) -> String {
-        "registryCache.\(creds.relayUrl).\(creds.deviceId)"
+    private func openStore() {
+        guard store == nil, let creds = credentials, !isFixture else { return }
+        if ProcessInfo.processInfo.environment["ARBOS_NO_STORE"] == "1" { return }
+        store = DeviceStore.open(relayUrl: creds.relayUrl, account: creds.deviceId)
+        storeUsage = store?.usage() ?? DeviceStore.Usage()
     }
 
-    /// Paint the home list from the last successful fetch so reopen is instant.
-    private func loadRegistryCache(for creds: DeviceCredentials) {
-        guard let data = UserDefaults.standard.data(forKey: registryCacheKey(for: creds)),
-              let cached = try? JSONDecoder().decode(RegistryCache.self, from: data),
-              !cached.projects.isEmpty else { return }
-        projects = cached.projects
-        chats = cached.chats
-        for p in cached.projects {
-            ensureRoom(projectId: p.id, key: projectDocKey(p.id), roomChat: projectDocChatId)
+    /// Registry, people chats, account and unread counts: small JSON, read
+    /// synchronously so the first frame already has the list.
+    private func loadStoreKV(_ store: DeviceStore) {
+        if let data = store.get(StoreKey.registry),
+           let cached = try? JSONDecoder().decode(RegistryCache.self, from: data), !cached.projects.isEmpty {
+            projects = cached.projects
+            chats = cached.chats
         }
-        for list in cached.chats.values {
-            for c in list {
-                ensureRoom(projectId: c.projectId, key: c.id, roomChat: c.id)
+        if let data = store.get(StoreKey.people),
+           let raw = try? JSONSerialization.jsonObject(with: data) as? [Any] {
+            let list = raw.compactMap(PeopleChat.parse)
+            if !list.isEmpty {
+                peopleChats = list
+                for c in list where c.unread { peopleUnread.insert(c.id) }
             }
         }
+        if user == nil, let data = store.get(StoreKey.me), let who = try? JSONDecoder().decode(AuthUser.self, from: data) {
+            user = who
+        }
+        if let data = store.get(StoreKey.unread), let counts = try? JSONDecoder().decode([String: Int].self, from: data) {
+            unreadCounts = counts
+        }
+        if !projects.isEmpty || !peopleChats.isEmpty { contentOrigin = "store" }
+    }
+
+    /// Import every saved room off the main thread (last opened first), then
+    /// hand each to `ensureRoom` with its cursor so it paints and dials at once.
+    private func loadStoreDocs(_ store: DeviceStore) async {
+        let saved = store.loadDocs()
+        guard !saved.isEmpty else { return }
+        let pending = store.loadPending()
+        let started = Date()
+        // Import and the Loro → Message conversion run off the main thread; the
+        // main actor only receives finished docs and message arrays.
+        let docs: [(DeviceStore.SavedDoc, ChatDoc, [Message]?)] = await Task.detached(priority: .userInitiated) {
+            saved.compactMap { s in
+                let doc = ChatDoc(key: s.key)
+                do {
+                    try doc.importUpdate(s.snapshot)
+                } catch {
+                    NSLog("store: snapshot for \(s.key) unreadable: \(error.localizedDescription)")
+                    return nil
+                }
+                let messages: [Message]? = s.roomChat == projectDocChatId ? nil : doc.readAll()
+                return (s, doc, messages)
+            }
+        }.value
+        for (s, doc, messages) in docs {
+            ensureRoom(projectId: s.projectId, key: s.key, roomChat: s.roomChat,
+                       restored: (doc, s.cursor, pending[s.key] ?? [], messages))
+        }
+        LaunchClock.mark("store-docs", detail: "\(docs.count) docs in \(Int(Date().timeIntervalSince(started) * 1000)) ms")
     }
 
     private func saveRegistryCache() {
-        guard let creds = credentials, !isFixture else { return }
-        if projects.isEmpty {
-            clearRegistryCache(for: creds)
+        guard let store else { return }
+        guard !projects.isEmpty else {
+            store.remove(StoreKey.registry)
             return
         }
-        let cached = RegistryCache(projects: projects, chats: chats)
-        guard let data = try? JSONEncoder().encode(cached) else { return }
-        UserDefaults.standard.set(data, forKey: registryCacheKey(for: creds))
+        if let data = try? JSONEncoder().encode(RegistryCache(projects: projects, chats: chats)) {
+            store.put(StoreKey.registry, data)
+        }
     }
 
-    private func clearRegistryCache(for creds: DeviceCredentials) {
-        UserDefaults.standard.removeObject(forKey: registryCacheKey(for: creds))
+    private func savePeopleCache(_ raw: [Any]) {
+        guard let store, let data = try? JSONSerialization.data(withJSONObject: raw) else { return }
+        store.put(StoreKey.people, data)
+    }
+
+    private func saveAccountCache() {
+        guard let store, let who = user, let data = try? JSONEncoder().encode(who) else { return }
+        store.put(StoreKey.me, data)
+    }
+
+    private func saveUnreadCache() {
+        guard let store, let data = try? JSONEncoder().encode(unreadCounts) else { return }
+        store.put(StoreKey.unread, data)
+    }
+
+    /// A room's doc or cursor moved: save soon (coalesced per 1.5 s).
+    private func markDirty(_ key: Id) {
+        guard store != nil else { return }
+        dirtyDocs.insert(key)
+        guard flushTask == nil else { return }
+        flushTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: AppModel.flushDelayNs)
+            guard let self, !Task.isCancelled else { return }
+            self.flushTask = nil
+            self.flushStore(all: false)
+        }
+    }
+
+    /// Write dirty rooms (or every room) to the store. The cursor is read
+    /// before the export, so a saved snapshot always covers its cursor.
+    func flushStore(all: Bool) {
+        guard let store else { return }
+        flushTask?.cancel()
+        flushTask = nil
+        let keys = all ? Set(docs.keys) : dirtyDocs
+        dirtyDocs = []
+        for key in keys {
+            guard let doc = docs[key], let room = rooms[key], !doc.isEmpty else { continue }
+            let cursor = room.cursor
+            guard let bytes = try? doc.exportSnapshot() else { continue }
+            store.saveDoc(key: key, projectId: room.projectId, roomChat: room.roomChat, cursor: cursor, snapshot: bytes)
+        }
+        store.enforceCaps()
+        if all { store.flush() }
+        if !keys.isEmpty { storeUsage = store.usage() }
+    }
+
+    /// Settings → Storage: forget saved chats (they stream again from the relay).
+    func clearStore() {
+        store?.clearAll()
+        storeUsage = store?.usage() ?? DeviceStore.Usage()
+    }
+
+    private func forgetDoc(_ key: Id) {
+        dirtyDocs.remove(key)
+        store?.deleteDoc(key)
     }
 
     static func sorted(_ chats: [Chat]) -> [Chat] {
@@ -748,14 +894,18 @@ final class AppModel: ObservableObject {
 
     // MARK: Rooms
 
-    private func ensureRoom(projectId: Id, key: Id, roomChat: String) {
+    /// `restored`: a doc imported from the on-device store with the relay
+    /// cursor it was saved at and the pushes the relay never ACKed.
+    private func ensureRoom(projectId: Id, key: Id, roomChat: String,
+                            restored: (doc: ChatDoc, cursor: Int64, pending: [(String, Data)], messages: [Message]?)? = nil) {
         guard rooms[key] == nil else { return }
-        let doc = ChatDoc(key: key)
+        let doc = restored?.doc ?? ChatDoc(key: key)
         let isProjectDoc = roomChat == projectDocChatId
         docs[key] = doc
         doc.onChange { [weak self] touched in
             Task { @MainActor in
                 guard let self else { return }
+                self.markDirty(key)
                 if isProjectDoc {
                     self.applyProjectDoc(projectId)
                 } else if touched.listChanged {
@@ -766,9 +916,12 @@ final class AppModel: ObservableObject {
                 }
             }
         }
-        let room = Room(projectId: projectId, key: key, roomChat: roomChat, doc: doc, api: api) { [weak self] in
+        let room = Room(projectId: projectId, key: key, roomChat: roomChat, doc: doc, api: api,
+                        cursor: restored?.cursor ?? 0, pending: restored?.pending ?? []) { [weak self] in
             self?.deviceId ?? "ios:unpaired"
         }
+        room.onCursorMoved = { [weak self] in self?.markDirty(key) }
+        room.onPendingChanged = { [weak self] batches in self?.store?.savePending(key: key, batches: batches) }
         room.onLink = { [weak self] l in self?.link = l }
         room.presenceUser = { [weak self] in self?.user.map { ($0.id, $0.login) } }
         room.onBoxState = { [weak self] state, detail in
@@ -798,6 +951,16 @@ final class AppModel: ObservableObject {
             }
         }
         rooms[key] = room
+        if let restored {
+            // Paint from disk now; the room's backfill only adds what is new.
+            if isProjectDoc {
+                applyProjectDoc(projectId)
+            } else if let list = restored.messages {
+                messages[key] = list
+            } else {
+                emitSnapshot(key)
+            }
+        }
         room.start()
     }
 
@@ -982,11 +1145,13 @@ final class AppModel: ObservableObject {
     func refreshPeople() async {
         guard credentials != nil, !isFixture else { return }
         do {
-            let list = try await api.peopleChats()
+            let raw = try await api.peopleChatsJSON()
+            let list = raw.compactMap(PeopleChat.parse)
             peopleChats = list
             for c in list where c.unread { peopleUnread.insert(c.id) }
             for c in list where !c.unread && visibleChatId != c.id { peopleUnread.remove(c.id) }
             for c in list { ensureRoom(projectId: peopleSlot, key: c.id, roomChat: c.id) }
+            savePeopleCache(raw)
         } catch {
             // Relays without people chats (older) answer 404; stay quiet.
         }
@@ -1349,6 +1514,7 @@ final class AppModel: ObservableObject {
         peopleChats.removeAll { $0.id == chatId }
         rooms[chatId]?.stop(); rooms[chatId] = nil; docs[chatId] = nil; messages[chatId] = nil
         unacked[chatId] = nil
+        forgetDoc(chatId)
         path = []
         Task { try? await api.leaveChat(chatId) }
     }
@@ -1385,6 +1551,7 @@ final class AppModel: ObservableObject {
         peopleChats.removeAll { $0.id == chatId }
         rooms[chatId]?.stop(); rooms[chatId] = nil; docs[chatId] = nil; messages[chatId] = nil
         unacked[chatId] = nil
+        forgetDoc(chatId)
         path = []
         Task {
             do { try await api.deleteChat(chatId) } catch { notice = Notice(text: "Delete failed: \(error.localizedDescription)") }
@@ -1828,6 +1995,7 @@ final class AppModel: ObservableObject {
         rooms[chat.id] = nil
         docs[chat.id] = nil
         messages[chat.id] = nil
+        forgetDoc(chat.id)
         Task {
             do {
                 try await api.closeChat(projectId: chat.projectId, chatId: chat.id)

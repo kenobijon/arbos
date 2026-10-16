@@ -145,6 +145,19 @@ struct SettingsView: View {
                 }
                 .listRowBackground(theme.card)
 
+                if !model.isFixture {
+                    Section {
+                        LabeledContent("On this iPhone", value: storageLine)
+                        Button("Clear saved chats") { model.clearStore() }
+                            .disabled(model.storeUsage.docs == 0)
+                    } header: {
+                        Text("Storage")
+                    } footer: {
+                        Text("Chats and agents are kept on this iPhone so the app opens instantly and works offline. Clearing them streams everything from the relay again.")
+                    }
+                    .listRowBackground(theme.card)
+                }
+
                 Section {
                     TextField("https://relay.example.com", text: $relayUrl)
                         .keyboardType(.URL)
@@ -206,6 +219,13 @@ struct SettingsView: View {
         // while the sheet stays on dark-mode system text (white-on-white).
         .preferredColorScheme(theme.isDark ? .dark : .light)
         .presentationBackground(theme.bg)
+    }
+
+    /// "12.4 MB · 23 chats" from the on-device store (#929).
+    private var storageLine: String {
+        let u = model.storeUsage
+        let size = ByteCountFormatter.string(fromByteCount: u.bytes, countStyle: .file)
+        return u.docs == 0 ? "Nothing saved yet" : "\(size) · \(u.docs) chat\(u.docs == 1 ? "" : "s")"
     }
 
     private var linkLabel: String {
