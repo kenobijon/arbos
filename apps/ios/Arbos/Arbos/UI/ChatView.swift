@@ -35,6 +35,8 @@ struct ChatView: View {
     @State private var demoRan = false
     @State private var demoQueue: [String] = []
     @StateObject private var recorder = MemoRecorder()
+    /// Finger is down on the mic hold-to-talk gesture (release sends the memo).
+    @State private var memoHoldActive = false
     @FocusState private var composerFocused: Bool
 
     @State private var showMembers = false
@@ -957,11 +959,7 @@ struct ChatView: View {
                     }
                 }
 
-                if recorder.recording {
-                    recordingField
-                } else {
-                    textField
-                }
+                textField
             }
         }
     }
@@ -976,49 +974,90 @@ struct ChatView: View {
         Theme.fieldHeight + 7 * 22
     }
 
+    /// Composer field: type normally, or hold the mic to dictate. The mic stays
+    /// mounted while recording so release can finish and send without a second tap.
     private var textField: some View {
         HStack(spacing: 8) {
-            TextField("", text: $draft, prompt: Text(composerPrompt).foregroundStyle(theme.placeholder), axis: .vertical)
-                .lineLimit(1...8)
-                // Size to the typed text (one line when empty), not the offered height.
-                .fixedSize(horizontal: false, vertical: true)
-                .font(.system(size: Theme.body))
-                .foregroundStyle(theme.text)
-                .tint(Color(hex: "#1084FE")!)
-                .focused($composerFocused)
-                .padding(.leading, 16)
-                .padding(.vertical, 10)
-                .onChange(of: draft) { _, d in
-                    // `@` completion: the token the caret is in (approximated by the last token).
-                    guard isPeople, let last = d.split(separator: " ", omittingEmptySubsequences: false).last, last.hasPrefix("@"), !d.hasSuffix(" ") else {
-                        mentionQuery = nil
-                        return
-                    }
-                    mentionQuery = String(last.dropFirst()).lowercased()
+            if recorder.recording {
+                Button { memoHoldActive = false; recorder.cancel() } label: {
+                    Image(systemName: "xmark").font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.icon)
                 }
-            if draft.isEmpty {
-                // Hold to record a voice memo (Grok: "Start dictation" / voice memo).
-                Image(systemName: "mic")
-                    .font(.system(size: 17))
-                    .foregroundStyle(theme.icon)
-                    .padding(.trailing, 4)
-                    .contentShape(Rectangle())
-                    .onLongPressGesture(minimumDuration: 0.25, maximumDistance: 40) {
-                        // Release handled by the recording field's gesture end.
-                    } onPressingChanged: { pressing in
-                        if pressing && !recorder.recording {
-                            recorder.start()
+                .buttonStyle(.plain)
+                .padding(.leading, 14)
+                Circle().fill(theme.danger).frame(width: 8, height: 8)
+                HStack(spacing: 2) {
+                    ForEach(Array(recorder.levels.enumerated()), id: \.offset) { _, l in
+                        Capsule().fill(theme.text).frame(width: 3, height: 4 + CGFloat(l) * 20)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                Text(recorder.timeLabel)
+                    .font(.system(size: Theme.small, design: .monospaced))
+                    .foregroundStyle(theme.text)
+            } else {
+                TextField("", text: $draft, prompt: Text(composerPrompt).foregroundStyle(theme.placeholder), axis: .vertical)
+                    .lineLimit(1...8)
+                    // Size to the typed text (one line when empty), not the offered height.
+                    .fixedSize(horizontal: false, vertical: true)
+                    .font(.system(size: Theme.body))
+                    .foregroundStyle(theme.text)
+                    .tint(Color(hex: "#1084FE")!)
+                    .focused($composerFocused)
+                    .padding(.leading, 16)
+                    .padding(.vertical, 10)
+                    .onChange(of: draft) { _, d in
+                        // `@` completion: the token the caret is in (approximated by the last token).
+                        guard isPeople, let last = d.split(separator: " ", omittingEmptySubsequences: false).last, last.hasPrefix("@"), !d.hasSuffix(" ") else {
+                            mentionQuery = nil
+                            return
                         }
+                        mentionQuery = String(last.dropFirst()).lowercased()
                     }
             }
-            // Grok keeps the composer usable while the bot works: text sends,
-            // an empty field starts voice chat. Stop lives in the … menu.
-            Button(action: canSend ? send : { callVideo = false; showVoice = true }) {
+            if draft.isEmpty || recorder.recording {
+                // Hold ≥0.25s to record; release sends the transcript. The mic stays
+                // mounted while recording so this gesture is not cancelled when the
+                // waveform replaces the text field.
+                Image(systemName: "mic")
+                    .font(.system(size: 17))
+                    .foregroundStyle(recorder.recording ? theme.danger : theme.icon)
+                    .padding(.trailing, 4)
+                    .contentShape(Rectangle())
+                    .id("memo-mic")
+                    .gesture(
+                        LongPressGesture(minimumDuration: 0.25, maximumDistance: 40)
+                            .sequenced(before: DragGesture(minimumDistance: 0))
+                            .onChanged { value in
+                                if case .second(true, _) = value {
+                                    memoHoldActive = true
+                                    if !recorder.recording { recorder.start() }
+                                }
+                            }
+                            .onEnded { _ in
+                                memoHoldActive = false
+                                finishMemoHold()
+                            }
+                    )
+            }
+            // While recording: tap send also finishes (same as release). Otherwise
+            // Grok keeps the composer usable while the bot works: text sends, an
+            // empty field starts voice chat. Stop lives in the … menu.
+            Button(action: {
+                if recorder.recording {
+                    memoHoldActive = false
+                    finishMemoHold()
+                } else if canSend {
+                    send()
+                } else {
+                    callVideo = false
+                    showVoice = true
+                }
+            }) {
                 Circle()
                     .fill(theme.primary)
                     .frame(width: Theme.voiceButton, height: Theme.voiceButton)
                     .overlay(
-                        Image(systemName: canSend ? "arrow.up" : "waveform")
+                        Image(systemName: (canSend || recorder.recording) ? "arrow.up" : "waveform")
                             .font(.system(size: 16, weight: .bold))
                             .foregroundStyle(theme.onPrimary)
                     )
@@ -1032,62 +1071,31 @@ struct ChatView: View {
         .background(RoundedRectangle(cornerRadius: Theme.fieldHeight / 2, style: .continuous).fill(theme.field))
         .overlay(
             RoundedRectangle(cornerRadius: Theme.fieldHeight / 2, style: .continuous)
-                .strokeBorder(needsAnswer ? theme.warn.opacity(0.7) : theme.fieldBorder, lineWidth: 1)
+                .strokeBorder(
+                    recorder.recording ? theme.danger.opacity(0.5)
+                        : (needsAnswer ? theme.warn.opacity(0.7) : theme.fieldBorder),
+                    lineWidth: 1
+                )
         )
         .alert("Microphone access is off", isPresented: $recorder.permissionDenied) {
             Button("OK", role: .cancel) { }
         } message: {
             Text("Allow the microphone in Settings to record a voice memo.")
         }
+        // Permission can return after the finger is already up; finish then so the
+        // memo does not keep recording with no gesture holding it.
+        .onChange(of: recorder.recording) { _, isOn in
+            guard isOn, !memoHoldActive else { return }
+            finishMemoHold()
+        }
     }
 
-    /// Replaces the field while recording: red dot, live bars, timer, stop/send/cancel.
-    /// Checkmark stops into the draft; send finishes and posts the transcript. Neither
-    /// attaches the audio file — STT turns the memo into text only.
-    private var recordingField: some View {
-        HStack(spacing: 10) {
-            Button { recorder.cancel() } label: {
-                Image(systemName: "xmark").font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.icon)
-            }
-            .buttonStyle(.plain)
-            .padding(.leading, 14)
-            Circle().fill(theme.danger).frame(width: 8, height: 8)
-            HStack(spacing: 2) {
-                ForEach(Array(recorder.levels.enumerated()), id: \.offset) { _, l in
-                    Capsule().fill(theme.text).frame(width: 3, height: 4 + CGFloat(l) * 20)
-                }
-            }
-            .frame(maxWidth: .infinity)
-            Text(recorder.timeLabel)
-                .font(.system(size: Theme.small, design: .monospaced))
-                .foregroundStyle(theme.text)
-            // Stop: transcript lands in the draft; user sends when ready.
-            Button {
-                if let memo = recorder.stop() {
-                    stopMemo(.init(name: memo.name, mime: "audio/m4a", data: memo.data))
-                }
-            } label: {
-                Image(systemName: "checkmark")
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundStyle(theme.icon)
-                    .frame(width: Theme.voiceButton, height: Theme.voiceButton)
-            }
-            .buttonStyle(.plain)
-            // Finish: transcribe and send at once (text only, no voice file).
-            Button {
-                if let memo = recorder.stop() {
-                    sendMemo(.init(name: memo.name, mime: "audio/m4a", data: memo.data))
-                }
-            } label: {
-                Circle().fill(theme.primary).frame(width: Theme.voiceButton, height: Theme.voiceButton)
-                    .overlay(Image(systemName: "arrow.up").font(.system(size: 16, weight: .bold)).foregroundStyle(theme.onPrimary))
-            }
-            .buttonStyle(.plain)
-            .padding(.trailing, 3)
+    /// Stop the hold-to-talk memo and send its transcript (no-op if too short).
+    private func finishMemoHold() {
+        guard recorder.recording else { return }
+        if let memo = recorder.stop() {
+            sendMemo(.init(name: memo.name, mime: "audio/m4a", data: memo.data))
         }
-        .frame(minHeight: Theme.fieldHeight)
-        .background(RoundedRectangle(cornerRadius: Theme.fieldHeight / 2, style: .continuous).fill(theme.field))
-        .overlay(RoundedRectangle(cornerRadius: Theme.fieldHeight / 2, style: .continuous).strokeBorder(theme.danger.opacity(0.5), lineWidth: 1))
     }
 
     private var canSend: Bool {
@@ -1162,26 +1170,6 @@ struct ChatView: View {
     private func sendAddress(for text: String) -> String? {
         if AppModel.addressesEveryone(text) || talkTo == "everyone" { return "everyone" }
         return effectiveTalkTo
-    }
-
-    /// Stop dictation without sending: fill the draft with the transcript. The audio
-    /// is only used for STT — it is not attached to the chat.
-    private func stopMemo(_ memo: AppModel.PendingAttachment) {
-        transcribing = true
-        Task {
-            // People chats have no Project row; meter STT on the people blob slot (same as uploads).
-            let sttProject: Id? = project?.id ?? (isPeople ? "\(peopleSlot):\(chatId)" : nil)
-            let transcript = await model.transcribe(projectId: sttProject, memo: memo)
-            transcribing = false
-            if let transcript {
-                let words = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !words.isEmpty {
-                    let existing = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-                    draft = existing.isEmpty ? words : "\(existing) \(words)"
-                }
-            }
-            composerFocused = true
-        }
     }
 
     /// Finish dictation and send: transcript (plus any typed draft) goes out as text.
