@@ -68,3 +68,7 @@ relay.arbos.life {
 		}
 	}
 }
+
+# ---- optional services on this host (LiveKit calls, …) ---------------------------------------------
+# One file per service, written by their setup scripts (scripts/deploy/livekit/setup.sh → livekit.caddy).
+import /etc/arbos/sites.d/*.caddy

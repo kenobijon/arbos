@@ -1,0 +1,26 @@
+# Caddy vhosts for the LiveKit SFU (rendered by scripts/deploy/livekit/setup.sh into
+# /etc/arbos/sites.d/livekit.caddy, which scripts/deploy/Caddyfile imports). Both names must be
+# DNS-only A records to this server: port 80 belongs to another Caddy here, so certificates come
+# from the TLS-ALPN challenge on 443.
+#
+# wss://livekit.arbos.life — signaling WebSocket (/rtc) and the HTTP admin API (/twirp/...) that
+# the relay calls with the same host; everything is proxied to the LiveKit process.
+@LIVEKIT_HOST@ {
+	import acme_alpn_only
+	header -Server
+	reverse_proxy 127.0.0.1:7880 {
+		flush_interval -1
+		transport http {
+			read_timeout 0
+			write_timeout 0
+		}
+	}
+}
+
+# turn.arbos.life serves nothing over HTTPS; the vhost exists so Caddy keeps a valid certificate
+# for the TURN/TLS listener (5349) — sync-turn-cert.sh copies it into /etc/livekit/certs.
+@TURN_HOST@ {
+	import acme_alpn_only
+	header -Server
+	respond "TURN endpoint: turn:@TURN_HOST@:3478?transport=udp / turns:@TURN_HOST@:5349?transport=tcp" 200
+}
