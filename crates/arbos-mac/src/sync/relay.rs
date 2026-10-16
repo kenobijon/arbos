@@ -559,7 +559,11 @@ async fn refresh_skills(shared: &Arc<Shared>) {
 
 /// `GET /me` → `SyncEvent::Account`.
 async fn refresh_me(shared: &Arc<Shared>) {
-    let Ok(v) = shared.get_json("/me").await else {
+    let me = shared.get_json("/me").await;
+    if let Err(err) = &me {
+        eprintln!("relay: GET /me: {err:#}");
+    }
+    let Ok(v) = me else {
         // Pair-code relays have no /me; the stored user (if any) stands.
         let user = shared
             .creds
@@ -580,6 +584,7 @@ async fn refresh_me(shared: &Arc<Shared>) {
     };
     let user = v.get("user").cloned().unwrap_or(Value::Null);
     if let Ok(u) = serde_json::from_value::<credentials::AccountUser>(user.clone()) {
+        shared.with_store(|s| s.put_json(store::KEY_ACCOUNT, &u));
         *shared.me.lock().unwrap() = Some(u);
     }
     let credits = v.get("credits").cloned().unwrap_or(Value::Null);
@@ -773,20 +778,34 @@ fn open_store(shared: &Arc<Shared>) {
 /// saved cursor and only backfill what is new.
 fn load_store(shared: &Arc<Shared>) {
     let started = std::time::Instant::now();
-    let Some((projects, chats, people, docs, pending, selection)) = shared.with_store(|s| {
-        (
-            s.get_json::<Vec<Project>>(store::KEY_PROJECTS)
-                .unwrap_or_default(),
-            s.get_json::<Vec<Chat>>(store::KEY_CHATS)
-                .unwrap_or_default(),
-            s.get_json::<Vec<Id>>(store::KEY_PEOPLE).unwrap_or_default(),
-            s.load_docs(),
-            s.load_pending(),
-            s.get_json::<(Id, Id)>(store::KEY_SELECTION),
-        )
-    }) else {
+    let Some((projects, chats, people, docs, pending, selection, account)) =
+        shared.with_store(|s| {
+            (
+                s.get_json::<Vec<Project>>(store::KEY_PROJECTS)
+                    .unwrap_or_default(),
+                s.get_json::<Vec<Chat>>(store::KEY_CHATS)
+                    .unwrap_or_default(),
+                s.get_json::<Vec<Id>>(store::KEY_PEOPLE).unwrap_or_default(),
+                s.load_docs(),
+                s.load_pending(),
+                s.get_json::<(Id, Id)>(store::KEY_SELECTION),
+                s.get_json::<credentials::AccountUser>(store::KEY_ACCOUNT),
+            )
+        })
+    else {
         return;
     };
+    if let Some(u) = account {
+        // Who is signed in, before `/me` answers (and when it cannot).
+        *shared.me.lock().unwrap() = Some(u.clone());
+        let _ = shared.events.send(SyncEvent::Account(Some(AccountView {
+            id: u.id,
+            login: u.login,
+            name: u.name,
+            avatar_url: u.avatar_url,
+            ..AccountView::default()
+        })));
+    }
     if projects.is_empty() {
         return;
     }
