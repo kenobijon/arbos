@@ -795,6 +795,19 @@ fn load_store(shared: &Arc<Shared>) {
     else {
         return;
     };
+    if let Some((last_chats, archived)) = shared.with_store(|s| {
+        (
+            s.get_json::<HashMap<Id, Id>>(store::KEY_LAST_CHATS)
+                .unwrap_or_default(),
+            s.get_json::<Vec<Id>>(store::KEY_ARCHIVED_CHATS)
+                .unwrap_or_default(),
+        )
+    }) {
+        let _ = shared.events.send(SyncEvent::ChatPrefs {
+            last_chats,
+            archived,
+        });
+    }
     if let Some(u) = account {
         // Who is signed in, before `/me` answers (and when it cannot).
         *shared.me.lock().unwrap() = Some(u.clone());
@@ -3076,11 +3089,16 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     c.unread = false;
                 }
             }
-            // Next cold launch reopens this chat first (and evicts it last).
+            // Next cold launch reopens this chat first (and evicts it last);
+            // selecting the agent again on this Mac opens it too.
             if let Some(project_id) = project_of(shared, &chat_id) {
                 shared.with_store(|s| {
                     s.touch_doc(&chat_id);
-                    s.put_json(store::KEY_SELECTION, &(project_id, chat_id.clone()));
+                    s.put_json(store::KEY_SELECTION, &(project_id.clone(), chat_id.clone()));
+                    let mut last: HashMap<Id, Id> =
+                        s.get_json(store::KEY_LAST_CHATS).unwrap_or_default();
+                    last.insert(project_id, chat_id.clone());
+                    s.put_json(store::KEY_LAST_CHATS, &last);
                 });
             }
             if shared.is_people(&chat_id) {
@@ -3608,46 +3626,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             });
         }
-        ClientCommand::CloseChat { chat_id } => {
-            let project_id = project_of(shared, &chat_id);
-            shared
-                .chats
-                .lock()
-                .unwrap()
-                .retain(|c| c.id != chat_id || c.is_pinned);
-            emit_chats(shared);
-            if let Some(project_id) = project_id {
-                let shared = shared.clone();
-                tokio::spawn(async move {
-                    // Soft close on the relay; 409 = pinned, which the UI never offers.
-                    let resp = shared
-                        .http
-                        .delete(format!(
-                            "{}/projects/{}/chats/{}",
-                            shared.http_url, project_id, chat_id
-                        ))
-                        .bearer_auth(shared.token())
-                        .send()
-                        .await;
-                    match resp {
-                        Ok(r) if r.status().is_success() || r.status().as_u16() == 404 => {
-                            if let Some(room) = shared.rooms.lock().unwrap().remove(&chat_id) {
-                                drop(room);
-                            }
-                            shared.docs.lock().unwrap().remove(&chat_id);
-                            shared.with_store(|s| s.delete_doc(&chat_id));
-                        }
-                        Ok(r) if r.status().as_u16() == 409 => {
-                            shared.notice("The pinned chat cannot be closed");
-                            if let Err(err) = refresh_registry(&shared).await {
-                                shared.notice(format!("Relay: {err:#}"));
-                            }
-                        }
-                        Ok(r) => shared.notice(format!("Close chat: HTTP {}", r.status())),
-                        Err(err) => shared.notice(format!("Close chat: {err}")),
-                    }
-                });
-            }
+        ClientCommand::ArchiveChat { chat_id, archived } => {
+            shared.with_store(|s| {
+                let mut ids: Vec<Id> = s.get_json(store::KEY_ARCHIVED_CHATS).unwrap_or_default();
+                ids.retain(|c| c != &chat_id);
+                if archived {
+                    ids.push(chat_id.clone());
+                }
+                s.put_json(store::KEY_ARCHIVED_CHATS, &ids);
+            });
         }
         ClientCommand::SetAvatar { project_id, slug } => {
             {

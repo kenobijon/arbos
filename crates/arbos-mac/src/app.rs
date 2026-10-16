@@ -62,18 +62,18 @@ fn muted_path() -> PathBuf {
     crate::sync::credentials::config_dir().join("muted.json")
 }
 
-/// Multi-chat (several chats per agent: chips, ⌘T, agent groups) is off by
-/// default. `ARBOS_MULTI_CHAT=1` or `{"multi_chat": true}` in
-/// `<config>/settings.json` turns it back on.
+/// Multi-chat (several chats per agent: tabs, "+", ⌘T, archive) is on by
+/// default. `ARBOS_MULTI_CHAT=0` or `{"multi_chat": false}` in
+/// `<config>/settings.json` turns it off (one chat per agent).
 fn multi_chat_enabled() -> bool {
     if let Ok(v) = std::env::var("ARBOS_MULTI_CHAT") {
-        return matches!(v.trim(), "1" | "true" | "yes" | "on");
+        return !matches!(v.trim(), "0" | "false" | "no" | "off");
     }
     std::fs::read_to_string(crate::sync::credentials::config_dir().join("settings.json"))
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
         .and_then(|v| v.get("multi_chat").and_then(|b| b.as_bool()))
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 fn load_muted() -> HashSet<Id> {
@@ -278,6 +278,11 @@ pub struct AppState {
     /// Feature flag: several chats per agent. Off → one chat per agent, the
     /// primary one (`primary_chat()`); extra chats stay in the data, unseen.
     pub multi_chat: bool,
+    /// The chat last opened per agent on this Mac (on-device store).
+    pub last_chats: HashMap<Id, Id>,
+    /// Chats archived on this Mac: off the tab strip, listed under "Archived",
+    /// still open on the relay (history in context, memory and search).
+    pub archived_chats: HashSet<Id>,
     pub link: Link,
     pub rail_collapsed: bool,
     pub right_panel_open: bool,
@@ -512,6 +517,8 @@ impl AppState {
             store_usage: (0, 0),
             active_tab: HashMap::new(),
             multi_chat: multi_chat_enabled(),
+            last_chats: HashMap::new(),
+            archived_chats: HashSet::new(),
             link: Link::Connecting,
             rail_collapsed: false,
             right_panel_open: false,
@@ -982,9 +989,21 @@ impl AppState {
                     if self.tabs(&project_id).iter().any(|c| c.id == chat_id) {
                         self.active_tab.insert(project_id.clone(), chat_id);
                     }
-                    // select_project() coerces to the primary chat in single-chat mode.
+                    // select_project() keeps the tab within the visible chats.
                     self.select_project(project_id, cx);
                 }
+            }
+            SyncEvent::ChatPrefs {
+                last_chats,
+                archived,
+            } => {
+                self.last_chats = last_chats;
+                self.archived_chats = archived.into_iter().collect();
+                let projects: Vec<Id> = self.projects.iter().map(|p| p.id.clone()).collect();
+                for p in projects {
+                    self.enforce_tab(&p);
+                }
+                cx.notify();
             }
             SyncEvent::StoreUsage { bytes, chats } => {
                 self.store_usage = (bytes, chats);
@@ -1027,7 +1046,7 @@ impl AppState {
                     }
                 }
                 self.chats.insert(project_id.clone(), chats);
-                self.enforce_single_chat(&project_id);
+                self.enforce_tab(&project_id);
                 cx.notify();
             }
             SyncEvent::ChatSnapshot { chat_id, messages } => {
@@ -1057,7 +1076,7 @@ impl AppState {
                 self.messages.insert(chat_id.clone(), messages);
                 // Message counts decide an agent's primary chat (single-chat mode).
                 if let Some(project_id) = self.project_of_chat(&chat_id).map(|p| p.id.clone()) {
-                    self.enforce_single_chat(&project_id);
+                    self.enforce_tab(&project_id);
                 }
                 for m in &arrived {
                     self.notify_for_message(&chat_id, m, false, false, true);
@@ -1206,10 +1225,20 @@ impl AppState {
     /// plain chats are hidden.
     pub fn visible_tabs(&self, project_id: &str) -> Vec<&Chat> {
         let is_people = self.project(project_id).is_some_and(|p| p.is_people());
-        if self.multi_chat || is_people {
+        if is_people {
             return self.tabs(project_id).iter().collect();
         }
         let primary = self.primary_chat(project_id);
+        if self.multi_chat {
+            // Archived chats leave the strip; the agent's primary chat never does.
+            return self
+                .tabs(project_id)
+                .iter()
+                .filter(|c| {
+                    !self.archived_chats.contains(&c.id) || primary.is_some_and(|p| p.id == c.id)
+                })
+                .collect();
+        }
         let mut out: Vec<&Chat> = primary.into_iter().collect();
         out.extend(self.tabs(project_id).iter().filter(|c| {
             (c.is_group() || c.kind == ChatKind::Projects || c.is_system)
@@ -1245,27 +1274,93 @@ impl AppState {
         })
     }
 
-    /// Single-chat mode: the active tab of an agent is one of its visible chats
-    /// (the primary chat or a group it hosts); anything else falls back to the
-    /// primary. Returns true when the active tab changed (and the chat was opened).
-    fn enforce_single_chat(&mut self, project_id: &str) -> bool {
-        if self.multi_chat || self.project(project_id).is_none_or(|p| p.is_people()) {
+    /// The agent's chats archived on this Mac (the "Archived" list).
+    pub fn archived_tabs(&self, project_id: &str) -> Vec<&Chat> {
+        let primary = self.primary_chat(project_id).map(|c| c.id.clone());
+        self.tabs(project_id)
+            .iter()
+            .filter(|c| {
+                self.archived_chats.contains(&c.id) && primary.as_deref() != Some(c.id.as_str())
+            })
+            .collect()
+    }
+
+    /// Archive a chat on this Mac (the tab's "×", ⌘W): it leaves the strip and
+    /// goes to "Archived"; nothing is deleted or closed on the relay.
+    pub fn archive_chat(&mut self, chat_id: Id, cx: &mut Context<Self>) {
+        let Some(project_id) = self.project_of_chat(&chat_id).map(|p| p.id.clone()) else {
+            return;
+        };
+        if self
+            .primary_chat(&project_id)
+            .is_some_and(|p| p.id == chat_id)
+        {
+            return;
+        }
+        self.archived_chats.insert(chat_id.clone());
+        self.command(ClientCommand::ArchiveChat {
+            chat_id,
+            archived: true,
+        });
+        self.enforce_tab(&project_id);
+        cx.notify();
+    }
+
+    /// Back onto the strip, and open it.
+    pub fn unarchive_chat(&mut self, chat_id: Id, cx: &mut Context<Self>) {
+        if !self.archived_chats.remove(&chat_id) {
+            return;
+        }
+        self.command(ClientCommand::ArchiveChat {
+            chat_id: chat_id.clone(),
+            archived: false,
+        });
+        if let Some(project_id) = self.project_of_chat(&chat_id).map(|p| p.id.clone()) {
+            if self.selected_project.as_deref() == Some(project_id.as_str()) {
+                self.select_tab(chat_id, cx);
+                return;
+            }
+        }
+        cx.notify();
+    }
+
+    /// The active tab of an agent is always one of its visible chats. When it
+    /// is not (nothing picked yet, archived, hidden by single-chat mode) fall
+    /// back to: the chat last used on this Mac, the primary chat, the first
+    /// visible one. Returns true when the active tab changed (and was opened).
+    fn enforce_tab(&mut self, project_id: &str) -> bool {
+        if self.project(project_id).is_none_or(|p| p.is_people()) {
             return false;
         }
-        let Some(primary) = self.primary_chat(project_id).map(|c| c.id.clone()) else {
+        let visible: Vec<Id> = self
+            .visible_tabs(project_id)
+            .iter()
+            .map(|c| c.id.clone())
+            .collect();
+        if visible.is_empty() {
             return false;
-        };
-        let active_visible = self
+        }
+        if self
             .active_tab
             .get(project_id)
-            .is_some_and(|a| self.visible_tabs(project_id).iter().any(|c| &c.id == a));
-        if active_visible {
+            .is_some_and(|a| visible.contains(a))
+        {
             return false;
         }
-        self.active_tab
-            .insert(project_id.to_string(), primary.clone());
+        let pick = self
+            .last_chats
+            .get(project_id)
+            .filter(|c| visible.contains(c))
+            .cloned()
+            .or_else(|| {
+                self.primary_chat(project_id)
+                    .map(|c| c.id.clone())
+                    .filter(|c| visible.contains(c))
+            })
+            .unwrap_or_else(|| visible[0].clone());
+        self.active_tab.insert(project_id.to_string(), pick.clone());
         if self.selected_project.as_deref() == Some(project_id) {
-            self.command(ClientCommand::OpenChat { chat_id: primary });
+            self.command(ClientCommand::OpenChat { chat_id: pick });
         }
         true
     }
@@ -1378,7 +1473,8 @@ impl AppState {
 
     pub fn select_project(&mut self, project_id: Id, cx: &mut Context<Self>) {
         self.selected_project = Some(project_id.clone());
-        if self.enforce_single_chat(&project_id) {
+        // Agents: the last chat used here, else the primary (enforce_tab picks).
+        if self.enforce_tab(&project_id) {
             self.sync_focus();
             cx.notify();
             return;
@@ -1411,7 +1507,8 @@ impl AppState {
                 _ => chat_id,
             }
         };
-        self.active_tab.insert(project_id, chat_id.clone());
+        self.active_tab.insert(project_id.clone(), chat_id.clone());
+        self.last_chats.insert(project_id, chat_id.clone());
         if let Some(chat) = self
             .chats
             .values_mut()
@@ -1454,6 +1551,7 @@ impl AppState {
         self.messages.insert(chat_id.clone(), Vec::new());
         self.chat_ui.insert(chat_id.clone(), ChatUi::default());
         self.active_tab.insert(project_id.clone(), chat_id.clone());
+        self.last_chats.insert(project_id.clone(), chat_id.clone());
         self.command(ClientCommand::NewChat {
             project_id,
             chat_id: chat_id.clone(),
@@ -1524,34 +1622,22 @@ impl AppState {
         cx.notify();
     }
 
-    /// Returns false for the pinned tab (S3.8: it never closes).
+    /// The tab's "×" / ⌘W: archives the chat (as the iPhone does). Returns
+    /// false for the agent's primary chat, which never leaves the strip.
     pub fn close_tab(&mut self, chat_id: Id, cx: &mut Context<Self>) -> bool {
         if !self.multi_chat {
             return false;
         }
-        let Some(project_id) = self.selected_project.clone() else {
+        let Some(project_id) = self.project_of_chat(&chat_id).map(|p| p.id.clone()) else {
             return false;
         };
-        let tabs = self.chats.entry(project_id.clone()).or_default();
-        let Some(ix) = tabs.iter().position(|c| c.id == chat_id) else {
-            return false;
-        };
-        if tabs[ix].is_pinned {
+        if self
+            .primary_chat(&project_id)
+            .is_some_and(|p| p.id == chat_id)
+        {
             return false;
         }
-        tabs.remove(ix);
-        if self.active_tab.get(&project_id) == Some(&chat_id) {
-            let next = tabs
-                .get(ix.saturating_sub(1))
-                .or(tabs.first())
-                .map(|c| c.id.clone());
-            if let Some(next) = next {
-                self.active_tab.insert(project_id.clone(), next.clone());
-                self.command(ClientCommand::OpenChat { chat_id: next });
-            }
-        }
-        self.command(ClientCommand::CloseChat { chat_id });
-        cx.notify();
+        self.archive_chat(chat_id, cx);
         true
     }
 

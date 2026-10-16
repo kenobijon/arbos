@@ -27,6 +27,10 @@ pub const KEY_CHATS: &str = "chats";
 pub const KEY_PEOPLE: &str = "people";
 pub const KEY_ACCOUNT: &str = "account";
 pub const KEY_SELECTION: &str = "selection";
+/// `{project_id: chat_id}`: the chat last opened per agent on this Mac.
+pub const KEY_LAST_CHATS: &str = "last_chats";
+/// Chat ids the user archived on this Mac (hidden from the tab strip, kept everywhere else).
+pub const KEY_ARCHIVED_CHATS: &str = "archived_chats";
 
 #[derive(Clone, Debug)]
 pub struct SavedDoc {
