@@ -43,10 +43,11 @@ on:
 permissions:
   contents: read
 
-# A newer push cancels an older run on a branch, never on main: every push to
-# main is a TestFlight build the feedback loop (scripts/feedback) waits for.
+# A newer push cancels an older run on a branch. On main every push is its own
+# group (keyed by the commit), so nothing is cancelled or coalesced: every push
+# to main is a TestFlight build the feedback loop (scripts/feedback) waits for.
 concurrency:
-  group: ios-${{ github.ref }}
+  group: ios-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:

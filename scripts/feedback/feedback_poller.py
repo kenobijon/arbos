@@ -397,6 +397,22 @@ class GitHub:
                     return lines
         return lines
 
+    def later_ios_build(self, sha: str, since_iso: str) -> dict | None:
+        """A successful iOS run on main, started after `since_iso`, whose commit contains `sha`
+        (a queued run cancelled by a newer push still ships in that newer build)."""
+        q = urllib.parse.urlencode({"branch": "main", "status": "success", "created": f">={since_iso}", "per_page": 30})
+        runs = self.repo_api("GET", f"/actions/workflows/ios.yml/runs?{q}").get("workflow_runs", [])
+        for r in sorted(runs, key=lambda r: r["run_started_at"]):
+            if r.get("event") != "push":
+                continue
+            try:
+                cmp = self.repo_api("GET", f"/compare/{sha}...{r['head_sha']}")
+            except HttpError:
+                continue
+            if cmp.get("status") in ("ahead", "identical"):
+                return r
+        return None
+
     def releases(self) -> list[dict]:
         return self.repo_api("GET", "/releases?per_page=15")
 
@@ -1101,7 +1117,15 @@ class Loop:
         st["runs"] = {k: {"url": v["html_url"], "status": v["status"], "conclusion": v["conclusion"]} for k, v in by_name.items()}
         waited = minutes_between(st["pushed_at"], iso())
 
-        # iOS: TestFlight
+        # iOS: TestFlight. A run GitHub cancelled while queued (a newer push took its slot) is not a
+        # failure: the fix is in the newer commit's build, so wait for that one.
+        if st.get("expects_ios") and ios and ios["status"] == "completed" and ios["conclusion"] in ("cancelled", "skipped") and not st.get("ios_done"):
+            later = self.gh.later_ios_build(sha, st["pushed_at"])
+            if later:
+                ios = later
+                st["ios_superseded_by"] = later["head_sha"]
+            else:
+                ios = None
         if st.get("expects_ios") and ios and ios["status"] == "completed" and not st.get("ios_done"):
             if ios["conclusion"] == "success":
                 number = next((m.group(1) for a in self.gh.run_artifacts(ios["id"])
