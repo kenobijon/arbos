@@ -271,12 +271,16 @@ struct ChatView: View {
                     case "profile": showProfile = true
                     case "feedback": FeedbackCenter.shared.open(screen: "chat", chatId: chatId, projectId: isPeople ? nil : projectId)
                     case "call":
+                        #if DEBUG
                         if let url = DebugHooks.callUrl, let token = DebugHooks.callToken {
                             Task { await calls.debugJoin(url: url, token: token, kind: DebugHooks.callKind == "video" ? .video : .voice,
                                                          chatId: chatId, projectId: isPeople ? peopleSlot : projectId) }
                         } else {
                             startCall(DebugHooks.callKind == "video" ? .video : .voice)
                         }
+                        #else
+                        startCall(.voice)
+                        #endif
                     case "recording": recorder.start()
                     case "pending":
                         pending = [.init(name: "Q3 board deck v5.pdf", mime: "application/pdf", data: Data()),
