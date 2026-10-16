@@ -2936,6 +2936,14 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 {
                     Ok(v) => {
                         let left: CallLeft = serde_json::from_value(v).unwrap_or_default();
+                        if !left.ended {
+                            // Others are still on it: refresh the list behind the Join bar.
+                            if let Ok(v) = shared.get_json(&format!("/calls/{call_id}")).await {
+                                if let Some(call) = parse_call(&v) {
+                                    let _ = shared.events.send(SyncEvent::CallInfo(call));
+                                }
+                            }
+                        }
                         if left.ended {
                             // I am the writer of the end line (contract §1).
                             let _ = shared.events.send(SyncEvent::CallEnded(CallEnded {
