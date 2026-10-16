@@ -964,7 +964,7 @@ final class AppModel: ObservableObject {
         Task {
             var uploaded: [Attachment] = []
             for a in attachments {
-                let key = "att-\(newId().lowercased())-\(AppModel.safeName(a.name))"
+                let key = AppModel.blobKey(for: a.name)
                 do {
                     _ = try await api.putBlob(projectId: "\(peopleSlot):\(chatId)", key: key, mime: a.mime, data: a.data)
                     uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: key))
@@ -1256,7 +1256,7 @@ final class AppModel: ObservableObject {
         Task {
             var uploaded: [Attachment] = []
             for a in attachments {
-                let key = "att-\(newId().lowercased())-\(AppModel.safeName(a.name))"
+                let key = AppModel.blobKey(for: a.name)
                 do {
                     _ = try await api.putBlob(projectId: chat.projectId, key: key, mime: a.mime, data: a.data)
                     uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: key))
@@ -1283,8 +1283,25 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Blob object name for `PUT /blob/{project}/{key}`. The relay's `safe_key` only
+    /// allows ASCII alnum plus `-_.:` and caps length at 128 — match Mac/`agentd`.
+    static func blobKey(for name: String) -> String {
+        let prefix = "att-\(newId().lowercased())-"
+        let budget = max(0, 128 - prefix.count)
+        return prefix + String(safeName(name).prefix(budget))
+    }
+
+    /// Strip to relay-safe ASCII (Mac `safe_name`). Swift `isLetter`/`isNumber` keep
+    /// Unicode (e.g. locale photo titles like `2026年10月15日.jpg`) which the relay
+    /// rejects with HTTP 400 `bad key`.
     static func safeName(_ name: String) -> String {
-        String(name.map { $0.isLetter || $0.isNumber || $0 == "." || $0 == "-" || $0 == "_" ? $0 : "_" })
+        let cleaned = String(name.map { c -> Character in
+            if c.isASCII && (c.isLetter || c.isNumber || c == "." || c == "-" || c == "_") {
+                return c
+            }
+            return "_"
+        })
+        return cleaned.isEmpty ? "file" : cleaned
     }
 
     func answer(chatId: Id, text: String) {

@@ -707,7 +707,9 @@ struct ChatView: View {
                         if let data = try? await item.loadTransferable(type: Data.self) {
                             let type = item.supportedContentTypes.first
                             let picked = ChatView.imageForUpload(data, type: type)
-                            pending.append(.init(name: "Photo \(Date().formatted(date: .abbreviated, time: .shortened)).\(picked.ext)", mime: picked.mime, data: picked.data))
+                            // POSIX stamp (no locale letters, no `:` — voice memos use the same idea).
+                            let stamp = ChatView.photoStamp.string(from: Date())
+                            pending.append(.init(name: "Photo \(stamp).\(picked.ext)", mime: picked.mime, data: picked.data))
                         }
                         photoItem = nil
                     }
@@ -857,6 +859,14 @@ struct ChatView: View {
         talkTo = m.member
         mentionQuery = nil
     }
+
+    /// Fixed-locale stamp for photo attachment names (relay blob keys must be ASCII).
+    private static let photoStamp: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd HH.mm.ss"
+        return f
+    }()
 
     /// Photos leave the phone as JPEG or PNG no wider than 2048 px: the models behind the
     /// agent read those; a 12 MB HEIC straight from the camera they do not. Videos and
