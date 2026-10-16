@@ -1201,8 +1201,9 @@ impl AppState {
     }
 
     /// The chats the UI may show for a space: all of them with multi-chat on,
-    /// or for a people chat; for an agent otherwise its primary chat plus the
-    /// group chats it hosts (those stay visible and working with the flag off).
+    /// or for a people chat; for an agent otherwise (§9b) its primary chat, the
+    /// group chats it hosts and the "Projects ⇄" system tab — only the extra
+    /// plain chats are hidden.
     pub fn visible_tabs(&self, project_id: &str) -> Vec<&Chat> {
         let is_people = self.project(project_id).is_some_and(|p| p.is_people());
         if self.multi_chat || is_people {
@@ -1210,11 +1211,10 @@ impl AppState {
         }
         let primary = self.primary_chat(project_id);
         let mut out: Vec<&Chat> = primary.into_iter().collect();
-        out.extend(
-            self.tabs(project_id)
-                .iter()
-                .filter(|c| c.is_group() && primary.is_none_or(|p| p.id != c.id)),
-        );
+        out.extend(self.tabs(project_id).iter().filter(|c| {
+            (c.is_group() || c.kind == ChatKind::Projects || c.is_system)
+                && primary.is_none_or(|p| p.id != c.id)
+        }));
         out
     }
 

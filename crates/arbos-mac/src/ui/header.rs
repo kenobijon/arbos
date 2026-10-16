@@ -388,6 +388,7 @@ pub fn chips(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option<
     // Multi-chat off: chips only when the agent hosts group chats next to its
     // one chat — and then without "+" or "×" (no new / closed chats).
     let multi_chat = state.multi_chat;
+    let primary_id = state.primary_chat(&space.id).map(|c| c.id.clone());
     let tabs: Vec<(Chat, bool, bool)> = state
         .visible_tabs(&space.id)
         .into_iter()
@@ -419,7 +420,7 @@ pub fn chips(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option<
         let id = chat.id.clone();
         let close_id = chat.id.clone();
         // With multi-chat off the agent's one chat is simply "Main".
-        let title = if chat.is_pinned || (!multi_chat && !chat.is_group()) {
+        let title = if chat.is_pinned || (!multi_chat && primary_id.as_deref() == Some(&*chat.id)) {
             "Main".to_string()
         } else {
             chat.title.clone()
