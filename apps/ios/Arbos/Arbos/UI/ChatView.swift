@@ -245,7 +245,7 @@ struct ChatView: View {
         .navigationBarBackButtonHidden(true)
         // Hiding the system back button also disables the edge-swipe pop; re-enable it.
         .background(InteractivePopGestureEnabler())
-        // Full-chat swipes: right → Home, left → next agent chat (or create), up → archive + previous.
+        // Full-chat swipes: right → previous agent chat (or Home), left → next (or create), up → archive + previous.
         .simultaneousGesture(chatNavSwipe)
         .sheet(isPresented: $showModelPicker, onDismiss: demoDismissed) {
             if let project {
@@ -587,7 +587,7 @@ struct ChatView: View {
 
     // MARK: Chat navigation swipes
 
-    /// Right → Home; left → next chat with this agent (create if none); up → close and open previous.
+    /// Right → previous chat with this agent (Home when on the first); left → next (create if none); up → close and open previous.
     private var chatNavSwipe: some Gesture {
         DragGesture(minimumDistance: 50, coordinateSpace: .local)
             .onEnded { value in handleChatSwipe(value) }
@@ -603,8 +603,12 @@ struct ChatView: View {
         // Horizontal: clear sideways flick (vertical scroll stays dominant otherwise).
         if absX > 70, absX > absY * 1.25, abs(vx) >= abs(vy) || absX > 120 {
             if dx > 0 {
-                composerFocused = false
-                dismiss()
+                if isPeople {
+                    composerFocused = false
+                    dismiss()
+                } else {
+                    goToPreviousAgentChat()
+                }
             } else if !isPeople {
                 goToNextAgentChat()
             }
@@ -617,6 +621,18 @@ struct ChatView: View {
            absY > absX * 2, vy < -900 {
             archiveAgentChatAndGoPrevious()
         }
+    }
+
+    /// Swipe right: previous thread with this agent, or Home when already on the first.
+    private func goToPreviousAgentChat() {
+        guard !isPeople else { return }
+        let list = agentChats
+        if let i = list.firstIndex(where: { $0.id == chatId }), i > 0 {
+            model.open(chat: list[i - 1])
+            return
+        }
+        composerFocused = false
+        dismiss()
     }
 
     /// Swipe left: next thread with this agent, or create one when there is no next.
