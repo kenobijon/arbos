@@ -149,7 +149,8 @@ struct PushItem: Identifiable, Equatable {
     static func == (a: PushItem, b: PushItem) -> Bool { a.id == b.id && a.kind == b.kind }
 
     static func parse(_ raw: Any) -> PushItem? {
-        guard let d = raw as? [String: Any], let id = d["id"] as? String, let kind = d["kind"] as? String else { return nil }
+        guard let d = raw as? [String: Any], let kind = d["kind"] as? String,
+              let id = (d["id"] as? String) ?? (d["id"] as? NSNumber).map({ $0.stringValue }) else { return nil }
         var payload: [String: String] = [:]
         var sender: [String: String] = [:]
         let rawPayload = (d["payload"] as? [String: Any]) ?? [:]
