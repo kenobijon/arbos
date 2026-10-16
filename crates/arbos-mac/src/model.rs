@@ -1838,7 +1838,7 @@ pub fn local_message_hits(items: &[LocalMsg<'_>], query: &str, limit: usize) -> 
 
 /// Box hits win when they name the same message (their snippet is the FTS one).
 pub fn merge_hits(local: Vec<ChatHit>, remote: &[ChatHit], limit: usize) -> Vec<ChatHit> {
-    let mut out = Vec::new();
+    let mut out: Vec<ChatHit> = Vec::new();
     for h in remote {
         if out.len() == limit {
             break;

@@ -185,60 +185,71 @@ struct RowView {
 
 pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
     let theme = Theme::of(cx).clone();
-    let state = shell.state.read(cx);
-    let selected = state.selected_project.clone();
     let query = shell.search_input.read(cx).text().trim().to_lowercase();
-    let machine = state.machine.shown_state();
+    // Copy what the list needs, then drop the state borrow before anything
+    // takes `&mut cx` (the waking pulse, row clicks, scroll).
+    let (rows, empty, link_connecting, machine, hits, search_status) = {
+        let state = shell.state.read(cx);
+        let selected = state.selected_project.clone();
+        let machine = state.machine.shown_state();
 
-    let mut rows: Vec<(u64, RowView)> = Vec::new();
-    for p in state.projects.iter() {
-        if !query.is_empty() {
-            let hay = format!(
-                "{} {}",
-                p.name.to_lowercase(),
-                p.person()
-                    .map(|x| x.handle.to_lowercase())
-                    .unwrap_or_default()
-            );
-            if !hay.contains(&query) {
-                continue;
+        let mut rows: Vec<(u64, RowView)> = Vec::new();
+        for p in state.projects.iter() {
+            if !query.is_empty() {
+                let hay = format!(
+                    "{} {}",
+                    p.name.to_lowercase(),
+                    p.person()
+                        .map(|x| x.handle.to_lowercase())
+                        .unwrap_or_default()
+                );
+                if !hay.contains(&query) {
+                    continue;
+                }
             }
-        }
-        let is_people = p.is_people();
-        let streaming = state.project_is_streaming(&p.id);
-        let shown_people: Vec<_> = if p.is_guest() {
-            p.owner().cloned().into_iter().collect()
-        } else {
-            p.guests().cloned().collect()
-        };
-        let row = RowView {
-            selected: selected.as_deref() == Some(p.id.as_str()),
-            streaming,
-            unread: state.project_unread(&p.id) > 0,
-            typing: state.typing_in(&p.id).is_some(),
-            preview: preview(state, p),
-            time: time_label(last_activity(state, p)),
-            person_image: p.person().and_then(|x| state.avatar(&x.avatar_url)),
-            guests: shown_people
-                .into_iter()
-                .map(|person| {
-                    let img = state.avatar(&person.avatar_url);
-                    (person, img)
-                })
-                .collect(),
-            avatar_slug: if is_people {
-                None
+            let is_people = p.is_people();
+            let streaming = state.project_is_streaming(&p.id);
+            let shown_people: Vec<_> = if p.is_guest() {
+                p.owner().cloned().into_iter().collect()
             } else {
-                state.avatar_slug(p)
-            },
-            avatar_state: state.avatar_state(&p.id),
-            space: p.clone(),
+                p.guests().cloned().collect()
+            };
+            let row = RowView {
+                selected: selected.as_deref() == Some(p.id.as_str()),
+                streaming,
+                unread: state.project_unread(&p.id) > 0,
+                typing: state.typing_in(&p.id).is_some(),
+                preview: preview(state, p),
+                time: time_label(last_activity(state, p)),
+                person_image: p.person().and_then(|x| state.avatar(&x.avatar_url)),
+                guests: shown_people
+                    .into_iter()
+                    .map(|person| {
+                        let img = state.avatar(&person.avatar_url);
+                        (person, img)
+                    })
+                    .collect(),
+                avatar_slug: if is_people {
+                    None
+                } else {
+                    state.avatar_slug(p)
+                },
+                avatar_state: state.avatar_state(&p.id),
+                space: p.clone(),
+            };
+            rows.push((last_activity(state, p), row));
+        }
+        rows.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+        let empty = state.projects.is_empty();
+        let link_connecting = state.link == crate::model::Link::Connecting;
+        let hits = if query.chars().count() >= 2 {
+            state.chat_results()
+        } else {
+            Vec::new()
         };
-        rows.push((last_activity(state, p), row));
-    }
-    rows.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
-    let empty = state.projects.is_empty();
-    let link_connecting = state.link == crate::model::Link::Connecting;
+        let search_status = state.chat_search_status.clone();
+        (rows, empty, link_connecting, machine, hits, search_status)
+    };
     if machine == MachineState::Waking {
         PulseClock::request(cx);
     }
@@ -360,18 +371,14 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
                 ),
         );
     }
-    let hits = if query.chars().count() >= 2 {
-        state.chat_results()
-    } else {
-        Vec::new()
-    };
-    let search_note = match &state.chat_search_status {
+    let search_note = match &search_status {
         crate::model::ChatSearchStatus::Searching if hits.is_empty() => Some("Searching…"),
         crate::model::ChatSearchStatus::Waking => Some("Waking…"),
         crate::model::ChatSearchStatus::Failed(err) => Some(err.as_str()),
         _ => None,
     };
-    if rows.is_empty() && hits.is_empty() && !empty {
+    let rows_empty = rows.is_empty();
+    if rows_empty && hits.is_empty() && !empty {
         let line = match search_note {
             Some(note) => note.to_string(),
             None => format!("Nothing matches “{query}”."),
@@ -388,7 +395,7 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
     for (_, row) in rows {
         list = list.child(render_row(row, &theme, cx));
     }
-    if !hits.is_empty() || (search_note.is_some() && !rows.is_empty()) {
+    if !hits.is_empty() || (search_note.is_some() && !rows_empty) {
         list = list.child(
             div()
                 .px(px(10.0))
@@ -400,12 +407,7 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
                 .child("Messages"),
         );
         if let Some(note) = search_note {
-            if hits.is_empty()
-                || matches!(
-                    state.chat_search_status,
-                    crate::model::ChatSearchStatus::Waking
-                )
-            {
+            if hits.is_empty() || matches!(search_status, crate::model::ChatSearchStatus::Waking) {
                 list = list.child(
                     div()
                         .px(px(10.0))

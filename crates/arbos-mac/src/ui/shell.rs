@@ -160,7 +160,7 @@ impl Shell {
         cx.observe(&pairing_input, |_, _, cx| cx.notify()).detach();
         cx.observe(&project_input, |_, _, cx| cx.notify()).detach();
         cx.observe(&search_input, |this, input, cx| {
-            let text = input.read(cx).text();
+            let text = input.read(cx).text().to_string();
             this.state.update(cx, |s, cx| s.set_chat_query(text, cx));
             cx.notify();
         })
