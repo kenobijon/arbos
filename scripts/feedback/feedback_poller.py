@@ -40,7 +40,7 @@ Config comes from the environment (systemd EnvironmentFile=/etc/arbos/feedback.e
   ARBOS_RELAY_URL + ARBOS_RELAY_ADMIN_TOKEN: Mac sheet intake (GET /admin/feedback)
   OPENROUTER_API_KEY + FEEDBACK_SCREEN_MODEL (openai/gpt-4o-mini): the malicious-intent screen
   FEEDBACK_STATE_DIR (default /var/lib/arbos-feedback), FEEDBACK_KILL_FILE
-  FEEDBACK_MIN_INTERVAL_S (90), FEEDBACK_MAX_PER_DAY (60), FEEDBACK_TESTER_MAX_PER_DAY (10)
+  FEEDBACK_MIN_INTERVAL_S (90), FEEDBACK_MAX_PER_DAY (120), FEEDBACK_TESTER_MAX_PER_DAY (20)
   FEEDBACK_TESTER_MAX_WAIT_MIN (30): after this wait a tester item is ordered with the priority ones
   FEEDBACK_TOPICS_FILE (/etc/arbos/feedback-topics.txt): "<issue> <regex>" lines; matching feedback is folded
       into that issue (a feature already being built) instead of starting an agent
@@ -212,8 +212,8 @@ class Config:
             openrouter_key=env.get("OPENROUTER_API_KEY", ""),
             screen_model=env.get("FEEDBACK_SCREEN_MODEL", "openai/gpt-4o-mini"),
             min_interval_s=int(env.get("FEEDBACK_MIN_INTERVAL_S", "90")),
-            max_per_day=int(env.get("FEEDBACK_MAX_PER_DAY", "60")),
-            tester_max_per_day=int(env.get("FEEDBACK_TESTER_MAX_PER_DAY", "10")),
+            max_per_day=int(env.get("FEEDBACK_MAX_PER_DAY", "120")),
+            tester_max_per_day=int(env.get("FEEDBACK_TESTER_MAX_PER_DAY", "20")),
             tester_max_wait_min=int(env.get("FEEDBACK_TESTER_MAX_WAIT_MIN", "30")),
             topics=topics,
             public_group_name=env.get("TESTFLIGHT_PUBLIC_GROUP", "Arbos public"),
