@@ -16,8 +16,10 @@
 # Nothing is written into the repo; the key file lives in a temp dir and is
 # removed when the lane ends.
 #
-# Build number: BUILD_NUMBER if set, else UTC `YYYYMMDDHHMM` (12 digits, always
-# above the 7 that build 7 used, strictly increasing between runs).
+# Build number: BUILD_NUMBER (UTC `YYYYMMDDHHMM` from ios.yml) plus the Actions
+# run id when present, else UTC `YYYYMMDDHHMMSS`. The run-id suffix keeps two
+# main pushes in the same minute from colliding on TestFlight ("Redundant
+# Binary Upload").
 #
 # Every xcodebuild runs under `set -o pipefail`; its full output is in
 # build/xcodebuild-<lane>.log (ios.yml keeps the logs as an artifact) and the
@@ -31,7 +33,9 @@ SCHEME = "Arbos"
 DEFAULT_TEAM = "25SCF3Q2AK"
 
 def build_number
-  ENV["BUILD_NUMBER"] || Time.now.utc.strftime("%Y%m%d%H%M")
+  base = ENV["BUILD_NUMBER"] || Time.now.utc.strftime("%Y%m%d%H%M%S")
+  run = ENV["GITHUB_RUN_ID"].to_s
+  run.empty? ? base : "#{base}#{run}"
 end
 
 def out_dir
