@@ -423,7 +423,10 @@ struct ChatView: View {
     private func transcript(width: CGFloat) -> some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
+                // VStack (not LazyVStack): a growing vertical TextField resizes the
+                // bottom safe-area inset, and LazyVStack can drop every visible row
+                // for a white transcript until the next layout pass.
+                VStack(alignment: .leading, spacing: 0) {
                     Color.clear.frame(height: isPeople ? 104 : 64).onAppear { scroller = proxy }
                     if let banner = machineBannerText {
                         HStack(spacing: 6) {
@@ -475,12 +478,14 @@ struct ChatView: View {
             }
             .defaultScrollAnchor(.bottom)
             .scrollDismissesKeyboard(.interactively)
+            // Mask stays in the scroll view's bounds — `ignoresSafeArea` on the
+            // mask mis-samples the fade when the composer/keyboard inset changes
+            // and can blank the whole transcript (white screen mid-type).
             .mask {
                 VStack(spacing: 0) {
                     LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom).frame(height: 110)
                     Color.black
                 }
-                .ignoresSafeArea()
             }
             .onAppear { settleToBottom(proxy) }
             .onChange(of: rows.last?.id) { old, _ in
@@ -510,9 +515,9 @@ struct ChatView: View {
         }
     }
 
-    /// Pin the transcript to its end once the lazy rows have a height: the
-    /// first `scrollTo` runs before layout knows the content size, so repeat
-    /// after the next runloop turn and once more after the rows settle.
+    /// Pin the transcript to its end once the rows have a height: the first
+    /// `scrollTo` runs before layout knows the content size, so repeat after
+    /// the next runloop turn and once more after the rows settle.
     private func settleToBottom(_ proxy: ScrollViewProxy) {
         proxy.scrollTo("bottom", anchor: .bottom)
         DispatchQueue.main.async { proxy.scrollTo("bottom", anchor: .bottom) }
@@ -670,7 +675,8 @@ struct ChatView: View {
                     .padding(.leading, Theme.plusButton + 12)
                 }
             }
-            HStack(spacing: 12) {
+            // Bottom-align the "+" with a multi-line field so growth expands upward.
+            HStack(alignment: .bottom, spacing: 12) {
                 Button { showAttach = true } label: {
                     ZStack {
                         Circle().fill(theme.field)
@@ -730,6 +736,16 @@ struct ChatView: View {
         }
     }
 
+    /// Max height for the growing composer field.
+    ///
+    /// A vertical `TextField` can report a huge intrinsic height while wrapping
+    /// (especially around the first line break). That inflates the bottom
+    /// `safeAreaInset` until it covers the transcript — a white screen that
+    /// clears on the next layout pass. Cap at 8 lines (Grok's 22 pt body pitch).
+    private var composerFieldMaxHeight: CGFloat {
+        Theme.fieldHeight + 7 * 22
+    }
+
     private var textField: some View {
         HStack(spacing: 8) {
             TextField("", text: $draft, prompt: Text(composerPrompt).foregroundStyle(theme.placeholder), axis: .vertical)
@@ -778,7 +794,8 @@ struct ChatView: View {
             .buttonStyle(.plain)
             .padding(.trailing, 3)
         }
-        .frame(minHeight: Theme.fieldHeight)
+        // Hard max so a TextField layout glitch cannot paint over the transcript.
+        .frame(minHeight: Theme.fieldHeight, maxHeight: composerFieldMaxHeight)
         .background(RoundedRectangle(cornerRadius: Theme.fieldHeight / 2, style: .continuous).fill(theme.field))
         .overlay(
             RoundedRectangle(cornerRadius: Theme.fieldHeight / 2, style: .continuous)
