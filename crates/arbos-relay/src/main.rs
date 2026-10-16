@@ -370,7 +370,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/chats/dm", post(people::dm_create))
         .route(
             "/chats/{id}",
-            get(people::chat_get).delete(people::chat_delete),
+            get(people::chat_get)
+                .patch(people::chat_patch)
+                .delete(people::chat_delete),
         )
         .route("/chats/{id}/read", axum::routing::put(people::chat_read))
         .route(

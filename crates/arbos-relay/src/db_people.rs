@@ -14,7 +14,7 @@ use crate::db::Db;
 pub const PEOPLE_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS people_chats (
   id TEXT PRIMARY KEY, kind TEXT NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL,
-  deleted_at INTEGER
+  deleted_at INTEGER, title TEXT, image_key TEXT
 );
 CREATE TABLE IF NOT EXISTS people_members (
   chat_id TEXT NOT NULL, member TEXT NOT NULL, role TEXT NOT NULL, added_by TEXT NOT NULL,
@@ -60,6 +60,8 @@ pub fn migrate_people(c: &Connection) {
         "ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'member'",
         [],
     );
+    let _ = c.execute("ALTER TABLE people_chats ADD COLUMN title TEXT", []);
+    let _ = c.execute("ALTER TABLE people_chats ADD COLUMN image_key TEXT", []);
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -83,6 +85,12 @@ pub struct PeopleChat {
     pub kind: String,
     pub created_by: String,
     pub created_at: i64,
+    /// Custom group name; when unset the API builds one from member handles.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Blob key under `people:{chat_id}` for an optional group picture.
+    #[serde(default)]
+    pub image_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,6 +138,17 @@ fn membership_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Membership> {
 
 const MEMBER_COLS: &str = "chat_id, member, role, added_by, joined_at, settings, muted";
 
+fn people_chat_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PeopleChat> {
+    Ok(PeopleChat {
+        id: r.get(0)?,
+        kind: r.get(1)?,
+        created_by: r.get(2)?,
+        created_at: r.get(3)?,
+        title: r.get(4)?,
+        image_key: r.get(5)?,
+    })
+}
+
 impl Db {
     // ---- chats and members --------------------------------------------------------------------
 
@@ -146,18 +165,35 @@ impl Db {
     pub fn people_chat(&self, id: &str) -> Result<Option<PeopleChat>> {
         self.with(|c| {
             c.query_row(
-                "SELECT id, kind, created_by, created_at FROM people_chats WHERE id = ?1 AND deleted_at IS NULL",
+                "SELECT id, kind, created_by, created_at, title, image_key FROM people_chats WHERE id = ?1 AND deleted_at IS NULL",
                 params![id],
-                |r| {
-                    Ok(PeopleChat {
-                        id: r.get(0)?,
-                        kind: r.get(1)?,
-                        created_by: r.get(2)?,
-                        created_at: r.get(3)?,
-                    })
-                },
+                people_chat_from_row,
             )
             .optional()
+        })
+    }
+
+    /// Set a custom group title and/or picture key. Empty strings clear the field.
+    pub fn update_people_chat_profile(
+        &self,
+        chat_id: &str,
+        title: Option<Option<&str>>,
+        image_key: Option<Option<&str>>,
+    ) -> Result<bool> {
+        self.with(|c| {
+            if let Some(t) = title {
+                c.execute(
+                    "UPDATE people_chats SET title = ?2 WHERE id = ?1 AND deleted_at IS NULL",
+                    params![chat_id, t],
+                )?;
+            }
+            if let Some(k) = image_key {
+                c.execute(
+                    "UPDATE people_chats SET image_key = ?2 WHERE id = ?1 AND deleted_at IS NULL",
+                    params![chat_id, k],
+                )?;
+            }
+            Ok(true)
         })
     }
 
@@ -241,19 +277,12 @@ impl Db {
     pub fn chats_of_member(&self, member: &str) -> Result<Vec<ChatWithMembers>> {
         let chats: Vec<PeopleChat> = self.with(|c| {
             let mut st = c.prepare(
-                "SELECT p.id, p.kind, p.created_by, p.created_at FROM people_chats p
+                "SELECT p.id, p.kind, p.created_by, p.created_at, p.title, p.image_key FROM people_chats p
                  JOIN people_members m ON m.chat_id = p.id
                  WHERE m.member = ?1 AND m.left_at IS NULL AND p.deleted_at IS NULL
                  ORDER BY p.created_at DESC",
             )?;
-            let rows = st.query_map(params![member], |r| {
-                Ok(PeopleChat {
-                    id: r.get(0)?,
-                    kind: r.get(1)?,
-                    created_by: r.get(2)?,
-                    created_at: r.get(3)?,
-                })
-            })?;
+            let rows = st.query_map(params![member], people_chat_from_row)?;
             rows.collect()
         })?;
         chats
@@ -269,19 +298,12 @@ impl Db {
     pub fn dm_between(&self, a: &str, b: &str) -> Result<Option<PeopleChat>> {
         self.with(|c| {
             c.query_row(
-                "SELECT p.id, p.kind, p.created_by, p.created_at FROM people_chats p
+                "SELECT p.id, p.kind, p.created_by, p.created_at, p.title, p.image_key FROM people_chats p
                  JOIN people_members ma ON ma.chat_id = p.id AND ma.member = ?1 AND ma.left_at IS NULL
                  JOIN people_members mb ON mb.chat_id = p.id AND mb.member = ?2 AND mb.left_at IS NULL
                  WHERE p.kind = 'dm' AND p.deleted_at IS NULL ORDER BY p.created_at LIMIT 1",
                 params![format!("user:{a}"), format!("user:{b}")],
-                |r| {
-                    Ok(PeopleChat {
-                        id: r.get(0)?,
-                        kind: r.get(1)?,
-                        created_by: r.get(2)?,
-                        created_at: r.get(3)?,
-                    })
-                },
+                people_chat_from_row,
             )
             .optional()
         })

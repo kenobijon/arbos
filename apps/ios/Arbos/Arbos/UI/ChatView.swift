@@ -73,6 +73,26 @@ struct ChatView: View {
         }
     }
 
+    /// Tokenised blob URL for a custom group picture, if the chat has one.
+    private func groupImageURL(_ people: PeopleChat) -> String? {
+        guard let key = people.imageKey, !key.isEmpty else { return nil }
+        return model.blobURL(projectId: "\(peopleSlot):\(people.id)", key: key)?.absoluteString
+    }
+
+    private func groupHeaderMembers(_ people: PeopleChat) -> [ChatMember] {
+        let others = people.humans.filter { $0.id != model.user?.id }
+        return others.isEmpty ? people.humans : others
+    }
+
+    private func groupSubtitle(_ people: PeopleChat) -> String {
+        let n = people.humans.count
+        var s = "\(n) member\(n == 1 ? "" : "s")"
+        if !people.agents.isEmpty {
+            s += " · \(people.agents.count) agent\(people.agents.count == 1 ? "" : "s")"
+        }
+        return s
+    }
+
     private var hasCallBar: Bool {
         guard let active = calls.activeByChat[chatId], !active.ended else { return false }
         return calls.call?.callId != active.callId || !calls.isPresented
@@ -435,23 +455,35 @@ struct ChatView: View {
                 HStack(spacing: 6) {
                     if let people {
                         HStack(spacing: 6) {
-                        PersonAvatar(url: counterpart?.avatarUrl, handle: counterpart?.handle ?? "?", size: Theme.avatar)
-                        VStack(alignment: .leading, spacing: 0) {
-                            Text(counterpart?.displayName ?? people.title)
-                                .font(.system(size: Theme.body, weight: .semibold))
-                                .foregroundStyle(theme.text)
-                                .lineLimit(1)
-                            if people.pending {
-                                Text("Invited · opens when they sign in").font(.system(size: 10)).foregroundStyle(theme.muted)
-                            } else if !people.agents.isEmpty {
-                                Text("\(people.agents.count) agent\(people.agents.count == 1 ? "" : "s")").font(.system(size: 10)).foregroundStyle(theme.muted)
+                            if people.isGroup {
+                                AvatarCluster(members: groupHeaderMembers(people), size: Theme.avatar,
+                                              imageUrl: groupImageURL(people))
+                                VStack(alignment: .leading, spacing: 0) {
+                                    Text(people.title)
+                                        .font(.system(size: Theme.body, weight: .semibold))
+                                        .foregroundStyle(theme.text)
+                                        .lineLimit(1)
+                                    Text(groupSubtitle(people)).font(.system(size: 10)).foregroundStyle(theme.muted)
+                                }
+                            } else {
+                                PersonAvatar(url: counterpart?.avatarUrl, handle: counterpart?.handle ?? "?", size: Theme.avatar)
+                                VStack(alignment: .leading, spacing: 0) {
+                                    Text(counterpart?.displayName ?? people.title)
+                                        .font(.system(size: Theme.body, weight: .semibold))
+                                        .foregroundStyle(theme.text)
+                                        .lineLimit(1)
+                                    if people.pending {
+                                        Text("Invited · opens when they sign in").font(.system(size: 10)).foregroundStyle(theme.muted)
+                                    } else if !people.agents.isEmpty {
+                                        Text("\(people.agents.count) agent\(people.agents.count == 1 ? "" : "s")").font(.system(size: 10)).foregroundStyle(theme.muted)
+                                    }
+                                }
                             }
-                        }
                         }
                         .contentShape(Rectangle())
                         .onTapGesture { openHeaderProfile() }
                         .accessibilityAddTraits(.isButton)
-                        .accessibilityHint("Opens the profile")
+                        .accessibilityHint(people.isGroup ? "Opens group info" : "Opens the profile")
                     } else {
                         HStack(spacing: 8) {
                             if let project {

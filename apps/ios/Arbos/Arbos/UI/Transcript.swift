@@ -641,6 +641,48 @@ struct PersonAvatar: View {
     }
 }
 
+/// Up to three overlapping member pictures, then a plus when there are more.
+/// A custom `imageUrl` (group picture) replaces the stack.
+struct AvatarCluster: View {
+    @Environment(\.theme) private var theme
+    let members: [ChatMember]
+    var size: CGFloat = Theme.avatar
+    var maxVisible: Int = 3
+    var imageUrl: String? = nil
+
+    private var shown: [ChatMember] { Array(members.prefix(maxVisible)) }
+    private var hasMore: Bool { members.count > maxVisible }
+
+    var body: some View {
+        if let imageUrl, !imageUrl.isEmpty {
+            PersonAvatar(url: imageUrl, handle: "group", size: size)
+        } else if shown.isEmpty {
+            GlassCircle(size: size) {
+                Image(systemName: "person.2.fill")
+                    .font(.system(size: size * 0.4))
+                    .foregroundStyle(theme.text)
+            }
+        } else {
+            HStack(spacing: -size * 0.32) {
+                ForEach(Array(shown.enumerated()), id: \.element.id) { _, m in
+                    PersonAvatar(url: m.avatarUrl, handle: m.handle, size: size)
+                        .overlay(Circle().strokeBorder(theme.bg, lineWidth: max(1, size * 0.06)))
+                }
+                if hasMore {
+                    ZStack {
+                        Circle().fill(theme.field)
+                        Image(systemName: "plus")
+                            .font(.system(size: size * 0.35, weight: .bold))
+                            .foregroundStyle(theme.text)
+                    }
+                    .frame(width: size * 0.85, height: size * 0.85)
+                    .overlay(Circle().strokeBorder(theme.bg, lineWidth: max(1, size * 0.06)))
+                }
+            }
+        }
+    }
+}
+
 /// Inline image attachment: loads with the device bearer (same as voice memos),
 /// tappable for a full-screen look. AsyncImage alone cannot send `Authorization`
 /// and often stays blank on people-chat blob URLs.

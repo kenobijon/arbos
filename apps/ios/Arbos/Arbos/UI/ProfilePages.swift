@@ -5,7 +5,9 @@
 // shared project chats), and an agent (`AgentProfileView`, its own file).
 // `AppModel.showProfile(_:)` opens one from anywhere; the root presents it.
 
+import PhotosUI
 import SwiftUI
+import UIKit
 
 /// Who a user page is about — from a chat member, a search result or a sender row.
 struct ProfilePerson: Identifiable, Equatable, Hashable {
@@ -547,6 +549,7 @@ struct GroupProfileView: View {
     @State private var muted = false
     @State private var projectMembers: [ProjectMember] = []
     @State private var showAdd = false
+    @State private var showEdit = false
     @State private var confirmLeave = false
 
     private var people: PeopleChat? { model.peopleChat(chatId) }
@@ -575,6 +578,17 @@ struct GroupProfileView: View {
 
     private var memberCount: Int { rows.filter { $0.agent == nil }.count }
 
+    private var groupImageURL: String? {
+        guard let people, let key = people.imageKey, !key.isEmpty else { return nil }
+        return model.blobURL(projectId: "\(peopleSlot):\(chatId)", key: key)?.absoluteString
+    }
+
+    private var clusterMembers: [ChatMember] {
+        guard let people else { return [] }
+        let others = people.humans.filter { $0.id != model.user?.id }
+        return others.isEmpty ? people.humans : others
+    }
+
     var body: some View {
         ZStack(alignment: .top) {
             theme.bg.ignoresSafeArea()
@@ -585,7 +599,10 @@ struct GroupProfileView: View {
                         if let project {
                             AgentAvatar(project: project, theme: theme, size: 112)
                         } else {
-                            GlassCircle(size: 112) { Image(systemName: "person.2.fill").font(.system(size: 44)).foregroundStyle(theme.text) }
+                            AvatarCluster(members: clusterMembers, size: 72, imageUrl: groupImageURL)
+                                .frame(width: 112, height: 112)
+                                .contentShape(Rectangle())
+                                .onTapGesture { showEdit = true }
                         }
                     }
                     ProfileActionRow(actions: [
@@ -606,7 +623,12 @@ struct GroupProfileView: View {
                 }
             }
             ProfileTopBar {
-                if project != nil, project?.shared != true {
+                if people != nil {
+                    Button("Edit") { showEdit = true }
+                        .font(.system(size: Theme.body, weight: .medium)).foregroundStyle(theme.text)
+                        .padding(.horizontal, 14).frame(height: Theme.control)
+                        .background(Capsule().fill(theme.field))
+                } else if project != nil, project?.shared != true {
                     Button("Edit") { model.showProfile(.agent(projectId: projectId!)) }
                         .font(.system(size: Theme.body, weight: .medium)).foregroundStyle(theme.text)
                         .padding(.horizontal, 14).frame(height: Theme.control)
@@ -626,6 +648,9 @@ struct GroupProfileView: View {
             } else {
                 MembersSheet(chatId: chatId).environmentObject(model).environment(\.theme, theme)
             }
+        }
+        .sheet(isPresented: $showEdit) {
+            GroupEditSheet(chatId: chatId).environmentObject(model).environment(\.theme, theme)
         }
         .task {
             muted = people?.muted ?? false
@@ -664,5 +689,145 @@ struct GroupProfileView: View {
     private func toggleMute() {
         muted.toggle()
         model.setMuted(chatId: chatId, muted: muted)
+    }
+}
+
+/// Name the group and optionally pick a picture. Saves with `PATCH /chats/{id}`.
+struct GroupEditSheet: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    @Environment(\.dismiss) private var dismiss
+    let chatId: String
+    @State private var name = ""
+    @State private var photoItem: PhotosPickerItem?
+    @State private var preview: UIImage?
+    @State private var jpegData: Data?
+    @State private var saving = false
+    @FocusState private var nameFocused: Bool
+
+    private var people: PeopleChat? { model.peopleChat(chatId) }
+
+    private var clusterMembers: [ChatMember] {
+        guard let people else { return [] }
+        let others = people.humans.filter { $0.id != model.user?.id }
+        return others.isEmpty ? people.humans : others
+    }
+
+    private var existingImageURL: String? {
+        guard let people, let key = people.imageKey, !key.isEmpty else { return nil }
+        return model.blobURL(projectId: "\(peopleSlot):\(chatId)", key: key)?.absoluteString
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 22) {
+                    PhotosPicker(selection: $photoItem, matching: .images) {
+                        ZStack(alignment: .bottomTrailing) {
+                            if let preview {
+                                Image(uiImage: preview)
+                                    .resizable().scaledToFill()
+                                    .frame(width: 112, height: 112)
+                                    .clipShape(Circle())
+                            } else {
+                                AvatarCluster(members: clusterMembers, size: 72, imageUrl: existingImageURL)
+                                    .frame(width: 112, height: 112)
+                            }
+                            GlassCircle(size: 36) {
+                                Image(systemName: "camera.fill")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundStyle(theme.text)
+                            }
+                            .offset(x: 4, y: 4)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Choose group image")
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Group name").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                        TextField("", text: $name, prompt: Text("Name this group").foregroundStyle(theme.placeholder))
+                            .font(.system(size: Theme.body))
+                            .foregroundStyle(theme.text)
+                            .focused($nameFocused)
+                            .padding(.horizontal, 14).frame(height: Theme.fieldHeight)
+                            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
+                            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+                    }
+                    .padding(.horizontal, 16)
+
+                    Text("A name and picture help everyone recognise this chat. Leave the name blank to use member handles.")
+                        .font(.system(size: Theme.tiny))
+                        .foregroundStyle(theme.muted)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 28)
+
+                    Color.clear.frame(height: 24)
+                }
+                .padding(.top, 28)
+            }
+            .background(theme.bg)
+            .navigationTitle("Edit group")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(theme.bg, for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Cancel") { dismiss() }.foregroundStyle(theme.text)
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { Task { await save() } } label: {
+                        Text(saving ? "Saving…" : "Save")
+                            .font(.system(size: Theme.small, weight: .semibold))
+                            .foregroundStyle(theme.onPrimary)
+                            .padding(.horizontal, 12).frame(height: 32)
+                            .background(Capsule().fill(theme.primary))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(saving)
+                    .opacity(saving ? 0.55 : 1)
+                }
+            }
+            .onAppear {
+                name = people?.title ?? ""
+                nameFocused = true
+            }
+            .onChange(of: photoItem) { _, item in
+                guard let item else { return }
+                Task {
+                    guard let data = try? await item.loadTransferable(type: Data.self),
+                          let img = UIImage(data: data) else { return }
+                    let square = Self.square(img, side: 512)
+                    preview = square
+                    jpegData = square.jpegData(compressionQuality: 0.85)
+                }
+            }
+        }
+    }
+
+    private func save() async {
+        saving = true
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        var ok = await model.patchPeopleChat(chatId, title: trimmed)
+        if ok, let jpegData {
+            ok = await model.setGroupImage(chatId: chatId, jpeg: jpegData)
+        }
+        saving = false
+        if ok { dismiss() }
+    }
+
+    /// Centre-crop to a square and resize.
+    private static func square(_ image: UIImage, side: CGFloat) -> UIImage {
+        let s = min(image.size.width, image.size.height)
+        let rect = CGRect(x: (image.size.width - s) / 2, y: (image.size.height - s) / 2, width: s, height: s)
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: side, height: side))
+        return renderer.image { _ in
+            guard let cg = image.cgImage?.cropping(to: rect) else {
+                image.draw(in: CGRect(origin: .zero, size: CGSize(width: side, height: side)))
+                return
+            }
+            UIImage(cgImage: cg, scale: image.scale, orientation: image.imageOrientation)
+                .draw(in: CGRect(origin: .zero, size: CGSize(width: side, height: side)))
+        }
     }
 }

@@ -290,11 +290,19 @@ pub fn chat_json(state: &AppState, cm: &ChatWithMembers, me: &str, device_id: &s
                 .is_some_and(|s| s.starts_with("user:") && s != format!("user:{me}"))
         })
         .collect();
-    let title = others
+    let computed = others
         .iter()
         .filter_map(|m| m["handle"].as_str())
         .collect::<Vec<_>>()
         .join(", ");
+    let title = cm
+        .chat
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .unwrap_or(computed.as_str())
+        .to_owned();
     let pending = others
         .iter()
         .any(|m| m["status"].as_str() == Some("invited"));
@@ -306,6 +314,7 @@ pub fn chat_json(state: &AppState, cm: &ChatWithMembers, me: &str, device_id: &s
         "created_by": cm.chat.created_by,
         "created_at": cm.chat.created_at,
         "title": title,
+        "image_key": cm.chat.image_key,
         "pending": pending,
         "members": members,
         "room": format!("/room/{PEOPLE_PROJECT}/{}", cm.chat.id),
@@ -582,6 +591,8 @@ pub async fn chats_create_group(
         kind: "group".into(),
         created_by: me.clone(),
         created_at: now_ms(),
+        title: None,
+        image_key: None,
     };
     if let Err(e) = state.db.insert_people_chat(&chat) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
@@ -675,6 +686,8 @@ pub async fn dm_create(
         kind: "dm".into(),
         created_by: me.clone(),
         created_at: now_ms(),
+        title: None,
+        image_key: None,
     };
     if let Err(e) = state.db.insert_people_chat(&chat) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
@@ -733,6 +746,72 @@ pub async fn chat_get(
     principal: Principal,
     Path(id): Path<String>,
 ) -> Response {
+    match member_chat(&state, &principal, &id) {
+        Ok((me, cm)) => Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response(),
+        Err(r) => *r,
+    }
+}
+
+#[derive(Deserialize)]
+pub struct PatchChatBody {
+    /// Custom group name. Empty string clears it (falls back to member handles).
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Blob key under `people:{chat}` for the group picture. Empty clears it.
+    #[serde(default)]
+    pub image_key: Option<String>,
+}
+
+fn safe_image_key(k: &str) -> bool {
+    !k.is_empty()
+        && k.len() <= 128
+        && k.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == ':')
+}
+
+/// `PATCH /chats/{id} {"title"?, "image_key"?}` — any human member can name the group
+/// and set an optional picture (uploaded first via `PUT /blob/people:{id}/…`).
+pub async fn chat_patch(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    Json(b): Json<PatchChatBody>,
+) -> Response {
+    let (me, cm) = match member_chat(&state, &principal, &id) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    if b.title.is_none() && b.image_key.is_none() {
+        return Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response();
+    }
+    let title = b.title.as_ref().map(|t| {
+        let trimmed = t.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.chars().take(80).collect::<String>())
+        }
+    });
+    let image_key = match &b.image_key {
+        None => None,
+        Some(k) if k.trim().is_empty() => Some(None),
+        Some(k) if safe_image_key(k.trim()) => Some(Some(k.trim().to_owned())),
+        Some(_) => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "bad_image_key",
+                "image_key must be a short blob object name",
+            );
+        }
+    };
+    let title_ref = title.as_ref().map(|o| o.as_ref().map(|s| s.as_str()));
+    let image_ref = image_key.as_ref().map(|o| o.as_ref().map(|s| s.as_str()));
+    if let Err(e) = state
+        .db
+        .update_people_chat_profile(&id, title_ref, image_ref)
+    {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+    }
     match member_chat(&state, &principal, &id) {
         Ok((me, cm)) => Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response(),
         Err(r) => *r,
@@ -1662,6 +1741,8 @@ pub async fn invite_create(
                     kind: "dm".into(),
                     created_by: me.clone(),
                     created_at: now_ms(),
+                    title: None,
+                    image_key: None,
                 };
                 if let Err(e) = state.db.insert_people_chat(&chat) {
                     return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
@@ -2304,6 +2385,8 @@ pub(crate) mod tests_support {
             kind: "dm".into(),
             created_by: a.to_owned(),
             created_at: now_ms(),
+            title: None,
+            image_key: None,
         };
         state.db.insert_people_chat(&chat).expect("chat");
         for u in [a, b] {

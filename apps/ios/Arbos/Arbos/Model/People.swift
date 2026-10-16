@@ -82,6 +82,8 @@ struct PeopleChat: Identifiable, Equatable {
     var createdBy: String
     var createdAt: Int64
     var title: String
+    /// Blob key under `people:{id}` for an optional group picture.
+    var imageKey: String? = nil
     var pending: Bool
     var members: [ChatMember]
     var headSeq: Int64
@@ -94,6 +96,9 @@ struct PeopleChat: Identifiable, Equatable {
 
     var humans: [ChatMember] { members.filter { !$0.isAgent } }
     var agents: [ChatMember] { members.filter { $0.isAgent } }
+
+    /// Several humans (or `kind == group`): show a cluster, not a single person.
+    var isGroup: Bool { kind == "group" || humans.count > 2 }
 
     /// The other person of a DM.
     func counterpart(me: String?) -> ChatMember? {
@@ -109,8 +114,9 @@ struct PeopleChat: Identifiable, Equatable {
         let members = ((d["members"] as? [Any]) ?? []).compactMap(ChatMember.parse)
         let me = d["me"] as? [String: Any]
         let n = { (k: String) -> Int64 in (d[k] as? NSNumber)?.int64Value ?? 0 }
+        let imageKey = (d["image_key"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         return PeopleChat(id: id, kind: d["kind"] as? String ?? "dm", createdBy: d["created_by"] as? String ?? "", createdAt: n("created_at"),
-                          title: d["title"] as? String ?? "Chat", pending: d["pending"] as? Bool ?? false, members: members,
+                          title: d["title"] as? String ?? "Chat", imageKey: imageKey, pending: d["pending"] as? Bool ?? false, members: members,
                           headSeq: n("head_seq"), readSeq: n("read_seq"), unread: d["unread"] as? Bool ?? false,
                           lockState: d["lock_state"] as? String ?? "people_only", lastActivityAt: n("last_activity_at"),
                           myRole: me?["role"] as? String ?? "member", muted: me?["muted"] as? Bool ?? false)

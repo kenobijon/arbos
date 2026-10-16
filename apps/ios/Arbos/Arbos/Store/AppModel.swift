@@ -1289,6 +1289,34 @@ final class AppModel: ObservableObject {
         Task { try? await api.leaveChat(chatId) }
     }
 
+    /// Rename a people group and/or set its picture blob key (`PATCH /chats/{id}`).
+    func patchPeopleChat(_ chatId: String, title: String? = nil, imageKey: String? = nil) async -> Bool {
+        do {
+            let chat = try await api.patchPeopleChat(chatId, title: title, imageKey: imageKey)
+            if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
+                peopleChats[i] = chat
+            } else {
+                peopleChats.insert(chat, at: 0)
+            }
+            return true
+        } catch {
+            notice = Notice(text: "Could not update group: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    /// Upload a group picture to `people:{chatId}` and patch `image_key`.
+    func setGroupImage(chatId: String, jpeg: Data) async -> Bool {
+        let key = "group-avatar-\(Int(Date().timeIntervalSince1970 * 1000)).jpg"
+        do {
+            _ = try await api.putBlob(projectId: "\(peopleSlot):\(chatId)", key: key, mime: "image/jpeg", data: jpeg)
+            return await patchPeopleChat(chatId, imageKey: key)
+        } catch {
+            notice = Notice(text: "Could not upload group image: \(error.localizedDescription)")
+            return false
+        }
+    }
+
     func deletePeopleChat(_ chatId: String) {
         peopleChats.removeAll { $0.id == chatId }
         rooms[chatId]?.stop(); rooms[chatId] = nil; docs[chatId] = nil; messages[chatId] = nil
