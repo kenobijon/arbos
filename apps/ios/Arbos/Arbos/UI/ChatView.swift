@@ -808,7 +808,7 @@ struct ChatView: View {
         }
     }
 
-    /// Replaces the field while recording: red dot, live bars, timer, send/cancel.
+    /// Replaces the field while recording: red dot, live bars, timer, confirm/cancel.
     private var recordingField: some View {
         HStack(spacing: 10) {
             Button { recorder.cancel() } label: {
@@ -828,11 +828,11 @@ struct ChatView: View {
                 .foregroundStyle(theme.text)
             Button {
                 if let memo = recorder.stop() {
-                    sendMemo(.init(name: memo.name, mime: "audio/m4a", data: memo.data))
+                    finishMemo(.init(name: memo.name, mime: "audio/m4a", data: memo.data))
                 }
             } label: {
                 Circle().fill(theme.primary).frame(width: Theme.voiceButton, height: Theme.voiceButton)
-                    .overlay(Image(systemName: "arrow.up").font(.system(size: 16, weight: .bold)).foregroundStyle(theme.onPrimary))
+                    .overlay(Image(systemName: "checkmark").font(.system(size: 16, weight: .bold)).foregroundStyle(theme.onPrimary))
             }
             .buttonStyle(.plain)
             .padding(.trailing, 3)
@@ -916,30 +916,24 @@ struct ChatView: View {
         return effectiveTalkTo
     }
 
-    /// A voice memo goes out as its transcript (typed text first, if any) with the
-    /// audio attached, so the agent reads it instead of receiving a file it cannot hear.
-    private func sendMemo(_ memo: AppModel.PendingAttachment) {
-        let typed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        let extras = pending
-        let reply = replyTo?.id
-        let address = sendAddress(for: typed)
-        pending.removeAll()
-        draft = ""
-        replyTo = nil
-        pinTalkTo(afterSending: address)
-        sentOnce = true
+    /// Finish dictation without sending: attach the memo, fill the draft with the
+    /// transcript, and leave the send button for the user to confirm.
+    private func finishMemo(_ memo: AppModel.PendingAttachment) {
+        pending.append(memo)
         transcribing = true
         Task {
             // People chats have no Project row; meter STT on the people blob slot (same as uploads).
             let sttProject: Id? = project?.id ?? (isPeople ? "\(peopleSlot):\(chatId)" : nil)
             let transcript = await model.transcribe(projectId: sttProject, memo: memo)
             transcribing = false
-            let text = [typed, transcript ?? ""].filter { !$0.isEmpty }.joined(separator: "\n\n")
-            if isPeople {
-                model.sendPeople(chatId: chatId, text: text, replyTo: reply, address: address, attachments: extras + [memo])
-            } else {
-                model.send(chatId: chatId, text: text, attachments: extras + [memo])
+            if let transcript {
+                let words = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !words.isEmpty {
+                    let existing = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+                    draft = existing.isEmpty ? words : "\(existing) \(words)"
+                }
             }
+            composerFocused = true
         }
     }
 
