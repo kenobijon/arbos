@@ -88,6 +88,8 @@ pub enum RowKind {
     /// message while anything runs here. `queued` tints it amber.
     Indicator {
         queued: bool,
+        /// "Cloning RaoFoundation/subtensor" — else "<name> is working".
+        activity: Option<String>,
     },
     /// Debug-only "Show details" disclosure under a finished reply.
     Details,
@@ -583,7 +585,7 @@ impl Transcript {
                 .text_color(theme.text_muted)
                 .child(glyph)
                 .into_any_element(),
-            RowKind::Indicator { queued } => {
+            RowKind::Indicator { queued, activity } => {
                 PulseClock::request(cx);
                 // "<name> is working" with the worker's picture (Grok's one line).
                 let state = self.state.read(cx);
@@ -621,7 +623,8 @@ impl Transcript {
                     }
                     None => ("Agent".into(), None),
                 };
-                cards::working_line(&name, picture, queued, &theme, cx).into_any_element()
+                cards::working_line(&name, picture, queued, activity.as_deref(), &theme, cx)
+                    .into_any_element()
             }
             RowKind::Sender {
                 name,
@@ -1266,11 +1269,16 @@ pub fn build_rows(
     }
     if running || queued {
         let last = messages.last().map(|m| m.id.clone()).unwrap_or_default();
+        let activity = messages
+            .iter()
+            .rev()
+            .find(|m| m.is_streaming())
+            .and_then(Message::current_activity);
         rows.push(Row {
-            version: hash_version(&queued, true),
+            version: hash_version(&(queued, &activity), true),
             id: "chat#indicator".into(),
             message_id: last,
-            kind: RowKind::Indicator { queued },
+            kind: RowKind::Indicator { queued, activity },
         });
     }
     rows

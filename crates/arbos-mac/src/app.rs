@@ -1480,6 +1480,7 @@ impl AppState {
                 created_at: now_ms(),
                 completed_at: None,
                 call_id: None,
+                activity: None,
                 pending: true,
                 parts,
                 hidden_parts: Vec::new(),
@@ -1643,6 +1644,7 @@ impl AppState {
                 created_at: now_ms(),
                 completed_at: None,
                 call_id: None,
+                activity: None,
                 pending: true,
                 parts: vec![Part::Text {
                     id: new_id(),

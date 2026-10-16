@@ -421,6 +421,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         created_at: now_ms(),
                         completed_at: None,
                         call_id: None,
+                        activity: None,
                         pending: true,
                         parts: vec![Part::Text {
                             id: new_id(),
@@ -1218,6 +1219,7 @@ fn send_user(
                 created_at: now_ms(),
                 completed_at: None,
                 call_id: None,
+                activity: None,
                 pending: true,
                 parts,
                 hidden_parts: Vec::new(),
@@ -1516,6 +1518,7 @@ fn run_routine_now(shared: &Arc<Shared>, project_id: &str, routine_id: &str) {
                 created_at: now_ms(),
                 completed_at: None,
                 call_id: None,
+                activity: None,
                 pending: false,
                 parts: vec![Part::Text {
                     id: new_id(),
@@ -2092,6 +2095,7 @@ async fn run_turn(
             created_at: now_ms(),
             completed_at: None,
             call_id: None,
+            activity: None,
             pending: false,
             parts: vec![Part::Status {
                 id: new_id(),
@@ -2696,6 +2700,7 @@ async fn run_outcome_turn(
             created_at: now_ms(),
             completed_at: None,
             call_id: None,
+            activity: None,
             pending: false,
             parts: vec![empty_text()],
             hidden_parts: Vec::new(),
@@ -3161,6 +3166,7 @@ impl Seeder<'_> {
             created_at: self.t,
             completed_at: Some(self.t),
             call_id: None,
+            activity: None,
             pending: false,
             parts: extra,
             hidden_parts: Vec::new(),
@@ -3199,6 +3205,7 @@ impl Seeder<'_> {
             created_at: self.t,
             completed_at: Some(self.t + 9_000),
             call_id: None,
+            activity: None,
             pending: false,
             parts,
             hidden_parts: Vec::new(),
@@ -3238,6 +3245,7 @@ fn project_message(chat_id: &str, project: &Project, text: &str, t: u64) -> Mess
         created_at: t,
         completed_at: Some(t),
         call_id: None,
+        activity: None,
         pending: false,
         parts: vec![Part::Text {
             id: new_id(),
@@ -3866,6 +3874,7 @@ fn human_message(chat_id: &str, who: &Person, text: &str, at: u64) -> Message {
         created_at: at,
         completed_at: Some(at),
         call_id: None,
+        activity: None,
         pending: false,
         parts: vec![text_part(text)],
         hidden_parts: Vec::new(),
@@ -4372,6 +4381,7 @@ async fn agent_reply(
             created_at: now_ms(),
             completed_at: None,
             call_id: None,
+            activity: None,
             pending: false,
             parts: vec![Part::Status {
                 id: new_id(),
@@ -4493,6 +4503,7 @@ fn system_message(chat_id: &str, text: &str) -> Message {
         created_at: now_ms(),
         completed_at: Some(now_ms()),
         call_id: None,
+        activity: None,
         pending: false,
         parts: vec![Part::Text {
             id: new_id(),

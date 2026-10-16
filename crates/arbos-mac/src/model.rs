@@ -970,6 +970,10 @@ pub struct Message {
     /// System lines about a call ("<name> started a video call") carry it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_id: Option<String>,
+    /// What the agent is doing right now ("Cloning RaoFoundation/subtensor"),
+    /// shown on the working line while the turn streams (agent-flow contract).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<String>,
     /// True until the relay `ACK`s the client's push (S3 faint echo). Client-only.
     #[serde(default)]
     pub pending: bool,
@@ -991,6 +995,31 @@ impl Message {
 
     pub fn is_streaming(&self) -> bool {
         self.status == MessageStatus::Streaming
+    }
+
+    /// The working line's text while this turn streams: the `activity` field,
+    /// else the newest `Working` / `Step` status message (visible or hidden).
+    pub fn current_activity(&self) -> Option<String> {
+        if let Some(a) = self
+            .activity
+            .as_deref()
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+        {
+            return Some(a.to_string());
+        }
+        self.parts
+            .iter()
+            .chain(self.hidden_parts.iter())
+            .rev()
+            .find_map(|p| match p {
+                Part::Status {
+                    code: StatusKind::Working | StatusKind::Step,
+                    message,
+                    ..
+                } if !message.trim().is_empty() => Some(message.trim().to_string()),
+                _ => None,
+            })
     }
 
     /// Open `question` parts of this message, newest last.

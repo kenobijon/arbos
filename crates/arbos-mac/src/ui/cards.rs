@@ -49,14 +49,15 @@ pub fn working_line(
     name: &str,
     picture: Option<Div>,
     queued: bool,
+    activity: Option<&str>,
     theme: &Theme,
     cx: &App,
 ) -> Div {
     let phase = PulseClock::phase(cx, 1100);
-    let text = if queued {
-        format!("{name} is waiting for the machine")
-    } else {
-        format!("{name} is working")
+    let text = match (queued, activity) {
+        (true, _) => format!("{name} is waiting for the machine"),
+        (false, Some(a)) => a.to_string(),
+        (false, None) => format!("{name} is working"),
     };
     div()
         .w_full()
