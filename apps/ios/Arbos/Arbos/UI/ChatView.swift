@@ -205,7 +205,7 @@ struct ChatView: View {
         GeometryReader { geo in
             ZStack(alignment: .top) {
                 theme.bg.ignoresSafeArea()
-                transcript(width: geo.size.width)
+                transcript(width: geo.size.width, height: geo.size.height)
                 headerBlur
                 VStack(spacing: 8) {
                     header
@@ -807,7 +807,7 @@ struct ChatView: View {
 
     // MARK: Transcript
 
-    private func transcript(width: CGFloat) -> some View {
+    private func transcript(width: CGFloat, height: CGFloat) -> some View {
         ScrollViewReader { proxy in
             ScrollView {
                 // VStack (not LazyVStack): a growing vertical TextField resizes the
@@ -862,6 +862,14 @@ struct ChatView: View {
                     Color.clear.frame(height: 28).id("bottom")
                 }
                 .padding(.horizontal, 16)
+                // Short threads: fill the viewport and pin rows to the bottom so
+                // two bubbles cannot float mid-screen (scroll-anchor alone was
+                // centering them on iOS 26). Empty-state copy keeps its own
+                // top padding; tall threads are unchanged.
+                .frame(
+                    minHeight: (visibleRows.isEmpty && !streaming) ? 0 : height,
+                    alignment: .bottom
+                )
             }
             .defaultScrollAnchor(.bottom)
             .scrollDismissesKeyboard(.interactively)
