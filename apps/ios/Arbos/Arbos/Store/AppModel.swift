@@ -1344,11 +1344,15 @@ final class AppModel: ObservableObject {
                 mentions.append(address)
             }
         }
-        // In a DM, carry on with the agent who last spoke when no agent was addressed.
+        // In a DM, carry on with the agent who last spoke when nothing addresses an agent
+        // and the message is not aimed at a person. A person chip / @handle must not also
+        // ping the last agent — otherwise "Message Allan" still wakes bob.
         // In a group, leave the message unaddressed (unless a chip / @agent set one) so the
         // box decision model can choose which agent replies from chat context.
         var reply = replyTo
-        if chat.kind != "group", !mentions.contains(where: { $0.hasPrefix("agent:") }), reply == nil,
+        let addressedPerson = mentions.contains { $0.hasPrefix("user:") }
+        if chat.kind != "group", !mentions.contains(where: { $0.hasPrefix("agent:") }),
+           !addressedPerson, reply == nil,
            let last = messages(of: chatId).last(where: { $0.role == .assistant }) {
             reply = last.id
             if let h = last.senderHandle?.lowercased(),
