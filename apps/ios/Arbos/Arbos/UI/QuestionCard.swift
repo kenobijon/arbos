@@ -100,7 +100,7 @@ struct QuestionCard: View {
         return Button {
             guard open else { return }
             if multi {
-                if !selected.remove(option.id) { selected.insert(option.id) }
+                if selected.remove(option.id) == nil { selected.insert(option.id) }
             } else {
                 answer(ids: [option.id], label: option.label)
             }
