@@ -561,9 +561,25 @@ final class CallManager: NSObject, ObservableObject {
                 let person = CallPerson.parse(metadata: p.metadata) ?? CallPerson.placeholder(identity: identity, name: p.name)
                 let video = p.videoTracks.first { $0.source == .camera }?.track as? VideoTrack
                 return CallTile(id: identity, person: person, isSpeaking: p.isSpeaking,
-                                micOn: p.isMicrophoneEnabled(), cameraOn: p.isCameraEnabled(), videoTrack: video)
+                                micOn: CallManager.remoteMicOn(p), cameraOn: p.isCameraEnabled(), videoTrack: video)
             }
         syncRingback()
+    }
+
+    /// Whether a remote participant's mic should show as on.
+    ///
+    /// LiveKit's `isMicrophoneEnabled()` is false when no mic publication exists
+    /// yet (`nil` → muted). That flashes "Muted" / a slash on every join before
+    /// the track arrives, and stays wrong if mute metadata desyncs while audio
+    /// (and speaking) still flow. Prefer real audio pubs + speaking.
+    private static func remoteMicOn(_ p: RemoteParticipant) -> Bool {
+        if p.isSpeaking { return true }
+        let audio = p.audioTracks
+        guard !audio.isEmpty else { return true }
+        if let mic = audio.first(where: { $0.source == .microphone }) {
+            return !mic.isMuted
+        }
+        return audio.contains { !$0.isMuted }
     }
 
     // MARK: Outgoing ringback
@@ -940,6 +956,20 @@ extension CallManager: CXProviderDelegate {
 
     nonisolated func provider(_ provider: CXProvider, perform action: CXSetMutedCallAction) {
         Task { @MainActor in
+            // CallKit often fires CXSetMutedCallAction(true) during CXStartCallAction
+            // / audio-session setup on recent iOS (and can flap for a moment after).
+            // Applying that publishes us as muted to everyone — remotes see "Muted"
+            // while our capture may still be live. Only mirror mute once connected,
+            // and ignore a mute=true in the first 2s unless we already muted ourselves.
+            guard self.phase == .connected || self.phase == .reconnecting else {
+                action.fulfill()
+                return
+            }
+            if action.isMuted, !self.muted,
+               let at = self.connectedAt, Date().timeIntervalSince(at) < 2 {
+                action.fulfill()
+                return
+            }
             if self.muted != action.isMuted {
                 self.muted = action.isMuted
                 try? await self.room.localParticipant.setMicrophone(enabled: !self.muted)
