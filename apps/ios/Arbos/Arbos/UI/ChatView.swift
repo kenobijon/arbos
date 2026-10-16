@@ -109,15 +109,18 @@ struct ChatView: View {
         return name
     }
 
-    /// Who the next people-chat message is for — chip pick, reply-to, or the agent who last spoke.
-    /// Uses the last assistant turn (not only when it is the absolute last row) so a follow-up
-    /// without `@` still names — and reaches — that agent while you wait for their reply.
+    /// Who the next people-chat message is for — chip pick, reply-to, or (in a DM only) the
+    /// agent who last spoke. Groups leave the addressee unset so the decision model on the box
+    /// can choose which agent replies, or none.
     private var effectiveTalkTo: String? {
         if let talkTo { return talkTo }
         if let r = replyTo, r.role == .assistant, let member = agentMember(for: r) {
             return member.member
         }
-        if let last = messages.last(where: { $0.role == .assistant }), let member = agentMember(for: last) {
+        // DMs keep the last-agent follow-up; groups do not auto-address anyone.
+        if people?.kind != "group",
+           let last = messages.last(where: { $0.role == .assistant }),
+           let member = agentMember(for: last) {
             return member.member
         }
         return nil

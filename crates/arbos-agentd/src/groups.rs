@@ -1,10 +1,11 @@
 //! Group chats on the box (F6, design D69 / S15). The host project's box owns the group chat
-//! doc: every user message there is fanned out by the relay to the other participants as a
-//! `group_message` push, their answers come back the same way and land in the host chat as
-//! `role: project` messages. A participant box receives group traffic in its own "Projects ⇄"
-//! tab (`kind: projects`), runs a normal turn, and posts the prose reply back through the relay.
-//! Agents address one another only with the main-session `group_send` tool (`mcp.rs` refuses
-//! subagents); the relay applies the D37 guards (trace, depth, cycle, rate).
+//! doc: a user message there is fanned out by the relay to the participants the decision model
+//! picks (none, one, several, or all) as a `group_message` push; their answers come back the
+//! same way and land in the host chat as `role: project` messages. A participant box receives
+//! group traffic in its own "Projects ⇄" tab (`kind: projects`), runs a normal turn, and posts
+//! the prose reply back through the relay. Agents address one another only with the main-session
+//! `group_send` tool (`mcp.rs` refuses subagents); the relay applies the D37 guards (trace,
+//! depth, cycle, rate).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -21,6 +22,14 @@ use crate::sync::SharedHost;
 /// Title the relay gives the system tab that collects group traffic on a participant box.
 pub const PROJECTS_TAB_TITLE: &str = "Projects ⇄";
 const PRELUDE_RECENT_MAX: usize = 12;
+
+const GROUP_RESPOND_SYSTEM: &str = r#"You are the reply router for a group chat with the user and several project agents.
+Decide which agents (if any) should reply to the user's message. You may pick none, one, several, or all.
+
+Pick an agent when the message asks for their help or fits their name/role. Pick none when the user is only noting something that needs no agent reply. Pick several when more than one should speak.
+
+Output: {"responders":["project_id",...],"reason":"one line","confidence":0-1}
+Use the project ids from the participant list. An empty responders list means nobody replies."#;
 
 #[derive(Default)]
 pub struct GroupState {
@@ -43,6 +52,10 @@ pub struct GroupTurn {
     pub prelude: String,
     /// Host side, a user message: the text to fan out to the other participants.
     pub fan_out_user_text: Option<String>,
+    /// Participant project ids (host included), for the reply-router decision.
+    pub participant_ids: Vec<String>,
+    /// `[{id, name}, …]` for the decision prompt.
+    pub participants_detail: Vec<Value>,
 }
 
 fn str_field(v: &Value, k: &str) -> Option<String> {
@@ -79,6 +92,13 @@ fn names(participants: &[Value], host: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn participant_ids(participants: &[Value]) -> Vec<String> {
+    participants
+        .iter()
+        .filter_map(|p| p.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect()
 }
 
 /// Project messages since the previous user message, oldest first, for the host's prelude.
@@ -175,6 +195,7 @@ impl Agent {
                 sender_label(&participants, &from),
                 self.cfg.project_name,
             );
+            let ids = participant_ids(&participants);
             return Some(GroupTurn {
                 host_project_id,
                 group_chat_id,
@@ -192,6 +213,8 @@ impl Agent {
                     .unwrap_or_default(),
                 prelude,
                 fan_out_user_text: None,
+                participant_ids: ids,
+                participants_detail: participants,
             });
         }
         if self.chat_kind(chat_id).as_deref() != Some("group") {
@@ -227,6 +250,7 @@ impl Agent {
         }
         prelude.push('\n');
         let is_user = msg.role == "user" && from == "user";
+        let ids = participant_ids(&participants);
         Some(GroupTurn {
             host_project_id: me,
             group_chat_id: chat_id.to_owned(),
@@ -235,6 +259,8 @@ impl Agent {
             trace: Vec::new(),
             prelude,
             fan_out_user_text: is_user.then(|| msg.text()),
+            participant_ids: ids,
+            participants_detail: participants,
         })
     }
 
@@ -274,22 +300,130 @@ impl Agent {
         Ok(v)
     }
 
-    /// Host side: the user's message goes to every other participant (their agents answer in
-    /// parallel with the host's own turn).
-    pub fn spawn_group_fan_out(self: &Arc<Self>, gt: &GroupTurn, text: &str) {
+    /// Host side: fan the user's message to `targets` (project ids). `None` means every other
+    /// participant; an empty list sends nothing.
+    pub fn spawn_group_fan_out(
+        self: &Arc<Self>,
+        gt: &GroupTurn,
+        text: &str,
+        targets: Option<Vec<String>>,
+    ) {
         let agent = self.clone();
         let gt = gt.clone();
         let text = text.to_owned();
         tokio::spawn(async move {
-            match agent.relay_send(&gt, "user", &text, None).await {
-                Ok(v) => {
-                    tracing::info!(group = %gt.group_chat_id, result = %v, "group: user message fanned out")
-                }
-                Err(e) => {
-                    tracing::warn!(group = %gt.group_chat_id, error = %e, "group: fan-out failed")
+            let sends: Vec<Option<String>> = match targets {
+                None => vec![None],
+                Some(list) if list.is_empty() => return,
+                Some(list) => list.into_iter().map(Some).collect(),
+            };
+            for to in sends {
+                match agent.relay_send(&gt, "user", &text, to.as_deref()).await {
+                    Ok(v) => {
+                        tracing::info!(
+                            group = %gt.group_chat_id,
+                            to = to.as_deref().unwrap_or("*"),
+                            result = %v,
+                            "group: user message fanned out"
+                        )
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            group = %gt.group_chat_id,
+                            to = to.as_deref().unwrap_or("*"),
+                            error = %e,
+                            "group: fan-out failed"
+                        )
+                    }
                 }
             }
         });
+    }
+
+    /// Decision model: which participant project ids should answer this user message.
+    /// On failure, falls open to every participant (previous behaviour).
+    pub async fn decide_group_responders(&self, gt: &GroupTurn, text: &str) -> Vec<String> {
+        let known = &gt.participant_ids;
+        if known.is_empty() {
+            return vec![self.cfg.project_id.clone()];
+        }
+        let text: String = text.chars().take(4000).collect();
+        let roster: Vec<Value> = gt
+            .participants_detail
+            .iter()
+            .filter_map(|p| {
+                let id = p.get("id").and_then(Value::as_str)?;
+                let name = p.get("name").and_then(Value::as_str).unwrap_or(id);
+                Some(json!({
+                    "project_id": id,
+                    "name": name,
+                    "host": id == gt.host_project_id,
+                }))
+            })
+            .collect();
+        let user = json!({
+            "group_chat_id": gt.group_chat_id,
+            "host_project_id": gt.host_project_id,
+            "participants": roster,
+            "text": text,
+        })
+        .to_string();
+        let model = self.settings.models.read().await.decision.id.clone();
+        let (v, ms) = match self
+            .llm
+            .complete_json(&model, GROUP_RESPOND_SYSTEM, &user, 600)
+            .await
+        {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::warn!(group = %gt.group_chat_id, error = %e, "group: respond decision failed");
+                let _ = self.store.log_decision(
+                    "respond",
+                    Some(&gt.group_chat_id),
+                    Some(&json!({ "error": e.to_string() })),
+                    Some("ALL"),
+                    known,
+                    Some("decision model failed; fan out to all"),
+                    None,
+                    Some(&model),
+                    None,
+                );
+                return known.clone();
+            }
+        };
+        let mut picked: Vec<String> = v
+            .get("responders")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_owned))
+                    .filter(|id| known.iter().any(|k| k == id))
+                    .collect()
+            })
+            .unwrap_or_default();
+        // Dedup while keeping order.
+        let mut seen = std::collections::HashSet::new();
+        picked.retain(|id| seen.insert(id.clone()));
+        let reason = v.get("reason").and_then(Value::as_str);
+        let confidence = v.get("confidence").and_then(Value::as_f64);
+        let _ = self.store.log_decision(
+            "respond",
+            Some(&gt.group_chat_id),
+            Some(&v),
+            Some(if picked.is_empty() { "NONE" } else { "REPLY" }),
+            &picked,
+            reason,
+            confidence,
+            Some(&model),
+            Some(ms),
+        );
+        tracing::info!(
+            group = %gt.group_chat_id,
+            ?picked,
+            reason = reason.unwrap_or(""),
+            "group: respond decision"
+        );
+        picked
     }
 
     /// The `group_send` MCP tool: the main agent's words to the other participants of the group

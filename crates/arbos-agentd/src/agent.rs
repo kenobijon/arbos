@@ -717,8 +717,8 @@ impl Agent {
         let Some(host) = self.sync.host(chat_id).await else {
             return Err(anyhow!("no room for chat {chat_id}"));
         };
-        // People chats route by mention: a message not for this agent is left pending for
-        // whichever agent (if any) it is for; the humans' own `send` commands are theirs.
+        // People chats route by mention (or, in a group, the decision model): a message not
+        // for this agent is left pending for whoever it is for; humans' own sends are theirs.
         if cmd.kind == "send" && self.people.is_people_chat(chat_id) {
             let msg_id = cmd
                 .payload
@@ -1037,13 +1037,44 @@ impl Agent {
         if let Some(note) = channel_note {
             prompt_text = format!("{note}\n\n{prompt_text}");
         }
-        // Group chats (F6): the agent is told which room it speaks in; a user message in a
-        // hosted group also goes out to the other participants.
+        // Group chats (F6): the decision model picks which agents reply (none / one / some /
+        // all); fan-out goes only to the chosen others, and the host skips its turn when not
+        // selected.
+        let mut skip_host_group_turn = false;
         if let Some(gt) = self.group_turn_context(chat_id, host, &user_msg_id).await {
             if let Some(text) = &gt.fan_out_user_text {
-                self.spawn_group_fan_out(&gt, text);
+                let responders = self.decide_group_responders(&gt, text).await;
+                let host_id = self.cfg.project_id.as_str();
+                let others: Vec<String> = responders
+                    .iter()
+                    .filter(|id| id.as_str() != host_id)
+                    .cloned()
+                    .collect();
+                let all_others: Vec<String> = gt
+                    .participant_ids
+                    .iter()
+                    .filter(|id| id.as_str() != host_id)
+                    .cloned()
+                    .collect();
+                let targets = if others.is_empty() {
+                    Some(Vec::new())
+                } else if others.len() == all_others.len() {
+                    None
+                } else {
+                    Some(others)
+                };
+                self.spawn_group_fan_out(&gt, text, targets);
+                if !responders.iter().any(|id| id == host_id) {
+                    skip_host_group_turn = true;
+                }
             }
-            prompt_text = format!("{}{prompt_text}", gt.prelude);
+            if !skip_host_group_turn {
+                prompt_text = format!("{}{prompt_text}", gt.prelude);
+            }
+        }
+        if skip_host_group_turn {
+            self.people.set_current(None);
+            return Ok(());
         }
         // People chats (D72): who is asking, in what role; the reply is attributed to them.
         if let Some(prelude) = self.people_turn_context(chat_id, host, &user_msg_id).await {

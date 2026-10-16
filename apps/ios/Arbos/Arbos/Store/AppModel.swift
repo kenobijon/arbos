@@ -1119,10 +1119,11 @@ final class AppModel: ObservableObject {
                 mentions = [address]
             }
         }
-        // Carry on with the agent who last spoke when nothing (and nobody) was addressed —
-        // even if a later user line is already in the transcript (follow-up without `@`).
+        // In a DM, carry on with the agent who last spoke when nothing was addressed.
+        // In a group, leave the message unaddressed so the box decision model can choose
+        // which agent replies (or none) instead of always pinging the last speaker.
         var reply = replyTo
-        if mentions.isEmpty && reply == nil,
+        if chat.kind != "group", mentions.isEmpty && reply == nil,
            let last = messages(of: chatId).last(where: { $0.role == .assistant }) {
             reply = last.id
             if let h = last.senderHandle?.lowercased(),

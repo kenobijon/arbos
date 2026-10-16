@@ -5,9 +5,12 @@
 //! Mention to reply (default): a human message is for this agent when its `mentions` carry
 //! `agent:<project>`, or the text says `@<slug>` (the Project's name as a handle), or it replies to
 //! one of this agent's messages, or it says `@arbos` and this is the only agent in the chat; the
-//! owner can switch the agent to "every message". Each human message is labelled with the author's
-//! handle and role (`owner` | `guest`) in the prompt — attribution only; in the permissive v1 a
-//! guest gets everything the owner gets. The owner's credits pay; audit lines carry `asked_by`.
+//! owner can switch the agent to "every message". In a people **group** (`kind: group`), when
+//! nothing addresses this agent, the decision model chooses whether it should still reply (or stay
+//! quiet) so agents do not always answer every line. Each human message is labelled with the
+//! author's handle and role (`owner` | `guest`) in the prompt — attribution only; in the
+//! permissive v1 a guest gets everything the owner gets. The owner's credits pay; audit lines
+//! carry `asked_by`.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -24,6 +27,14 @@ use crate::sync::SharedHost;
 /// The relay's project slot for people rooms.
 pub const PEOPLE_PROJECT: &str = "people";
 
+const RESPOND_SYSTEM: &str = r#"You are the reply gate for one agent in a group chat with people and possibly other agents.
+Decide whether THIS agent should reply to the latest human message.
+
+Reply when the message asks for help this agent can give, is aimed at agents in general, continues work this agent was doing, or clearly needs an agent and this one is a fair choice.
+Stay quiet when people are talking to each other, the message is for another agent, or no agent reply is needed.
+
+Output: {"respond":bool,"reason":"one line","confidence":0-1}"#;
+
 #[derive(Debug, Clone, Default)]
 pub struct PeopleChatInfo {
     pub members: Vec<Value>,
@@ -33,6 +44,8 @@ pub struct PeopleChatInfo {
     pub owner_user: String,
     /// `@slug` this agent answers to here.
     pub slug: String,
+    /// `dm` or `group` from the relay.
+    pub kind: String,
 }
 
 impl PeopleChatInfo {
@@ -45,6 +58,22 @@ impl PeopleChatInfo {
                     .is_some_and(|s| s.starts_with("agent:"))
             })
             .count()
+    }
+
+    fn is_group(&self) -> bool {
+        self.kind == "group" || self.agents() > 1
+    }
+
+    fn agent_labels(&self) -> Vec<String> {
+        self.members
+            .iter()
+            .filter_map(|m| {
+                let member = m["member"].as_str()?;
+                let id = member.strip_prefix("agent:")?;
+                let handle = m["handle"].as_str().unwrap_or(id);
+                Some(format!("@{handle} ({id})"))
+            })
+            .collect()
     }
 
     fn handle_of(&self, user_id: &str) -> String {
@@ -194,6 +223,11 @@ impl Agent {
                     .and_then(|m| m["handle"].as_str())
                     .unwrap_or_default()
                     .to_owned(),
+                kind: c
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .unwrap_or("dm")
+                    .to_owned(),
                 members,
             };
             let fresh = self
@@ -283,36 +317,117 @@ impl Agent {
     }
 
     /// Should this `send` command drive a turn here? People chats route by mention; a message
-    /// not for this agent is left alone (its command stays pending for whoever it is for).
+    /// not for this agent is left alone (its command stays pending for whoever it is for). In a
+    /// group, an unaddressed message still asks the decision model whether this agent should reply.
     pub async fn people_wants(&self, chat_id: &str, host: &SharedHost, user_msg_id: &str) -> bool {
         let Some(info) = self.people.info(chat_id) else {
             return true;
         };
-        let h = host.lock().await;
-        let Some(msg) = h.doc.message(user_msg_id) else {
-            return false;
+        let (msg, replied_to_mine) = {
+            let h = host.lock().await;
+            let Some(msg) = h.doc.message(user_msg_id) else {
+                return false;
+            };
+            let me = format!("agent:{}", self.cfg.project_id);
+            let replied_to_mine = msg
+                .rest
+                .get("replyTo")
+                .and_then(Value::as_str)
+                .and_then(|id| h.doc.message(id))
+                .is_some_and(|m| {
+                    m.rest.get("sender").and_then(Value::as_str) == Some(me.as_str())
+                        || (m.role == "assistant"
+                            && m.rest.get("deviceId").and_then(Value::as_str)
+                                == Some(self.cfg.device_id.as_str()))
+                });
+            (msg, replied_to_mine)
         };
         let every = info.settings["reply_policy"].as_str() == Some("every_message");
-        let me = format!("agent:{}", self.cfg.project_id);
-        let replied_to_mine = msg
-            .rest
-            .get("replyTo")
-            .and_then(Value::as_str)
-            .and_then(|id| h.doc.message(id))
-            .is_some_and(|m| {
-                m.rest.get("sender").and_then(Value::as_str) == Some(me.as_str())
-                    || (m.role == "assistant"
-                        && m.rest.get("deviceId").and_then(Value::as_str)
-                            == Some(self.cfg.device_id.as_str()))
-            });
-        addressed(
+        if addressed(
             &msg,
             &self.cfg.project_id,
             &info.slug,
             info.agents() == 1,
             every,
             replied_to_mine,
-        )
+        ) {
+            return true;
+        }
+        if !info.is_group() {
+            return false;
+        }
+        self.people_decide_respond(chat_id, &info, &msg).await
+    }
+
+    /// Decision-model gate for an unaddressed human message in a people group.
+    async fn people_decide_respond(
+        &self,
+        chat_id: &str,
+        info: &PeopleChatInfo,
+        msg: &MessageView,
+    ) -> bool {
+        let text: String = msg.text().chars().take(4000).collect();
+        if text.trim().is_empty() {
+            return false;
+        }
+        let asker = msg
+            .rest
+            .get("senderHandle")
+            .and_then(Value::as_str)
+            .unwrap_or("someone");
+        let user = json!({
+            "chat_id": chat_id,
+            "kind": info.kind,
+            "this_agent": { "project_id": self.cfg.project_id, "slug": info.slug },
+            "agents_here": info.agent_labels(),
+            "from": asker,
+            "text": text,
+        })
+        .to_string();
+        let model = self.settings.models.read().await.decision.id.clone();
+        let (v, ms) = match self
+            .llm
+            .complete_json(&model, RESPOND_SYSTEM, &user, 400)
+            .await
+        {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::warn!(chat = %chat_id, error = %e, "people: respond decision failed");
+                let _ = self.store.log_decision(
+                    "respond",
+                    Some(&msg.id),
+                    Some(&json!({ "error": e.to_string() })),
+                    Some("SKIP"),
+                    &[],
+                    Some("decision model failed"),
+                    None,
+                    Some(&model),
+                    None,
+                );
+                return false;
+            }
+        };
+        let respond = v.get("respond").and_then(Value::as_bool).unwrap_or(false);
+        let reason = v.get("reason").and_then(Value::as_str);
+        let confidence = v.get("confidence").and_then(Value::as_f64);
+        let _ = self.store.log_decision(
+            "respond",
+            Some(&msg.id),
+            Some(&v),
+            Some(if respond { "REPLY" } else { "SKIP" }),
+            &[],
+            reason,
+            confidence,
+            Some(&model),
+            Some(ms),
+        );
+        tracing::info!(
+            chat = %chat_id,
+            respond,
+            reason = reason.unwrap_or(""),
+            "people: respond decision"
+        );
+        respond
     }
 
     /// Prelude for the prompt and the asker for attribution, when `chat_id` is a people chat.
@@ -378,7 +493,7 @@ impl Agent {
             info.owner_handle(),
             self.cfg.project_id,
             if others > 0 {
-                format!("; {others} other agent(s) are here and answer only when mentioned")
+                format!("; {others} other agent(s) are here — they answer when mentioned or when the reply gate picks them")
             } else {
                 String::new()
             },
