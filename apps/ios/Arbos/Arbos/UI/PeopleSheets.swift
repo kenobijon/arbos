@@ -462,7 +462,6 @@ struct MembersSheet: View {
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
     let chatId: String
-    @State private var showAddPerson = false
     @State private var showAddAgent = false
     @State private var confirmDelete = false
     @State private var confirmLeave = false
@@ -492,7 +491,12 @@ struct MembersSheet: View {
                                 }
                             }
                         }
-                        Button { showAddPerson = true } label: {
+                        // Push (not a nested sheet): a sheet-in-sheet often fails to present on iOS.
+                        NavigationLink {
+                            PersonPicker(excludeIds: memberIds) { person in
+                                model.addPerson(chatId: chatId, handle: person.handle)
+                            }
+                        } label: {
                             Label("Add person", systemImage: "plus.circle").foregroundStyle(theme.text)
                         }
                     } header: { Text("People") } footer: { Text(chat.lockLabel) }
@@ -543,13 +547,6 @@ struct MembersSheet: View {
             .navigationTitle("Members")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
-            .sheet(isPresented: $showAddPerson) {
-                PersonPicker(excludeIds: memberIds) { person in
-                    model.addPerson(chatId: chatId, handle: person.handle)
-                }
-                .environmentObject(model)
-                .environment(\.theme, theme)
-            }
             .sheet(isPresented: $showAddAgent) {
                 AgentPicker(projects: myProjects) { p in
                     model.addAgent(chatId: chatId, projectId: p.id)
@@ -568,6 +565,7 @@ struct MembersSheet: View {
 }
 
 /// Pick a person (directory + GitHub search) who is not already in the chat.
+/// Pushed onto Members (same pattern as New agent / New group on New Message).
 struct PersonPicker: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -597,47 +595,55 @@ struct PersonPicker: View {
     }
 
     var body: some View {
-        NavigationStack {
-            List {
-                Section {
-                    HStack(spacing: 8) {
-                        Image(systemName: "magnifyingglass").foregroundStyle(theme.muted)
-                        TextField("", text: $query, prompt: Text("Search people").foregroundStyle(theme.placeholder))
-                            .textInputAutocapitalization(.never).autocorrectionDisabled()
-                            .foregroundStyle(theme.text)
-                        if searching { ProgressView().controlSize(.small).tint(theme.muted) }
-                    }
+        List {
+            Section {
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass").foregroundStyle(theme.muted)
+                    TextField("", text: $query, prompt: Text("Search people").foregroundStyle(theme.placeholder))
+                        .textInputAutocapitalization(.never).autocorrectionDisabled()
+                        .foregroundStyle(theme.text)
+                    if searching { ProgressView().controlSize(.small).tint(theme.muted) }
                 }
-                .listRowBackground(theme.card)
+            }
+            .listRowBackground(theme.card)
 
-                Section {
-                    ForEach(people) { p in
+            Section {
+                ForEach(people) { p in
+                    Button {
+                        onPick(p)
+                        dismiss()
+                    } label: {
+                        PersonRow(person: p)
+                    }
+                    .buttonStyle(.plain)
+                }
+                if people.isEmpty {
+                    Text(trimmed.isEmpty
+                         ? "No one else on Arbos yet. Search a GitHub username."
+                         : "No one matches @\(trimmed).")
+                        .font(.system(size: Theme.small)).foregroundStyle(theme.muted)
+                    if trimmed.count >= 2, !searching {
                         Button {
-                            onPick(p)
+                            onPick(Person(id: "github:\(trimmed.lowercased())", handle: trimmed, avatarUrl: nil, name: nil, status: "github"))
                             dismiss()
                         } label: {
-                            PersonRow(person: p)
+                            Text("Invite @\(trimmed)")
+                                .font(.system(size: Theme.small, weight: .semibold))
+                                .foregroundStyle(theme.text)
                         }
-                        .buttonStyle(.plain)
-                    }
-                    if people.isEmpty {
-                        Text(trimmed.isEmpty
-                             ? "No one else on Arbos yet. Search a GitHub username."
-                             : "No one matches @\(trimmed).")
-                            .font(.system(size: Theme.small)).foregroundStyle(theme.muted)
                     }
                 }
-                .listRowBackground(theme.card)
             }
-            .scrollContentBackground(.hidden)
-            .background(theme.bg)
-            .navigationTitle("Add person")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .topBarLeading) { Button("Cancel") { dismiss() } } }
-            .task { await model.loadDirectory() }
-            .onChange(of: query) { _, _ in search() }
+            .listRowBackground(theme.card)
         }
-        .presentationDetents([.medium, .large])
+        .scrollContentBackground(.hidden)
+        .background(theme.bg)
+        .navigationTitle("Add person")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbarBackground(theme.bg, for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
+        .task { await model.loadDirectory() }
+        .onChange(of: query) { _, _ in search() }
     }
 
     private func search() {
