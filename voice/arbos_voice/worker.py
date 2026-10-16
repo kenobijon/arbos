@@ -68,6 +68,9 @@ from .relay import EventBatcher, Relay, RelayError, ToolPending
 log = logging.getLogger("arbos-voice")
 
 ATTENTION_WINDOW_S = 20.0
+# Until the owner's machine runs an agentd with the voice link (image roll), tools are off.
+NO_LINK_LINE = "I can't run that for you yet on this call."
+
 GOODBYE = {
     "call_cap": "I've hit the spending cap for this call, so I'll drop off now. Everything we said is in the chat.",
     "voice_daily_cap": "I've reached today's voice budget, so I'll leave the call. I'm still here in the text chat.",
@@ -275,6 +278,12 @@ class VoiceCall:
         if recent:
             extra += "\n\n# Last lines of this chat\n" + "\n".join(f"- {r.get('from')}: {r.get('text')}" for r in recent[-12:])
             self.state.window = [{"from": r.get("from"), "text": r.get("text")} for r in recent[-8:]]
+        if self.info and not self.info.get("box_online", True):
+            extra += (
+                "\n\n# Tools on this call\nYour computer is not linked to this call yet, so ask_agent will fail. "
+                f"When someone asks you to do or look up something, say \"{NO_LINK_LINE}\" and that you can do it in the text chat. "
+                "Answer everything else from what you know."
+            )
         return system_prompt(
             name=self.agent_name,
             group=self.state.mode == "group",
@@ -288,7 +297,7 @@ class VoiceCall:
                 type="server_vad",
                 threshold=0.5,
                 prefix_padding_ms=200,
-                silence_duration_ms=350,
+                silence_duration_ms=300,
                 create_response=True,
                 interrupt_response=True,
             )
@@ -687,7 +696,7 @@ class VoiceCall:
             self.state.open_work -= 1
             self.event("tool", name="ask_agent", status="failed", request_id=request_id, error=str(e.body)[:300], ms=int((time.monotonic() - t0) * 1000))
             if e.status == 503:
-                return "I can't reach my computer right now, so I can't do that. Say so briefly."
+                return NO_LINK_LINE + " Say exactly that, briefly, and offer to do it in the text chat."
             if e.status == 402:
                 return "Spending is capped right now, so I can't run that. Say so briefly."
             return f"The request failed: {str(e.body)[:200]}. Say so briefly."

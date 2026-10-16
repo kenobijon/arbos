@@ -49,6 +49,16 @@ SPEECH_RMS = 350  # int16 RMS above which the agent "is speaking"
 QUIET_S = 1.2
 
 
+def voiced_bounds(pcm: np.ndarray, thresh: float = 300.0) -> tuple[float, float]:
+    """(first, last) voiced second of a clip, so timings start at the first word, not the file."""
+    n = max(1, len(pcm) // FRAME_SAMPLES)
+    rms = [float(np.sqrt(np.mean(pcm[i * FRAME_SAMPLES : (i + 1) * FRAME_SAMPLES].astype(np.float32) ** 2))) for i in range(n)]
+    voiced = [i for i, r in enumerate(rms) if r > thresh]
+    if not voiced:
+        return 0.0, len(pcm) / SAMPLE_RATE
+    return voiced[0] * FRAME_MS / 1000, (voiced[-1] + 1) * FRAME_MS / 1000
+
+
 def wav_write(path: Path, pcm: np.ndarray, rate: int = SAMPLE_RATE) -> None:
     with wave.open(str(path), "wb") as w:
         w.setnchannels(1)
@@ -92,6 +102,7 @@ class Participant:
         self.agent_last_audio_at = 0.0
         self.agent_started_at = 0.0
         self.our_speech_ended_at: float | None = None
+        self.our_speech_onset_at: float | None = None
         self.ttfa_ms: list[int] = []
         self.barge_ms: list[int] = []
         self.call: dict = {}
@@ -165,8 +176,10 @@ class Participant:
 
     async def say(self, text: str, *, record_end: bool = True) -> None:
         pcm = await tts(text, self.args.voice, Path(self.args.cache), os.environ["OPENAI_API_KEY"])
-        self.event("say", text=text, seconds=round(len(pcm) / SAMPLE_RATE, 2))
+        onset, offset = voiced_bounds(pcm)
+        self.event("say", text=text, seconds=round(len(pcm) / SAMPLE_RATE, 2), onset=round(onset, 2), offset=round(offset, 2))
         t_start = self.now()
+        self.our_speech_onset_at = t_start + onset
         start = time.monotonic()
         for n, i in enumerate(range(0, len(pcm), FRAME_SAMPLES)):
             chunk = pcm[i : i + FRAME_SAMPLES]
@@ -182,7 +195,8 @@ class Participant:
                 await asyncio.sleep(delay)
         self.event("said", seconds=round(self.now() - t_start, 2))
         if record_end:
-            self.our_speech_ended_at = self.now()
+            # End of speech = the last voiced frame, as a person would hear it.
+            self.our_speech_ended_at = t_start + offset
 
     async def wait_agent_turn(self, max_s: float = 25.0, quiet_s: float = QUIET_S) -> None:
         """Wait until the agent spoke and has been quiet for `quiet_s`."""
@@ -213,22 +227,25 @@ class Participant:
             self.event("barge_skipped")
             return
         await asyncio.sleep(after_ms / 1000)
-        t_barge = self.now()
         self.event("barge_start")
         task = asyncio.create_task(self.say(text))
-        # When does the agent's audio stop after we started talking?
+        while self.our_speech_onset_at is None or self.our_speech_onset_at > self.now():
+            await asyncio.sleep(0.005)
+            if task.done():
+                break
+        onset = self.our_speech_onset_at or self.now()
+        # When does the agent's audio stop after our first word?
         cut: int | None = None
         while not task.done():
-            if cut is None and self.now() - self.agent_last_audio_at > 0.25 and self.agent_last_audio_at >= t_barge - 0.3:
-                cut = int((self.agent_last_audio_at - t_barge) * 1000)
+            if cut is None and self.now() - self.agent_last_audio_at > 0.25 and self.agent_last_audio_at >= onset - 0.3:
+                cut = int((self.agent_last_audio_at - onset) * 1000)
             await asyncio.sleep(0.01)
         await task
-        if cut is None:
-            if self.agent_last_audio_at >= t_barge:
-                cut = int((self.agent_last_audio_at - t_barge) * 1000)
+        if cut is None and self.agent_last_audio_at >= onset - 0.3:
+            cut = int((self.agent_last_audio_at - onset) * 1000)
         if cut is not None:
             self.barge_ms.append(max(0, cut))
-            self.event("barge_cut", cut_ms=max(0, cut))
+            self.event("barge_cut", cut_ms=max(0, cut), onset_wall=int((time.time() - (self.now() - onset)) * 1000))
 
     async def run(self) -> None:
         a = self.args
