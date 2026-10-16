@@ -635,6 +635,10 @@ struct FileCard: View {
 }
 
 /// Voice memo bubble: play/pause, a static waveform, duration.
+/// The whole chip is the control (waveform and timer included) — same idea as
+/// `FileCard`. Audio is fetched with `URLSession` then played via
+/// `AVAudioPlayer` so auth and the post-record `AVAudioSession` work;
+/// streaming the blob through `AVPlayer` left the chip stuck on pause at `0:00`.
 struct VoiceMemoBubble: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -645,32 +649,32 @@ struct VoiceMemoBubble: View {
     @StateObject private var player = MemoPlayer()
 
     var body: some View {
-        HStack(spacing: 10) {
-            Button {
-                if let ref = blobRef, let url = model.blobURL(projectId: projectId, key: ref) {
-                    player.toggle(url: url, headers: model.authHeaders)
-                }
-            } label: {
+        Button {
+            guard let ref = blobRef, let url = model.blobURL(projectId: projectId, key: ref) else { return }
+            player.toggle(url: url, headers: model.authHeaders)
+        } label: {
+            HStack(spacing: 10) {
                 Circle().fill(theme.primary).frame(width: 32, height: 32)
                     .overlay(Image(systemName: player.playing ? "pause.fill" : "play.fill").font(.system(size: 13, weight: .bold)).foregroundStyle(theme.onPrimary).offset(x: player.playing ? 0 : 1))
-            }
-            .buttonStyle(.plain)
-            HStack(spacing: 2) {
-                ForEach(0..<22, id: \.self) { i in
-                    let played: Bool = Double(i) / 22.0 < player.progress
-                    let barHeight: CGFloat = 6 + CGFloat((i * 7) % 13)
-                    Capsule()
-                        .fill((fromUser ? theme.userText : theme.text).opacity(played ? 1 : 0.35))
-                        .frame(width: 3, height: barHeight)
+                HStack(spacing: 2) {
+                    ForEach(0..<22, id: \.self) { i in
+                        let played: Bool = Double(i) / 22.0 < player.progress
+                        let barHeight: CGFloat = 6 + CGFloat((i * 7) % 13)
+                        Capsule()
+                            .fill((fromUser ? theme.userText : theme.text).opacity(played ? 1 : 0.35))
+                            .frame(width: 3, height: barHeight)
+                    }
                 }
+                Text(player.durationLabel)
+                    .font(.system(size: Theme.tiny, design: .monospaced))
+                    .foregroundStyle(fromUser ? theme.userText.opacity(0.8) : theme.muted)
             }
-            Text(player.durationLabel)
-                .font(.system(size: Theme.tiny, design: .monospaced))
-                .foregroundStyle(fromUser ? theme.userText.opacity(0.8) : theme.muted)
+            .padding(.horizontal, Theme.bubbleHPad)
+            .padding(.vertical, Theme.bubbleVPad)
+            .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(fromUser ? theme.bubbleUser : theme.bubbleAssistant))
         }
-        .padding(.horizontal, Theme.bubbleHPad)
-        .padding(.vertical, Theme.bubbleVPad)
-        .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(fromUser ? theme.bubbleUser : theme.bubbleAssistant))
+        .buttonStyle(.plain)
+        .disabled(blobRef == nil)
         .onAppear {
             if let ref = blobRef, let url = model.blobURL(projectId: projectId, key: ref) {
                 player.loadDuration(url: url, headers: model.authHeaders)
@@ -684,58 +688,130 @@ final class MemoPlayer: ObservableObject {
     @Published var playing = false
     @Published var progress: Double = 0
     @Published var durationLabel = "0:00"
-    private var player: AVPlayer?
-    private var timeObserver: Any?
+    private var audio: AVAudioPlayer?
+    private var tick: Timer?
     private var totalSeconds: Double = 0
+    private var localData: Data?
+    private var fetchTask: Task<Void, Never>?
 
     /// Resolve the memo length as soon as the bubble appears (not only on play).
     /// Remote `AVURLAsset` often returns no duration for m4a until the whole file is
     /// buffered (moov at the end), so download then probe with `AVAudioPlayer`.
     func loadDuration(url: URL, headers: [String: String]) {
-        guard totalSeconds <= 0 else { return }
-        Task {
-            var req = URLRequest(url: url)
-            for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
-            guard let (data, response) = try? await URLSession.shared.data(for: req),
-                  let http = response as? HTTPURLResponse, (200..<400).contains(http.statusCode),
-                  !data.isEmpty,
-                  let audio = try? AVAudioPlayer(data: data) else { return }
-            let d = audio.duration
-            guard d.isFinite, d > 0 else { return }
-            totalSeconds = d
-            if !playing { durationLabel = Self.format(d) }
-        }
+        guard totalSeconds <= 0, localData == nil else { return }
+        fetchTask?.cancel()
+        fetchTask = Task { _ = await ensureLocal(url: url, headers: headers) }
     }
 
     func toggle(url: URL, headers: [String: String]) {
-        if let player {
-            if playing {
-                player.pause(); playing = false
+        if let audio {
+            if audio.isPlaying {
+                audio.pause()
+                playing = false
+                stopTick()
                 if totalSeconds > 0 { durationLabel = Self.format(totalSeconds) }
             } else {
-                player.play(); playing = true
+                Self.activatePlayback()
+                audio.play()
+                playing = true
+                startTick()
             }
             return
         }
-        let asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
-        let item = AVPlayerItem(asset: asset)
-        let p = AVPlayer(playerItem: item)
-        player = p
-        timeObserver = p.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.25, preferredTimescale: 600), queue: .main) { [weak self] t in
-            guard let self, let d = p.currentItem?.duration.seconds, d.isFinite, d > 0 else { return }
-            self.totalSeconds = d
-            self.progress = t.seconds / d
-            let remaining = Int(max(0, d - t.seconds))
-            self.durationLabel = String(format: "%d:%02d", remaining / 60, remaining % 60)
-            if t.seconds >= d - 0.05 {
-                self.playing = false
-                p.seek(to: .zero)
-                self.progress = 0
-                self.durationLabel = Self.format(d)
-            }
-        }
-        p.play()
         playing = true
+        fetchTask?.cancel()
+        fetchTask = Task {
+            guard await ensureLocal(url: url, headers: headers) else {
+                playing = false
+                return
+            }
+            guard !Task.isCancelled else {
+                playing = false
+                return
+            }
+            startPlaying()
+        }
+    }
+
+    /// Download the blob (Bearer / `?token=`) so duration and playback do not
+    /// depend on `AVPlayer` streaming authenticated URLs.
+    private func ensureLocal(url: URL, headers: [String: String]) async -> Bool {
+        if localData != nil, totalSeconds > 0 { return true }
+        do {
+            var req = URLRequest(url: url)
+            for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
+            let (data, response) = try await URLSession.shared.data(for: req)
+            guard !Task.isCancelled else { return false }
+            guard let http = response as? HTTPURLResponse, (200..<400).contains(http.statusCode), !data.isEmpty else {
+                return false
+            }
+            let probe = try AVAudioPlayer(data: data)
+            let d = probe.duration
+            guard d.isFinite, d > 0 else { return false }
+            guard !Task.isCancelled else { return false }
+            localData = data
+            totalSeconds = d
+            if !playing { durationLabel = Self.format(d) }
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private func startPlaying() {
+        guard let localData else { playing = false; return }
+        Self.activatePlayback()
+        do {
+            let p = try AVAudioPlayer(data: localData)
+            p.prepareToPlay()
+            audio = p
+            totalSeconds = p.duration
+            guard p.play() else { playing = false; return }
+            playing = true
+            startTick()
+        } catch {
+            playing = false
+        }
+    }
+
+    private func startTick() {
+        stopTick()
+        tick = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.updateProgress() }
+        }
+    }
+
+    private func stopTick() {
+        tick?.invalidate()
+        tick = nil
+    }
+
+    private func updateProgress() {
+        guard let audio else { return }
+        let d = max(audio.duration, totalSeconds)
+        guard d > 0 else { return }
+        totalSeconds = d
+        progress = min(1, audio.currentTime / d)
+        if audio.isPlaying {
+            let remaining = Int(max(0, d - audio.currentTime))
+            durationLabel = String(format: "%d:%02d", remaining / 60, remaining % 60)
+            return
+        }
+        // Natural end (user pause sets `playing = false` before stopping the tick).
+        if playing {
+            playing = false
+            audio.currentTime = 0
+            progress = 0
+            durationLabel = Self.format(d)
+            stopTick()
+        }
+    }
+
+    /// Switch off the recorder's play-and-record session so the memo is audible.
+    private static func activatePlayback() {
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
+        try? session.setActive(true)
     }
 
     private static func format(_ seconds: Double) -> String {
