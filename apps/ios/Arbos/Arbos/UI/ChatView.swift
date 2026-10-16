@@ -70,6 +70,9 @@ struct ChatView: View {
     private var messages: [Message] { model.messages(of: chatId) }
     private var needsAnswer: Bool { model.chatNeedsAnswer(chatId) }
     private var streaming: Bool { model.isStreaming(chatId) }
+    /// Other threads with this agent (chevron when more than one; plus when alone).
+    private var agentChats: [Chat] { isPeople ? [] : model.chats(of: projectId) }
+    private var hasOtherAgentChats: Bool { agentChats.count > 1 }
     private var name: String {
         if let people { return counterpart.map { "@\($0.handle)" } ?? people.title }
         return project?.name ?? "Arbos"
@@ -371,7 +374,7 @@ struct ChatView: View {
             .buttonStyle(.plain)
             Spacer()
             GlassPill {
-                HStack(spacing: 8) {
+                HStack(spacing: 6) {
                     if let people {
                         PersonAvatar(url: counterpart?.avatarUrl, handle: counterpart?.handle ?? "?", size: Theme.avatar)
                         VStack(alignment: .leading, spacing: 0) {
@@ -386,22 +389,26 @@ struct ChatView: View {
                             }
                         }
                     } else {
-                        if let project {
-                            AgentAvatar(project: project, theme: theme, size: Theme.avatar, dot: machineDotColor(model.machine.state, theme: theme), working: streaming)
+                        HStack(spacing: 8) {
+                            if let project {
+                                AgentAvatar(project: project, theme: theme, size: Theme.avatar, dot: machineDotColor(model.machine.state, theme: theme), working: streaming)
+                            }
+                            Text(name)
+                                .font(.system(size: Theme.body, weight: .semibold))
+                                .foregroundStyle(theme.text)
+                                .lineLimit(1)
                         }
-                        Text(name)
-                            .font(.system(size: Theme.body, weight: .semibold))
-                            .foregroundStyle(theme.text)
-                            .lineLimit(1)
+                        .contentShape(Rectangle())
+                        .onTapGesture { showProfile = true }
+                        .accessibilityAddTraits(.isButton)
+                        .accessibilityHint("Opens the agent profile")
+                        agentChatSwitcher
                     }
                 }
                 .padding(.leading, 10)
-                .padding(.trailing, 16)
+                .padding(.trailing, isPeople ? 16 : 10)
                 .frame(height: Theme.control)
                 .contentShape(Capsule())
-                .onTapGesture { if !isPeople { showProfile = true } }
-                .accessibilityAddTraits(isPeople ? [] : .isButton)
-                .accessibilityHint(isPeople ? "" : "Opens the agent profile")
             }
             Spacer()
             if isPeople || project?.shared == true {
@@ -471,6 +478,53 @@ struct ChatView: View {
         }
         .padding(.horizontal, 16)
         .padding(.top, 6)
+    }
+
+    /// Chevron when this agent has other chats (instant Menu); plus when alone (new chat).
+    @ViewBuilder
+    private var agentChatSwitcher: some View {
+        if hasOtherAgentChats {
+            Menu {
+                ForEach(agentChats) { chat in
+                    Button {
+                        guard chat.id != chatId else { return }
+                        model.open(chat: chat)
+                    } label: {
+                        if chat.id == chatId {
+                            Label(chat.isPinned ? "Main" : chat.title, systemImage: "checkmark")
+                        } else {
+                            Text(chat.isPinned ? "Main" : chat.title)
+                        }
+                    }
+                }
+                Divider()
+                Button {
+                    Task { if let c = await model.newChat(projectId: projectId) { model.open(chat: c) } }
+                } label: {
+                    Label("New chat", systemImage: "plus")
+                }
+            } label: {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(theme.muted)
+                    .frame(width: 22, height: 22)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Chats with \(name)")
+        } else {
+            Button {
+                Task { if let c = await model.newChat(projectId: projectId) { model.open(chat: c) } }
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(theme.muted)
+                    .frame(width: 22, height: 22)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("New chat")
+        }
     }
 
     // MARK: Transcript
