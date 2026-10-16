@@ -36,6 +36,10 @@ final class PushManager: NSObject, ObservableObject, UNUserNotificationCenterDel
     /// §9c: archived chats never show a banner here (the relay stops pushing them too).
     var isChatArchived: (String) -> Bool = { _ in false }
     private var registeredToken: String?
+    /// chat_id → when a local `/me/pushes` banner was posted; swallows a matching
+    /// APNs alert that lands a moment later for the same chat.
+    private var localBannerAt: [String: CFAbsoluteTime] = [:]
+    private static let localBannerDedupe: CFAbsoluteTime = 8
 
     private let primerKey = "pushPrimerShown"
     var primerShown: Bool {
@@ -131,6 +135,11 @@ final class PushManager: NSObject, ObservableObject, UNUserNotificationCenterDel
     /// service extension builds remote ones.
     func postMessage(id: String, info: [AnyHashable: Any]) async {
         guard let push = MessagePush(userInfo: info) else { return }
+        // APNs already showed a banner for this chat a moment ago — skip the twin.
+        if let at = localBannerAt[push.chatId], CFAbsoluteTimeGetCurrent() - at < PushManager.localBannerDedupe {
+            return
+        }
+        localBannerAt[push.chatId] = CFAbsoluteTimeGetCurrent()
         let base = UNMutableNotificationContent()
         base.sound = .default
         base.userInfo = info
@@ -160,7 +169,24 @@ final class PushManager: NSObject, ObservableObject, UNUserNotificationCenterDel
             return []
         }
         let chatId = info["chat_id"] as? String
-        let silent = await MainActor.run { chatId != nil && (chatId == visibleChatId() || isChatArchived(chatId!)) }
+        let silent = await MainActor.run { () -> Bool in
+            guard let chatId else { return false }
+            if chatId == visibleChatId() || isChatArchived(chatId) { return true }
+            // Local `/me/pushes` banner already shown for this chat — skip the APNs twin.
+            if let at = localBannerAt[chatId], CFAbsoluteTimeGetCurrent() - at < PushManager.localBannerDedupe {
+                return true
+            }
+            // Claim the slot so a later local postMessage does not double-banner.
+            localBannerAt[chatId] = CFAbsoluteTimeGetCurrent()
+            return false
+        }
+        // Alert pushes do not hit didReceiveRemoteNotification while foregrounded;
+        // wake the same refresh path so blue circles catch up with the banner.
+        if chatId != nil {
+            await MainActor.run {
+                NotificationCenter.default.post(name: PushManager.remoteReceived, object: nil, userInfo: info)
+            }
+        }
         return silent ? [] : [.banner, .sound, .list, .badge]
     }
 

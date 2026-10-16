@@ -456,7 +456,17 @@ final class AppModel: ObservableObject {
     var unreadTotal: Int {
         // Archived agent chats never badge (§9c).
         if !unreadCounts.isEmpty {
-            return unreadCounts.reduce(0) { $0 + (isChatArchived($1.key) ? 0 : $1.value) }
+            var total = unreadCounts.reduce(0) { $0 + (isChatArchived($1.key) ? 0 : $1.value) }
+            // Live Loro rows can mark unread before /me/unread has the event.
+            for id in peopleUnread where !isChatArchived(id) && (unreadCounts[id] ?? 0) == 0 {
+                total += 1
+            }
+            for list in chats.values {
+                for c in list where c.unread && !isChatArchived(c.id) && (unreadCounts[c.id] ?? 0) == 0 {
+                    total += 1
+                }
+            }
+            return total
         }
         let people = peopleChats.reduce(0) { $0 + unreadCount(for: $1) }
         let projects = chats.values.flatMap { $0 }.filter { $0.unread && !isChatArchived($0.id) }.count
@@ -473,9 +483,12 @@ final class AppModel: ObservableObject {
     func unreadCount(for chat: PeopleChat) -> Int {
         // On screen: never show a stale remote count (notify can lag behind Loro).
         if chat.id == visibleChatId { return 0 }
-        if let n = unreadCounts[chat.id] { return n }
         let bySeq = Int(max(0, chat.headSeq - chat.readSeq))
-        return bySeq > 0 ? bySeq : (peopleUnread.contains(chat.id) ? 1 : 0)
+        let local = bySeq > 0 ? bySeq : (peopleUnread.contains(chat.id) ? 1 : 0)
+        // Loro can light peopleUnread before GET /me/unread catches up — never let a
+        // stale remote 0 hide the blue circle / count.
+        if let n = unreadCounts[chat.id] { return max(n, local) }
+        return local
     }
 
     func applyBadge() {
@@ -935,6 +948,11 @@ final class AppModel: ObservableObject {
                 } else if touched.listChanged {
                     self.emitSnapshot(key)
                     self.markActivity(chatId: key)
+                    // Loro is live; /me/pushes and /me/unread can lag — light the
+                    // blue circle and drain the push queue as soon as a new row lands.
+                    if self.caughtUp.contains(key) {
+                        self.noteLiveUnread(chatId: key)
+                    }
                 } else if !touched.messages.isEmpty {
                     self.emitMessages(key, indexes: touched.messages)
                 }
@@ -946,7 +964,13 @@ final class AppModel: ObservableObject {
         }
         room.onCursorMoved = { [weak self] in self?.markDirty(key) }
         room.onPendingChanged = { [weak self] batches in self?.store?.savePending(key: key, batches: batches) }
-        room.onLink = { [weak self] l in self?.link = l }
+        room.onLink = { [weak self] l in
+            guard let self else { return }
+            self.link = l
+            // Backfill rows after a reconnect must not light unread; only live
+            // rows after the next catch-up do (Loro is ahead of /me/unread).
+            if l != .live { self.caughtUp.remove(key) }
+        }
         room.presenceUser = { [weak self] in self?.user.map { ($0.id, $0.login) } }
         room.onBoxState = { [weak self] state, detail in
             self?.setProjectState(projectId, state, detail: detail)
@@ -1040,6 +1064,48 @@ final class AppModel: ObservableObject {
                 return
             }
         }
+    }
+
+    /// A live Loro row landed while this chat is not on screen: show the blue
+    /// circle immediately and drain `/me/pushes` so the banner does not wait
+    /// for the 15 s registry poll (notify / APNs can lag the row).
+    private func noteLiveUnread(chatId: Id) {
+        guard !isWatching(chatId), !isChatArchived(chatId) else { return }
+        if let last = messages[chatId]?.last {
+            if last.pending { return }
+            if last.role == .system { return }
+            if let me = myUserId, last.sender == me { return }
+            // Project-chat echoes from this device use sender "user".
+            if peopleChat(chatId) == nil, last.role == .user, last.sender == "user" || last.sender.isEmpty {
+                return
+            }
+        }
+        var changed = false
+        if peopleChat(chatId) != nil {
+            if !peopleUnread.contains(chatId) {
+                peopleUnread.insert(chatId)
+                changed = true
+            }
+            if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
+                peopleChats[i].lastActivityAt = nowMs()
+                if peopleChats[i].headSeq <= peopleChats[i].readSeq {
+                    peopleChats[i].headSeq = peopleChats[i].readSeq + 1
+                    changed = true
+                }
+            }
+        } else {
+            for (pid, list) in chats {
+                if let i = list.firstIndex(where: { $0.id == chatId }), !list[i].unread {
+                    var updated = list
+                    updated[i].unread = true
+                    chats[pid] = updated
+                    changed = true
+                    break
+                }
+            }
+        }
+        if changed { applyBadge() }
+        Task { await drainPushes() }
     }
 
     /// Project doc (crdt-sync §6.3): `settings.modelNote`, plus the D70
@@ -1173,7 +1239,16 @@ final class AppModel: ObservableObject {
             let list = raw.compactMap(PeopleChat.parse)
             peopleChats = list
             for c in list where c.unread { peopleUnread.insert(c.id) }
-            for c in list where !c.unread && visibleChatId != c.id { peopleUnread.remove(c.id) }
+            for c in list where !c.unread && visibleChatId != c.id {
+                // Loro can mark unread before the people list's head_seq catches up;
+                // keep the blue circle while the latest row is still incoming.
+                if peopleUnread.contains(c.id), let last = messages[c.id]?.last,
+                   !last.pending, last.role != .system,
+                   myUserId == nil || last.sender != myUserId {
+                    continue
+                }
+                peopleUnread.remove(c.id)
+            }
             for c in list { ensureRoom(projectId: peopleSlot, key: c.id, roomChat: c.id) }
             savePeopleCache(raw)
         } catch {
