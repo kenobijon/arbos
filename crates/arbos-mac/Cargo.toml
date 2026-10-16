@@ -48,6 +48,8 @@ hound = "3.5"
 # Sign in with GitHub (ASWebAuthenticationSession), notifications
 # (UNUserNotificationCenter) and the Dock badge through objc2 (macOS only).
 [target.'cfg(target_os = "macos")'.dependencies]
+# Calls v1 camera capture: AVFoundation through nokhwa.
+nokhwa = { version = "0.10", default-features = false, features = ["input-avfoundation"] }
 objc2 = "0.6"
 block2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSURL", "NSString", "NSError", "NSObject", "NSGeometry", "NSBundle", "NSArray", "NSSet", "NSEnumerator"] }
