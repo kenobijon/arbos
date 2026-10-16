@@ -1747,9 +1747,34 @@ final class AppModel: ObservableObject {
         ["Authorization": "Bearer \(credentials?.deviceToken ?? "")"]
     }
 
-    /// Pinned ("main") chat of a project, the one the agent list opens.
+    // MARK: One chat per agent (D-single-chat)
+
+    /// Multi-chat UI (new chat / chat switcher / thread swipes / chat list /
+    /// chat-level archive) is off by default; Settings → Debug flips it. The
+    /// data stays: extra chats remain on the box and the relay.
+    @Published var multiChatEnabled: Bool = UserDefaults.standard.bool(forKey: "multiChatEnabled") {
+        didSet { UserDefaults.standard.set(multiChatEnabled, forKey: "multiChatEnabled") }
+    }
+
+    /// The one chat an agent shows. Rule: the relay's `primary_chat` when it
+    /// sends one; else the chat with the most messages, ties → the earliest
+    /// created (ULID order); before any messages have loaded, the pinned
+    /// ("main") chat, else the first.
+    func primaryChat(of projectId: Id) -> Chat? {
+        let list = chats(of: projectId)
+        guard !list.isEmpty else { return nil }
+        if let pid = project(projectId)?.primaryChatId, let c = list.first(where: { $0.id == pid }) { return c }
+        let counted = list.map { ($0, messages(of: $0.id).count) }
+        if counted.contains(where: { $0.1 > 0 }) {
+            return counted.max { a, b in a.1 != b.1 ? a.1 < b.1 : a.0.id > b.0.id }?.0
+        }
+        return list.first { $0.isPinned } ?? list.min { $0.id < $1.id }
+    }
+
+    /// Pinned ("main") chat of a project — with multi-chat on; the primary chat otherwise.
     func mainChat(of projectId: Id) -> Chat? {
-        chats(of: projectId).first { $0.isPinned } ?? chats(of: projectId).first
+        if !multiChatEnabled { return primaryChat(of: projectId) }
+        return chats(of: projectId).first { $0.isPinned } ?? chats(of: projectId).first
     }
 
     func project(_ id: Id) -> Project? { projects.first { $0.id == id } }

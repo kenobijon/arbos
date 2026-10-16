@@ -159,35 +159,40 @@ final class RelayAPI {
             let models = p["models"] as? [String: Any] ?? [:]
             let talking = models["talking_model"] as? [String: Any] ?? [:]
             let boxField = (detail["box"] as? String) ?? (item["box"] as? String) ?? ""
-            let project = Project(
+            let owner = p["owner"] as? [String: Any] ?? [:]
+            let machine = p["machine"] as? [String: Any] ?? [:]
+            let primaryChat: String? = ((p["primary_chat"] as? String) ?? (p["primary_chat_id"] as? String) ?? (detail["primary_chat"] as? String)).flatMap { $0.isEmpty ? nil : $0 }
+            let spendToday: Double = (detail["spend_today"] as? NSNumber)?.doubleValue ?? (p["spend_today_usd"] as? NSNumber)?.doubleValue ?? 0
+            let spendCap: Double = (p["spend_cap_usd"] as? NSNumber)?.doubleValue ?? (p["spend_cap_daily"] as? NSNumber)?.doubleValue ?? 25
+            let since: Int64? = (detail["box_since"] as? NSNumber)?.int64Value ?? (p["box_since"] as? NSNumber)?.int64Value
+            var project = Project(
                 id: id,
                 name: p["name"] as? String ?? "Project",
                 icon: p["icon"] as? String ?? "Ω",
                 color: p["color"] as? String ?? "#8b7cf6",
                 state: BoxState.from(state: p["state"] as? String ?? "", box: boxField),
-                stateSince: (detail["box_since"] as? NSNumber)?.int64Value ?? (p["box_since"] as? NSNumber)?.int64Value,
+                stateSince: since,
                 stateDetail: nil,
                 model: talking["id"] as? String ?? "anthropic/claude-haiku-5.5",
                 effort: Effort.from(talking["effort"] as? String),
-                spendTodayUsd: (detail["spend_today"] as? NSNumber)?.doubleValue
-                    ?? (p["spend_today_usd"] as? NSNumber)?.doubleValue ?? 0,
-                spendCapUsd: (p["spend_cap_usd"] as? NSNumber)?.doubleValue
-                    ?? (p["spend_cap_daily"] as? NSNumber)?.doubleValue ?? 25,
-                shared: p["shared"] as? Bool ?? false,
-                ownerHandle: p["owner_handle"] as? String,
-                avatar: (p["avatar"] as? String).flatMap { $0.isEmpty ? nil : $0 },
-                avatarColor: (p["avatar_color"] as? String).flatMap { $0.isEmpty ? nil : $0 },
-                instructions: (p["instructions"] as? String) ?? "",
-                description: (p["description"] as? String) ?? "",
-                ownerName: (p["owner"] as? [String: Any])?["name"] as? String,
-                ownerAvatarUrl: (p["owner"] as? [String: Any])?["avatar_url"] as? String,
-                ownerLastSeenAt: ((p["owner"] as? [String: Any])?["last_seen_at"] as? NSNumber)?.int64Value,
-                ownerOnline: ((p["owner"] as? [String: Any])?["online"] as? NSNumber)?.boolValue ?? false,
-                machineState: (p["machine"] as? [String: Any])?["state"] as? String,
-                machineClass: (p["machine"] as? [String: Any])?["class"] as? String,
-                machineSnapshot: (p["machine"] as? [String: Any])?["snapshot"] as? String,
-                machineAlwaysOn: ((p["machine"] as? [String: Any])?["always_on"] as? NSNumber)?.boolValue ?? false
+                spendTodayUsd: spendToday,
+                spendCapUsd: spendCap
             )
+            project.shared = p["shared"] as? Bool ?? false
+            project.ownerHandle = p["owner_handle"] as? String
+            project.avatar = (p["avatar"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            project.avatarColor = (p["avatar_color"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            project.instructions = (p["instructions"] as? String) ?? ""
+            project.description = (p["description"] as? String) ?? ""
+            project.ownerName = owner["name"] as? String
+            project.ownerAvatarUrl = owner["avatar_url"] as? String
+            project.ownerLastSeenAt = (owner["last_seen_at"] as? NSNumber)?.int64Value
+            project.ownerOnline = (owner["online"] as? NSNumber)?.boolValue ?? false
+            project.machineState = machine["state"] as? String
+            project.machineClass = machine["class"] as? String
+            project.machineSnapshot = machine["snapshot"] as? String
+            project.machineAlwaysOn = (machine["always_on"] as? NSNumber)?.boolValue ?? false
+            project.primaryChatId = primaryChat
             let chats = ((detail["chats"] as? [Any]) ?? []).compactMap(RelayAPI.parseChat)
             out.append(RegistryProject(project: project, chats: chats))
         }

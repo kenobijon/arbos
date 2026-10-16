@@ -67,11 +67,13 @@ struct AgentEditSheet: View {
                             }
                             .buttonStyle(.plain)
                             divider
-                            Button { showChats = true } label: {
-                                row(icon: "bubble.left.and.bubble.right", title: "Chats", value: chatCount == 1 ? "1 chat" : "\(chatCount) chats")
+                            if model.multiChatEnabled {
+                                Button { showChats = true } label: {
+                                    row(icon: "bubble.left.and.bubble.right", title: "Chats", value: chatCount == 1 ? "1 chat" : "\(chatCount) chats")
+                                }
+                                .buttonStyle(.plain)
+                                divider
                             }
-                            .buttonStyle(.plain)
-                            divider
                             Button { showShare = true } label: {
                                 row(icon: "person.2", title: project.shared ? "Members" : "Share", value: project.shared ? "Owned by @\(project.ownerHandle ?? "?")" : "Invite by @handle")
                             }

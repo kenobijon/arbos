@@ -182,6 +182,8 @@ struct Project: Identifiable, Equatable, Codable {
     var ownerAvatarUrl: String? = nil
     var ownerLastSeenAt: Int64? = nil
     var ownerOnline: Bool = false
+    /// The relay's `primary_chat` when it sends one; else the app picks (see AppModel.primaryChat).
+    var primaryChatId: Id? = nil
     /// §9 machine summary: awake|waking|asleep|error, class, snapshot, always_on.
     var machineState: String? = nil
     var machineClass: String? = nil

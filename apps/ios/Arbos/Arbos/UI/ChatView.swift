@@ -135,7 +135,7 @@ struct ChatView: View {
     private var needsAnswer: Bool { model.chatNeedsAnswer(chatId) }
     private var streaming: Bool { model.isStreaming(chatId) }
     /// Other threads with this agent (chevron when more than one; plus when alone).
-    private var agentChats: [Chat] { isPeople ? [] : model.chats(of: projectId) }
+    private var agentChats: [Chat] { isPeople || !model.multiChatEnabled ? [] : model.chats(of: projectId) }
     private var hasOtherAgentChats: Bool { agentChats.count > 1 }
     private var name: String {
         if let people { return counterpart.map { "@\($0.handle)" } ?? people.title }
@@ -360,7 +360,7 @@ struct ChatView: View {
                     case "keyboard": composerFocused = true
                     case "settings": showSettings = true
                     case "voice": showVoice = true
-                    case "threads": showThreads = true
+                    case "threads": if model.multiChatEnabled { showThreads = true }
                     case "model": showModelPicker = true
                     case "profile": openHeaderProfile()
                     case "edit": showProfile = true
@@ -514,7 +514,7 @@ struct ChatView: View {
                         .onTapGesture { openHeaderProfile() }
                         .accessibilityAddTraits(.isButton)
                         .accessibilityHint("Opens the agent profile")
-                        agentChatSwitcher
+                        if model.multiChatEnabled { agentChatSwitcher }
                     }
                 }
                 .padding(.leading, 10)
@@ -556,10 +556,12 @@ struct ChatView: View {
                         Button(role: .destructive) { model.block(c) } label: { Label("Block @\(c.handle)", systemImage: "hand.raised") }
                     }
                 } else {
-                    Button { showThreads = true } label: { Label("Chats", systemImage: "bubble.left.and.bubble.right") }
-                    Button {
-                        Task { if let c = await model.newChat(projectId: projectId) { model.open(chat: c) } }
-                    } label: { Label("New chat", systemImage: "square.and.pencil") }
+                    if model.multiChatEnabled {
+                        Button { showThreads = true } label: { Label("Chats", systemImage: "bubble.left.and.bubble.right") }
+                        Button {
+                            Task { if let c = await model.newChat(projectId: projectId) { model.open(chat: c) } }
+                        } label: { Label("New chat", systemImage: "square.and.pencil") }
+                    }
                     Button { showModelPicker = true } label: { Label("Model · \(project?.shortModel ?? "")", systemImage: "cpu") }
                     if project?.shared == true {
                         // People in a shared project talk to each other; the agent joins in Phase 2.
@@ -659,7 +661,7 @@ struct ChatView: View {
 
     /// Soft thresholds so the cue appears before the gesture commits.
     private func updateSwipeHint(_ value: DragGesture.Value) {
-        guard !isPeople else {
+        guard !isPeople, model.multiChatEnabled else {
             if swipeHint != .none { withAnimation(.easeOut(duration: 0.12)) { swipeHint = .none } }
             return
         }
@@ -688,21 +690,22 @@ struct ChatView: View {
         // Horizontal: clear sideways flick (vertical scroll stays dominant otherwise).
         if absX > 70, absX > absY * 1.25, abs(vx) >= abs(vy) || absX > 120 {
             if dx > 0 {
-                if isPeople {
+                // Swipe back to Home (#916/#925) — always; thread stepping only with multi-chat on.
+                if isPeople || !model.multiChatEnabled {
                     composerFocused = false
                     dismiss()
                 } else {
                     goToPreviousAgentChat()
                 }
-            } else if !isPeople {
+            } else if !isPeople, model.multiChatEnabled {
                 goToNextAgentChat()
             }
             return
         }
 
-        // Up: archive this agent chat and open the previous one (not people chats).
+        // Up: archive this agent chat and open the previous one (multi-chat only).
         // High distance + velocity so ordinary transcript scrolling does not fire this.
-        if !isPeople, dy < -140, value.predictedEndTranslation.height < -280,
+        if !isPeople, model.multiChatEnabled, dy < -140, value.predictedEndTranslation.height < -280,
            absY > absX * 2, vy < -900 {
             archiveAgentChatAndGoPrevious()
         }

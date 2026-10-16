@@ -134,6 +134,17 @@ struct SettingsView: View {
                 }
                 .listRowBackground(theme.card)
 
+                #if DEBUG
+                Section {
+                    Toggle("Multiple chats per agent", isOn: $model.multiChatEnabled)
+                } header: {
+                    Text("Debug")
+                } footer: {
+                    Text("Off: one chat per agent (its primary chat). On: new chat, chat switcher, thread swipes and the chat list come back. Data is never deleted either way.")
+                }
+                .listRowBackground(theme.card)
+                #endif
+
                 Section("Appearance") {
                     Picker("Theme", selection: $model.appearanceSetting) {
                         ForEach(Appearance.allCases) { a in Text(a.label).tag(a.rawValue) }
