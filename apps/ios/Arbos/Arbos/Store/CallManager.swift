@@ -91,6 +91,19 @@ final class CallManager: NSObject, ObservableObject {
     private var ringbackPlayer: AVAudioPlayer?
     /// True between CallKit `didActivate` and `didDeactivate` — LiveKit's engine may run only then.
     private var callKitOwnsAudio = false
+    /// We handed this call to CallKit. Do not `setActive(true)` or start the
+    /// engine until `didActivate`, or until CallKit refuses the report.
+    private var callKitReported = false
+    /// Inside `CXAnswerCallAction`, so `accept()` connects instead of requesting another answer.
+    private var answeringFromProvider = false
+    /// CallKit's queue reads these. The call object may not exist yet when
+    /// `didActivate` runs (the answer action is fulfilled before connect).
+    nonisolated(unsafe) private var callWantsVideo = false
+    nonisolated(unsafe) private var callWantsSpeaker = true
+    /// True after we forced the built-in speaker. Cleared when Speaker is
+    /// turned off or a headset connects, so the override cannot pin the
+    /// loudspeaker over Bluetooth.
+    nonisolated(unsafe) private var speakerPortOverridden = false
 
     private override init() {
         let config = CXProviderConfiguration()
@@ -146,11 +159,9 @@ final class CallManager: NSObject, ObservableObject {
         if kind == .video { _ = await CallManager.cameraGranted() }
         guard let api else { return }
         error = nil
+        prepareOutgoingCallKitAudio(video: kind == .video)
         phase = .connecting
         isPresented = true
-        prepareCallAudioSession(video: kind == .video)
-        ringbackWanted = true
-        syncRingback()
         do {
             let (started, isNew) = try await api.startCall(chatId: chatId, projectId: projectId, kind: kind)
             call = started
@@ -159,6 +170,7 @@ final class CallManager: NSObject, ObservableObject {
             }
             activeByChat[chatId] = started
             reportOutgoing(title: title, video: kind == .video)
+            syncRingback()
             try await connect(started, video: kind == .video)
         } catch {
             log.error("start failed: \(error.localizedDescription, privacy: .public)")
@@ -172,15 +184,14 @@ final class CallManager: NSObject, ObservableObject {
         guard !isActive, let api else { isPresented = true; return }
         guard await CallManager.micGranted() else { error = "Microphone access is off in Settings."; return }
         error = nil
+        prepareOutgoingCallKitAudio(video: existing.kind == .video)
         phase = .connecting
         isPresented = true
-        prepareCallAudioSession(video: existing.kind == .video)
-        ringbackWanted = true
-        syncRingback()
         do {
             let fresh = try await api.joinCall(existing.callId)
             call = fresh
             reportOutgoing(title: title, video: fresh.kind == .video)
+            syncRingback()
             try await connect(fresh, video: fresh.kind == .video)
         } catch {
             self.error = CallManager.describe(error)
@@ -195,6 +206,8 @@ final class CallManager: NSObject, ObservableObject {
             onCallKitReported?()
             return
         }
+        callWantsVideo = incomingCall.kind == .video
+        callWantsSpeaker = true
         incoming = (incomingCall, from)
         #if DEBUG
         if DebugHooks.autoAcceptCall {
@@ -213,6 +226,9 @@ final class CallManager: NSObject, ObservableObject {
         update.supportsGrouping = false
         update.supportsUngrouping = false
         update.supportsDTMF = false
+        // Optimistic: an answer can arrive before this callback. Cleared if CallKit refuses.
+        callKitReported = true
+        holdEngineUntilCallKit()
         provider.reportNewIncomingCall(with: uuid, update: update) { [weak self] err in
             // CallKit rings (system ringtone + vibration, honouring the ring/silent
             // switch like a phone call). If it refuses, keep the incoming state and
@@ -221,7 +237,10 @@ final class CallManager: NSObject, ObservableObject {
             // PushKit's completion must run here (not inside a later Task).
             if let err {
                 log.error("reportNewIncomingCall: \(err.localizedDescription, privacy: .public)")
-                Task { @MainActor in self?.startIncomingRingFallback() }
+                Task { @MainActor in
+                    self?.callKitReported = false
+                    self?.startIncomingRingFallback()
+                }
             } else {
                 audioLog.notice("incoming: CallKit is ringing")
             }
@@ -250,7 +269,7 @@ final class CallManager: NSObject, ObservableObject {
     private func startIncomingRingFallback() {
         guard incoming != nil, incomingRingPlayer == nil else { return }
         // CallKit refused the report: we own the session and must activate it.
-        prepareCallAudioSession(video: incoming?.call.kind == .video, activate: true)
+        prepareCallAudioSession(video: incoming?.call.kind == .video, activate: true, speaker: true)
         do {
             let player = try AVAudioPlayer(data: CallManager.ringtoneWAV)
             player.numberOfLoops = -1
@@ -311,29 +330,32 @@ final class CallManager: NSObject, ObservableObject {
         return wav
     }
 
-    /// In-app Accept: answer through CallKit when we reported the call so
-    /// `didActivate` runs and the LiveKit engine is allowed to open.
+    /// In-app Accept: go through CallKit when this call was reported so
+    /// `didActivate` runs before the LiveKit engine starts.
     func acceptFromUI() {
-        if let uuid = cxUUID, incoming != nil {
-            let action = CXAnswerCallAction(call: uuid)
-            callController.request(CXTransaction(action: action)) { [weak self] err in
-                if let err {
-                    log.error("CXAnswerCallAction: \(err.localizedDescription, privacy: .public)")
-                    Task { @MainActor in await self?.accept() }
-                }
-            }
-        } else {
-            Task { await accept() }
-        }
+        Task { await accept() }
     }
 
     func accept() async {
+        if callKitReported, !answeringFromProvider, let uuid = cxUUID {
+            do {
+                try await callController.request(CXTransaction(action: CXAnswerCallAction(call: uuid)))
+                return
+            } catch {
+                log.error("CXAnswerCallAction: \(error.localizedDescription, privacy: .public)")
+                callKitReported = false
+            }
+        }
         guard let inc = incoming, let api else { return }
         ringTimeout?.cancel()
         stopIncomingRing()
         guard await CallManager.micGranted() else { error = "Microphone access is off in Settings."; endIncoming(reason: .failed); return }
         if inc.call.kind == .video { _ = await CallManager.cameraGranted() }
+        let video = inc.call.kind == .video
         incoming = nil
+        callWantsVideo = video
+        callWantsSpeaker = true
+        speakerOn = true
         phase = .connecting
         isPresented = true
         ringbackWanted = false
@@ -341,7 +363,7 @@ final class CallManager: NSObject, ObservableObject {
         do {
             let fresh = try await api.joinCall(inc.call.callId)
             call = fresh
-            try await connect(fresh, video: fresh.kind == .video)
+            try await connect(fresh, video: video)
         } catch {
             self.error = CallManager.describe(error)
             await teardown(leave: false)
@@ -358,6 +380,8 @@ final class CallManager: NSObject, ObservableObject {
         if let uuid = cxUUID { provider.reportCall(with: uuid, endedAt: Date(), reason: reason) }
         cxUUID = nil
         incoming = nil
+        callKitReported = false
+        answeringFromProvider = false
         if phase == .ringing { phase = .idle }
     }
 
@@ -435,6 +459,7 @@ final class CallManager: NSObject, ObservableObject {
         call = c
         phase = .connecting
         isPresented = true
+        prepareOutgoingCallKitAudio(video: kind == .video, ringback: false)
         reportOutgoing(title: "Dev call", video: kind == .video)
         do { try await connect(c, video: kind == .video) } catch { self.error = CallManager.describe(error); await teardown(leave: false) }
     }
@@ -460,12 +485,12 @@ final class CallManager: NSObject, ObservableObject {
         if video, AVCaptureDevice.authorizationStatus(for: .video) == .authorized {
             do { try await room.localParticipant.setCamera(enabled: true); cameraOn = true } catch { cameraOn = false }
         }
-        speakerOn = video
-        // Prefer CallKit's didActivate to open the engine; if it has not run yet
-        // (slow CXStartCallAction, in-app accept without CallKit, debug join),
-        // take the session ourselves so the call is not silent.
-        if callKitOwnsAudio {
-            applySpeakerRoute()
+        // Voice stays on the loudspeaker while this screen is up. Earpiece only
+        // after the user turns Speaker off. Do not start the engine here when
+        // CallKit owns the session — `didActivate` does, and `setActive(true)`
+        // before that is rejected (LiveKit Swift 2.17, issue #886).
+        if callKitReported {
+            routeBuiltInOutput(AVAudioSession.sharedInstance(), speaker: callWantsSpeaker)
         } else {
             enableCallAudioEngine(video: video)
         }
@@ -479,6 +504,10 @@ final class CallManager: NSObject, ObservableObject {
         outgoingTimeout = nil
         disableCallAudioEngine()
         callKitOwnsAudio = false
+        callKitReported = false
+        answeringFromProvider = false
+        speakerOn = false
+        speakerPortOverridden = false
         let missed = !anyoneJoined
         let ended = call
         let wasConnected = connectedAt
@@ -538,8 +567,10 @@ final class CallManager: NSObject, ObservableObject {
 
     func toggleSpeaker() {
         speakerOn.toggle()
-        // Automatic session config is off (CallKit); re-apply category options + port.
-        configureCallAudioSession(video: call?.kind == .video, activate: false)
+        callWantsSpeaker = speakerOn
+        // Category options carry `.defaultToSpeaker`. Changing them restarts
+        // Voice Processing once, on the toggle; route changes must not.
+        configureCallAudioSession(video: call?.kind == .video || callWantsVideo, speaker: speakerOn, activate: false)
     }
 
     func flipCamera() async {
@@ -590,44 +621,113 @@ final class CallManager: NSObject, ObservableObject {
         if waiting { force ? startRingback(force: true) : resumeRingbackIfNeeded() } else { stopRingback() }
     }
 
-    /// Category/mode for call audio. CallKit activates the session; we only
-    /// `setActive` ourselves when CallKit is not in the picture (in-app ring
-    /// fallback). Do not open LiveKit's engine here — that is `enableCallAudioEngine`.
-    private func prepareCallAudioSession(video: Bool, activate: Bool = false) {
-        configureCallAudioSession(video: video, activate: activate && !callKitOwnsAudio)
+    /// Outgoing call screen: loudspeaker, engine held off until CallKit
+    /// activates the session. `ringback` is false for the dev join, which
+    /// has no "calling…" wait.
+    private func prepareOutgoingCallKitAudio(video: Bool, ringback: Bool = true) {
+        callWantsVideo = video
+        callWantsSpeaker = true
+        speakerOn = true
+        callKitReported = true
+        holdEngineUntilCallKit()
+        if ringback { ringbackWanted = true }
         observeAudioSession()
     }
 
-    private func configureCallAudioSession(video: Bool, activate: Bool) {
+    /// LiveKit Swift 2.17: automatic session configuration fights CallKit, and
+    /// the engine must stay unavailable until `provider(_:didActivate:)`.
+    /// Pending subscribe/publish starts once availability returns to `.default`.
+    nonisolated private func holdEngineUntilCallKit() {
+        AudioManager.shared.audioSession.isAutomaticConfigurationEnabled = false
+        disableCallAudioEngine()
+    }
+
+    /// Category/mode for call audio. CallKit activates the session; we only
+    /// `setActive` ourselves when CallKit is not in the picture (in-app ring
+    /// fallback, or a report that failed). Do not open LiveKit's engine here.
+    private func prepareCallAudioSession(video: Bool, activate: Bool = false, speaker: Bool? = nil) {
+        configureCallAudioSession(video: video, speaker: speaker ?? speakerOn, activate: activate && !callKitReported)
+        observeAudioSession()
+    }
+
+    private func configureCallAudioSession(video: Bool, speaker: Bool? = nil, activate: Bool) {
         let session = AVAudioSession.sharedInstance()
-        let mode: AVAudioSession.Mode = video ? .videoChat : .voiceChat
-        var options: AVAudioSession.CategoryOptions = [.allowBluetooth, .allowBluetoothA2DP]
-        if speakerOn || video { options.insert(.defaultToSpeaker) }
+        let wantSpeaker = speaker ?? speakerOn
         do {
-            try session.setCategory(.playAndRecord, mode: mode, options: options)
-            // CallKit activates the session; calling setActive again fights it and
-            // is a known source of near-silent remote audio with Voice Processing.
+            try configureActivatedCallSession(session, video: video, speaker: wantSpeaker)
+            // CallKit activates the session. `setActive(true)` while it owns
+            // the session is rejected and the engine never connects output.
             if activate { try session.setActive(true) }
-            applySpeakerRoute()
+            routeBuiltInOutput(session, speaker: wantSpeaker)
             audioLog.notice("session ready category=\(session.category.rawValue, privacy: .public) mode=\(session.mode.rawValue, privacy: .public) activate=\(activate) route=\(session.currentRoute.outputs.map(\.portType.rawValue).joined(separator: ","), privacy: .public)")
         } catch {
             audioLog.error("session setup: \(error.localizedDescription, privacy: .public)")
         }
     }
 
-    private func applySpeakerRoute() {
-        let session = AVAudioSession.sharedInstance()
+    /// `.playAndRecord` + `.voiceChat` (`.videoChat` for video) and
+    /// `.allowBluetooth`. `.defaultToSpeaker` while Speaker is on prefers the
+    /// loudspeaker only when no headset is connected — it does not take a
+    /// Bluetooth route. Does not call `setActive`.
+    nonisolated private func configureActivatedCallSession(_ session: AVAudioSession, video: Bool, speaker: Bool) throws {
+        let mode: AVAudioSession.Mode = video ? .videoChat : .voiceChat
+        var options: AVAudioSession.CategoryOptions = [.allowBluetooth]
+        if speaker { options.insert(.defaultToSpeaker) }
+        try session.setCategory(.playAndRecord, mode: mode, options: options)
+    }
+
+    /// `.voiceChat` still comes up on the receiver. Move only the built-in
+    /// port: speaker when wanted and currently the receiver, receiver when
+    /// Speaker is off and currently the loudspeaker. Skip when the route is
+    /// already correct so this does not loop on its own notification. An
+    /// external route releases a previous override and is otherwise left alone
+    /// (`overrideOutputAudioPort(.speaker)` would steal a headset).
+    nonisolated private func routeBuiltInOutput(_ session: AVAudioSession, speaker: Bool) {
+        guard session.category == .playAndRecord else { return }
+        let ports = session.currentRoute.outputs.map(\.portType)
+        if ports.contains(where: Self.isExternalOutput) {
+            guard speakerPortOverridden else { return }
+            do {
+                try session.overrideOutputAudioPort(.none)
+                speakerPortOverridden = false
+            } catch {
+                audioLog.error("speaker route: \(error.localizedDescription, privacy: .public)")
+            }
+            return
+        }
+        let onSpeaker = ports.contains(.builtInSpeaker)
         do {
-            try session.overrideOutputAudioPort(speakerOn ? .speaker : .none)
+            if speaker, !onSpeaker {
+                try session.overrideOutputAudioPort(.speaker)
+                speakerPortOverridden = true
+            } else if !speaker, onSpeaker || speakerPortOverridden {
+                try session.overrideOutputAudioPort(.none)
+                speakerPortOverridden = false
+            }
         } catch {
             audioLog.error("speaker route: \(error.localizedDescription, privacy: .public)")
         }
     }
 
-    /// Open LiveKit's audio engine after the session is call-ready (CallKit
-    /// didActivate, or a non-CallKit fallback).
+    nonisolated private static func isExternalOutput(_ port: AVAudioSession.Port) -> Bool {
+        switch port {
+        case .bluetoothA2DP, .bluetoothHFP, .bluetoothLE, .headphones, .headsetMic, .carAudio, .airPlay:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// CallKit did not take the session. Configure, activate, and let the engine run.
+    private func startEngineWithoutCallKit(video: Bool) {
+        callKitReported = false
+        enableCallAudioEngine(video: video)
+        resumeRingbackIfNeeded()
+    }
+
+    /// Open LiveKit's audio engine when CallKit is not activating the session.
     private func enableCallAudioEngine(video: Bool) {
-        configureCallAudioSession(video: video, activate: !callKitOwnsAudio)
+        configureCallAudioSession(video: video, speaker: callWantsSpeaker, activate: true)
         do {
             try AudioManager.shared.setEngineAvailability(.default)
             audioLog.notice("engine default (call audio live)")
@@ -636,7 +736,7 @@ final class CallManager: NSObject, ObservableObject {
         }
     }
 
-    private func disableCallAudioEngine() {
+    nonisolated private func disableCallAudioEngine() {
         do {
             try AudioManager.shared.setEngineAvailability(.none)
             audioLog.notice("engine none")
@@ -664,7 +764,12 @@ final class CallManager: NSObject, ObservableObject {
                 let s = AVAudioSession.sharedInstance()
                 audioLog.notice("route → \(s.currentRoute.outputs.map(\.portType.rawValue).joined(separator: ","), privacy: .public) category=\(s.category.rawValue, privacy: .public)")
                 // A route change does not kill the player; only pick it up if it fell silent.
+                // Re-apply the built-in speaker if iOS dropped back to the receiver.
+                // Do not reconfigure the category here — that restarts Voice Processing.
                 try? await Task.sleep(nanoseconds: 300_000_000)
+                if self?.isActive == true {
+                    self?.routeBuiltInOutput(AVAudioSession.sharedInstance(), speaker: self?.callWantsSpeaker ?? false)
+                }
                 self?.resumeRingbackIfNeeded()
             }
         })
@@ -713,7 +818,13 @@ final class CallManager: NSObject, ObservableObject {
         ringbackRetry?.cancel()
         ringbackRetry = nil
         let session = AVAudioSession.sharedInstance()
-        if session.category != .playAndRecord { prepareCallAudioSession(video: call?.kind == .video) }
+        if session.category != .playAndRecord {
+            if callKitReported {
+                audioLog.notice("ringback waiting for the call audio session")
+                return
+            }
+            prepareCallAudioSession(video: call?.kind == .video, speaker: true)
+        }
         do {
             let player = try AVAudioPlayer(data: CallManager.ringbackWAV)
             player.numberOfLoops = -1
@@ -778,11 +889,19 @@ final class CallManager: NSObject, ObservableObject {
     private func reportOutgoing(title: String, video: Bool) {
         let uuid = UUID()
         cxUUID = uuid
+        callWantsVideo = video
+        callKitReported = true
         let handle = CXHandle(type: .generic, value: title)
         let action = CXStartCallAction(call: uuid, handle: handle)
         action.isVideo = video
-        callController.request(CXTransaction(action: action)) { err in
-            if let err { log.error("CXStartCallAction: \(err.localizedDescription, privacy: .public)") }
+        callController.request(CXTransaction(action: action)) { [weak self] err in
+            if let err {
+                log.error("CXStartCallAction: \(err.localizedDescription, privacy: .public)")
+                Task { @MainActor in
+                    guard let self, self.isActive, !self.callKitOwnsAudio else { return }
+                    self.startEngineWithoutCallKit(video: video)
+                }
+            }
         }
         let update = CXCallUpdate()
         update.remoteHandle = handle
@@ -932,9 +1051,18 @@ extension CallManager: CXProviderDelegate {
     }
 
     nonisolated func provider(_ provider: CXProvider, perform action: CXAnswerCallAction) {
+        // Fulfill before any network. CallKit activates the session as this
+        // returns; `didActivate` is what starts playback. No main-actor hop
+        // here: the in-app Accept button is awaiting this request on main,
+        // and syncing back would deadlock it.
+        self.callWantsSpeaker = true
+        self.holdEngineUntilCallKit()
+        action.fulfill()
         Task { @MainActor in
+            self.answeringFromProvider = true
+            self.speakerOn = true
             await self.accept()
-            action.fulfill()
+            self.answeringFromProvider = false
         }
     }
 
@@ -945,6 +1073,8 @@ extension CallManager: CXProviderDelegate {
                 self.incoming = nil
                 self.phase = .idle
                 self.cxUUID = nil
+                self.callKitReported = false
+                self.answeringFromProvider = false
             } else if self.isActive {
                 // Ended from the system UI: leave the relay call too.
                 self.cxUUID = nil
@@ -979,22 +1109,32 @@ extension CallManager: CXProviderDelegate {
     }
 
     nonisolated func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
-        audioLog.notice("audio session activated by CallKit category=\(audioSession.category.rawValue, privacy: .public)")
-        // CallKit has the session: configure it and allow LiveKit's engine to run.
-        // Do not setActive — CallKit already did.
+        // LiveKit Swift 2.17: configure and start the engine inside this
+        // callback. `.voiceChat` for voice, `.videoChat` for video,
+        // `.allowBluetooth` so a headset can stay the route. Do not call
+        // `setActive` — CallKit already did.
+        let video = self.callWantsVideo
+        let speaker = self.callWantsSpeaker
+        do {
+            try self.configureActivatedCallSession(audioSession, video: video, speaker: speaker)
+            try AudioManager.shared.setEngineAvailability(.default)
+            self.routeBuiltInOutput(audioSession, speaker: speaker)
+            audioLog.notice("CallKit didActivate mode=\(video ? "videoChat" : "voiceChat", privacy: .public) speaker=\(speaker)")
+        } catch {
+            audioLog.error("CallKit didActivate: \(error.localizedDescription, privacy: .public)")
+        }
         Task { @MainActor in
             self.callKitOwnsAudio = true
-            let video = self.call?.kind == .video || self.incoming?.call.kind == .video
-            self.enableCallAudioEngine(video: video)
+            self.speakerOn = self.callWantsSpeaker
             self.resumeRingbackIfNeeded()
         }
     }
 
     nonisolated func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
         log.notice("audio session deactivated by CallKit")
+        self.disableCallAudioEngine()
         Task { @MainActor in
             self.callKitOwnsAudio = false
-            self.disableCallAudioEngine()
         }
     }
 }
