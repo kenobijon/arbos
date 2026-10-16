@@ -21,6 +21,9 @@ enum RowKind: Equatable {
     /// Another person's message in a people chat: left bubble with handle + avatar.
     case other(text: String, handle: String, avatar: String?)
     case assistant(blocks: [Block], live: Bool, caption: String?)
+    /// Shared agent in a people chat: same shape as `.other` (avatar + handle + bubble),
+    /// with an optional reply chip for the message it answers.
+    case member(blocks: [Block], live: Bool, handle: String, avatar: String?, replyHandle: String?, replyPreview: String?)
     /// Centred muted line: hand-offs ("Messaged ◉ Affine"), stops, dates.
     case system(icon: String?, text: String, avatarProject: Id?)
     case question(text: String)
@@ -73,18 +76,35 @@ enum Transcript {
                                      kind: .system(icon: nil, text: "Messaged \u{FFFC}\(name)", avatarProject: projectId)))
                 }
                 let lastTextPart = message.parts.lastIndex { $0.textValue != nil }
+                let firstTextPart = message.parts.firstIndex { $0.textValue != nil }
+                let parent = message.inReplyTo.flatMap { id in messages.first { $0.id == id } }
+                let replyHandle = message.askedByHandle ?? parent?.senderHandle
+                let replyPreview: String? = {
+                    guard let parent else { return nil }
+                    let t = Self.stripAskedPrefix(parent.plainText)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !t.isEmpty else { return nil }
+                    if t.count <= 80 { return t }
+                    return String(t.prefix(80)) + "…"
+                }()
                 for (pix, part) in message.parts.enumerated() {
                     switch part {
                     case .text(let id, let text):
-                        let blocks = Markdown.blocks(text).filter { !Markdown.isJSON($0) }
+                        let body = people ? Self.stripAskedPrefix(text) : text
+                        let blocks = Markdown.blocks(body).filter { !Markdown.isJSON($0) }
                         if blocks.isEmpty { continue }
                         let live = streaming && pix == lastTextPart
-                        var caption: String? = nil
                         if people, let h = message.senderHandle {
-                            caption = message.ownerHandle.map { "\(h) · owned by @\($0)" } ?? h
+                            let showReply = pix == firstTextPart
+                            chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
+                                             kind: .member(blocks: blocks, live: live, handle: h,
+                                                           avatar: message.senderAvatar,
+                                                           replyHandle: showReply ? replyHandle : nil,
+                                                           replyPreview: showReply ? replyPreview : nil)))
+                        } else {
+                            chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
+                                             kind: .assistant(blocks: blocks, live: live, caption: nil)))
                         }
-                        chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
-                                         kind: .assistant(blocks: blocks, live: live, caption: pix == message.parts.firstIndex { $0.textValue != nil } ? caption : nil)))
                     case .status(let id, .askUser, let text):
                         chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant, kind: .question(text: text)))
                     case .status(let id, .handoff, let text):
@@ -145,6 +165,17 @@ enum Transcript {
             return "Messaged \u{FFFC}" + t.dropFirst(prefix.count)
         }
         return t
+    }
+
+    /// Drop a legacy leading "@handle asked: …" line that older agentd builds wrote into prose.
+    static func stripAskedPrefix(_ text: String) -> String {
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        guard let first = lines.first,
+              first.hasPrefix("@"),
+              first.contains(" asked:") else { return text }
+        var i = 1
+        while i < lines.count && lines[i].isEmpty { i += 1 }
+        return lines[i...].joined(separator: "\n")
     }
 
     static func dateLabel(_ ms: Int64) -> String {
@@ -295,6 +326,29 @@ struct RowView: View {
                 .frame(maxWidth: maxBubble - 34, alignment: .leading)
                 Spacer(minLength: 0)
             }
+        case .member(let blocks, let live, let handle, let avatar, let replyHandle, let replyPreview):
+            HStack(alignment: .bottom, spacing: 8) {
+                peopleAvatar(handle: handle, avatar: avatar)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("@\(handle)")
+                        .font(.system(size: Theme.tiny, weight: .medium))
+                        .foregroundStyle(theme.muted)
+                        .padding(.leading, 4)
+                    VStack(alignment: .leading, spacing: 8) {
+                        if let replyHandle {
+                            replyChip(handle: replyHandle, preview: replyPreview)
+                        }
+                        ForEach(Array(blocks.enumerated()), id: \.offset) { i, block in
+                            BlockView(block: block, live: live && i == blocks.count - 1)
+                        }
+                    }
+                    .padding(.horizontal, Theme.bubbleHPad)
+                    .padding(.vertical, Theme.bubbleVPad)
+                    .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
+                }
+                .frame(maxWidth: maxBubble - 34, alignment: .leading)
+                Spacer(minLength: 0)
+            }
         case .assistant(let blocks, let live, let caption):
             HStack {
                 VStack(alignment: .leading, spacing: 8) {
@@ -389,6 +443,44 @@ struct RowView: View {
             }
             .padding(.horizontal, Theme.bubbleHPad).padding(.vertical, 10)
             .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.dangerSoft))
+        }
+    }
+
+    /// Avatar for a people-chat agent: project tree when we know it, else sender slug / initials.
+    @ViewBuilder
+    private func peopleAvatar(handle: String, avatar: String?) -> some View {
+        if let project = model.projects.first(where: {
+            mentionSlug($0.name).caseInsensitiveCompare(handle) == .orderedSame
+        }) {
+            AgentAvatar(project: project, theme: theme, size: 26, still: true)
+        } else if let avatar, avatar.contains("://") {
+            PersonAvatar(url: avatar, handle: handle, size: 26)
+        } else if let avatar, !avatar.isEmpty, TreeAvatars.shared.has(avatar) {
+            TreeCharacterView(slug: avatar, size: 26,
+                              color: TreeAvatars.shared.defaultColor(forProjectId: handle), still: true)
+        } else {
+            PersonAvatar(url: avatar, handle: handle, size: 26)
+        }
+    }
+
+    /// Compact reply reference above the prose (iMessage-style), not inline "@user asked:".
+    private func replyChip(handle: String, preview: String?) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            RoundedRectangle(cornerRadius: 1, style: .continuous)
+                .fill(theme.muted.opacity(0.55))
+                .frame(width: 2)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("@\(handle)")
+                    .font(.system(size: Theme.tiny, weight: .semibold))
+                    .foregroundStyle(theme.muted)
+                if let preview, !preview.isEmpty {
+                    Text(preview)
+                        .font(.system(size: Theme.tiny))
+                        .foregroundStyle(theme.muted)
+                        .lineLimit(2)
+                }
+            }
+            Spacer(minLength: 0)
         }
     }
 

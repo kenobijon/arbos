@@ -36,13 +36,6 @@ pub struct PeopleChatInfo {
 }
 
 impl PeopleChatInfo {
-    fn humans(&self) -> usize {
-        self.members
-            .iter()
-            .filter(|m| m["member"].as_str().is_some_and(|s| s.starts_with("user:")))
-            .count()
-    }
-
     fn agents(&self) -> usize {
         self.members
             .iter()
@@ -68,10 +61,10 @@ impl PeopleChatInfo {
     }
 }
 
-/// What a reply in a people chat carries: message fields and the leading quote of the asker.
+/// What a reply in a people chat carries: message fields for the clients.
+/// Clients show `inReplyTo` / `askedByHandle` as a reply chip; the prose stays clean.
 pub struct ReplyAttribution {
     pub fields: Vec<(&'static str, Value)>,
-    pub quote: Option<String>,
 }
 
 /// Who asked the question the current turn answers.
@@ -81,7 +74,6 @@ pub struct Asker {
     pub handle: String,
     pub role: &'static str,
     pub message_id: String,
-    pub text: String,
 }
 
 #[derive(Default)]
@@ -358,7 +350,6 @@ impl Agent {
             handle: handle.clone(),
             role,
             message_id: user_msg_id.to_owned(),
-            text: msg.text(),
         };
         self.people
             .askers
@@ -426,7 +417,6 @@ impl Agent {
                 handle: handle.to_owned(),
                 role: "guest",
                 message_id: user_msg_id.to_owned(),
-                text: msg.text(),
             },
         );
         self.people.set_current(Some(chat_id));
@@ -435,8 +425,7 @@ impl Agent {
         ))
     }
 
-    /// Fields and the quote on a reply in a people chat (called right after the assistant
-    /// message starts).
+    /// Fields on a reply in a people chat (called right after the assistant message starts).
     pub fn people_reply_fields(&self, chat_id: &str) -> Option<ReplyAttribution> {
         let info = self.people.info(chat_id)?;
         let asker = self.people.asker(chat_id)?;
@@ -458,14 +447,7 @@ impl Agent {
             ("askedByHandle", json!(asker.handle)),
             ("inReplyTo", json!(asker.message_id)),
         ];
-        let quote = (info.humans() > 1).then(|| {
-            let mut q: String = asker.text.split_whitespace().collect::<Vec<_>>().join(" ");
-            if q.chars().count() > 120 {
-                q = format!("{}…", q.chars().take(120).collect::<String>());
-            }
-            format!("@{} asked: “{q}”\n\n", asker.handle)
-        });
-        Some(ReplyAttribution { fields, quote })
+        Some(ReplyAttribution { fields })
     }
 
     /// The agent was removed while answering here: abort that turn.

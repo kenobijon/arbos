@@ -1283,9 +1283,6 @@ impl Agent {
                         .add_status_part(&assistant_msg_id, "working", "Working…");
                     if let Some(attr) = self.people_reply_fields(chat_id) {
                         h.doc.set_message_fields(&assistant_msg_id, &attr.fields);
-                        if let Some(q) = attr.quote {
-                            h.doc.append_text(&assistant_msg_id, &pid, &q);
-                        }
                     }
                 }
                 TurnKind::SubagentResult { subagent_id, name } => {
