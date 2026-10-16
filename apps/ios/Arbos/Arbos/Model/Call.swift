@@ -93,6 +93,9 @@ struct Call: Identifiable, Equatable {
     var endedAt: Int64?
     var reason: String?
     var participants: [CallPerson]
+    /// Project agents that belong to this chat (Phase 2): they join through the voice worker
+    /// and show as tiles before they connect.
+    var agents: [CallPerson] = []
     /// Only on the 201 start response.
     var reachable: [CallReachability] = []
 
@@ -112,6 +115,7 @@ struct Call: Identifiable, Equatable {
                     startedBy: CallPerson.parse(d["started_by"]), startedAt: n("started_at") ?? nowMs(), endedAt: n("ended_at"),
                     reason: d["reason"] as? String,
                     participants: ((d["participants"] as? [Any]) ?? []).compactMap(CallPerson.parse),
+                    agents: ((d["agents"] as? [Any]) ?? []).compactMap(CallPerson.parse),
                     reachable: ((outer["reachable"] as? [Any]) ?? (d["reachable"] as? [Any]) ?? []).compactMap(CallReachability.parse))
     }
 }

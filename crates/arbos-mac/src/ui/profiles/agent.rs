@@ -176,6 +176,7 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
 
     // ----- actions --------------------------------------------------------------
     let p_call = pid.clone();
+    let p_voice = pid.clone();
     let p_mute = pid.clone();
     let name_q = project.name.clone();
     let actions = action_row(vec![
@@ -186,9 +187,12 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
                     .update(cx, |s, cx| s.start_call(CallTarget::Agent(p), false, cx));
             },
         )),
-        action_button(
-            &Action::new("profile-voice", "waveform", "voice").soon(),
-            &theme,
+        action_button(&Action::new("profile-voice", "waveform", "voice"), &theme).on_click(
+            cx.listener(move |this, _, _, cx| {
+                let p = p_voice.clone();
+                this.state
+                    .update(cx, |s, cx| s.start_call(CallTarget::Agent(p), false, cx));
+            }),
         ),
         action_button(
             &Action::new(

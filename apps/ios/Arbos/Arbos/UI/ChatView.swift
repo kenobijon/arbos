@@ -20,9 +20,6 @@ struct ChatView: View {
     @State private var rows: [Row] = []
     @State private var showModelPicker = false
     @State private var showThreads = false
-    @State private var showVoice = false
-    /// When `showVoice` opens, present video-call chrome instead of voice-only.
-    @State private var callVideo = false
     @State private var showSettings = false
     @State private var sentOnce = false
     @State private var transcribing = false
@@ -277,29 +274,6 @@ struct ChatView: View {
         .sheet(isPresented: $showProfile) {
             AgentEditSheet(projectId: projectId).environmentObject(model).environment(\.theme, theme)
         }
-        .fullScreenCover(isPresented: $showVoice, onDismiss: {
-            callVideo = false
-            demoDismissed()
-        }) {
-            // Always emit a real view. A ViewBuilder that falls through to
-            // EmptyView presents a blank white full-screen cover (no Hang up).
-            Group {
-                if let project {
-                    VoiceModeView(project: project, video: callVideo)
-                } else {
-                    VoiceModeView(
-                        peerName: counterpart?.displayName ?? people?.title ?? name,
-                        peerHandle: counterpart?.handle ?? "",
-                        peerAvatarUrl: counterpart?.avatarUrl,
-                        video: callVideo
-                    )
-                }
-            }
-            .environmentObject(model)
-            .environment(\.theme, theme)
-            .preferredColorScheme(theme.isDark ? .dark : .light)
-            .presentationBackground(theme.bg)
-        }
         .task {
             guard DebugHooks.liveDemo, !model.demoStarted, DebugHooks.openChat == chatId || DebugHooks.openChat == nil, let text = DebugHooks.autoSend else { return }
             model.demoStarted = true
@@ -352,13 +326,13 @@ struct ChatView: View {
             model.visibleChatId = chatId
             if isPeople { model.markPeopleRead(chatId) }
             openPendingSearchIfNeeded()
-            if isPeople || project?.shared == true { Task { await model.refreshActiveCall(chatId: chatId, projectId: isPeople ? nil : projectId) } }
+            Task { await model.refreshActiveCall(chatId: chatId, projectId: isPeople ? nil : projectId) }
             if let show = DebugHooks.show {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
                     switch show {
                     case "keyboard": composerFocused = true
                     case "settings": showSettings = true
-                    case "voice": showVoice = true
+                    case "voice": startCall(.voice)
                     case "threads": if model.multiChatEnabled { showThreads = true }
                     case "model": showModelPicker = true
                     case "profile": openHeaderProfile()
@@ -422,7 +396,7 @@ struct ChatView: View {
         case "model": showModelPicker = true
         case "threads": showThreads = true
         case "attach": showAttach = true
-        case "voice": showVoice = true
+        case "voice": startCall(.voice)
         case "settings": showSettings = true
         default: break
         }
@@ -432,7 +406,7 @@ struct ChatView: View {
             case "model": showModelPicker = false
             case "threads": showThreads = false
             case "attach": showAttach = false
-            case "voice": showVoice = false
+            case "voice": break
             default: break
             }
         }
@@ -585,16 +559,11 @@ struct ChatView: View {
                         }
                     }
                     Button { showModelPicker = true } label: { Label("Model · \(project?.shortModel ?? "")", systemImage: "cpu") }
-                    if project?.shared == true {
-                        // People in a shared project talk to each other; the agent joins in Phase 2.
-                        Button { startCall(.video) } label: { Label("Video call", systemImage: "video") }
-                        Button { startCall(.voice) } label: { Label("Voice call", systemImage: "phone") }
-                    } else {
-                        Button {
-                            callVideo = true
-                            showVoice = true
-                        } label: { Label("Video call", systemImage: "video") }
-                    }
+                    // Calls Phase 2: every project chat is callable; the agent joins the room
+                    // through the voice worker (1:1 = a voice call with the agent; shared
+                    // projects = people plus the agent).
+                    Button { startCall(.voice) } label: { Label(project?.shared == true ? "Voice call" : "Call \(project?.name ?? "agent")", systemImage: "phone") }
+                    Button { startCall(.video) } label: { Label("Video call", systemImage: "video") }
                     Button { showShare = true } label: { Label(project?.shared == true ? "Members" : "Share project…", systemImage: "person.2.badge.plus") }
                     if streaming {
                         Button(role: .destructive) { stop() } label: { Label("Stop \(name)", systemImage: "stop.circle") }
@@ -935,8 +904,7 @@ struct ChatView: View {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showFiles = true }
                     } onVoice: {
                         showAttach = false
-                        callVideo = false
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showVoice = true }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { startCall(.voice) }
                     }
                     .environment(\.theme, theme)
                 }
@@ -1076,7 +1044,7 @@ struct ChatView: View {
             }
             // While recording: tap send also finishes (same as release). Otherwise
             // Grok keeps the composer usable while the bot works: text sends, an
-            // empty field starts voice chat. Stop lives in the … menu.
+            // empty field starts a voice call with the agent. Stop lives in the … menu.
             Button(action: {
                 if recorder.recording {
                     memoHoldActive = false
@@ -1087,8 +1055,7 @@ struct ChatView: View {
                 } else if canSend {
                     send()
                 } else {
-                    callVideo = false
-                    showVoice = true
+                    startCall(.voice)
                 }
             }) {
                 Circle()

@@ -21,8 +21,11 @@ use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, HEADER_HEIGHT, PANEL_RADIUS, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
 /// Chats where a call can start: every people chat and every shared project.
+/// Every space takes a call: people chats and shared projects ring their humans; a project
+/// chat with nobody else in it is a voice call with the agent (Calls Phase 2, D75).
 pub fn callable(space: &Project) -> bool {
-    space.is_people() || space.shared || space.is_guest() || !space.people.is_empty()
+    let _ = space;
+    true
 }
 
 fn mmss(ms: u64) -> String {

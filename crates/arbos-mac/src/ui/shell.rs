@@ -657,7 +657,7 @@ impl Shell {
         let call_here = self.state.read(cx).calls_in_chat.get(&space.id).cloned();
         let screen_open = my_call
             .as_ref()
-            .map(|c| c.expanded && c.call.chat_id == space.id)
+            .map(|c| c.expanded && c.call.space_id() == space.id)
             .unwrap_or(false);
         if let Some(active) = my_call.as_ref().filter(|_| !screen_open) {
             column = column.child(callview::bar(active, cx));
