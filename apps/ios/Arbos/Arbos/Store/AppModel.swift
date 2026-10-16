@@ -296,6 +296,15 @@ final class AppModel: ObservableObject {
         calls.writeSystemLine = { [weak self] chatId, projectId, text, callId in
             self?.writeSystemLine(chatId: chatId, projectId: projectId, text: text, callId: callId)
         }
+        calls.calleePresence = { [weak self] chatId in
+            guard let self, let chat = self.peopleChat(chatId), chat.kind == "dm", let other = chat.counterpart(me: self.user?.id) else { return nil }
+            let seen = max(other.lastSeenAt ?? 0, self.lastSeen[other.id] ?? 0)
+            return (other.online || (nowMs() - seen) < 90_000, seen > 0 ? seen : nil)
+        }
+        calls.calleeName = { [weak self] chatId in
+            guard let self, let chat = self.peopleChat(chatId) else { return nil }
+            return chat.counterpart(me: self.user?.id)?.displayName
+        }
         // Presence carries `in_call` for the chat we are talking in.
         callSink = calls.$call.receive(on: DispatchQueue.main).sink { [weak self] c in
             guard let self else { return }

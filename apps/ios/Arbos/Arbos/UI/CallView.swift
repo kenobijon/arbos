@@ -78,7 +78,14 @@ struct CallScreen: View {
         switch calls.phase {
         case .connecting: return "Calling…"
         case .reconnecting: return "Reconnecting…"
-        case .connected: return calls.tiles.isEmpty ? "Ringing…" : (primary?.micOn == false ? "Muted" : "Connected")
+        case .connected:
+            if calls.tiles.isEmpty {
+                if calls.calleeUnreachable, let name = calls.calleeName?(calls.call?.chatId ?? "") {
+                    return "\(name)'s Arbos isn't open — they'll see a missed call"
+                }
+                return "Ringing…"
+            }
+            return primary?.micOn == false ? "Muted" : "Connected"
         case .ringing: return "Incoming…"
         case .idle: return calls.error ?? "Call ended"
         }

@@ -172,6 +172,8 @@ final class PushManager: NSObject, ObservableObject, UNUserNotificationCenterDel
 final class PushAppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         PushManager.shared.prepare()
+        // PushKit wants to be registered at launch; the token is posted once the device is signed in.
+        CallManager.shared.prepareVoip()
         return true
     }
 

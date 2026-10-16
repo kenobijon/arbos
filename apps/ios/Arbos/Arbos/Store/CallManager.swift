@@ -14,12 +14,14 @@
 import Foundation
 import UIKit
 import AVFoundation
+import AudioToolbox
 import CallKit
 import PushKit
 import LiveKit
 import os
 
 private let log = Logger(subsystem: "com.unarbos.arbos.ios", category: "calls")
+private let audioLog = Logger(subsystem: "com.unarbos.arbos.ios", category: "call-audio")
 
 /// A remote participant as the UI needs it.
 struct CallTile: Identifiable, Equatable {
@@ -57,6 +59,13 @@ final class CallManager: NSObject, ObservableObject {
     @Published var isPresented = false
     /// `push` from the VoIP registration: false until the relay has an APNs key.
     @Published private(set) var voipPushEnabled: Bool?
+    /// What happened with the VoIP token, for Settings → Help and the logs.
+    @Published private(set) var voipStatus: String = "no token yet"
+    /// Someone other than us was in the call at some point (else it was a missed call).
+    private var anyoneJoined = false
+    private var outgoingTimeout: Task<Void, Never>?
+    /// Nobody picks up within this → hang up as a missed call.
+    static let missedAfter: TimeInterval = 30
     /// Active calls per chat (for the "On a call · Join" bar), from pushes, presence and GET /chats/{id}/call.
     @Published private(set) var activeByChat: [String: Call] = [:]
 
@@ -127,6 +136,7 @@ final class CallManager: NSObject, ObservableObject {
         error = nil
         phase = .connecting
         isPresented = true
+        prepareCallAudioSession(video: kind == .video)
         ringbackWanted = true
         syncRingback()
         do {
@@ -152,6 +162,7 @@ final class CallManager: NSObject, ObservableObject {
         error = nil
         phase = .connecting
         isPresented = true
+        prepareCallAudioSession(video: existing.kind == .video)
         ringbackWanted = true
         syncRingback()
         do {
@@ -187,6 +198,11 @@ final class CallManager: NSObject, ObservableObject {
         update.supportsUngrouping = false
         update.supportsDTMF = false
         provider.reportNewIncomingCall(with: uuid, update: update) { [weak self] err in
+            // CallKit rings (system ringtone + vibration, honouring the ring/silent
+            // switch like a phone call). If it refuses, ring in-app instead.
+            Task { @MainActor in
+                if err != nil { self?.startIncomingRingFallback() } else { audioLog.notice("incoming: CallKit is ringing") }
+            }
             if let err {
                 log.error("reportNewIncomingCall: \(err.localizedDescription, privacy: .public)")
                 Task { @MainActor in self?.incoming = nil; self?.phase = .idle }
@@ -207,9 +223,78 @@ final class CallManager: NSObject, ObservableObject {
         if live.ended { endIncoming(reason: .remoteEnded) }
     }
 
+    // MARK: In-app incoming ring (only when CallKit cannot report the call)
+
+    private var incomingRingPlayer: AVAudioPlayer?
+    private var incomingVibration: Task<Void, Never>?
+
+    private func startIncomingRingFallback() {
+        guard incoming != nil, incomingRingPlayer == nil else { return }
+        prepareCallAudioSession(video: incoming?.call.kind == .video)
+        do {
+            let player = try AVAudioPlayer(data: CallManager.ringtoneWAV)
+            player.numberOfLoops = -1
+            player.volume = 0.8
+            player.prepareToPlay()
+            _ = player.play()
+            incomingRingPlayer = player
+            audioLog.notice("incoming: in-app ring playing (CallKit refused)")
+        } catch {
+            audioLog.error("incoming ring: \(error.localizedDescription, privacy: .public)")
+        }
+        incomingVibration?.cancel()
+        incomingVibration = Task { [weak self] in
+            while !Task.isCancelled, self?.incoming != nil {
+                AudioServicesPlaySystemSound(kSystemSoundID_Vibrate)
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+        }
+    }
+
+    private func stopIncomingRing() {
+        incomingRingPlayer?.stop()
+        incomingRingPlayer = nil
+        incomingVibration?.cancel()
+        incomingVibration = nil
+    }
+
+    /// Incoming ring: a two-tone trill, 1 s on / 2 s off.
+    private static let ringtoneWAV: Data = {
+        let sampleRate = 44_100
+        let cycle = sampleRate * 3
+        var pcm = Data(count: cycle * 2)
+        pcm.withUnsafeMutableBytes { raw in
+            guard let base = raw.bindMemory(to: Int16.self).baseAddress else { return }
+            let amp = 0.3 * Double(Int16.max)
+            for i in 0..<sampleRate {
+                let t = Double(i) / Double(sampleRate)
+                let trill = sin(2 * Double.pi * 20 * t) > 0 ? 1.0 : 0.0
+                let s = sin(2 * Double.pi * 880 * t) * 0.6 + sin(2 * Double.pi * 1320 * t) * 0.4
+                base[i] = Int16(amp * s * trill)
+            }
+        }
+        return CallManager.wav(pcm, sampleRate: sampleRate)
+    }()
+
+    static func wav(_ pcm: Data, sampleRate: Int) -> Data {
+        var wav = Data()
+        wav.reserveCapacity(44 + pcm.count)
+        func u32(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { wav.append(contentsOf: $0) } }
+        func u16(_ v: UInt16) { withUnsafeBytes(of: v.littleEndian) { wav.append(contentsOf: $0) } }
+        wav.append(contentsOf: [0x52, 0x49, 0x46, 0x46])
+        u32(UInt32(36 + pcm.count))
+        wav.append(contentsOf: [0x57, 0x41, 0x56, 0x45, 0x66, 0x6D, 0x74, 0x20])
+        u32(16); u16(1); u16(1); u32(UInt32(sampleRate)); u32(UInt32(sampleRate * 2)); u16(2); u16(16)
+        wav.append(contentsOf: [0x64, 0x61, 0x74, 0x61])
+        u32(UInt32(pcm.count))
+        wav.append(pcm)
+        return wav
+    }
+
     func accept() async {
         guard let inc = incoming, let api else { return }
         ringTimeout?.cancel()
+        stopIncomingRing()
         guard await CallManager.micGranted() else { error = "Microphone access is off in Settings."; endIncoming(reason: .failed); return }
         if inc.call.kind == .video { _ = await CallManager.cameraGranted() }
         incoming = nil
@@ -233,6 +318,7 @@ final class CallManager: NSObject, ObservableObject {
     }
 
     private func endIncoming(reason: CXCallEndedReason) {
+        stopIncomingRing()
         if let uuid = cxUUID { provider.reportCall(with: uuid, endedAt: Date(), reason: reason) }
         cxUUID = nil
         incoming = nil
@@ -242,6 +328,28 @@ final class CallManager: NSObject, ObservableObject {
     func hangUp() async {
         await teardown(leave: true)
     }
+
+    /// Outgoing: start the no-answer clock; a joiner cancels it.
+    private func armOutgoingTimeout() {
+        outgoingTimeout?.cancel()
+        outgoingTimeout = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(CallManager.missedAfter * 1_000_000_000))
+            guard let self, !Task.isCancelled, self.isActive, !self.anyoneJoined else { return }
+            audioLog.notice("no answer after \(Int(CallManager.missedAfter))s — ending as missed")
+            self.outgoingTimeout = nil  // teardown must not cancel the task it runs in
+            self.error = nil
+            await self.teardown(leave: true, reason: .unanswered)
+        }
+    }
+
+    /// The DM peer's reachability for the caller's status line (§9 presence).
+    var calleeUnreachable: Bool {
+        guard let c = call, let peer = calleePresence?(c.chatId) else { return false }
+        return !peer.online && (peer.lastSeenAt.map { nowMs() - $0 > 90_000 } ?? true)
+    }
+    /// Set by AppModel: the DM counterpart's presence for a chat.
+    var calleePresence: ((String) -> (online: Bool, lastSeenAt: Int64?)?)?
+    var calleeName: ((String) -> String?)?
 
     /// `call_ended` from the relay (push or alert): stop everything for that call.
     func remoteEnded(callId: String, chatId: String, durationS: Int, writerDevice: String?) {
@@ -288,6 +396,7 @@ final class CallManager: NSObject, ObservableObject {
         try await room.connect(url: url.absoluteString, token: token, connectOptions: ConnectOptions(autoSubscribe: true), roomOptions: roomOptions)
         phase = .connected
         connectedAt = Date()
+        if room.remoteParticipants.isEmpty { armOutgoingTimeout() } else { anyoneJoined = true }
         if let uuid = cxUUID { provider.reportOutgoingCall(with: uuid, connectedAt: Date()) }
         try? await room.localParticipant.setMicrophone(enabled: !muted)
         if video, AVCaptureDevice.authorizationStatus(for: .video) == .authorized {
@@ -301,6 +410,9 @@ final class CallManager: NSObject, ObservableObject {
     private func teardown(leave: Bool, reason: CXCallEndedReason = .remoteEnded) async {
         ringbackWanted = false
         stopRingback()
+        outgoingTimeout?.cancel()
+        outgoingTimeout = nil
+        let missed = !anyoneJoined
         let ended = call
         let wasConnected = connectedAt
         await room.disconnect()
@@ -318,7 +430,9 @@ final class CallManager: NSObject, ObservableObject {
                 let r = try await api.leaveCall(ended.callId)
                 if r.ended {
                     activeByChat[ended.chatId] = nil
-                    writeSystemLine?(ended.chatId, ended.projectId, callEndedLine(durationS: r.durationS), ended.callId)
+                    // Nobody ever joined: the shared line says so, for both sides.
+                    let line = missed ? "Missed call from \(me()?.displayName ?? "someone")" : callEndedLine(durationS: r.durationS)
+                    writeSystemLine?(ended.chatId, ended.projectId, line, ended.callId)
                 }
             } catch {
                 log.error("leave: \(error.localizedDescription, privacy: .public)")
@@ -333,6 +447,7 @@ final class CallManager: NSObject, ObservableObject {
         connectedAt = nil
         cameraOn = false
         muted = false
+        anyoneJoined = false
         phase = .idle
         isPresented = false
     }
@@ -367,6 +482,10 @@ final class CallManager: NSObject, ObservableObject {
     }
 
     private func refreshTiles() {
+        if !room.remoteParticipants.isEmpty, !anyoneJoined {
+            anyoneJoined = true
+            outgoingTimeout?.cancel()
+        }
         tiles = room.remoteParticipants.values
             .sorted { ($0.joinedAt ?? .distantPast) < ($1.joinedAt ?? .distantPast) }
             .map { p in
@@ -382,28 +501,119 @@ final class CallManager: NSObject, ObservableObject {
     // MARK: Outgoing ringback
 
     /// Play while we wait for someone else ("Calling…" / "Ringing…"); stop when they join.
-    private func syncRingback() {
+    private func syncRingback(force: Bool = false) {
         let waiting = ringbackWanted && tiles.isEmpty && (phase == .connecting || phase == .connected || phase == .reconnecting)
-        if waiting { startRingback() } else { stopRingback() }
+        if waiting { force ? startRingback(force: true) : resumeRingbackIfNeeded() } else { stopRingback() }
     }
 
-    private func startRingback() {
-        if let ringbackPlayer, ringbackPlayer.isPlaying { return }
+    /// The call's audio session, set before any call sound: `.playAndRecord` /
+    /// `.voiceChat` is what LiveKit and CallKit use too, so the ringback is
+    /// not cut when they take over, and — unlike the app's default
+    /// `.soloAmbient` — it plays with the ring/silent switch off, through
+    /// the receiver (voice) or the speaker (video), like a phone call.
+    private func prepareCallAudioSession(video: Bool) {
+        let session = AVAudioSession.sharedInstance()
+        do {
+            if session.category != .playAndRecord || session.mode != .voiceChat {
+                try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetooth, .allowBluetoothA2DP])
+            }
+            try session.setActive(true)
+            try session.overrideOutputAudioPort(video ? .speaker : .none)
+            audioLog.notice("session ready category=\(session.category.rawValue, privacy: .public) mode=\(session.mode.rawValue, privacy: .public) route=\(session.currentRoute.outputs.map(\.portType.rawValue).joined(separator: ","), privacy: .public)")
+        } catch {
+            audioLog.error("session setup: \(error.localizedDescription, privacy: .public)")
+        }
+        observeAudioSession()
+    }
+
+    private var audioObservers: [NSObjectProtocol] = []
+
+    /// A category change or interruption (LiveKit/CallKit taking the session)
+    /// silently stops an AVAudioPlayer; restart the ringback while it is wanted.
+    private func observeAudioSession() {
+        guard audioObservers.isEmpty else { return }
+        let center = NotificationCenter.default
+        audioObservers.append(center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] n in
+            let type = (n.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt).flatMap(AVAudioSession.InterruptionType.init)
+            Task { @MainActor in
+                audioLog.notice("interruption \(type == .began ? "began" : "ended", privacy: .public)")
+                if type == .ended { self?.resumeRingbackIfNeeded() }
+            }
+        })
+        audioObservers.append(center.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                let s = AVAudioSession.sharedInstance()
+                audioLog.notice("route → \(s.currentRoute.outputs.map(\.portType.rawValue).joined(separator: ","), privacy: .public) category=\(s.category.rawValue, privacy: .public)")
+                // A route change does not kill the player; only pick it up if it fell silent.
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                self?.resumeRingbackIfNeeded()
+            }
+        })
+    }
+
+    /// The player fell silent (interruption, session handed around): play again, same instance.
+    private func resumeRingbackIfNeeded() {
+        guard ringbackWanted, tiles.isEmpty, isActive else { return }
+        if let p = ringbackPlayer {
+            if !p.isPlaying {
+                let ok = p.play()
+                audioLog.notice("ringback resume \(ok ? "ok" : "refused", privacy: .public)")
+                if !ok { retryRingback() }
+            }
+        } else {
+            startRingback()
+        }
+    }
+
+    private var ringbackRetry: Task<Void, Never>?
+
+    /// `play()` says no while WebRTC/CallKit are still configuring the session:
+    /// keep trying every half second (re-activating the session first) until
+    /// it takes or the wait is over — one loop, not one per notification.
+    private func retryRingback() {
+        guard ringbackRetry == nil else { return }
+        ringbackRetry = Task { [weak self] in
+            defer { Task { @MainActor in self?.ringbackRetry = nil } }
+            for attempt in 1...40 {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                guard let self, !Task.isCancelled, self.ringbackWanted, self.tiles.isEmpty, self.isActive, let p = self.ringbackPlayer else { return }
+                if p.isPlaying { return }
+                let session = AVAudioSession.sharedInstance()
+                try? session.setActive(true)
+                let ok = p.play()
+                audioLog.notice("ringback retry \(attempt) \(ok ? "ok" : "refused", privacy: .public) active-others=\(session.isOtherAudioPlaying) route=\(session.currentRoute.outputs.map(\.portType.rawValue).joined(separator: ","), privacy: .public)")
+                if ok { return }
+            }
+        }
+    }
+
+    private func startRingback(force: Bool = false) {
+        if let ringbackPlayer, ringbackPlayer.isPlaying, !force { return }
+        if let p = ringbackPlayer, !force { resumeRingbackIfNeeded(); _ = p; return }
+        ringbackPlayer?.stop()
+        ringbackRetry?.cancel()
+        ringbackRetry = nil
+        let session = AVAudioSession.sharedInstance()
+        if session.category != .playAndRecord { prepareCallAudioSession(video: call?.kind == .video) }
         do {
             let player = try AVAudioPlayer(data: CallManager.ringbackWAV)
             player.numberOfLoops = -1
             player.volume = 0.55
             player.prepareToPlay()
-            // CallKit / LiveKit own the session — do not retarget the category.
-            _ = player.play()
+            let ok = player.play()
             ringbackPlayer = player
+            audioLog.notice("ringback \(ok ? "playing" : "did not start", privacy: .public) category=\(session.category.rawValue, privacy: .public) route=\(session.currentRoute.outputs.map(\.portType.rawValue).joined(separator: ","), privacy: .public)")
+            if !ok { retryRingback() }
         } catch {
-            log.error("ringback: \(error.localizedDescription, privacy: .public)")
+            audioLog.error("ringback: \(error.localizedDescription, privacy: .public)")
             ringbackPlayer = nil
         }
     }
 
     private func stopRingback() {
+        if ringbackPlayer != nil { audioLog.notice("ringback stopped") }
+        ringbackRetry?.cancel()
+        ringbackRetry = nil
         ringbackPlayer?.stop()
         ringbackPlayer = nil
     }
@@ -473,15 +683,21 @@ final class CallManager: NSObject, ObservableObject {
     }
 
     func sendVoipTokenIfNeeded(force: Bool = false) async {
-        guard let api, let token = voipToken, !isFixture else { return }
+        guard !isFixture else { return }
+        guard let token = voipToken else { voipStatus = "no token yet"; return }
+        guard let api, !deviceId().isEmpty, deviceId() != "ios:unpaired" else { voipStatus = "token ready · not signed in"; return }
         if !force, token == registeredVoipToken { return }
         registeredVoipToken = token
         do {
-            voipPushEnabled = try await api.registerVoip(deviceId: deviceId(), token: token, environment: PushManager.environment,
-                                                         bundleId: Bundle.main.bundleIdentifier ?? "com.unarbos.arbos.ios")
+            let enabled = try await api.registerVoip(deviceId: deviceId(), token: token, environment: PushManager.environment,
+                                                     bundleId: Bundle.main.bundleIdentifier ?? "com.unarbos.arbos.ios")
+            voipPushEnabled = enabled
+            voipStatus = enabled ? "registered" : "registered · relay push key pending"
+            log.notice("voip token registered for device \(self.deviceId(), privacy: .public) env=\(PushManager.environment, privacy: .public) push=\(enabled)")
         } catch {
             registeredVoipToken = nil
-            log.error("voip register: \(error.localizedDescription, privacy: .public)")
+            voipStatus = "registration failed: \(CallManager.describe(error))"
+            log.error("voip register failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -611,7 +827,9 @@ extension CallManager: CXProviderDelegate {
     }
 
     nonisolated func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
-        log.notice("audio session activated by CallKit")
+        audioLog.notice("audio session activated by CallKit category=\(audioSession.category.rawValue, privacy: .public)")
+        // CallKit has just handed us the session: make sure the ringback is sounding on it.
+        Task { @MainActor in self.resumeRingbackIfNeeded() }
     }
 
     nonisolated func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
@@ -624,6 +842,7 @@ extension CallManager: CXProviderDelegate {
 extension CallManager: PKPushRegistryDelegate {
     nonisolated func pushRegistry(_ registry: PKPushRegistry, didUpdate pushCredentials: PKPushCredentials, for type: PKPushType) {
         let hex = pushCredentials.token.map { String(format: "%02x", $0) }.joined()
+        log.notice("voip token received (\(hex.count) hex chars)")
         Task { @MainActor in
             self.voipToken = hex
             await self.sendVoipTokenIfNeeded()

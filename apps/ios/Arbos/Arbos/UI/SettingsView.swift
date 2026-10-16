@@ -3,6 +3,7 @@ import SwiftUI
 struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
     @ObservedObject private var push = PushManager.shared
+    @ObservedObject private var calls = CallManager.shared
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
     @State private var relayUrl = ""
@@ -116,6 +117,9 @@ struct SettingsView: View {
                 Section {
                     LabeledContent("Notifications") {
                         Text(notificationsLine).foregroundStyle(theme.muted).multilineTextAlignment(.trailing)
+                    }
+                    LabeledContent("Call ringing") {
+                        Text(calls.voipStatus).foregroundStyle(theme.muted).multilineTextAlignment(.trailing)
                     }
                     Button {
                         dismiss()
