@@ -383,7 +383,7 @@ pub fn render(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
 }
 
 /// The agent's chat tabs, next to its name: every visible chat as a pill
-/// (groups with their participants' heads), "×" on each but the primary
+/// (groups with their participants' heads), "×" on each but the pinned "Main"
 /// (archives it), "+" for a new chat, and an "Archived" pill when there is
 /// something in it. With multi-chat off: the primary, groups and the
 /// Projects tab only, no "+", no "×", no Archived.
@@ -391,7 +391,6 @@ fn agent_tabs(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option
     let theme = Theme::of(cx).clone();
     let state = shell.state.read(cx);
     let multi_chat = state.multi_chat;
-    let primary_id = state.primary_chat(&space.id).map(|c| c.id.clone());
     let tabs: Vec<(Chat, bool, bool)> = state
         .visible_tabs(&space.id)
         .into_iter()
@@ -427,13 +426,12 @@ fn agent_tabs(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option
         let phase = PulseClock::phase(cx, 1200);
         let id = chat.id.clone();
         let close_id = chat.id.clone();
-        let is_primary = primary_id.as_deref() == Some(&*chat.id);
         let title = if chat.is_pinned {
             "Main".to_string()
         } else {
             chat.title.clone()
         };
-        let closable = multi_chat && !is_primary && !chat.is_pinned;
+        let closable = multi_chat && !chat.is_pinned;
         let mut pill = div()
             .id(ElementId::Name(SharedString::from(format!(
                 "tab-{}",

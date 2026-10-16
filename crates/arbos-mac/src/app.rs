@@ -1288,13 +1288,11 @@ impl AppState {
         }
         let primary = self.primary_chat(project_id);
         if self.multi_chat {
-            // Archived chats leave the strip; the agent's primary chat never does.
+            // Archived chats leave the strip; the pinned "Main" chat never does.
             return self
                 .tabs(project_id)
                 .iter()
-                .filter(|c| {
-                    !self.archived_chats.contains(&c.id) || primary.is_some_and(|p| p.id == c.id)
-                })
+                .filter(|c| c.is_pinned || !self.archived_chats.contains(&c.id))
                 .collect();
         }
         let mut out: Vec<&Chat> = primary.into_iter().collect();
@@ -1340,12 +1338,9 @@ impl AppState {
 
     /// The agent's chats archived on this Mac (the "Archived" list).
     pub fn archived_tabs(&self, project_id: &str) -> Vec<&Chat> {
-        let primary = self.primary_chat(project_id).map(|c| c.id.clone());
         self.tabs(project_id)
             .iter()
-            .filter(|c| {
-                self.archived_chats.contains(&c.id) && primary.as_deref() != Some(c.id.as_str())
-            })
+            .filter(|c| !c.is_pinned && self.archived_chats.contains(&c.id))
             .collect()
     }
 
@@ -1356,8 +1351,9 @@ impl AppState {
             return;
         };
         if self
-            .primary_chat(&project_id)
-            .is_some_and(|p| p.id == chat_id)
+            .tabs(&project_id)
+            .iter()
+            .any(|c| c.id == chat_id && c.is_pinned)
         {
             return;
         }
@@ -1714,7 +1710,7 @@ impl AppState {
     }
 
     /// The tab's "×" / ⌘W: archives the chat (as the iPhone does). Returns
-    /// false for the agent's primary chat, which never leaves the strip.
+    /// false for the pinned "Main" chat, which never leaves the strip.
     pub fn close_tab(&mut self, chat_id: Id, cx: &mut Context<Self>) -> bool {
         if !self.multi_chat {
             return false;
@@ -1723,8 +1719,9 @@ impl AppState {
             return false;
         };
         if self
-            .primary_chat(&project_id)
-            .is_some_and(|p| p.id == chat_id)
+            .tabs(&project_id)
+            .iter()
+            .any(|c| c.id == chat_id && c.is_pinned)
         {
             return false;
         }
