@@ -249,6 +249,7 @@ class VoiceCall:
         )
         if self.state.mode == "group":
             await self.start_group_listening()
+        self.hook_realtime()
         log.info("session started in %s mode (humans=%d, chattiness=%s)", self.state.mode, len(self.humans()), self.chattiness)
         self.spawn(self.usage_loop())
         self.spawn(self.idle_loop())
@@ -433,6 +434,23 @@ class VoiceCall:
         @session.on("error")
         def _error(ev) -> None:
             log.warning("session error: %s", getattr(ev, "error", ev))
+
+    def hook_realtime(self) -> None:
+        """Wall-clock stamps of the speech model's own VAD, for the barge-in measurement."""
+        try:
+            rt = self.agent.realtime_llm_session if self.agent else None
+        except Exception:
+            rt = None
+        if rt is None:
+            return
+
+        @rt.on("input_speech_started")
+        def _started(_ev) -> None:
+            log.info("rt input_speech_started wall=%d agent_state=%s", now_ms(), self.state.agent_state)
+
+        @rt.on("input_speech_stopped")
+        def _stopped(_ev) -> None:
+            log.info("rt input_speech_stopped wall=%d", now_ms())
 
     def hook_room(self) -> None:
         room = self.ctx.room

@@ -101,7 +101,7 @@ class Participant:
         return time.monotonic() - self.t0
 
     def event(self, kind: str, **f) -> None:
-        rec = {"t": round(self.now(), 3), "kind": kind, **f}
+        rec = {"t": round(self.now(), 3), "wall": int(time.time() * 1000), "kind": kind, **f}
         self.events.write(json.dumps(rec) + "\n")
         self.events.flush()
         log.info("%s %s", kind, {k: v for k, v in f.items() if k != "text"} | ({"text": f["text"][:60]} if "text" in f else {}))
