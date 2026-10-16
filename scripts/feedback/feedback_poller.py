@@ -56,7 +56,7 @@ Inbox entries (<state>/inbox/<name>/) carry comment.txt and optional screenshot 
 origin.txt (where it came from, shown as the issue's Source). `inject` writes one for you.
 
 CLI:  feedback_poller.py [run] | status | testers | set-cursor <ISO-8601>
-      | inject <image|-> "<comment>" [ios|mac] [--handle <login>] [--origin "<text>"]
+      | inject <image|-> "<comment>" [ios|mac] [--handle <login>] [--origin "<text>"] [--email <tester email, grouping only>]
       | requeue <id>… | prioritize <id>… | confirm <id> [note] | handoff <id> [label]
 """
 
@@ -1518,7 +1518,7 @@ class Loop:
 
 
 def inject(cfg: Config, image: Path | None, comment: str, target: str | None,
-           handle: str | None = None, origin: str | None = None) -> None:
+           handle: str | None = None, origin: str | None = None, email: str | None = None) -> None:
     inbox = cfg.state_dir / "inbox"
     inbox.mkdir(parents=True, exist_ok=True)
     stamp = utcnow().strftime("%Y%m%d%H%M%S%f")[:-3]
@@ -1534,6 +1534,9 @@ def inject(cfg: Config, image: Path | None, comment: str, target: str | None,
         (d / "handle.txt").write_text(handle.lstrip("@") + "\n")
     if origin:
         (d / "origin.txt").write_text(origin + "\n")
+    if email:
+        # Groups the item with the same person's TestFlight items (the key is hashed in the issue, never shown).
+        (d / "email.txt").write_text(email.strip().lower() + "\n")
     print(f"placed {d}; the next tick picks it up")
 
 
@@ -1544,11 +1547,15 @@ def tester_summary(store: Store) -> list[dict]:
         st = store.state(fid)
         sub = store.item_dir(fid) / "submission.json"
         info = json.loads(sub.read_text()) if sub.is_file() else {}
-        label = st.get("tester") or "?"
-        row = rows.setdefault(label, {"tester": label, "sources": set(), "ingested": 0, "issues": 0,
-                                      "shipped": 0, "shipped_unverified": 0, "folded": 0, "other": {}})
+        # Group by the stable tester key (older items carry an earlier, shorter label for the same person);
+        # show the most informative label seen. The key itself may be an email and is never printed.
+        key = st.get("tester_key") or (Loop.tester_key(info) if info else st.get("tester") or "?")
+        row = rows.setdefault(key, {"tester": "", "sources": set(), "ingested": 0, "issues": 0,
+                                    "shipped": 0, "shipped_unverified": 0, "folded": 0, "other": {}})
+        if len(st.get("tester") or "") > len(row["tester"]):
+            row["tester"] = st["tester"]
         row["ingested"] += 1
-        row["sources"].add(info.get("origin") or info.get("source") or "?")
+        row["sources"].add("relayed chat" if info.get("origin") else info.get("source") or "?")
         if st.get("issue"):
             row["issues"] += 1
         status = st.get("status", "?")
@@ -1562,7 +1569,8 @@ def tester_summary(store: Store) -> list[dict]:
         else:
             row["other"][status] = row["other"].get(status, 0) + 1
     out = sorted(rows.values(), key=lambda r: -r["ingested"])
-    for r in out:
+    for key, r in zip(sorted(rows, key=lambda k: -rows[k]["ingested"]), out):
+        r["tester"] = r["tester"] or ("tester-" + hashlib.sha256(key.encode()).hexdigest()[:8])
         r["sources"] = ", ".join(sorted(r["sources"]))
     return out
 
@@ -1583,21 +1591,23 @@ def main(argv: list[str]) -> int:
         if len(argv) < 4:
             print(__doc__)
             return 2
-        rest, handle, origin = list(argv[4:]), None, None
-        for flag in ("--handle", "--origin"):
+        rest, handle, origin, email = list(argv[4:]), None, None, None
+        for flag in ("--handle", "--origin", "--email"):
             if flag in rest:
                 i = rest.index(flag)
                 value = rest[i + 1] if i + 1 < len(rest) else ""
                 del rest[i:i + 2]
                 if flag == "--handle":
                     handle = value
-                else:
+                elif flag == "--origin":
                     origin = value
+                else:
+                    email = value
         image = None if argv[2] == "-" else Path(argv[2])
         if image is None and not handle:
             print("inject: a report without an image needs --handle <login>")
             return 2
-        inject(cfg, image, argv[3], rest[0] if rest else None, handle, origin)
+        inject(cfg, image, argv[3], rest[0] if rest else None, handle, origin, email)
         return 0
     if cmd == "testers":
         print_testers(Store(cfg))
