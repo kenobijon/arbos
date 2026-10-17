@@ -15,7 +15,7 @@ struct SettingsView: View {
                 Section {
                     HStack(spacing: 14) {
                         if let url = model.user?.avatarUrl.flatMap(URL.init(string:)) {
-                            AsyncImage(url: url) { img in img.resizable().scaledToFill() } placeholder: { Color(hex: "#2A2A2A")! }
+                            AsyncImage(url: url) { img in img.resizable().scaledToFill() } placeholder: { theme.field }
                                 .frame(width: 56, height: 56)
                                 .clipShape(Circle())
                         } else {

@@ -653,9 +653,12 @@ struct PersonAvatar: View {
     let handle: String
     var size: CGFloat = 40
 
+    /// Initials disc: dark grey in dark mode, Grok's light grey (#E4E4E4) in light.
+    private var fallbackFill: Color { theme.isDark ? Color(hex: "#2A2A2A")! : Color(hex: "#E4E4E4")! }
+
     var body: some View {
         ZStack {
-            Circle().fill(Color(hex: "#2A2A2A")!)
+            Circle().fill(fallbackFill)
             if let url, let u = URL(string: url) {
                 AsyncImage(url: u) { img in img.resizable().scaledToFill() } placeholder: { initials }
             } else {

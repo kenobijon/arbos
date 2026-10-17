@@ -69,13 +69,15 @@ struct Theme {
         separator: Color.white.opacity(0.08)
     )
 
+    // Light, measured from Grok's App Store shots: page #FCFCFC, assistant
+    // bubble #F2F2F2, user bubble near-black, white field with a hairline.
     static let light = Theme(
         isDark: false, surface: .matte,
-        bg: Color(hex: "#F7F7F7")!,
-        bubbleAssistant: Color(hex: "#ECECEC")!,
+        bg: Color(hex: "#FCFCFC")!,
+        bubbleAssistant: Color(hex: "#F2F2F2")!,
         bubbleUser: Color(hex: "#111111")!,
         field: .white,
-        fieldBorder: Color(hex: "#E2E2E2")!,
+        fieldBorder: Color(hex: "#E3E3E3")!,
         text: Color(hex: "#111111")!,
         muted: Color(hex: "#8A8A8E")!,
         placeholder: Color(hex: "#A0A0A5")!,

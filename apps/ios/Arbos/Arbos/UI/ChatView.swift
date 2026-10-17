@@ -1066,7 +1066,7 @@ struct ChatView: View {
                     .fill(theme.primary)
                     .frame(width: Theme.voiceButton, height: Theme.voiceButton)
                     .overlay(
-                        Image(systemName: (canSend || recorder.recording) ? "arrow.up" : "phone.fill")
+                        Image(systemName: (canSend || recorder.recording) ? "arrow.up" : idleButtonGlyph)
                             .font(.system(size: 16, weight: .bold))
                             .foregroundStyle(theme.onPrimary)
                     )
@@ -1112,6 +1112,10 @@ struct ChatView: View {
     private var canSend: Bool {
         !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pending.isEmpty
     }
+
+    /// Idle round button: Grok's waveform (voice mode with the bot); a people chat
+    /// starts a real call, so it keeps the phone.
+    private var idleButtonGlyph: String { isPeople ? "phone.fill" : "waveform" }
 
     /// Members whose handle/slug starts with the typed `@` prefix; agents first.
     private func mentionList(_ people: PeopleChat, query: String) -> some View {
