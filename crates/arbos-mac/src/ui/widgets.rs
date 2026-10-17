@@ -26,7 +26,7 @@ use crate::app::AppState;
 use crate::model::{ChoiceOption, FieldKind, FormField, Id, Part, QuestionState, Widget};
 use crate::ui::composer::ComposerInput;
 use crate::ui::icons::icon;
-use crate::ui::theme::{Appearance, Theme, TEXT_TINY};
+use crate::ui::theme::{Appearance, Theme, TEXT_SMALL, TEXT_TINY};
 use crate::ui::transcript::ASSISTANT_MAX_WIDTH;
 
 actions!(
@@ -675,6 +675,16 @@ impl Render for QuestionCard {
                 }),
             )
             .child(body)
+            // Grok's hint under an open card (measured on the real iPhone app).
+            .when(open, |el| {
+                el.child(
+                    div()
+                        .px(px(1.0))
+                        .text_size(px(TEXT_SMALL))
+                        .text_color(palette.badge_ink)
+                        .child("Or answer in the chat below"),
+                )
+            })
             .when_some(self.error.clone(), |el, e| {
                 el.child(
                     div()
@@ -702,7 +712,8 @@ pub const TITLE_TEXT: f32 = 14.5;
 pub const BADGE: f32 = 20.0;
 
 /// The card's colours for the current appearance: light = the assistant-bubble grey with a
-/// white list; dark = near-black with a slightly lighter list; badges and × always grey.
+/// white list; dark (measured on the real Grok Bot app) = the #202020 card with the page
+/// colour (#141414) inset as the list, card-coloured badges and separators, #5D5D60 ink.
 #[derive(Clone, Copy, Debug)]
 pub struct CardPalette {
     pub outer: Hsla,
@@ -719,11 +730,11 @@ impl CardPalette {
         match theme.appearance {
             Appearance::Dark => Self {
                 outer: theme.bubble_assistant,
-                inner: hex(0x2c2c2c),
-                badge: hex(0x3a3a3c),
-                badge_ink: hex(0x8e8e93),
-                close: hex(0x8e8e93),
-                hairline: Theme::with_alpha(gpui::white(), 0.08),
+                inner: theme.bg,
+                badge: theme.bubble_assistant,
+                badge_ink: hex(0x5d5d60),
+                close: hex(0x5d5d60),
+                hairline: theme.bubble_assistant,
                 highlight: Theme::with_alpha(gpui::white(), 0.05),
             },
             Appearance::Light => Self {
