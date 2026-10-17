@@ -364,6 +364,18 @@ impl Shell {
         self.feedback.update(cx, |sheet, cx| sheet.open(window, cx));
     }
 
+    /// Settings › Credits: the feedback sheet, pre-addressed as a top-up request.
+    fn request_top_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_feedback(window, cx);
+        self.feedback.update(cx, |sheet, cx| {
+            sheet.note.update(cx, |note, cx| {
+                if note.text().trim().is_empty() {
+                    note.set_text("Top-up request: ".into(), cx);
+                }
+            });
+        });
+    }
+
     fn submit_pairing(&mut self, cx: &mut Context<Self>) {
         let code = self.pairing_input.read(cx).text().trim().to_string();
         if code.is_empty() {
@@ -1672,7 +1684,7 @@ impl Shell {
                     glass::row("Credits", &theme)
                         .child(value(format!("${:.2} left", account.balance_usd), &theme)),
                 );
-                group = group.child(glass::row("Today", &theme).border_b_0().child(value(
+                group = group.child(glass::row("Today", &theme).child(value(
                     match account.daily_cap_usd {
                         Some(cap) => {
                             format!("${:.2} of ${cap:.0} cap", account.spent_today_usd)
@@ -1681,7 +1693,21 @@ impl Shell {
                     },
                     &theme,
                 )));
-                body = body.child(section("Account", group, None, &theme));
+                // iPhone parity: during the beta a top-up is a note to the relay.
+                group = group.child(glass::row("", &theme).border_b_0().child(
+                    link_button("credits-top-up", "Request a top-up", false, &theme).on_click(
+                        cx.listener(|this, _, window, cx| this.request_top_up(window, cx)),
+                    ),
+                ));
+                body = body.child(section(
+                    "Account",
+                    group,
+                    Some(footnote(
+                        "Credits pay for your agents' model use. Machine time is billed separately. During the beta, usage credit is included — request a top-up when you run low.".into(),
+                        &theme,
+                    )),
+                    &theme,
+                ));
             }
             sign_out = Some(
                 settings_group(&theme).child(
