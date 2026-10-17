@@ -283,6 +283,7 @@ class VoiceCall:
             self.state.last_agent_text = text
             self.state.last_agent_at = now
         self.event("transcript", speaker=speaker if speaker else {"kind": "agent"}, text=text, truncated=truncated)
+        log.info("transcript %s: %s%s", "agent" if is_agent else label_of(speaker), text[:160], " [cut]" if truncated else "")
         return True
 
     def agent_speaking(self) -> bool:
@@ -886,6 +887,7 @@ class VoiceCall:
             self.ctx.room,
             self.cfg,
             agent_identity=self.ctx.room.local_participant.identity,
+            agent_name=self.agent_name,
             label_of=lambda identity: label_of(speaker_of(self.participant(identity), identity)),
             enabled=self.vision_enabled,
         )

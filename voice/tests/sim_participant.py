@@ -18,7 +18,7 @@ Script = JSON list of steps, run in order:
     {"wait_quiet": 20}                    wait (max s) until the agent has been silent for 1.5 s
     {"hangup": true}                      leave the call (POST /calls/{id}/leave)
     {"camera": "photo.jpg"}               turn the camera on (or switch the picture): publishes a
-                                          640x480 @ 10 fps video track showing the image, like a
+                                          1280x720 @ 10 fps video track showing the image, like a
                                           phone pointed at it (`--camera` sets it from the start)
     {"camera_off": true}                  mute the camera (frames stop; the agent's "seeing" clears)
 
@@ -196,7 +196,7 @@ class Participant:
 
     # ---- camera -----------------------------------------------------------------------------------
 
-    CAM_W, CAM_H, CAM_FPS = 640, 480, 10
+    CAM_W, CAM_H, CAM_FPS = 1280, 720, 10
 
     def on_data(self, pkt: rtc.DataPacket) -> None:
         if pkt.topic != "agent_vision":
@@ -211,8 +211,8 @@ class Participant:
         self.event("agent_vision", **{k: v for k, v in msg.items() if k != "type"}, mine=msg.get("participant_identity") == me)
 
     def on_attributes(self, changed: dict, p: rtc.Participant) -> None:
-        if "arbos.seeing" in changed:
-            self.event("agent_attr", identity=p.identity, seeing=changed["arbos.seeing"])
+        if "agent_vision" in changed:
+            self.event("agent_attr", identity=p.identity, agent_vision=changed["agent_vision"])
 
     async def camera_on(self, path: str) -> None:
         img = Image.open(path).convert("RGBA")

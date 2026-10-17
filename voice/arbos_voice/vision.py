@@ -15,10 +15,12 @@ Old frames are deleted from the model's conversation (`conversation.item.delete`
 `vision_keep` recent frames plus the latest one per participant stay in context: cost and
 context stay bounded. In group calls every frame is labelled with who it came from.
 
-Clients learn when the agent is looking: the agent participant's attribute `arbos.seeing` (comma
-separated identities, "" when nobody) and a reliable data message on topic `agent_vision`
-(`{"type":"agent_vision","agent":"a_<pid>","participant_identity":"u_<uid>","seeing":true|false}`).
-Camera off (mute / unpublish) stops the frames at once and clears the indicator.
+Clients learn when the agent is looking from a reliable LiveKit data message on topic
+`agent_vision`, sent by the agent participant once per participant at every start and stop of
+sampling: `{"type":"agent_vision","participant_identity":"u_<uid>","seeing":true|false,
+"agent_name":"Forest","agent":"a_<pid>","seeing_identities":[…]}`. The same JSON is mirrored into
+the agent participant's attribute `agent_vision` (last event; `seeing_identities` is the full
+state for late joiners). Camera off (mute / unpublish) stops the frames at once and clears it.
 """
 
 from __future__ import annotations
@@ -44,14 +46,15 @@ from .config import Config
 log = logging.getLogger("arbos-voice.vision")
 
 VISION_TOPIC = "agent_vision"
-SEEING_ATTR = "arbos.seeing"
+VISION_ATTR = "agent_vision"
 # A still picture (difference below this, 0–255 grey scale) is not re-sent every second.
 STATIC_DIFF = 2.5
 # ... but at least this often, so the model never works from a stale frame.
 VISION_STATIC_EVERY_S = 5.0
-# A difference above this is a new scene: send a frame at once (after `MIN_GAP_S`).
-SCENE_CHANGE_DIFF = 18.0
-MIN_GAP_S = 0.3
+# A difference above this is a new scene: send a frame at once (after `MIN_GAP_S`). A hand-held
+# phone camera moves all the time, so this gate is high and the gap caps motion at 2 frames/s.
+SCENE_CHANGE_DIFF = 30.0
+MIN_GAP_S = 0.5
 THUMB = (32, 18)
 # Phrases that mean "use your eyes now" (checked by the worker on each transcript line).
 LOOK_PHRASES = (
@@ -109,12 +112,14 @@ class Vision:
         cfg: Config,
         *,
         agent_identity: str,
+        agent_name: str,
         label_of: Callable[[str], str],
         enabled: bool = True,
     ):
         self.room = room
         self.cfg = cfg
         self.agent_identity = agent_identity
+        self.agent_name = agent_name
         self.label_of = label_of
         self.enabled = enabled
         self.rt: Any = None
@@ -287,18 +292,25 @@ class Vision:
             self._seeing.discard(identity)
         lp = self.room.local_participant
         payload = json.dumps(
-            {"type": "agent_vision", "agent": self.agent_identity, "participant_identity": identity, "seeing": seeing}
+            {
+                "type": "agent_vision",
+                "participant_identity": identity,
+                "seeing": seeing,
+                "agent_name": self.agent_name,
+                "agent": self.agent_identity,
+                "seeing_identities": sorted(self._seeing),
+            }
         )
 
         async def send() -> None:
             try:
-                await lp.set_attributes({SEEING_ATTR: ",".join(sorted(self._seeing))})
-            except Exception as e:
-                log.warning("set_attributes failed: %s", e)
-            try:
                 await lp.publish_data(payload, reliable=True, topic=VISION_TOPIC)
             except Exception as e:
                 log.warning("publish_data failed: %s", e)
+            try:
+                await lp.set_attributes({VISION_ATTR: payload})
+            except Exception as e:
+                log.warning("set_attributes failed: %s", e)
 
         asyncio.create_task(send())
 
@@ -329,7 +341,7 @@ class Vision:
                     pass
                 else:
                     continue
-                self._send(cam, jpeg, thumb, detail="low", look=False, why="scene change" if (diff or 0) >= SCENE_CHANGE_DIFF else "")
+                self._send(cam, jpeg, thumb, detail="low", look=False, why=f"scene change {diff:.0f}" if (diff or 0) >= SCENE_CHANGE_DIFF else "")
 
     def trigger(self, identity: str | None = None) -> bool:
         """Someone said "look at this": send the newest frame now (from them, else from anyone)."""
