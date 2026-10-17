@@ -73,6 +73,9 @@ GROUP_BARGE_MIN_SPEECH_S = 0.35
 # 1:1 (duplex) server VAD activation (0–1). Higher = less sensitive: ambient noise and
 # speaker echo must be louder before they count as speech and cut the agent mid-sentence.
 DUPLEX_VAD_THRESHOLD = 0.65
+# An interrupted agent line shorter than this (words) is dropped from the transcript as a
+# noise-triggered restart; longer cut lines are kept as the humans heard them.
+TRUNCATED_KEEP_WORDS = 6
 # Until the owner's machine runs an agentd with the voice link (image roll), tools are off.
 NO_LINK_LINE = "I can't run that for you yet on this call."
 
@@ -215,8 +218,10 @@ class VoiceCall:
         """Write a transcript line. Returns False when a duplicate/interrupted agent line is dropped."""
         is_agent = speaker is None or speaker.get("kind") == "agent"
         if is_agent:
-            # Interrupted mid-sentence replies are followed by a regenerate; keep only the final.
-            if truncated:
+            # A reply cut within its first words is a noise-trigger regenerate (keep only the
+            # final line); a longer cut line is a real barge-in and stays in the chat, as the
+            # humans heard it (spec §4).
+            if truncated and len(_norm_words(text)) < TRUNCATED_KEEP_WORDS:
                 return False
             now = time.monotonic()
             if self.state.last_agent_text and now - self.state.last_agent_at < 8.0 and similar_reply(
