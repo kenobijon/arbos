@@ -106,7 +106,15 @@ final class AppModel: ObservableObject {
     func setAppActive(_ active: Bool) {
         guard appActive != active else { return }
         appActive = active
-        if let id = visibleChatId { rooms[id]?.focused = active }
+        if let id = visibleChatId {
+            rooms[id]?.focused = active
+            // Rows that landed while inactive (e.g. mid-call) lit the unread flag
+            // because isWatching was false — clear now that we are back on screen.
+            if active {
+                if isPeopleChat(id) { markPeopleRead(id) }
+                else { markRead(chatId: id) }
+            }
+        }
         // Leaving the foreground is the last safe moment to write before a kill.
         if !active { flushStore(all: true) }
     }
@@ -540,8 +548,10 @@ final class AppModel: ObservableObject {
     /// Unread rows of one agent chat for its dot: none while archived.
     func chatHasUnread(_ chat: Chat) -> Bool {
         if isChatArchived(chat.id) { return false }
+        // On screen: never keep a stale local/remote flag (same rule as people chats).
+        if chat.id == visibleChatId { return false }
         if chat.unread { return true }
-        return (unreadCounts[chat.id] ?? 0) > 0 && chat.id != visibleChatId
+        return (unreadCounts[chat.id] ?? 0) > 0
     }
 
     func unreadCount(for chat: PeopleChat) -> Int {
@@ -2571,6 +2581,9 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Clear a project chat's unread dot and always PUT /read so chat_events
+    /// unread clears even when local flags were already clean (notify can record
+    /// events while the chat was on screen, or while focus briefly dropped on a call).
     func markRead(chatId: Id) {
         let hadRemote = (unreadCounts[chatId] ?? 0) > 0
         if unreadCounts[chatId] != nil { unreadCounts[chatId] = 0 }
@@ -2584,15 +2597,13 @@ final class AppModel: ObservableObject {
                 hadLocal = true
             }
         }
-        if hadRemote || hadLocal {
-            applyBadge()
-            // §7c: PUT /chats/{id}/read takes project chat ids too; the relay
-            // clears the user's events for it and badges their other devices.
-            if !isFixture, chat(chatId) != nil {
-                let api = self.api
-                let seq = Int64(messages(of: chatId).count)
-                Task { try? await api.markRead(chatId: chatId, seq: seq) }
-            }
+        if hadRemote || hadLocal { applyBadge() }
+        // §7c: PUT /chats/{id}/read takes project chat ids too; the relay
+        // clears the user's events for it and badges their other devices.
+        if !isFixture, chat(chatId) != nil {
+            let api = self.api
+            let seq = Int64(messages(of: chatId).count)
+            Task { try? await api.markRead(chatId: chatId, seq: seq) }
         }
     }
 
