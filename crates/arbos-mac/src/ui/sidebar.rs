@@ -627,10 +627,6 @@ fn render_row(row: RowView, theme: &Theme, cx: &mut Context<Shell>) -> impl Into
         .on_mouse_down(
             gpui::MouseButton::Left,
             cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
-                eprintln!(
-                    "row-menu: left down ctrl={} at {:?}",
-                    event.modifiers.control, event.position
-                );
                 if !event.modifiers.control {
                     return;
                 }
