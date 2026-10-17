@@ -20,6 +20,7 @@ use crate::ui::attachments;
 use crate::ui::cards;
 use crate::ui::frost::edge_faded;
 use crate::ui::groups;
+use crate::ui::icons::icon;
 use crate::ui::markdown::{inline_spans, split_blocks, Block};
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
@@ -552,13 +553,45 @@ impl Transcript {
                     .when(!last, |el| el.pb(px(3.0)))
                     .bg(theme.bubble_assistant)
                     .child(render_block(&row.id, &block, veil.as_ref(), now, &theme));
+                // Grok Mac (ref 58): a muted react glyph appears right of the
+                // bubble on hover; it opens the same bar as a right-click.
+                let hover_react = (last && !live).then(|| {
+                    let chat_id = self.chat_id.clone();
+                    let message_id = row.message_id.clone();
+                    div()
+                        .id(SharedString::from(format!("{}#react", row.id)))
+                        .ml(px(8.0))
+                        .size(px(24.0))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .cursor_pointer()
+                        .opacity(0.0)
+                        .group_hover("bubble-row", |s| s.opacity(1.0))
+                        .hover(|s| s.bg(theme.surface_2))
+                        .child(icon("face-smile", 16.0, theme.text_muted))
+                        .on_click(cx.listener(move |_, event: &gpui::ClickEvent, _, cx| {
+                            if let Some(chat_id) = chat_id.clone() {
+                                cx.emit(TranscriptEvent::ReactMenu {
+                                    chat_id,
+                                    message_id: message_id.clone(),
+                                    position: event.position(),
+                                });
+                            }
+                        }))
+                });
                 div()
+                    .group("bubble-row")
                     .w_full()
                     .flex()
+                    .items_center()
                     .justify_start()
                     .when(first, |el| el.pt(px(6.0)))
                     .when(last, |el| el.pb(px(6.0)))
                     .child(bubble)
+                    .children(hover_react)
                     .into_any_element()
             }
             RowKind::Stamp { label } => div()
