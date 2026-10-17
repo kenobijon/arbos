@@ -204,6 +204,8 @@ final class CallManager: NSObject, ObservableObject {
         } catch {
             self.error = CallManager.describe(error)
             await teardown(leave: false)
+            // 410 / call_ended left the Join bar up; re-check the chat.
+            await syncActiveBar(chatId: existing.chatId, projectId: existing.isPeople ? nil : existing.projectId)
         }
     }
 
@@ -258,7 +260,11 @@ final class CallManager: NSObject, ObservableObject {
     /// A VoIP-woken phone checks the call did not end in the meantime.
     private func verifyStillLive(_ callId: String) async {
         guard let api, let live = try? await api.call(callId) else { return }
-        if live.ended { endIncoming(reason: .remoteEnded) }
+        if live.ended {
+            // Drop the Join bar too — endIncoming alone left "On a call · Join" up.
+            noteActive(nil, chatId: live.chatId)
+            endIncoming(reason: .remoteEnded)
+        }
     }
 
     // MARK: In-app incoming ring (only when CallKit cannot report the call)
@@ -364,6 +370,7 @@ final class CallManager: NSObject, ObservableObject {
         } catch {
             self.error = CallManager.describe(error)
             await teardown(leave: false)
+            await syncActiveBar(chatId: inc.call.chatId, projectId: inc.call.isPeople ? nil : inc.call.projectId)
         }
     }
 
@@ -564,14 +571,29 @@ final class CallManager: NSObject, ObservableObject {
                     // Nobody ever joined: the callee's client writes "Missed call from …"
                     // from its call_missed push (§8); the caller writes nothing more.
                     if !missed { writeSystemLine?(ended.chatId, ended.projectId, callEndedLine(durationS: r.durationS), ended.callId) }
+                } else {
+                    // Others still on, or leave answered already_ended:true (ended:false).
+                    // Re-check the chat so a dead call does not leave "On a call · Join" up.
+                    await syncActiveBar(chatId: ended.chatId, projectId: ended.isPeople ? nil : ended.projectId)
                 }
             } catch {
                 log.error("leave: \(error.localizedDescription, privacy: .public)")
+                await syncActiveBar(chatId: ended.chatId, projectId: ended.isPeople ? nil : ended.projectId)
             }
         }
         if leave, isFixture, let ended {
             activeByChat[ended.chatId] = nil
             writeSystemLine?(ended.chatId, ended.projectId, callEndedLine(durationS: Int(wasConnected.map { Date().timeIntervalSince($0) } ?? 0)), ended.callId)
+        }
+    }
+
+    /// Match the Join bar to GET …/call (nil / ended → hide; live → show).
+    private func syncActiveBar(chatId: String, projectId: String?) async {
+        guard let api else { activeByChat[chatId] = nil; return }
+        if let live = try? await api.activeCall(chatId: chatId, projectId: projectId) {
+            noteActive(live, chatId: chatId)
+        } else {
+            activeByChat[chatId] = nil
         }
     }
 
