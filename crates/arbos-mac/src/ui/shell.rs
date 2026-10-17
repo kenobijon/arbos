@@ -119,7 +119,7 @@ impl Shell {
     pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let open_settings = std::env::var("ARBOS_OPEN_SETTINGS")
             .ok()
-            .filter(|v| v == "1" || v == "bottom");
+            .filter(|v| v == "1" || v == "bottom" || v == "connectors");
         let settings_scroll = ScrollHandle::new();
         if open_settings.as_deref() == Some("bottom") {
             settings_scroll.scroll_to_bottom();
@@ -256,6 +256,9 @@ impl Shell {
         })
         .detach();
         let connectors = cx.new(|cx| ConnectorsPanel::new(state.clone(), cx));
+        if open_settings.as_deref() == Some("connectors") {
+            connectors.update(cx, |p, cx| p.show(cx));
+        }
         cx.observe(&connectors, |_, _, cx| cx.notify()).detach();
         cx.subscribe(
             &connectors,
@@ -325,9 +328,9 @@ impl Shell {
             skills,
             local,
             focus_handle: cx.focus_handle(),
-            // `ARBOS_OPEN_SETTINGS=1|bottom` opens the sheet at launch, `bottom`
-            // scrolled to its end (screenshot rig).
-            settings_open: open_settings.is_some(),
+            // `ARBOS_OPEN_SETTINGS=1|bottom|connectors` opens the sheet at launch
+            // (`bottom` scrolled to its end, `connectors` the Connectors panel) — rig.
+            settings_open: open_settings.as_deref().is_some_and(|v| v != "connectors"),
             settings_scroll,
             row_menu: None,
             react_menu: None,
