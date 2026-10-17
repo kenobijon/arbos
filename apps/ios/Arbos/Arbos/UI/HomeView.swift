@@ -814,7 +814,9 @@ struct AgentRow: View {
         // semibold over a 15 pt grey preview, time right, 10 pt unread dot at the far
         // right of the preview line, 80 pt row pitch.
         HStack(spacing: 15) {
-            AgentAvatar(project: project, theme: theme, size: Theme.rowAvatar, working: streaming)
+            // Grok carries the bot's activity on the avatar (12 pt green disc, bottom-right)
+            // and keeps the right edge for the unread dot.
+            AgentAvatar(project: project, theme: theme, size: Theme.rowAvatar, dot: streaming ? theme.online : nil, working: streaming)
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(project.name)
@@ -844,9 +846,7 @@ struct AgentRow: View {
                         .foregroundStyle(theme.muted)
                         .lineLimit(1)
                     Spacer(minLength: 0)
-                    if streaming {
-                        PulseDot(color: theme.warn)
-                    } else if unread {
+                    if unread {
                         Circle().fill(theme.unread).frame(width: Theme.unreadDot, height: Theme.unreadDot)
                     }
                 }

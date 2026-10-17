@@ -329,10 +329,12 @@ struct AgentAvatar: View {
                 BlobAvatar(project: project, theme: theme, size: size)
             }
             if let dot {
+                // Grok's status badge is 12 pt on a 48 pt row avatar; smaller avatars scale.
+                let d = min(size * 0.36, 12)
                 Circle()
                     .fill(dot)
-                    .frame(width: size * 0.36, height: size * 0.36)
-                    .overlay(Circle().strokeBorder(theme.bg, lineWidth: max(1.5, size * 0.06)))
+                    .frame(width: d, height: d)
+                    .overlay(Circle().strokeBorder(theme.bg, lineWidth: 2))
                     .offset(x: size * 0.08, y: size * 0.08)
             }
         }
