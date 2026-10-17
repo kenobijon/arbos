@@ -1082,6 +1082,7 @@ struct ChatView: View {
                                     finishMemoHold()
                                 } else {
                                     memoIgnoreRelease = false
+                                    Haptics.recordStart()
                                     recorder.start()
                                 }
                             }
@@ -1165,6 +1166,7 @@ struct ChatView: View {
     /// Stop the hold-to-talk memo and send its transcript (no-op if too short).
     private func finishMemoHold() {
         guard recorder.recording else { return }
+        Haptics.send()
         if let memo = recorder.stop() {
             sendMemo(.init(name: memo.name, mime: "audio/m4a", data: memo.data))
         }
@@ -1301,6 +1303,7 @@ struct ChatView: View {
     private func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !pending.isEmpty else { return }
+        Haptics.send()
         if isPeople {
             let address = sendAddress(for: text)
             model.sendPeople(chatId: chatId, text: text, replyTo: replyTo?.id, address: address, attachments: pending)

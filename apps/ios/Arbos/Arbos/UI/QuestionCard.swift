@@ -109,6 +109,7 @@ struct QuestionCard: View {
         let faded = !open && !chosen
         return Button {
             guard open else { return }
+            Haptics.pick()
             if multi {
                 if selected.remove(option.id) == nil { selected.insert(option.id) }
             } else {

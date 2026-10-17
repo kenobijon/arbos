@@ -5,6 +5,22 @@
 // header controls, system lines in #95959B.
 
 import SwiftUI
+import UIKit
+
+/// Haptics for the few moments Grok Bot marks with a tap: sending, starting or
+/// finishing a dictation, picking a card option. Nothing on scrolling or opening.
+enum Haptics {
+    private static let light = UIImpactFeedbackGenerator(style: .light)
+    private static let medium = UIImpactFeedbackGenerator(style: .medium)
+    private static let selection = UISelectionFeedbackGenerator()
+
+    /// Message sent, dictation finished.
+    static func send() { light.impactOccurred() }
+    /// Hold-to-talk started.
+    static func recordStart() { medium.impactOccurred() }
+    /// Card option picked, chip toggled.
+    static func pick() { selection.selectionChanged() }
+}
 
 struct Theme {
     let isDark: Bool
