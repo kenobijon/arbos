@@ -139,7 +139,10 @@ struct ChatView: View {
     private var counterpart: ChatMember? { people?.counterpart(me: model.user?.id) }
     private var messages: [Message] { model.messages(of: chatId) }
     private var needsAnswer: Bool { model.chatNeedsAnswer(chatId) }
-    private var streaming: Bool { model.isStreaming(chatId) }
+    /// True while a turn runs, or right after the user sends (before the
+    /// agent opens a streaming row) — visual cheat so a simple first reply
+    /// does not sit on a dead transcript.
+    private var streaming: Bool { model.isStreaming(chatId) || model.isAwaitingReply(chatId) }
     private var name: String {
         if let people { return counterpart.map { "@\($0.handle)" } ?? people.title }
         if let chat, chat.isGroup, !chat.title.isEmpty { return chat.title }
@@ -687,7 +690,14 @@ struct ChatView: View {
                         .padding(.bottom, 16)
                     }
                     if !model.caughtUp.contains(chatId) && messages.isEmpty && !model.isFixture {
-                        HStack { Spacer(); ProgressView().tint(theme.muted); Spacer() }.padding(.top, 60)
+                        // Known-empty (optimistic new chat seeds `messages[id] = []`):
+                        // show the empty hint at once — no spinner flash while the
+                        // room catches up on a thread we already know has no rows.
+                        if model.hasKnownEmptyTranscript(chatId) {
+                            if !isPeople { emptyHint }
+                        } else {
+                            HStack { Spacer(); ProgressView().tint(theme.muted); Spacer() }.padding(.top, 60)
+                        }
                     } else if rows.isEmpty, !isPeople {
                         // People chats stay blank (iMessage-style); the agent empty
                         // copy would say "Ask @handle anything…" which is wrong here.
@@ -715,8 +725,16 @@ struct ChatView: View {
                                 Button { UIPasteboard.general.string = m_text(row) } label: { Label("Copy", systemImage: "doc.on.doc") }
                             }
                     }
-                    if streaming {
+                    if model.isStreaming(chatId) {
                         workingLine.padding(.top, 20)
+                    } else if model.isAwaitingReply(chatId) {
+                        // Tick once a second so the awaiting-reply cheat expires
+                        // (isAwaitingReply is time-capped) without a stuck line.
+                        TimelineView(.periodic(from: .now, by: 1)) { _ in
+                            if model.isAwaitingReply(chatId) {
+                                workingLine.padding(.top, 20)
+                            }
+                        }
                     }
                     // Clears the 24 pt fade above the composer, so the last row
                     // (and "<name> is working") is never under the chat bar.

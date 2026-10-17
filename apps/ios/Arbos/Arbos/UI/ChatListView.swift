@@ -69,13 +69,10 @@ struct ChatListView: View {
                     Button {
                         guard !creating else { return }
                         creating = true
-                        Task {
-                            if let chat = await model.newChat(projectId: projectId) {
-                                model.open(chat: chat)
-                                dismiss()
-                            }
-                            creating = false
-                        }
+                        // Open immediately (optimistic local id); relay create runs in the background.
+                        _ = model.startNewChat(projectId: projectId)
+                        dismiss()
+                        creating = false
                     } label: {
                         if creating { ProgressView() } else { Image(systemName: "plus") }
                     }

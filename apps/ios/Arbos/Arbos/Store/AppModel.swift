@@ -202,7 +202,8 @@ final class AppModel: ObservableObject {
         if let chat = landingChat(of: project.id) {
             open(chat: chat)
         } else {
-            Task { if let c = await newChat(projectId: project.id) { open(chat: c) } }
+            // No landing chat yet — open a local thread at once (Mac `new_tab`).
+            _ = startNewChat(projectId: project.id)
         }
     }
 
@@ -2343,6 +2344,20 @@ final class AppModel: ObservableObject {
         chats(of: projectId).contains { isStreaming($0.id) }
     }
 
+    /// Visual cheat: the last row is the user's and no assistant turn has
+    /// started yet — show the working line immediately so a simple first
+    /// question does not sit on a dead transcript while the box wakes.
+    /// Agent project chats only (a human DM has no agent to "work").
+    func isAwaitingReply(_ chatId: Id) -> Bool {
+        if isStreaming(chatId) { return false }
+        if peopleChat(chatId) != nil { return false }
+        let list = messages(of: chatId)
+        guard let last = list.last, last.role == .user else { return false }
+        // Short bridge until the agent opens a streaming row (cold wake).
+        // ChatView ticks this once a second so it can expire cleanly.
+        return nowMs() - last.createdAt < 15_000
+    }
+
     // MARK: Commands (crdt-sync §6.2: the client writes rows and commands)
 
     /// An attachment staged in the composer, uploaded on send.
@@ -2461,14 +2476,22 @@ final class AppModel: ObservableObject {
         messages[chatId] = list
     }
 
-    private func write(chatId: Id, text: String, command: String, attachments: [Attachment], extra: [String: Any] = [:]) {
-        guard let doc = docs[chatId], let chat = chat(chatId) else {
+    private func write(chatId: Id, text: String, command: String, attachments: [Attachment],
+                       extra: [String: Any] = [:], messageId presetId: Id? = nil) {
+        guard let chat = chat(chatId) else {
             #if DEBUG
             if isFixture { fixtureAppend(chatId: chatId, text: text, attachments: attachments) }
             #endif
             return
         }
-        let messageId = newId()
+        // Optimistic new chat: the relay id (and room doc) may not exist yet.
+        // Echo the bubble now and flush once `finalizeNewChat` swaps the id.
+        guard let doc = docs[chatId] else {
+            enqueueOptimisticSend(chatId: chatId, chat: chat, text: text, command: command,
+                                  attachments: attachments, extra: extra)
+            return
+        }
+        let messageId = presetId ?? newId()
         markUnacked(chatId: chatId, messageId: messageId)
         do {
             try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: attachments)
@@ -2486,6 +2509,56 @@ final class AppModel: ObservableObject {
         doc.commit()
         markActivity(chatId: chatId)
         if command == "send" { announce(chatId: chatId, projectId: chat.projectId, messageId: messageId, text: text) }
+        if let p = project(chat.projectId), p.state.isAsleep || p.state == .error {
+            wake(projectId: p.id, reason: "send")
+        }
+    }
+
+    /// A send typed before the optimistic new-chat's relay id landed.
+    private struct OptimisticSend {
+        var messageId: Id
+        var text: String
+        var command: String
+        var attachments: [Attachment]
+        var extra: [String: Any]
+    }
+    private var optimisticSends: [Id: [OptimisticSend]] = [:]
+    /// Local chat ids still waiting on `POST /projects/{id}/chats`.
+    private var optimisticChatIds: Set<Id> = []
+    /// Local → real chat id once the relay create lands (for awaiters).
+    private var optimisticRemap: [Id: Id] = [:]
+
+    /// True when we already published an empty transcript for this chat
+    /// (optimistic new chat) — ChatView shows the empty hint, not a spinner.
+    func hasKnownEmptyTranscript(_ chatId: Id) -> Bool {
+        messages[chatId]?.isEmpty == true
+    }
+
+    private func enqueueOptimisticSend(chatId: Id, chat: Chat, text: String, command: String,
+                                       attachments: [Attachment], extra: [String: Any]) {
+        guard optimisticChatIds.contains(chatId) else {
+            notice = Notice(text: "Could not write the message: chat is not ready yet")
+            return
+        }
+        let messageId = newId()
+        markUnacked(chatId: chatId, messageId: messageId)
+        var m = Message(id: messageId, chatId: chatId, role: .user, sender: "user", status: .done, turn: nil,
+                        decision: nil, subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:], model: nil,
+                        createdAt: nowMs(), completedAt: nowMs(), pending: true,
+                        parts: attachments.map { .attachment(id: newId(), attachment: $0) }
+                            + (text.isEmpty ? [] : [.text(id: "\(messageId)-t", text: text)]),
+                        hiddenCount: 0)
+        // Keep attachment-only rows valid when text is empty.
+        if m.parts.isEmpty { m.parts = [.text(id: "\(messageId)-t", text: text)] }
+        messages[chatId, default: []].append(m)
+        if !chat.isPinned && chat.title == "New chat" {
+            retitleLocally(chatId: chatId, title: AppModel.title(from: text))
+        }
+        optimisticSends[chatId, default: []].append(
+            OptimisticSend(messageId: messageId, text: text, command: command,
+                           attachments: attachments, extra: extra)
+        )
+        markActivity(chatId: chatId)
         if let p = project(chat.projectId), p.state.isAsleep || p.state == .error {
             wake(projectId: p.id, reason: "send")
         }
@@ -2547,19 +2620,117 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Returns the new chat once the relay has created it.
-    func newChat(projectId: Id) async -> Chat? {
-        do {
-            let chat = try await api.createChat(projectId: projectId)
-            var list = chats[projectId] ?? []
-            list.append(chat)
-            chats[projectId] = AppModel.sorted(list)
-            ensureRoom(projectId: projectId, key: chat.id, roomChat: chat.id)
-            return chat
-        } catch {
-            notice = Notice(text: "New chat failed: \(error.localizedDescription)")
-            return nil
+    /// Open a new chat at once (Mac `new_tab`): local id + empty transcript,
+    /// no spinner. The relay create runs in the background and the id is
+    /// swapped when it lands. Pre-wakes a sleeping box so the first question
+    /// does not wait on a cold start.
+    @discardableResult
+    func startNewChat(projectId: Id) -> Chat {
+        let localId = newId()
+        let chat = Chat(id: localId, projectId: projectId, title: "New chat",
+                        isPinned: false, unread: false, lastMessageAt: nowMs())
+        var list = chats[projectId] ?? []
+        // Right after the pinned "Main" chat, same strip order as Mac.
+        let at = min((list.firstIndex(where: { $0.isPinned }).map { $0 + 1 } ?? 0), list.count)
+        list.insert(chat, at: at)
+        chats[projectId] = list
+        messages[localId] = []
+        caughtUp.insert(localId)
+        optimisticChatIds.insert(localId)
+        if let p = project(projectId), p.state.isAsleep || p.state == .error {
+            wake(projectId: projectId, reason: "new-chat")
         }
+        open(chat: chat)
+        Task { await finalizeNewChat(localId: localId, projectId: projectId) }
+        return chat
+    }
+
+    /// Returns the new chat once the relay has created it (legacy awaiters).
+    func newChat(projectId: Id) async -> Chat? {
+        let local = startNewChat(projectId: projectId)
+        let localId = local.id
+        for _ in 0..<100 {
+            if let realId = optimisticRemap[localId], let c = chat(realId) {
+                optimisticRemap.removeValue(forKey: localId)
+                return c
+            }
+            if !optimisticChatIds.contains(localId), optimisticRemap[localId] == nil {
+                return nil // abandoned
+            }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        return optimisticRemap[localId].flatMap(chat) ?? chat(localId)
+    }
+
+    private func finalizeNewChat(localId: Id, projectId: Id) async {
+        do {
+            let real = try await api.createChat(projectId: projectId)
+            adoptOptimisticChat(localId: localId, real: real)
+        } catch {
+            abandonOptimisticChat(localId: localId, projectId: projectId,
+                                  reason: "New chat failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func adoptOptimisticChat(localId: Id, real: Chat) {
+        optimisticChatIds.remove(localId)
+        optimisticRemap[localId] = real.id
+        var list = chats[real.projectId] ?? []
+        if let i = list.firstIndex(where: { $0.id == localId }) {
+            // Keep any title the user already typed into.
+            var adopted = real
+            if list[i].title != "New chat" { adopted.title = list[i].title }
+            list[i] = adopted
+        } else if !list.contains(where: { $0.id == real.id }) {
+            list.append(real)
+        }
+        chats[real.projectId] = AppModel.sorted(list)
+
+        // Copy under the real id first; keep the local key until path swaps so
+        // an in-flight ChatView does not flash an empty transcript mid-adopt.
+        let pending = messages[localId] ?? []
+        messages[real.id] = pending.map { m in
+            var copy = m
+            copy.chatId = real.id
+            return copy
+        }
+        if let u = unacked[localId] { unacked[real.id] = u }
+        caughtUp.insert(real.id)
+        if lastOpenedChat[real.projectId] == localId { rememberOpened(real) }
+
+        // Room (and doc) before the navigation swap so a remounted ChatView can send.
+        ensureRoom(projectId: real.projectId, key: real.id, roomChat: real.id)
+
+        let queued = optimisticSends.removeValue(forKey: localId) ?? []
+        // Keep the echoed bubbles on screen; write them into the real doc with
+        // the same ids so emitSnapshot replaces them in place (no flicker).
+        for item in queued {
+            write(chatId: real.id, text: item.text, command: item.command,
+                  attachments: item.attachments, extra: item.extra, messageId: item.messageId)
+        }
+
+        // Swap the navigation id for the real one, then drop the local mirrors.
+        if case .chat(let id, let pid)? = path.last, id == localId {
+            path[path.count - 1] = .chat(chatId: real.id, projectId: pid)
+        }
+        if visibleChatId == localId { visibleChatId = real.id }
+        messages[localId] = nil
+        unacked[localId] = nil
+        caughtUp.remove(localId)
+    }
+
+    private func abandonOptimisticChat(localId: Id, projectId: Id, reason: String) {
+        optimisticChatIds.remove(localId)
+        optimisticSends[localId] = nil
+        unacked[localId] = nil
+        messages[localId] = nil
+        caughtUp.remove(localId)
+        chats[projectId] = (chats[projectId] ?? []).filter { $0.id != localId }
+        if case .chat(let id, _)? = path.last, id == localId {
+            path.removeLast()
+        }
+        if visibleChatId == localId { visibleChatId = nil }
+        notice = Notice(text: reason)
     }
 
     func closeChat(_ chat: Chat) {
