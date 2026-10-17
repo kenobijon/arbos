@@ -29,7 +29,7 @@ struct InitialsAvatar: View {
         ZStack {
             Circle().fill(AvatarPalette.gradient(colorIndex, dark: theme.isDark))
             Text(initials)
-                .font(.system(size: size * (initials.count > 1 ? 0.38 : 0.42), weight: .semibold))
+                .font(.system(size: size * AvatarPalette.initialsScale, weight: .semibold))
                 .foregroundStyle(.white)
                 .lineLimit(1)
                 .minimumScaleFactor(0.6)
