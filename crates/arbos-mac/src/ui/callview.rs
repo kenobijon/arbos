@@ -735,7 +735,7 @@ fn seeing_badge(agent: &str, theme: &Theme) -> Div {
         .bg(Theme::with_alpha(gpui::black(), 0.55))
         // The iPhone's badge: semibold on a 0.5 pt white hairline.
         .border(px(0.5))
-        .border_color(Theme::with_alpha(gpui::white(), 0.6))
+        .border_color(Theme::with_alpha(gpui::white(), 0.25))
         .text_size(px(TEXT_TINY))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(gpui::white())
