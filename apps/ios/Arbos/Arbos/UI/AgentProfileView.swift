@@ -15,6 +15,7 @@ struct AgentEditSheet: View {
     @State private var editingName = false
     @State private var showModel = false
     @State private var showChats = false
+    @State private var showVoice = false
     @State private var showShare = false
     @FocusState private var nameFocused: Bool
 
@@ -64,6 +65,11 @@ struct AgentEditSheet: View {
                         card {
                             Button { showModel = true } label: {
                                 row(icon: "cpu", title: "Model", value: "\(project.shortModel) · \(project.effort.label)")
+                            }
+                            .buttonStyle(.plain)
+                            divider
+                            Button { showVoice = true } label: {
+                                row(icon: "waveform", title: "Voice", value: voiceLabel(project))
                             }
                             .buttonStyle(.plain)
                             divider
@@ -120,6 +126,9 @@ struct AgentEditSheet: View {
             }
             .sheet(isPresented: $showModel) {
                 if let project { ModelPickerView(project: project).environmentObject(model).environment(\.theme, theme) }
+            }
+            .sheet(isPresented: $showVoice) {
+                if let project { VoicePickerView(project: project).environmentObject(model).environment(\.theme, theme) }
             }
             .sheet(isPresented: $showChats) {
                 ChatListView(projectId: projectId).environmentObject(model).environment(\.theme, theme)
@@ -234,6 +243,16 @@ struct AgentEditSheet: View {
         return hex
     }
 
+    /// "Default (Marin)" or the chosen voice's name (§10.3).
+    private func voiceLabel(_ project: Project) -> String {
+        let catalog = model.voiceCatalog
+        if let id = project.voice {
+            return catalog?.voices.first { $0.id == id }?.name ?? id.capitalized
+        }
+        if let d = catalog?.defaultId, let v = catalog?.voices.first(where: { $0.id == d }) { return "Default (\(v.name))" }
+        return "Default"
+    }
+
     private func row(icon: String, title: String, value: String, chevron: Bool = true) -> some View {
         HStack(spacing: 14) {
             Image(systemName: icon)
@@ -287,6 +306,7 @@ struct AgentProfileView: View {
     var fallback: Project? = nil
     @State private var tab = "Media"
     @State private var showEdit = false
+    @State private var showVoice = false
     @State private var showDescription = false
     @State private var descriptionDraft = ""
     @State private var muted = false
@@ -325,6 +345,9 @@ struct AgentProfileView: View {
                             ProfileRowDivider()
                             ProfileInfoRow(label: "model", value: "\(project.shortModel) · \(project.effort.label)")
                             ProfileRowDivider()
+                            ProfileInfoRow(label: "voice", value: voiceLine(project))
+                                .onTapGesture { if isMine { showVoice = true } }
+                            ProfileRowDivider()
                             if project.description.isEmpty {
                                 if isMine {
                                     ProfileLinkRow(title: "Add a description") { descriptionDraft = ""; showDescription = true }
@@ -357,6 +380,10 @@ struct AgentProfileView: View {
                 }
             }
         }
+        .task { await model.loadVoices() }
+        .sheet(isPresented: $showVoice) {
+            if let project = model.project(projectId) { VoicePickerView(project: project).environmentObject(model).environment(\.theme, theme) }
+        }
         .sheet(isPresented: $showEdit) {
             AgentEditSheet(projectId: projectId).environmentObject(model).environment(\.theme, theme)
         }
@@ -383,6 +410,14 @@ struct AgentProfileView: View {
         case "error": return "machine needs attention"
         default: return p.workspace == .active ? "idle · running" : "idle"
         }
+    }
+
+    /// "Marin (default)" or the chosen voice (§10.3).
+    private func voiceLine(_ project: Project) -> String {
+        let catalog = model.voiceCatalog
+        if let id = project.voice { return catalog?.voices.first { $0.id == id }?.name ?? id.capitalized }
+        if let d = catalog?.defaultId, let v = catalog?.voices.first(where: { $0.id == d }) { return "\(v.name) (default)" }
+        return "Default"
     }
 
     private func machineLine(_ p: Project) -> String {

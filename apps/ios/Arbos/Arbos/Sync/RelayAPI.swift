@@ -193,6 +193,7 @@ final class RelayAPI {
             project.machineSnapshot = machine["snapshot"] as? String
             project.machineAlwaysOn = (machine["always_on"] as? NSNumber)?.boolValue ?? false
             project.primaryChatId = primaryChat
+            project.voice = ((p["voice"] as? String) ?? (detail["voice"] as? String)).flatMap { $0.isEmpty ? nil : $0 }
             let chats = ((detail["chats"] as? [Any]) ?? []).compactMap(RelayAPI.parseChat)
             out.append(RegistryProject(project: project, chats: chats))
         }
@@ -548,6 +549,34 @@ final class RelayAPI {
         if let avatarColor { body["avatar_color"] = avatarColor }
         guard !body.isEmpty else { return }
         _ = try await request("PATCH", "/projects/\(projectId)", body: body)
+    }
+
+    /// §10.3 `PATCH /projects/{id} {"voice": id|null}` (null = the default voice). Returns the
+    /// project's `voice` as the relay now has it.
+    func setProjectVoice(_ projectId: Id, voice: String?) async throws -> String? {
+        let value: Any = voice.map { $0 as Any } ?? NSNull()
+        let body: [String: Any] = ["voice": value]
+        let v = try await json("PATCH", "/projects/\(projectId)", body: body)
+        let m = v as? [String: Any]
+        let p: [String: Any]? = (m?["project"] as? [String: Any]) ?? m
+        let kept: String? = p?["voice"] as? String
+        return kept.flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    /// §10.3 `GET /voices` (no auth) → the default id and the catalogue. `sample_url` may be
+    /// relative; it is resolved against the relay.
+    func voices() async throws -> VoiceCatalog {
+        let v = try await json("GET", "/voices", auth: false)
+        guard let m = v as? [String: Any] else { throw RelayError(status: 0, message: "The relay returned no voices") }
+        let base = endpoint.httpUrl
+        let list: [Voice] = ((m["voices"] as? [[String: Any]]) ?? []).compactMap { d in
+            guard let id = d["id"] as? String, !id.isEmpty else { return nil }
+            let rawSample = (d["sample_url"] as? String) ?? "/voices/\(id)/sample.mp3"
+            let sample = rawSample.hasPrefix("http") ? rawSample : base + (rawSample.hasPrefix("/") ? "" : "/") + rawSample
+            return Voice(id: id, name: (d["name"] as? String) ?? id.capitalized, description: d["description"] as? String,
+                         seconds: (d["seconds"] as? NSNumber)?.doubleValue, sampleURL: URL(string: sample))
+        }
+        return VoiceCatalog(defaultId: (m["default"] as? String) ?? list.first?.id ?? "", voices: list)
     }
 
     func peopleChats() async throws -> [PeopleChat] {
