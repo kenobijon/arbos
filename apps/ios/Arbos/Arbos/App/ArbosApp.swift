@@ -114,11 +114,12 @@ struct RootView: View {
         .sheet(isPresented: $feedback.isPresented) {
             FeedbackSheet().environmentObject(model).environment(\.theme, theme)
         }
+        // Shake or a system screenshot → Send feedback (TestFlight-style screenshot path).
         .onReceive(NotificationCenter.default.publisher(for: FeedbackCenter.shake)) { _ in
-            guard model.isPaired else { return }
-            feedback.open(screen: model.path.isEmpty ? "home" : "chat",
-                          chatId: model.path.last.map { if case .chat(let c, _) = $0 { return c } else { return "" } },
-                          projectId: model.path.last.map { if case .chat(_, let p) = $0 { return p } else { return "" } })
+            openFeedbackFromGesture()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.userDidTakeScreenshotNotification)) { _ in
+            openFeedbackFromGesture()
         }
         .onChange(of: model.isPaired, initial: true) { _, paired in schedulePrimer(paired) }
         .onChange(of: model.firstLogin == nil) { _, _ in schedulePrimer(model.isPaired) }
@@ -138,6 +139,14 @@ struct RootView: View {
     }
 
     private var expectedPeople: [CallPerson] { calls.call.map(model.expectedCallPeople) ?? [] }
+
+    /// Shake / screenshot → capture the current screen and open the feedback sheet.
+    private func openFeedbackFromGesture() {
+        guard model.isPaired else { return }
+        feedback.open(screen: model.path.isEmpty ? "home" : "chat",
+                      chatId: model.path.last.map { if case .chat(let c, _) = $0 { return c } else { return "" } },
+                      projectId: model.path.last.map { if case .chat(_, let p) = $0 { return p } else { return "" } })
+    }
 
     /// Ask once, a beat after the home screen appears (never in the fixture or a live demo).
     private func schedulePrimer(_ paired: Bool) {
