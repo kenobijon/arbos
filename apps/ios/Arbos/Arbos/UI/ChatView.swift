@@ -1516,6 +1516,25 @@ struct ModelPickerView: View {
     var body: some View {
         NavigationStack {
             List {
+                Section {
+                    HStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundStyle(theme.muted)
+                        TextField("", text: $query, prompt: Text("Filter models").foregroundStyle(theme.placeholder))
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .font(.system(size: Theme.body))
+                            .foregroundStyle(theme.text)
+                        if !query.isEmpty {
+                            Button { query = "" } label: {
+                                Image(systemName: "xmark.circle.fill").foregroundStyle(theme.muted)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .listRowBackground(theme.card)
+                }
                 Section("Reasoning") {
                     Picker("Effort", selection: $effort) {
                         ForEach(Effort.allCases) { e in Text(e.label).tag(e) }
@@ -1554,7 +1573,6 @@ struct ModelPickerView: View {
                     }
                 }
             }
-            .searchable(text: $query, prompt: "Filter models")
             .scrollContentBackground(.hidden)
             .background(theme.bg)
             .navigationTitle("Model")
