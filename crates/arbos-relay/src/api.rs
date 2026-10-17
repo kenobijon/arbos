@@ -253,6 +253,7 @@ pub async fn create_project(
         avatar_color: Some(avatar_color),
         description: clean_description(b.description.as_deref().unwrap_or_default())?,
         primary_chat_id: None,
+        avatar_color_index: None,
     };
     if state
         .db
@@ -416,6 +417,9 @@ pub struct PatchProjectBody {
     /// Call voice id from `GET /voices`; `null` = the relay default (D75).
     #[serde(default, deserialize_with = "deserialize_double_option")]
     pub voice: Option<Option<String>>,
+    /// Telegram-style initials colour (D79): 0–6, or `null` to go back to the derived colour.
+    #[serde(default, deserialize_with = "deserialize_double_option_i64")]
+    pub avatar_color_index: Option<Option<i64>>,
 }
 
 fn deserialize_double_option<'de, D>(d: D) -> Result<Option<Option<String>>, D::Error>
@@ -423,6 +427,13 @@ where
     D: serde::Deserializer<'de>,
 {
     Option::<String>::deserialize(d).map(Some)
+}
+
+fn deserialize_double_option_i64<'de, D>(d: D) -> Result<Option<Option<i64>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<i64>::deserialize(d).map(Some)
 }
 
 /// `PATCH /projects/{id}`: settings writes (SetModel, rename, icon, instructions, cap). Devices and the
@@ -505,6 +516,14 @@ pub async fn patch_project(
         Some(d) => Some(clean_description(d)?),
         None => None,
     };
+    if let Some(Some(i)) = b.avatar_color_index {
+        if !(0..7).contains(&i) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "avatar_color_index must be 0–6 or null".into(),
+            ));
+        }
+    }
     if let Some(voice) = &b.voice {
         let voice = voice.as_deref().map(str::trim).filter(|v| !v.is_empty());
         if let Some(v) = voice {
@@ -533,6 +552,7 @@ pub async fn patch_project(
             avatar_patch.as_ref().map(|a| a.as_deref()),
             color_patch.as_ref().map(|a| a.as_deref()),
             description.as_deref(),
+            b.avatar_color_index,
         )
         .map_err(internal)?;
     let p = state
@@ -666,6 +686,8 @@ pub(crate) async fn project_json(state: &AppState, p: &Project) -> Value {
         "created_at": p.created_at, "last_active_at": p.last_active_at,
         "description": p.description,
         "voice": state.db.voice_agent_settings(&p.id).ok().and_then(|s| s.voice),
+        "avatar_color_index": p.avatar_color_index,
+        "avatar_color_index_effective": crate::avatar::effective_color_index(&p.id, p.avatar_color_index),
         "primary_chat_id": primary_chat_id(state, p),
         "owner": crate::people::with_presence(state, crate::notify::Sender::user(state, &p.user_id).json()),
         "model": p.models.get("talking_model").and_then(|m| m.get("id")).cloned().unwrap_or(Value::Null),
@@ -1290,6 +1312,10 @@ fn workspace_json(state: &AppState, p: &Project) -> Result<Value, (StatusCode, S
     let mut project = serde_json::to_value(p).unwrap_or(Value::Null);
     project["skills_rev"] = json!(state.db.skills_rev(Some(&p.id)).map_err(internal)?);
     project["primary_chat_id"] = json!(primary_chat_id(state, p));
+    project["avatar_color_index_effective"] = json!(crate::avatar::effective_color_index(
+        &p.id,
+        p.avatar_color_index
+    ));
     // Always true for the box: agentd 0.1.16 (85fd0b4e) read this as "may I open my Projects ⇄
     // tab" and otherwise spilled agent-hosted group traffic into the owner's primary chat. The
     // relay enforces the single-chat rule itself in `create_chat` (plain chats only), so the box

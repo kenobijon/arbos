@@ -392,6 +392,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/users/search", get(people::users_search))
         .route("/users", get(people::users_directory))
         .route("/users/{id}", get(people::user_profile))
+        .route("/avatar-colors", get(people::avatar_colors))
         .route(
             "/chats",
             get(people::chats_list).post(people::chats_create_group),

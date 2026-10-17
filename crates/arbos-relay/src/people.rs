@@ -198,12 +198,18 @@ pub const ONLINE_MS: i64 = 90_000;
 
 /// Add `last_seen_at` (floored to the minute) and `online` to a user JSON that has an `id`.
 pub fn with_presence(state: &AppState, mut v: Value) -> Value {
-    let Some(uid) = v["id"].as_str().or_else(|| v["user_id"].as_str()) else {
+    let Some(uid) = v["id"]
+        .as_str()
+        .or_else(|| v["user_id"].as_str())
+        .map(str::to_owned)
+    else {
         return v;
     };
-    let seen = state.db.user_last_seen(uid).ok().flatten();
+    let seen = state.db.user_last_seen(&uid).ok().flatten();
     v["last_seen_at"] = json!(seen.map(|t| t - t % 60_000));
     v["online"] = json!(seen.is_some_and(|t| now_ms() - t < ONLINE_MS));
+    // D79: people's initials colour derives from the user id; no override for people.
+    v["avatar_color_index_effective"] = json!(crate::avatar::color_index(&uid));
     v
 }
 
@@ -238,8 +244,15 @@ fn member_json(state: &AppState, m: &Membership) -> Value {
             });
             v["avatar"] = json!(avatar);
             v["avatar_color"] = json!(avatar_color);
+            v["avatar_color_index"] = json!(p.avatar_color_index);
+            v["avatar_color_index_effective"] = json!(crate::avatar::effective_color_index(
+                &p.id,
+                p.avatar_color_index
+            ));
             v["project"] = json!({
                 "id": p.id, "name": p.name, "icon": p.icon, "color": p.color, "avatar": avatar, "avatar_color": avatar_color,
+                "avatar_color_index": p.avatar_color_index,
+                "avatar_color_index_effective": crate::avatar::effective_color_index(&p.id, p.avatar_color_index),
                 "description": p.description,
                 "model": p.models.get("talking_model").and_then(|m| m.get("id")).cloned().unwrap_or(Value::Null),
                 "owner": with_presence(state, crate::notify::Sender::user(state, &p.user_id).json()),
@@ -445,6 +458,11 @@ pub async fn users_search(
         .map(|u| with_presence(&state, u))
         .collect();
     Json(found).into_response()
+}
+
+/// `GET /avatar-colors` — the one 7-entry initials palette every client renders from (D79).
+pub async fn avatar_colors() -> Response {
+    Json(crate::avatar::palette_json()).into_response()
 }
 
 /// `GET /users/{id}` — one person's card for a profile page: handle, name, avatar, status,
@@ -2527,6 +2545,7 @@ pub(crate) mod tests_support {
             avatar_color: None,
             description: String::new(),
             primary_chat_id: None,
+            avatar_color_index: None,
         };
         state.db.insert_project(&project).expect("project");
         state

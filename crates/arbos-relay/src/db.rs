@@ -214,6 +214,9 @@ pub struct Project {
     /// most activity, ties → earliest — and kept until that chat is closed.
     #[serde(default)]
     pub primary_chat_id: Option<String>,
+    /// Telegram-style initials colour override (D79), 0–6; `None` = derived from the id.
+    #[serde(default)]
+    pub avatar_color_index: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -457,6 +460,10 @@ impl Db {
             [],
         );
         let _ = c.execute("ALTER TABLE projects ADD COLUMN primary_chat_id TEXT", []);
+        let _ = c.execute(
+            "ALTER TABLE projects ADD COLUMN avatar_color_index INTEGER",
+            [],
+        );
         // One box per user: devices and projects belong to a user; legacy sandboxes record where
         // their /work went.
         let _ = c.execute(
@@ -570,12 +577,13 @@ impl Db {
                    deleted_at INTEGER,
                    avatar_color TEXT,
                    description TEXT NOT NULL DEFAULT '',
-                   primary_chat_id TEXT
+                   primary_chat_id TEXT,
+                   avatar_color_index INTEGER
                  );
                  INSERT INTO projects_new(id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily,
-                                          project_token_hash, color, user_id, workspace_state, avatar, deleted_at, avatar_color, description, primary_chat_id)
+                                          project_token_hash, color, user_id, workspace_state, avatar, deleted_at, avatar_color, description, primary_chat_id, avatar_color_index)
                    SELECT id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily,
-                          project_token_hash, color, user_id, workspace_state, avatar, deleted_at, avatar_color, description, primary_chat_id FROM projects;
+                          project_token_hash, color, user_id, workspace_state, avatar, deleted_at, avatar_color, description, primary_chat_id, avatar_color_index FROM projects;
                  DROP TABLE projects;
                  ALTER TABLE projects_new RENAME TO projects;
                  COMMIT;",
@@ -680,9 +688,9 @@ impl Db {
     pub fn insert_project(&self, p: &Project) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO projects(id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color, user_id, workspace_state, avatar, avatar_color, description, primary_chat_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
-                params![p.id, p.name, p.icon, p.instructions, p.models.to_string(), p.state, p.created_at, p.last_active_at, p.spend_cap_daily, p.color, p.user_id, p.workspace_state, p.avatar, p.avatar_color, p.description, p.primary_chat_id],
+                "INSERT INTO projects(id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color, user_id, workspace_state, avatar, avatar_color, description, primary_chat_id, avatar_color_index)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                params![p.id, p.name, p.icon, p.instructions, p.models.to_string(), p.state, p.created_at, p.last_active_at, p.spend_cap_daily, p.color, p.user_id, p.workspace_state, p.avatar, p.avatar_color, p.description, p.primary_chat_id, p.avatar_color_index],
             )
             .map(|_| ())
         })
@@ -706,11 +714,12 @@ impl Db {
             avatar_color: r.get(13)?,
             description: r.get::<_, Option<String>>(14)?.unwrap_or_default(),
             primary_chat_id: r.get(15)?,
+            avatar_color_index: r.get(16)?,
         })
     }
 
     const PROJECT_COLS: &'static str =
-        "id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color, user_id, workspace_state, avatar, avatar_color, description, primary_chat_id";
+        "id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color, user_id, workspace_state, avatar, avatar_color, description, primary_chat_id, avatar_color_index";
 
     /// By id, else by name. Names are unique per user only, so a name lookup prefers the id
     /// match and otherwise returns the most recently active project with that name; callers that
@@ -842,6 +851,7 @@ impl Db {
         avatar: Option<Option<&str>>,
         avatar_color: Option<Option<&str>>,
         description: Option<&str>,
+        avatar_color_index: Option<Option<i64>>,
     ) -> Result<()> {
         self.with(|c| {
             c.execute(
@@ -861,6 +871,12 @@ impl Db {
                 c.execute(
                     "UPDATE projects SET avatar_color = ?2 WHERE id = ?1",
                     params![id, col],
+                )?;
+            }
+            if let Some(idx) = avatar_color_index {
+                c.execute(
+                    "UPDATE projects SET avatar_color_index = ?2 WHERE id = ?1",
+                    params![id, idx],
                 )?;
             }
             Ok(())
@@ -2810,6 +2826,7 @@ mod avatar_migration_tests {
             avatar_color: avatar_color.map(str::to_owned),
             description: String::new(),
             primary_chat_id: None,
+            avatar_color_index: None,
         }
     }
 

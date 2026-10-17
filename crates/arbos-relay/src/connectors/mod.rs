@@ -980,6 +980,7 @@ mod tests {
             avatar_color: None,
             description: String::new(),
             primary_chat_id: None,
+            avatar_color_index: None,
         };
         let env = crate::boxes::box_env(
             &state,

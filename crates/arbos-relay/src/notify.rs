@@ -87,6 +87,8 @@ pub struct Sender {
     pub avatar_url: Option<String>,
     /// The person behind it (the user for a human; the owner for an agent is *not* excluded).
     pub user_id: Option<String>,
+    /// Agent's initials-colour override (D79); people never have one.
+    pub avatar_color_index: Option<i64>,
 }
 
 impl Sender {
@@ -112,6 +114,7 @@ impl Sender {
             avatar_color: None,
             avatar_url: card["avatar_url"].as_str().map(str::to_owned),
             user_id: Some(user_id.to_owned()),
+            avatar_color_index: None,
         }
     }
 
@@ -131,6 +134,7 @@ impl Sender {
             })),
             avatar_url: None,
             user_id: None,
+            avatar_color_index: p.avatar_color_index,
         }
     }
 
@@ -138,6 +142,8 @@ impl Sender {
         json!({
             "kind": self.kind, "id": self.id, "name": self.name, "handle": self.handle,
             "avatar": self.avatar, "avatar_color": self.avatar_color, "avatar_url": self.avatar_url,
+            "avatar_color_index": self.avatar_color_index,
+            "avatar_color_index_effective": crate::avatar::effective_color_index(&self.id, self.avatar_color_index),
         })
     }
 

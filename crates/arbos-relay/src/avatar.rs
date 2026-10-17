@@ -25,6 +25,82 @@ pub const DEFAULT_COLORS: &[&str] = &[
 /// The colour slug that is never picked by default.
 pub const MONO: &str = "mono";
 
+/// Telegram-style coloured initials (D79): one shared 7-entry palette for every client, each a
+/// top → bottom gradient, with a dark-mode pair (same hue, lightness −7 %, so white text keeps
+/// ≥ 4.5:1). Index order is part of the contract.
+pub const INITIALS_PALETTE: [InitialsColor; 7] = [
+    InitialsColor {
+        name: "red",
+        light: ("#FF845E", "#D45246"),
+        dark: ("#FF693A", "#C83B2E"),
+    },
+    InitialsColor {
+        name: "orange",
+        light: ("#FEBB5B", "#F68136"),
+        dark: ("#FEAC38", "#F46C14"),
+    },
+    InitialsColor {
+        name: "violet",
+        light: ("#B694F9", "#6C61DF"),
+        dark: ("#9F72F7", "#5043D9"),
+    },
+    InitialsColor {
+        name: "green",
+        light: ("#9AD164", "#46BA43"),
+        dark: ("#88C948", "#3CA03A"),
+    },
+    InitialsColor {
+        name: "cyan",
+        light: ("#53EDD6", "#28C9B7"),
+        dark: ("#33EACE", "#22AB9C"),
+    },
+    InitialsColor {
+        name: "blue",
+        light: ("#5CAFFA", "#408ACF"),
+        dark: ("#399EF9", "#2F78BC"),
+    },
+    InitialsColor {
+        name: "pink",
+        light: ("#FF8AA5", "#E05F8E"),
+        dark: ("#FF668A", "#DA4179"),
+    },
+];
+
+#[derive(Debug, Clone, Copy)]
+pub struct InitialsColor {
+    pub name: &'static str,
+    /// (top, bottom) in light mode.
+    pub light: (&'static str, &'static str),
+    /// (top, bottom) in dark mode.
+    pub dark: (&'static str, &'static str),
+}
+
+/// Which palette entry a stable id gets: `(sum of the id's UTF-8 bytes) mod 7`. Stable id =
+/// project id for agents, user id for people. Every client implements exactly this.
+pub fn color_index(stable_id: &str) -> u8 {
+    (stable_id.bytes().map(u64::from).sum::<u64>() % 7) as u8
+}
+
+/// The index an agent renders with: the owner's override when set, else the derived one.
+pub fn effective_color_index(stable_id: &str, override_index: Option<i64>) -> u8 {
+    match override_index {
+        Some(i) if (0..7).contains(&i) => i as u8,
+        _ => color_index(stable_id),
+    }
+}
+
+/// `GET /avatar-colors` body.
+pub fn palette_json() -> Value {
+    serde_json::json!({
+        "derivation": "sum_utf8_bytes_mod_7",
+        "palette": INITIALS_PALETTE.iter().enumerate().map(|(i, c)| serde_json::json!({
+            "index": i, "name": c.name,
+            "light": { "top": c.light.0, "bottom": c.light.1 },
+            "dark": { "top": c.dark.0, "bottom": c.dark.1 },
+        })).collect::<Vec<_>>(),
+    })
+}
+
 /// The palette minus `mono`, for default picks; `mono` is kept only if it is all there is.
 fn default_palette(colors: &[String]) -> Vec<String> {
     let all: Vec<String> = if colors.is_empty() {
@@ -184,6 +260,34 @@ pub fn valid_slug(s: &str) -> bool {
         && s.len() <= 40
         && s.chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+}
+
+#[cfg(test)]
+mod initials_tests {
+    //! D79 derivation is byte arithmetic every client can reproduce.
+
+    use super::*;
+
+    #[test]
+    fn index_is_byte_sum_mod_7() {
+        // "gh_1": 103 + 104 + 95 + 49 = 351; 351 mod 7 = 1.
+        assert_eq!(color_index("gh_1"), 1);
+        // "u_mac": 117 + 95 + 109 + 97 + 99 = 517; 517 mod 7 = 6.
+        assert_eq!(color_index("u_mac"), 6);
+        assert_eq!(color_index(""), 0);
+        assert!(color_index("01M51AF8N6QFBDW8H9Y76W82T0") < 7);
+        assert_eq!(effective_color_index("gh_1", Some(4)), 4);
+        assert_eq!(
+            effective_color_index("gh_1", Some(9)),
+            1,
+            "out-of-range overrides fall back"
+        );
+        assert_eq!(effective_color_index("gh_1", None), 1);
+        let p = palette_json();
+        assert_eq!(p["palette"].as_array().unwrap().len(), 7);
+        assert_eq!(p["palette"][2]["name"], "violet");
+        assert_eq!(p["palette"][0]["light"]["top"], "#FF845E");
+    }
 }
 
 #[cfg(test)]

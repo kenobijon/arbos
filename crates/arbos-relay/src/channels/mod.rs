@@ -822,6 +822,7 @@ mod tests {
             avatar_color: None,
             description: String::new(),
             primary_chat_id: None,
+            avatar_color_index: None,
         };
         state.db.insert_project(&project).unwrap();
         state
