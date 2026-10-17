@@ -1470,6 +1470,7 @@ fn write_system_line(shared: &Arc<Shared>, chat_id: &str, text: String, call_id:
         subagent_id: None,
         subagent_name: None,
         handoff_messages: None,
+        reactions: Default::default(),
         in_reply_to: None,
         routine_name: None,
         sender_icon: None,
@@ -2997,6 +2998,7 @@ async fn send_message(
             subagent_id: None,
             subagent_name: None,
             handoff_messages: None,
+            reactions: Default::default(),
             in_reply_to: None,
             routine_name: None,
             sender_icon: None,
@@ -3830,6 +3832,20 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             let docs = shared.docs.lock().unwrap();
             if let Some(doc) = docs.get(&chat_id) {
                 let _ = doc.push_command("stop", json!({}), &shared.device_id());
+                doc.commit();
+            }
+        }
+        ClientCommand::React {
+            chat_id,
+            message_id,
+            emoji,
+        } => {
+            let me = format!("user:{}", shared.me_id());
+            let docs = shared.docs.lock().unwrap();
+            if let Some(doc) = docs.get(&chat_id) {
+                if let Err(e) = doc.toggle_reaction(&message_id, &emoji, &me) {
+                    eprintln!("relay: reaction: {e:#}");
+                }
                 doc.commit();
             }
         }

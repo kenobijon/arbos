@@ -1109,6 +1109,9 @@ pub struct Message {
     /// Messages exchanged with the subagent on a hand-off row (1 = brief sent, 2 = result back).
     #[serde(default)]
     pub handoff_messages: Option<u32>,
+    /// Emoji reactions, the iPhone's shape: `{ emoji: { "user:<id>": true } }`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub reactions: std::collections::BTreeMap<String, std::collections::BTreeMap<String, bool>>,
     #[serde(default)]
     pub in_reply_to: Option<String>,
     /// Set on user messages a routine injected (`sender: routine:<id>`, F3).
@@ -1176,7 +1179,40 @@ pub struct Message {
     pub greeting: bool,
 }
 
+/// The quick-react set, in display order (the iPhone's `MessageReaction.palette`).
+pub const REACTION_PALETTE: [&str; 6] = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
+
 impl Message {
+    /// Reactions as `(emoji, senders)`, palette order first, then the rest
+    /// alphabetically; emojis nobody holds any more are dropped.
+    pub fn reaction_list(&self) -> Vec<(String, Vec<String>)> {
+        let senders = |emoji: &str| -> Vec<String> {
+            self.reactions
+                .get(emoji)
+                .map(|people| {
+                    people
+                        .iter()
+                        .filter(|(sid, on)| !sid.is_empty() && **on)
+                        .map(|(sid, _)| sid.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let mut out: Vec<(String, Vec<String>)> = REACTION_PALETTE
+            .iter()
+            .map(|e| (e.to_string(), senders(e)))
+            .filter(|(_, s)| !s.is_empty())
+            .collect();
+        out.extend(
+            self.reactions
+                .keys()
+                .filter(|e| !e.is_empty() && !REACTION_PALETTE.contains(&e.as_str()))
+                .map(|e| (e.clone(), senders(e)))
+                .filter(|(_, s)| !s.is_empty()),
+        );
+        out
+    }
+
     /// Every tool call of this turn, visible or hidden.
     pub fn tool_parts(&self) -> impl Iterator<Item = &Part> {
         self.parts

@@ -7,8 +7,8 @@ use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
 use gpui::{
-    div, list, prelude::*, px, AnyElement, Context, Entity, FontWeight, ListAlignment,
-    ListScrollEvent, ListState, Render, SharedString, StyledText, TextRun, Window,
+    div, list, prelude::*, px, AnyElement, Context, Div, Entity, FontWeight, ListAlignment,
+    ListScrollEvent, ListState, Render, SharedString, Stateful, StyledText, TextRun, Window,
 };
 
 use crate::app::{AppEvent, AppState, DetailsTarget};
@@ -62,6 +62,14 @@ pub enum RowKind {
     /// Centered muted time line ("Today 9:39 PM").
     Stamp {
         label: String,
+    },
+    /// Emoji reaction chips under a bubble (iPhone parity): `(emoji, senders)`.
+    Reactions {
+        reactions: Vec<(String, Vec<String>)>,
+        /// Under my right-hand bubble (chips align right).
+        mine: bool,
+        /// Under another person's bubble (chips clear the avatar column).
+        indent: bool,
     },
     /// Grok's hand-off line: "Messaged ◉ A" / "N messages with ◉ A, ◉ B and ◉ C".
     Handoff {
@@ -148,6 +156,17 @@ struct StickSpring {
 const SPRING_STIFFNESS: f32 = 0.22;
 const SPRING_DAMPING: f32 = 0.55;
 pub const STICK_THRESHOLD_PX: f32 = 70.0;
+
+/// Right-click / control-click on a bubble: the shell opens the react menu there.
+pub enum TranscriptEvent {
+    ReactMenu {
+        chat_id: Id,
+        message_id: Id,
+        position: gpui::Point<gpui::Pixels>,
+    },
+}
+
+impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
 
 pub struct Transcript {
     state: Entity<AppState>,
@@ -325,6 +344,45 @@ impl Transcript {
         cx.notify();
     }
 
+    /// Right-click (or control-click) a bubble → the shell shows the react menu.
+    fn react_target(
+        &self,
+        el: Stateful<Div>,
+        message_id: &Id,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let Some(chat_id) = self.chat_id.clone() else {
+            return el;
+        };
+        let (right_chat, right_msg) = (chat_id.clone(), message_id.clone());
+        let (ctrl_chat, ctrl_msg) = (chat_id, message_id.clone());
+        el.on_mouse_down(
+            gpui::MouseButton::Right,
+            cx.listener(move |_, event: &gpui::MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                cx.emit(TranscriptEvent::ReactMenu {
+                    chat_id: right_chat.clone(),
+                    message_id: right_msg.clone(),
+                    position: event.position,
+                });
+            }),
+        )
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            cx.listener(move |_, event: &gpui::MouseDownEvent, _, cx| {
+                if !event.modifiers.control {
+                    return;
+                }
+                cx.stop_propagation();
+                cx.emit(TranscriptEvent::ReactMenu {
+                    chat_id: ctrl_chat.clone(),
+                    message_id: ctrl_msg.clone(),
+                    position: event.position,
+                });
+            }),
+        )
+    }
+
     fn render_row(
         &mut self,
         ix: usize,
@@ -344,7 +402,12 @@ impl Transcript {
                 sender_label,
                 from,
             } => {
-                let mut bubble = div()
+                let mut bubble = self
+                    .react_target(
+                        div().id(SharedString::from(format!("{}#bubble", row.id))),
+                        &row.message_id,
+                        cx,
+                    )
                     .flex()
                     .flex_col()
                     .gap(px(6.0))
@@ -474,7 +537,12 @@ impl Transcript {
                 // One assistant bubble, drawn block by block: the first block
                 // rounds the top, the last the bottom, the rest run straight.
                 let r = px(BUBBLE_RADIUS);
-                let bubble = div()
+                let bubble = self
+                    .react_target(
+                        div().id(SharedString::from(format!("{}#bubble", row.id))),
+                        &row.message_id,
+                        cx,
+                    )
                     .max_w(px(ASSISTANT_MAX_WIDTH))
                     .when(fill, |el| el.w_full())
                     .px(px(14.0))
@@ -503,6 +571,74 @@ impl Transcript {
                 .text_color(theme.text_muted)
                 .child(label)
                 .into_any_element(),
+            RowKind::Reactions {
+                reactions,
+                mine,
+                indent,
+            } => {
+                // iPhone parity: small capsules under the bubble, mine tinted;
+                // click toggles my reaction on that emoji.
+                let me = format!("user:{}", self.state.read(cx).me_id());
+                let chat_id = self.chat_id.clone().unwrap_or_default();
+                let mut chips = div().flex().flex_wrap().gap(px(4.0));
+                for (emoji, senders) in reactions {
+                    let on = senders.contains(&me);
+                    let (state, chat, message_id, e) = (
+                        self.state.clone(),
+                        chat_id.clone(),
+                        row.message_id.clone(),
+                        emoji.clone(),
+                    );
+                    chips = chips.child(
+                        div()
+                            .id(SharedString::from(format!("{}#{}", row.id, emoji)))
+                            .flex()
+                            .items_center()
+                            .gap(px(3.0))
+                            .px(px(8.0))
+                            .py(px(4.0))
+                            .rounded_full()
+                            .bg(if on {
+                                Theme::with_alpha(theme.accent, 0.22)
+                            } else {
+                                theme.bubble_assistant
+                            })
+                            .border_1()
+                            .border_color(if on {
+                                Theme::with_alpha(theme.accent, 0.55)
+                            } else {
+                                theme.border
+                            })
+                            .cursor_pointer()
+                            .child(div().text_size(px(14.0)).child(emoji.clone()))
+                            .when(senders.len() > 1, |el| {
+                                el.child(
+                                    div()
+                                        .text_size(px(12.0))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(theme.text_muted)
+                                        .child(senders.len().to_string()),
+                                )
+                            })
+                            .on_click(move |_, _, cx| {
+                                let (chat, message_id, e) =
+                                    (chat.clone(), message_id.clone(), e.clone());
+                                state
+                                    .update(cx, |s, cx| s.toggle_reaction(chat, message_id, e, cx));
+                            }),
+                    );
+                }
+                div()
+                    .w_full()
+                    .flex()
+                    .when(mine, |el| el.justify_end())
+                    .when(!mine, |el| el.justify_start())
+                    .when(indent, |el| el.pl(px(2.0)))
+                    .mt(px(-2.0))
+                    .pb(px(6.0))
+                    .child(chips)
+                    .into_any_element()
+            }
             RowKind::Handoff { names, total } => {
                 // "Messaged ◉ A" while only the brief went out; "N messages with
                 // ◉ A, ◉ B and ◉ C" once replies came back (Grok refs 13/58).
@@ -998,6 +1134,7 @@ pub fn build_rows(
                 if message.status == MessageStatus::Queued {
                     queued = true;
                 }
+                push_reactions(&mut rows, message, mine(message));
             }
             Role::System => {
                 // Call lines and other system notes: one centred muted line.
@@ -1311,6 +1448,9 @@ pub fn build_rows(
                         kind: RowKind::Glyph { glyph },
                     });
                 }
+                if !streaming {
+                    push_reactions(&mut rows, message, false);
+                }
                 // Speaker (F11): every reply whose speech is cached, plus the
                 // newest finished reply while voice mode is on.
                 let cached = speech.spoken.contains(&message.id);
@@ -1352,6 +1492,25 @@ pub fn build_rows(
         });
     }
     rows
+}
+
+/// One chips row under a message that carries reactions.
+fn push_reactions(rows: &mut Vec<Row>, message: &Message, mine: bool) {
+    let reactions = message.reaction_list();
+    if reactions.is_empty() {
+        return;
+    }
+    let indent = message.role == Role::User && !mine;
+    rows.push(Row {
+        version: hash_version(&(&reactions, mine, indent), false),
+        id: format!("{}#reactions", message.id),
+        message_id: message.id.clone(),
+        kind: RowKind::Reactions {
+            reactions,
+            mine,
+            indent,
+        },
+    });
 }
 
 // ---------------------------------------------------------------------------

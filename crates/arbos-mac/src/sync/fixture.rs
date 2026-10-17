@@ -467,6 +467,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         subagent_id: None,
                         subagent_name: None,
                         handoff_messages: None,
+                        reactions: Default::default(),
                         in_reply_to: None,
                         routine_name: None,
                         sender_name: None,
@@ -514,6 +515,17 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             let docs = shared.docs.lock().unwrap();
             if let Some(doc) = docs.get(&chat_id) {
                 let _ = doc.push_command("stop", json!({}), DEVICE);
+                doc.commit();
+            }
+        }
+        ClientCommand::React {
+            chat_id,
+            message_id,
+            emoji,
+        } => {
+            let docs = shared.docs.lock().unwrap();
+            if let Some(doc) = docs.get(&chat_id) {
+                let _ = doc.toggle_reaction(&message_id, &emoji, &format!("user:{ME_ID}"));
                 doc.commit();
             }
         }
@@ -1296,6 +1308,7 @@ fn send_user(
                 subagent_id: None,
                 subagent_name: None,
                 handoff_messages: None,
+                reactions: Default::default(),
                 in_reply_to: None,
                 routine_name: None,
                 sender_name: None,
@@ -1597,6 +1610,7 @@ fn run_routine_now(shared: &Arc<Shared>, project_id: &str, routine_id: &str) {
                 subagent_id: None,
                 subagent_name: None,
                 handoff_messages: None,
+                reactions: Default::default(),
                 in_reply_to: None,
                 routine_name: Some(routine.name.clone()),
                 sender_name: None,
@@ -2187,6 +2201,7 @@ async fn run_turn(
             subagent_id: None,
             subagent_name: None,
             handoff_messages: None,
+            reactions: Default::default(),
             in_reply_to: None,
             routine_name: None,
             sender_name: None,
@@ -2725,6 +2740,7 @@ fn insert_running_row(
             subagent_id: None,
             subagent_name: None,
             handoff_messages: None,
+            reactions: Default::default(),
             in_reply_to: None,
             routine_name: None,
             sender_name: None,
@@ -2900,6 +2916,7 @@ async fn run_outcome_turn(
             subagent_id: None,
             subagent_name: None,
             handoff_messages: None,
+            reactions: Default::default(),
             in_reply_to: None,
             usage: None,
             return_contract: None,
@@ -3436,6 +3453,7 @@ impl Seeder<'_> {
             subagent_id: None,
             subagent_name: None,
             handoff_messages: None,
+            reactions: Default::default(),
             in_reply_to: None,
             routine_name: None,
             sender_name: None,
@@ -3477,6 +3495,7 @@ impl Seeder<'_> {
             subagent_id: None,
             subagent_name: None,
             handoff_messages: None,
+            reactions: Default::default(),
             in_reply_to: None,
             routine_name: None,
             sender_name: None,
@@ -3519,6 +3538,7 @@ fn project_message(chat_id: &str, project: &Project, text: &str, t: u64) -> Mess
         subagent_id: None,
         subagent_name: None,
         handoff_messages: None,
+        reactions: Default::default(),
         in_reply_to: None,
         routine_name: None,
         sender_name: Some(project.name.clone()),
@@ -4163,6 +4183,7 @@ fn human_message(chat_id: &str, who: &Person, text: &str, at: u64) -> Message {
         subagent_id: None,
         subagent_name: None,
         handoff_messages: None,
+        reactions: Default::default(),
         in_reply_to: None,
         routine_name: None,
         sender_name: who.name.clone(),
@@ -4207,12 +4228,18 @@ fn seed_people_docs(shared: &Arc<Shared>) {
         "Hey — are you around? I want to go over the beta invite copy before it ships.",
         base,
     ));
-    let _ = doc.insert_message(&human_message(
+    // Sam reacted to my line (one chip); a seed for the reaction rows.
+    let mut mine = human_message(
         DM_SAM,
         &me(),
         "Here now. Paste what you have and I'll read it.",
         base + 90_000,
-    ));
+    );
+    mine.reactions
+        .entry("👍".into())
+        .or_default()
+        .insert(format!("user:{}", sam().id), true);
+    let _ = doc.insert_message(&mine);
     let _ = doc.insert_message(&human_message(
         DM_SAM,
         &sam(),
@@ -4675,6 +4702,7 @@ async fn agent_reply(
             subagent_id: None,
             subagent_name: None,
             handoff_messages: None,
+            reactions: Default::default(),
             in_reply_to: None,
             routine_name: None,
             sender_name: Some(agent.name.clone()),
@@ -4805,6 +4833,7 @@ fn system_message(chat_id: &str, text: &str) -> Message {
         subagent_id: None,
         subagent_name: None,
         handoff_messages: None,
+        reactions: Default::default(),
         in_reply_to: None,
         routine_name: None,
         sender_icon: None,

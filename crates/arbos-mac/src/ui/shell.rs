@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use gpui::{
     actions, div, prelude::*, px, Animation, AnimationExt, App, Context, Div, Entity, FocusHandle,
-    Focusable, FontWeight, Render, ScrollHandle, Stateful, Window,
+    Focusable, FontWeight, Render, ScrollHandle, SharedString, Stateful, Window,
 };
 
 use crate::app::SignInMode;
@@ -38,7 +38,7 @@ use crate::ui::theme::{
     DRAWER_WIDTH, HEADER_HEIGHT, LINE_HEIGHT, PANEL_RADIUS, PLUS_BUTTON, RIGHT_PANEL_WIDTH,
     TAB_BAR_HEIGHT, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
 };
-use crate::ui::transcript::{Transcript, COLUMN_MAX_WIDTH};
+use crate::ui::transcript::{Transcript, TranscriptEvent, COLUMN_MAX_WIDTH};
 use crate::ui::vault::{VaultEvent, VaultPanel};
 use crate::ui::voice::Voice;
 use crate::ui::voicepicker;
@@ -63,6 +63,12 @@ pub struct Shell {
     local: Entity<LocalPanel>,
     focus_handle: FocusHandle,
     pub(crate) settings_open: bool,
+    /// Emoji react menu over a bubble: (chat, message, where it was clicked).
+    react_menu: Option<(
+        crate::model::Id,
+        crate::model::Id,
+        gpui::Point<gpui::Pixels>,
+    )>,
     settings_scroll: ScrollHandle,
     routines: Entity<RoutinesPanel>,
     routines_open: bool,
@@ -115,6 +121,21 @@ impl Shell {
             settings_scroll.scroll_to_bottom();
         }
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        cx.subscribe(
+            &transcript,
+            |this, _, event: &TranscriptEvent, cx| match event {
+                TranscriptEvent::ReactMenu {
+                    chat_id,
+                    message_id,
+                    position,
+                } => {
+                    this.close_popovers(cx);
+                    this.react_menu = Some((chat_id.clone(), message_id.clone(), *position));
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
         let voice = cx.new(|cx| Voice::new(state.clone(), cx));
         let composer = cx.new(|cx| Composer::new(state.clone(), voice.clone(), cx));
         {
@@ -291,6 +312,7 @@ impl Shell {
             settings_open: open_settings.is_some(),
             settings_scroll,
             row_menu: None,
+            react_menu: None,
             group_picker_open: false,
             archived_open: false,
             voice_picker_open: false,
@@ -373,7 +395,8 @@ impl Shell {
             || self.members_open
             || self.add_agent_open
             || self.group_picker_open
-            || self.row_menu.is_some();
+            || self.row_menu.is_some()
+            || self.react_menu.is_some();
         self.close_popovers(cx);
         if floating {
             return;
@@ -441,6 +464,7 @@ impl Shell {
             || self.group_picker_open
             || self.archived_open
             || self.row_menu.is_some()
+            || self.react_menu.is_some()
         {
             self.menu_open = false;
             self.members_open = false;
@@ -448,6 +472,7 @@ impl Shell {
             self.group_picker_open = false;
             self.archived_open = false;
             self.row_menu = None;
+            self.react_menu = None;
             cx.notify();
         }
         if self.composer.read(cx).open_picker.is_some() {
@@ -456,6 +481,72 @@ impl Shell {
                 cx.notify();
             });
         }
+    }
+
+    // ----- react menu -----------------------------------------------------------------
+    /// The quick-react bar (iPhone parity: the long-press palette) at the click.
+    fn react_menu(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let (chat_id, message_id, at) = self.react_menu.clone()?;
+        let theme = Theme::of(cx).clone();
+        let me = format!("user:{}", self.state.read(cx).me_id());
+        let held: Vec<String> = self
+            .state
+            .read(cx)
+            .messages
+            .get(&chat_id)
+            .and_then(|list| list.iter().find(|m| m.id == message_id))
+            .map(|m| {
+                m.reaction_list()
+                    .into_iter()
+                    .filter(|(_, s)| s.contains(&me))
+                    .map(|(e, _)| e)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut bar = div().flex().items_center().gap(px(2.0)).p(px(4.0));
+        for emoji in crate::model::REACTION_PALETTE {
+            let on = held.iter().any(|e| e == emoji);
+            let (chat, msg) = (chat_id.clone(), message_id.clone());
+            bar = bar.child(
+                div()
+                    .id(SharedString::from(format!("react-{emoji}")))
+                    .size(px(32.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .cursor_pointer()
+                    .when(on, |el| el.bg(Theme::with_alpha(theme.accent, 0.22)))
+                    .hover(|s| s.bg(theme.surface_2))
+                    .text_size(px(18.0))
+                    .child(emoji)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.react_menu = None;
+                        let (chat, msg) = (chat.clone(), msg.clone());
+                        this.state.update(cx, |s, cx| {
+                            s.toggle_reaction(chat, msg, emoji.to_string(), cx)
+                        });
+                        cx.notify();
+                    })),
+            );
+        }
+        // Appended straight to the root (see sidebar::row_menu): sits just above the click.
+        Some(
+            div()
+                .absolute()
+                .left(at.x - px(16.0))
+                .top(at.y - px(48.0))
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(
+                    div()
+                        .rounded_full()
+                        .bg(theme.card())
+                        .border_1()
+                        .border_color(theme.border_strong)
+                        .shadow_lg()
+                        .child(bar),
+                ),
+        )
     }
 
     // ----- update pill (sidebar bottom) ------------------------------------------
@@ -2353,6 +2444,9 @@ impl Render for Shell {
             }
         }
         if let Some(menu) = sidebar::row_menu(self, cx) {
+            root = root.child(menu);
+        }
+        if let Some(menu) = self.react_menu(cx) {
             root = root.child(menu);
         }
         if self.group_picker_open {

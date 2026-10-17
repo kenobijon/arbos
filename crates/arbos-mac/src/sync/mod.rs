@@ -359,6 +359,12 @@ pub enum ClientCommand {
     Stop {
         chat_id: Id,
     },
+    /// Toggle my emoji reaction on a message (written into the chat doc).
+    React {
+        chat_id: Id,
+        message_id: Id,
+        emoji: String,
+    },
     /// S18: decide an approval card (`approve` / `reject` commands, `arbos_core::approval`).
     Approve {
         chat_id: Id,

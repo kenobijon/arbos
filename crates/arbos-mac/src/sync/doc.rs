@@ -113,6 +113,33 @@ impl ChatDoc {
         Ok(ix)
     }
 
+    /// Toggle one emoji reaction for `sender` on a message — the iPhone's shape,
+    /// `reactions: Map { emoji: Map { sender: true } }`, several emojis per
+    /// message. Does not commit.
+    pub fn toggle_reaction(&self, message_id: &str, emoji: &str, sender: &str) -> Result<()> {
+        if emoji.is_empty() || sender.is_empty() {
+            return Ok(());
+        }
+        let list = self.messages();
+        let Some(ix) = self.index_of(message_id) else {
+            return Ok(());
+        };
+        let map = message_map(&list, ix).context("message row is not a map")?;
+        let reactions = match map.get("reactions") {
+            Some(ValueOrContainer::Container(Container::Map(m))) => m,
+            _ => map.insert_container("reactions", LoroMap::new())?,
+        };
+        let bucket = match reactions.get(emoji) {
+            Some(ValueOrContainer::Container(Container::Map(m))) => m,
+            _ => reactions.insert_container(emoji, LoroMap::new())?,
+        };
+        match bucket.get(sender) {
+            Some(ValueOrContainer::Value(LoroValue::Bool(true))) => bucket.delete(sender)?,
+            _ => bucket.insert(sender, true)?,
+        }
+        Ok(())
+    }
+
     /// Append a `commands` row (`send`, `stop`, `answer`, `retry`, `retitle`).
     pub fn push_command(&self, kind: &str, payload: Value, device: &str) -> Result<()> {
         let list = self.commands();

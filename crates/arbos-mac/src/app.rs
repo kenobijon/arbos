@@ -1901,6 +1901,7 @@ impl AppState {
                 subagent_id: None,
                 subagent_name: None,
                 handoff_messages: None,
+                reactions: Default::default(),
                 in_reply_to: None,
                 routine_name: None,
                 sender_name: None,
@@ -2067,6 +2068,7 @@ impl AppState {
                 subagent_id: None,
                 subagent_name: None,
                 handoff_messages: None,
+                reactions: Default::default(),
                 in_reply_to: None,
                 usage: None,
                 return_contract: None,
@@ -2141,6 +2143,26 @@ impl AppState {
         if let Some(chat_id) = self.active_chat_id() {
             self.command(ClientCommand::Stop { chat_id });
         }
+        cx.notify();
+    }
+
+    /// Add or remove my emoji reaction on a message (several emojis may sit on
+    /// one message; the same emoji again clears it).
+    pub fn toggle_reaction(
+        &mut self,
+        chat_id: Id,
+        message_id: Id,
+        emoji: String,
+        cx: &mut Context<Self>,
+    ) {
+        if emoji.is_empty() || self.me_id().is_empty() {
+            return;
+        }
+        self.command(ClientCommand::React {
+            chat_id,
+            message_id,
+            emoji,
+        });
         cx.notify();
     }
 
