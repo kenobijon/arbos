@@ -2622,7 +2622,12 @@ impl AppState {
             .map(|(s, _, i)| (s.clone(), *i))
             .or_else(|| project.map(|p| (p.id.clone(), p.avatar_color_index)))
             .unwrap_or_else(|| (project_id.to_string(), None));
-        let image = crate::ui::avatars::notification_png(&seed, &name, index);
+        let image = crate::ui::avatars::notification_png(
+            &seed,
+            &name,
+            index,
+            crate::ui::theme::system_is_dark(),
+        );
         (name, image)
     }
 
@@ -4194,6 +4199,7 @@ impl AppState {
             &sender.id,
             &sender.display_name(),
             sender.avatar_color_index,
+            crate::ui::theme::system_is_dark(),
         )
     }
 }
