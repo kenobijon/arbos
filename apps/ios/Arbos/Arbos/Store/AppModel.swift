@@ -220,7 +220,14 @@ final class AppModel: ObservableObject {
         Set(UserDefaults.standard.stringArray(forKey: "archivedProjects") ?? [])
     }()
 
+    /// People DMs/groups hidden from home until found in search (or opened).
+    @Published private(set) var archivedPeopleChatIds: Set<Id> = {
+        Set(UserDefaults.standard.stringArray(forKey: "archivedPeopleChats") ?? [])
+    }()
+
     func isArchived(_ projectId: Id) -> Bool { archivedProjectIds.contains(projectId) }
+
+    func isArchived(peopleChatId: Id) -> Bool { archivedPeopleChatIds.contains(peopleChatId) }
 
     func archive(_ projectId: Id) {
         guard !archivedProjectIds.contains(projectId) else { return }
@@ -230,10 +237,23 @@ final class AppModel: ObservableObject {
         unpinHome(projectId: projectId)
     }
 
+    func archive(peopleChatId: Id) {
+        guard !archivedPeopleChatIds.contains(peopleChatId) else { return }
+        archivedPeopleChatIds.insert(peopleChatId)
+        UserDefaults.standard.set(Array(archivedPeopleChatIds), forKey: "archivedPeopleChats")
+        unpinHome(peopleChatId: peopleChatId)
+    }
+
     func unarchive(_ projectId: Id) {
         guard archivedProjectIds.contains(projectId) else { return }
         archivedProjectIds.remove(projectId)
         UserDefaults.standard.set(Array(archivedProjectIds), forKey: "archivedProjects")
+    }
+
+    func unarchive(peopleChatId: Id) {
+        guard archivedPeopleChatIds.contains(peopleChatId) else { return }
+        archivedPeopleChatIds.remove(peopleChatId)
+        UserDefaults.standard.set(Array(archivedPeopleChatIds), forKey: "archivedPeopleChats")
     }
 
     // MARK: Home pins (device-local)
@@ -253,7 +273,10 @@ final class AppModel: ObservableObject {
 
     func unpinHome(projectId: Id) { setHomePinned("p:" + projectId, false) }
 
-    func pinHome(peopleChatId: Id) { setHomePinned("c:" + peopleChatId, true) }
+    func pinHome(peopleChatId: Id) {
+        unarchive(peopleChatId: peopleChatId)
+        setHomePinned("c:" + peopleChatId, true)
+    }
     func unpinHome(peopleChatId: Id) { setHomePinned("c:" + peopleChatId, false) }
 
     private func setHomePinned(_ key: String, _ pinned: Bool) {
@@ -1673,6 +1696,7 @@ final class AppModel: ObservableObject {
     }
 
     func open(peopleChat chat: PeopleChat) {
+        unarchive(peopleChatId: chat.id)
         path = [.chat(chatId: chat.id, projectId: peopleSlot)]
     }
 
@@ -2034,6 +2058,11 @@ final class AppModel: ObservableObject {
         rooms[chatId]?.stop(); rooms[chatId] = nil; docs[chatId] = nil; messages[chatId] = nil
         unacked[chatId] = nil
         forgetDoc(chatId)
+        if archivedPeopleChatIds.contains(chatId) {
+            archivedPeopleChatIds.remove(chatId)
+            UserDefaults.standard.set(Array(archivedPeopleChatIds), forKey: "archivedPeopleChats")
+        }
+        unpinHome(peopleChatId: chatId)
         path = []
         Task {
             do { try await api.deleteChat(chatId) } catch { notice = Notice(text: "Delete failed: \(error.localizedDescription)") }
