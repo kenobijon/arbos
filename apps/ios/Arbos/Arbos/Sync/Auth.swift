@@ -91,7 +91,10 @@ struct AuthError: Error, LocalizedError {
         case "invite_required": return "This relay is invite-only. Ask for an invite code."
         case "oauth_denied": return "GitHub sign-in was declined."
         case "oauth_failed": return "GitHub sign-in failed. Try again."
-        default: return message
+        case "handle_taken": return "That handle is already taken."
+        case "bad_handle": return "Handle must be 1–39 letters, numbers, or hyphens."
+        case "": return message
+        default: return message.isEmpty ? type : message
         }
     }
 }
@@ -189,6 +192,18 @@ extension RelayAPI {
                               spentTodayUsd: n("spent_today_usd"), dailyCapUsd: (c["daily_cap_usd"] as? NSNumber)?.doubleValue)
         }
         return (user, credits, m["machine"] as? [String: Any] ?? [:])
+    }
+
+    /// `PATCH /me {name?, login?}` → updated user (display name and/or handle).
+    func patchMe(name: String?, login: String?) async throws -> AuthUser {
+        var body: [String: Any] = [:]
+        if let name { body["name"] = name }
+        if let login { body["login"] = login }
+        guard let m = try await json("PATCH", AuthEndpoints.me, body: body) as? [String: Any],
+              let user = RelayAPI.parseUser(m["user"] as? [String: Any]) else {
+            throw AuthError(message: "Could not update profile")
+        }
+        return user
     }
 
     func approvals() async throws -> [PendingDevice] {
