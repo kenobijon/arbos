@@ -149,6 +149,7 @@ class VoiceCall:
         self.agent_name: str = self.agent_sender.get("name") or "Arbos"
         self.chattiness: str = meta.get("chattiness") or "balanced"
         self.wake_name: str | None = meta.get("wake_name")
+        self.voice: str = meta.get("voice") or cfg.voice
         self.relay = Relay(cfg, http)
         self.events = EventBatcher(self.relay, self.call_id, self.project_id)
         self.meter = CallMeter(model=cfg.model, stt_model=cfg.stt_model)
@@ -207,6 +208,8 @@ class VoiceCall:
         settings = self.info.get("settings") or {}
         self.chattiness = settings.get("chattiness") or self.chattiness
         self.wake_name = settings.get("wake_name") or self.wake_name
+        # The owner's pick for this agent (GET /voices); read at join, used for this call.
+        self.voice = settings.get("voice") or self.meta.get("voice") or self.cfg.voice
         self.events.start()
         self.event("joined", mode=self.state.mode, version=__version__)
 
@@ -224,7 +227,7 @@ class VoiceCall:
         self.agent = ArbosVoiceAgent(self, instructions)
         self.rt_model = openai.realtime.RealtimeModel(
             model=self.cfg.model,
-            voice=self.cfg.voice,
+            voice=self.voice,
             api_key=self.cfg.openai_api_key,
             turn_detection=self.turn_detection_for(self.state.mode),
             input_audio_transcription=AudioTranscription(model=self.cfg.stt_model),
@@ -255,7 +258,7 @@ class VoiceCall:
         if self.state.mode == "group":
             await self.start_group_listening()
         self.hook_realtime()
-        log.info("session started in %s mode (humans=%d, chattiness=%s, turn_detection=%s)", self.state.mode, len(self.humans()), self.chattiness, self.cfg.turn_detection)
+        log.info("session started in %s mode (humans=%d, chattiness=%s, voice=%s, turn_detection=%s)", self.state.mode, len(self.humans()), self.chattiness, self.voice, self.cfg.turn_detection)
         self.spawn(self.usage_loop())
         self.spawn(self.idle_loop())
         await self.greet()

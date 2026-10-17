@@ -4,6 +4,8 @@
 #
 #   sudo -E scripts/deploy/voice-server.sh            # install/upgrade from this checkout's voice/
 #   sudo -E scripts/deploy/voice-server.sh --env-only # only rewrite /etc/arbos/voice.env + unit
+#   VOICE_SAMPLES_SRC=/tmp/voices sudo -E scripts/deploy/voice-server.sh   # also install voice samples
+#                                        (made with: OPENAI_API_KEY=… voice/.venv/bin/python voice/tools/make_voice_samples.py --out /tmp/voices)
 #
 # Secrets: the worker reads /etc/arbos/relay.env (OPENAI_API_KEY, LIVEKIT_*, ARBOS_RELAY_ADMIN_TOKEN,
 # written by relay-server.sh) and /etc/arbos/voice.env (worker knobs, no secrets). Nothing is
@@ -57,11 +59,21 @@ if [[ -z "$ENV_ONLY" ]]; then
   git -C "$REPO_DIR" rev-parse HEAD > /etc/arbos/voice.deployed-sha 2>/dev/null && chmod 0644 /etc/arbos/voice.deployed-sha || true
 fi
 
+# ---- 1b. voice samples (GET /voices): made once by voice/tools/make_voice_samples.py, served by the relay
+VOICES_DIR="${ARBOS_VOICES_DIR:-/var/lib/arbos-relay/voices}"
+if [[ -n "${VOICE_SAMPLES_SRC:-}" && -d "$VOICE_SAMPLES_SRC" ]]; then
+  say "voice samples → $VOICES_DIR"
+  install -d -o arbos -g arbos "$VOICES_DIR"
+  rsync -a --include='*.mp3' --include='voices.json' --exclude='*' "$VOICE_SAMPLES_SRC/" "$VOICES_DIR/"
+  chown -R arbos:arbos "$VOICES_DIR"
+  ls "$VOICES_DIR" | tr '\n' ' '; echo
+fi
+
 # ---- 2. knobs ----------------------------------------------------------------------------------------
 say "env → $ENV_FILE"
 if [[ -f "$ENV_FILE" ]]; then
   keep() { local k=$1; [[ -n "${!k:-}" ]] || printf -v "$k" '%s' "$(sed -n "s/^$k=//p" "$ENV_FILE" | head -1)"; }
-  for k in ARBOS_VOICE_MODEL ARBOS_VOICE_VOICE ARBOS_VOICE_STT_MODEL ARBOS_VOICE_JUDGE_MODEL ARBOS_VOICE_AGENT_NAME ARBOS_VOICE_LOG_LEVEL; do keep "$k"; done
+  for k in ARBOS_VOICE_MODEL ARBOS_VOICE_VOICE ARBOS_VOICE_STT_MODEL ARBOS_VOICE_JUDGE_MODEL ARBOS_VOICE_AGENT_NAME ARBOS_VOICE_LOG_LEVEL ARBOS_VOICE_TURN_DETECTION; do keep "$k"; done
 fi
 umask 022
 cat > "$ENV_FILE" <<EOF
@@ -73,6 +85,7 @@ ARBOS_VOICE_VOICE=${ARBOS_VOICE_VOICE:-marin}
 ARBOS_VOICE_STT_MODEL=${ARBOS_VOICE_STT_MODEL:-gpt-4o-mini-transcribe}
 ARBOS_VOICE_JUDGE_MODEL=${ARBOS_VOICE_JUDGE_MODEL:-typesafe/jev-1.14}
 ARBOS_VOICE_LOG_LEVEL=${ARBOS_VOICE_LOG_LEVEL:-INFO}
+ARBOS_VOICE_TURN_DETECTION=${ARBOS_VOICE_TURN_DETECTION:-server_vad:300}
 LIVEKIT_AGENTS_PROD=1
 HOME=/var/lib/arbos-voice
 EOF

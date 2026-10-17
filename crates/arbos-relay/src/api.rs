@@ -413,6 +413,9 @@ pub struct PatchProjectBody {
     /// Profile blurb (≤ 500 chars; empty string clears it).
     #[serde(default)]
     pub description: Option<String>,
+    /// Call voice id from `GET /voices`; `null` = the relay default (D75).
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub voice: Option<Option<String>>,
 }
 
 fn deserialize_double_option<'de, D>(d: D) -> Result<Option<Option<String>>, D::Error>
@@ -502,6 +505,21 @@ pub async fn patch_project(
         Some(d) => Some(clean_description(d)?),
         None => None,
     };
+    if let Some(voice) = &b.voice {
+        let voice = voice.as_deref().map(str::trim).filter(|v| !v.is_empty());
+        if let Some(v) = voice {
+            if !crate::voice::valid_voice(&state, v) {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "voice must be an id from GET /voices".into(),
+                ));
+            }
+        }
+        state
+            .db
+            .set_voice_agent_voice(&p.id, voice)
+            .map_err(internal)?;
+    }
     state
         .db
         .update_project(
@@ -647,6 +665,7 @@ pub(crate) async fn project_json(state: &AppState, p: &Project) -> Value {
         "spend_today_usd": today, "spend_cap_usd": p.spend_cap_daily,
         "created_at": p.created_at, "last_active_at": p.last_active_at,
         "description": p.description,
+        "voice": state.db.voice_agent_settings(&p.id).ok().and_then(|s| s.voice),
         "primary_chat_id": primary_chat_id(state, p),
         "owner": crate::people::with_presence(state, crate::notify::Sender::user(state, &p.user_id).json()),
         "model": p.models.get("talking_model").and_then(|m| m.get("id")).cloned().unwrap_or(Value::Null),
