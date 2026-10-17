@@ -1644,9 +1644,16 @@ final class AppModel: ObservableObject {
         for person in leadingPeople where !mentions.contains(person) {
             mentions.append(person)
         }
-        // Only agent @mentions in the typed text count as an address. A leading person name
-        // must not keep a sticky agent chip — otherwise "Message @bob" + "Allan?" wakes bob.
-        // A person @handle mid-line must not block the chip (bob still answers about @jo).
+        // Leading bare agent names ("Bob?", "hey Bob …") count as addressing that agent —
+        // same as typing @bob — so the box wakes without requiring the @ handle.
+        let leadingAgents = AppModel.namedAgents(in: text, members: chat.members)
+        for agent in leadingAgents where !mentions.contains(agent) {
+            mentions.append(agent)
+        }
+        // Agent @mentions, bare agent names, and "everyone"/"agents" phrases count as an
+        // address. A leading person name must not keep a sticky agent chip — otherwise
+        // "Message @bob" + "Allan?" wakes bob. A person @handle mid-line must not block the
+        // chip (bob still answers about @jo).
         let addressedAgent = mentions.contains { $0.hasPrefix("agent:") }
         if !addressedAgent, let address {
             if address == "everyone" {
@@ -1755,12 +1762,17 @@ final class AppModel: ObservableObject {
         return out
     }
 
-    /// "hey everyone" / "hi everyone" / … at the start of the message (no `@` required).
+    /// "hey everyone" / "hey agents" / "can the agents…" at the start (no `@` required) —
+    /// addresses every agent in the chat.
     static func addressesEveryone(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        for g in ["hey everyone", "hi everyone", "hello everyone", "yo everyone", "ok everyone", "okay everyone"] {
+        for g in [
+            "hey everyone", "hi everyone", "hello everyone", "yo everyone", "ok everyone", "okay everyone",
+            "hey agents", "hi agents", "hello agents", "yo agents", "ok agents", "okay agents",
+            "all agents", "the agents", "can the agents", "can agents",
+        ] {
             if trimmed == g { return true }
-            for sep in [" ", ",", "!", ":", "—", "-"] {
+            for sep in [" ", ",", "!", "?", ":", "—", "-"] {
                 if trimmed.hasPrefix(g + sep) { return true }
             }
         }
@@ -1793,6 +1805,47 @@ final class AppModel: ObservableObject {
             }
             if Set(needles).contains(token), !out.contains(h.member) {
                 out.append(h.member)
+            }
+        }
+        return out
+    }
+
+    /// Agents addressed at the start of the text without `@` — "Bob", "Bob?", "hey Bob …".
+    /// A leading person name wins when the same token could match a human in the chat.
+    /// Mid-line names ("ask Bob later") do not count.
+    static func namedAgents(in text: String, members: [ChatMember]) -> [String] {
+        if !namedPeople(in: text, members: members).isEmpty { return [] }
+        let agents = members.filter(\.isAgent)
+        guard !agents.isEmpty else { return [] }
+        var lower = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !lower.isEmpty else { return [] }
+        for g in ["yo ", "hey ", "hi ", "hello ", "ok ", "okay "] {
+            if lower.hasPrefix(g) { lower = String(lower.dropFirst(g.count)); break }
+        }
+        let first = lower.split(whereSeparator: { $0.isWhitespace }).first.map(String.init) ?? ""
+        let token = first.trimmingCharacters(in: CharacterSet(charactersIn: ".,!?:;"))
+        guard token.count >= 2 else { return [] }
+        var out: [String] = []
+        for a in agents {
+            var needles: [String] = [a.handle.lowercased()]
+            let projectName = a.project?.name.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !projectName.isEmpty {
+                let n = projectName.lowercased()
+                needles.append(n)
+                needles.append(mentionSlug(projectName))
+                if let firstName = n.split(whereSeparator: { $0.isWhitespace }).first, firstName.count >= 2 {
+                    needles.append(String(firstName))
+                }
+            }
+            if let name = a.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+                let n = name.lowercased()
+                needles.append(n)
+                if let firstName = n.split(whereSeparator: { $0.isWhitespace }).first, firstName.count >= 2 {
+                    needles.append(String(firstName))
+                }
+            }
+            if Set(needles).contains(token), !out.contains(a.member) {
+                out.append(a.member)
             }
         }
         return out
