@@ -58,6 +58,8 @@ from openai.types.realtime.audio_transcription import AudioTranscription
 from openai.types.realtime.realtime_audio_input_turn_detection import SemanticVad, ServerVad
 
 from . import __version__
+
+WORKER_SHA = os.environ.get("ARBOS_VOICE_SHA", "").strip() or None
 from .config import CONFIG, Config
 from .judge import CHATTINESS_THRESHOLD, Decision, Judge, JudgeContext, forced_decision
 from .listener import GroupListeners, Utterance
@@ -236,6 +238,15 @@ class VoiceCall:
     def agent_speaking(self) -> bool:
         return self.state.agent_state == "speaking"
 
+    def speak_line(self, line: str, *, allow_interruptions: bool = True):
+        """Speak a fixed line. A realtime session has no TTS, so the framework's say() raises;
+        the model is told to say the line verbatim instead."""
+        assert self.session
+        return self.session.generate_reply(
+            instructions=f"Say exactly this line and nothing else, in your normal voice: {line}",
+            allow_interruptions=allow_interruptions,
+        )
+
     # ---- lifecycle ---------------------------------------------------------------------------------
 
     async def run(self) -> None:
@@ -259,7 +270,7 @@ class VoiceCall:
         # The owner's pick for this agent (GET /voices); read at join, used for this call.
         self.voice = settings.get("voice") or self.meta.get("voice") or self.cfg.voice
         self.events.start()
-        self.event("joined", mode=self.state.mode, version=__version__)
+        self.event("joined", mode=self.state.mode, version=__version__, sha=WORKER_SHA)
 
         # Wait for a human if the room is empty at dispatch (the caller is still connecting).
         if not self.humans():
@@ -375,12 +386,12 @@ class VoiceCall:
             line = f"{self.agent_name}, {owner_label}'s agent, has joined and can hear this call."
             self.event("system", text=line)
             await self.wait_for_silence()
-            self.session.say(line, allow_interruptions=True)
+            self.speak_line(line)
         else:
-            # Fixed line (not generate_reply): one greeting, no model paraphrase race with VAD.
+            # One fixed greeting line (no free-form generate: that raced the VAD and produced a
+            # paraphrase after any noise cut).
             self.event("system", text=f"{self.agent_name} joined the call")
-            line = f"Hey — {self.agent_name} here. What do you need?"
-            self.session.say(line, allow_interruptions=True)
+            self.speak_line(f"Hey — {self.agent_name} here. What do you need?")
 
     async def finish(self, reason: str) -> None:
         if self.state.leaving:
@@ -391,7 +402,7 @@ class VoiceCall:
         log.info("leaving call %s: %s", self.call_id, reason)
         try:
             if self.session and reason != "alone" and GOODBYE.get(reason):
-                handle = self.session.say(GOODBYE[reason], allow_interruptions=False)
+                handle = self.speak_line(GOODBYE[reason], allow_interruptions=False)
                 try:
                     await asyncio.wait_for(handle.wait_for_playout(), timeout=12.0)
                 except asyncio.TimeoutError:
@@ -883,6 +894,18 @@ async def entrypoint(ctx: JobContext) -> None:
         await call.run()
 
 
+async def hello_relay() -> None:
+    """Tell the relay which build is running (`voice.worker_sha` in GET /admin/calls)."""
+    try:
+        async with aiohttp.ClientSession() as http:
+            await Relay(CONFIG, http)._json(
+                "POST", "/voice/worker/hello", {"sha": WORKER_SHA, "version": __version__, "model": CONFIG.model}, timeout=5.0
+            )
+        log.info("relay told: worker sha=%s version=%s", WORKER_SHA, __version__)
+    except Exception as e:
+        log.warning("relay hello failed: %s", e)
+
+
 def main() -> None:
     logging.basicConfig(
         level=os.environ.get("ARBOS_VOICE_LOG_LEVEL", "INFO"),
@@ -893,6 +916,8 @@ def main() -> None:
     if missing:
         log.error("missing configuration: %s", ", ".join(missing))
         raise SystemExit(2)
+    if len(sys.argv) > 1 and sys.argv[1] in ("start", "dev"):
+        asyncio.run(hello_relay())
     cli.run_app(
         WorkerOptions(
             entrypoint_fnc=entrypoint,
