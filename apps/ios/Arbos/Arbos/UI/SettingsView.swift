@@ -4,10 +4,13 @@ struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
     #if DEBUG
     @State private var relayUrl = ""
     #endif
     @State private var confirmUnpair = false
+    /// Connector errors — the root `notice` alert sits under this sheet and looks like a silent fail.
+    @State private var connectorError: String?
 
     var body: some View {
         NavigationStack {
@@ -236,6 +239,28 @@ struct SettingsView: View {
                 #endif
                 model.refreshConnectors()
             }
+            // After Google OAuth in Safari, refresh so "Needs sign-in" flips to Connected.
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .active { model.refreshConnectors() }
+            }
+            // Steal connector notices so they appear above this sheet, not under it.
+            .onChange(of: model.notice) { _, n in
+                guard let text = n?.text else { return }
+                let isConnector = text.hasPrefix("Connect ")
+                    || text.hasPrefix("Connectors:")
+                    || text.hasPrefix("Disconnect:")
+                guard isConnector else { return }
+                connectorError = text
+                model.notice = nil
+            }
+            .alert("Arbos", isPresented: Binding(
+                get: { connectorError != nil },
+                set: { if !$0 { connectorError = nil } }
+            )) {
+                Button("OK", role: .cancel) { connectorError = nil }
+            } message: {
+                Text(connectorError ?? "")
+            }
         }
         // Form headers/footers/LabeledContent/segmented pickers use system
         // label colours. Without this, Light appearance paints theme.card white
@@ -292,14 +317,15 @@ struct SettingsView: View {
         if let cn, cn.status == .connected {
             return cn.label.isEmpty ? ConnectorStatus.connected.label : cn.label
         }
-        if let cn, cn.status == .needsAuth {
-            return ConnectorStatus.needsAuth.label
+        // Prefer the real reason over a stuck "Needs sign-in" from a failed start.
+        if model.connectors.loaded, !p.oauthConfigured, !model.connectors.mock, p.hasOauth {
+            return "OAuth client not configured on the relay"
         }
         if let err = cn?.lastError, !err.isEmpty, cn?.status != .connected {
             return err
         }
-        if model.connectors.loaded, !p.oauthConfigured, !model.connectors.mock, p.hasOauth {
-            return "OAuth client not configured on the relay"
+        if let cn, cn.status == .needsAuth {
+            return ConnectorStatus.needsAuth.label
         }
         if let cn { return cn.status.label }
         return "Not connected"

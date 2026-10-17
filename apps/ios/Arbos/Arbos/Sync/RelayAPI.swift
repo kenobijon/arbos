@@ -740,7 +740,10 @@ final class RelayAPI {
                 provider: provider,
                 label: m["label"] as? String ?? provider,
                 connect: m["connect"] as? String ?? "oauth",
-                oauthConfigured: (m["oauth_configured"] as? NSNumber)?.boolValue ?? false
+                // Bool and NSNumber both show up from JSONSerialization.
+                oauthConfigured: (m["oauth_configured"] as? Bool)
+                    ?? (m["oauth_configured"] as? NSNumber)?.boolValue
+                    ?? false
             )
         }
         let items: [Connector] = ((list["items"] as? [Any]) ?? []).compactMap { raw in
