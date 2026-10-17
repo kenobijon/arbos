@@ -409,8 +409,20 @@ struct ChatView: View {
         }
         .onChange(of: model.caughtUp.contains(chatId), initial: true) { _, ready in
             if ready, !sentOnce, !DebugHooks.liveDemo, let text = DebugHooks.autoSend, DebugHooks.openChat == chatId {
-                draft = text
+                // Several messages separated by " ||| " go out a few seconds apart
+                // (multitasking checks: the composer never waits for a reply).
+                let parts = text.components(separatedBy: " ||| ").filter { !$0.isEmpty }
+                draft = parts.first ?? text
                 send()
+                if parts.count > 1 {
+                    Task {
+                        for p in parts.dropFirst() {
+                            try? await Task.sleep(nanoseconds: 3_000_000_000)
+                            draft = p
+                            send()
+                        }
+                    }
+                }
             }
         }
     }
