@@ -8,14 +8,16 @@ import SwiftUI
 import UIKit
 import os
 
+/// Theme choice (D81): System follows the device and is the default; the order
+/// is the Settings order (System first, then Light, then Dark).
 enum Appearance: String, CaseIterable, Identifiable {
-    case system, dark, light
+    case system, light, dark
     var id: String { rawValue }
     var label: String {
         switch self {
         case .system: return "System"
-        case .dark: return "Dark"
         case .light: return "Light"
+        case .dark: return "Dark"
         }
     }
 }
@@ -59,6 +61,9 @@ final class AppModel: ObservableObject {
     /// The hosted relay; self-hosters change it under Advanced.
     static let defaultRelayUrl = "https://relay.arbos.life"
 
+    /// D81: System is the default; the key is only written when the user picks a
+    /// theme in Settings, so an absent key means "never chose" → System, and an
+    /// explicit "dark" or "light" stays.
     @Published var appearanceSetting: String = UserDefaults.standard.string(forKey: "appearance") ?? Appearance.system.rawValue {
         didSet { UserDefaults.standard.set(appearanceSetting, forKey: "appearance") }
     }

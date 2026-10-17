@@ -12,10 +12,11 @@ struct CallPersonAvatar: View {
     let person: CallPerson
     var size: CGFloat
     @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
 
     var body: some View {
         if person.isAgent, let p = model.project(person.id) {
-            AgentAvatar(project: p, theme: Theme.dark, size: size, still: true)
+            AgentAvatar(project: p, theme: theme, size: size, still: true)
         } else {
             PersonAvatar(url: person.avatarUrl, handle: person.handle, size: size, name: person.name, id: person.id, colorIndex: person.avatarColorIndex)
         }

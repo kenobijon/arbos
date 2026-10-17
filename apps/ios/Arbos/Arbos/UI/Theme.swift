@@ -184,7 +184,8 @@ extension Color {
 }
 
 private struct ThemeKey: EnvironmentKey {
-    static let defaultValue = Theme.dark
+    /// Views shown without an injected theme fall back to Light, never Dark (D81).
+    static let defaultValue = Theme.light
 }
 
 extension EnvironmentValues {
