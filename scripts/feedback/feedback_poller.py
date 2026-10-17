@@ -1670,17 +1670,33 @@ class Loop:
             return
         hdrs = {"Authorization": f"Bearer {self.cfg.relay_admin_token}"}
         doc = http_json("GET", f"{self.cfg.relay_url}/admin/calls", headers=hdrs)
-        deployed = {"voice": (doc.get("voice") or {}).get("worker_sha"), "agentd": (doc.get("agentd") or {}).get("sha")}
+        voice_sha = (doc.get("voice") or {}).get("worker_sha")
+        agentd = doc.get("agentd") or {}
+        # Fleet: when every awake box runs the same agentd, fleet_min_sha speaks for all; otherwise
+        # the fix must be in every awake box's sha (a box left behind still runs the old code).
+        if agentd.get("all_same") and agentd.get("fleet_min_sha"):
+            agentd_shas = [agentd["fleet_min_sha"]]
+        else:
+            agentd_shas = sorted({b["sha"] for b in agentd.get("boxes") or [] if b.get("sha") and b.get("state", "awake") == "awake"}
+                                 or set(agentd.get("shas") or []))
+        targets = {"voice": [voice_sha] if voice_sha else [], "agentd": agentd_shas}
         for fid, st in pending:
-            sha = deployed.get(st["pending_deploy"])
-            if not sha or not st.get("commit"):
+            shas = targets.get(st["pending_deploy"]) or []
+            if not shas or not st.get("commit"):
                 continue
-            try:
-                cmp = self.gh.repo_api("GET", f"/compare/{st['commit']}...{sha}")
-            except HttpError:
-                continue
-            if cmp.get("status") in ("ahead", "identical"):
-                self.mark_deployed(fid, st, f"{st['pending_deploy']} now runs {sha[:8]}, which contains {st['commit'][:8]}")
+            contained = []
+            for sha in shas:
+                try:
+                    cmp = self.gh.repo_api("GET", f"/compare/{st['commit']}...{sha}")
+                except HttpError:
+                    contained = []
+                    break
+                contained.append(cmp.get("status") in ("ahead", "identical"))
+            if contained and all(contained):
+                where = ("the voice pod" if st["pending_deploy"] == "voice"
+                         else f"all {agentd.get('awake') or len(shas)} awake boxes (image {(agentd.get('boxes') or [{}])[0].get('image', '?')})")
+                self.mark_deployed(fid, st, f"{where} now run {shas[0][:8]}" + ("" if len(shas) == 1 else f" and {len(shas) - 1} other sha(s)")
+                                   + f", which contain {st['commit'][:8]}")
 
     def mark_deployed(self, fid: str, st: dict, note: str) -> None:
         kind = st.pop("pending_deploy", None)
