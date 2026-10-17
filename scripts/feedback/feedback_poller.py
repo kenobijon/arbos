@@ -527,7 +527,7 @@ class GitHub:
         return None
 
     def releases(self) -> list[dict]:
-        return self.repo_api("GET", "/releases?per_page=15")
+        return self.repo_api("GET", "/releases?per_page=60")
 
 
 # ---------------------------------------------------------------- Cursor
