@@ -168,6 +168,8 @@ struct Project: Identifiable, Equatable, Codable {
     var workspace: WorkspaceState = .unknown
     /// D72 step 3: a project someone else shared with me.
     var shared: Bool = false
+    /// Owner's user id (`gh_…`) when the relay sends `owner` / `owner_id`; used to open their profile.
+    var ownerId: String? = nil
     var ownerHandle: String? = nil
     /// Tree-character slug chosen by the owner (`avatar` on the relay); nil → hashed.
     var avatar: String? = nil

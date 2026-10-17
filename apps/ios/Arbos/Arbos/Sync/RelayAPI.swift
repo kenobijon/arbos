@@ -179,7 +179,11 @@ final class RelayAPI {
                 spendCapUsd: spendCap
             )
             project.shared = p["shared"] as? Bool ?? false
-            project.ownerHandle = p["owner_handle"] as? String
+            project.ownerId = (owner["id"] as? String)
+                ?? (owner["user_id"] as? String)
+                ?? (p["owner_id"] as? String)
+                ?? (p["owner"] as? String)
+            project.ownerHandle = (p["owner_handle"] as? String) ?? (owner["handle"] as? String)
             project.avatar = (p["avatar"] as? String).flatMap { $0.isEmpty ? nil : $0 }
             project.avatarColor = (p["avatar_color"] as? String).flatMap { $0.isEmpty ? nil : $0 }
             project.avatarColorIndex = (p["avatar_color_index"] as? NSNumber)?.intValue

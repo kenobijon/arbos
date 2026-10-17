@@ -1999,19 +1999,19 @@ final class AppModel: ObservableObject {
     /// A sender avatar was tapped: resolve the handle through the chat's members.
     /// Stable user id for a handle seen in a chat (members first, then the directory); nil when unknown.
     func personId(handle: String) -> String? {
-        if let me = user, me.login == handle { return me.id }
+        if let me = user, me.login.caseInsensitiveCompare(handle) == .orderedSame { return me.id }
         for c in peopleChats {
-            if let m = c.members.first(where: { $0.handle == handle && !$0.isAgent }) { return m.id }
+            if let m = c.members.first(where: { !$0.isAgent && $0.handle.caseInsensitiveCompare(handle) == .orderedSame }) { return m.id }
         }
-        return directory.first { $0.handle == handle }?.id
+        return directory.first { $0.handle.caseInsensitiveCompare(handle) == .orderedSame }?.id
     }
 
     func personName(handle: String) -> String? {
-        if let me = user, me.login == handle { return me.name }
+        if let me = user, me.login.caseInsensitiveCompare(handle) == .orderedSame { return me.name }
         for c in peopleChats {
-            if let m = c.members.first(where: { $0.handle == handle && !$0.isAgent }) { return m.name }
+            if let m = c.members.first(where: { !$0.isAgent && $0.handle.caseInsensitiveCompare(handle) == .orderedSame }) { return m.name }
         }
-        return directory.first { $0.handle == handle }?.name
+        return directory.first { $0.handle.caseInsensitiveCompare(handle) == .orderedSame }?.name
     }
 
     func openPersonProfile(handle: String, avatarUrl: String?, chatId: String) {
@@ -2060,11 +2060,21 @@ final class AppModel: ObservableObject {
     /// Projects of mine (or shared with me) that this person is a member of.
     func sharedProjects(with person: ProfilePerson) async -> [Project] {
         guard !isFixture else { return projects.filter { $0.shared } }
+        let id = personId(handle: person.handle) ?? person.id
+        let handle = person.handle
         var out: [Project] = []
-        for p in projects.prefix(24) {
-            if p.ownerHandle == person.handle { out.append(p); continue }
+        for p in projects {
+            if let oh = p.ownerHandle, oh.caseInsensitiveCompare(handle) == .orderedSame {
+                out.append(p); continue
+            }
+            if let oid = p.ownerId, oid == id || oid == person.id {
+                out.append(p); continue
+            }
             let members = await projectMembers(p.id)
-            if members.contains(where: { $0.id == person.id || $0.handle == person.handle }) { out.append(p) }
+            if members.contains(where: {
+                $0.id == id || $0.id == person.id
+                    || $0.handle.caseInsensitiveCompare(handle) == .orderedSame
+            }) { out.append(p) }
         }
         return out
     }

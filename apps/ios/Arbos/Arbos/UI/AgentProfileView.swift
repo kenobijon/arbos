@@ -400,7 +400,9 @@ struct AgentProfileView: View {
 
     private func ownerRow(_ p: Project) -> some View {
         let handle = p.ownerHandle ?? model.user?.login ?? ""
-        let person = ProfilePerson(id: p.ownerHandle == nil ? (model.user?.id ?? handle) : handle, handle: handle, name: p.ownerName ?? (p.ownerHandle == nil ? model.user?.name : nil),
+        // Prefer the relay's owner id; never use the handle as id (that broke "groups in common").
+        let ownerId = p.ownerId ?? model.personId(handle: handle) ?? handle
+        let person = ProfilePerson(id: p.ownerHandle == nil ? (model.user?.id ?? handle) : ownerId, handle: handle, name: p.ownerName ?? (p.ownerHandle == nil ? model.user?.name : nil),
                                    avatarUrl: p.ownerAvatarUrl ?? (p.ownerHandle == nil ? model.user?.avatarUrl : nil),
                                    lastSeenAt: p.ownerLastSeenAt, online: p.ownerOnline)
         let status = p.ownerHandle == nil ? ("you", false) : lastSeenLine(person.lastSeenAt, online: person.online)
