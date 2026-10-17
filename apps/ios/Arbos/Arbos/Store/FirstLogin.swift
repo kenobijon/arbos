@@ -267,25 +267,25 @@ extension AppModel {
             }
         }
 
-        let project = fl.projectId.flatMap { project($0) }
-        if let project, fl.chatId == nil, let chat = singleChat(of: project.id) {
+        let home: Project? = fl.projectId.flatMap { id in self.project(id) }
+        if let home, fl.chatId == nil, let chat = singleChat(of: home.id) {
             fl.chatId = chat.id
         }
         let machineAwake = machine.reported && machine.rawState == .awake
         if machineAwake, fl.awakeSince == nil { fl.awakeSince = now }
         if !machineAwake { fl.awakeSince = nil }
-        let workspaceRunning = project?.workspace == .active
+        let workspaceRunning = home?.workspace == .active
         // Boxes on an image older than the workspace report never say "running":
         // after 25 s awake with a synced chat, take the chat as the signal.
         let workspaceFallback = fl.awakeSince.map { now.timeIntervalSince($0) > 25 } ?? false
         let chatSynced = fl.chatId.map { caughtUp.contains($0) } ?? false
 
-        if chatSynced, let chatId = fl.chatId, let project, !fl.greetingWritten {
-            fl.greetingWritten = writeGreetingIfMissing(chatId: chatId, project: project)
+        if chatSynced, let chatId = fl.chatId, let home, !fl.greetingWritten {
+            fl.greetingWritten = writeGreetingIfMissing(chatId: chatId, project: home)
         }
 
         let target: FirstLogin.Stage
-        if !machineAwake || project == nil {
+        if !machineAwake || home == nil {
             target = .computer
         } else if !(workspaceRunning || (workspaceFallback && chatSynced)) {
             target = .agent
@@ -309,7 +309,7 @@ extension AppModel {
             }
         case .agent:
             let name = fl.agentName
-            if project?.workspace == .active {
+            if home?.workspace == .active {
                 fl.detail = "\(name) is online"
             } else if let image = machine.image, !image.isEmpty {
                 fl.detail = "Starting \(name)’s workspace · \(image)"
