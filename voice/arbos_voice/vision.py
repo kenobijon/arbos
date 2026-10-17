@@ -61,6 +61,7 @@ LOOK_PHRASES = (
     "look at this", "look at that", "look here", "can you see", "do you see", "what do you see",
     "what is this", "what's this", "what am i holding", "see this", "take a look", "have a look",
     "read this", "read the label", "what does this say", "describe this", "check this out",
+    "what's written", "what is written", "what does it say", "printed on", "written on",
 )
 
 SOURCES = {

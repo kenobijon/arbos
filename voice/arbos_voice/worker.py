@@ -847,13 +847,23 @@ class VoiceCall:
             label = label_of(speaker)
             lines = "\n".join(f"{w['from']}: {w['text']}" for w in self.state.window[-8:-1])
             user_input = (f"Recent lines on the call:\n{lines}\n\n" if lines else "") + f"{label} just said: {u.text}"
+            cam_on = bool(self.vision and any(c.identity == u.identity for c in self.vision.live_cameras()))
             if decision.action == "act":
                 instr = (
                     f"{label} asked for work that needs your tools. Say one very short line like 'On it' addressed to {label}, "
                     f"then call ask_agent with their request (as they asked it, including who asked). Keep it under ten words before the tool."
                 )
+                if cam_on:
+                    instr = (
+                        f"{label} asked something while their camera is on. If it is about what they are showing (an object, a label, "
+                        f"a screen, printed text), say a very short line like 'Let me look', then call look(what) and answer from the picture; "
+                        f"add hand_to_agent=true only when they want something done with it (search, save, compare, note). "
+                        f"Otherwise say 'On it' and call ask_agent with their request (as they asked it, including who asked)."
+                    )
             else:
                 instr = f"Answer {label} out loud in one or two short sentences. If the answer needs the computer, files or recent data, use ask_agent instead."
+                if cam_on:
+                    instr += f" {label}'s camera is on: if the question is about what they show, answer from their latest camera still, or call look(what) first for small print."
             self.state.pending_ttfa_from = u.ended_at
             self.session.generate_reply(user_input=user_input, instructions=instr)
 
