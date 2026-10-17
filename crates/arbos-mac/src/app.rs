@@ -4138,6 +4138,13 @@ impl AppState {
                 if active.notice.as_deref() == Some("Reconnecting…") {
                     active.notice = None;
                 }
+                // Screenshot rig (the iPhone's ARBOS_FAKE_VISION): pretend the camera is on
+                // and the agent reports seeing it, so the §11 badge can be shot without a
+                // voice worker. Env-gated only; never set in a normal launch.
+                if std::env::var("ARBOS_FAKE_VISION").as_deref() == Ok("1") {
+                    active.camera = true;
+                    active.agent_seeing = true;
+                }
             }
             CallEvent::Participant {
                 identity,
