@@ -1,0 +1,230 @@
+//! Per-agent call voice picker (Grok settings look): "Default" first, then
+//! every voice from `GET /voices` as a row with name + description, a play
+//! button that plays the cached sample, and a checkmark on the selected one.
+//! Saving is a click (`PATCH /projects/{id} {voice}`).
+
+use gpui::{div, prelude::*, px, Context, Div, ElementId, FontWeight, SharedString};
+
+use crate::model::{Project, Voice};
+use crate::ui::glass;
+use crate::ui::icons::icon;
+use crate::ui::shell::Shell;
+use crate::ui::theme::{Appearance, Theme, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
+use crate::ui::widgets::CardPalette;
+
+/// The sheet. `space` is the agent whose voice is being picked.
+pub fn sheet(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
+    let theme = Theme::of(cx).clone();
+    let palette = CardPalette::of(&theme);
+    let state = shell.state.read(cx);
+    let voices: Vec<Voice> = state.voices.clone();
+    let selected = space.voice.clone();
+    let pid = space.id.clone();
+    // White in light, near-black in dark (the question-card palette).
+    let list_bg = match theme.appearance {
+        Appearance::Light => palette.inner,
+        Appearance::Dark => palette.outer,
+    };
+
+    let done = glass::sheet_button("voice-done", "Done", &theme).on_click(cx.listener(
+        |this, _, window, cx| {
+            this.voice_picker_open = false;
+            this.state.update(cx, |s, cx| s.stop_voice_sample(cx));
+            crate::ui::composer::Composer::focus(&this.composer, window, cx);
+            cx.notify();
+        },
+    ));
+    let header = glass::sheet_header("Voice", None, Some(done), &theme);
+
+    let row_base = |id: ElementId, theme: &Theme| {
+        div()
+            .id(id)
+            .flex()
+            .items_center()
+            .gap(px(12.0))
+            .min_h(px(56.0))
+            .px(px(14.0))
+            .py(px(8.0))
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.surface_2))
+    };
+    let check = |on: bool, theme: &Theme| {
+        div()
+            .flex_shrink_0()
+            .size(px(22.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(on, |el| el.child(icon("check", 16.0, theme.accent)))
+    };
+
+    let mut list = div()
+        .flex()
+        .flex_col()
+        .rounded(px(14.0))
+        .overflow_hidden()
+        .bg(list_bg)
+        .border_1()
+        .border_color(palette.hairline);
+
+    // "Default" first: the voice the relay / voice worker uses when none is set.
+    {
+        let p = pid.clone();
+        list = list.child(
+            row_base(ElementId::Name("voice-default".into()), &theme)
+                .border_b_1()
+                .border_color(palette.hairline)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .child(
+                            div()
+                                .text_size(px(TEXT_BODY))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child("Default"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(TEXT_TINY))
+                                .text_color(theme.text_muted)
+                                .child("The current default voice for calls"),
+                        ),
+                )
+                .child(check(selected.is_none(), &theme))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.state
+                        .update(cx, |s, cx| s.set_voice(p.clone(), None, cx));
+                })),
+        );
+    }
+    if voices.is_empty() {
+        list = list.child(
+            div()
+                .px(px(14.0))
+                .py(px(14.0))
+                .text_size(px(TEXT_SMALL))
+                .text_color(theme.text_muted)
+                .child("Loading voices…"),
+        );
+    }
+    let n = voices.len();
+    for (i, v) in voices.into_iter().enumerate() {
+        let on = selected.as_deref() == Some(v.id.as_str());
+        let playing = state.voice_sample_playing(&v.sample_url);
+        let p = pid.clone();
+        let vid = v.id.clone();
+        let url = v.sample_url.clone();
+        let has_sample = !v.sample_url.is_empty();
+        let mut row = row_base(
+            ElementId::Name(SharedString::from(format!("voice-{}", v.id))),
+            &theme,
+        )
+        .when(i + 1 < n, |el| {
+            el.border_b_1().border_color(palette.hairline)
+        })
+        .child(
+            div()
+                .id(ElementId::Name(SharedString::from(format!(
+                    "voice-play-{}",
+                    v.id
+                ))))
+                .flex_shrink_0()
+                .size(px(34.0))
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(if playing {
+                    theme.text
+                } else {
+                    Theme::with_alpha(theme.text, 0.08)
+                })
+                .when(!has_sample, |el| el.opacity(0.35))
+                .hover(|s| s.opacity(0.85))
+                .child(icon(
+                    if playing { "stop" } else { "play" },
+                    13.0,
+                    if playing { theme.bg } else { theme.text },
+                ))
+                .when(has_sample, |el| {
+                    el.on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.state
+                                .update(cx, |s, cx| s.toggle_voice_sample(url.clone(), cx));
+                        }),
+                    )
+                }),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .text_size(px(TEXT_BODY))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .truncate()
+                        .child(v.name.clone()),
+                )
+                .when_some(
+                    v.description.clone().filter(|d| !d.trim().is_empty()),
+                    |el, d| {
+                        el.child(
+                            div()
+                                .text_size(px(TEXT_TINY))
+                                .text_color(theme.text_muted)
+                                .child(d),
+                        )
+                    },
+                ),
+        )
+        .child(check(on, &theme));
+        row = row.on_click(cx.listener(move |this, _, _, cx| {
+            this.state
+                .update(cx, |s, cx| s.set_voice(p.clone(), Some(vid.clone()), cx));
+        }));
+        list = list.child(row);
+    }
+
+    let body = div()
+        .flex()
+        .flex_col()
+        .gap(px(10.0))
+        .px(px(16.0))
+        .pb(px(18.0))
+        .child(
+            div()
+                .px(px(4.0))
+                .text_size(px(TEXT_SMALL))
+                .text_color(theme.text_muted)
+                .child(format!(
+                    "How {} sounds on calls. Press play to hear a sample.",
+                    space.name
+                )),
+        )
+        .child(list);
+    glass::sheet(440.0, &theme, header, body.max_h(px(620.0)))
+}
+
+/// The label for the "…" menu row and the profile's info row.
+pub fn current_label(space: &Project, voices: &[Voice]) -> String {
+    match space.voice.as_deref() {
+        None => "Default".into(),
+        Some(id) => voices
+            .iter()
+            .find(|v| v.id == id)
+            .map(|v| v.name.clone())
+            .unwrap_or_else(|| id.to_string()),
+    }
+}

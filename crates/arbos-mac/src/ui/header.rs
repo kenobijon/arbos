@@ -27,6 +27,7 @@ use crate::ui::theme::{
     Theme, AVATAR_HEADER, CONTROL, HEADER_HEIGHT, RIGHT_PANEL_WIDTH, TEXT_BODY, TEXT_SMALL,
     TEXT_TINY,
 };
+use crate::ui::voicepicker;
 
 pub fn render(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
     let theme = Theme::of(cx).clone();
@@ -860,6 +861,24 @@ pub fn menu(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
                             c.open_picker = Some(Picker::Effort);
                             cx.notify();
                         });
+                    })),
+                )
+                .child(
+                    glass::menu_row(
+                        "menu-voice",
+                        "mic",
+                        format!(
+                            "Voice · {}",
+                            voicepicker::current_label(space, &state.voices)
+                        ),
+                        false,
+                        &theme,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.menu_open = false;
+                        this.voice_picker_open = true;
+                        this.state.update(cx, |s, _| s.fetch_voices());
+                        cx.notify();
                     })),
                 )
                 .child(glass::menu_divider(&theme))

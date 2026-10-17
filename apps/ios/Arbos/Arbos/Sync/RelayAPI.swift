@@ -239,12 +239,26 @@ final class RelayAPI {
         _ = try await request("DELETE", "/projects/\(projectId)/chats/\(chatId)")
     }
 
-    func createProject(name: String, avatar: String? = nil, avatarColor: String? = nil, color: String? = nil) async throws {
+    func createProject(
+        name: String,
+        avatar: String? = nil,
+        avatarColor: String? = nil,
+        color: String? = nil,
+        description: String? = nil,
+        instructions: String? = nil
+    ) async throws {
         var body: [String: Any] = ["name": name]
         if let avatar { body["avatar"] = avatar }
         if let avatarColor { body["avatar_color"] = avatarColor }
         if let color { body["color"] = color }
+        if let description, !description.isEmpty { body["description"] = String(description.prefix(500)) }
+        if let instructions, !instructions.isEmpty { body["instructions"] = instructions }
         _ = try await json("POST", "/projects", body: body)
+    }
+
+    /// Soft-delete an owned agent (`DELETE /projects/{id}`).
+    func deleteProject(_ projectId: Id) async throws {
+        _ = try await request("DELETE", "/projects/\(projectId)")
     }
 
     func setModel(projectId: Id, model: String, effort: Effort) async throws {

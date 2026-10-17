@@ -17,7 +17,7 @@ use tokio::time::sleep;
 
 use crate::model::{
     AgentMember, Call, CallEnded, CallKind, Machine, MachineState, Person, ProjectDocView,
-    ReplyPolicy, Sender, SpaceKind, ThreadInfo,
+    ReplyPolicy, Sender, SpaceKind, ThreadInfo, Voice,
 };
 
 use super::doc::ChatDoc;
@@ -572,6 +572,28 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             emit_chats(shared);
         }
         ClientCommand::MarkRead { chat_id } => mark_read(shared, &chat_id),
+        ClientCommand::FetchVoices => {
+            let _ = shared.events.send(SyncEvent::Voices(fixture_voices()));
+        }
+        ClientCommand::FetchVoiceSample { url } => {
+            // The demo has no samples to fetch; a short synthesised tone stands in.
+            let dir = crate::sync::credentials::voice_sample_cache_dir();
+            let _ = std::fs::create_dir_all(&dir);
+            let path = dir.join("fixture-sample.wav");
+            if !path.is_file() {
+                let _ = std::fs::write(&path, fixture_sample_wav());
+            }
+            let _ = shared.events.send(SyncEvent::VoiceSample { url, path });
+        }
+        ClientCommand::SetVoice { project_id, voice } => {
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
+                    p.voice = voice;
+                }
+            }
+            emit_projects(shared);
+        }
         ClientCommand::SetModel {
             project_id,
             model,
@@ -685,6 +707,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 machine_info: None,
                 muted: false,
                 primary_chat: None,
+                voice: None,
             });
             let chat_id = new_id();
             shared.chats.lock().unwrap().push(Chat {
@@ -2969,6 +2992,7 @@ fn seed_projects() -> Vec<Project> {
             machine_info: None,
             muted: false,
             primary_chat: None,
+            voice: None,
         },
         Project {
             id: PROJECT_COMMS.into(),
@@ -2995,6 +3019,7 @@ fn seed_projects() -> Vec<Project> {
             machine_info: None,
             muted: false,
             primary_chat: None,
+            voice: None,
         },
         Project {
             id: PROJECT_ARBOS.into(),
@@ -3021,6 +3046,7 @@ fn seed_projects() -> Vec<Project> {
             machine_info: None,
             muted: false,
             primary_chat: None,
+            voice: None,
         },
     ]
 }
@@ -3084,6 +3110,58 @@ fn seed_skills() -> Vec<Skill> {
             6,
         ),
     ]
+}
+
+/// The demo's call voices (`GET /voices` shape).
+fn fixture_voices() -> Vec<Voice> {
+    let v = |id: &str, name: &str, description: &str| Voice {
+        id: id.into(),
+        name: name.into(),
+        description: Some(description.into()),
+        sample_url: format!("fixture://voices/{id}.wav"),
+    };
+    vec![
+        v(
+            "ara",
+            "Ara",
+            "Warm and clear, a touch of gravel. The current default.",
+        ),
+        v("rex", "Rex", "Low, steady, unhurried."),
+        v("sol", "Sol", "Bright and quick; good for short answers."),
+        v("ivy", "Ivy", "Soft, close to the mic."),
+        v("ode", "Ode", "Even and neutral, reads long text well."),
+    ]
+}
+
+/// A 0.6 s two-note wav (48 kHz mono, 16-bit) so Play has something to play.
+fn fixture_sample_wav() -> Vec<u8> {
+    let sr = 48_000u32;
+    let n = (sr as f32 * 0.6) as usize;
+    let mut pcm: Vec<i16> = Vec::with_capacity(n);
+    for i in 0..n {
+        let t = i as f32 / sr as f32;
+        let f = if t < 0.3 { 440.0 } else { 554.37 };
+        let env = (1.0 - (t % 0.3) / 0.3).max(0.0);
+        pcm.push(((t * f * std::f32::consts::TAU).sin() * 0.3 * env * i16::MAX as f32) as i16);
+    }
+    let data_len = (pcm.len() * 2) as u32;
+    let mut out = Vec::with_capacity(44 + data_len as usize);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data_len).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&sr.to_le_bytes());
+    out.extend_from_slice(&(sr * 2).to_le_bytes());
+    out.extend_from_slice(&2u16.to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_len.to_le_bytes());
+    for s in pcm {
+        out.extend_from_slice(&s.to_le_bytes());
+    }
+    out
 }
 
 fn seed_chats() -> Vec<Chat> {
@@ -3919,6 +3997,7 @@ fn people_space(id: &str, other: Person, agents: Vec<AgentMember>) -> Project {
         machine_info: None,
         muted: false,
         primary_chat: None,
+        voice: None,
     }
 }
 
@@ -3952,6 +4031,7 @@ fn seed_people_projects() -> Vec<Project> {
             machine_info: None,
             muted: false,
             primary_chat: None,
+            voice: None,
         },
     ]
 }

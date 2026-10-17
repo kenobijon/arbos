@@ -20,6 +20,7 @@ use arbos_core::{wire, PROTO_VERSION};
 use futures::future::BoxFuture;
 use futures::{SinkExt, StreamExt};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{interval, sleep, timeout, Instant};
@@ -36,7 +37,7 @@ use crate::model::{
     Chat, ChatKind, Connector, ConnectorProvider, ConnectorsView, Effort, Id, Link, LocalDevice,
     LocalView, Machine, MachineState, Message, MessageStatus, Part, Person, Project,
     ProjectDocView, Reachable, ReplyPolicy, Role, Routine, RoutineRun, Sender, Skill, SpaceKind,
-    ThreadInfo, VaultItem, VaultRequest, VaultView,
+    ThreadInfo, VaultItem, VaultRequest, VaultView, Voice,
 };
 use crate::update;
 
@@ -1179,6 +1180,7 @@ fn people_space_from(shared: &Shared, v: &Value) -> Option<(Project, Chat)> {
             .and_then(Value::as_bool)
             .unwrap_or(false),
         primary_chat: None,
+        voice: None,
     };
     let previous_unread = shared
         .chats
@@ -1320,6 +1322,30 @@ async fn fetch_avatar(shared: Arc<Shared>, url: String) {
             url,
             bytes: Arc::new(bytes.to_vec()),
         });
+    }
+}
+
+/// `GET /voices` → `SyncEvent::Voices` (a relay without it just leaves the list empty).
+async fn fetch_voices(shared: &Arc<Shared>) {
+    match shared.get_json("/voices").await {
+        Ok(v) => {
+            let list = v.get("voices").cloned().unwrap_or(v);
+            let voices: Vec<Voice> = list
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| serde_json::from_value::<Voice>(x.clone()).ok())
+                        .filter(|x| !x.id.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let _ = shared.events.send(SyncEvent::Voices(voices));
+        }
+        Err(err) => {
+            if !err.to_string().contains("HTTP 404") {
+                shared.notice(format!("Voices: {}", people_error(&err)));
+            }
+        }
     }
 }
 
@@ -1618,6 +1644,12 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
                         .and_then(Value::as_str)
                         .filter(|c| !c.is_empty())
                 })
+                .map(str::to_string),
+            voice: p
+                .get("voice")
+                .or_else(|| item.get("voice"))
+                .and_then(Value::as_str)
+                .filter(|v| !v.is_empty())
                 .map(str::to_string),
         });
         let chats: Vec<Chat> = detail
@@ -3923,6 +3955,77 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .await
                 {
                     shared.notice(format!("Mute: {err:#}"));
+                }
+            });
+        }
+        ClientCommand::FetchVoices => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                fetch_voices(&shared).await;
+            });
+        }
+        ClientCommand::FetchVoiceSample { url } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let dir = credentials::voice_sample_cache_dir();
+                let _ = tokio::fs::create_dir_all(&dir).await;
+                let ext = url
+                    .rsplit('/')
+                    .next()
+                    .and_then(|n| n.rsplit_once('.'))
+                    .map(|(_, e)| e.split('?').next().unwrap_or("").to_string())
+                    .filter(|e| !e.is_empty() && e.len() <= 5)
+                    .unwrap_or_else(|| "mp3".into());
+                let mut h = Sha256::new();
+                h.update(url.as_bytes());
+                let path = dir.join(format!("{:x}.{ext}", h.finalize()));
+                if !path.is_file() {
+                    let resp = shared.http.get(&url).send().await;
+                    match resp {
+                        Ok(r) if r.status().is_success() => match r.bytes().await {
+                            Ok(bytes) => {
+                                if let Err(err) = tokio::fs::write(&path, &bytes).await {
+                                    shared.notice(format!("Voice sample: {err}"));
+                                    return;
+                                }
+                            }
+                            Err(err) => {
+                                shared.notice(format!("Voice sample: {err}"));
+                                return;
+                            }
+                        },
+                        Ok(r) => {
+                            shared.notice(format!("Voice sample: HTTP {}", r.status()));
+                            return;
+                        }
+                        Err(err) => {
+                            shared.notice(format!("Voice sample: {err}"));
+                            return;
+                        }
+                    }
+                }
+                let _ = shared.events.send(SyncEvent::VoiceSample { url, path });
+            });
+        }
+        ClientCommand::SetVoice { project_id, voice } => {
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
+                    p.voice = voice.clone();
+                }
+                let snapshot = projects.clone();
+                drop(projects);
+                let _ = shared.events.send(SyncEvent::Projects(snapshot));
+            }
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let body = json!({ "voice": voice });
+                match shared
+                    .patch_json(&format!("/projects/{project_id}"), body)
+                    .await
+                {
+                    Ok(_) => {}
+                    Err(err) => shared.notice(format!("Voice not saved: {}", people_error(&err))),
                 }
             });
         }

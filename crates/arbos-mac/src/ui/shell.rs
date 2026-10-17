@@ -40,6 +40,7 @@ use crate::ui::theme::{
 use crate::ui::transcript::{Transcript, COLUMN_MAX_WIDTH};
 use crate::ui::vault::{VaultEvent, VaultPanel};
 use crate::ui::voice::Voice;
+use crate::ui::voicepicker;
 
 actions!(
     shell,
@@ -80,6 +81,8 @@ pub struct Shell {
     pub members_open: bool,
     /// The agent's "Archived" chats list (header strip / "…" menu).
     pub(crate) archived_open: bool,
+    /// Per-agent call voice picker sheet ("…" menu → Voice, profile → voice).
+    pub(crate) voice_picker_open: bool,
     /// Video picture-in-picture while the call screen is collapsed: offset
     /// from the window's bottom-right (right, bottom), and the drag in flight
     /// (mouse start, offset start, moved past the click threshold).
@@ -274,6 +277,7 @@ impl Shell {
             settings_open: false,
             group_picker_open: false,
             archived_open: false,
+            voice_picker_open: false,
             pip_offset: (24.0, 96.0),
             pip_drag: None,
             routines,
@@ -2350,6 +2354,11 @@ impl Render for Shell {
         }
         if self.settings_open {
             root = root.child(self.render_settings(cx));
+        }
+        if self.voice_picker_open {
+            if let Some(space) = selected.as_ref().filter(|s| !s.is_people()) {
+                root = root.child(voicepicker::sheet(self, space, cx));
+            }
         }
         if new_chat_open {
             root = root.child(people::new_chat_sheet(

@@ -29,8 +29,10 @@ struct CallScreen: View {
     /// Who we expected to talk to (shown before they join). Groups pass every other member + agents.
     var expected: [CallPerson] = []
 
-    private var isVideo: Bool { calls.call?.kind == .video }
-    private var title: String { isVideo ? "Video call" : "Voice call" }
+    /// Legacy `kind` still arrives from the API; the UI no longer treats voice and
+    /// video as separate call types — every call starts audio-only and the camera
+    /// can be turned on from the controls.
+    private var title: String { "Call" }
     private var primary: CallTile? { calls.tiles.first }
     private var primaryPerson: CallPerson? {
         primary?.person ?? expected.first ?? calls.call?.participants.first { $0.id != model.user?.id } ?? calls.call?.startedBy
@@ -147,7 +149,7 @@ struct CallScreen: View {
                                 } else {
                                     GlassCircle(size: 108) { Image(systemName: "person.fill").font(.system(size: 40)).foregroundStyle(theme.muted) }
                                 }
-                                Image(systemName: isVideo ? (primary?.cameraOn == true ? "video.fill" : "video.slash.fill") : "waveform")
+                                Image(systemName: primary?.cameraOn == true ? "video.fill" : "waveform")
                                     .font(.system(size: 22, weight: .semibold))
                                     .foregroundStyle(theme.muted)
                             }
@@ -236,13 +238,11 @@ struct CallScreen: View {
             control(icon: calls.muted ? "mic.slash.fill" : "mic.fill", label: calls.muted ? "Unmute" : "Mute", on: calls.muted) {
                 Task { await calls.toggleMute() }
             }
-            if isVideo {
-                control(icon: calls.cameraOn ? "video.fill" : "video.slash.fill", label: calls.cameraOn ? "Camera off" : "Camera on", on: !calls.cameraOn) {
-                    Task { await calls.toggleCamera() }
-                }
+            control(icon: calls.cameraOn ? "video.fill" : "video.slash.fill", label: calls.cameraOn ? "Camera off" : "Camera on", on: !calls.cameraOn) {
+                Task { await calls.toggleCamera() }
+            }
+            if calls.cameraOn {
                 control(icon: "arrow.triangle.2.circlepath.camera", label: "Flip", on: false) { Task { await calls.flipCamera() } }
-                    .disabled(!calls.cameraOn)
-                    .opacity(calls.cameraOn ? 1 : 0.4)
             } else {
                 control(icon: calls.speakerOn ? "speaker.wave.3.fill" : "speaker.fill", label: "Speaker", on: calls.speakerOn) { calls.toggleSpeaker() }
             }
@@ -295,7 +295,7 @@ struct IncomingCallView: View {
             theme.bg.ignoresSafeArea()
             if let inc = calls.incoming {
                 VStack(spacing: 0) {
-                    Text(inc.call.kind == .video ? "Incoming video call" : "Incoming voice call")
+                    Text("Incoming call")
                         .font(.system(size: Theme.small, weight: .semibold)).foregroundStyle(theme.muted)
                         .padding(.top, 14)
                     Spacer()
@@ -318,7 +318,7 @@ struct IncomingCallView: View {
                         VStack(spacing: 8) {
                             Button { calls.acceptFromUI() } label: {
                                 Circle().fill(theme.online).frame(width: 72, height: 72)
-                                    .overlay(Image(systemName: inc.call.kind == .video ? "video.fill" : "phone.fill").font(.system(size: 26, weight: .semibold)).foregroundStyle(.white))
+                                    .overlay(Image(systemName: "phone.fill").font(.system(size: 26, weight: .semibold)).foregroundStyle(.white))
                             }
                             .buttonStyle(.plain)
                             Text("Accept").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
@@ -341,7 +341,7 @@ struct CallBar: View {
     var body: some View {
         Button(action: onJoin) {
             HStack(spacing: 10) {
-                Image(systemName: call.kind == .video ? "video.fill" : "phone.fill").font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.online)
+                Image(systemName: "phone.fill").font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.online)
                 Text(calls.call?.callId == call.callId ? "On this call" : "On a call")
                     .font(.system(size: Theme.small, weight: .semibold)).foregroundStyle(theme.text)
                 if !call.participants.isEmpty {

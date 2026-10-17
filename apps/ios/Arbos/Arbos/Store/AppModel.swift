@@ -2571,4 +2571,78 @@ final class AppModel: ObservableObject {
             }
         }
     }
+
+    /// Grok Bot "Duplicate": a new top-level agent with the same profile, look,
+    /// model, and instructions — not the chat history. Own agents only.
+    func duplicateProject(_ project: Project) {
+        guard !project.shared else { return }
+        let name = uniqueCopyName(of: project.name)
+        let avatar = avatarSlug(for: project)
+        let colorName = project.avatarColor ?? avatarColorOverrides[project.id]
+        let modelId = project.model
+        let effort = project.effort
+        Task {
+            do {
+                // Do not pass `models` on create: a partial map would drop the
+                // relay's default subagent/decision slots. Set the talking
+                // model after the copy exists.
+                try await api.createProject(
+                    name: name,
+                    avatar: avatar,
+                    avatarColor: colorName,
+                    color: project.color,
+                    description: project.description,
+                    instructions: project.instructions
+                )
+                await refreshRegistry()
+                if let copy = projects.first(where: { $0.name == name && !$0.shared }) {
+                    if copy.model != modelId || copy.effort != effort {
+                        setModel(projectId: copy.id, model: modelId, effort: effort)
+                    }
+                    open(project: copy)
+                }
+            } catch {
+                notice = Notice(text: "Duplicate failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Soft-delete an owned agent from every list (`DELETE /projects/{id}`).
+    func deleteProject(_ projectId: Id) {
+        guard let p = project(projectId), !p.shared else { return }
+        if path.contains(where: {
+            if case .chat(_, let pid) = $0 { return pid == projectId }
+            return false
+        }) {
+            path.removeAll()
+        }
+        projects.removeAll { $0.id == projectId }
+        chats[projectId] = nil
+        if archivedProjectIds.contains(projectId) {
+            archivedProjectIds.remove(projectId)
+            UserDefaults.standard.set(Array(archivedProjectIds), forKey: "archivedProjects")
+        }
+        unpinHome(projectId: projectId)
+        Task {
+            do {
+                try await api.deleteProject(projectId)
+                await refreshRegistry()
+            } catch {
+                notice = Notice(text: "Delete failed: \(error.localizedDescription)")
+                await refreshRegistry()
+            }
+        }
+    }
+
+    /// "`Name` copy", then "`Name` copy 2"… so the relay's unique-name check passes.
+    private func uniqueCopyName(of name: String) -> String {
+        let owned = Set(projects.filter { !$0.shared }.map(\.name))
+        let base = "\(name) copy"
+        if !owned.contains(base) { return base }
+        for i in 2...99 {
+            let candidate = "\(name) copy \(i)"
+            if !owned.contains(candidate) { return candidate }
+        }
+        return "\(name) copy \(String(UUID().uuidString.prefix(4)))"
+    }
 }

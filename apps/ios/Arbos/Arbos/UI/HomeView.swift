@@ -16,6 +16,10 @@ struct HomeView: View {
     /// "Offline · saved chats": the list came from the on-device store and the
     /// relay has not answered for a few seconds (#929).
     @State private var offlineHint = false
+    /// Own-agent Share sheet from the home long-press menu.
+    @State private var shareProject: Project? = nil
+    /// Own-agent delete confirmation from the home long-press menu.
+    @State private var deleteProject: Project? = nil
     @FocusState private var searchFocused: Bool
 
     private var projects: [Project] {
@@ -81,6 +85,9 @@ struct HomeView: View {
                                 }
                                 .buttonStyle(.plain)
                                 .contextMenu {
+                                    // Grok Bot home actions for an agent: Pin, Duplicate
+                                    // (fork as a new top-level agent), Archive, Share,
+                                    // Profile, Delete. Groups/people keep a smaller menu.
                                     Button {
                                         withAnimation {
                                             if pinned { model.unpinHome(projectId: project.id) }
@@ -89,7 +96,29 @@ struct HomeView: View {
                                     } label: {
                                         Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
                                     }
-                                    Button { model.showProfile(.agent(projectId: project.id)) } label: { Label("Profile", systemImage: "person.crop.circle") }
+                                    if !project.shared {
+                                        Button { model.duplicateProject(project) } label: {
+                                            Label("Duplicate", systemImage: "plus.square.on.square")
+                                        }
+                                    }
+                                    Button {
+                                        withAnimation { model.archive(project.id) }
+                                    } label: {
+                                        Label("Archive", systemImage: "archivebox")
+                                    }
+                                    if !project.shared {
+                                        Button { shareProject = project } label: {
+                                            Label("Share", systemImage: "person.2")
+                                        }
+                                    }
+                                    Button { model.showProfile(.agent(projectId: project.id)) } label: {
+                                        Label("Profile", systemImage: "person.crop.circle")
+                                    }
+                                    if !project.shared {
+                                        Button(role: .destructive) { deleteProject = project } label: {
+                                            Label("Delete", systemImage: "trash")
+                                        }
+                                    }
                                 }
                                 .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
                                 .listRowSeparator(.hidden)
@@ -198,6 +227,25 @@ struct HomeView: View {
             }
             .sheet(isPresented: $showNewChat) {
                 NewChatSheet().environmentObject(model).environment(\.theme, theme)
+            }
+            .sheet(item: $shareProject) { project in
+                ProjectMembersSheet(project: project).environmentObject(model).environment(\.theme, theme)
+            }
+            .confirmationDialog(
+                "Delete \(deleteProject?.name ?? "this agent")?",
+                isPresented: Binding(
+                    get: { deleteProject != nil },
+                    set: { if !$0 { deleteProject = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("Delete", role: .destructive) {
+                    if let p = deleteProject { model.deleteProject(p.id) }
+                    deleteProject = nil
+                }
+                Button("Cancel", role: .cancel) { deleteProject = nil }
+            } message: {
+                Text("Removes this agent and its chats from your list. Hide it with Archive if you may need it later.")
             }
         }
         .task {

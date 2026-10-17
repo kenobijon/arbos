@@ -309,8 +309,8 @@ struct AgentProfileView: View {
                             AgentAvatar(project: project, theme: theme, size: 112, working: model.isStreaming(project: project.id))
                         }
                         ProfileActionRow(actions: [
+                            // Calls start audio-only; camera is toggled on the call screen.
                             ProfileAction(icon: "phone.fill", label: "call") { call(project, .voice) },
-                            ProfileAction(icon: "video.fill", label: "video") { call(project, .video) },
                             ProfileAction(icon: muted ? "bell.slash.fill" : "bell.fill", label: muted ? "unmute" : "mute") { muted.toggle() },
                             ProfileAction(icon: "magnifyingglass", label: "search") { search(project) },
                             ProfileAction(icon: "ellipsis", label: "more") { showEdit = true },
