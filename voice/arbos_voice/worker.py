@@ -11,7 +11,9 @@ metadata. The job joins as `a_<project_id>`, speaks with OpenAI `gpt-realtime-2.
   and answer with audio. The agent waits for 700 ms of room silence before speaking and is cut
   at once when anyone starts talking.
 
-Tools: one, `ask_agent(request)`, forwarded through the relay to agentd on the owner's machine.
+Tools: `ask_agent(request)`, forwarded through the relay to agentd on the owner's machine, and
+`look(what, hand_to_agent)`, a full-resolution camera still (vision.py). While a human's camera is
+on the model also gets a small still about once a second (owner toggle `vision_enabled`).
 Costs, time to first audio and barge-in cut time are measured here and reported to the relay
 every 30 s and at the end; the relay's answer carries the cost stops.
 """
@@ -19,6 +21,7 @@ every 30 s and at the end; the relay's answer carries the cost stops.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -65,8 +68,9 @@ from .config import CONFIG, Config
 from .judge import CHATTINESS_THRESHOLD, Decision, Judge, JudgeContext, forced_decision
 from .listener import GroupListeners, Utterance
 from .meter import CallMeter
-from .prompts import ASK_AGENT_DESCRIPTION, system_prompt
+from .prompts import ASK_AGENT_DESCRIPTION, LOOK_DESCRIPTION, system_prompt
 from .relay import EventBatcher, Relay, RelayError, ToolPending
+from .vision import Vision, wants_a_look
 
 log = logging.getLogger("arbos-voice")
 
@@ -193,6 +197,7 @@ class CallState:
     pending_ttfa_from: float | None = None
     # Group mode.
     last_asker: dict | None = None
+    last_asker_identity: str | None = None
     last_reply_ended_at: float | None = None
     last_trigger_at: float = field(default_factory=time.monotonic)
     last_human_speech_at: float = field(default_factory=time.monotonic)
@@ -210,7 +215,7 @@ class CallState:
 
 class ArbosVoiceAgent(Agent):
     def __init__(self, call: VoiceCall, instructions: str):
-        super().__init__(instructions=instructions, tools=[call.make_tool()])
+        super().__init__(instructions=instructions, tools=call.make_tools())
         self.call = call
 
 
@@ -227,6 +232,8 @@ class VoiceCall:
         self.chattiness: str = meta.get("chattiness") or "balanced"
         self.wake_name: str | None = meta.get("wake_name")
         self.voice: str = meta.get("voice") or cfg.voice
+        self.vision_enabled: bool = meta.get("vision_enabled", True) is not False
+        self.vision: Vision | None = None
         self.relay = Relay(cfg, http)
         self.events = EventBatcher(self.relay, self.call_id, self.project_id)
         self.meter = CallMeter(model=cfg.model, stt_model=cfg.stt_model)
@@ -294,7 +301,8 @@ class VoiceCall:
 
     async def run(self) -> None:
         ctx = self.ctx
-        await ctx.connect(auto_subscribe=AutoSubscribe.SUBSCRIBE_ALL)
+        # Audio for everyone; video only when vision is on (vision.py subscribes per track).
+        await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
         log.info("joined room %s as %s for call %s (project %s)", ctx.room.name, ctx.room.local_participant.identity, self.call_id, self.project_id)
         try:
             self.info = await self.relay.call_info(self.call_id, self.project_id)
@@ -312,6 +320,8 @@ class VoiceCall:
         self.wake_name = settings.get("wake_name") or self.wake_name
         # The owner's pick for this agent (GET /voices); read at join, used for this call.
         self.voice = settings.get("voice") or self.meta.get("voice") or self.cfg.voice
+        if "vision_enabled" in settings:
+            self.vision_enabled = settings.get("vision_enabled") is not False
         self.events.start()
         self.event("joined", mode=self.state.mode, version=__version__, sha=WORKER_SHA)
 
@@ -363,9 +373,11 @@ class VoiceCall:
         if self.state.mode == "group":
             await self.start_group_listening()
         self.hook_realtime()
-        log.info("session started in %s mode (humans=%d, chattiness=%s, voice=%s, turn_detection=%s)", self.state.mode, len(self.humans()), self.chattiness, self.voice, self.cfg.turn_detection)
+        self.start_vision()
+        log.info("session started in %s mode (humans=%d, chattiness=%s, voice=%s, turn_detection=%s, vision=%s)", self.state.mode, len(self.humans()), self.chattiness, self.voice, self.cfg.turn_detection, "on" if self.vision_enabled else "off")
         self.spawn(self.usage_loop())
         self.spawn(self.idle_loop())
+        self.spawn(self.settings_loop())
         await self.greet()
         await self._done.wait()
 
@@ -393,6 +405,11 @@ class VoiceCall:
                 "\n\n# Tools on this call\nYour computer is not linked to this call yet, so ask_agent will fail. "
                 f"When someone asks you to do or look up something, say \"{NO_LINK_LINE}\" and that you can do it in the text chat. "
                 "Answer everything else from what you know."
+            )
+        if not self.vision_enabled:
+            extra += (
+                "\n\n# Eyes on this call\nThe owner turned camera vision off for you: you get no camera stills and look() "
+                "returns nothing. If someone asks you to look at something, say vision is off for this agent."
             )
         return system_prompt(
             name=self.agent_name,
@@ -459,12 +476,15 @@ class VoiceCall:
         self.event("left", reason=reason)
         if self.listeners:
             await self.listeners.stop()
+        if self.vision:
+            self.sync_vision_meter()
+            await self.vision.stop()
         try:
             await self.relay.usage(self.call_id, self.project_id, self.meter.usage(ended=True))
         except Exception as e:
             log.warning("final usage post failed: %s", e)
         await self.events.close()
-        log.info("call %s summary: %s", self.call_id, json.dumps(self.meter.summary()))
+        log.info("call %s summary: %s", self.call_id, json.dumps({**self.meter.summary(), "vision": self.vision.summary() if self.vision else None}))
         if self.session:
             try:
                 await asyncio.wait_for(self.session.aclose(), timeout=5.0)
@@ -538,6 +558,9 @@ class VoiceCall:
             speaker = speaker_of(self.participant(identity), identity)
             self.transcript(speaker, text)
             self.state.last_asker = speaker
+            self.state.last_asker_identity = identity
+            if self.vision and wants_a_look(text):
+                self.vision.trigger(identity)
             self.state.window.append({"from": label_of(speaker), "text": text})
             self.state.window = self.state.window[-12:]
             fd = forced_decision(text, self.judge_ctx())
@@ -623,8 +646,37 @@ class VoiceCall:
 
         @room.on("track_subscribed")
         def _track(track: rtc.Track, pub: rtc.RemoteTrackPublication, p: rtc.RemoteParticipant) -> None:
+            if pub.kind == rtc.TrackKind.KIND_VIDEO:
+                if self.vision:
+                    self.vision.attach(track, pub, p)
+                return
             if self.listeners and self.state.mode == "group":
                 self.listeners.attach(p, track)
+
+        @room.on("track_published")
+        def _published(pub: rtc.RemoteTrackPublication, p: rtc.RemoteParticipant) -> None:
+            if self.vision:
+                self.vision.consider(pub, p)
+
+        @room.on("track_unsubscribed")
+        def _unsubscribed(track: rtc.Track, pub: rtc.RemoteTrackPublication, p: rtc.RemoteParticipant) -> None:
+            if self.vision and pub.kind == rtc.TrackKind.KIND_VIDEO:
+                self.spawn(self.vision.detach(pub.sid))
+
+        @room.on("track_unpublished")
+        def _unpublished(pub: rtc.RemoteTrackPublication, p: rtc.RemoteParticipant) -> None:
+            if self.vision and pub.kind == rtc.TrackKind.KIND_VIDEO:
+                self.spawn(self.vision.detach(pub.sid))
+
+        @room.on("track_muted")
+        def _muted(p: rtc.Participant, pub: rtc.TrackPublication) -> None:
+            if self.vision and pub.kind == rtc.TrackKind.KIND_VIDEO and isinstance(p, rtc.RemoteParticipant):
+                self.vision.muted(pub, p)
+
+        @room.on("track_unmuted")
+        def _unmuted(p: rtc.Participant, pub: rtc.TrackPublication) -> None:
+            if self.vision and pub.kind == rtc.TrackKind.KIND_VIDEO and isinstance(p, rtc.RemoteParticipant):
+                self.vision.unmuted(pub, p)
 
         @room.on("disconnected")
         def _disconnected(*_a) -> None:
@@ -728,6 +780,8 @@ class VoiceCall:
         speaker = speaker_of(self.participant(u.identity), u.identity)
         label = label_of(speaker)
         self.transcript(speaker, u.text)
+        if self.vision and wants_a_look(u.text):
+            self.vision.trigger(u.identity)
         ctx = self.judge_ctx()
         decision = await self.judge.decide(u.text, label, ctx)
         self.meter.add_decision(decision.cost_usd)
@@ -757,6 +811,7 @@ class VoiceCall:
         if decision.action == "silent":
             return
         self.state.last_asker = speaker
+        self.state.last_asker_identity = u.identity
         self.state.last_trigger_at = time.monotonic()
         await self.respond_group(u, speaker, decision)
 
@@ -801,29 +856,101 @@ class VoiceCall:
 
     # ---- tool ----------------------------------------------------------------------------------------
 
-    def make_tool(self):
+    def make_tools(self):
         call = self
 
         @function_tool(name="ask_agent", description=ASK_AGENT_DESCRIPTION)
         async def ask_agent(context: RunContext, request: str) -> str:
             return await call.ask_agent(request)
 
-        return ask_agent
+        @function_tool(name="look", description=LOOK_DESCRIPTION)
+        async def look(context: RunContext, what: str, hand_to_agent: bool = False, participant: str = "") -> str:
+            return await call.look(what, hand_to_agent=hand_to_agent, participant=participant)
 
-    async def ask_agent(self, request: str) -> str:
+        return [ask_agent, look]
+
+    # ---- vision ------------------------------------------------------------------------------------
+
+    def start_vision(self) -> None:
+        rt = None
+        try:
+            rt = self.agent.realtime_llm_session if self.agent else None
+        except Exception:
+            pass
+        self.vision = Vision(
+            self.ctx.room,
+            self.cfg,
+            agent_identity=self.ctx.room.local_participant.identity,
+            label_of=lambda identity: label_of(speaker_of(self.participant(identity), identity)),
+            enabled=self.vision_enabled,
+        )
+        self.vision.rt = rt
+        # Private on purpose: the read-only view cannot drop pruned placeholders (vision.py).
+        self.vision.local_ctx = lambda: getattr(self.agent, "_chat_ctx", None)
+        self.vision.on_first_frame = lambda identity: self.event("vision", identity=identity, seeing=True)
+        self.vision.start()
+
+    def sync_vision_meter(self) -> None:
+        if not self.vision:
+            return
+        self.meter.frames = self.vision.frames_sent
+        self.meter.looks = self.vision.looks
+        self.meter.vision_seconds = self.vision.camera_seconds()
+
+    def identity_for(self, participant: str) -> str | None:
+        """`participant` as the model names it (handle, name, or identity) → LiveKit identity."""
+        want = participant.strip().lstrip("@").lower()
+        if not want:
+            return self.state.last_asker_identity or self.state.linked_identity
+        for p in self.humans():
+            sp = speaker_of(p, p.identity)
+            if want in {p.identity.lower(), str(sp.get("handle", "")).lower(), str(sp.get("name", "")).lower()}:
+                return p.identity
+        return self.state.last_asker_identity or self.state.linked_identity
+
+    def blob_slot(self) -> str:
+        chat = self.info.get("chat") or {}
+        pid = chat.get("project_id")
+        return pid if pid and pid != "people" else f"people:{self.chat_id}"
+
+    async def look(self, what: str, *, hand_to_agent: bool = False, participant: str = "") -> str:
+        if not self.vision or not self.vision_enabled:
+            return "Vision is off for this agent, so you cannot look. Say so briefly."
+        identity = self.identity_for(participant)
+        got = await self.vision.look(identity)
+        if got is None:
+            return "No camera is on right now. Ask them to turn their camera on, then look again."
+        jpeg, seen_identity = got
+        label = label_of(speaker_of(self.participant(seen_identity), seen_identity))
+        self.event("tool", name="look", status="done", request=what[:300], speaker=label, kb=len(jpeg) // 1024, hand_to_agent=hand_to_agent)
+        log.info("look(%r) from %s: %d KB%s", what[:60], label, len(jpeg) // 1024, " → agent" if hand_to_agent else "")
+        if not hand_to_agent:
+            return f"A full-resolution frame of {label}'s camera is now in front of you (the last image). Answer about: {what}"
+        key = hashlib.sha256(jpeg).hexdigest()
+        try:
+            await self.relay.put_blob(self.blob_slot(), key, jpeg, "image/jpeg")
+        except Exception as e:
+            log.warning("blob upload failed: %s", e)
+            return f"The full-resolution frame is in front of you, but it could not be sent to your agent ({e}). Answer about: {what}"
+        attachment = {"name": f"camera-{time.strftime('%H%M%S', time.gmtime())}.jpg", "mime": "image/jpeg", "ref": key}
+        request = f"{what.strip()} (A photo from {label}'s camera on the call is attached.)"
+        return await self.ask_agent(request, attachments=[attachment], tool_name="look")
+
+    async def ask_agent(self, request: str, *, attachments: list[dict] | None = None, tool_name: str = "ask_agent") -> str:
         speaker = self.state.last_asker or (
             speaker_of(self.participant(self.state.linked_identity or ""), self.state.linked_identity or "") if self.state.linked_identity else {}
         )
         self.meter.tool_calls += 1
         self.state.open_work += 1
         request_id = uuid.uuid4().hex[:12]
-        self.event("tool", name="ask_agent", status="started", request=request[:500], request_id=request_id, speaker=label_of(speaker) if speaker else None)
-        log.info("ask_agent[%s] from %s: %s", request_id, label_of(speaker) if speaker else "?", request[:120])
+        self.event("tool", name=tool_name, status="started", request=request[:500], request_id=request_id, speaker=label_of(speaker) if speaker else None)
+        log.info("%s[%s] from %s: %s", tool_name, request_id, label_of(speaker) if speaker else "?", request[:120])
         t0 = time.monotonic()
 
         async def run() -> dict:
             return await self.relay.tool(
-                self.call_id, self.project_id, speaker=speaker, request=request, mode=self.state.mode, request_id=request_id
+                self.call_id, self.project_id, speaker=speaker, request=request, mode=self.state.mode, request_id=request_id,
+                attachments=attachments,
             )
 
         task = asyncio.create_task(run())
@@ -889,6 +1016,7 @@ class VoiceCall:
             await asyncio.sleep(self.cfg.usage_every_s)
             if self.state.leaving:
                 return
+            self.sync_vision_meter()
             try:
                 resp = await self.relay.usage(self.call_id, self.project_id, self.meter.usage())
             except Exception as e:
@@ -901,6 +1029,34 @@ class VoiceCall:
             if self.meter.seconds() >= self.cfg.call_max_s:
                 await self.finish("call_max")
                 return
+
+    async def settings_loop(self) -> None:
+        """Owner toggles (vision on/off, chattiness) apply during the call: re-read every few seconds."""
+        while not self.state.leaving:
+            await asyncio.sleep(self.cfg.settings_poll_s)
+            if self.state.leaving:
+                return
+            try:
+                s = await self.relay.agent_settings(self.project_id)
+            except Exception as e:
+                log.debug("settings re-read failed: %s", e)
+                continue
+            enabled = s.get("vision_enabled", True) is not False
+            if enabled != self.vision_enabled:
+                self.vision_enabled = enabled
+                log.info("owner turned vision %s", "on" if enabled else "off")
+                if self.vision:
+                    self.vision.set_enabled(enabled)
+                if self.agent:
+                    try:
+                        await self.agent.update_instructions(self.instructions())
+                    except Exception as e:
+                        log.warning("update_instructions failed: %s", e)
+                self.event("system", text=f"{self.agent_name} {'can see cameras on this call now' if enabled else 'no longer sees cameras on this call'}")
+            chattiness = s.get("chattiness")
+            if chattiness and chattiness != self.chattiness:
+                self.chattiness = chattiness
+                log.info("owner set chattiness %s", chattiness)
 
     async def idle_loop(self) -> None:
         while not self.state.leaving:

@@ -6,7 +6,9 @@
 //! * `voice_tool` — a spoken request to do work or look something up. It runs as a normal turn
 //!   of the pi main session in the chat the call belongs to (same tools, same D64/D66 limits):
 //!   the request lands as a user row marked `voice: true`, the usual ack / tool cards / result
-//!   rows follow, and the result text goes back to be spoken;
+//!   rows follow, and the result text goes back to be spoken. `attachments` (`[{name, mime,
+//!   ref}]`, camera frames from the worker's `look` tool, already in the chat's blob slot) become
+//!   attachment parts on that row, so the agent sees the picture like any attached image;
 //! * `voice_rows` — transcript lines (what people said, what the agent said) and system lines
 //!   ("Arbos joined the call") written into the chat doc as finished rows, never as turns.
 //!
@@ -129,9 +131,10 @@ async fn handle_frame(sup: Arc<Supervisor>, frame: Value, out: mpsc::Sender<Stri
                 }
                 "voice_tool" => {
                     let request = frame["request"].as_str().unwrap_or_default().to_owned();
+                    let attachments = frame["attachments"].as_array().cloned().unwrap_or_default();
                     let t0 = std::time::Instant::now();
                     match agent
-                        .voice_request(&chat_id, &frame["speaker"], &request, &call_id)
+                        .voice_request(&chat_id, &frame["speaker"], &request, &call_id, &attachments)
                         .await
                     {
                         Ok((text, message_id)) => {
@@ -244,13 +247,15 @@ impl Agent {
     }
 
     /// A spoken request becomes a turn in `chat_id`: user row (`voice: true`, addressed to this
-    /// agent), the normal turn, and the result row's text back. Blocks until the turn ends.
+    /// agent, with `attachments` as attachment parts), the normal turn, and the result row's
+    /// text back. Blocks until the turn ends.
     pub async fn voice_request(
         self: &Arc<Self>,
         chat_id: &str,
         speaker: &Value,
         request: &str,
         call_id: &str,
+        attachments: &[Value],
     ) -> Result<(String, String)> {
         if request.trim().is_empty() {
             return Err(anyhow!("empty request"));
@@ -296,6 +301,16 @@ impl Agent {
                 &sender,
                 &extra,
             );
+            for a in attachments {
+                if a["ref"].as_str().is_some_and(|r| !r.is_empty()) {
+                    let part = json!({
+                        "name": a["name"].as_str().unwrap_or("camera.jpg"),
+                        "mime": a["mime"].as_str().unwrap_or("image/jpeg"),
+                        "ref": a["ref"], "kind": "image",
+                    });
+                    h.doc.add_attachment_part(&msg_id, &part);
+                }
+            }
             h.mark_seen(&cmd_id);
             CommandView {
                 id: cmd_id,

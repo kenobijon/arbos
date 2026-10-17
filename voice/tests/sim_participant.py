@@ -17,6 +17,10 @@ Script = JSON list of steps, run in order:
     {"sleep": 2.5}                        say nothing for a while
     {"wait_quiet": 20}                    wait (max s) until the agent has been silent for 1.5 s
     {"hangup": true}                      leave the call (POST /calls/{id}/leave)
+    {"camera": "photo.jpg"}               turn the camera on (or switch the picture): publishes a
+                                          640x480 @ 10 fps video track showing the image, like a
+                                          phone pointed at it (`--camera` sets it from the start)
+    {"camera_off": true}                  mute the camera (frames stop; the agent's "seeing" clears)
 
 Output: `<out>/agent.wav` (what the agent said), `<out>/mix.wav` (both sides, for the recording),
 `<out>/events.jsonl` (timestamps), and a summary on stdout. Several participants can run at once
@@ -39,6 +43,7 @@ from pathlib import Path
 import aiohttp
 import numpy as np
 from livekit import rtc
+from PIL import Image
 
 log = logging.getLogger("sim")
 
@@ -112,6 +117,12 @@ class Participant:
         self.barge_ms: list[int] = []
         self.call: dict = {}
         self._agent_identity: str | None = None
+        self.cam_source: rtc.VideoSource | None = None
+        self.cam_track: rtc.LocalVideoTrack | None = None
+        self.cam_pub: rtc.LocalTrackPublication | None = None
+        self.cam_rgba: bytes | None = None
+        self.cam_task: asyncio.Task | None = None
+        self.seen_by_agent: bool | None = None
 
     def now(self) -> float:
         return time.monotonic() - self.t0
@@ -182,6 +193,60 @@ class Participant:
             elif self.agent_speaking and now - self.agent_last_audio_at > 0.35:
                 self.agent_speaking = False
                 self.event("agent_quiet", spoke_s=round(self.agent_last_audio_at - self.agent_started_at, 2))
+
+    # ---- camera -----------------------------------------------------------------------------------
+
+    CAM_W, CAM_H, CAM_FPS = 640, 480, 10
+
+    def on_data(self, pkt: rtc.DataPacket) -> None:
+        if pkt.topic != "agent_vision":
+            return
+        try:
+            msg = json.loads(pkt.data.decode())
+        except Exception:
+            return
+        me = self.room.local_participant.identity if self.room else ""
+        if msg.get("participant_identity") == me:
+            self.seen_by_agent = bool(msg.get("seeing"))
+        self.event("agent_vision", **{k: v for k, v in msg.items() if k != "type"}, mine=msg.get("participant_identity") == me)
+
+    def on_attributes(self, changed: dict, p: rtc.Participant) -> None:
+        if "arbos.seeing" in changed:
+            self.event("agent_attr", identity=p.identity, seeing=changed["arbos.seeing"])
+
+    async def camera_on(self, path: str) -> None:
+        img = Image.open(path).convert("RGBA")
+        # Letterbox into the camera frame, as a phone would show it.
+        scale = min(self.CAM_W / img.width, self.CAM_H / img.height)
+        img = img.resize((max(1, int(img.width * scale)), max(1, int(img.height * scale))))
+        canvas = Image.new("RGBA", (self.CAM_W, self.CAM_H), (20, 20, 20, 255))
+        canvas.paste(img, ((self.CAM_W - img.width) // 2, (self.CAM_H - img.height) // 2))
+        self.cam_rgba = canvas.tobytes()
+        if self.cam_source is None:
+            self.cam_source = rtc.VideoSource(self.CAM_W, self.CAM_H)
+            self.cam_track = rtc.LocalVideoTrack.create_video_track("camera", self.cam_source)
+            self.cam_pub = await self.room.local_participant.publish_track(
+                self.cam_track, rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_CAMERA, simulcast=False)
+            )
+            self.cam_task = asyncio.create_task(self.camera_pump())
+            self.event("camera_on", image=path)
+        else:
+            if self.cam_track and self.cam_track.muted:
+                self.cam_track.unmute()
+            self.event("camera_switch", image=path)
+
+    async def camera_pump(self) -> None:
+        period = 1.0 / self.CAM_FPS
+        while True:
+            if self.cam_rgba and self.cam_source:
+                frame = rtc.VideoFrame(self.CAM_W, self.CAM_H, rtc.VideoBufferType.RGBA, self.cam_rgba)
+                self.cam_source.capture_frame(frame)
+            await asyncio.sleep(period)
+
+    async def camera_off(self) -> None:
+        if self.cam_track:
+            self.cam_track.mute()
+            self.event("camera_off")
 
     async def say(self, text, *, record_end: bool = True) -> None:
         """`text` is a string, or a list of strings and numbers (seconds of silence) so one
@@ -280,12 +345,16 @@ class Participant:
         async with aiohttp.ClientSession() as http:
             self.call = await self.start_call(http)
             self.room.on("track_subscribed", self.on_track)
+            self.room.on("data_received", self.on_data)
+            self.room.on("participant_attributes_changed", self.on_attributes)
             self.room.on("participant_connected", lambda p: self.event("participant_connected", identity=p.identity, name=p.name))
             self.room.on("participant_disconnected", lambda p: self.event("participant_disconnected", identity=p.identity))
             await self.room.connect(self.call["livekit_url"], self.call["token"], options=rtc.RoomOptions(auto_subscribe=True))
             self.event("connected", room=self.room.name, identity=self.room.local_participant.identity)
             await self.room.local_participant.publish_track(self.track, rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE))
             self.event("published")
+            if a.camera:
+                await self.camera_on(a.camera)
             if a.wait_agent:
                 deadline = time.monotonic() + 20
                 while time.monotonic() < deadline and not any(p.identity.startswith("a_") for p in self.room.remote_participants.values()):
@@ -313,6 +382,10 @@ class Participant:
                     await asyncio.sleep(float(step["sleep"]))
                 elif "wait_quiet" in step:
                     await self.wait_quiet(float(step["wait_quiet"]))
+                elif "camera" in step:
+                    await self.camera_on(step["camera"])
+                elif "camera_off" in step:
+                    await self.camera_off()
                 elif "hangup" in step:
                     break
             await asyncio.sleep(a.tail)
@@ -342,6 +415,7 @@ class Participant:
             "early_cut_ins": self.early_cut_ins,
             "barge_ms": self.barge_ms,
             "agent_seconds": round(sum(len(p) for p in self.agent_pcm) / SAMPLE_RATE, 1),
+            "seen_by_agent": self.seen_by_agent,
             "out": str(self.out),
         }
         (self.out / "summary.json").write_text(json.dumps(summary, indent=2))
@@ -363,6 +437,7 @@ def main() -> None:
     ap.add_argument("--tail", type=float, default=2.0, help="seconds to keep recording after the script")
     ap.add_argument("--no-wait-agent", dest="wait_agent", action="store_false")
     ap.add_argument("--stay", action="store_true", help="do not leave the call at the end (another participant ends it)")
+    ap.add_argument("--camera", default=None, help="image file to show on a camera track from the start")
     args = ap.parse_args()
     if not args.token:
         sys.exit("--token (or ARBOS_DEVICE_TOKEN) is required")

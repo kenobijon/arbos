@@ -50,6 +50,14 @@ class Config:
     # How long a spoken request waits for the agent before "working on it".
     tool_quick_wait_s: float = field(default_factory=lambda: _env_f("ARBOS_VOICE_TOOL_QUICK_WAIT_S", 8.0))
     log_dir: str = field(default_factory=lambda: _env("ARBOS_VOICE_LOG_DIR", ""))
+    # Camera vision (vision.py): stills per second while the picture changes, long edge of the
+    # routine frame, long edge of a `look`, frames kept in the model's context.
+    vision_fps: float = field(default_factory=lambda: _env_f("ARBOS_VOICE_VISION_FPS", 1.0))
+    vision_long_edge: int = field(default_factory=lambda: int(_env_f("ARBOS_VOICE_VISION_LONG_EDGE", 512)))
+    vision_look_long_edge: int = field(default_factory=lambda: int(_env_f("ARBOS_VOICE_VISION_LOOK_LONG_EDGE", 1280)))
+    vision_keep: int = field(default_factory=lambda: int(_env_f("ARBOS_VOICE_VISION_KEEP", 4)))
+    # How often the worker re-reads the owner's voice settings during a call (vision on/off).
+    settings_poll_s: float = field(default_factory=lambda: _env_f("ARBOS_VOICE_SETTINGS_POLL_S", 5.0))
 
     def check(self) -> list[str]:
         missing = []

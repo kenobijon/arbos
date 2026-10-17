@@ -417,6 +417,9 @@ pub struct PatchProjectBody {
     /// Call voice id from `GET /voices`; `null` = the relay default (D75).
     #[serde(default, deserialize_with = "deserialize_double_option")]
     pub voice: Option<Option<String>>,
+    /// May the agent see cameras on calls (default true).
+    #[serde(default)]
+    pub vision_enabled: Option<bool>,
     /// Telegram-style initials colour (D79): 0–6, or `null` to go back to the derived colour.
     #[serde(default, deserialize_with = "deserialize_double_option_i64")]
     pub avatar_color_index: Option<Option<i64>>,
@@ -537,6 +540,12 @@ pub async fn patch_project(
         state
             .db
             .set_voice_agent_voice(&p.id, voice)
+            .map_err(internal)?;
+    }
+    if let Some(v) = b.vision_enabled {
+        state
+            .db
+            .set_voice_agent_vision(&p.id, v)
             .map_err(internal)?;
     }
     state
@@ -676,6 +685,7 @@ pub(crate) async fn project_json(state: &AppState, p: &Project) -> Value {
         .usage_since(&p.id, start_of_day())
         .map(|u| u.usd)
         .unwrap_or(0.0);
+    let voice_settings = state.db.voice_agent_settings(&p.id).ok();
     json!({
         "id": p.id, "name": p.name, "icon": p.icon, "color": p.color, "instructions": p.instructions,
         "avatar": p.avatar.clone().unwrap_or_else(|| crate::avatar::default_for(&p.id, &state.cfg.avatar_slugs)),
@@ -685,7 +695,8 @@ pub(crate) async fn project_json(state: &AppState, p: &Project) -> Value {
         "spend_today_usd": today, "spend_cap_usd": p.spend_cap_daily,
         "created_at": p.created_at, "last_active_at": p.last_active_at,
         "description": p.description,
-        "voice": state.db.voice_agent_settings(&p.id).ok().and_then(|s| s.voice),
+        "voice": voice_settings.as_ref().and_then(|s| s.voice.clone()),
+        "vision_enabled": voice_settings.as_ref().map(|s| s.vision_enabled).unwrap_or(true),
         "avatar_color_index": p.avatar_color_index,
         "avatar_color_index_effective": crate::avatar::effective_color_index(&p.id, p.avatar_color_index),
         "primary_chat_id": primary_chat_id(state, p),

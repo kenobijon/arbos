@@ -50,6 +50,21 @@ CREATE TABLE IF NOT EXISTS voice_worker (
 /// Columns added after the first voice release (ALTER is idempotent through the error).
 pub fn migrate_voice(c: &rusqlite::Connection) {
     let _ = c.execute("ALTER TABLE voice_agent_settings ADD COLUMN voice TEXT", []);
+    // Camera vision: owner toggle, and the image part of the bill per (call, agent).
+    let _ = c.execute(
+        "ALTER TABLE voice_agent_settings ADD COLUMN vision_enabled INTEGER NOT NULL DEFAULT 1",
+        [],
+    );
+    for col in [
+        "image_in_tokens INTEGER NOT NULL DEFAULT 0",
+        "frames INTEGER NOT NULL DEFAULT 0",
+        "looks INTEGER NOT NULL DEFAULT 0",
+        "vision_seconds REAL NOT NULL DEFAULT 0",
+        "vision_usd REAL NOT NULL DEFAULT 0",
+        "vision_charged REAL NOT NULL DEFAULT 0",
+    ] {
+        let _ = c.execute(&format!("ALTER TABLE voice_calls ADD COLUMN {col}"), []);
+    }
 }
 
 /// What the worker reports for one agent in one call (cumulative since the call began).
@@ -69,6 +84,18 @@ pub struct VoiceUsage {
     pub text_out_tokens: i64,
     #[serde(default)]
     pub cached_tokens: i64,
+    /// Camera vision (a subset of the realtime bill): image tokens, frames and `look`s sent,
+    /// camera-on seconds, and the image-token dollars.
+    #[serde(default)]
+    pub image_in_tokens: i64,
+    #[serde(default)]
+    pub frames: i64,
+    #[serde(default)]
+    pub looks: i64,
+    #[serde(default)]
+    pub vision_seconds: f64,
+    #[serde(default)]
+    pub vision_usd: f64,
     #[serde(default)]
     pub stt_seconds: f64,
     #[serde(default)]
@@ -104,6 +131,8 @@ pub struct VoiceCallRow {
     pub updated_at: i64,
     pub usage: VoiceUsage,
     pub usd_charged: f64,
+    /// The part of `usd_charged` that went to the ledger as `call:<id>#vision`.
+    pub vision_charged: f64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -128,6 +157,8 @@ pub struct VoiceAgentSettings {
     pub wake_name: Option<String>,
     /// Speech-model voice id (`GET /voices`); `None` = the relay default.
     pub voice: Option<String>,
+    /// May the agent see cameras on calls (default true)?
+    pub vision_enabled: bool,
 }
 
 pub const CHATTINESS_LEVELS: [&str; 3] = ["quiet", "balanced", "chatty"];
@@ -158,13 +189,16 @@ impl Db {
                    ttfa_ms_p50 = COALESCE(?16, ttfa_ms_p50), ttfa_ms_p95 = COALESCE(?17, ttfa_ms_p95),
                    barge_ms_p50 = COALESCE(?18, barge_ms_p50), barge_ms_max = COALESCE(?19, barge_ms_max),
                    ended_at = CASE WHEN ?20 THEN COALESCE(ended_at, ?4) ELSE ended_at END,
-                   stop_reason = COALESCE(?21, stop_reason)
+                   stop_reason = COALESCE(?21, stop_reason),
+                   image_in_tokens = MAX(image_in_tokens, ?22), frames = MAX(frames, ?23), looks = MAX(looks, ?24),
+                   vision_seconds = MAX(vision_seconds, ?25), vision_usd = MAX(vision_usd, ?26)
                  WHERE call_id = ?1 AND project_id = ?2",
                 params![
                     call_id, project_id, u.mode, now, u.seconds, u.audio_in_tokens, u.audio_out_tokens,
                     u.text_in_tokens, u.text_out_tokens, u.cached_tokens, u.stt_seconds, u.decisions,
                     u.tool_calls, u.turns_spoken, u.usd, u.ttfa_ms_p50, u.ttfa_ms_p95, u.barge_ms_p50,
-                    u.barge_ms_max, u.ended, u.stop_reason
+                    u.barge_ms_max, u.ended, u.stop_reason, u.image_in_tokens, u.frames, u.looks,
+                    u.vision_seconds, u.vision_usd
                 ],
             )?;
             Ok(())
@@ -173,14 +207,33 @@ impl Db {
             .ok_or_else(|| anyhow::anyhow!("voice usage row vanished"))
     }
 
-    /// Record that `usd` more was debited for this (call, agent).
-    pub fn voice_charged(&self, call_id: &str, project_id: &str, usd: f64) -> Result<()> {
+    /// Record that `usd` more was debited for this (call, agent), `vision_usd` of it as vision.
+    pub fn voice_charged(
+        &self,
+        call_id: &str,
+        project_id: &str,
+        usd: f64,
+        vision_usd: f64,
+    ) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "UPDATE voice_calls SET usd_charged = usd_charged + ?3 WHERE call_id = ?1 AND project_id = ?2",
-                params![call_id, project_id, usd],
+                "UPDATE voice_calls SET usd_charged = usd_charged + ?3, vision_charged = vision_charged + ?4
+                 WHERE call_id = ?1 AND project_id = ?2",
+                params![call_id, project_id, usd, vision_usd],
             )
             .map(|_| ())
+        })
+    }
+
+    /// Camera-on minutes and image dollars over every agent call since `since_ms`.
+    pub fn voice_vision_totals(&self, since_ms: i64) -> Result<(f64, f64, i64)> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT COALESCE(SUM(vision_seconds), 0.0) / 60.0, COALESCE(SUM(vision_usd), 0.0), COALESCE(SUM(frames), 0)
+                 FROM voice_calls WHERE started_at >= ?1",
+                params![since_ms],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
         })
     }
 
@@ -355,24 +408,26 @@ impl Db {
         self.with(|c| {
             let row = c
                 .query_row(
-                    "SELECT chattiness, wake_name, voice FROM voice_agent_settings WHERE project_id = ?1",
+                    "SELECT chattiness, wake_name, voice, vision_enabled FROM voice_agent_settings WHERE project_id = ?1",
                     params![project_id],
                     |r| {
                         Ok((
                             r.get::<_, String>(0)?,
                             r.get::<_, Option<String>>(1)?,
                             r.get::<_, Option<String>>(2)?,
+                            r.get::<_, i64>(3)? != 0,
                         ))
                     },
                 )
                 .optional()?;
-            let (chattiness, wake_name, voice) =
-                row.unwrap_or_else(|| ("balanced".to_owned(), None, None));
+            let (chattiness, wake_name, voice, vision_enabled) =
+                row.unwrap_or_else(|| ("balanced".to_owned(), None, None, true));
             Ok(VoiceAgentSettings {
                 project_id: project_id.to_owned(),
                 chattiness,
                 wake_name,
                 voice,
+                vision_enabled,
             })
         })
     }
@@ -384,6 +439,18 @@ impl Db {
                 "INSERT INTO voice_agent_settings(project_id, voice) VALUES (?1, ?2)
                  ON CONFLICT(project_id) DO UPDATE SET voice = excluded.voice",
                 params![project_id, voice],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// May the agent see cameras on calls?
+    pub fn set_voice_agent_vision(&self, project_id: &str, enabled: bool) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO voice_agent_settings(project_id, vision_enabled) VALUES (?1, ?2)
+                 ON CONFLICT(project_id) DO UPDATE SET vision_enabled = excluded.vision_enabled",
+                params![project_id, enabled],
             )
             .map(|_| ())
         })
@@ -418,7 +485,7 @@ impl Db {
     }
 }
 
-const VOICE_COLS: &str = "call_id, project_id, payer, mode, started_at, ended_at, updated_at, seconds, audio_in_tokens, audio_out_tokens, text_in_tokens, text_out_tokens, cached_tokens, stt_seconds, decisions, tool_calls, turns_spoken, usd, usd_charged, ttfa_ms_p50, ttfa_ms_p95, barge_ms_p50, barge_ms_max, stop_reason";
+const VOICE_COLS: &str = "call_id, project_id, payer, mode, started_at, ended_at, updated_at, seconds, audio_in_tokens, audio_out_tokens, text_in_tokens, text_out_tokens, cached_tokens, stt_seconds, decisions, tool_calls, turns_spoken, usd, usd_charged, ttfa_ms_p50, ttfa_ms_p95, barge_ms_p50, barge_ms_max, stop_reason, image_in_tokens, frames, looks, vision_seconds, vision_usd, vision_charged";
 
 fn voice_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<VoiceCallRow> {
     let ended_at: Option<i64> = r.get(5)?;
@@ -448,7 +515,13 @@ fn voice_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<VoiceCallRow> {
             barge_ms_max: r.get(22)?,
             ended: ended_at.is_some(),
             stop_reason: r.get(23)?,
+            image_in_tokens: r.get(24)?,
+            frames: r.get(25)?,
+            looks: r.get(26)?,
+            vision_seconds: r.get(27)?,
+            vision_usd: r.get(28)?,
         },
         usd_charged: r.get(18)?,
+        vision_charged: r.get(29)?,
     })
 }

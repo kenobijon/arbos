@@ -17,7 +17,13 @@
 //! Cost rails: per-call cap (`ARBOS_VOICE_CALL_CAP_USD`, default $1.50), per-user daily voice cap
 //! (`ARBOS_VOICE_DAILY_CAP_USD`, default $5, `PUT /admin/users/{id}/voice` per user), the user's
 //! own credits/daily cap and the global kill switch. Owner setting per agent: chattiness
-//! (`quiet` | `balanced` | `chatty`) and wake name, `GET/PUT /projects/{id}/voice`.
+//! (`quiet` | `balanced` | `chatty`), wake name and `vision_enabled` (may the agent see cameras),
+//! `GET/PUT /projects/{id}/voice`.
+//!
+//! Camera vision: the worker reports the image part of the bill (`image_in_tokens`, `vision_usd`,
+//! camera-on `vision_seconds`, `frames`, `looks`) inside the same usage report; it is debited
+//! within the same caps as a second `voice` ledger line with `ref = call:<id>#vision`. A `look`
+//! handed to the agent carries `attachments` (blobs the worker uploaded) through `voice_tool`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -477,6 +483,7 @@ async fn dispatch_missing(state: &AppState, call: &CallRow) -> Vec<Value> {
             "agent": Sender::agent(state, &project).json(),
             "identity": agent_identity(&project.id),
             "chattiness": settings.as_ref().map(|s| s.chattiness.clone()).unwrap_or_else(|| "balanced".to_owned()),
+            "vision_enabled": settings.as_ref().map(|s| s.vision_enabled).unwrap_or(true),
             "wake_name": settings.and_then(|s| s.wake_name),
             "voice": voice_for(state, &project.id),
             "started_at": call.started_at,
@@ -638,8 +645,8 @@ pub async fn call_info(
     let settings = state
         .db
         .voice_agent_settings(&project.id)
-        .map(|s| json!({ "chattiness": s.chattiness, "wake_name": s.wake_name, "voice": voice_for(&state, &project.id) }))
-        .unwrap_or_else(|_| json!({ "chattiness": "balanced", "wake_name": null, "voice": state.voice.default_voice }));
+        .map(|s| json!({ "chattiness": s.chattiness, "wake_name": s.wake_name, "voice": voice_for(&state, &project.id), "vision_enabled": s.vision_enabled }))
+        .unwrap_or_else(|_| json!({ "chattiness": "balanced", "wake_name": null, "voice": state.voice.default_voice, "vision_enabled": true }));
     let online = box_online(&state, &project.user_id).await;
     let context = if online {
         box_request(
@@ -714,6 +721,9 @@ pub struct ToolBody {
     /// The worker's id for this request (returned as is).
     #[serde(default)]
     pub request_id: Option<String>,
+    /// Camera frames for the agent: `[{ name, mime, ref }]`, already in the chat's blob slot.
+    #[serde(default)]
+    pub attachments: Vec<Value>,
 }
 
 /// `POST /voice/calls/{id}/tool` → runs the request as a turn of the agent on the user's machine
@@ -750,6 +760,7 @@ pub async fn call_tool(
         "type": "voice_tool", "call_id": call.id, "chat_id": call.chat_id,
         "chat_project": chat.project_label(), "project_id": project.id,
         "speaker": b.speaker, "request": b.request, "mode": b.mode,
+        "attachments": b.attachments,
     });
     let t0 = std::time::Instant::now();
     match box_request(&state, &project.user_id, frame, TOOL_WAIT).await {
@@ -832,7 +843,7 @@ pub async fn call_events(
             "left" => {
                 let _ = state.db.call_agent_leave(&call.id, &project.id);
             }
-            "metric" | "tool" => {
+            "metric" | "tool" | "vision" => {
                 tracing::info!(call = %call.id, project = %project.id, event = %ev, "voice event");
             }
             other => tracing::debug!(call = %call.id, kind = other, "voice: unknown event"),
@@ -864,8 +875,9 @@ pub struct UsageBody {
 
 /// `POST /voice/calls/{id}/usage` — cumulative usage for this agent in this call. The relay
 /// debits the difference since the last report from the owner's ledger (`voice`,
-/// `ref = call:<id>`), mirrors it into the project's `usage` table (so the project's spend cap
-/// counts it), and answers the caps: `{ caps: { stop: null | reason, … }, usd_charged }`.
+/// `ref = call:<id>`; the camera-vision part as its own line, `ref = call:<id>#vision`),
+/// mirrors it into the project's `usage` table (so the project's spend cap counts it), and
+/// answers the caps: `{ caps: { stop: null | reason, … }, usd_charged }`.
 pub async fn call_usage(
     State(state): State<AppState>,
     principal: Principal,
@@ -890,9 +902,19 @@ pub async fn call_usage(
         };
     let delta = row.usage.usd - row.usd_charged;
     if delta > 0.000_001 {
+        let vision_delta = (row.usage.vision_usd - row.vision_charged).clamp(0.0, delta);
+        let voice_delta = delta - vision_delta;
         let reference = format!("call:{}", call.id);
-        crate::credits::charge(&state, &payer, delta, "voice", Some(&reference));
-        let _ = state.db.voice_charged(&call.id, &project.id, delta);
+        if voice_delta > 0.000_001 {
+            crate::credits::charge(&state, &payer, voice_delta, "voice", Some(&reference));
+        }
+        if vision_delta > 0.000_001 {
+            let vision_ref = format!("{reference}#vision");
+            crate::credits::charge(&state, &payer, vision_delta, "voice", Some(&vision_ref));
+        }
+        let _ = state
+            .db
+            .voice_charged(&call.id, &project.id, delta, vision_delta);
         let _ = state.db.record_usage(
             &project.id,
             "voice",
@@ -911,6 +933,8 @@ pub async fn call_usage(
             call = %call.id, project = %project.id, seconds = b.usage.seconds, usd = b.usage.usd,
             tool_calls = b.usage.tool_calls, decisions = b.usage.decisions, turns = b.usage.turns_spoken,
             ttfa_p50 = ?b.usage.ttfa_ms_p50, barge_p50 = ?b.usage.barge_ms_p50, stop = ?b.usage.stop_reason,
+            frames = b.usage.frames, looks = b.usage.looks, vision_seconds = b.usage.vision_seconds,
+            vision_usd = b.usage.vision_usd,
             "voice: call usage final"
         );
         let _ = state.db.call_agent_leave(&call.id, &project.id);
@@ -931,6 +955,9 @@ pub struct AgentSettingsBody {
     /// `Some(None)` clears it (JSON `null`).
     #[serde(default, deserialize_with = "deserialize_double_option")]
     pub wake_name: Option<Option<String>>,
+    /// May the agent see cameras on calls? Default true.
+    #[serde(default)]
+    pub vision_enabled: Option<bool>,
 }
 
 fn deserialize_double_option<'de, D>(d: D) -> Result<Option<Option<String>>, D::Error>
@@ -941,10 +968,10 @@ where
 }
 
 fn settings_json(s: &crate::db_voice::VoiceAgentSettings) -> Value {
-    json!({ "project_id": s.project_id, "chattiness": s.chattiness, "wake_name": s.wake_name, "voice": s.voice, "levels": CHATTINESS_LEVELS })
+    json!({ "project_id": s.project_id, "chattiness": s.chattiness, "wake_name": s.wake_name, "voice": s.voice, "vision_enabled": s.vision_enabled, "levels": CHATTINESS_LEVELS })
 }
 
-/// `GET /projects/{id}/voice` → `{ chattiness, wake_name }` (owner, guests, the box, the admin).
+/// `GET /projects/{id}/voice` → `{ chattiness, wake_name, voice, vision_enabled }` (owner, guests, the box, the admin).
 pub async fn get_agent_settings(
     State(state): State<AppState>,
     principal: Principal,
@@ -962,7 +989,7 @@ pub async fn get_agent_settings(
     }
 }
 
-/// `PUT /projects/{id}/voice {chattiness?, wake_name?}` (owner or admin).
+/// `PUT /projects/{id}/voice {chattiness?, wake_name?, vision_enabled?}` (owner or admin).
 pub async fn put_agent_settings(
     State(state): State<AppState>,
     principal: Principal,
@@ -999,6 +1026,11 @@ pub async fn put_agent_settings(
             .filter(|w| !w.is_empty())
             .map(|w| w.chars().take(32).collect::<String>())
     });
+    if let Some(v) = b.vision_enabled {
+        if let Err(e) = state.db.set_voice_agent_vision(&p.id, v) {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+        }
+    }
     match state.db.set_voice_agent_settings(
         &p.id,
         b.chattiness.as_deref(),
@@ -1073,6 +1105,7 @@ pub fn admin_json(state: &AppState) -> Value {
         .iter()
         .map(|r| {
             let minutes = r.usage.seconds / 60.0;
+            let vision_minutes = r.usage.vision_seconds / 60.0;
             json!({
                 "call_id": r.call_id, "project_id": r.project_id, "payer": r.payer, "mode": r.usage.mode,
                 "started_at": r.started_at, "ended_at": r.ended_at, "minutes": (minutes * 100.0).round() / 100.0,
@@ -1085,10 +1118,22 @@ pub fn admin_json(state: &AppState) -> Value {
                 "ttfa_ms_p50": r.usage.ttfa_ms_p50, "ttfa_ms_p95": r.usage.ttfa_ms_p95,
                 "barge_ms_p50": r.usage.barge_ms_p50, "barge_ms_max": r.usage.barge_ms_max,
                 "stop_reason": r.usage.stop_reason,
+                "vision": {
+                    "minutes": (vision_minutes * 100.0).round() / 100.0,
+                    "usd": r.usage.vision_usd, "usd_charged": r.vision_charged,
+                    "image_in_tokens": r.usage.image_in_tokens, "frames": r.usage.frames, "looks": r.usage.looks,
+                    "usd_per_camera_minute": if vision_minutes > 0.0 { Some(r.usage.vision_usd / vision_minutes) } else { None },
+                },
                 "decisions_log": state.db.voice_decisions_of(&r.call_id, 50).unwrap_or_default(),
             })
         })
         .collect();
+    let (vision_minutes_today, vision_usd_today, frames_today) = state
+        .db
+        .voice_vision_totals(start_of_utc_day_ms())
+        .unwrap_or((0.0, 0.0, 0));
+    let (vision_minutes_all, vision_usd_all, frames_all) =
+        state.db.voice_vision_totals(0).unwrap_or((0.0, 0.0, 0));
     // Memory first, else the last hello persisted before a relay restart.
     let worker = state
         .voice_worker
@@ -1109,6 +1154,10 @@ pub fn admin_json(state: &AppState) -> Value {
         "call_cap_usd": state.voice.call_cap_usd,
         "call_max_minutes": CALL_MAX_MINUTES,
         "boxes_linked": state.voice_conns.try_lock().map(|c| c.len()).unwrap_or(0),
+        "vision": {
+            "today": { "minutes": (vision_minutes_today * 100.0).round() / 100.0, "usd": vision_usd_today, "frames": frames_today },
+            "all": { "minutes": (vision_minutes_all * 100.0).round() / 100.0, "usd": vision_usd_all, "frames": frames_all },
+        },
         "recent": recent,
     })
 }

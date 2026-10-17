@@ -51,19 +51,43 @@ class Relay:
     async def call_info(self, call_id: str, project_id: str) -> dict:
         return await self._json("GET", f"/voice/calls/{call_id}?project_id={project_id}", timeout=12.0)
 
-    async def tool(self, call_id: str, project_id: str, *, speaker: dict, request: str, mode: str, request_id: str) -> dict:
-        """Runs until the agent finishes (minutes, for long work). Raises ToolPending on 504."""
+    async def tool(
+        self,
+        call_id: str,
+        project_id: str,
+        *,
+        speaker: dict,
+        request: str,
+        mode: str,
+        request_id: str,
+        attachments: list[dict] | None = None,
+    ) -> dict:
+        """Runs until the agent finishes (minutes, for long work). Raises ToolPending on 504.
+        `attachments` = `[{name, mime, ref}]` blobs already uploaded with `put_blob` (camera frames)."""
+        body = {"project_id": project_id, "speaker": speaker, "request": request, "mode": mode, "request_id": request_id}
+        if attachments:
+            body["attachments"] = attachments
         try:
-            return await self._json(
-                "POST",
-                f"/voice/calls/{call_id}/tool",
-                {"project_id": project_id, "speaker": speaker, "request": request, "mode": mode, "request_id": request_id},
-                timeout=300.0,
-            )
+            return await self._json("POST", f"/voice/calls/{call_id}/tool", body, timeout=300.0)
         except RelayError as e:
             if e.status == 504:
                 raise ToolPending() from e
             raise
+
+    async def put_blob(self, slot: str, key: str, data: bytes, mime: str) -> None:
+        """`PUT /blob/{slot}/{key}`: the chat's blob store (project id, or `people:<chat_id>`)."""
+        async with self.http.put(
+            f"{self.cfg.relay_url}/blob/{slot}/{key}",
+            data=data,
+            headers={"authorization": self._headers["authorization"], "content-type": mime},
+            timeout=aiohttp.ClientTimeout(total=20.0),
+        ) as r:
+            if r.status >= 400:
+                raise RelayError(r.status, await r.text())
+
+    async def agent_settings(self, project_id: str) -> dict:
+        """`GET /projects/{id}/voice` — chattiness, wake name, voice, vision_enabled (live re-read)."""
+        return await self._json("GET", f"/projects/{project_id}/voice", timeout=5.0)
 
     async def events(self, call_id: str, project_id: str, events: list[dict]) -> None:
         if not events:

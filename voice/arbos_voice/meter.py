@@ -9,7 +9,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 
-from .pricing import realtime_cost, stt_price
+from .pricing import realtime_cost, realtime_price, stt_price
 
 
 def percentile(values: list[int], p: float) -> int | None:
@@ -33,6 +33,10 @@ class CallMeter:
     cached_audio: int = 0
     cached_text: int = 0
     image_in: int = 0
+    # Camera vision: frames sent to the model, `look` captures, camera-on seconds (set by the worker).
+    frames: int = 0
+    looks: int = 0
+    vision_seconds: float = 0.0
     stt_seconds: float = 0.0
     judge_usd: float = 0.0
     decisions: int = 0
@@ -102,6 +106,10 @@ class CallMeter:
     def stt_usd(self) -> float:
         return self.stt_seconds / 60.0 * stt_price(self.stt_model)
 
+    def vision_usd(self) -> float:
+        """The image-token part of the realtime bill (frames and looks); a subset of `realtime_usd`."""
+        return self.image_in * realtime_price(self.model).image_in / 1_000_000.0
+
     def usd(self) -> float:
         return self.realtime_usd() + self.stt_usd() + self.judge_usd
 
@@ -115,6 +123,11 @@ class CallMeter:
             "text_in_tokens": self.text_in,
             "text_out_tokens": self.text_out,
             "cached_tokens": self.cached_audio + self.cached_text,
+            "image_in_tokens": self.image_in,
+            "frames": self.frames,
+            "looks": self.looks,
+            "vision_seconds": round(self.vision_seconds, 1),
+            "vision_usd": round(self.vision_usd(), 6),
             "stt_seconds": round(self.stt_seconds, 1),
             "decisions": self.decisions,
             "tool_calls": self.tool_calls,
@@ -135,6 +148,7 @@ class CallMeter:
             "realtime_usd": round(self.realtime_usd(), 6),
             "stt_usd": round(self.stt_usd(), 6),
             "judge_usd": round(self.judge_usd, 6),
+            "vision_usd_per_camera_minute": round(self.vision_usd() / (self.vision_seconds / 60.0), 5) if self.vision_seconds > 0 else None,
             "usd_per_minute": round(self.usd() / (secs / 60.0), 5),
             "usd_per_hour": round(self.usd() / (secs / 3600.0), 4),
             "ttft_ms_p50": percentile(self.ttft_ms, 0.5),
