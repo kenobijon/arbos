@@ -79,8 +79,27 @@ DUPLEX_VAD_THRESHOLD = 0.65
 # An interrupted agent line shorter than this (words) is dropped from the transcript as a
 # noise-triggered restart; longer cut lines are kept as the humans heard them.
 TRUNCATED_KEEP_WORDS = 6
+# A lone STT token this long that is not a known short reply is almost always ambient-noise
+# gibberish (e.g. "naabustame"), not a real one-word answer like "bet" / "okay".
+NOISE_TOKEN_MIN_LEN = 8
+# Phone / speakerphone mic: filter room noise before VAD so background sound does not become
+# a user turn the model answers.
+DUPLEX_NOISE_REDUCTION = "far_field"
 # Until the owner's machine runs an agentd with the voice link (image roll), tools are off.
 NO_LINK_LINE = "I can't run that for you yet on this call."
+
+# Real brief spoken replies — never treat these as noise, even alone.
+_SPOKEN_SHORT = frozenset(
+    """
+    hi hey hello yo sup yes yeah yep yup ya yah no nope nah ok okay k kk sure bet
+    cool fine good great nice right true thanks thank ty thx bye goodbye later peace
+    what why how when where who huh eh hm hmm mm mmm mhm uh um uhh umm ah oh ooh wow
+    wait stop leave help please sorry go done ready you one two three four five six
+    seven eight nine ten morning night afternoon tonight absolutely definitely
+    tomorrow yesterday alright perfect awesome understood continue cancel deploy
+    restart status update install python whatever interesting
+    """.split()
+)
 
 GOODBYE = {
     "call_cap": "I've hit the spending cap for this call, so I'll drop off now. Everything we said is in the chat.",
@@ -122,6 +141,27 @@ def _norm_words(text: str) -> list[str]:
     return [w for w in "".join(c.lower() if c.isalnum() else " " for c in text).split() if w]
 
 
+def is_noise_transcript(text: str) -> bool:
+    """True when duplex STT almost certainly hallucinated ambient noise, not real speech.
+
+    Keeps real short replies ("bet", "hey", "ok"). Drops one long nonsense token like
+    "naabustame" that VAD+STT invent from background sound.
+    """
+    words = _norm_words(text)
+    if not words:
+        return True
+    # Three or more words: treat as real speech (even if messy).
+    if len(words) >= 3:
+        return False
+    if all(w in _SPOKEN_SHORT or len(w) <= 3 for w in words):
+        return False
+    if len(words) == 1:
+        w = words[0]
+        return w not in _SPOKEN_SHORT and len(w) >= NOISE_TOKEN_MIN_LEN
+    # Two words: noise only when neither is a known short reply and at least one is a long junk token.
+    return all(w not in _SPOKEN_SHORT for w in words) and any(len(w) >= NOISE_TOKEN_MIN_LEN for w in words)
+
+
 def similar_reply(a: str, b: str) -> bool:
     """True when two agent lines are the same idea (interrupt + regenerate, or a near-repeat)."""
     a, b = a.strip(), b.strip()
@@ -160,6 +200,8 @@ class CallState:
     # Last agent transcript line we wrote (skip interrupted + near-duplicate paraphrases).
     last_agent_text: str = ""
     last_agent_at: float = 0.0
+    # When set, the next agent reply in this window is the auto-answer to a noise transcript — drop it.
+    noise_turn_at: float | None = None
     open_work: int = 0
     idle_asked: bool = False
     leaving: bool = False
@@ -291,6 +333,9 @@ class VoiceCall:
             api_key=self.cfg.openai_api_key,
             turn_detection=self.turn_detection_for(self.state.mode),
             input_audio_transcription=AudioTranscription(model=self.cfg.stt_model),
+            # Filter ambient / room noise before VAD so background sound does not become a
+            # user turn (and a chat line the agent answers).
+            input_audio_noise_reduction=DUPLEX_NOISE_REDUCTION if self.state.mode == "duplex" else None,
         )
         self.session = AgentSession(
             llm=self.rt_model,
@@ -477,6 +522,18 @@ class VoiceCall:
             text = (ev.transcript or "").strip()
             if not text:
                 return
+            if is_noise_transcript(text):
+                # Ambient noise became a fake user turn (create_response=True). Do not write it
+                # to the chat, cut any auto-reply, and drop that reply from the transcript.
+                log.info("dropping noise transcript %r", text)
+                self.state.noise_turn_at = time.monotonic()
+                if self.session:
+                    try:
+                        self.session.interrupt()
+                    except Exception as e:
+                        log.warning("interrupt after noise transcript failed: %s", e)
+                return
+            self.state.noise_turn_at = None
             identity = self.state.linked_identity or ""
             speaker = speaker_of(self.participant(identity), identity)
             self.transcript(speaker, text)
@@ -494,6 +551,16 @@ class VoiceCall:
                 return
             text = (item.text_content or "").strip()
             if not text:
+                return
+            # Auto-reply to a dropped noise transcript — never show it in the chat.
+            if self.state.noise_turn_at is not None and time.monotonic() - self.state.noise_turn_at < 4.0:
+                self.state.noise_turn_at = None
+                log.info("dropping agent reply to noise transcript")
+                if self.session and self.agent_speaking():
+                    try:
+                        self.session.interrupt()
+                    except Exception:
+                        pass
                 return
             wrote = self.transcript(None, text, truncated=bool(getattr(item, "interrupted", False)))
             if wrote:
