@@ -749,9 +749,16 @@ struct ChatView: View {
                     minHeight: (visibleRows.isEmpty && !streaming) ? 0 : height,
                     alignment: .bottom
                 )
+                // Fill the short-thread frame so taps on empty chrome hit this view.
+                .contentShape(Rectangle())
             }
             .defaultScrollAnchor(.bottom)
             .scrollDismissesKeyboard(.interactively)
+            // Tap empty chat chrome to dismiss the keyboard and free the transcript.
+            .onTapGesture {
+                composerFocused = false
+                searchFocused = false
+            }
             .modifier(AwayFromBottomReporter(away: $awayFromBottom))
             // Mask stays in the scroll view's bounds — `ignoresSafeArea` on the
             // mask mis-samples the fade when the composer/keyboard inset changes
