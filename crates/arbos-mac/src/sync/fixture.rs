@@ -1990,21 +1990,10 @@ enum Script {
     },
 }
 
-const FLOW_ACK: &str = "On it — cloning RaoFoundation/subtensor and reading it before I summarise.";
-/// (activity, how long it shows)
-const FLOW_ACTIVITIES: &[(&str, u64)] = &[
-    ("Cloning RaoFoundation/subtensor", 1600),
-    ("Reading README.md and Cargo.toml", 1400),
-    ("Counting crates and modules", 1200),
-    ("Scanning the runtime and pallets", 1300),
-];
-const FLOW_MILESTONE: &str =
-    "Cloned. 38 crates, 412 Rust files; the node, the runtime and the pallets are the big three.";
-const FLOW_RESULT: &[&str] = &[
-    "**subtensor** is the Substrate chain behind Bittensor: a node binary, a runtime, and a set of pallets that register subnets, weigh validators and pay out emissions.",
-    "- `node/` boots the chain and talks to peers.\n- `runtime/` wires the pallets into one state machine.\n- `pallets/subtensor/` holds the registration, weights and emission logic — about two thirds of the code.",
-    "Want me to go one level deeper on the emission schedule, or set up a local devnet so you can poke at it?",
-];
+const FLOW_ACK: &str = "Cloning it now.";
+/// (activity, how long it shows) — one line only; no milestone boilerplate for a quick clone.
+const FLOW_ACTIVITIES: &[(&str, u64)] = &[("Cloning RaoFoundation/subtensor", 2200)];
+const FLOW_RESULT: &[&str] = &["Got `subtensor/` on main. What do you want to do with it?"];
 
 const REPLY_DEFAULT: &[&str] = &[
     "Here is how I would approach it.",
@@ -2267,35 +2256,26 @@ async fn run_turn(
                 finish_cancelled(shared, chat_id, work_ix);
                 return;
             }
-            // 3. Milestone: that row turns into a bubble and finishes.
+            // 3. Same row becomes the short conversational result (no milestone bubble).
             with_doc(shared, chat_id, |doc| {
                 let _ = doc.set_field(work_ix, "activity", json!(null));
-                let _ = doc.replace_part(work_ix, 0, &text_part(FLOW_MILESTONE));
-                let _ = doc.set_status(work_ix, MessageStatus::Done);
+                let _ = doc.set_field(
+                    work_ix,
+                    "turn",
+                    serde_json::to_value(TurnKind::Reply).unwrap_or_default(),
+                );
+                let _ = doc.replace_part(work_ix, 0, &empty_text());
                 doc.commit();
             });
-            sleep(Duration::from_millis(500)).await;
-            // 4. The result: a third row that streams in.
-            let result_ix = insert_running_row(shared, chat_id, project_id, TurnKind::Reply);
-            with_doc(shared, chat_id, |doc| {
-                let _ = doc.set_field(result_ix, "activity", json!("Writing the summary"));
-                doc.commit();
-            });
-            sleep(Duration::from_millis(900)).await;
-            with_doc(shared, chat_id, |doc| {
-                let _ = doc.set_field(result_ix, "activity", json!(null));
-                let _ = doc.replace_part(result_ix, 0, &empty_text());
-                doc.commit();
-            });
-            let ok = stream_blocks(shared, chat_id, result_ix, 0, FLOW_RESULT, &stop).await;
+            let ok = stream_blocks(shared, chat_id, work_ix, 0, FLOW_RESULT, &stop).await;
             if ok {
                 with_doc(shared, chat_id, |doc| {
-                    let _ = doc.set_status(result_ix, MessageStatus::Done);
+                    let _ = doc.set_status(work_ix, MessageStatus::Done);
                     doc.commit();
                 });
                 mark_unread_if_hidden(shared, chat_id);
             } else {
-                finish_cancelled(shared, chat_id, result_ix);
+                finish_cancelled(shared, chat_id, work_ix);
             }
             return;
         }

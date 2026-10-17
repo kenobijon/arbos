@@ -260,17 +260,34 @@ impl ProseFilter {
             "this is a factual",
             "this is straightforward",
             "this is an easy",
+            // Routing / plan-aloud (clone and similar act turns).
+            "that's real work",
+            "the instructions say",
+            "the instructions",
+            "prefer act over",
+            "a git clone",
+            "i'll act",
+            "i will act",
+            "i should not use",
+            "ack first",
+            "clone into the project",
         ])
     }
 
     /// Split off the first sentence. Treats ".Austin" (period, no space, capital) as a boundary
-    /// so a glued thought+answer still separates.
+    /// so a glued thought+answer still separates. Skips `e.g.` / `i.e.`-style abbreviations.
     fn split_first_sentence(s: &str) -> Option<(&str, &str)> {
         let bytes = s.as_bytes();
         let mut i = 0;
         while i < bytes.len() {
             let b = bytes[i];
             if b == b'.' || b == b'!' || b == b'?' {
+                // "e.g." / "i.e.": period after a lowercase letter that itself follows a period.
+                if b == b'.' && i >= 2 && bytes[i - 1].is_ascii_lowercase() && bytes[i - 2] == b'.'
+                {
+                    i += 1;
+                    continue;
+                }
                 let after = &s[i + 1..];
                 if after.is_empty() {
                     return None;
@@ -2353,15 +2370,9 @@ impl Agent {
         }
     }
 
-    /// The `route.ack` sentence streams straight into the live row (no filter: it is one
-    /// sentence the model wrote for the user), agent-flow contract §1.
-    async fn write_ack(&self, host: &SharedHost, t: &mut TurnState, delta: &str) {
-        if t.row_closed {
-            self.open_row(host, t, "ack").await;
-        }
-        let mut h = host.lock().await;
-        h.doc
-            .append_text(&t.assistant_msg_id, &t.text_part_id, delta);
+    /// Buffer `route.ack` until it is complete, then strip thought-aloud and write one clean
+    /// sentence (agent-flow contract §1). Streaming raw deltas would flash planning text.
+    async fn write_ack(&self, _host: &SharedHost, t: &mut TurnState, delta: &str) {
         t.ack_text.push_str(delta);
     }
 
@@ -2385,6 +2396,30 @@ impl Agent {
             (None, true) => "act".to_owned(),
             (None, false) => return,
         };
+        // Drop planning / routing thoughts; keep only the user-facing sentence.
+        let cleaned = ProseFilter::strip_thought_prefix(t.ack_text.trim());
+        let cleaned = cleaned.trim().to_owned();
+        if cleaned.is_empty() {
+            t.ack_text.clear();
+            t.ack_split = true;
+            if action != "reply" && !t.row_closed {
+                self.close_row(host, t, "ack").await;
+            }
+            if action == "act" {
+                self.open_row(host, t, "result").await;
+            }
+            tracing::info!(chat_id = %t.chat_id, action, "ack bubble dropped (thought-aloud only)");
+            return;
+        }
+        t.ack_text = cleaned;
+        if t.row_closed {
+            self.open_row(host, t, "ack").await;
+        }
+        {
+            let mut h = host.lock().await;
+            h.doc
+                .append_text(&t.assistant_msg_id, &t.text_part_id, &t.ack_text);
+        }
         t.ack_split = true;
         match action.as_str() {
             "reply" => {}
@@ -3638,6 +3673,17 @@ mod tests {
         assert_eq!(
             ex2.feed("{\"action\":\"act\",\"plan\":\"x\",\"reply\":null}"),
             ""
+        );
+    }
+
+    /// Clone-style routing thoughts in `ack` leave only the user-facing sentence.
+    #[test]
+    fn strip_thought_prefix_keeps_clone_ack() {
+        let raw = "The user wants me to clone a GitHub repo. That's real work — cloning can take a bit and might exceed a quick act if the repo is large. The instructions say prefer act over new only when it fits 8 calls and ~60s, no build. A git clone of one repo is typically one command. I'll act and clone it into the project folder.\n\nI should not use /work itself. Clone into the project folder, e.g. subtensor/.\n\nAck first via route.Cloning RaoFoundation/subtensor into this project now.";
+        let cleaned = ProseFilter::strip_thought_prefix(raw);
+        assert_eq!(
+            cleaned.trim(),
+            "Cloning RaoFoundation/subtensor into this project now."
         );
     }
 }
