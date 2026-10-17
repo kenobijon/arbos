@@ -11,28 +11,47 @@ struct SignInView: View {
     @State private var advanced = false
     @State private var relayUrl = ""
 
+    /// Grok's welcome screen scatters five bots around the title (positions read
+    /// off the App Store shot, as fractions of the screen; the last one sits half
+    /// off the bottom edge). Coloured trees (D74) stand in for the blobs.
+    private static let scatter: [(x: CGFloat, y: CGFloat, color: String)] = [
+        (0.10, 0.15, "green"), (0.86, 0.22, "orange"), (0.11, 0.74, "red"),
+        (0.90, 0.80, "blue"), (0.52, 0.985, "pink"),
+    ]
+
+    private func scatteredTrees(in size: CGSize) -> some View {
+        let trees = TreeAvatars.shared.characters
+        return ZStack {
+            ForEach(Array(Self.scatter.enumerated()), id: \.offset) { i, spot in
+                Group {
+                    if trees.count > i {
+                        let c = trees[(i * 3) % trees.count]
+                        TreeCharacterView(slug: c.slug, size: 64,
+                                          color: TreeAvatars.shared.color(named: spot.color)
+                                              ?? TreeAvatars.shared.defaultColor(forProjectId: c.slug),
+                                          still: true)
+                    } else {
+                        BlobAvatar(color: Theme.palette[i % Theme.palette.count], shape: .blob, size: 64)
+                    }
+                }
+                .position(x: size.width * spot.x, y: size.height * spot.y)
+            }
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
     var body: some View {
         ZStack {
             theme.bg.ignoresSafeArea()
+            GeometryReader { geo in
+                scatteredTrees(in: geo.size)
+            }
+            .ignoresSafeArea()
             ScrollView {
                 VStack(spacing: 16) {
-                    Spacer(minLength: 120)
-                    HStack(spacing: -10) {
-                        let trees = TreeAvatars.shared.characters
-                        if trees.count >= 3 {
-                            // Coloured trees (D74); the approved trio when the bundle has them.
-                            let picks = ["green", "blue", "red"]
-                            ForEach(Array(trees.prefix(3).enumerated()), id: \.element.id) { i, c in
-                                TreeCharacterView(slug: c.slug, size: 54,
-                                                  color: TreeAvatars.shared.color(named: picks[i]) ?? TreeAvatars.shared.defaultColor(forProjectId: c.slug))
-                            }
-                        } else {
-                            BlobAvatar(color: Theme.palette[1], shape: .blob, size: 54)
-                            BlobAvatar(color: Theme.palette[0], shape: .drop, size: 54)
-                            BlobAvatar(color: Theme.palette[2], shape: .cloud, size: 54)
-                        }
-                    }
-                    .padding(.bottom, 10)
+                    // Grok: the title sits at ~38 % of the screen height.
+                    Spacer(minLength: 250)
                     Text("Arbos")
                         .font(.system(size: 30, weight: .semibold))
                         .foregroundStyle(theme.text)
