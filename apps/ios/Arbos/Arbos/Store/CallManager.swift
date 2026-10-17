@@ -486,6 +486,8 @@ final class CallManager: NSObject, ObservableObject {
         phase = .connected
         connectedAt = Date()
         if room.remoteParticipants.isEmpty { armOutgoingTimeout() } else { anyoneJoined = true }
+        // Late joiner: the agent's attribute mirrors its last agent_vision event.
+        for p in room.remoteParticipants.values { handleAttributes(p.attributes, of: p) }
         if let uuid = cxUUID { provider.reportOutgoingCall(with: uuid, connectedAt: Date()) }
         try? await room.localParticipant.setMicrophone(enabled: !muted)
         #if DEBUG
@@ -599,44 +601,51 @@ final class CallManager: NSObject, ObservableObject {
 
     // MARK: Agent camera vision (§11)
 
-    /// The voice worker says the agent is sampling OUR camera: `agent_vision`
-    /// `{participant_identity, seeing}` as a data message (topic `agent_vision`)
-    /// or as the agent participant's `agent_vision` attribute. True only while
-    /// our camera is on; camera off, `seeing:false` or the agent leaving clears it.
+    /// §11: the voice worker says the agent is sampling OUR camera. Canonical
+    /// event = reliable data message on topic `agent_vision` from the agent
+    /// participant `a_<project_id>`:
+    /// `{"type":"agent_vision","participant_identity":"u_<user>","seeing":bool,
+    ///   "agent_name":…,"agent":"a_…","seeing_identities":[…]}`;
+    /// the same JSON sits in the agent's `agent_vision` attribute for late
+    /// joiners (`seeing_identities` is the full state). True only while our
+    /// camera is on; camera off, `seeing:false` or the agent leaving clears it.
     @Published private(set) var agentSeeing = false
     /// Which agent reported it (name for the "<Agent> can see" badge).
     @Published private(set) var seeingAgentName: String?
 
     private func applyAgentVision(_ obj: Any?, from participant: Participant?) {
-        guard let d = obj as? [String: Any] else { return }
-        let payload = (d["agent_vision"] as? [String: Any]) ?? d
-        guard d["type"] as? String == "agent_vision" || d["agent_vision"] != nil || payload["seeing"] != nil else { return }
-        let target = payload["participant_identity"] as? String
-        let me = room.localParticipant.identity?.stringValue
-        guard target == nil || target == me else { return }
-        let seeing = (payload["seeing"] as? Bool) ?? ((payload["seeing"] as? NSNumber)?.boolValue ?? false)
-        agentSeeing = seeing && cameraOn
-        if seeing {
-            let identity = participant?.identity?.stringValue ?? ""
-            seeingAgentName = (payload["agent_name"] as? String)
+        guard let d = obj as? [String: Any], d["type"] as? String == "agent_vision" else { return }
+        guard let me = room.localParticipant.identity?.stringValue else { return }
+        let target = d["participant_identity"] as? String
+        let seeingIds = (d["seeing_identities"] as? [String]) ?? []
+        let seeingFlag = (d["seeing"] as? Bool) ?? ((d["seeing"] as? NSNumber)?.boolValue ?? false)
+        let seeingMe: Bool
+        if target == me {
+            seeingMe = seeingFlag
+        } else if !seeingIds.isEmpty || target != nil {
+            // An event about someone else, or the attribute mirror: the full state decides.
+            seeingMe = seeingIds.contains(me)
+        } else {
+            return
+        }
+        agentSeeing = seeingMe && cameraOn
+        if seeingMe {
+            let identity = (d["agent"] as? String) ?? participant?.identity?.stringValue ?? ""
+            seeingAgentName = (d["agent_name"] as? String)
                 ?? tiles.first { $0.id == identity }?.person.displayName
                 ?? call?.agents.first?.displayName
         }
     }
 
     fileprivate func handleData(_ data: Data, topic: String, from participant: RemoteParticipant?) {
-        guard topic == "agent_vision" || topic.isEmpty,
-              let obj = try? JSONSerialization.jsonObject(with: data) else { return }
+        guard topic == "agent_vision", let obj = try? JSONSerialization.jsonObject(with: data) else { return }
         applyAgentVision(obj, from: participant)
     }
 
     fileprivate func handleAttributes(_ attributes: [String: String], of participant: Participant) {
-        guard let raw = attributes["agent_vision"] else { return }
-        if raw == "true" || raw == "false" {
-            applyAgentVision(["seeing": raw == "true"], from: participant)
-        } else if let data = raw.data(using: .utf8), let obj = try? JSONSerialization.jsonObject(with: data) {
-            applyAgentVision(obj, from: participant)
-        }
+        guard let raw = attributes["agent_vision"], let data = raw.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) else { return }
+        applyAgentVision(obj, from: participant)
     }
 
     func toggleSpeaker() {
@@ -995,7 +1004,10 @@ extension CallManager: RoomDelegate {
     }
 
     nonisolated func room(_ room: LiveKit.Room, participantDidConnect participant: RemoteParticipant) {
-        Task { @MainActor in self.refreshTiles() }
+        Task { @MainActor in
+            self.refreshTiles()
+            self.handleAttributes(participant.attributes, of: participant)
+        }
     }
 
     nonisolated func room(_ room: LiveKit.Room, participantDidDisconnect participant: RemoteParticipant) {
