@@ -133,6 +133,16 @@ pub enum SyncEvent {
     Models(Vec<String>),
     /// The user's machine (`status.box` at user level).
     Machine(Machine),
+    /// A chat room finished its backfill (ROWS_DONE): its doc is current.
+    ChatSynced(Id),
+    /// The project's workspace on the box (`GET /machine` `workspaces[]` or the
+    /// project doc `status.workspace`): running or not.
+    Workspace {
+        project_id: Id,
+        running: bool,
+    },
+    /// D82: the greeting row exists in this chat (just written, or found).
+    GreetingWritten(Id),
     /// Workspace lifecycle for one project (`status.workspace` or relay `STATUS`).
     ProjectStatus {
         project_id: Id,
@@ -319,6 +329,14 @@ pub enum ClientCommand {
         text: String,
         call_id: Option<String>,
     },
+    /// D82: the agent's greeting in a brand-new project's chat (once per chat).
+    Greeting {
+        chat_id: Id,
+        project_id: Id,
+        agent_name: String,
+    },
+    /// D82: refresh the registry and the machine now (first-login fast lane).
+    PollNow,
     OpenChat {
         chat_id: Id,
     },

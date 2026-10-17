@@ -254,6 +254,9 @@ pub struct AppState {
     typing_sent_at: HashMap<Id, u64>,
     /// Set by a fresh sign-in: with no projects yet, create "Home" and land in it.
     first_project_pending: bool,
+    /// D82: the first-login screen while the relay creates the computer and the
+    /// first agent; None on every ordinary launch (`onboarding.rs`).
+    pub onboarding: Option<crate::onboarding::Onboarding>,
     pub projects: Vec<Project>,
     /// Picker contents; empty = the fixture's static list.
     pub models: Vec<String>,
@@ -501,6 +504,14 @@ impl AppState {
             ))
             .map(Arc::new),
             first_project_pending: false,
+            onboarding: std::env::var("ARBOS_SHOW")
+                .ok()
+                .filter(|v| v == "onboarding")
+                .map(|_| {
+                    crate::onboarding::Onboarding::demo(
+                        &std::env::var("ARBOS_ONBOARDING_STAGE").unwrap_or_default(),
+                    )
+                }),
             new_chat_open: false,
             people_query: String::new(),
             people_results: Vec::new(),
@@ -750,6 +761,7 @@ impl AppState {
                 self.maybe_prompt_notifications();
                 // Land in a chat: if this account has no project yet, make "Home".
                 self.first_project_pending = true;
+                self.begin_onboarding(cx);
                 cx.notify();
             }
             SyncEvent::Account(account) => {
@@ -1000,11 +1012,29 @@ impl AppState {
                         self.select_project(id, cx);
                     }
                 }
+                self.onboarding_registry_seen();
+                self.onboarding_tick(cx);
                 cx.notify();
             }
             SyncEvent::Machine(machine) => {
                 self.machine = machine;
+                self.onboarding_tick(cx);
                 cx.notify();
+            }
+            SyncEvent::ChatSynced(chat_id) => {
+                self.onboarding_chat_synced(&chat_id);
+                self.onboarding_tick(cx);
+            }
+            SyncEvent::Workspace {
+                project_id,
+                running,
+            } => {
+                self.onboarding_workspace(&project_id, running);
+                self.onboarding_tick(cx);
+            }
+            SyncEvent::GreetingWritten(chat_id) => {
+                self.onboarding_greeting_written(&chat_id);
+                self.onboarding_tick(cx);
             }
             SyncEvent::RestoreSelection {
                 project_id,
@@ -1108,6 +1138,7 @@ impl AppState {
                 }
                 self.chats.insert(project_id.clone(), chats);
                 self.enforce_tab(&project_id);
+                self.onboarding_tick(cx);
                 cx.notify();
             }
             SyncEvent::Voices { default, voices } => {
@@ -1180,6 +1211,9 @@ impl AppState {
                     self.notify_for_message(&chat_id, m, false, false, true);
                 }
                 self.request_thumbnails(&chat_id);
+                if self.onboarding.is_some() {
+                    self.onboarding_tick(cx);
+                }
                 cx.emit(AppEvent::TranscriptChanged { chat_id });
                 cx.notify();
             }
@@ -1591,7 +1625,7 @@ impl AppState {
 
     // ----- commands --------------------------------------------------------
 
-    fn command(&self, cmd: ClientCommand) {
+    pub(crate) fn command(&self, cmd: ClientCommand) {
         let _ = self.commands.send(cmd);
     }
 
@@ -1891,6 +1925,7 @@ impl AppState {
                 pending: true,
                 parts,
                 hidden_parts: Vec::new(),
+                greeting: false,
             });
         if answer {
             let question_id = self.open_plain_question_id(&chat_id);
@@ -2059,6 +2094,7 @@ impl AppState {
                     text: text.clone(),
                 }],
                 hidden_parts: Vec::new(),
+                greeting: false,
             });
         self.command(ClientCommand::Answer {
             chat_id: chat_id.clone(),

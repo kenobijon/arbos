@@ -524,7 +524,34 @@ impl SyncSource for RelaySource {
             });
             let _ = events.send(SyncEvent::Link(Link::Connecting));
 
-            if shared.creds.read().unwrap().is_some() {
+            // Rig hook (D82 first-login recordings): `ARBOS_TEST_TOKENS=<file>` holds a
+            // `/auth/token` response for a test account; it is taken as a fresh sign-in
+            // regardless of what the keychain holds, and is not kept in the keychain.
+            let test_tokens = std::env::var("ARBOS_TEST_TOKENS")
+                .ok()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                .and_then(|v| {
+                    *shared.creds.write().unwrap() = None;
+                    let creds = shared.apply_token_response(&v).ok()?;
+                    credentials::clear(&shared.http_url);
+                    Some(creds)
+                });
+            if let Some(creds) = test_tokens {
+                if let Some(user) = creds.user.clone() {
+                    let _ = shared.events.send(SyncEvent::Account(Some(AccountView {
+                        id: user.id,
+                        login: user.login,
+                        name: user.name,
+                        avatar_url: user.avatar_url,
+                        ..AccountView::default()
+                    })));
+                }
+                let _ = shared.events.send(SyncEvent::Paired {
+                    device_id: creds.device_id,
+                });
+                start_after_pairing(&shared);
+            } else if shared.creds.read().unwrap().is_some() {
                 start_after_pairing(&shared);
             } else {
                 let _ = events.send(SyncEvent::NeedsPairing {
@@ -1462,9 +1489,68 @@ fn write_system_line(shared: &Arc<Shared>, chat_id: &str, text: String, call_id:
         pending: false,
         parts: vec![Part::Text { id: new_id(), text }],
         hidden_parts: Vec::new(),
+        greeting: false,
     };
     let _ = doc.insert_message(&msg);
     doc.commit();
+}
+
+/// D82: the agent's first line in a brand-new project's chat, written by the
+/// device that created the project. Idempotent: a chat that already holds a
+/// `greeting: true` row (ours or another device's) gets nothing.
+fn write_greeting(shared: &Arc<Shared>, chat_id: &str, project_id: &str, agent_name: &str) -> bool {
+    let docs = shared.docs.lock().unwrap();
+    let Some(doc) = docs.get(chat_id) else {
+        return false;
+    };
+    if doc.read_all().iter().any(|m| m.greeting) {
+        return true;
+    }
+    let msg = Message {
+        id: new_id(),
+        chat_id: chat_id.to_string(),
+        role: Role::Assistant,
+        sender: format!("agent:{project_id}"),
+        sender_handle: None,
+        sender_name: Some(agent_name.to_string()),
+        sender_avatar: None,
+        sender_avatar_color: None,
+        mentions: Vec::new(),
+        status: MessageStatus::Done,
+        turn: None,
+        decision: None,
+        subagent_id: None,
+        subagent_name: None,
+        handoff_messages: None,
+        in_reply_to: None,
+        routine_name: None,
+        sender_icon: None,
+        reply_to: None,
+        asked_by_handle: None,
+        owner_handle: None,
+        usage: None,
+        return_contract: None,
+        waiting_user: false,
+        waiting_approval: false,
+        model: None,
+        effort: None,
+        created_at: now_ms(),
+        completed_at: Some(now_ms()),
+        call_id: None,
+        activity: None,
+        pending: false,
+        parts: vec![Part::Text {
+            id: new_id(),
+            text: format!(
+                "Hi, I’m {agent_name}. Your computer is ready — what should we build first?"
+            ),
+        }],
+        hidden_parts: Vec::new(),
+        greeting: true,
+    };
+    let _ = doc.insert_message(&msg);
+    doc.commit();
+    true
 }
 
 fn people_error(err: &anyhow::Error) -> String {
@@ -2160,12 +2246,14 @@ fn apply_project_doc_status(shared: &Shared, project_id: &str) {
         Some(_) | None => {}
     }
     if let Some(ws) = status.get("workspace").and_then(Value::as_object) {
-        if let Some(state) = ws
-            .get("state")
-            .and_then(Value::as_str)
-            .and_then(box_state_from_word)
-        {
-            set_project_state(shared, project_id, state, None);
+        if let Some(word) = ws.get("state").and_then(Value::as_str) {
+            let _ = shared.events.send(SyncEvent::Workspace {
+                project_id: project_id.to_string(),
+                running: word == "running",
+            });
+            if let Some(state) = box_state_from_word(word) {
+                set_project_state(shared, project_id, state, None);
+            }
         }
     }
 }
@@ -2218,6 +2306,20 @@ async fn refresh_machine(shared: &Arc<Shared>) {
         if class.is_some() {
             m.class = class;
         }
+        if let Some(spec) = spec_obj {
+            m.cpu = spec.get("cpu").and_then(Value::as_u64).map(|v| v as u32);
+            m.mem_gib = spec
+                .get("mem_gib")
+                .and_then(Value::as_u64)
+                .map(|v| v as u32);
+        }
+        if let Some(img) = value
+            .pointer("/image/current")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            m.image = Some(img.to_string());
+        }
         if let Some(v) = value.get("spend_today_usd").and_then(Value::as_f64) {
             m.spend_today_usd = v;
         }
@@ -2238,6 +2340,10 @@ async fn refresh_machine(shared: &Arc<Shared>) {
             ) else {
                 continue;
             };
+            let _ = shared.events.send(SyncEvent::Workspace {
+                project_id: id.to_string(),
+                running: word == "running",
+            });
             if let Some(state) = box_state_from_word(word) {
                 set_project_state(shared, id, state, None);
             }
@@ -2472,6 +2578,7 @@ async fn run_session(
                             emit_project_doc(shared, project_id);
                         } else {
                             emit_snapshot(shared, key);
+                            let _ = shared.events.send(SyncEvent::ChatSynced(key.to_string()));
                         }
                     }
                     FrameType::Ack => {
@@ -2909,6 +3016,7 @@ async fn send_message(
             pending: false,
             parts,
             hidden_parts: Vec::new(),
+            greeting: false,
         };
         let _ = doc.insert_message(&msg);
         let payload = match &answer {
@@ -3605,6 +3713,25 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             call_id,
         } => {
             write_system_line(shared, &chat_id, text, call_id);
+        }
+        ClientCommand::Greeting {
+            chat_id,
+            project_id,
+            agent_name,
+        } => {
+            if write_greeting(shared, &chat_id, &project_id, &agent_name) {
+                emit_snapshot(shared, &chat_id);
+                let _ = shared.events.send(SyncEvent::GreetingWritten(chat_id));
+            }
+        }
+        ClientCommand::PollNow => {
+            // First login (D82): the 10–15 s polls are too slow for stage changes
+            // that take seconds; the onboarding timer asks every 1.5 s instead.
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let _ = refresh_registry(&shared).await;
+                refresh_machine(&shared).await;
+            });
         }
         ClientCommand::BlockUser { handle } => {
             let shared = shared.clone();

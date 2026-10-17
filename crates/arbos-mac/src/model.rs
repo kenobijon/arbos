@@ -1170,6 +1170,10 @@ pub struct Message {
     /// Parts the box flagged `hidden: true` (tool details): Details drawer only.
     #[serde(default)]
     pub hidden_parts: Vec<Part>,
+    /// D82: the agent's canned first line, written once by the device that created
+    /// the project; never read as the user's words.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub greeting: bool,
 }
 
 impl Message {
@@ -1777,6 +1781,11 @@ pub struct Machine {
     /// Hosted machines never sleep (`machine.always_on`): no waking/asleep
     /// states in the UI, machine time is included rather than billed to credits.
     pub always_on: bool,
+    /// `spec.cpu` / `spec.mem_gib` and `image.current` as reported (D82
+    /// first-login detail lines: "Starting a 4-core machine with 8 GB of memory").
+    pub cpu: Option<u32>,
+    pub mem_gib: Option<u32>,
+    pub image: Option<String>,
 }
 
 impl Machine {

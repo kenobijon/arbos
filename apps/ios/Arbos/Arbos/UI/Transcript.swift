@@ -460,6 +460,10 @@ struct RowView: View {
 
     private var maxBubble: CGFloat { max(200, width - Theme.bubbleInset) }
 
+    private var reportsGreetingFrame: Bool {
+        model.firstLogin != nil && model.messages(of: chatId).first(where: { $0.greeting })?.id == row.messageId
+    }
+
     var body: some View {
         VStack(spacing: 4) {
             bubble
@@ -548,6 +552,17 @@ struct RowView: View {
                 .padding(.horizontal, Theme.bubbleHPad)
                 .padding(.vertical, Theme.bubbleVPad)
                 .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
+                .background {
+                    // D82: while the first-login terminal morphs into this bubble it
+                    // needs the bubble's exact frame; only the greeting row reports.
+                    if reportsGreetingFrame {
+                        GeometryReader { g in
+                            Color.clear
+                                .onAppear { model.greetingBubbleFrame = g.frame(in: .global) }
+                                .onChange(of: g.frame(in: .global)) { _, f in model.greetingBubbleFrame = f }
+                        }
+                    }
+                }
                 .frame(maxWidth: maxBubble, alignment: .leading)
                 Spacer(minLength: 0)
             }

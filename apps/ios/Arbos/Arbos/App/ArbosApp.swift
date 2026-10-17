@@ -28,12 +28,24 @@ struct RootView: View {
     }
 
     var body: some View {
-        Group {
+        ZStack {
             if model.isPaired {
                 HomeView()
             } else {
                 SignInView()
             }
+            // D82: first sign-in on a fresh account — the terminal screen sits over
+            // the shell until the computer, agent and first chat exist, then morphs
+            // into the greeting bubble of the chat underneath.
+            if model.isPaired, let firstLogin = model.firstLogin {
+                FirstLoginView(state: firstLogin)
+                    .zIndex(10)
+                    .transition(.asymmetric(insertion: .identity, removal: .opacity))
+            }
+        }
+        .animation(.easeInOut(duration: 0.25), value: model.firstLogin == nil)
+        .onAppear {
+            if DebugHooks.show == "onboarding" { model.demoFirstLogin(stage: DebugHooks.onboardingStage) }
         }
         .environment(\.theme, theme)
         .preferredColorScheme(preferredScheme)
@@ -41,7 +53,10 @@ struct RootView: View {
         .alert(item: $model.notice) { n in
             Alert(title: Text("Arbos"), message: Text(n.text), dismissButton: .default(Text("OK")))
         }
-        .sheet(isPresented: $model.needsProfileSetup) {
+        // Profile setup waits for the first-login screen (D82): the terminal and the
+        // greeting hand-off come first, then the name/handle sheet, then the primer.
+        .sheet(isPresented: Binding(get: { model.needsProfileSetup && model.firstLogin == nil },
+                                    set: { model.needsProfileSetup = $0 })) {
             ProfileEditView(onboarding: true)
                 .environmentObject(model)
                 .environment(\.theme, theme)
@@ -105,6 +120,7 @@ struct RootView: View {
                           projectId: model.path.last.map { if case .chat(_, let p) = $0 { return p } else { return "" } })
         }
         .onChange(of: model.isPaired, initial: true) { _, paired in schedulePrimer(paired) }
+        .onChange(of: model.firstLogin == nil) { _, _ in schedulePrimer(model.isPaired) }
         .onChange(of: model.needsProfileSetup) { _, needed in if !needed { schedulePrimer(model.isPaired) } }
         .onChange(of: push.status) { _, _ in schedulePrimer(model.isPaired) }
         .onChange(of: scenePhase) { _, phase in
@@ -124,10 +140,11 @@ struct RootView: View {
 
     /// Ask once, a beat after the home screen appears (never in the fixture or a live demo).
     private func schedulePrimer(_ paired: Bool) {
-        guard paired, !model.isFixture, !DebugHooks.liveDemo, DebugHooks.show == nil, push.shouldShowPrimer, !showPrimer else { return }
+        guard paired, !model.isFixture, !DebugHooks.liveDemo, DebugHooks.show == nil, push.shouldShowPrimer, !showPrimer,
+              model.firstLogin == nil else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-            // Never on top of another sheet (feedback, settings, profile setup…).
-            if push.shouldShowPrimer, model.isPaired, !feedback.isPresented, !model.needsProfileSetup { showPrimer = true }
+            // Never on top of another sheet (feedback, settings, profile setup…) or the first-login screen.
+            if push.shouldShowPrimer, model.isPaired, !feedback.isPresented, !model.needsProfileSetup, model.firstLogin == nil { showPrimer = true }
         }
     }
 

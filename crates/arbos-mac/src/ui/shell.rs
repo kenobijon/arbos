@@ -27,6 +27,7 @@ use crate::ui::header;
 use crate::ui::icons::icon;
 use crate::ui::local::{LocalEvent, LocalPanel};
 use crate::ui::motion::{ease_out_cubic, PulseClock, COMPOSER_DROP_MS, SHAKE_MS};
+use crate::ui::onboarding;
 use crate::ui::people;
 use crate::ui::profiles;
 use crate::ui::routines::{RoutinesEvent, RoutinesPanel};
@@ -2503,6 +2504,17 @@ impl Render for Shell {
         }
         if let Some(notices) = self.render_notices(cx) {
             root = root.child(notices);
+        }
+        // D82: first sign-in — the terminal screen covers the shell until the
+        // computer, agent and first chat exist, then morphs into the greeting.
+        if let Some(onboarding) = self.state.read(cx).onboarding.clone() {
+            root = root.child(onboarding::render(
+                self,
+                &self.state,
+                &onboarding,
+                window,
+                cx,
+            ));
         }
         root.into_any_element()
     }

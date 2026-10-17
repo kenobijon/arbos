@@ -144,6 +144,9 @@ impl SyncSource for FixtureSource {
                     always_on: std::env::var("ARBOS_FIXTURE_ALWAYS_ON")
                         .map(|v| v != "0")
                         .unwrap_or(true),
+                    cpu: Some(4),
+                    mem_gib: Some(8),
+                    image: Some("arbos-agent-0.1.7".into()),
                 }),
             });
             seed_docs(&shared);
@@ -355,6 +358,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 doc.commit();
             }
         }
+        ClientCommand::Greeting { chat_id, .. } => {
+            let _ = shared.events.send(SyncEvent::GreetingWritten(chat_id));
+        }
+        ClientCommand::PollNow => {}
         ClientCommand::Send {
             chat_id,
             message_id,
@@ -487,6 +494,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                             text: text.clone(),
                         }],
                         hidden_parts: Vec::new(),
+                        greeting: false,
                     };
                     let _ = doc.insert_message(&msg);
                     let _ = doc.push_command(
@@ -1312,6 +1320,7 @@ fn send_user(
                 pending: true,
                 parts,
                 hidden_parts: Vec::new(),
+                greeting: false,
             };
             let _ = doc.insert_message(&msg);
             let _ = doc.push_command(
@@ -1615,6 +1624,7 @@ fn run_routine_now(shared: &Arc<Shared>, project_id: &str, routine_id: &str) {
                     text: routine.prompt.clone(),
                 }],
                 hidden_parts: Vec::new(),
+                greeting: false,
             });
             doc.commit();
         }
@@ -2205,6 +2215,7 @@ async fn run_turn(
                 message: "Arbos is deciding…".into(),
             }],
             hidden_parts: Vec::new(),
+            greeting: false,
         };
         let ix = doc.insert_message(&msg).unwrap_or(0);
         doc.commit();
@@ -2742,6 +2753,7 @@ fn insert_running_row(
                 message: String::new(),
             }],
             hidden_parts: Vec::new(),
+            greeting: false,
         };
         let ix = doc.insert_message(&msg).unwrap_or(0);
         doc.commit();
@@ -2912,6 +2924,7 @@ async fn run_outcome_turn(
             pending: false,
             parts: vec![empty_text()],
             hidden_parts: Vec::new(),
+            greeting: false,
         };
         msg.parts.push(Part::Status {
             id: new_id(),
@@ -3447,6 +3460,7 @@ impl Seeder<'_> {
             pending: false,
             parts: extra,
             hidden_parts: Vec::new(),
+            greeting: false,
         });
     }
 
@@ -3487,6 +3501,7 @@ impl Seeder<'_> {
             pending: false,
             parts,
             hidden_parts: Vec::new(),
+            greeting: false,
         });
     }
 }
@@ -3531,6 +3546,7 @@ fn project_message(chat_id: &str, project: &Project, text: &str, t: u64) -> Mess
             text: text.into(),
         }],
         hidden_parts: Vec::new(),
+        greeting: false,
     }
 }
 
@@ -4171,6 +4187,7 @@ fn human_message(chat_id: &str, who: &Person, text: &str, at: u64) -> Message {
         pending: false,
         parts: vec![text_part(text)],
         hidden_parts: Vec::new(),
+        greeting: false,
     }
 }
 
@@ -4686,6 +4703,7 @@ async fn agent_reply(
                 message: format!("{} is reading…", agent.name),
             }],
             hidden_parts: Vec::new(),
+            greeting: false,
         };
         let ix = doc.insert_message(&msg).unwrap_or(0);
         doc.commit();
@@ -4809,6 +4827,7 @@ fn system_message(chat_id: &str, text: &str) -> Message {
             text: text.to_string(),
         }],
         hidden_parts: Vec::new(),
+        greeting: false,
     }
 }
 

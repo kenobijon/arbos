@@ -299,7 +299,12 @@ final class RelayAPI {
             alwaysOn: alwaysOn,
             held: held,
             machineTodayUsd: (m["machine_today_usd"] as? NSNumber)?.doubleValue ?? 0,
-            reported: true
+            reported: true,
+            rawState: wire,
+            cpu: (spec["cpu"] as? NSNumber)?.intValue,
+            memGib: (spec["mem_gib"] as? NSNumber)?.intValue,
+            image: ((m["image"] as? [String: Any])?["current"] as? String)
+                ?? (spec["class"] as? String)
         )
     }
 

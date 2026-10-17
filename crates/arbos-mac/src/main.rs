@@ -5,6 +5,7 @@ mod audio;
 mod auth;
 mod calls;
 mod model;
+mod onboarding;
 mod sync;
 mod ui;
 mod update;

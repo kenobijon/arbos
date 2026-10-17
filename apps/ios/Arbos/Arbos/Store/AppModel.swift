@@ -152,6 +152,13 @@ final class AppModel: ObservableObject {
     @Published private(set) var models: [String] = []
     @Published var machine: Machine = .unknown
     @Published private(set) var machineBusy = false
+    /// D82: the first-login screen while the relay creates the computer and first
+    /// agent; nil for every ordinary launch. Driven by `FirstLogin.swift`.
+    @Published var firstLogin: FirstLogin?
+    /// Where the first assistant bubble (the greeting) landed, in global
+    /// coordinates — the morph target of the first-login terminal.
+    @Published var greetingBubbleFrame: CGRect?
+    var firstLoginTask: Task<Void, Never>?
     /// `machine.always_on` as last reported by `GET /me` (nil = field absent).
     private var meAlwaysOn: Bool?
     /// Navigation: home → chat. Shared so menus anywhere can open a chat.
@@ -365,6 +372,17 @@ final class AppModel: ObservableObject {
         if creds != nil {
             startAfterPairing()
         }
+        #if DEBUG
+        // Rig hook (D82 first-login recordings): `ARBOS_TEST_TOKENS=<file>` holds a
+        // `/auth/token` response for a test account; taken as a fresh sign-in.
+        if creds == nil, let path = env["ARBOS_TEST_TOKENS"], !path.isEmpty,
+           let data = FileManager.default.contents(atPath: path),
+           let v = try? JSONSerialization.jsonObject(with: data),
+           let (toks, who) = try? RelayAPI.parseTokens(v, relayUrl: endpoint.httpUrl) {
+            // Unsigned simulator builds have no Keychain: keep the rig session in memory.
+            adopt(tokens: toks, user: who, persist: false)
+        }
+        #endif
         Task { await probeAuthMode() }
         PushManager.shared.visibleChatId = { [weak self] in
             guard let self, self.appActive else { return nil }
@@ -495,6 +513,19 @@ final class AppModel: ObservableObject {
         } catch {
             notice = Notice(text: "Could not write the call line: \(error.localizedDescription)")
         }
+    }
+
+    /// D82 first login: the live doc of a chat (nil until its room exists).
+    func liveDoc(_ chatId: Id) -> ChatDoc? { docs[chatId] }
+
+    /// D82 first login: `POST /projects` for the account's first agent.
+    func createFirstProject(name: String) async throws {
+        _ = try await api.createProject(name: name)
+    }
+
+    /// D82 first login: `POST /machine/start` from the Retry block.
+    func startMachineQuietly() async {
+        try? await api.startMachine()
     }
 
     /// Opening a chat: is a call on there? (GET /chats/{id}/call)
@@ -645,15 +676,21 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func adopt(tokens toks: AuthTokens, user who: AuthUser?) {
+    private func adopt(tokens toks: AuthTokens, user who: AuthUser?, persist: Bool = true) {
         tokens = toks
         if let who { user = who }
-        do { try Keychain.storeAuth(toks) } catch {
-            notice = Notice(text: "Session kept in memory only: \(error.localizedDescription)")
+        if persist {
+            do { try Keychain.storeAuth(toks) } catch {
+                notice = Notice(text: "Session kept in memory only: \(error.localizedDescription)")
+            }
         }
         let wasPaired = credentials != nil
         credentials = DeviceCredentials(relayUrl: toks.relayUrl, deviceId: toks.deviceId, deviceToken: toks.accessToken)
-        if !wasPaired { startAfterPairing() }
+        if !wasPaired {
+            // A sign-in through the browser (not a token refresh): a possible first login.
+            if who != nil { beginFirstLogin() }
+            startAfterPairing()
+        }
     }
 
     /// Single-flight refresh; false when the relay rejected the refresh token
@@ -789,6 +826,7 @@ final class AppModel: ObservableObject {
                     notice = Notice(text: "Token kept in memory only: \(error.localizedDescription)")
                 }
                 credentials = creds
+                beginFirstLogin()
                 startAfterPairing()
             } catch {
                 pairingError = (error as? RelayError)?.isUnauthorized == true
@@ -828,6 +866,7 @@ final class AppModel: ObservableObject {
         link = .connecting
         connectors = ConnectorsView()
         connectorsBusy = false
+        endFirstLogin()
     }
 
     private func startAfterPairing() {
@@ -837,6 +876,7 @@ final class AppModel: ObservableObject {
         if let store, projects.isEmpty, peopleChats.isEmpty {
             loadStoreKV(store)
         }
+        if projects.isEmpty { resumeFirstLoginIfPending() }
         hookPush()
         Task {
             if let ids = try? await api.models(), !ids.isEmpty {
@@ -907,6 +947,7 @@ final class AppModel: ObservableObject {
                     ensureRoom(projectId: c.projectId, key: c.id, roomChat: c.id)
                 }
             }
+            firstLoginRegistryUpdated()
         } catch {
             if (error as? RelayError)?.isUnauthorized == true {
                 // Token revoked or relay re-initialised: pair again.
@@ -1116,6 +1157,7 @@ final class AppModel: ObservableObject {
             } else {
                 self.emitSnapshot(key)
                 self.caughtUp.insert(key)
+                self.firstLoginChatSynced(key)
             }
         }
         room.onAcked = { [weak self] in
