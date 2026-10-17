@@ -12,7 +12,15 @@ struct FirstLoginView: View {
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    let state: FirstLogin
+    /// The state at creation; the body reads the live value from the model so
+    /// stage changes land inside the timeline closure on the next frame.
+    let initial: FirstLogin
+
+    init(state: FirstLogin) {
+        initial = state
+    }
+
+    private var state: FirstLogin { model.firstLogin ?? initial }
 
     private static let cardSize = CGSize(width: 256, height: 172)
     private static let cardRadius: CGFloat = 22
@@ -21,8 +29,9 @@ struct FirstLoginView: View {
         GeometryReader { geo in
             let size = geo.size
             let cardCenter = CGPoint(x: size.width / 2, y: size.height * 0.40)
-            let target = bubbleTarget(in: size)
             TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: reduceMotion && state.stage != .finishing)) { timeline in
+                let state = self.state
+                let target = bubbleTarget(in: size)
                 let now = timeline.date
                 let p = state.finishProgress(at: now)
                 let fin = p.map { Terminal.ease($0) }
@@ -30,9 +39,9 @@ struct FirstLoginView: View {
                     theme.bg
                         .opacity(fin.map { 1 - Terminal.ramp($0, 0.6, 1.0) } ?? 1)
                         .ignoresSafeArea()
-                    terminal(now: now, p: fin, cardCenter: cardCenter, target: target)
+                    terminal(state: state, now: now, p: fin, cardCenter: cardCenter, target: target)
                     if state.stage != .finishing {
-                        textBlock(cardCenter: cardCenter)
+                        textBlock(state: state, cardCenter: cardCenter)
                             .frame(width: size.width)
                             .position(x: size.width / 2, y: cardCenter.y + Self.cardSize.height / 2 + 72)
                     }
@@ -45,7 +54,7 @@ struct FirstLoginView: View {
 
     // MARK: Terminal
 
-    private func terminal(now: Date, p: Double?, cardCenter: CGPoint, target: CGRect) -> some View {
+    private func terminal(state: FirstLogin, now: Date, p: Double?, cardCenter: CGPoint, target: CGRect) -> some View {
         let t = reduceMotion ? 2.0 : now.timeIntervalSince(state.startedAt)
         let loopRect = CGRect(x: cardCenter.x - Self.cardSize.width / 2, y: cardCenter.y - Self.cardSize.height / 2,
                               width: Self.cardSize.width, height: Self.cardSize.height)
@@ -76,7 +85,7 @@ struct FirstLoginView: View {
                 }
             }
             if greetingAlpha > 0 {
-                Text(greetingText)
+                Text(greetingText(state))
                     .font(.system(size: Theme.body))
                     .lineSpacing(Theme.bodyLineSpacing)
                     .foregroundStyle(theme.text)
@@ -90,7 +99,7 @@ struct FirstLoginView: View {
         .opacity(wholeAlpha)
     }
 
-    private var greetingText: String {
+    private func greetingText(_ state: FirstLogin) -> String {
         "Hi, I’m \(state.agentName). Your computer is ready — what should we build first?"
     }
 
@@ -107,7 +116,7 @@ struct FirstLoginView: View {
     // MARK: Hero text / error block
 
     @ViewBuilder
-    private func textBlock(cardCenter: CGPoint) -> some View {
+    private func textBlock(state: FirstLogin, cardCenter: CGPoint) -> some View {
         if state.stage == .failed {
             VStack(spacing: 6) {
                 HStack(spacing: 6) {
