@@ -78,15 +78,19 @@ struct CallScreen: View {
                     .padding(.horizontal, 16)
                 }
                 .padding(.top, 8)
-                Spacer(minLength: 12)
                 if useGroupLayout {
-                    grid
+                    // Fill the space between header and controls so a tall group
+                    // grid shrinks on short phones instead of overflowing under the
+                    // Dynamic Island and clipping the hang-up row.
+                    grid.frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
+                    Spacer(minLength: 12)
                     oneToOne
+                    Spacer(minLength: 12)
                 }
-                Spacer(minLength: 12)
                 controls.padding(.bottom, 40)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             if let err = calls.error {
                 VStack {
                     Spacer()
@@ -213,21 +217,34 @@ struct CallScreen: View {
     // MARK: Group
 
     private var grid: some View {
-        VStack(spacing: 14) {
-            LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
-                ForEach(calls.tiles) { tile in
-                    personTile(tile.person, videoTrack: tile.videoTrack, cameraOn: tile.cameraOn, micOn: tile.micOn, speaking: tile.isSpeaking)
+        let tileCount = calls.tiles.count + waitingExpected.count + (calls.cameraOn ? 1 : 0)
+        return VStack(spacing: 14) {
+            GeometryReader { geo in
+                let cols = 2
+                let rows = max(1, (tileCount + cols - 1) / cols)
+                let gap: CGFloat = 10
+                let hPad: CGFloat = 20
+                let tileW = max(0, geo.size.width - hPad * 2 - gap) / CGFloat(cols)
+                let idealH = tileW * 4 / 3
+                let fitH = max(0, geo.size.height - gap * CGFloat(rows - 1)) / CGFloat(rows)
+                let tileH = max(56, min(idealH, fitH))
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: gap), GridItem(.flexible(), spacing: gap)], spacing: gap) {
+                    ForEach(calls.tiles) { tile in
+                        personTile(tile.person, videoTrack: tile.videoTrack, cameraOn: tile.cameraOn, micOn: tile.micOn, speaking: tile.isSpeaking, height: tileH)
+                    }
+                    ForEach(waitingExpected) { person in
+                        personTile(person, videoTrack: nil, cameraOn: false, micOn: true, speaking: false, height: tileH)
+                    }
+                    if calls.cameraOn {
+                        selfPreview(cornerRadius: 20)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: tileH)
+                            .overlay(alignment: .bottomLeading) { AgentSeesBadge(compact: false).padding(8) }
+                    }
                 }
-                ForEach(waitingExpected) { person in
-                    personTile(person, videoTrack: nil, cameraOn: false, micOn: true, speaking: false)
-                }
-                if calls.cameraOn {
-                    selfPreview(cornerRadius: 20)
-                        .aspectRatio(3 / 4, contentMode: .fit)
-                        .overlay(alignment: .bottomLeading) { AgentSeesBadge(compact: false).padding(8) }
-                }
+                .padding(.horizontal, hPad)
+                .frame(width: geo.size.width, height: geo.size.height, alignment: .center)
             }
-            .padding(.horizontal, 20)
             if let groupTitle {
                 Text(groupTitle).font(.system(size: 22, weight: .semibold)).foregroundStyle(theme.text)
             }
@@ -240,17 +257,19 @@ struct CallScreen: View {
                 Text("\(calls.tiles.count + 1) in the call").font(.system(size: Theme.small)).foregroundStyle(theme.muted)
             }
         }
+        .padding(.top, 12)
     }
 
-    private func personTile(_ person: CallPerson, videoTrack: VideoTrack?, cameraOn: Bool, micOn: Bool, speaking: Bool) -> some View {
-        ZStack(alignment: .bottomLeading) {
+    private func personTile(_ person: CallPerson, videoTrack: VideoTrack?, cameraOn: Bool, micOn: Bool, speaking: Bool, height: CGFloat) -> some View {
+        let avatar = min(64, max(28, height * 0.45))
+        return ZStack(alignment: .bottomLeading) {
             RoundedRectangle(cornerRadius: 20, style: .continuous).fill(theme.card)
                 .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous)
                     .strokeBorder(speaking ? theme.online : theme.fieldBorder, lineWidth: speaking ? 2 : 1))
             if let track = videoTrack, cameraOn {
                 SwiftUIVideoView(track, layoutMode: .fill).clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
             } else {
-                CallPersonAvatar(person: person, size: 64).frame(maxWidth: .infinity, maxHeight: .infinity)
+                CallPersonAvatar(person: person, size: avatar).frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             HStack(spacing: 5) {
                 if !micOn { Image(systemName: "mic.slash.fill").font(.system(size: 10, weight: .bold)) }
@@ -261,7 +280,9 @@ struct CallScreen: View {
             .background(Capsule().fill(.black.opacity(0.45)))
             .padding(8)
         }
-        .aspectRatio(3 / 4, contentMode: .fit)
+        .frame(maxWidth: .infinity)
+        .frame(height: height)
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 
     /// Our camera: the live track, or a quiet placeholder until it is published.
