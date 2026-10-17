@@ -153,7 +153,12 @@ def speaker_of(participant: rtc.RemoteParticipant | None, identity: str) -> dict
 
 
 def label_of(speaker: dict) -> str:
-    return f"@{speaker['handle']}" if speaker.get("handle") else (speaker.get("name") or "someone")
+    """How to speak about someone: display name, else bare handle (never @handle)."""
+    name = (speaker.get("name") or "").strip()
+    if name:
+        return name
+    handle = (speaker.get("handle") or "").strip()
+    return handle or "someone"
 
 
 def _norm_words(text: str) -> list[str]:
@@ -507,7 +512,7 @@ class VoiceCall:
         assert self.session
         humans = self.info.get("humans") or []
         owner = next((h for h in humans if h.get("role") == "owner"), None)
-        owner_label = f"@{owner['handle']}" if owner and owner.get("handle") else "the owner"
+        owner_label = label_of(owner) if owner else "the owner"
         if self.state.mode == "group":
             line = f"{self.agent_name}, {owner_label}'s agent, has joined and can hear this call."
             self.event("system", text=line)

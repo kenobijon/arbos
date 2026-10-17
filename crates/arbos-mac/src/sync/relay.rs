@@ -2871,18 +2871,12 @@ async fn send_message(
             } else {
                 "user".into()
             },
-            sender_handle: if in_people {
-                me.as_ref().map(|u| u.login.clone())
-            } else {
-                None
-            },
-            sender_name: if in_people {
-                me.as_ref()
-                    .map(|u| u.name.clone())
-                    .filter(|n| !n.is_empty())
-            } else {
-                None
-            },
+            // Always attach the author's display name so agents address them by name, not @handle.
+            sender_handle: me.as_ref().map(|u| u.login.clone()),
+            sender_name: me
+                .as_ref()
+                .map(|u| u.name.clone())
+                .filter(|n| !n.is_empty()),
             sender_avatar: if in_people {
                 me.as_ref().map(|u| u.avatar_url.clone())
             } else {
