@@ -1275,6 +1275,12 @@ pub struct BoxHelloBody {
     pub version: Option<String>,
     #[serde(default)]
     pub proto: Option<u32>,
+    /// Git commit the agentd binary was built from (image.yml bakes `ARBOS_AGENTD_SHA`).
+    #[serde(default)]
+    pub sha: Option<String>,
+    /// Sandbox image version (`ARBOS_IMAGE_VERSION`).
+    #[serde(default)]
+    pub image: Option<String>,
 }
 
 /// One project as the box sees it: settings, chats, and the pushes queued for it.
@@ -1306,7 +1312,13 @@ pub async fn box_hello(
     let Principal::Box { user_id } = &principal else {
         return Err((StatusCode::FORBIDDEN, "box only".into()));
     };
-    tracing::info!(user = %user_id, version = ?b.version, "box hello");
+    tracing::info!(user = %user_id, version = ?b.version, sha = ?b.sha, image = ?b.image, "box hello");
+    let _ = state.db.set_box_agentd(
+        user_id,
+        b.sha.as_deref(),
+        b.version.as_deref(),
+        b.image.as_deref(),
+    );
     if b.proto.unwrap_or(arbos_core::PROTO_VERSION) != arbos_core::PROTO_VERSION {
         return Err((
             StatusCode::CONFLICT,

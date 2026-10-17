@@ -107,6 +107,12 @@ RUN userdel -r node \
  && chown root:arbos /opt/arbos/shared && chmod 755 /opt/arbos/shared \
  && chmod 1777 /run/arbos
 
+# The commit and image version agentd reports in its box hello (relay admin `agentd.sha`).
+ARG AGENTD_SHA=unknown
+ARG IMAGE_VERSION=unknown
+ENV ARBOS_AGENTD_SHA=$AGENTD_SHA \
+    ARBOS_IMAGE_VERSION=$IMAGE_VERSION
+
 ENV HOME=/home/daytona \
     ARBOS_STATE_DIR=/work/.arbos \
     ARBOS_PORT=7788 \

@@ -62,6 +62,9 @@ jobs:
           tags: |
             ${{ env.IMAGE }}:${{ steps.v.outputs.version }}
             ${{ env.IMAGE }}:sha-${{ github.sha }}
+          build-args: |
+            AGENTD_SHA=${{ github.sha }}
+            IMAGE_VERSION=${{ steps.v.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

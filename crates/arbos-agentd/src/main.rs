@@ -321,7 +321,15 @@ async fn boot() -> Result<()> {
         let hello = http_client
             .post(format!("{}/box/hello", cfg.relay_url))
             .bearer_auth(&cfg.box_token)
-            .json(&json!({ "url": format!("http://127.0.0.1:{}", cfg.port), "version": env!("CARGO_PKG_VERSION"), "proto": arbos_core::PROTO_VERSION }))
+            .json(&json!({
+                "url": format!("http://127.0.0.1:{}", cfg.port),
+                "version": env!("CARGO_PKG_VERSION"),
+                "proto": arbos_core::PROTO_VERSION,
+                // Baked by image.yml (ARBOS_AGENTD_SHA / ARBOS_IMAGE_VERSION): which commit this
+                // box runs, so the relay admin can tell what is shipped.
+                "sha": std::env::var("ARBOS_AGENTD_SHA").ok().filter(|v| !v.is_empty() && v != "unknown"),
+                "image": std::env::var("ARBOS_IMAGE_VERSION").ok().filter(|v| !v.is_empty() && v != "unknown"),
+            }))
             .send()
             .await;
         match hello {

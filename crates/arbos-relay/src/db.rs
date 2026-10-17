@@ -11,6 +11,16 @@ use serde::{Deserialize, Serialize};
 use arbos_core::ids::now_ms;
 use arbos_core::skill::Skill;
 
+/// What a user's box reported in its last `/box/hello`.
+#[derive(Debug, Clone, Serialize)]
+pub struct BoxAgentd {
+    pub user_id: String,
+    pub sha: Option<String>,
+    pub version: Option<String>,
+    pub image: Option<String>,
+    pub reported_at: i64,
+}
+
 #[derive(Clone)]
 pub struct Db(Arc<Mutex<Connection>>);
 
@@ -89,6 +99,10 @@ CREATE TABLE IF NOT EXISTS wake_jobs (
 CREATE TABLE IF NOT EXISTS push_queue (
   id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL, kind TEXT NOT NULL, payload TEXT NOT NULL,
   created_at INTEGER NOT NULL, delivered_at INTEGER
+);
+-- What each user's box reported in its last `/box/hello` (agentd commit, crate version, image).
+CREATE TABLE IF NOT EXISTS box_agentd (
+  user_id TEXT PRIMARY KEY, sha TEXT, version TEXT, image TEXT, reported_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS timings (
   id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL, kind TEXT NOT NULL, ms INTEGER NOT NULL,
@@ -1505,6 +1519,44 @@ impl Db {
                 c.execute("UPDATE push_queue SET delivered_at = ?2 WHERE id = ?1", params![id, now_ms()])?;
             }
             Ok(items)
+        })
+    }
+
+    /// Remember what a box's agentd reported in its hello (commit, version, image).
+    pub fn set_box_agentd(
+        &self,
+        user_id: &str,
+        sha: Option<&str>,
+        version: Option<&str>,
+        image: Option<&str>,
+    ) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO box_agentd(user_id, sha, version, image, reported_at) VALUES (?1,?2,?3,?4,?5)
+                 ON CONFLICT(user_id) DO UPDATE SET sha=excluded.sha, version=excluded.version, image=excluded.image, reported_at=excluded.reported_at",
+                params![user_id, sha, version, image, now_ms()],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// `(sha, version, image, reported_at)` of one user's box, when it ever said hello.
+    pub fn box_agentd(&self, user_id: &str) -> Result<Option<BoxAgentd>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT user_id, sha, version, image, reported_at FROM box_agentd WHERE user_id = ?1",
+                params![user_id],
+                |r| Ok(BoxAgentd { user_id: r.get(0)?, sha: r.get(1)?, version: r.get(2)?, image: r.get(3)?, reported_at: r.get(4)? }),
+            )
+            .optional()
+        })
+    }
+
+    pub fn all_box_agentd(&self) -> Result<Vec<BoxAgentd>> {
+        self.with(|c| {
+            let mut st = c.prepare("SELECT user_id, sha, version, image, reported_at FROM box_agentd ORDER BY reported_at")?;
+            let rows = st.query_map([], |r| Ok(BoxAgentd { user_id: r.get(0)?, sha: r.get(1)?, version: r.get(2)?, image: r.get(3)?, reported_at: r.get(4)? }))?;
+            rows.collect()
         })
     }
 
