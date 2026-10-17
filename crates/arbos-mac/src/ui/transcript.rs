@@ -328,6 +328,15 @@ impl Transcript {
             self.list.reset(self.rows.len());
             self.pinned_to_bottom = true;
             self.list.scroll_to_end();
+            // `ARBOS_SCROLL_UP=1`: open at the top instead (screenshot rig; the
+            // GUI session accepts no synthetic wheel events).
+            if std::env::var("ARBOS_SCROLL_UP").is_ok_and(|v| v == "1") {
+                self.pinned_to_bottom = false;
+                self.list.scroll_to(gpui::ListOffset {
+                    item_ix: 0,
+                    offset_in_item: px(0.0),
+                });
+            }
             cx.notify();
             return;
         }
