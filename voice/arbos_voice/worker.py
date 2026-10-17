@@ -70,6 +70,9 @@ log = logging.getLogger("arbos-voice")
 ATTENTION_WINDOW_S = 20.0
 # Group listeners: speech must last this long before it counts (and before it can barge in).
 GROUP_BARGE_MIN_SPEECH_S = 0.35
+# 1:1 (duplex) server VAD activation (0–1). Higher = less sensitive: ambient noise and
+# speaker echo must be louder before they count as speech and cut the agent mid-sentence.
+DUPLEX_VAD_THRESHOLD = 0.65
 # Until the owner's machine runs an agentd with the voice link (image roll), tools are off.
 NO_LINK_LINE = "I can't run that for you yet on this call."
 
@@ -306,7 +309,7 @@ class VoiceCall:
             silence_ms = 300
         return ServerVad(
             type="server_vad",
-            threshold=0.5,
+            threshold=DUPLEX_VAD_THRESHOLD,
             prefix_padding_ms=200,
             silence_duration_ms=silence_ms,
             create_response=True,
