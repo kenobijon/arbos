@@ -985,7 +985,9 @@ class VoiceCall:
         """Dismiss ourselves from the call after the model has said goodbye."""
         if self.state.leaving:
             return "Already leaving."
-        self.state.goodbye_said = True
+        # The model usually says its goodbye before calling; when it calls first, finish() says it.
+        last = self.state.last_reply_ended_at
+        self.state.goodbye_said = self.agent_speaking() or (last is not None and time.monotonic() - last < 4.0)
         self.spawn(self.finish("asked"))
         return "You are leaving the call now. Do not say anything else."
 
