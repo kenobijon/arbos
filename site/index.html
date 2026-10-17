@@ -1,30 +1,29 @@
 <!doctype html>
-<html lang="en" class="dark">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Arbos — an always-on agent for every project</title>
-  <meta name="description" content="Arbos gives every project its own always-on agent on your own cloud machine. Chat from your Mac and iPhone; we run the machine, the inference, and the updates.">
-  <meta name="theme-color" content="#0a0a0a">
+  <meta name="description" content="Arbos gives every project its own always-on agent on your own cloud machine. Message or call it from your Mac and iPhone; we run the machine, the inference, and the updates.">
+  <meta name="theme-color" content="#FCFCFC" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#141414" media="(prefers-color-scheme: dark)">
   <meta property="og:title" content="Arbos — an always-on agent for every project">
-  <meta property="og:description" content="Every project gets its own always-on agent, working in your own cloud machine while you chat from Mac and iPhone.">
+  <meta property="og:description" content="Every project gets its own always-on agent, working in your own cloud machine while you message or call it from Mac and iPhone.">
   <meta property="og:url" content="https://arbos.life/">
   <meta property="og:type" content="website">
   <meta property="og:image" content="https://arbos.life/assets/og/arbos-social.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="Arbos — nine coloured tree agents beside the Arbos wordmark">
+  <meta property="og:image:alt" content="Arbos — a row of coloured agent avatars with initials beside the Arbos wordmark">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Arbos — an always-on agent for every project">
-  <meta name="twitter:description" content="Every project gets its own always-on agent, working in your own cloud machine while you chat from Mac and iPhone.">
+  <meta name="twitter:description" content="Every project gets its own always-on agent, working in your own cloud machine while you message or call it from Mac and iPhone.">
   <meta name="twitter:image" content="https://arbos.life/assets/og/arbos-social.png">
   <link rel="icon" href="/assets/logo/favicon.svg" type="image/svg+xml">
   <link rel="alternate icon" href="/assets/logo/favicon.ico" sizes="16x16 32x32 48x48">
   <link rel="apple-touch-icon" href="/assets/logo/app-icon-256.png">
-  <link rel="preload" href="/assets/fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/style.css">
   <script src="/main.js" defer></script>
-  <script src="/assets/js/avatars.js" defer></script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -94,7 +93,7 @@
         <span class="word word-mark"><svg class="h1-mark" viewBox="0 0 64 64" aria-hidden="true"><use href="#arbos-mark"/></svg></span>
         <span class="word">Arbos</span>
       </h1>
-      <p class="lede" data-fade>Every project gets an always-on agent on your own cloud machine. Hand it real work from your Mac or iPhone, and it comes back finished.</p>
+      <p class="lede" data-fade>Every project gets an always-on agent on your own cloud machine. Message it or call it from your Mac or iPhone, and it comes back with the work finished.</p>
       <div class="hero-actions" data-fade>
         <a class="btn btn-primary" href="https://relay.arbos.life/download/mac">
           <svg class="apple" viewBox="0 0 17 20" aria-hidden="true"><use href="#apple-logo"/></svg>Download for Mac
@@ -105,53 +104,13 @@
     </div>
 
     <div class="hero-frame-wrap" data-frame>
-      <div class="hero-frame media-frame" aria-label="The Arbos Mac app: a project list on the left, a chat with the Website project in the middle" role="img">
-        <div class="app">
-          <aside class="app-rail">
-            <div class="app-traffic" aria-hidden="true"><i></i><i></i><i></i></div>
-            <div class="app-rail-title">Projects</div>
-            <ul class="app-projects">
-              <li><span class="avatar avatar-sm" data-avatar="oak" data-color="green" data-static aria-label="Home"></span>Home</li>
-              <li class="is-active"><span class="avatar avatar-sm" data-avatar="pine" data-color="blue" data-state="working" aria-label="Website, working"></span>Website<span class="pj-state working" title="working"></span></li>
-              <li><span class="avatar avatar-sm" data-avatar="fractal" data-color="cyan" aria-label="Research"></span>Research<span class="pj-state"></span></li>
-              <li><span class="avatar avatar-sm" data-avatar="maple" data-color="amber" data-static aria-label="Books"></span>Books</li>
-              <li><span class="avatar avatar-sm" data-avatar="palm" data-color="orange" data-static aria-label="Travel"></span>Travel</li>
-              <li><span class="avatar avatar-sm" data-avatar="cherry" data-color="pink" data-static aria-label="Hiring"></span>Hiring</li>
-            </ul>
-            <div class="app-rail-foot">
-              <span class="machine-dot"></span>Your machine · running
-            </div>
-          </aside>
-          <div class="app-main">
-            <div class="app-tabs">
-              <span class="tab is-active">Launch checklist</span>
-              <span class="tab">Pricing page copy</span>
-              <span class="tab">Lighthouse</span>
-              <span class="tab tab-plus" aria-hidden="true">+</span>
-            </div>
-            <div class="app-thread">
-              <div class="msg msg-user">Can you get the launch checklist done before I land? Ping Research for the numbers.</div>
-              <div class="msg msg-agent with-avatar"><span class="avatar avatar-sm msg-avatar" data-avatar="pine" data-color="blue" aria-label="Website"></span><div>
-                <p>On it. I asked Research for the latest benchmark numbers and they replied in two minutes. The checklist is in <code>/work/website/launch.md</code>.</p>
-                <p>Three items are done; the last one needs you:</p>
-                <ul>
-                  <li>Pricing page copy rewritten and committed</li>
-                  <li>Lighthouse at 97 on the new hero</li>
-                  <li>Release notes drafted</li>
-                </ul>
-              </div></div>
-              <div class="card approval">
-                <div class="approval-head"><span class="approval-tag">Approval</span>Send the launch email to the beta list?</div>
-                <div class="approval-body">To 412 people · from you · via Gmail</div>
-                <div class="approval-actions"><span class="chip chip-solid">Approve</span><span class="chip">Edit</span></div>
-              </div>
-              <div class="msg msg-user">Approve. And book the Tuesday flight through Travel.</div>
-              <div class="msg msg-agent working-line with-avatar"><span class="avatar avatar-sm msg-avatar" data-avatar="palm" data-color="orange" data-state="working" aria-label="Travel, working"></span><span class="working-dots" aria-hidden="true"><i></i><i></i><i></i></span>Working with Travel…</div>
-            </div>
-            <div class="app-composer"><span>Message Website…</span><span class="composer-mic" aria-hidden="true"></span></div>
-          </div>
-        </div>
-      </div>
+      <figure class="hero-shot">
+        <picture>
+          <source srcset="/assets/app/mac-chat-dark.webp" media="(prefers-color-scheme: dark)">
+          <img class="shot-mac" src="/assets/app/mac-chat-light.webp" width="2320" height="1440" alt="The Arbos Mac app: a list of agents and people on the left, the Arbos agent's chat with tabs on the right" fetchpriority="high">
+        </picture>
+        <img class="shot-phone" src="/assets/app/iphone-chat-dark.webp" width="840" height="1824" alt="The same agent on the iPhone: one chat with the Comms agent, a hand-off line that says Messaged Affine" loading="lazy">
+      </figure>
     </div>
   </div>
 </section>
@@ -161,10 +120,10 @@
   <div class="container-wide">
     <div class="statement-card" data-reveal>
       <div class="statement-copy">
-        <h2>Message projects like teammates</h2>
-        <p>Give work to a project the way you would to a colleague, from your Mac or your iPhone. The project agent takes it from start to finish, keeps the context on how you work, and comes back when it needs your approval.</p>
+        <h2>Message agents like teammates</h2>
+        <p>Every agent is one conversation, the same on your Mac and your iPhone. Hand it work the way you would to a colleague; it keeps the context, messages the other agents it needs, and comes back when it needs your approval.</p>
       </div>
-      <span class="statement-avatar avatar" data-avatar="baobab" data-color="green" aria-label="Baobab, a project agent"></span>
+      <img class="statement-shot" src="/assets/app/iphone-home-dark.webp" width="840" height="1824" alt="The iPhone home screen: a list of agents and people with coloured initials avatars" loading="lazy">
     </div>
   </div>
 </section>
@@ -172,8 +131,8 @@
 <!-- Features -->
 <section id="features">
   <div class="container section-head" data-reveal>
-    <h2>Work with many projects at once</h2>
-    <p>Create a project, give it a task, and add another when the work grows — one on the website, one on research, one on the books. They run in parallel on your machine, talk to each other when it helps, and keep working while your laptop is closed.</p>
+    <h2>Work with many agents at once</h2>
+    <p>Create an agent, give it a task, and add another when the work grows — one on the website, one on research, one on the books. They run in parallel on your machine, talk to each other when it helps, and keep working while your laptop is closed.</p>
   </div>
   <div class="container-wide feature-grid">
     <article class="feature-card" data-reveal>
@@ -181,8 +140,8 @@
       <p>Every user gets one cloud computer. It starts when you send a message and stops when you leave, so there is nothing to run and nothing to pay for while it sleeps.</p>
       <div class="illus illus-machine" aria-hidden="true">
         <div class="mini-panel">
-          <div class="mini-row mini-head"><span>Your machine</span><span class="pill-state on">Running</span></div>
-          <div class="mini-row"><span>Projects</span><span class="mini-avatars"><span class="avatar avatar-xs" data-avatar="pine" data-color="blue" data-static aria-label="Website"></span><span class="avatar avatar-xs" data-avatar="fractal" data-color="cyan" data-static aria-label="Research"></span><span class="avatar avatar-xs" data-avatar="maple" data-color="amber" data-static aria-label="Books"></span><span class="avatar avatar-xs" data-avatar="palm" data-color="orange" data-static aria-label="Travel"></span></span></div>
+          <div class="mini-row mini-head"><span>Your machine</span><span class="pill-state on">Awake</span></div>
+          <div class="mini-row"><span>Agents</span><span class="mini-avatars"><span class="ini c4 ini-xs" aria-label="Affine">A</span><span class="ini c0 ini-xs" aria-label="Comms">C</span><span class="ini c2 ini-xs" aria-label="Hyper">H</span><span class="ini c6 ini-xs" aria-label="Launch week">LW</span></span></div>
           <div class="mini-row"><span>Started</span><span class="mini-muted">12 s ago, on your first message</span></div>
           <div class="mini-row"><span>Sleeps</span><span class="mini-muted">20 min after you go quiet</span></div>
           <div class="mini-bar"><i></i></div>
@@ -190,31 +149,49 @@
       </div>
     </article>
     <article class="feature-card" data-reveal>
-      <h3>Chat from your Mac and your iPhone</h3>
-      <p>One thread, two devices. Start a task at your desk, approve the result from your pocket. Voice memos in, finished work out.</p>
-      <div class="illus illus-devices" aria-hidden="true">
-        <div class="dev-mac">
-          <div class="dev-bar"><i></i><i></i><i></i></div>
-          <div class="dev-line w60"></div><div class="dev-line w80 dim"></div><div class="dev-line w40 dim"></div>
-          <div class="dev-bubble">Draft the Q3 update for the board.</div>
-        </div>
-        <div class="dev-phone">
-          <div class="dev-notch"></div>
-          <div class="dev-line w70 dim"></div><div class="dev-line w50 dim"></div>
-          <div class="dev-bubble dev-bubble-agent"><span class="avatar avatar-xs" data-avatar="mushroom" data-color="rose" aria-label="Agent"></span>Done. Two charts and a one-page summary are in the thread.</div>
-          <div class="dev-home"></div>
+      <h3>Call your agents, and your people</h3>
+      <p>Voice and video calls from the chat header. Call an agent one-to-one and talk it through a task; in a group call it listens to everyone and speaks up only when it has something to add.</p>
+      <div class="illus illus-call" aria-hidden="true">
+        <div class="call-card">
+          <div class="call-head"><span class="ini c4 ini-lg" aria-label="Affine">A</span><div><div class="call-name">Affine</div><div class="call-sub">Voice call · 04:12</div></div></div>
+          <div class="call-wave"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+          <div class="call-actions"><span class="call-btn">Mute</span><span class="call-btn">Video</span><span class="call-btn call-end">End</span></div>
         </div>
       </div>
     </article>
     <article class="feature-card" data-reveal>
-      <h3>Projects stay separate, and still talk</h3>
-      <p>Each project has its own directory, memory, and history on your machine. Put a few in one group chat and they hand work between themselves while you watch.</p>
+      <h3>Agents remember everything</h3>
+      <p>Each agent keeps its whole history — chats, tool calls, hand-offs — and picks what matters before every reply, so you never repeat yourself. Each agent also gets its own voice: pick one per agent.</p>
+      <div class="illus illus-memory" aria-hidden="true">
+        <div class="mem-card">
+          <div class="mem-line"><span class="mem-k">Recalled</span>Acme signs annual only; Dana approves (Sep 3)</div>
+          <div class="mem-line"><span class="mem-k">Recalled</span>Pricing page shipped at 03:12 with the new hero</div>
+          <div class="mem-line mem-dim"><span class="mem-k">Skipped</span>42 older threads</div>
+          <div class="voice-row"><span class="ini c4 ini-xs" aria-label="Affine">A</span><span>Voice</span><span class="voice-pick">Cedar <span class="chev">⌄</span></span></div>
+        </div>
+      </div>
+    </article>
+    <article class="feature-card" data-reveal>
+      <h3>Agents talk to each other</h3>
+      <p>An agent can message another agent, and the hand-off shows up in your thread. Put a few in one group chat and they pass work between themselves while you watch.</p>
       <div class="illus illus-group" aria-hidden="true">
-        <div class="relay-line"><span class="avatar avatar-sm" data-avatar="pine" data-color="blue" aria-label="Website"></span>Asking Research…</div>
-        <div class="relay-line"><span class="avatar avatar-sm" data-avatar="fractal" data-color="cyan" aria-label="Research"></span>Looping in Books…</div>
-        <div class="relay-line"><span class="avatar avatar-sm" data-avatar="maple" data-color="amber" aria-label="Books"></span>Sending to Website…</div>
-        <div class="relay-line"><span class="avatar avatar-sm" data-avatar="palm" data-color="orange" aria-label="Travel"></span>Pinging Travel…</div>
-        <div class="av-stack"><span class="avatar" data-avatar="pine" data-color="blue" data-static aria-label="Website"></span><span class="avatar" data-avatar="fractal" data-color="cyan" data-static aria-label="Research"></span><span class="avatar" data-avatar="maple" data-color="amber" data-static aria-label="Books"></span><span class="avatar" data-avatar="palm" data-color="orange" data-static aria-label="Travel"></span></div>
+        <div class="relay-line"><span class="ini c0 ini-sm" aria-label="Comms">C</span>Messaged <strong>Affine</strong></div>
+        <div class="relay-line"><span class="ini c4 ini-sm" aria-label="Affine">A</span>Messaged <strong>Hyper</strong></div>
+        <div class="relay-line"><span class="ini c2 ini-sm" aria-label="Hyper">H</span>Replied to <strong>Comms</strong></div>
+        <div class="av-stack"><span class="ini c0" aria-label="Comms">C</span><span class="ini c4" aria-label="Affine">A</span><span class="ini c2" aria-label="Hyper">H</span><span class="ini c6" aria-label="Launch week">LW</span></div>
+      </div>
+    </article>
+    <article class="feature-card" data-reveal>
+      <h3>Profiles for everyone</h3>
+      <p>Tap a person, an agent or a group to open its page: who it is, what it works on, the members, the groups you share. People you invite see the same project chats on their own devices.</p>
+      <div class="illus illus-profile" aria-hidden="true">
+        <div class="profile-card">
+          <span class="ini c2 ini-xl" aria-label="Studio">S</span>
+          <div class="profile-name">Studio</div>
+          <div class="profile-sub">Agent · 4 members</div>
+          <div class="profile-members"><span class="ini c4 ini-sm" aria-label="Unconst">U</span><span class="ini c0 ini-sm" aria-label="Sam Rivera">SR</span><span class="ini c4 ini-sm" aria-label="Affine">A</span><span class="ini c0 ini-sm" aria-label="Comms">C</span></div>
+          <div class="profile-row"><span>Shared groups</span><span class="mini-muted">Launch week · Hyper</span></div>
+        </div>
       </div>
     </article>
     <article class="feature-card" data-reveal>
@@ -222,7 +199,7 @@
       <p>Anything that leaves the machine — an email, a Slack post, a payment — shows up as a draft first. Approve it, edit it, or say no. Logins and keys stay in an encrypted vault the agent never sees.</p>
       <div class="illus illus-approve" aria-hidden="true">
         <div class="card approval approval-lg">
-          <div class="approval-head"><span class="avatar avatar-sm" data-avatar="willow" data-color="teal" aria-label="Inbox"></span><span class="approval-tag">Approval</span>Reply to Dana about the annual plan?</div>
+          <div class="approval-head"><span class="ini c0 ini-sm" aria-label="Comms">C</span><span class="approval-tag">Approval</span>Reply to Dana about the annual plan?</div>
           <div class="approval-quote">“Annual works for us. I’ll send the order form today — same terms as last quarter.”</div>
           <div class="approval-body">Gmail · as you · to dana@acme.com</div>
           <div class="approval-actions"><span class="chip chip-solid">Approve</span><span class="chip">Edit</span><span class="chip chip-ghost">Not now</span></div>
@@ -236,16 +213,16 @@
 <section id="projects">
   <div class="container usecases">
     <div class="usecases-copy" data-reveal>
-      <h2>Give each project a job</h2>
-      <div class="chips" role="tablist" aria-label="Example projects" data-chips>
-                <button class="chip-tab is-active" role="tab" aria-selected="true" data-chip="inbox" data-avatar-slug="willow" data-avatar-color="teal"><span class="avatar avatar-xs" data-avatar="willow" data-color="teal" data-static aria-hidden="true"></span>Inbox</button>
-        <button class="chip-tab" role="tab" aria-selected="false" data-chip="research" data-avatar-slug="fractal" data-avatar-color="cyan"><span class="avatar avatar-xs" data-avatar="fractal" data-color="cyan" data-static aria-hidden="true"></span>Research</button>
-        <button class="chip-tab" role="tab" aria-selected="false" data-chip="website" data-avatar-slug="pine" data-avatar-color="blue"><span class="avatar avatar-xs" data-avatar="pine" data-color="blue" data-static aria-hidden="true"></span>Website</button>
-        <button class="chip-tab" role="tab" aria-selected="false" data-chip="books" data-avatar-slug="maple" data-avatar-color="amber"><span class="avatar avatar-xs" data-avatar="maple" data-color="amber" data-static aria-hidden="true"></span>Books</button>
-        <button class="chip-tab" role="tab" aria-selected="false" data-chip="hiring" data-avatar-slug="cherry" data-avatar-color="pink"><span class="avatar avatar-xs" data-avatar="cherry" data-color="pink" data-static aria-hidden="true"></span>Hiring</button>
-        <button class="chip-tab" role="tab" aria-selected="false" data-chip="travel" data-avatar-slug="palm" data-avatar-color="orange"><span class="avatar avatar-xs" data-avatar="palm" data-color="orange" data-static aria-hidden="true"></span>Travel</button>
-        <button class="chip-tab" role="tab" aria-selected="false" data-chip="oncall" data-avatar-slug="cactus" data-avatar-color="red"><span class="avatar avatar-xs" data-avatar="cactus" data-color="red" data-static aria-hidden="true"></span>On-call</button>
-        <button class="chip-tab" role="tab" aria-selected="false" data-chip="chief" data-avatar-slug="sequoia" data-avatar-color="violet"><span class="avatar avatar-xs" data-avatar="sequoia" data-color="violet" data-static aria-hidden="true"></span>Chief of staff</button>
+      <h2>Give each agent a job</h2>
+      <div class="chips" role="tablist" aria-label="Example agents" data-chips>
+        <button class="chip-tab is-active" role="tab" aria-selected="true" data-chip="inbox" data-name="Inbox" data-ci="1"><span class="ini c1 ini-xs" aria-label="Inbox">I</span>Inbox</button>
+        <button class="chip-tab" role="tab" aria-selected="false" data-chip="research" data-name="Research" data-ci="1"><span class="ini c1 ini-xs" aria-label="Research">R</span>Research</button>
+        <button class="chip-tab" role="tab" aria-selected="false" data-chip="website" data-name="Website" data-ci="2"><span class="ini c2 ini-xs" aria-label="Website">W</span>Website</button>
+        <button class="chip-tab" role="tab" aria-selected="false" data-chip="books" data-name="Books" data-ci="6"><span class="ini c6 ini-xs" aria-label="Books">B</span>Books</button>
+        <button class="chip-tab" role="tab" aria-selected="false" data-chip="hiring" data-name="Hiring" data-ci="0"><span class="ini c0 ini-xs" aria-label="Hiring">H</span>Hiring</button>
+        <button class="chip-tab" role="tab" aria-selected="false" data-chip="travel" data-name="Travel" data-ci="6"><span class="ini c6 ini-xs" aria-label="Travel">T</span>Travel</button>
+        <button class="chip-tab" role="tab" aria-selected="false" data-chip="oncall" data-name="On-call" data-ci="2"><span class="ini c2 ini-xs" aria-label="On-call">OC</span>On-call</button>
+        <button class="chip-tab" role="tab" aria-selected="false" data-chip="chief" data-name="Chief of staff" data-ci="0"><span class="ini c0 ini-xs" aria-label="Chief of staff">CO</span>Chief of staff</button>
       </div>
       <div class="usecase-panels">
         <p class="usecase" data-panel="inbox"><strong>Clear your inbox overnight.</strong> Reads every thread through your Gmail connector, drafts replies in your voice, files what needs no answer, and leaves a short review list for the morning.</p>
@@ -255,43 +232,48 @@
         <p class="usecase" data-panel="hiring" hidden><strong>Run the hiring loop.</strong> Screens applications against the brief, schedules through your calendar, and writes the debrief after each round.</p>
         <p class="usecase" data-panel="travel" hidden><strong>Handle the trip.</strong> Finds the flights and hotel that fit your rules, holds them as drafts, books on approval, and drops the itinerary in the thread.</p>
         <p class="usecase" data-panel="oncall" hidden><strong>Watch production.</strong> A routine checks the dashboards every ten minutes, triages alerts, reproduces the bug on its machine, and wakes you only for the real ones.</p>
-        <p class="usecase" data-panel="chief" hidden><strong>Chief of staff.</strong> Sits in a group chat with your other projects, keeps the weekly plan, chases what is late, and writes the Friday summary.</p>
+        <p class="usecase" data-panel="chief" hidden><strong>Chief of staff.</strong> Sits in a group chat with your other agents, keeps the weekly plan, chases what is late, and writes the Friday summary.</p>
       </div>
-      <a class="btn btn-nav-secondary" href="https://github.com/unarbos/arbos#readme" rel="noopener">See how projects work</a>
+      <a class="btn btn-nav-secondary" href="https://github.com/unarbos/arbos#readme" rel="noopener">See how agents work</a>
     </div>
     <div class="usecases-visual" data-reveal aria-hidden="true">
       <div class="thread-card">
-        <div class="thread-head"><span class="thread-avatar"><span class="avatar" data-avatar="willow" data-color="teal" aria-label="Inbox"></span></span><span class="thread-title" data-thread-title>Inbox</span><span class="thread-meta">routine · every night at 2:00</span></div>
+        <div class="thread-head"><span class="thread-avatar"><span class="ini c1 ini-sm" aria-label="Inbox">I</span></span><span class="thread-title" data-thread-title>Inbox</span><span class="thread-meta">routine · every night at 2:00</span></div>
         <div class="thread-body">
           <div class="msg msg-user">Anything I need to see before standup?</div>
-          <div class="msg msg-agent with-avatar"><span class="avatar avatar-sm msg-avatar" data-avatar="willow" data-color="teal" data-thread-msg-avatar aria-label="Inbox"></span><div>Two things. Acme accepted the annual terms — I drafted the thank-you and it is waiting for your approval. And the vendor invoice is 40% higher than last month; I asked Books to check it.</div></div>
+          <div class="msg msg-agent">Two things. Acme accepted the annual terms — I drafted the thank-you and it is waiting for your approval. And the vendor invoice is 40% higher than last month; I asked Books to check it.</div>
+          <div class="handoff"><span class="ini c1 ini-xs" aria-label="Inbox">I</span>Messaged <strong>Books</strong></div>
           <div class="card approval">
             <div class="approval-head"><span class="approval-tag">Approval</span>Send the thank-you to Acme?</div>
             <div class="approval-body">Gmail · as you · to procurement@acme.com</div>
             <div class="approval-actions"><span class="chip chip-solid">Approve</span><span class="chip">Edit</span></div>
           </div>
           <div class="msg msg-user">Approve. What did Books say?</div>
-          <div class="msg msg-agent working-line with-avatar"><span class="avatar avatar-sm msg-avatar" data-avatar="maple" data-color="amber" data-state="working" aria-label="Books, working"></span><span class="working-dots"><i></i><i></i><i></i></span>Books is replying…</div>
+          <div class="msg msg-agent working-line"><span class="working-dots"><i></i><i></i><i></i></span>Books is working</div>
         </div>
-        <div class="app-composer"><span>Message Inbox…</span><span class="composer-mic"></span></div>
+        <div class="app-composer"><span>Ask Inbox</span><span class="composer-mic"></span></div>
       </div>
     </div>
   </div>
 </section>
 
-<!-- Demo -->
+<!-- Light and dark -->
 <section id="demo">
   <div class="container-wide">
-    <h2 class="center" data-reveal>A day with Arbos</h2>
-    <div class="demo-frame media-frame" data-reveal>
-      <div class="demo-stage" data-demo>
-        <div class="demo-cast" aria-hidden="true"><span class="avatar avatar-sm" data-avatar="fractal" data-color="cyan" data-static></span><span class="avatar avatar-sm" data-avatar="pine" data-color="blue" data-static></span><span class="avatar avatar-sm" data-avatar="maple" data-color="amber" data-static></span><span class="avatar avatar-sm" data-avatar="palm" data-color="orange" data-static></span><span class="avatar avatar-sm" data-avatar="sequoia" data-color="violet" data-static></span><span class="demo-cast-label">Research · Website · Books · Travel · Chief of staff</span></div>
-        <div class="demo-msg demo-user" data-step="1">Morning. What happened overnight?</div>
-        <div class="demo-msg demo-agent with-avatar" data-step="2"><span class="avatar demo-avatar" data-avatar="sequoia" data-color="violet" aria-label="Chief of staff"></span><div>Research finished the competitor memo and Website shipped the pricing fix at 03:12. Books flagged one invoice. Two approvals are waiting for you.</div></div>
-        <div class="demo-msg demo-user" data-step="3">Approve the first one, hold the second. Then have Travel move my flight to Tuesday.</div>
-        <div class="demo-msg demo-agent with-avatar" data-step="4"><span class="avatar demo-avatar" data-avatar="sequoia" data-color="violet" data-state="working" aria-label="Chief of staff, working"></span><div><span class="working-dots" aria-hidden="true"><i></i><i></i><i></i></span>Done. Email sent. Travel found a 9:40 on Tuesday — it is a draft in your thread, waiting for a yes.</div></div>
-        <div class="demo-caption">Mac at the desk, iPhone on the way — the same thread, the same machine.</div>
-      </div>
+    <div class="section-head" data-reveal>
+      <h2>At home on your Mac and your iPhone</h2>
+      <p>Light and dark, following your system. Settings are laid out the way Apple lays out an account: a few grouped cards, nothing hidden.</p>
+    </div>
+    <div class="twoup" data-reveal>
+      <figure class="twoup-mac media-frame">
+        <picture>
+          <source srcset="/assets/app/mac-affine-light.webp" media="(prefers-color-scheme: dark)">
+          <img src="/assets/app/mac-affine-dark.webp" width="1600" height="993" alt="The Arbos Mac app in the other appearance: the Affine agent's chat" loading="lazy">
+        </picture>
+      </figure>
+      <figure class="twoup-phone">
+        <img src="/assets/app/iphone-settings-dark.webp" width="840" height="1824" alt="iPhone Settings: profile header, then grouped cards for Account, Machine, Notifications, Appearance, feedback and about" loading="lazy">
+      </figure>
     </div>
   </div>
 </section>
@@ -328,7 +310,7 @@
           <li>Higher daily usage</li>
           <li>Bigger machine class</li>
           <li>Group chats across more projects</li>
-          <li>Voice calls with a project</li>
+          <li>Longer voice and video calls</li>
           <li>Priority at peak times</li>
         </ul>
       </article>
@@ -358,7 +340,7 @@
   <div class="container download">
     <div class="download-copy" data-reveal>
       <h2>Download Arbos</h2>
-      <p>One thread, wherever you are — on your desk and in your pocket.</p>
+      <p>One conversation per agent, wherever you are — on your desk and in your pocket.</p>
     </div>
     <div class="download-list" data-reveal>
       <a class="dl-row" href="https://relay.arbos.life/download/mac">
@@ -391,7 +373,7 @@
     <div class="faq-list" data-reveal data-accordion>
       <details open>
         <summary>How is Arbos different from a chat assistant?</summary>
-        <div class="faq-body"><p>A project in Arbos has its own computer. It can run code, use a browser, sign in to your tools, and keep working after you close the laptop. A chat assistant answers; a project finishes the work and comes back.</p></div>
+        <div class="faq-body"><p>An Arbos agent has its own computer and its own memory. It can run code, use a browser, sign in to your tools, remember everything you told it, and keep working after you close the laptop. A chat assistant answers; an agent finishes the work and comes back.</p></div>
       </details>
       <details>
         <summary>Do projects share one computer?</summary>
@@ -403,15 +385,15 @@
       </details>
       <details>
         <summary>Where do I talk to Arbos?</summary>
-        <div class="faq-body"><p>From the Mac app, and from the iPhone app in the TestFlight beta. Both show the same threads. Voice memos work on both; channels such as Slack and Telegram are on the roadmap.</p></div>
+        <div class="faq-body"><p>From the Mac app, and from the iPhone app in the TestFlight beta. Each agent is one conversation that both devices share. You can also call an agent — voice or video, one-to-one or in a group with people — and pick the voice it answers with.</p></div>
       </details>
       <details>
-        <summary>Can projects talk to each other?</summary>
-        <div class="faq-body"><p>Yes. A project can message another project directly, and you can put several in one group chat. They pass work between themselves and you watch the thread instead of relaying messages.</p></div>
+        <summary>Can agents talk to each other?</summary>
+        <div class="faq-body"><p>Yes. An agent can message another agent directly — the hand-off shows in your thread as a short “Messaged Affine” line — and you can put several in one group chat. They pass work between themselves and you watch instead of relaying messages.</p></div>
       </details>
       <details>
         <summary>What can a project connect to?</summary>
-        <div class="faq-body"><p>Connectors for Gmail, Google Calendar, Slack, and GitHub, used as you. Routines that run on a schedule or on an event. A skills library you can edit. A credential vault for logins and keys. Local access to your Mac, with a separate approval for every action.</p></div>
+        <div class="faq-body"><p>Connectors for Gmail, Google Calendar, Slack, and GitHub, used as you. Routines that run on a schedule or on an event. A skills library you can edit. A credential vault for logins and keys. Channels so you can talk to it from Slack, Telegram or WhatsApp. Local access to your Mac, with a separate approval for every action.</p></div>
       </details>
       <details>
         <summary>How does Arbos handle my data?</summary>
@@ -425,7 +407,7 @@
 <section id="get-started">
   <div class="container get-started">
     <div data-reveal>
-      <h2>Meet your first project</h2>
+      <h2>Meet your first agent</h2>
       <p>An always-on agent, on its own machine, that you can hand real work to.</p>
       <div class="hero-actions">
         <a class="btn btn-primary" href="https://relay.arbos.life/download/mac"><svg class="apple" viewBox="0 0 17 20" aria-hidden="true"><use href="#apple-logo"/></svg>Download for Mac</a>
@@ -433,16 +415,16 @@
       </div>
     </div>
   </div>
-  <div class="lineup" aria-label="Nine project agents">
-    <span class="avatar" data-avatar="cactus" data-color="red" aria-label="On-call"></span>
-    <span class="avatar" data-avatar="cherry" data-color="pink" aria-label="Hiring"></span>
-    <span class="avatar" data-avatar="palm" data-color="orange" aria-label="Travel"></span>
-    <span class="avatar" data-avatar="pine" data-color="blue" aria-label="Website"></span>
-    <span class="avatar" data-avatar="baobab" data-color="green" aria-label="Home"></span>
-    <span class="avatar" data-avatar="fractal" data-color="cyan" aria-label="Research"></span>
-    <span class="avatar" data-avatar="maple" data-color="amber" aria-label="Books"></span>
-    <span class="avatar" data-avatar="willow" data-color="teal" aria-label="Inbox"></span>
-    <span class="avatar" data-avatar="sequoia" data-color="violet" aria-label="Chief of staff"></span>
+  <div class="lineup" aria-label="Nine agents">
+    <span class="ini c2" aria-label="On-call">OC</span>
+    <span class="ini c0" aria-label="Hiring">H</span>
+    <span class="ini c6" aria-label="Travel">T</span>
+    <span class="ini c2" aria-label="Website">W</span>
+    <span class="ini c6" aria-label="Arbos">A</span>
+    <span class="ini c1" aria-label="Research">R</span>
+    <span class="ini c6" aria-label="Books">B</span>
+    <span class="ini c1" aria-label="Inbox">I</span>
+    <span class="ini c0" aria-label="Chief of staff">CO</span>
   </div>
 </section>
 
@@ -486,7 +468,6 @@
         <h3>Legal</h3>
         <a href="/privacy/">Privacy</a>
         <a href="https://github.com/unarbos/arbos/blob/main/LICENSE" rel="noopener">MIT licence</a>
-        <a href="https://github.com/unarbos/arbos/blob/main/site/assets/fonts/LICENSE-Geist.txt" rel="noopener">Font licence</a>
       </div>
     </div>
   </div>
