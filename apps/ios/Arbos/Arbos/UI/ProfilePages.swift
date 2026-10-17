@@ -573,6 +573,8 @@ struct GroupProfileView: View {
     @State private var showAdd = false
     @State private var showEdit = false
     @State private var confirmLeave = false
+    @State private var pendingRemoveId: String?
+    @State private var pendingRemoveName: String?
 
     private var people: PeopleChat? { model.peopleChat(chatId) }
     private var project: Project? { projectId.flatMap { model.project($0) } }
@@ -599,6 +601,16 @@ struct GroupProfileView: View {
     }
 
     private var memberCount: Int { rows.filter { $0.agent == nil }.count }
+
+    /// Owners (and admins, when a chat has that role) can remove other people.
+    private var canManageMembers: Bool {
+        let role = people?.myRole
+        return role == "owner" || role == "admin"
+    }
+
+    private func canRemove(_ r: Row) -> Bool {
+        canManageMembers && r.agent == nil && r.person.id != model.user?.id && r.role != "owner"
+    }
 
     private var groupImageURL: String? {
         guard let people, let key = people.imageKey, !key.isEmpty else { return nil }
@@ -673,6 +685,24 @@ struct GroupProfileView: View {
                 dismiss()
             }
         }
+        .confirmationDialog(
+            pendingRemoveName.map { "Remove \($0) from \(title)?" } ?? "Remove from chat?",
+            isPresented: Binding(
+                get: { pendingRemoveId != nil },
+                set: { if !$0 { pendingRemoveId = nil; pendingRemoveName = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Remove", role: .destructive) {
+                if let id = pendingRemoveId { model.removeMember(chatId: chatId, userId: id) }
+                pendingRemoveId = nil
+                pendingRemoveName = nil
+            }
+            Button("Cancel", role: .cancel) {
+                pendingRemoveId = nil
+                pendingRemoveName = nil
+            }
+        }
         .sheet(isPresented: $showAdd) {
             if let project {
                 ProjectMembersSheet(project: project).environmentObject(model).environment(\.theme, theme)
@@ -713,6 +743,14 @@ struct GroupProfileView: View {
                                     isMe: r.person.id == model.user?.id, agent: r.agent)
                 }
                 .buttonStyle(.plain)
+                .contextMenu {
+                    if canRemove(r) {
+                        Button("Remove from chat", role: .destructive) {
+                            pendingRemoveId = r.person.id
+                            pendingRemoveName = r.person.displayName
+                        }
+                    }
+                }
             }
         }
     }
