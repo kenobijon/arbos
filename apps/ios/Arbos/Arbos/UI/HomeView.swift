@@ -586,7 +586,7 @@ struct HomeView: View {
     }
 
     private func chatPreview(_ c: Chat) -> String {
-        guard let m = model.messages(of: c.id).last(where: { !$0.plainText.isEmpty }) else { return "No messages yet" }
+        guard let m = model.messages(of: c.id).last(where: { !$0.voice && !$0.plainText.isEmpty }) else { return "No messages yet" }
         let line = m.plainText.split(separator: "\n").first.map(String.init) ?? ""
         let who = m.role == .user ? "You" : (m.senderHandle.map { "@\($0)" } ?? (model.project(c.projectId)?.name ?? ""))
         return (who.isEmpty ? "" : who + ": ") + HomeView.plain(line)
@@ -597,7 +597,7 @@ struct HomeView: View {
     }
 
     private func peoplePreview(_ c: PeopleChat) -> String {
-        guard let m = model.messages(of: c.id).last(where: { !$0.plainText.isEmpty }) else {
+        guard let m = model.messages(of: c.id).last(where: { !$0.voice && !$0.plainText.isEmpty }) else {
             return c.pending ? "Invited · opens when they sign in" : "Say hi"
         }
         let line = m.plainText.split(separator: "\n").first.map(String.init) ?? ""
@@ -609,7 +609,7 @@ struct HomeView: View {
     private func latest(_ p: Project) -> Message? {
         var best: Message? = nil
         for chat in model.chats(of: p.id) {
-            if let m = model.messages(of: chat.id).last(where: { !$0.plainText.isEmpty || $0.openQuestion != nil }) {
+            if let m = model.messages(of: chat.id).last(where: { !$0.voice && (!$0.plainText.isEmpty || $0.openQuestion != nil) }) {
                 if best == nil || m.createdAt > best!.createdAt { best = m }
             }
         }
@@ -789,7 +789,7 @@ struct HiddenChatsView: View {
     static func preview(_ p: Project, in model: AppModel) -> String {
         var best: Message? = nil
         for chat in model.chats(of: p.id) {
-            if let m = model.messages(of: chat.id).last(where: { !$0.plainText.isEmpty }),
+            if let m = model.messages(of: chat.id).last(where: { !$0.voice && !$0.plainText.isEmpty }),
                best == nil || m.createdAt > best!.createdAt { best = m }
         }
         guard let m = best else { return "No messages yet" }

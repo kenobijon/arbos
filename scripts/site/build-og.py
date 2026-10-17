@@ -1,83 +1,69 @@
-"""Build the arbos.life social preview (1200x630) with coloured v2 tree avatars (D74).
+"""Build the arbos.life social preview (1200x630) with D79 initials avatars.
 
-Reads assets/avatars/trees/<slug>.svg, recolours them per manifest colors[], lays them out in an
-HTML page and screenshots it with headless Chrome (google-chrome or chromium on PATH).
-Output: site/assets/og/arbos-social.png. Run: python scripts/site/build-og.py
+Lays out a row of coloured-initial circles (palette = GET https://relay.arbos.life/avatar-colors,
+index = sum of the name's UTF-8 bytes mod 7) beside the Arbos mark and wordmark in an HTML page
+and screenshots it with headless Chromium (Playwright if installed, else google-chrome/chromium
+on PATH). Output: site/assets/og/arbos-social.png. Run: python scripts/site/build-og.py
 """
-import json
 import pathlib
-import re
 import shutil
 import subprocess
 import tempfile
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
-TREES = REPO / "assets/avatars/trees"
 OUT = REPO / "site/assets/og/arbos-social.png"
-HTML = pathlib.Path(tempfile.mkdtemp()) / "og.html"
+MARK = (REPO / "site/assets/logo/arbos-mark.svg").read_text()
 
-manifest = json.loads((TREES / "manifest.json").read_text())
-colors = {c["slug"]: c for c in manifest["colors"]}
-ROLES = ["bg", "ring", "tree", "tree_dark", "tree_light", "face"]
-
-# (slug, color) — the approved trio first, then a spread of the palette.
-CAST = [
-    ("oak", "green"), ("fractal", "blue"), ("mushroom", "red"),
-    ("pine", "amber"), ("cherry", "pink"), ("willow", "teal"),
-    ("sequoia", "violet"), ("palm", "orange"), ("cactus", "cyan"),
+PALETTE = [  # light pairs (top, bottom); the OG image is light like the default page
+    ("#FF845E", "#D45246"), ("#FEBB5B", "#F68136"), ("#B694F9", "#6C61DF"), ("#9AD164", "#46BA43"),
+    ("#53EDD6", "#28C9B7"), ("#5CAFFA", "#408ACF"), ("#FF8AA5", "#E05F8E"),
 ]
+CAST = ["Studio", "Affine", "Research", "Website", "Books", "Hiring", "Talent Scout", "Expense Manager", "Comms"]
 
 
-def tint(svg: str, color: str) -> str:
-    c = colors[color]
-    def fix(m):
-        tag = m.group(0)
-        role = re.search(r'class="([a-z_]+)"', tag).group(1)
-        hexv = c.get(role)
-        if role == "ring":
-            hexv = c.get("ring", "#ffffff")
-        if not hexv:
-            return tag
-        tag = re.sub(r'fill="(?!none)[^"]*"', f'fill="{hexv}"', tag)
-        tag = re.sub(r'stroke="(?!none)[^"]*"', f'stroke="{hexv}"', tag)
-        return tag
-    return re.sub(r"<[a-z]+ [^>]*class=\"[a-z_]+\"[^>]*>", fix, svg)
+def initials(name: str) -> str:
+    parts = [p for p in name.replace("-", " ").split() if p]
+    return "".join(p[0] for p in parts[:2]).upper() if len(parts) > 1 else parts[0][0].upper()
 
 
-avatars = "".join(
-    f'<div class="av">{tint((TREES / f"{slug}.svg").read_text(), color)}</div>' for slug, color in CAST
-)
-wordmark = (REPO / "site/assets/logo/arbos-wordmark-white.svg").read_text()
-font = (REPO / "site/assets/fonts/Geist-Variable.woff2").resolve()
+def circle(name: str, size: int) -> str:
+    top, bottom = PALETTE[sum(name.encode()) % 7]
+    return (
+        f'<span class="ini" style="width:{size}px;height:{size}px;font-size:{size * 0.445:.0f}px;'
+        f'background:linear-gradient(180deg,{top},{bottom})">{initials(name)}</span>'
+    )
 
-HTML.write_text(f"""<!doctype html><html><head><meta charset="utf-8">
-<style>
-@font-face {{ font-family: Geist; src: url("file://{font}") format("woff2"); font-weight: 100 900; }}
-html,body {{ margin:0; width:1200px; height:630px; background:#0a0a0a; color:#fff; font-family: Geist, system-ui, sans-serif; overflow:hidden; }}
-.page {{ position:relative; width:1200px; height:630px; display:flex; align-items:center; justify-content:space-between; padding:0 84px; box-sizing:border-box;
-  background: radial-gradient(900px 500px at 85% 50%, rgba(255,255,255,0.06), transparent 60%), #0a0a0a; }}
-.copy {{ max-width: 560px; }}
-.copy svg {{ height: 56px; width:auto; display:block; margin-bottom: 34px; }}
-h1 {{ font-size: 52px; line-height: 1.06; font-weight: 500; letter-spacing: -0.015em; margin: 0 0 22px; }}
-p {{ font-size: 24px; line-height: 1.35; color: #c9cdd6; margin: 0; font-weight: 400; }}
-.url {{ margin-top: 40px; font-size: 20px; color: #8b8f99; letter-spacing: 0.01em; }}
-.cast {{ display:grid; grid-template-columns: repeat(3, 132px); gap: 22px; transform: rotate(-6deg); }}
-.av {{ width:132px; height:132px; border-radius:50%; box-shadow: 0 18px 40px rgba(0,0,0,0.55); }}
-.av svg {{ width:100%; height:100%; display:block; }}
-</style></head><body><div class="page">
-<div class="copy">{wordmark}
-<h1>An always-on agent for every project.</h1>
-<p>Chat from your Mac and iPhone. Your agents work on your own cloud machine and report back in prose.</p>
-<div class="url">arbos.life</div></div>
-<div class="cast">{avatars}</div>
-</div></body></html>""")
 
+sizes = [72, 92, 112, 136, 164, 136, 112, 92, 72]
+row = "".join(circle(n, s) for n, s in zip(CAST, sizes))
+html = f"""<!doctype html><meta charset="utf-8"><style>
+html,body{{margin:0;width:1200px;height:630px;background:#FCFCFC;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Inter,Helvetica,Arial,sans-serif;overflow:hidden}}
+.wrap{{position:relative;width:1200px;height:630px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:56px}}
+.brand{{display:flex;align-items:center;gap:22px;color:#111}}
+.brand svg{{width:72px;height:72px}}
+.brand span{{font-size:64px;font-weight:600;letter-spacing:-0.02em}}
+.row{{display:flex;align-items:center;gap:18px}}
+.ini{{display:inline-flex;align-items:center;justify-content:center;border-radius:50%;color:#fff;font-weight:600;line-height:1;box-shadow:0 24px 60px rgba(0,0,0,.14)}}
+.tag{{position:absolute;left:0;right:0;bottom:44px;text-align:center;font-size:26px;color:#6E6E73}}
+</style><div class="wrap"><div class="brand">{MARK.replace('color="#000"', 'color="#111"')}<span>Arbos</span></div>
+<div class="row">{row}</div><div class="tag">An always-on agent for every project, on your own cloud machine.</div></div>"""
+
+tmp = pathlib.Path(tempfile.mkdtemp()) / "og.html"
+tmp.write_text(html)
 OUT.parent.mkdir(parents=True, exist_ok=True)
-chrome = next((c for c in ("google-chrome", "chromium", "chromium-browser") if shutil.which(c)), None)
-if not chrome:
-    raise SystemExit("needs google-chrome or chromium on PATH")
-subprocess.run([
-    chrome, "--headless=new", "--no-sandbox", "--disable-gpu", "--hide-scrollbars",
-    "--allow-file-access-from-files", "--window-size=1200,630", f"--screenshot={OUT}", f"file://{HTML}",
-], check=True, capture_output=True)
-print(OUT, OUT.stat().st_size)
+try:
+    from playwright.sync_api import sync_playwright  # type: ignore
+
+    with sync_playwright() as p:
+        b = p.chromium.launch()
+        page = b.new_page(viewport={"width": 1200, "height": 630})
+        page.goto(tmp.as_uri())
+        page.screenshot(path=str(OUT))
+        b.close()
+except ImportError:
+    chrome = shutil.which("google-chrome") or shutil.which("chromium") or shutil.which("chromium-browser")
+    if not chrome:
+        raise SystemExit("install playwright (pip) or put google-chrome/chromium on PATH")
+    subprocess.run([chrome, "--headless=new", "--hide-scrollbars", "--window-size=1200,630",
+                    f"--screenshot={OUT}", tmp.as_uri()], check=True, capture_output=True)
+print(OUT, OUT.stat().st_size // 1024, "KB")

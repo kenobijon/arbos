@@ -58,33 +58,6 @@
     reveals.forEach(function (el) { el.classList.add('in'); });
   }
 
-  // ---- Demo conversation: plays when visible, loops ----
-  var demo = doc.querySelector('[data-demo]');
-  if (demo) {
-    var msgs = Array.prototype.slice.call(demo.querySelectorAll('.demo-msg'));
-    var timer = null;
-    var play = function () {
-      msgs.forEach(function (m) { m.classList.remove('in'); });
-      var i = 0;
-      var step = function () {
-        if (i < msgs.length) { msgs[i++].classList.add('in'); timer = setTimeout(step, i === 1 ? 900 : 1700); }
-        else { timer = setTimeout(play, 5000); }
-      };
-      timer = setTimeout(step, 500);
-    };
-    if (reduce || !('IntersectionObserver' in window)) {
-      msgs.forEach(function (m) { m.classList.add('in'); });
-    } else {
-      var dio = new IntersectionObserver(function (entries) {
-        entries.forEach(function (en) {
-          if (en.isIntersecting && timer === null) play();
-          else if (!en.isIntersecting && timer !== null) { clearTimeout(timer); timer = null; }
-        });
-      }, { threshold: 0.35 });
-      dio.observe(demo);
-    }
-  }
-
   // ---- Use-case chips ----
   var chips = doc.querySelector('[data-chips]');
   if (chips) {
@@ -100,19 +73,15 @@
       panels.forEach(function (p) { p.hidden = p.getAttribute('data-panel') !== name; });
       var active = tabs.filter(function (b) { return b.classList.contains('is-active'); })[0];
       if (title && active) title.textContent = active.textContent.trim();
-      // The thread card's avatar follows the selected project (the avatar loader remounts new spans).
-      if (active && window.ArbosAvatars) {
-        var slug = active.getAttribute('data-avatar-slug'), color = active.getAttribute('data-avatar-color');
-        doc.querySelectorAll('.thread-avatar .avatar, [data-thread-msg-avatar]').forEach(function (old) {
-          if (old.getAttribute('data-avatar') === slug) return;
-          var fresh = doc.createElement('span');
-          fresh.className = old.className.replace(/\bis-ready\b|\bis-missing\b/g, '').trim();
-          fresh.setAttribute('data-avatar', slug); fresh.setAttribute('data-color', color);
-          fresh.setAttribute('aria-label', active.textContent.trim());
-          if (old.hasAttribute('data-thread-msg-avatar')) fresh.setAttribute('data-thread-msg-avatar', '');
-          if (old.__avatar) old.__avatar.destroy();
-          old.replaceWith(fresh);
-          window.ArbosAvatars.mount(fresh.parentNode);
+      // The thread card's avatar follows the selected agent (D79 initials + palette index).
+      if (active) {
+        var name = active.getAttribute('data-name') || active.textContent.trim();
+        var ci = active.getAttribute('data-ci') || '0';
+        var letters = name.split(/[\s-]+/).filter(Boolean).slice(0, 2).map(function (w) { return w[0]; }).join('').toUpperCase();
+        doc.querySelectorAll('.thread-avatar .ini, .thread-body .handoff .ini').forEach(function (el) {
+          el.className = el.className.replace(/\bc[0-6]\b/, 'c' + ci);
+          el.textContent = letters;
+          el.setAttribute('aria-label', name);
         });
       }
     };

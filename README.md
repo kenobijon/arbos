@@ -26,8 +26,8 @@ Use it hosted at [arbos.life](https://arbos.life) (sign in with GitHub), or [run
 
 | Path | What |
 | --- | --- |
-| `crates/arbos-mac` | The Mac app (GPUI): project rail, tabs, chat transcript, composer with voice and attachments, approval cards, Settings, machine status, in-app updates, Send feedback. Also builds on Linux. |
-| `apps/ios/Arbos` | The iPhone app (SwiftUI): the same chats over the relay, home with machine status, people chats, attach sheet, voice memos, notifications. |
+| `crates/arbos-mac` | The Mac app (GPUI): agent and people list, chat with tabs, composer with voice and attachments, calls, approval cards, profile pages, Settings (Apple-style groups), machine status, in-app updates, Send feedback. Also builds on Linux. |
+| `apps/ios/Arbos` | The iPhone app (SwiftUI): one chat per agent over the relay, home with machine status, people chats and groups, calls, profile pages, attach sheet, voice memos, notifications, Settings. |
 | `crates/arbos-relay` | The one service outside the machines: sign-in, project registry and sync rooms (SQLite), machine lifecycle on Daytona, model proxy with per-project metering and spend caps, blob store, connectors/vault broker, routines, channels, group and people chats. |
 | `crates/arbos-agentd` | The machine daemon: one process per machine supervising one workspace per project — chat doc host, SQLite+FTS5 history and memory, project MCP server, the pi main-agent driver, the subagent harness registry, per-workspace isolation. |
 | `crates/arbosctl` | Headless client: projects, chats (send/stream/stop/answer), machine start/stop/status, routines, skills, channels, groups, blobs, admin. |
@@ -36,7 +36,7 @@ Use it hosted at [arbos.life](https://arbos.life) (sign in with GitHub), or [run
 | `crates/arbos-core` | Shared types: ids, room frames, the chat-doc schema, the `route` schema, approval rules. |
 | `harness/arbos-pi-ext` | The pi extension (TypeScript): `route`, `ask_user`, deny+audit hook, act-call limits, output offload, working set. |
 | `image/` | The `arbos-agent` machine image (pi + Prime + Claude Code + agent-browser/Chrome), hook scripts, Prime skills; `register-snapshot.sh`. |
-| `assets/avatars/trees` | The tree characters every agent wears (SVG, Lottie, frame strips) and their colour manifest. |
+| `assets/avatars/trees` | Retired tree characters (replaced by coloured-initial avatars, D79); the black-and-white tree remains only as the brand mark in `site/assets/logo`. |
 | `site/` | arbos.life. |
 | `scripts/` | `bundle-mac.sh` (DMG, signing, notarization), `release/`, `deploy/` (relay server, site sync), `runner/` (self-hosted Mac runner), `relay-start.sh`, `site/` (social preview), `readme-hero/` (this page's hero image). |
 | `docs/` | [Self-hosting guide](docs/self-host.md) and the README assets. |
@@ -46,7 +46,8 @@ Use it hosted at [arbos.life](https://arbos.life) (sign in with GitHub), or [run
 - **Relay** (`arbos-relay`): the only internet-facing piece. Devices sign in with GitHub (or pair with a one-time code when you self-host) and talk to it over HTTPS/WebSocket; machines dial back to its public URL. It owns the chat rooms, wakes machines, forwards model calls with metering, and keeps every secret: provider keys, connector tokens, the vault.
 - **One machine per user**: a Daytona sandbox from the `arbos-agent` image (4 vCPU / 8 GiB / 10 GiB). Each project is a workspace on it: `/work/<project>` owned by its own Unix user, its own pi session, subagents, SQLite memory/history and cgroup slice. Machines stay on for signed-in users.
 - **Harness**: the main agent is **pi** with the `arbos-pi-ext` extension; every turn starts with a `route` call (`reply`, `act` with a few tool calls, or hand off to a subagent). Subagents run through the harness registry — **Prime Agent** by default, **pi**, or **Claude Code** — up to 4 per workspace and 8 per machine, and report back as a prose turn written by the main agent.
-- **Clients**: the Mac app, the iPhone app and `arbosctl` are peers of the same chat documents (Loro CRDT replicas), so a conversation continues on any device.
+- **Clients**: the Mac app, the iPhone app and `arbosctl` are peers of the same chat documents (Loro CRDT replicas), so a conversation continues on any device. On the iPhone each agent is one conversation; the Mac adds tabs for work that runs in parallel.
+- **Avatars**: agents and people get a coloured circle with their initials (a 7-colour palette, the colour derived from the stable id, the same on every device and on the relay at `GET /avatar-colors`); a GitHub photo replaces the circle.
 - **What a chat shows**: only prose from the agent, written like a colleague, plus real attachments and one subtle working indicator. Tool calls and raw subagent output live behind an off-by-default debug setting.
 
 ## Install
@@ -80,7 +81,9 @@ The quickest full stack with no cloud account is the **process box**: the relay 
 
 - **Questions and widgets** — `ask_user(question, widget?)` is the one way an agent asks you something. With a widget (`choice`, `multi_select`, `text`, `date`, `form`) the chat shows a card you answer with the mouse or keyboard; `arbosctl chat answer … --answer-json` does it from a terminal.
 - **Approvals** — risky actions wait for you: outbound messages (`draft_message`), sending connectors, vault requests, commands on your own computer, destructive shell commands. Each becomes a card with Approve / Reject; decisions are audited (`arbosctl audit <project>`).
-- **Voice** — hold the mic to talk; the transcript lands in the composer or is sent directly in Voice mode, and replies are read aloud. The call strip loops listening → thinking → speaking. Speech goes through the relay so the OpenAI key never reaches a device.
+- **Voice** — hold the mic to talk; the transcript lands in the composer or is sent directly in Voice mode, and replies are read aloud in the voice you picked for that agent (Settings → the agent's profile). Speech goes through the relay so the OpenAI key never reaches a device.
+- **Calls with agents** — call a project agent from the chat header. One-to-one it is a full voice conversation; in a group call it hears everyone and speaks only when it has something to add, using the same tools as the text agent.
+- **Memory** — every agent keeps its whole history and a background index of it; before each reply a small decision model picks the threads, episodes and tool results that matter, so you never repeat yourself and nothing is summarised away from the thread.
 - **Files and images** — the agent produces documents and media in the workspace (python-pptx, python-docx, openpyxl, reportlab, Pillow, ffmpeg) and hands them over with `deliver_file`; `generate_image` makes pictures. They arrive as attachment cards with Download.
 - **Connectors** — Gmail/Calendar, Slack, GitHub and Harness Comms, brokered by the relay so tokens never enter a machine. Writes and sends go through an approval card first. Settings → Connectors.
 - **Routines** — prompts that run while you are away: on a cron schedule, when a webhook is called, or on an event. `arbosctl routines create <project> --name "Stand-up" --prompt "…" --cron "0 9 * * 1-5"`; Settings → Routines.
@@ -88,11 +91,11 @@ The quickest full stack with no cloud account is the **process box**: the relay 
 - **Channels** — talk to an agent from Slack, Telegram, WhatsApp or Beeper: mint a code in Settings → Channels and send `/pair <code>` from that chat. Unpaired senders get one hint and never reach a machine.
 - **People** — direct messages and shared projects with other Arbos users; invite someone to a project and their devices join its chats, or add a project's agent to a DM.
 - **Voice and video calls between people (self-hosted LiveKit)** — start a call from the header of a DM or a shared project; the relay decides who may join and mints the tokens, media goes through [your own LiveKit server](docs/self-host.md#9-calls-livekit) and never through the relay.
-- **Telegram-style profile pages** — tap a person, an agent or a group to open its page: who it is, members, and the groups you have in common.
+- **Profile pages** — tap a person, an agent or a group to open its page: who it is, what it works on, members, and the groups you have in common.
 - **Group chats** — one chat shared by several projects' agents, with loop guards (depth, cycles, rate). `arbosctl group create --host Alpha --with Beta,Gamma`.
 - **Vault** — logins and API keys the agent may *use* but never *see*: values are encrypted on the relay, the agent only handles `arbos-secret://` placeholders, and every use is a request you approve. Settings → Vault.
 - **Your computer** — `arbos-local` runs on your own machine so an agent can run a command or read a file there, each behind an approval card. Settings → This Mac.
-- **Notifications** — Mac and iPhone notify you when an agent finishes or a person writes, with the agent's tree as the sender picture; nothing else.
+- **Notifications** — Mac and iPhone notify you when an agent finishes or a person writes, with the agent's avatar as the sender picture; nothing else.
 
 ## Releases
 
