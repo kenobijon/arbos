@@ -112,6 +112,27 @@ extension AppModel {
             fl.detail = "Starting a 4-core machine with 8 GB of memory"
         }
         firstLogin = fl
+        // `ARBOS_ONBOARDING_AUTOPLAY=1`: walk every stage on a timer (rig recordings).
+        if DebugHooks.onboardingAutoplay {
+            firstLoginTask = Task { [weak self] in
+                let steps: [(FirstLogin.Stage, String?)] = [
+                    (.agent, "Starting Home’s workspace · arbos-agent"),
+                    (.almostReady, "Syncing your first chat"),
+                ]
+                for (stage, detail) in steps {
+                    try? await Task.sleep(nanoseconds: 2_500_000_000)
+                    guard let self, var fl = self.firstLogin else { return }
+                    fl.stage = stage; fl.detail = detail; fl.stageSince = Date()
+                    self.firstLogin = fl
+                }
+                try? await Task.sleep(nanoseconds: 2_500_000_000)
+                guard let self, var fl = self.firstLogin else { return }
+                fl.stage = .finishing; fl.finishStartedAt = Date(); fl.stageSince = Date()
+                self.firstLogin = fl
+                try? await Task.sleep(nanoseconds: UInt64((FirstLogin.finishSeconds + 0.1) * 1_000_000_000))
+                self.endFirstLogin()
+            }
+        }
     }
 
     private func startFirstLoginPolling() {
@@ -185,6 +206,7 @@ extension AppModel {
         // The account already has agents: this was never a first login.
         if fl.registrySeen, fl.projectId == nil, !fl.creating,
            projects.contains(where: { !$0.shared && $0.name != FirstLogin.agentName }) {
+            NSLog("first login: account already has agents (\(projects.map(\.name))) — not a first login")
             endFirstLogin()
             return
         }
@@ -313,6 +335,7 @@ extension AppModel {
             // Advance one stage per tick so a fast machine still shows every line.
             fl.stage = order[ci + 1]
             fl.stageSince = now
+            NSLog("first login: stage → \(fl.stage) (\(fl.detail ?? ""))")
         }
 
         if ready, fl.stage == .almostReady, heldLongEnough, !reduceMotionForFirstLogin {
@@ -330,6 +353,7 @@ extension AppModel {
     private var reduceMotionForFirstLogin: Bool { UIAccessibility.isReduceMotionEnabled }
 
     private func beginFirstLoginFinish(_ fl: inout FirstLogin, now: Date) {
+        NSLog("first login: finishing → chat \(fl.chatId ?? "?")")
         fl.stage = .finishing
         fl.stageSince = now
         fl.finishStartedAt = now

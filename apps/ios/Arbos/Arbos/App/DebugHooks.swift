@@ -32,6 +32,7 @@ enum DebugHooks {
     /// `onboarding` shows the D82 first-login screen frozen on `ARBOS_ONBOARDING_STAGE` (1|2|3|fail).
     static var show: String? { value("ARBOS_SHOW") }
     static var onboardingStage: String? { value("ARBOS_ONBOARDING_STAGE") }
+    static var onboardingAutoplay: Bool { value("ARBOS_ONBOARDING_AUTOPLAY") == "1" }
     /// Scripted tour for the screen recording (fixture only).
     static var demo: Bool { value("ARBOS_DEMO") == "1" }
     /// Scripted tour against the live relay: sends ARBOS_AUTO_SEND, waits for the reply, tours the sheets.
