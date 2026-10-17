@@ -277,12 +277,15 @@ struct SettingsView: View {
                 Button("Disconnect") {
                     model.disconnectConnector(id: id)
                 }
+                .buttonStyle(.borderless)
                 .disabled(model.connectorsBusy)
             } else if p.hasOauth {
                 Button("Connect") {
                     model.connectConnector(provider: p.provider)
                 }
-                .disabled(model.connectorsBusy || model.isFixture || (!p.oauthConfigured && model.connectors.loaded && !model.connectors.mock))
+                .buttonStyle(.borderless)
+                .foregroundStyle(theme.accent)
+                .disabled(model.connectorsBusy || model.isFixture)
             }
         }
     }
