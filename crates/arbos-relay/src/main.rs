@@ -41,7 +41,7 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::Router;
 use clap::{Parser, Subcommand};
 use tokio::sync::{Mutex, RwLock};
@@ -343,6 +343,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/auth/devices", get(signin::devices_list))
         .route("/auth/devices/{id}", delete(signin::device_revoke))
         .route("/me", get(signin::me))
+        .route("/me/avatar", put(signin::put_avatar))
+        .route("/avatars/{file}", get(signin::get_avatar))
         .route("/me/pushes", get(people::me_pushes))
         .route("/me/unread", get(notify::me_unread))
         .route("/chats/{id}/calls", post(calls::start_people_call))

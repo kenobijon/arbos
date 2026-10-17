@@ -246,11 +246,28 @@ impl Db {
                     // An `invited` placeholder (someone opened a DM with this login before it
                     // ever signed in) becomes a member now: first sign-in, with the welcome grant.
                     let first = status == "invited";
+                    // Keep a picture the user uploaded via PUT /me/avatar (URL path `/avatars/…`).
+                    let existing_avatar: Option<String> = c
+                        .query_row(
+                            "SELECT avatar_url FROM users WHERE github_id = ?1",
+                            params![gh.id],
+                            |r| r.get(0),
+                        )
+                        .optional()?
+                        .flatten();
+                    let avatar = if existing_avatar
+                        .as_deref()
+                        .is_some_and(|u| u.contains("/avatars/"))
+                    {
+                        existing_avatar
+                    } else {
+                        gh.avatar_url.clone()
+                    };
                     c.execute(
                         "UPDATE users SET login = ?2, avatar_url = ?3, name = ?4, last_login_at = ?5, status = 'member',
                             spend_cap_usd = CASE WHEN status = 'invited' THEN ?6 ELSE spend_cap_usd END
                          WHERE github_id = ?1",
-                        params![gh.id, gh.login, gh.avatar_url, gh.name, now, default_daily_cap_usd],
+                        params![gh.id, gh.login, avatar, gh.name, now, default_daily_cap_usd],
                     )?;
                     Ok(first)
                 }
@@ -333,6 +350,20 @@ impl Db {
             c.execute("DELETE FROM users WHERE id = ?1", params![id])?;
             Ok(true)
         })
+    }
+
+    /// Custom profile picture URL (`PUT /me/avatar`); shown everywhere as `avatar_url`.
+    pub fn set_user_avatar_url(&self, user_id: &str, avatar_url: &str) -> Result<()> {
+        let n = self.with(|c| {
+            c.execute(
+                "UPDATE users SET avatar_url = ?2 WHERE id = ?1",
+                params![user_id, avatar_url],
+            )
+        })?;
+        if n == 0 {
+            return Err(anyhow!("no such user"));
+        }
+        Ok(())
     }
 
     /// Admin: daily cap (`None` = unlimited) and the negative-balance override.

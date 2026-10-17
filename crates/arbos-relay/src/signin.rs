@@ -13,8 +13,9 @@
 //! Provider config is env only: `ARBOS_GITHUB_CLIENT_ID` / `ARBOS_GITHUB_CLIENT_SECRET` (the
 //! `ARBOS_GITHUB_OAUTH_CLIENT_*` spellings work too), `ARBOS_PUBLIC_URL`, `ARBOS_JWT_KEY` (optional).
 
-use axum::extract::{Query, State};
-use axum::http::{header, StatusCode};
+use axum::body::Bytes;
+use axum::extract::{Path, Query, State};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
@@ -648,6 +649,111 @@ pub async fn device_revoke(
     match state.db.revoke_device_fully(&target) {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    }
+}
+
+/// Max JPEG for `PUT /me/avatar` (512×512 at high quality is well under this).
+const MAX_AVATAR_BYTES: usize = 2 * 1024 * 1024;
+
+fn safe_avatar_user_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+fn avatar_file(state: &AppState, user_id: &str) -> std::path::PathBuf {
+    state
+        .cfg
+        .data_dir
+        .join("avatars")
+        .join(format!("{user_id}.jpg"))
+}
+
+fn is_jpeg(bytes: &[u8]) -> bool {
+    bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF
+}
+
+/// `PUT /me/avatar`: raw JPEG body → public `{public_url}/avatars/{user_id}.jpg?v=…`.
+pub async fn put_avatar(
+    State(state): State<AppState>,
+    principal: Principal,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let user_id = match &principal {
+        Principal::Device { user_id, .. } => user_id.clone(),
+        Principal::Box { .. } | Principal::Admin => {
+            return api_error(StatusCode::FORBIDDEN, "forbidden", "device token required")
+        }
+    };
+    if !safe_avatar_user_id(&user_id) {
+        return api_error(StatusCode::BAD_REQUEST, "bad_user", "bad user id");
+    }
+    if let Some(ct) = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+    {
+        let base = ct.split(';').next().unwrap_or(ct).trim();
+        if !base.eq_ignore_ascii_case("image/jpeg") && !base.eq_ignore_ascii_case("image/jpg") {
+            return api_error(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "bad_mime",
+                "avatar must be image/jpeg",
+            );
+        }
+    }
+    if body.len() > MAX_AVATAR_BYTES {
+        return api_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "too_large",
+            "avatar must be at most 2 MB",
+        );
+    }
+    if !is_jpeg(&body) {
+        return api_error(StatusCode::BAD_REQUEST, "bad_image", "body is not a JPEG");
+    }
+    let path = avatar_file(&state, &user_id);
+    if let Some(parent) = path.parent() {
+        if let Err(e) = tokio::fs::create_dir_all(parent).await {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "io", e.to_string());
+        }
+    }
+    if let Err(e) = tokio::fs::write(&path, &body).await {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "io", e.to_string());
+    }
+    let v = now_ms();
+    let avatar_url = format!(
+        "{}/avatars/{user_id}.jpg?v={v}",
+        state.cfg.public_url.trim_end_matches('/')
+    );
+    if let Err(e) = state.db.set_user_avatar_url(&user_id, &avatar_url) {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+    }
+    Json(json!({ "avatar_url": avatar_url, "user": user_json(&state, &user_id) })).into_response()
+}
+
+/// `GET /avatars/{user_id}.jpg` — public (same role as a GitHub CDN avatar URL).
+pub async fn get_avatar(State(state): State<AppState>, Path(file): Path<String>) -> Response {
+    let user_id = file.strip_suffix(".jpg").unwrap_or(file.as_str());
+    if !safe_avatar_user_id(user_id) {
+        return api_error(StatusCode::NOT_FOUND, "not_found", "no such avatar");
+    }
+    let path = avatar_file(&state, user_id);
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => (
+            [
+                (header::CONTENT_TYPE, HeaderValue::from_static("image/jpeg")),
+                (
+                    header::CACHE_CONTROL,
+                    HeaderValue::from_static("public, max-age=86400"),
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(_) => api_error(StatusCode::NOT_FOUND, "not_found", "no such avatar"),
     }
 }
 

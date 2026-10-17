@@ -832,8 +832,7 @@ struct ChatView: View {
     }
 
     /// Avatars + handles of everyone in a people chat; agents show their owner.
-    /// Tap a chip to talk to that person or agent without typing `@` — the composer
-    /// prompt and the next send follow the selection.
+    /// Tap a chip to insert `@handle` into the composer and address the next send.
     private func memberChips(_ people: PeopleChat) -> some View {
         // Skip me — you don't address yourself; keeps a 1:1 DM to one chip + Agent.
         let others = people.members.filter { $0.id != model.user?.id }
@@ -848,7 +847,9 @@ struct ChatView: View {
                         if effectiveTalkTo == m.member {
                             talkTo = nil
                         } else {
-                            talkTo = m.member
+                            // Same path as the @-picker: put `@handle` in the draft and set talkTo.
+                            completeMention(m)
+                            composerFocused = true
                         }
                         replyTo = nil
                     } label: {

@@ -1880,6 +1880,22 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Settings profile picture: `PUT /me/avatar` JPEG, then update the local user.
+    func setUserAvatar(jpeg: Data) async -> Bool {
+        do {
+            let url = try await api.putMeAvatar(jpeg: jpeg)
+            if var who = user {
+                who.avatarUrl = url
+                user = who
+                saveAccountCache()
+            }
+            return true
+        } catch {
+            notice = Notice(text: "Could not update profile picture: \(error.localizedDescription)")
+            return false
+        }
+    }
+
     func deletePeopleChat(_ chatId: String) {
         peopleChats.removeAll { $0.id == chatId }
         rooms[chatId]?.stop(); rooms[chatId] = nil; docs[chatId] = nil; messages[chatId] = nil
