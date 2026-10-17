@@ -652,10 +652,12 @@ struct ConnectorsPage: View {
         let fromRelay = model.connectors.providers
         if !fromRelay.isEmpty { return fromRelay }
         if model.connectors.loaded { return [] }
+        // oauthConfigured: false until the catalog says otherwise — Connect
+        // before load used to 409 with ARBOS_GOOGLE_CLIENT_* in the alert.
         return [
-            ConnectorProvider(provider: "google", label: "Google (Gmail, Calendar)", connect: "oauth", oauthConfigured: true),
-            ConnectorProvider(provider: "slack", label: "Slack", connect: "oauth_or_token", oauthConfigured: true),
-            ConnectorProvider(provider: "github", label: "GitHub", connect: "oauth_or_token", oauthConfigured: true),
+            ConnectorProvider(provider: "google", label: "Google (Gmail, Calendar)", connect: "oauth", oauthConfigured: false),
+            ConnectorProvider(provider: "slack", label: "Slack", connect: "oauth_or_token", oauthConfigured: false),
+            ConnectorProvider(provider: "github", label: "GitHub", connect: "oauth_or_token", oauthConfigured: false),
             ConnectorProvider(provider: "harness_comms", label: "Harness Comms (Beeper + Gmail)", connect: "token", oauthConfigured: true),
         ]
     }
@@ -734,14 +736,26 @@ struct ConnectorsPage: View {
     }
 
     private func startOauth(_ p: ConnectorProvider) {
-        // Avoid a silent fail: without a client on the relay, Connect only 409s.
-        if model.connectors.loaded, !p.oauthConfigured, !model.connectors.mock {
-            connectorError = "Connect \(p.label): OAuth client not configured on the relay."
-                + (p.acceptsToken ? " Use Token… with an API key or personal access token instead." : "")
-            return
-        }
         tokenFor = nil
         tokenDraft = ""
+        // Stand-ins claim oauth is ready; tapping Connect before the catalog
+        // lands hits a 409 and surfaces env-var names. Wait, then explain.
+        if !model.connectors.mock {
+            if !model.connectors.loaded {
+                model.refreshConnectors()
+                connectorError = "Still loading connected apps. Try Connect again in a moment."
+                return
+            }
+            // Prefer the live catalog row (oauthConfigured) over a stale stand-in.
+            let live = model.connectors.providers.first(where: { $0.provider == p.provider }) ?? p
+            if !live.oauthConfigured {
+                connectorError = "Connect \(live.label): OAuth client not configured on the relay."
+                    + (live.acceptsToken ? " Use Token… with an API key or personal access token instead." : "")
+                return
+            }
+            model.connectConnector(provider: live.provider)
+            return
+        }
         model.connectConnector(provider: p.provider)
     }
 
