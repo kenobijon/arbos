@@ -500,7 +500,7 @@ struct ChatView: View {
             }
             Spacer()
             if !isPeople && model.multiChatEnabled {
-                // Outside the agent pill, same trailing slot as the video-call button on group chats.
+                // Outside the agent pill, same trailing slot as the members button on group chats.
                 Button { showThreads = true } label: {
                     GlassCircle {
                         Image(systemName: "bubble.left.and.bubble.right")
@@ -512,17 +512,6 @@ struct ChatView: View {
                 .accessibilityLabel("Chats with \(project?.name ?? "this agent")")
             }
             if isPeople || project?.shared == true {
-                Button {
-                    startCall(.video)
-                } label: {
-                    GlassCircle {
-                        Image(systemName: "video.fill")
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(theme.text)
-                    }
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Video call")
                 Button { showMembers = true } label: {
                     GlassCircle {
                         Image(systemName: "person.badge.plus")
@@ -535,8 +524,8 @@ struct ChatView: View {
             }
             Menu {
                 if isPeople {
-                    Button { startCall(.video) } label: { Label("Video call", systemImage: "video") }
-                    Button { startCall(.voice) } label: { Label("Voice call", systemImage: "phone") }
+                    // Calls always start audio-only; turn the camera on from the call screen.
+                    Button { startCall(.voice) } label: { Label("Call", systemImage: "phone") }
                     Button { openHeaderProfile() } label: { Label(people?.kind == "dm" ? "Profile" : "Group info", systemImage: "person.crop.circle") }
                     Button { showSearch = true; DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { searchFocused = true } } label: { Label("Search in chat", systemImage: "magnifyingglass") }
                     Button { showMembers = true } label: { Label("Members & agents", systemImage: "person.2") }
@@ -560,10 +549,9 @@ struct ChatView: View {
                     }
                     Button { showModelPicker = true } label: { Label("Model · \(project?.shortModel ?? "")", systemImage: "cpu") }
                     // Calls Phase 2: every project chat is callable; the agent joins the room
-                    // through the voice worker (1:1 = a voice call with the agent; shared
-                    // projects = people plus the agent).
-                    Button { startCall(.voice) } label: { Label(project?.shared == true ? "Voice call" : "Call \(project?.name ?? "agent")", systemImage: "phone") }
-                    Button { startCall(.video) } label: { Label("Video call", systemImage: "video") }
+                    // through the voice worker (1:1 = a call with the agent; shared
+                    // projects = people plus the agent). Always start audio-only.
+                    Button { startCall(.voice) } label: { Label(project?.shared == true ? "Call" : "Call \(project?.name ?? "agent")", systemImage: "phone") }
                     Button { showShare = true } label: { Label(project?.shared == true ? "Members" : "Share project…", systemImage: "person.2.badge.plus") }
                     if streaming {
                         Button(role: .destructive) { stop() } label: { Label("Stop \(name)", systemImage: "stop.circle") }

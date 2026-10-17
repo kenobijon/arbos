@@ -425,8 +425,8 @@ struct UserProfileView: View {
                     }
                     if !isMe {
                         ProfileActionRow(actions: [
+                            // Calls start audio-only; camera is toggled on the call screen.
                             ProfileAction(icon: "phone.fill", label: "call") { call(.voice) },
-                            ProfileAction(icon: "video.fill", label: "video") { call(.video) },
                             ProfileAction(icon: muted ? "bell.slash.fill" : "bell.fill", label: muted ? "unmute" : "mute") { toggleMute() },
                             ProfileAction(icon: "magnifyingglass", label: "search") { openDM(search: true) },
                             ProfileAction(icon: "ellipsis", label: "more") { },
