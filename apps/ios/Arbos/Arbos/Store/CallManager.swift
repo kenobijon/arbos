@@ -105,6 +105,8 @@ final class CallManager: NSObject, ObservableObject {
     private var ringbackPlayer: AVAudioPlayer?
     /// True between CallKit `didActivate` and `didDeactivate` — LiveKit's engine may run only then.
     private var callKitOwnsAudio = false
+    /// Teardown is re-entrant from CallKit's `CXEndCallAction`; ignore nested calls.
+    private var isTearingDown = false
     #if DEBUG
     private var micInjector: MicInjector?
     #endif
@@ -517,6 +519,9 @@ final class CallManager: NSObject, ObservableObject {
     }
 
     private func teardown(leave: Bool, reason: CXCallEndedReason = .remoteEnded) async {
+        guard !isTearingDown else { return }
+        isTearingDown = true
+        defer { isTearingDown = false }
         #if DEBUG
         micInjector?.stop()
         micInjector = nil
@@ -531,15 +536,26 @@ final class CallManager: NSObject, ObservableObject {
         let ended = call
         let wasConnected = connectedAt
         await room.disconnect()
+        // Always `reportCall(ended:)` — never `request(CXEndCallAction)` from here.
+        // The provider delegate queue is main (`setDelegate(..., queue: nil)`); awaiting
+        // CXEndCallAction on MainActor deadlocks Hang up (fulfill waits on teardown that
+        // awaits the request), so the screen stayed on "Ringing…" with a live timer.
         if let uuid = cxUUID {
-            if leave {
-                let action = CXEndCallAction(call: uuid)
-                try? await callController.request(CXTransaction(action: action))
-            } else {
-                provider.reportCall(with: uuid, endedAt: Date(), reason: reason)
-            }
+            cxUUID = nil
+            provider.reportCall(with: uuid, endedAt: Date(), reason: reason)
         }
-        cxUUID = nil
+        // Drop the call UI before the network leave so Hang up always dismisses, even
+        // when POST /leave is slow or fails.
+        call = nil
+        tiles = []
+        connectedAt = nil
+        cameraOn = false
+        agentSeeing = false
+        seeingAgentName = nil
+        muted = false
+        anyoneJoined = false
+        phase = .idle
+        isPresented = false
         if leave, let ended, let api, !isFixture {
             do {
                 let r = try await api.leaveCall(ended.callId)
@@ -557,16 +573,6 @@ final class CallManager: NSObject, ObservableObject {
             activeByChat[ended.chatId] = nil
             writeSystemLine?(ended.chatId, ended.projectId, callEndedLine(durationS: Int(wasConnected.map { Date().timeIntervalSince($0) } ?? 0)), ended.callId)
         }
-        call = nil
-        tiles = []
-        connectedAt = nil
-        cameraOn = false
-        agentSeeing = false
-        seeingAgentName = nil
-        muted = false
-        anyoneJoined = false
-        phase = .idle
-        isPresented = false
     }
 
     func toggleMute() async {
@@ -1075,17 +1081,22 @@ extension CallManager: CXProviderDelegate {
 
     nonisolated func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
         Task { @MainActor in
+            // Fulfill before awaiting teardown so CallKit is never blocked on MainActor work.
             if self.incoming != nil {
                 self.ringTimeout?.cancel()
                 self.incoming = nil
                 self.phase = .idle
                 self.cxUUID = nil
-            } else if self.isActive {
+                action.fulfill()
+                return
+            }
+            let leaveRelay = self.isActive
+            self.cxUUID = nil
+            action.fulfill()
+            if leaveRelay {
                 // Ended from the system UI: leave the relay call too.
-                self.cxUUID = nil
                 await self.teardown(leave: true)
             }
-            action.fulfill()
         }
     }
 
