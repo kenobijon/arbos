@@ -58,6 +58,8 @@ struct PendingDevice: Identifiable, Equatable {
 enum AuthEndpoints {
     static let callbackScheme = "arbos"
     static let callback = "arbos://auth/callback"
+    /// Relay connector OAuth success/error page redirects here so the auth sheet closes.
+    static let connectorCallbackHost = "connectors"
     static func start(deviceName: String) -> String {
         let name = deviceName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "iPhone"
         let redirect = callback.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? callback
@@ -72,6 +74,10 @@ enum AuthEndpoints {
     static let deny = "/auth/approvals/deny"
     /// Refresh when less than this is left on the access token.
     static let refreshAheadMs: Int64 = 5 * 60 * 1000
+
+    static func isConnectorCallback(_ url: URL) -> Bool {
+        url.scheme == callbackScheme && url.host == connectorCallbackHost
+    }
 }
 
 struct AuthError: Error, LocalizedError {
@@ -95,7 +101,22 @@ final class WebAuth: NSObject, ASWebAuthenticationPresentationContextProviding {
     private var session: ASWebAuthenticationSession?
 
     func signIn(startURL: URL) async throws -> String {
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<String, Error>) in
+        let url = try await open(startURL)
+        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        if let err = items.first(where: { $0.name == "error" })?.value {
+            let message = items.first(where: { $0.name == "message" })?.value ?? err
+            throw AuthError(message: AuthError.humanize(err, message))
+        }
+        guard let code = items.first(where: { $0.name == "code" })?.value, !code.isEmpty else {
+            throw AuthError(message: "The relay did not return a sign-in code")
+        }
+        return code
+    }
+
+    /// Open `startURL` in the system auth sheet and wait for any `arbos://` callback
+    /// (GitHub sign-in or connector OAuth return).
+    func open(_ startURL: URL) async throws -> URL {
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<URL, Error>) in
             let session = ASWebAuthenticationSession(url: startURL, callbackURLScheme: AuthEndpoints.callbackScheme) { url, error in
                 if let error {
                     if (error as? ASWebAuthenticationSessionError)?.code == .canceledLogin {
@@ -105,17 +126,11 @@ final class WebAuth: NSObject, ASWebAuthenticationPresentationContextProviding {
                     }
                     return
                 }
-                let items = url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems } ?? []
-                if let err = items.first(where: { $0.name == "error" })?.value {
-                    let message = items.first(where: { $0.name == "message" })?.value ?? err
-                    cont.resume(throwing: AuthError(message: AuthError.humanize(err, message)))
+                guard let url else {
+                    cont.resume(throwing: AuthError(message: "Sign-in produced no callback"))
                     return
                 }
-                guard let code = items.first(where: { $0.name == "code" })?.value, !code.isEmpty else {
-                    cont.resume(throwing: AuthError(message: "The relay did not return a sign-in code"))
-                    return
-                }
-                cont.resume(returning: code)
+                cont.resume(returning: url)
             }
             session.presentationContextProvider = self
             session.prefersEphemeralWebBrowserSession = true

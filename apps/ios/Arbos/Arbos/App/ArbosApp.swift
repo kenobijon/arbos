@@ -101,6 +101,11 @@ struct RootView: View {
             model.setAppActive(phase == .active)
             if phase == .active { Task { await push.refreshStatus(); await model.refreshUnread(); await CallManager.shared.sendVoipTokenIfNeeded() } }
         }
+        // Safari / Mac-style connector OAuth: relay redirects to arbos://connectors/callback.
+        .onOpenURL { url in
+            guard AuthEndpoints.isConnectorCallback(url) else { return }
+            model.refreshConnectors()
+        }
     }
 
     private var expectedPeople: [CallPerson] { calls.call.map(model.expectedCallPeople) ?? [] }
