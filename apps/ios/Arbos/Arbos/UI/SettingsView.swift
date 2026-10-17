@@ -530,11 +530,12 @@ struct SettingsActionRow: View {
 struct CreditsPage: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
+    @State private var showTopUpFeedback = false
 
     var body: some View {
         SettingsPage(title: "Credits") {
             if let c = model.credits {
-                SettingsGroup(footer: "Credits pay for your agents' model use. Machine time is billed separately.") {
+                SettingsGroup(footer: "Credits pay for your agents' model use. Machine time is billed separately. During the beta, usage credit is included — request a top-up when you run low.") {
                     SettingsValueRow("Balance", value: String(format: "$%.2f left of $%.0f", c.balanceUsd, c.grantedUsd))
                     if let cap = c.dailyCapUsd {
                         SettingsValueRow("Today", value: String(format: "$%.2f of $%.0f cap", c.spentTodayUsd, cap))
@@ -545,6 +546,18 @@ struct CreditsPage: View {
             } else {
                 SettingsGroup { SettingsValueRow("Balance", value: "Not available yet") }
             }
+            SettingsGroup {
+                SettingsActionRow(title: "Request a top-up") {
+                    FeedbackCenter.shared.context = FeedbackCenter.Context(screen: "credits")
+                    FeedbackCenter.shared.screenshot = FeedbackCenter.captureScreen()
+                    showTopUpFeedback = true
+                }
+            }
+        }
+        .sheet(isPresented: $showTopUpFeedback) {
+            FeedbackSheet()
+                .environmentObject(model)
+                .environment(\.theme, theme)
         }
     }
 }
