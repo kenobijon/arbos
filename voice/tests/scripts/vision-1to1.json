@@ -1,16 +1,59 @@
 [
-  {"say": "Hi Forest. I'm turning my camera on now.", "max": 15},
-  {"camera": "/tmp/vision/duck.jpg"},
-  {"sleep": 2.5},
-  {"say": "Can you see what I'm holding up? Describe it in one sentence.", "max": 25},
-  {"camera": "/tmp/vision/tea.jpg"},
-  {"sleep": 2.5},
-  {"say": "Okay, now I'm showing you something else. What is it?", "max": 25},
-  {"say": "There is a small batch code printed near the bottom of the box. Read it to me exactly.", "max": 40},
-  {"camera_off": true},
-  {"sleep": 2.0},
-  {"say": "I turned my camera off. Can you still see anything?", "max": 25},
-  {"say": "Thanks. Forest, leave the call.", "max": 20},
-  {"sleep": 3},
-  {"hangup": true}
+  {
+    "say": "Hi Forest. I'm turning my camera on now.",
+    "max": 15
+  },
+  {
+    "camera": "/tmp/vision/duck.jpg"
+  },
+  {
+    "sleep": 2.5
+  },
+  {
+    "say": "Can you see what I'm holding up? Describe it in one sentence.",
+    "max": 25
+  },
+  {
+    "camera": "/tmp/vision/tea.jpg"
+  },
+  {
+    "sleep": 2.5
+  },
+  {
+    "say": "Okay, now I'm showing you something else. What is it?",
+    "max": 25
+  },
+  {
+    "say": "There is a small batch code printed near the bottom of the box. Read it to me exactly.",
+    "max": 40
+  },
+  {
+    "sleep": 6
+  },
+  {
+    "wait_quiet": 8
+  },
+  {
+    "sleep": 1.0
+  },
+  {
+    "camera_off": true
+  },
+  {
+    "sleep": 2.0
+  },
+  {
+    "say": "I turned my camera off. Can you still see anything?",
+    "max": 25
+  },
+  {
+    "say": "Great, thanks Forest. That's all for now.",
+    "max": 20
+  },
+  {
+    "sleep": 2
+  },
+  {
+    "hangup": true
+  }
 ]

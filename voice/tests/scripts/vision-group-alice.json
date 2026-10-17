@@ -1,0 +1,22 @@
+[
+  {"sleep": 2},
+  {"say": "Hey Bob, thanks for jumping on. Forest is on the call too.", "wait": false},
+  {"sleep": 6},
+  {"camera": "/tmp/vision/duck.jpg"},
+  {"sleep": 2.5},
+  {"say": "Forest, can you see what I'm holding up? One sentence.", "wait": false},
+  {"sleep": 12},
+  {"say": "Bob, how was the hike on Sunday?", "wait": false},
+  {"sleep": 10},
+  {"camera": "/tmp/vision/tea.jpg"},
+  {"sleep": 2.5},
+  {"say": "Forest, what's the batch code printed at the bottom of this box?", "wait": false},
+  {"sleep": 16},
+  {"camera_off": true},
+  {"sleep": 2},
+  {"say": "Forest, camera's off now. Can you still see the box?", "wait": false},
+  {"sleep": 10},
+  {"say": "Okay, that's all. Forest, say goodbye to everyone.", "wait": false},
+  {"sleep": 8},
+  {"hangup": true}
+]

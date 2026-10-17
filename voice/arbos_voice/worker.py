@@ -80,9 +80,11 @@ GROUP_BARGE_MIN_SPEECH_S = 0.35
 # 1:1 (duplex) server VAD activation (0–1). Higher = less sensitive: ambient noise and
 # speaker echo must be louder before they count as speech and cut the agent mid-sentence.
 DUPLEX_VAD_THRESHOLD = 0.65
-# An interrupted agent line shorter than this (words) is dropped from the transcript as a
-# noise-triggered restart; longer cut lines are kept as the humans heard them.
+# An interrupted agent line shorter than this (words) that was cut within its first
+# `TRUNCATED_KEEP_S` seconds is dropped from the transcript as a noise-triggered restart; a longer
+# cut line, or a short one the humans heard almost whole, stays in the chat.
 TRUNCATED_KEEP_WORDS = 6
+TRUNCATED_KEEP_S = 1.2
 # A lone STT token this long that is not a known short reply is almost always ambient-noise
 # gibberish (e.g. "naabustame"), not a real one-word answer like "bet" / "okay".
 NOISE_TOKEN_MIN_LEN = 8
@@ -203,6 +205,8 @@ class CallState:
     last_human_speech_at: float = field(default_factory=time.monotonic)
     window: list[dict] = field(default_factory=list)
     # Last agent transcript line we wrote (skip interrupted + near-duplicate paraphrases).
+    speaking_since: float | None = None
+    last_speech_s: float = 0.0
     last_agent_text: str = ""
     last_agent_at: float = 0.0
     # When set, the next agent reply in this window is the auto-answer to a noise transcript — drop it.
@@ -273,7 +277,8 @@ class VoiceCall:
             # A reply cut within its first words is a noise-trigger regenerate (keep only the
             # final line); a longer cut line is a real barge-in and stays in the chat, as the
             # humans heard it (spec §4).
-            if truncated and len(_norm_words(text)) < TRUNCATED_KEEP_WORDS:
+            spoke = (time.monotonic() - self.state.speaking_since) if self.state.speaking_since else self.state.last_speech_s
+            if truncated and len(_norm_words(text)) < TRUNCATED_KEEP_WORDS and spoke < TRUNCATED_KEEP_S:
                 return False
             now = time.monotonic()
             if self.state.last_agent_text and now - self.state.last_agent_at < 8.0 and similar_reply(
@@ -510,6 +515,7 @@ class VoiceCall:
             prev = self.state.agent_state
             self.state.agent_state = ev.new_state
             if ev.new_state == "speaking":
+                self.state.speaking_since = now
                 src = self.state.pending_ttfa_from
                 if src is not None:
                     ttfa = int((now - src) * 1000)
@@ -519,6 +525,8 @@ class VoiceCall:
                     log.info("TTFA %d ms (%s)", ttfa, self.state.mode)
             if prev == "speaking" and ev.new_state != "speaking":
                 self.state.last_reply_ended_at = now
+                self.state.last_speech_s = now - (self.state.speaking_since or now)
+                self.state.speaking_since = None
                 if self.state.barge_started_at is not None:
                     cut = int((now - self.state.barge_started_at) * 1000)
                     self.meter.barge_ms.append(cut)

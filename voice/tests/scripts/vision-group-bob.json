@@ -1,0 +1,10 @@
+[
+  {"sleep": 5},
+  {"say": "Hi Alice. Sure, go ahead.", "wait": false},
+  {"sleep": 20},
+  {"say": "The hike was great, we did the ridge loop. My legs still hurt.", "wait": false},
+  {"sleep": 22},
+  {"say": "Looks like a tea box to me, is that the new one?", "wait": false},
+  {"sleep": 50},
+  {"hangup": true}
+]
