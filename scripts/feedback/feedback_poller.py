@@ -71,7 +71,9 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
+import subprocess
 import struct
 import sys
 import time
@@ -171,6 +173,9 @@ class Config:
     public_group_id: str
     agent_timeout_min: int
     ship_timeout_min: int
+    ios_gate_ssh: str
+    ios_gate_key: str
+    ios_gate_timeout_s: int
 
     @staticmethod
     def from_env() -> "Config":
@@ -245,6 +250,9 @@ class Config:
             public_group_id=env.get("TESTFLIGHT_PUBLIC_GROUP_ID", ""),
             dedupe_days=int(env.get("FEEDBACK_DEDUPE_DAYS", "7")),
             agent_timeout_min=int(env.get("FEEDBACK_AGENT_TIMEOUT_MIN", "75")),
+            ios_gate_ssh=env.get("IOS_GATE_SSH", ""),
+            ios_gate_key=env.get("IOS_GATE_KEY", "/etc/arbos/ec2-mac.pem"),
+            ios_gate_timeout_s=int(env.get("IOS_GATE_TIMEOUT_S", "900")),
             ship_timeout_min=int(env.get("FEEDBACK_SHIP_TIMEOUT_MIN", "90")),
         )
 
@@ -444,6 +452,30 @@ class GitHub:
 
     def commit(self, sha: str) -> dict:
         return self.repo_api("GET", f"/commits/{sha}")
+
+    def branch_head(self, branch: str) -> str | None:
+        try:
+            return self.repo_api("GET", f"/branches/{urllib.parse.quote(branch, safe='')}")["commit"]["sha"]
+        except HttpError as e:
+            if e.status == 404:
+                return None
+            raise
+
+    def compare(self, base: str, head: str) -> dict:
+        return self.repo_api("GET", f"/compare/{base}...{head}")
+
+    def merge_into_main(self, head_sha: str, message: str) -> dict | None:
+        """A merge commit on main (never a rewrite). None when GitHub reports a conflict (409)."""
+        try:
+            return self.repo_api("POST", "/merges", json_body={"base": "main", "head": head_sha, "commit_message": message})
+        except HttpError as e:
+            if e.status == 409:
+                return None
+            raise
+
+    def delete_branch(self, branch: str) -> None:
+        with contextlib.suppress(HttpError):
+            self.repo_api("DELETE", f"/git/refs/heads/{branch}")
 
     def runs_for_sha(self, sha: str) -> list[dict]:
         q = urllib.parse.urlencode({"head_sha": sha, "per_page": 50})
@@ -962,6 +994,8 @@ class Loop:
             self.launch(fid, st)
         elif status == "running":
             self.check_agent(fid, st)
+        elif status == "gating":
+            self.gate(fid, st)
         elif status == "pushed":
             self.check_ship(fid, st)
 
@@ -1182,6 +1216,22 @@ class Loop:
                             f"Agent: {st.get('agent_url')}. Jacob, say so here if this is wrong.")
             self.gh.set_labels(st["issue"], ["flagged"], [])
             return
+        # The fix lives on `feedback/<id>` until the iOS gate has passed; the poller merges it.
+        branch = f"feedback/{fid}"
+        head = self.gh.branch_head(branch)
+        if head and head != st.get("gated_head"):
+            cmp = self.gh.compare("main", head)
+            tagged = any(f"[feedback {fid}]" in c["commit"]["message"] for c in cmp.get("commits", []))
+            if cmp.get("status") in ("ahead", "diverged") and tagged:
+                files = [f["filename"] for f in cmp.get("files", [])]
+                st.update(status="gating", branch=branch, branch_head=head, files=files,
+                          expects_ios=any(f.startswith("apps/ios/") or f == ".github/workflows/ios.yml" for f in files),
+                          expects_ci=any(not f.startswith("apps/ios/") for f in files),
+                          agent_summary=self.summary_line(result))
+                self.store.save_state(fid, st)
+                self.store.event(fid, "branch_pushed", branch=branch, head=head, files=files)
+                self.gate(fid, st)
+                return
         commit = self.find_commit(fid, st["launched"])
         if not commit:
             if re.search(r"^PUSHED:\s*no\b", result, re.M | re.I):
@@ -1193,8 +1243,9 @@ class Loop:
                 self.gh.comment(st["issue"], f"No change: {self.summary_line(result)}\n\nAgent: {st.get('agent_url')}")
                 self.gh.set_labels(st["issue"], ["no-change"], [])
                 return
-            self.fail(fid, st, "agent finished without pushing a [feedback] commit to main", extra=result)
+            self.fail(fid, st, "agent finished without pushing a [feedback] commit (branch feedback/<id> or main)", extra=result)
             return
+        # Pushed straight to main (older prompt, or the agent ignored the branch rule): track it as before.
         files = [f["filename"] for f in self.gh.commit(commit["sha"]).get("files", [])]
         st.update(status="pushed", commit=commit["sha"], commit_url=commit["html_url"],
                   commit_message=commit["commit"]["message"].splitlines()[0], pushed_at=iso(), files=files,
@@ -1206,6 +1257,110 @@ class Loop:
         self.gh.comment(st["issue"], f"Pushed to `main`: {commit['html_url']} — `{st['commit_message']}`\n\n"
                         f"Files: {', '.join(f'`{f}`' for f in files) or '—'}\n\n"
                         f"Agent summary: {summary}")
+
+    # ---- pre-merge gate: iOS-touching fixes must compile on the EC2 Mac before they reach main -----
+
+    def gate(self, fid: str, st: dict) -> None:
+        """`gating`: build the branch (Debug, simulator, no signing) on the Mac when it touches apps/ios;
+        green (or no iOS files) → merge commit on main → `pushed`. Red → compiler output back to the
+        agent as a follow-up (new commit on the same branch), at most FEEDBACK_GATE_RETRIES times."""
+        head = st["branch_head"]
+        if st.get("expects_ios") and self.cfg.ios_gate_ssh:
+            ok, output = self.ios_gate(st["branch"], head)
+            st["gate"] = {"head": head, "ok": ok, "at": iso(), "tail": output[-3000:]}
+            self.store.save_state(fid, st)
+            self.store.event(fid, "ios_gate", head=head, ok=ok)
+            if not ok:
+                st["gated_head"] = head
+                retries = st.get("gate_retries", 0)
+                if retries >= 2:
+                    self.fail(fid, st, f"the iOS build of `{st['branch']}` failed {retries + 1} times on the gate Mac; not merged", extra=output)
+                    return
+                followup = (f"The iPhone app does not compile with your change (built on a Mac with Xcode, Debug, simulator). "
+                            f"Fix it with the smallest change and push a **new commit** to the same branch `{st['branch']}` "
+                            f"(no force-push, no amend; same commit message shape `fix(feedback): <summary> [feedback {fid}]`). "
+                            "Compiler output:\n\n```\n" + output[-5000:] + "\n```\n\nEnd with the SUMMARY:/PUSHED: lines again.")
+                try:
+                    run = self.cursor.followup(st["agent_id"], followup)
+                except HttpError as e:
+                    if e.status == 409:
+                        log(f"[{fid}] agent busy; gate follow-up deferred")
+                        st.pop("gated_head", None)
+                        self.store.save_state(fid, st)
+                        return
+                    self.fail(fid, st, f"iOS gate failed; follow-up could not start (HTTP {e.status})", extra=output)
+                    return
+                self.store.record_launch(st.get("tester_key", ""))
+                st.update(status="running", run_id=run["id"], launched=iso(), gate_retries=retries + 1)
+                self.store.save_state(fid, st)
+                self.store.event(fid, "retry", gate=True, head=head)
+                self.gh.comment(st["issue"], f"iOS gate: `{st['branch']}` does not compile — sent the compiler output back to the agent "
+                                f"(retry {retries + 1}/2). Not merged.\n\n```\n" + "\n".join(output.splitlines()[-20:]) + "\n```")
+                return
+        elif st.get("expects_ios"):
+            log(f"[{fid}] IOS_GATE_SSH unset; merging {st['branch']} without the compile gate")
+        self.merge_branch(fid, st)
+
+    def ios_gate(self, branch: str, head: str) -> tuple[bool, str]:
+        """ssh to the gate Mac and run ios-gate.sh <branch> <sha>; (ok, output)."""
+        cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=30", "-o", "StrictHostKeyChecking=accept-new",
+               "-o", f"UserKnownHostsFile={self.cfg.state_dir}/known_hosts", "-i", self.cfg.ios_gate_key,
+               self.cfg.ios_gate_ssh, "bash", "~/arbos-gate/ios-gate.sh", shlex.quote(branch), shlex.quote(head)]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=self.cfg.ios_gate_timeout_s)
+        except subprocess.TimeoutExpired as e:
+            return False, (e.stdout or "")[-3000:] + f"\n(gate timed out after {self.cfg.ios_gate_timeout_s} s)"
+        out = (r.stdout or "") + (r.stderr or "")
+        if r.returncode == 2:
+            # Infrastructure trouble (ssh/fetch), not the agent's code: say so, do not count a retry.
+            raise RuntimeError(f"iOS gate infrastructure error: {out[-1500:]}")
+        return r.returncode == 0, out
+
+    def merge_branch(self, fid: str, st: dict) -> None:
+        head = st["branch_head"]
+        summary = re.sub(r"\s+", " ", st.get("agent_summary") or "").strip()[:80]
+        merged = self.gh.merge_into_main(head, f"Merge {st['branch']}: {summary or 'feedback fix'} [feedback {fid}]")
+        if merged is None:
+            # Conflict with main: the agent merges main into its branch (a merge, never a rebase) and pushes.
+            st["gated_head"] = head
+            retries = st.get("gate_retries", 0)
+            if retries >= 2:
+                self.fail(fid, st, f"`{st['branch']}` conflicts with main and the agent could not resolve it", extra="")
+                return
+            try:
+                run = self.cursor.followup(st["agent_id"], (
+                    f"Your branch `{st['branch']}` no longer merges cleanly into `main`. Run `git fetch origin main && "
+                    f"git merge origin/main` on the branch, resolve the conflicts with the smallest change, run the checks, "
+                    "and push the merge (no rebase, no force-push). End with the SUMMARY:/PUSHED: lines again."))
+            except HttpError as e:
+                if e.status == 409:
+                    st.pop("gated_head", None)
+                    self.store.save_state(fid, st)
+                    return
+                self.fail(fid, st, f"merge conflict; follow-up could not start (HTTP {e.status})")
+                return
+            self.store.record_launch(st.get("tester_key", ""))
+            st.update(status="running", run_id=run["id"], launched=iso(), gate_retries=retries + 1)
+            self.store.save_state(fid, st)
+            self.gh.comment(st["issue"], f"`{st['branch']}` conflicts with `main`; asked the agent to merge main into the branch.")
+            return
+        # The fix commit (the one tagged [feedback id]) is what ancestry checks use; the merge is its carrier.
+        tagged = [c for c in self.gh.compare(merged["parents"][0]["sha"], head).get("commits", []) if f"[feedback {fid}]" in c["commit"]["message"]]
+        fix = tagged[-1] if tagged else {"sha": head, "html_url": f"https://github.com/{self.cfg.github_repo}/commit/{head}",
+                                         "commit": {"message": st.get("agent_summary") or ""}}
+        st.update(status="pushed", commit=fix["sha"], commit_url=fix["html_url"],
+                  commit_message=fix["commit"]["message"].splitlines()[0], pushed_at=iso(), merge_sha=merged["sha"],
+                  merge_url=merged["html_url"], commit_date=merged["commit"]["committer"]["date"])
+        st.pop("gated_head", None)
+        self.store.save_state(fid, st)
+        self.store.event(fid, "pushed", commit=fix["sha"], merge=merged["sha"], files=st.get("files"))
+        gate_note = ""
+        if st.get("gate"):
+            gate_note = " iOS gate: compiled on the Mac ✓."
+        self.gh.comment(st["issue"], f"Merged to `main`: {merged['html_url']} (fix {fix['html_url']} — `{st['commit_message']}`).{gate_note}\n\n"
+                        f"Files: {', '.join(f'`{f}`' for f in st.get('files') or []) or '—'}\n\n"
+                        f"Agent summary: {st.get('agent_summary') or '—'}")
+        self.gh.delete_branch(st["branch"])
 
     def resolve_build_number(self, prefix: str, run_id: int) -> str:
         """The CFBundleVersion Apple knows: the artifact's 12 digits plus the run id's last 6 digits
@@ -1292,7 +1447,8 @@ class Loop:
                         return
                     followup = ("The iOS build on `main` failed after your push "
                                 f"({ios['html_url']}). Fix the build with the smallest change, keep the same commit message "
-                                f"shape (`fix(feedback): <summary> [feedback {fid}]`), pull --rebase, and push to main again. "
+                                f"shape (`fix(feedback): <summary> [feedback {fid}]`), and push it as a new commit on the branch "
+                                f"`feedback/{fid}` created from `origin/main` (the loop gates and merges it; no rebase, no force-push). "
                                 "Compiler output:\n\n```\n" + "\n".join(errors or ["(no error lines captured; open the run)"]) + "\n```\n\n"
                                 "End with the SUMMARY:/PUSHED: lines again.")
                     try:
@@ -1375,7 +1531,7 @@ class Loop:
                 followup = (f"CI on `main` failed after your push ({ci['html_url']}): fmt, clippy (-D warnings) or tests. "
                             "Fix it with the smallest change, run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings` "
                             f"and `cargo test --workspace --locked` before pushing, keep the commit message shape (`fix(feedback): <summary> [feedback {fid}]`), "
-                            "pull --rebase, push to main. Output:\n\n```\n" + "\n".join(errors or ["(no error lines captured; open the run)"]) + "\n```\n\n"
+                            f"push it as a new commit on the branch `feedback/{fid}` created from `origin/main` (the loop merges it; no rebase, no force-push). Output:\n\n```\n" + "\n".join(errors or ["(no error lines captured; open the run)"]) + "\n```\n\n"
                             "End with the SUMMARY:/PUSHED: lines again.")
                 try:
                     run = self.cursor.followup(st["agent_id"], followup)
@@ -1711,6 +1867,7 @@ def main(argv: list[str]) -> int:
                   "tester_key": loop.tester_key(info), "target": loop.pick_target(info)}
             store.save_state(fid, st)
             store.event(fid, "requeued", tier=tier, tester=st["tester"])
+            loop.gh.delete_branch(f"feedback/{fid}")  # a fresh agent starts its branch from main again
             if st.get("issue"):
                 with contextlib.suppress(HttpError):
                     loop.gh.comment(st["issue"], "Requeued by the operator; a new agent run follows.")
