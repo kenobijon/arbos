@@ -76,6 +76,9 @@ enum Transcript {
         /// Hand-off rows by id (name, messages exchanged), merged into one line when consecutive.
         var handoffs: [String: (String, Int)] = [:]
         for message in messages {
+            // Voice-call transcript lines stay in the doc for the agent; they are not
+            // chat bubbles (Grok: typed prose, attachments, and call start/end notes only).
+            if message.voice { continue }
             // Build this message's visible rows first. Date separators only land when
             // something actually renders — otherwise an empty/hidden-only message leaves
             // a lone "Today 5:45 PM" in a blank chat.

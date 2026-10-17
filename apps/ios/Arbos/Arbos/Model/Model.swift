@@ -390,6 +390,9 @@ struct Message: Identifiable, Equatable {
     /// What the agent is doing right now ("Cloning RaoFoundation/subtensor"),
     /// written by the harness while the turn runs; the working line shows it.
     var activity: String? = nil
+    /// Voice-call transcript line (`voice: true` / `source: "voice"` in the doc).
+    /// Kept in the chat doc for agent context; the transcript UI does not render it.
+    var voice: Bool = false
 
     var isStreaming: Bool { status == .streaming }
 
@@ -485,7 +488,8 @@ enum DocJSON {
             askedByHandle: str(m["askedByHandle"]),
             mentions: (m["mentions"] as? [Any])?.compactMap { $0 as? String } ?? [],
             replyTo: str(m["replyTo"]),
-            activity: str(m["activity"]).flatMap { $0.isEmpty ? nil : $0 }
+            activity: str(m["activity"]).flatMap { $0.isEmpty ? nil : $0 },
+            voice: bool(m["voice"]) || str(m["source"]) == "voice"
         )
     }
 
@@ -566,6 +570,12 @@ enum DocJSON {
     static func str(_ v: Any?) -> String? {
         if let s = v as? String { return s }
         return nil
+    }
+
+    static func bool(_ v: Any?) -> Bool {
+        if let b = v as? Bool { return b }
+        if let n = v as? NSNumber { return n.boolValue }
+        return false
     }
 
     static func int(_ v: Any?) -> Int64? {
