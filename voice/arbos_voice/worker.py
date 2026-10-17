@@ -230,6 +230,8 @@ class CallState:
     stop_reason: str | None = None
     # True while mute_self has detached our audio output (people cannot hear us).
     muted: bool = False
+    # leave_call: the model said its own goodbye; finish() must not add the canned one.
+    goodbye_said: bool = False
 
 
 class ArbosVoiceAgent(Agent):
@@ -525,7 +527,7 @@ class VoiceCall:
         self.meter.stop_reason = reason
         log.info("leaving call %s: %s", self.call_id, reason)
         try:
-            if self.session and reason != "alone" and GOODBYE.get(reason):
+            if self.session and reason != "alone" and GOODBYE.get(reason) and not self.state.goodbye_said:
                 handle = self.speak_line(GOODBYE[reason], allow_interruptions=False)
                 try:
                     await asyncio.wait_for(handle.wait_for_playout(), timeout=12.0)
@@ -983,8 +985,9 @@ class VoiceCall:
         """Dismiss ourselves from the call after the model has said goodbye."""
         if self.state.leaving:
             return "Already leaving."
+        self.state.goodbye_said = True
         self.spawn(self.finish("asked"))
-        return "Leaving the call now."
+        return "You are leaving the call now. Do not say anything else."
 
     # ---- vision ------------------------------------------------------------------------------------
 
