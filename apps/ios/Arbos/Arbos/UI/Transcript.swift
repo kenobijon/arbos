@@ -880,6 +880,7 @@ struct ImageBubble: View {
 }
 
 /// Full-screen image: pinch to zoom, drag to pan when zoomed, double-tap to toggle.
+/// At 1×: swipe down or swipe right from the left edge to dismiss.
 private struct ZoomableImageViewer: View {
     let image: UIImage
     let onClose: () -> Void
@@ -892,21 +893,27 @@ private struct ZoomableImageViewer: View {
     private let minScale: CGFloat = 1
     private let maxScale: CGFloat = 5
     private let doubleTapScale: CGFloat = 2.5
+    /// Vertical drag past this distance dismisses when not zoomed.
+    private let dismissDownThreshold: CGFloat = 120
+    /// Horizontal drag past this distance dismisses from the left edge.
+    private let dismissEdgeThreshold: CGFloat = 100
+    /// Start must be within this many points of the leading edge for edge swipe.
+    private let edgeSwipeWidth: CGFloat = 28
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
-            Color.black.ignoresSafeArea()
+            Color.black.opacity(backdropOpacity).ignoresSafeArea()
             Image(uiImage: image)
                 .resizable()
                 .scaledToFit()
-                .scaleEffect(scale)
+                .scaleEffect(scale * dismissScale)
                 .offset(offset)
                 .ignoresSafeArea()
                 .gesture(magnifyGesture)
                 .simultaneousGesture(panGesture)
                 .onTapGesture(count: 2, perform: toggleZoom)
                 .accessibilityLabel("Image")
-                .accessibilityHint("Pinch to zoom, double tap to zoom in or out")
+                .accessibilityHint("Pinch to zoom, double tap to zoom in or out, swipe down or from the left edge to close")
             Button(action: onClose) {
                 Image(systemName: "xmark")
                     .font(.system(size: 15, weight: .semibold))
@@ -918,6 +925,22 @@ private struct ZoomableImageViewer: View {
             .padding(16)
             .accessibilityLabel("Close")
         }
+    }
+
+    /// Fade the black backdrop while the user drags to dismiss at 1×.
+    private var backdropOpacity: Double {
+        guard scale <= minScale + 0.01 else { return 1 }
+        let distance = max(offset.height, offset.width)
+        guard distance > 0 else { return 1 }
+        return max(0.35, 1 - Double(distance) / 400)
+    }
+
+    /// Slight shrink while dragging to dismiss, matching the Photos-style feel.
+    private var dismissScale: CGFloat {
+        guard scale <= minScale + 0.01 else { return 1 }
+        let distance = max(offset.height, offset.width)
+        guard distance > 0 else { return 1 }
+        return max(0.85, 1 - distance / 1000)
     }
 
     private var magnifyGesture: some Gesture {
@@ -936,14 +959,42 @@ private struct ZoomableImageViewer: View {
     private var panGesture: some Gesture {
         DragGesture()
             .onChanged { value in
-                guard scale > minScale else { return }
-                offset = CGSize(
-                    width: baseOffset.width + value.translation.width,
-                    height: baseOffset.height + value.translation.height
-                )
+                if scale > minScale {
+                    offset = CGSize(
+                        width: baseOffset.width + value.translation.width,
+                        height: baseOffset.height + value.translation.height
+                    )
+                    return
+                }
+                // At 1×: follow a dismiss drag (down anywhere, or right from the left edge).
+                let t = value.translation
+                if t.height > 0, t.height >= abs(t.width) {
+                    offset = CGSize(width: 0, height: t.height)
+                } else if value.startLocation.x <= edgeSwipeWidth,
+                          t.width > 0,
+                          t.width >= abs(t.height) {
+                    offset = CGSize(width: t.width, height: 0)
+                }
             }
-            .onEnded { _ in
-                baseOffset = offset
+            .onEnded { value in
+                if scale > minScale {
+                    baseOffset = offset
+                    return
+                }
+                let t = value.translation
+                let dismissDown = t.height > dismissDownThreshold
+                    && t.height > abs(t.width) * 1.5
+                let dismissEdge = value.startLocation.x <= edgeSwipeWidth
+                    && t.width > dismissEdgeThreshold
+                    && t.width > abs(t.height) * 1.25
+                if dismissDown || dismissEdge {
+                    onClose()
+                } else {
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        offset = .zero
+                        baseOffset = .zero
+                    }
+                }
             }
     }
 
