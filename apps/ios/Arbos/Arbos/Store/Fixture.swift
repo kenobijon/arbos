@@ -56,6 +56,9 @@ extension AppModel {
                                                       lastMessageAt: now - 9 * 60_000, kind: "group", participants: ["fx-affine", "fx-hyper"]))
         allMessages[g] = [
             user("g0", g, "Affine, Hyper — align the launch copy with the Discord tone Comms set.", at: now - 30 * 60_000),
+            // Two hand-offs in a row merge into one Grok line: "4 messages with ◉ Affine and ◉ Hyper".
+            handoff("g0a", g, name: "Affine", at: now - 29 * 60_000),
+            handoff("g0b", g, name: "Hyper", at: now - 28 * 60_000),
             assistant("g1", g, "Got it. Three variants in the shared doc, all short and casual.", at: now - 9 * 60_000),
         ]
         caughtUp.insert(g)
@@ -64,7 +67,7 @@ extension AppModel {
         allMessages[c] = [
             user("c1", c, "That was really great what we set up with Alan. However, I think we need to be a little more careful about the way in which we type in Discord, not to write massive, verbose responses. Try to write in my style do things that make it seem like it's not an agent that's writing the response. so maybe you can rewrite messages that go through our Discord.", at: t0),
             assistant("c2", c, "Makes sense. I'll pull a sample of your own Discord messages to get your style, then set it so everything going through Discord gets rewritten to sound like you first.", at: t0 + 20_000),
-            handoff("c3", c, name: "Affine", at: t0 + 40_000),
+            handoff("c3", c, name: "Affine", at: t0 + 40_000, messages: 1),
             assistant("c4", c, "From now on, anything I send on your Discord gets rewritten to sound like you first. That means short, casual one-liners like \"Can be done in a day\" or \"nice work with 10\", sometimes split into two or three quick messages. It also means no lists, no long blocks, and no \"— Arbos\" sign-off. I've told Affine to keep its answers to the key points too, and I'll stick to this style for anything else I send on your Discord.", at: t0 + 90_000),
             user("c5", c, "Hey", at: t0 + 120_000),
             streaming("c6", c, at: t0 + 125_000),
@@ -240,9 +243,9 @@ extension AppModel {
                 pending: false, parts: [.text(id: "\(id)-t", text: text)], hiddenCount: 0)
     }
 
-    private func handoff(_ id: Id, _ chat: Id, name: String, at: Int64) -> Message {
+    private func handoff(_ id: Id, _ chat: Id, name: String, at: Int64, messages: Int = 2) -> Message {
         Message(id: id, chatId: chat, role: .assistant, sender: "agent", status: .done, turn: .spawn, decision: "new", subagentId: "sub-1",
-                subagentName: name, inReplyTo: nil, usage: [:], model: nil, createdAt: at, completedAt: at + 5_000, pending: false,
+                subagentName: name, handoffMessages: messages, inReplyTo: nil, usage: [:], model: nil, createdAt: at, completedAt: at + 5_000, pending: false,
                 parts: [.status(id: "\(id)-s", code: .handoff, message: "Handed to subagent \(name)")], hiddenCount: 2)
     }
 

@@ -73,6 +73,8 @@ enum Transcript {
             }
         }
 
+        /// Hand-off rows by id (name, messages exchanged), merged into one line when consecutive.
+        var handoffs: [String: (String, Int)] = [:]
         for message in messages {
             // Build this message's visible rows first. Date separators only land when
             // something actually renders — otherwise an empty/hidden-only message leaves
@@ -110,10 +112,15 @@ enum Transcript {
                                      kind: .system(icon: icon, text: text, avatarProject: nil)))
                 }
             case .assistant, .project:
-                // Hand-off ack: Grok shows "Messaged ◉ <bot>" as a system line.
-                if message.turn == .new, let name = message.subagentName ?? subagentNames[message.subagentId ?? ""] {
-                    chunk.append(Row(id: "\(message.id)#handoff", messageId: message.id, role: .system,
-                                     kind: .system(icon: nil, text: "Messaged \u{FFFC}\(name)", avatarProject: projectId)))
+                // Hand-off: Grok shows "Messaged ◉ <bot>" / "N messages with ◉ A, ◉ B and ◉ C"
+                // as a system line. Consecutive hand-offs merge below.
+                let handoffName = (message.turn == .new || message.turn?.isProgress == true)
+                    ? (message.subagentName ?? subagentNames[message.subagentId ?? ""]) : nil
+                if let name = handoffName {
+                    let rowId = "\(message.id)#handoff"
+                    handoffs[rowId] = (name, max(1, message.handoffMessages ?? 1))
+                    chunk.append(Row(id: rowId, messageId: message.id, role: .system,
+                                     kind: .system(icon: nil, text: Self.handoffText([(name, max(1, message.handoffMessages ?? 1))]), avatarProject: projectId)))
                 }
                 let lastTextPart = message.parts.lastIndex { $0.textValue != nil }
                 let firstTextPart = message.parts.firstIndex { $0.textValue != nil }
@@ -156,8 +163,11 @@ enum Transcript {
                                          kind: .question(questionId: q.questionId, text: q.question, options: q.options,
                                                          multi: q.multi, picked: q.answer, open: q.open)))
                     case .status(let id, .handoff, let text):
-                        chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .system,
-                                         kind: .system(icon: nil, text: handoffText(text), avatarProject: nil)))
+                        // Legacy status line; the turn-based row above already covers it.
+                        if handoffName == nil {
+                            chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .system,
+                                             kind: .system(icon: nil, text: handoffText(text), avatarProject: nil)))
+                        }
                     case .status(let id, .stopped, _):
                         chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .system,
                                          kind: .system(icon: "stop.circle", text: "Stopped", avatarProject: nil)))
@@ -187,7 +197,58 @@ enum Transcript {
         }
         // Agent added after the latest message (the usual "I just added Bob" case).
         flushJoins(before: nil)
-        return rows
+        return Self.mergeHandoffs(rows, handoffs)
+    }
+
+    /// Consecutive hand-off lines become one: "6 messages with ◉ Kenny, ◉ Tyler and ◉ Jenny".
+    private static func mergeHandoffs(_ rows: [Row], _ handoffs: [String: (String, Int)]) -> [Row] {
+        guard handoffs.count > 1 else { return rows }
+        var out: [Row] = []
+        var run: [(String, Int)] = []
+        var runRow: Row?
+        func flush() {
+            guard let first = runRow else { return }
+            if run.count > 1, case .system(_, _, let project) = first.kind {
+                out.append(Row(id: first.id, messageId: first.messageId, role: .system,
+                               kind: .system(icon: nil, text: handoffText(run), avatarProject: project)))
+            } else {
+                out.append(first)
+            }
+            run = []; runRow = nil
+        }
+        for row in rows {
+            if let h = handoffs[row.id] {
+                if runRow == nil { runRow = row }
+                run.append(h)
+            } else {
+                flush()
+                out.append(row)
+            }
+        }
+        flush()
+        return out
+    }
+
+    /// Grok's wording: "Messaged ◉ A" (brief only), "Messaged ◉ A and ◉ B", or
+    /// "N messages with ◉ A, ◉ B and ◉ C" once replies came back. Each ◉ is drawn
+    /// from the marker + name by `systemText`.
+    static func handoffText(_ items: [(String, Int)]) -> String {
+        var names: [String] = []
+        var total = 0
+        for (name, count) in items {
+            if !names.contains(name) { names.append(name) }
+            total += max(1, count)
+        }
+        let marked = names.map { "\u{FFFC}\($0)" }
+        let joined: String
+        switch marked.count {
+        case 0: return ""
+        case 1: joined = marked[0]
+        case 2: joined = "\(marked[0]) and \(marked[1])"
+        default: joined = marked.dropLast().joined(separator: ", ") + " and " + marked.last!
+        }
+        if total <= names.count { return "Messaged \(joined)" }
+        return "\(total) messages with \(joined)"
     }
 
     private static func attachmentRow(id: String, message: Message, a: Attachment, projectId: Id, fromUser: Bool) -> Row {
@@ -555,28 +616,61 @@ struct RowView: View {
         }
     }
 
-    /// "Messaged \u{FFFC}Affine" draws a small avatar where the object marker is.
+    /// "Messaged \u{FFFC}Affine" / "6 messages with \u{FFFC}A, \u{FFFC}B and \u{FFFC}C":
+    /// every object marker becomes a small avatar before the name that follows it.
     @ViewBuilder
     private func systemText(_ text: String, avatarProject: Id?) -> some View {
-        if let range = text.range(of: "\u{FFFC}") {
-            let before = String(text[..<range.lowerBound])
-            let after = String(text[range.upperBound...])
-            let target = model.projects.first { $0.name.caseInsensitiveCompare(after) == .orderedSame }
+        if text.contains("\u{FFFC}") {
+            let pieces = Self.splitMarkers(text)
             HStack(spacing: 5) {
-                Text(before)
-                if let target {
-                    AgentAvatar(project: target, theme: theme, size: 16, still: true)
-                } else if let slug = TreeAvatars.shared.relayDefault(after), TreeAvatars.shared.has(slug) {
-                    // An agent we do not list yet still shows as a coloured tree (D74).
-                    TreeCharacterView(slug: slug, size: 16, color: TreeAvatars.shared.defaultColor(forProjectId: after), still: true)
-                } else {
-                    BlobAvatar(color: theme.muted, shape: BlobShape.pick(for: after), size: 16)
+                ForEach(Array(pieces.enumerated()), id: \.offset) { _, piece in
+                    if piece.isName {
+                        agentGlyph(named: piece.text)
+                        Text(piece.text)
+                    } else {
+                        Text(piece.text)
+                    }
                 }
-                Text(after)
             }
+            .lineLimit(1)
+            .minimumScaleFactor(0.85)
         } else {
             Text(text)
         }
+    }
+
+    @ViewBuilder
+    private func agentGlyph(named name: String) -> some View {
+        if let target = model.projects.first(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
+            AgentAvatar(project: target, theme: theme, size: 16, still: true)
+        } else if let slug = TreeAvatars.shared.relayDefault(name), TreeAvatars.shared.has(slug) {
+            // An agent we do not list yet still shows as a coloured tree (D74).
+            TreeCharacterView(slug: slug, size: 16, color: TreeAvatars.shared.defaultColor(forProjectId: name), still: true)
+        } else {
+            BlobAvatar(color: theme.muted, shape: BlobShape.pick(for: name), size: 16)
+        }
+    }
+
+    /// Split "6 messages with ◉Kenny, ◉Tyler and ◉Jenny" into plain text and name pieces;
+    /// a name runs from its marker to the next ", " or " and ".
+    static func splitMarkers(_ text: String) -> [(text: String, isName: Bool)] {
+        var out: [(String, Bool)] = []
+        let parts = text.components(separatedBy: "\u{FFFC}")
+        if let head = parts.first, !head.isEmpty { out.append((head.trimmingCharacters(in: .whitespaces), false)) }
+        for seg in parts.dropFirst() {
+            var name = seg
+            var rest = ""
+            for sep in [", ", " and "] {
+                if let r = seg.range(of: sep), r.lowerBound < name.endIndex {
+                    let candidate = String(seg[..<r.lowerBound])
+                    if candidate.count < name.count { name = candidate; rest = String(seg[r.lowerBound...]) }
+                }
+            }
+            out.append((name, true))
+            let trimmed = rest.trimmingCharacters(in: .whitespaces)
+            if !trimmed.isEmpty { out.append((trimmed, false)) }
+        }
+        return out
     }
 }
 

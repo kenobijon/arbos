@@ -360,6 +360,8 @@ struct Message: Identifiable, Equatable {
     var decision: String?
     var subagentId: String?
     var subagentName: String?
+    /// Messages exchanged with the subagent on a hand-off row (1 = brief sent, 2 = result back).
+    var handoffMessages: Int? = nil
     var inReplyTo: String?
     var usage: [String: Double]
     var model: String?
@@ -460,6 +462,7 @@ enum DocJSON {
             decision: str(m["decision"]),
             subagentId: str(m["subagentId"]),
             subagentName: str(m["subagentName"]),
+            handoffMessages: int(m["handoffMessages"]).map { Int($0) },
             inReplyTo: str(m["inReplyTo"]),
             usage: usage,
             model: str(m["model"]),
