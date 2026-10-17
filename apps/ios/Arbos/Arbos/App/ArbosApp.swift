@@ -60,6 +60,18 @@ struct RootView: View {
             .presentationCornerRadius(28)
             .preferredColorScheme(theme.isDark ? .dark : .light)
         }
+        .overlay(alignment: .top) {
+            // Collapsed call: the voice pill sits in the chat header while that chat is
+            // on screen (ChatView draws it there); everywhere else, and for video, it floats.
+            if calls.isActive, !calls.isPresented,
+               calls.call?.kind == .video || !model.isShowing(chatId: calls.call?.chatId ?? "") {
+                InCallOverlay(expected: expectedPeople)
+                    .environmentObject(model)
+                    .environment(\.theme, theme)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(.spring(duration: 0.3), value: calls.isPresented)
         .fullScreenCover(isPresented: $calls.isPresented) {
             CallScreen(expected: expectedPeople)
                 .environmentObject(model)
@@ -91,24 +103,7 @@ struct RootView: View {
         }
     }
 
-    /// Who the call screen shows before anyone joins: the DM peer, or (for a
-    /// people group) every other human plus the agents in that chat; for a
-    /// project chat the project's agent (Calls Phase 2).
-    private var expectedPeople: [CallPerson] {
-        guard let c = calls.call else { return [] }
-        guard let chat = model.peopleChat(c.chatId) else {
-            if !c.agents.isEmpty { return c.agents }
-            guard let project = model.project(c.projectId) else { return [] }
-            return [CallPerson(id: project.id, kind: "agent", name: project.name, handle: mentionSlug(project.name),
-                               avatar: project.avatar, avatarColor: project.avatarColor, avatarUrl: nil)]
-        }
-        let me = model.user?.id
-        if chat.isGroup {
-            return chat.members.filter { $0.id != me }.map(CallPerson.from(member:))
-        }
-        guard let other = chat.counterpart(me: me) else { return [] }
-        return [CallPerson.from(member: other)]
-    }
+    private var expectedPeople: [CallPerson] { calls.call.map(model.expectedCallPeople) ?? [] }
 
     /// Ask once, a beat after the home screen appears (never in the fixture or a live demo).
     private func schedulePrimer(_ paired: Bool) {
