@@ -57,12 +57,26 @@ struct CallScreen: View {
         ZStack {
             theme.bg.ignoresSafeArea()
             VStack(spacing: 0) {
-                TimelineView(.periodic(from: .now, by: 1)) { _ in
-                    Text(headline)
-                        .font(.system(size: Theme.small, weight: .semibold))
-                        .foregroundStyle(theme.muted)
-                        .padding(.top, 14)
+                ZStack {
+                    TimelineView(.periodic(from: .now, by: 1)) { _ in
+                        Text(headline)
+                            .font(.system(size: Theme.small, weight: .semibold))
+                            .foregroundStyle(theme.muted)
+                    }
+                    HStack {
+                        Button { collapse() } label: {
+                            GlassCircle(size: 40) {
+                                Image(systemName: "chevron.down").font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.text)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Back to chat")
+                        .accessibilityHint("Keeps the call going in a small bar over the chat")
+                        Spacer()
+                    }
+                    .padding(.horizontal, 16)
                 }
+                .padding(.top, 8)
                 Spacer(minLength: 12)
                 if useGroupLayout {
                     grid
@@ -83,6 +97,24 @@ struct CallScreen: View {
         .statusBarHidden(false)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(title)
+        // Pull down anywhere on the screen: same as the chevron.
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 40)
+                .onEnded { v in
+                    if v.translation.height > 120, v.translation.height > abs(v.translation.width) * 1.5 { collapse() }
+                }
+        )
+    }
+
+    /// Collapse into the in-call pill and make sure the call's chat is on screen.
+    private func collapse() {
+        guard calls.isActive, let c = calls.call else { return }
+        if let pc = model.peopleChat(c.chatId) {
+            if !model.isShowing(chatId: pc.id) { model.open(peopleChat: pc) }
+        } else if let chat = model.chat(c.chatId) {
+            if !model.isShowing(chatId: chat.id) { model.open(chat: chat) }
+        }
+        calls.minimize()
     }
 
     private var headline: String {

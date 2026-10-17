@@ -155,6 +155,30 @@ final class AppModel: ObservableObject {
         case chat(chatId: Id, projectId: Id)
     }
 
+    /// Who the call screen shows before anyone joins: the DM peer, or (for a
+    /// people group) every other human plus the agents in that chat; for a
+    /// project chat the project's agent (Calls Phase 2).
+    func expectedCallPeople(_ c: Call) -> [CallPerson] {
+        guard let chat = peopleChat(c.chatId) else {
+            if !c.agents.isEmpty { return c.agents }
+            guard let project = project(c.projectId) else { return [] }
+            return [CallPerson(id: project.id, kind: "agent", name: project.name, handle: mentionSlug(project.name),
+                               avatar: project.avatar, avatarColor: project.avatarColor, avatarUrl: nil)]
+        }
+        let me = user?.id
+        if chat.isGroup {
+            return chat.members.filter { $0.id != me }.map(CallPerson.from(member:))
+        }
+        guard let other = chat.counterpart(me: me) else { return [] }
+        return [CallPerson.from(member: other)]
+    }
+
+    /// Is this chat the one on screen (top of the navigation path)?
+    func isShowing(chatId: Id) -> Bool {
+        if case .chat(let id, _)? = path.last { return id == chatId }
+        return false
+    }
+
     func open(chat: Chat) {
         unarchive(chat.projectId)
         rememberOpened(chat)

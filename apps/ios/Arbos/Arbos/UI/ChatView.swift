@@ -109,11 +109,16 @@ struct ChatView: View {
         return s
     }
 
+    /// A call in this chat we are not in (the one we are in shows as the in-call pill instead).
     private var hasCallBar: Bool {
         guard let active = calls.activeByChat[chatId], !active.ended else { return false }
-        return calls.call?.callId != active.callId || !calls.isPresented
+        return calls.call?.callId != active.callId
     }
-    private var headerExtra: CGFloat { (hasCallBar ? 52 : 0) + (showSearch ? 46 : 0) }
+    /// Our own call, collapsed into the header bar of this chat (voice; video floats as PiP).
+    private var hasInCallBar: Bool {
+        calls.isActive && !calls.isPresented && calls.call?.kind == .voice && calls.call?.chatId == chatId
+    }
+    private var headerExtra: CGFloat { (hasCallBar ? 52 : 0) + (hasInCallBar ? 56 : 0) + (showSearch ? 46 : 0) }
 
     private func startCall(_ kind: CallKind) {
         Task { await calls.start(chatId: chatId, projectId: isPeople ? nil : projectId, kind: kind, title: callTitle) }
@@ -231,10 +236,13 @@ struct ChatView: View {
                         .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
                         .padding(.horizontal, 16)
                     }
-                    if let active = calls.activeByChat[chatId], !active.ended, calls.call?.callId != active.callId || !calls.isPresented {
+                    if hasInCallBar, let c = calls.call {
+                        InCallOverlay(expected: model.expectedCallPeople(c), inline: true)
+                            .frame(height: 48)
+                    }
+                    if hasCallBar, let active = calls.activeByChat[chatId] {
                         CallBar(call: active) {
-                            if calls.call?.callId == active.callId { calls.isPresented = true }
-                            else { Task { await calls.join(active, title: callTitle) } }
+                            Task { await calls.join(active, title: callTitle) }
                         }
                         .padding(.horizontal, 16)
                     }
