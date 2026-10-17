@@ -474,6 +474,19 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// D82 first login: the live doc of a chat (nil until its room exists).
+    func liveDoc(_ chatId: Id) -> ChatDoc? { docs[chatId] }
+
+    /// D82 first login: `POST /projects` for the account's first agent.
+    func createFirstProject(name: String) async throws {
+        _ = try await api.createProject(name: name)
+    }
+
+    /// D82 first login: `POST /machine/start` from the Retry block.
+    func startMachineQuietly() async {
+        try? await api.startMachine()
+    }
+
     /// Opening a chat: is a call on there? (GET /chats/{id}/call)
     func refreshActiveCall(chatId: Id, projectId: Id?) async {
         guard credentials != nil, !isFixture else { return }

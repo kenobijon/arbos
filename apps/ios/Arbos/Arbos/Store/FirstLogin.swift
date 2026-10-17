@@ -152,7 +152,7 @@ extension AppModel {
         fl.awakeSince = nil
         firstLogin = fl
         Task {
-            try? await api.startMachine()
+            await startMachineQuietly()
             await refreshRegistry()
             firstLoginTick()
         }
@@ -224,7 +224,7 @@ extension AppModel {
                 Task { [weak self] in
                     guard let self else { return }
                     do {
-                        _ = try await self.api.createProject(name: FirstLogin.agentName)
+                        try await self.createFirstProject(name: FirstLogin.agentName)
                     } catch {
                         // 409: another device of this account made it first.
                         if (error as? RelayError)?.status != 409 {
@@ -343,7 +343,7 @@ extension AppModel {
     /// True once a greeting row exists in the chat (ours or another device's).
     private func writeGreetingIfMissing(chatId: Id, project: Project) -> Bool {
         if messages(of: chatId).contains(where: { $0.greeting }) { return true }
-        guard let doc = docs[chatId] else { return false }
+        guard let doc = liveDoc(chatId) else { return false }
         if doc.readAll().contains(where: { $0.greeting }) { return true }
         let text = "Hi, I’m \(project.name). Your computer is ready — what should we build first?"
         do {
