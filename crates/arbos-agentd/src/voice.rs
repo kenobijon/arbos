@@ -134,7 +134,13 @@ async fn handle_frame(sup: Arc<Supervisor>, frame: Value, out: mpsc::Sender<Stri
                     let attachments = frame["attachments"].as_array().cloned().unwrap_or_default();
                     let t0 = std::time::Instant::now();
                     match agent
-                        .voice_request(&chat_id, &frame["speaker"], &request, &call_id, &attachments)
+                        .voice_request(
+                            &chat_id,
+                            &frame["speaker"],
+                            &request,
+                            &call_id,
+                            &attachments,
+                        )
                         .await
                     {
                         Ok((text, message_id)) => {
