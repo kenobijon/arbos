@@ -328,6 +328,9 @@ impl Tree {
         llm: Arc<Llm>,
     ) -> Self {
         let _ = store.exec_batch(SCHEMA);
+        // Every card and walk call carries `x-arbos-purpose: memory-tree`, so the relay's usage
+        // table and credit ledger show the feature's spend on its own.
+        let llm = Arc::new(llm.with_purpose("memory-tree"));
         Self {
             project_id: project_id.to_owned(),
             project_name: project_name.to_owned(),
