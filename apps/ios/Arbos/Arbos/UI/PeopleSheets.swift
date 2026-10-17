@@ -969,6 +969,30 @@ struct ProjectMembersSheet: View {
     @State private var members: [ProjectMember] = []
     @State private var handle = ""
     @State private var busy = false
+    @State private var remote: [Person] = []
+    @State private var searching = false
+
+    private var trimmed: String {
+        handle.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "@"))
+    }
+
+    private var memberIds: Set<String> { Set(members.map(\.id)) }
+
+    /// Directory + remote matches for the typed handle (excludes current members).
+    private var suggestions: [Person] {
+        let q = trimmed.lowercased()
+        guard !q.isEmpty else { return [] }
+        let local = model.directory.filter {
+            $0.handle.lowercased().contains(q) || ($0.name ?? "").lowercased().contains(q)
+        }.filter { !memberIds.contains($0.id) && $0.id != model.user?.id }
+        var seen = Set(local.map(\.id))
+        var out = local
+        for p in remote where !seen.contains(p.id) && !memberIds.contains(p.id) && p.id != model.user?.id {
+            seen.insert(p.id)
+            out.append(p)
+        }
+        return out
+    }
 
     var body: some View {
         NavigationStack {
@@ -979,10 +1003,36 @@ struct ProjectMembersSheet: View {
                             Text("@").foregroundStyle(theme.muted)
                             TextField("", text: $handle, prompt: Text("GitHub username").foregroundStyle(theme.placeholder))
                                 .textInputAutocapitalization(.never).autocorrectionDisabled()
-                                .onSubmit(invite)
-                            Button(busy ? "…" : "Invite", action: invite)
+                                .onSubmit { invite() }
+                            if searching {
+                                ProgressView().controlSize(.small).tint(theme.muted)
+                            }
+                            Button(busy ? "…" : "Invite") { invite() }
                                 .font(.system(size: Theme.small, weight: .semibold))
-                                .disabled(busy || handle.trimmingCharacters(in: .whitespaces).isEmpty)
+                                .disabled(busy || trimmed.isEmpty)
+                        }
+                        if !trimmed.isEmpty {
+                            ForEach(suggestions) { p in
+                                Button { invite(p.handle) } label: {
+                                    HStack(spacing: 12) {
+                                        PersonAvatar(url: p.avatarUrl, handle: p.handle, size: 40)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(p.displayName).foregroundStyle(theme.text)
+                                            Text("@\(p.handle)").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                                        }
+                                        Spacer()
+                                        Text(PersonRow.statusLabel(p.status))
+                                            .font(.system(size: 11, weight: .medium))
+                                            .foregroundStyle(p.status == "member" ? theme.online : theme.muted)
+                                    }
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(busy)
+                            }
+                            if suggestions.isEmpty && !searching && trimmed.count >= 2 {
+                                Text("No one matches @\(trimmed).")
+                                    .font(.system(size: Theme.small)).foregroundStyle(theme.muted)
+                            }
                         }
                     } footer: {
                         Text("A member drives this agent with you, sees its chats and files, and spends your credits. You can remove them any time.")
@@ -1015,19 +1065,41 @@ struct ProjectMembersSheet: View {
             .navigationTitle("Share \(project.name)")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
-            .task { await load() }
+            .task {
+                await load()
+                await model.loadDirectory()
+            }
+            .onChange(of: handle) { _, _ in search() }
         }
         .presentationDetents([.medium, .large])
     }
 
     private func load() async { members = await model.projectMembers(project.id) }
 
-    private func invite() {
-        let h = handle.trimmingCharacters(in: .whitespaces)
+    private func search() {
+        let q = trimmed
+        guard q.count >= 2 else { remote = []; searching = false; return }
+        searching = true
+        Task {
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard q == trimmed else { return }
+            remote = await model.searchPeople(q)
+            if q == trimmed { searching = false }
+        }
+    }
+
+    private func invite(_ raw: String? = nil) {
+        let h = (raw ?? trimmed)
+            .trimmingCharacters(in: .whitespaces)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "@"))
         guard !h.isEmpty, !busy else { return }
         busy = true
         Task {
-            if let list = await model.inviteToProject(project.id, handle: h) { members = list; handle = "" }
+            if let list = await model.inviteToProject(project.id, handle: h) {
+                members = list
+                handle = ""
+                remote = []
+            }
             busy = false
         }
     }
