@@ -53,9 +53,10 @@ struct RootView: View {
         .alert(item: $model.notice) { n in
             Alert(title: Text("Arbos"), message: Text(n.text), dismissButton: .default(Text("OK")))
         }
-        // Profile setup waits for the first-login screen (D82): the terminal and the
-        // greeting hand-off come first, then the name/handle sheet, then the primer.
-        .sheet(isPresented: Binding(get: { model.needsProfileSetup && model.firstLogin == nil },
+        // Fresh account: the name/handle sheet shows over the first-login terminal
+        // screen (D82) while the machine boots (8–11 s), as Telegram and Grok ask for
+        // the name before the first chat; the notifications primer waits for both.
+        .sheet(isPresented: Binding(get: { model.needsProfileSetup },
                                     set: { model.needsProfileSetup = $0 })) {
             ProfileEditView(onboarding: true)
                 .environmentObject(model)
