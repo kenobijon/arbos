@@ -46,7 +46,8 @@ Config comes from the environment (systemd EnvironmentFile=/etc/arbos/feedback.e
   FEEDBACK_TOPICS_FILE (/etc/arbos/feedback-topics.txt): "<issue> <regex>" lines; matching feedback is folded
       into that issue (a feature already being built) instead of starting an agent
   FEEDBACK_DEFERRED_FILE (/etc/arbos/feedback-deferred.txt): "<regex> :: <comment>" lines; matching feedback gets
-      its issue + label `deferred` + the comment, no agent (a product area intentionally off for now)
+      its issue + label `deferred` + the comment, no agent (a product area intentionally off for now).
+      "ios: <regex>" / "mac: <regex>" limits a rule to feedback aimed at that app.
   FEEDBACK_DEDUPE_DAYS (7), FEEDBACK_AGENT_TIMEOUT_MIN (75), FEEDBACK_SHIP_TIMEOUT_MIN (90)
 
 Only the standard library plus `cryptography` (for the ES256 App Store Connect token).
@@ -207,6 +208,7 @@ class Config:
                 if not line or line.startswith("#") or " :: " not in line:
                     continue
                 pattern, _, comment = line.partition(" :: ")
+                # Optional target prefix: "ios: <regex>" / "mac: <regex>" limits the rule to that app.
                 if pattern.strip() and comment.strip():
                     deferred.append((pattern.strip(), comment.strip()))
         # Topics already being built: "<issue number> <regex>" per line; matching feedback is folded
@@ -941,6 +943,20 @@ class Loop:
         self.store.event(fid, "queued", tester=st["tester"], tier=tier, source=info.get("source"),
                          target=st["target"], comment=info["comment"][:200])
 
+    def deferral_for(self, info: dict, target: str) -> str | None:
+        """The deferred-area comment for this feedback, or None. A rule written as "ios: <regex>" or
+        "mac: <regex>" applies only to feedback aimed at that app."""
+        text = info.get("comment") or ""
+        for pat, comment in self.cfg.deferred:
+            m = re.match(r"^(ios|mac):\s*(.+)$", pat, re.I)
+            if m:
+                if m.group(1).lower() != target:
+                    continue
+                pat = m.group(2)
+            if re.search(pat, text, re.I):
+                return comment
+        return None
+
     @staticmethod
     def pick_target(info: dict) -> str:
         if info.get("forced_target") in ("ios", "mac"):
@@ -1094,7 +1110,7 @@ class Loop:
             st["tier"] = self.tier(info)
             st["tester"] = self.tester_label(info, st["tier"])
             self.store.save_state(fid, st)
-        deferral = next((c for pat, c in self.cfg.deferred if re.search(pat, info.get("comment") or "", re.I)), None)
+        deferral = self.deferral_for(info, st.get("target") or self.pick_target(info))
         reason = None if deferral else self.rate_limit_reason(st)
         if reason:
             if st.get("deferred_reason") != reason.split(" (")[0]:
