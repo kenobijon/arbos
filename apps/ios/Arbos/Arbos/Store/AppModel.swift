@@ -1632,14 +1632,17 @@ final class AppModel: ObservableObject {
                 mentions.append(address)
             }
         }
-        // In a DM, carry on with the agent who last spoke when nothing addresses an agent
-        // and the message is not aimed at a person. A person chip / @handle / bare name must
-        // not also ping the last agent — otherwise "Message Allan" still wakes bob.
-        // In a group, leave the message unaddressed (unless a chip / @agent set one) so the
-        // box decision model can choose which agent replies from chat context.
+        // In an agent-only DM, carry on with the agent who last spoke when nothing addresses
+        // an agent and the message is not aimed at a person. A DM with a human peer (Allan +
+        // bob) must not inherit that sticky target — otherwise "New test" / "Don't respond bob"
+        // still wakes bob. A person chip / @handle / bare name must not also ping the last
+        // agent — otherwise "Message Allan" still wakes bob. In a group, leave the message
+        // unaddressed (unless a chip / @agent set one) so the box decision model can choose
+        // which agent replies from chat context.
         var reply = replyTo
         let addressedPerson = mentions.contains { $0.hasPrefix("user:") }
-        if chat.kind != "group", !mentions.contains(where: { $0.hasPrefix("agent:") }),
+        let hasHumanPeer = chat.humans.contains { $0.id != me.id }
+        if chat.kind != "group", !hasHumanPeer, !mentions.contains(where: { $0.hasPrefix("agent:") }),
            !addressedPerson, reply == nil,
            let last = messages(of: chatId).last(where: { $0.role == .assistant }) {
             reply = last.id

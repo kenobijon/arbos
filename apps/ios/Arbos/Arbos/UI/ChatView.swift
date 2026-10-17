@@ -128,7 +128,8 @@ struct ChatView: View {
     @State private var replyTo: Message?
     @State private var mentionQuery: String?
     /// Chip-picked addressee in a people chat: `agent:…`, `user:…`, or `"everyone"`.
-    /// Nil means infer from the last agent reply (carry the convo) or the human counterpart.
+    /// Nil means no chip: agent-only DMs may still infer the last agent; human-peer DMs stay
+    /// with the person until a chip / `@` / reply picks an agent.
     @State private var talkTo: String?
 
     private var project: Project? { model.project(projectId) }
@@ -151,16 +152,18 @@ struct ChatView: View {
         return name
     }
 
-    /// Who the next people-chat message is for — chip pick, reply-to, or (in a DM only) the
-    /// agent who last spoke. Groups leave the addressee unset so the decision model on the box
-    /// can choose which agent replies, or none.
+    /// Who the next people-chat message is for — chip pick, reply-to, or (agent-only DM) the
+    /// agent who last spoke. A DM with a human peer (Allan + bob) leaves the addressee unset so
+    /// plain lines stay with the person; tap the agent chip or `@` to talk to the agent. Groups
+    /// leave the addressee unset so the decision model on the box can choose who replies, or none.
     private var effectiveTalkTo: String? {
         if let talkTo { return talkTo }
         if let r = replyTo, r.role == .assistant, let member = agentMember(for: r) {
             return member.member
         }
-        // DMs keep the last-agent follow-up; groups do not auto-address anyone.
-        if people?.kind != "group",
+        // Agent-only DMs keep the last-agent follow-up; a human peer must not inherit @bob.
+        let hasHumanPeer = people?.humans.contains { $0.id != model.user?.id } == true
+        if people?.kind != "group", !hasHumanPeer,
            let last = messages.last(where: { $0.role == .assistant }),
            let member = agentMember(for: last) {
             return member.member
@@ -827,7 +830,14 @@ struct ChatView: View {
                 ForEach(others) { m in
                     let selected = effectiveTalkTo == m.member
                     Button {
-                        talkTo = talkTo == m.member ? nil : m.member
+                        // Tapping the selected chip clears it. Do not promote an inferred /
+                        // reply-only selection into a sticky talkTo — that locked @bob on
+                        // every later line in Allan+bob DMs.
+                        if effectiveTalkTo == m.member {
+                            talkTo = nil
+                        } else {
+                            talkTo = m.member
+                        }
                         replyTo = nil
                     } label: {
                         HStack(spacing: 6) {
@@ -1292,14 +1302,20 @@ struct ChatView: View {
         }
     }
 
-    /// After a send in a DM, keep the agent chip selected so the next line stays with them.
-    /// In a group, clear the chip so the next line is unaddressed and the decision model
-    /// picks who replies from chat context (an explicit chip tap still addresses that send).
-    /// Always clear a one-shot "everyone" address.
+    /// After a send in a DM, keep an explicit agent chip selected so the next line stays with
+    /// them. Do not promote a reply-only / @-only address into a sticky chip when a human peer
+    /// is in the chat — otherwise Allan+bob DMs leave Message @bob on unrelated follow-ups.
+    /// In a group, clear the chip so the next line is unaddressed and the decision model picks
+    /// who replies (an explicit chip tap still addresses that send). Always clear "everyone".
     private func pinTalkTo(afterSending address: String?) {
         if address == "everyone" || people?.kind == "group" {
             talkTo = nil
         } else if let address, address.hasPrefix("agent:") {
+            let hasHumanPeer = people?.humans.contains { $0.id != model.user?.id } == true
+            if hasHumanPeer, talkTo != address {
+                // Reply-to or typed @agent addressed this send; leave the next line free.
+                return
+            }
             talkTo = address
         }
     }
