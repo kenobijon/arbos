@@ -6,7 +6,11 @@
 //! The Mac is that UI scaled up: a chat-list sidebar, one conversation pane.
 //! Matte is the default; Glass is a macOS-only toggle (D10, §3.11).
 
-use gpui::{hsla, rgb, rgba, App, Global, Hsla, WindowBackgroundAppearance};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use gpui::{hsla, rgb, rgba, App, Global, Hsla, WindowAppearance, WindowBackgroundAppearance};
+
+use crate::sync::credentials::config_dir;
 
 /// Chat-list sidebar (the iPhone home list, one column).
 pub const SIDEBAR_WIDTH: f32 = 296.0;
@@ -47,16 +51,106 @@ pub enum Surface {
     Glass,
 }
 
+/// What the window is drawn in right now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Appearance {
     Dark,
     Light,
 }
 
+/// What the user chose (D81): System follows macOS and is the default; the
+/// order is the Settings order. Saved as one word in `<config>/appearance`
+/// only when the user picks in Settings, so a missing file means "never
+/// chose" → System, and an explicit `dark` or `light` stays.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppearancePref {
+    System,
+    Light,
+    Dark,
+}
+
+const APPEARANCE_FILE: &str = "appearance";
+
+/// macOS's own light/dark, mirrored from the last window-appearance reading so
+/// code without a `cx` (notification images) can follow it.
+static SYSTEM_DARK: AtomicBool = AtomicBool::new(false);
+
+impl AppearancePref {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "system" => Some(Self::System),
+            "light" => Some(Self::Light),
+            "dark" => Some(Self::Dark),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Light => "light",
+            Self::Dark => "dark",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::System => "System",
+            Self::Light => "Light",
+            Self::Dark => "Dark",
+        }
+    }
+
+    /// The saved choice, or System.
+    pub fn load() -> Self {
+        std::fs::read_to_string(config_dir().join(APPEARANCE_FILE))
+            .ok()
+            .and_then(|s| Self::parse(&s))
+            .unwrap_or(Self::System)
+    }
+
+    pub fn save(self) {
+        let dir = config_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join(APPEARANCE_FILE), self.as_str());
+    }
+
+    /// The appearance to draw: System takes macOS's; anything unknown is Light.
+    pub fn resolve(self, system: WindowAppearance) -> Appearance {
+        match self {
+            Self::Light => Appearance::Light,
+            Self::Dark => Appearance::Dark,
+            Self::System => match system {
+                WindowAppearance::Dark | WindowAppearance::VibrantDark => Appearance::Dark,
+                WindowAppearance::Light | WindowAppearance::VibrantLight => Appearance::Light,
+            },
+        }
+    }
+}
+
+/// Remember macOS's current light/dark (startup and every appearance change).
+pub fn note_system_appearance(system: WindowAppearance) {
+    SYSTEM_DARK.store(
+        matches!(
+            system,
+            WindowAppearance::Dark | WindowAppearance::VibrantDark
+        ),
+        Ordering::Relaxed,
+    );
+}
+
+/// Is macOS itself dark right now? Notification banners are drawn by the
+/// system, so their pictures follow this rather than the in-app theme (D81).
+pub fn system_is_dark() -> bool {
+    SYSTEM_DARK.load(Ordering::Relaxed)
+}
+
 #[derive(Clone, Debug)]
 pub struct Theme {
     pub surface: Surface,
     pub appearance: Appearance,
+    /// The user's choice behind `appearance` (System / Light / Dark).
+    pub pref: AppearancePref,
     pub bg: Hsla,
     /// The chat-list column (a shade lighter than the conversation, as on Grok Mac).
     pub sidebar: Hsla,
@@ -113,6 +207,7 @@ impl Theme {
         Self {
             surface,
             appearance: Appearance::Dark,
+            pref: AppearancePref::Dark,
             bg: hex(0x141414),
             sidebar: hex(0x1a1a1a),
             surface_1: hex(0x1e1e1e),
@@ -144,6 +239,7 @@ impl Theme {
         Self {
             surface,
             appearance: Appearance::Light,
+            pref: AppearancePref::Light,
             // Grok Mac light (ref 16/30): chat #FCFCFC, sidebar #F6F6F6,
             // selected row #EFEFEF, assistant bubble #F2F2F2.
             bg: hex(0xfcfcfc),
@@ -182,6 +278,15 @@ impl Theme {
             Appearance::Dark => Self::dark(surface),
             Appearance::Light => Self::light(surface),
         }
+    }
+
+    /// The theme for a choice: System resolves against macOS's current appearance.
+    pub fn for_pref(pref: AppearancePref, surface: Surface, cx: &App) -> Self {
+        let system = cx.window_appearance();
+        note_system_appearance(system);
+        let mut theme = Self::with(pref.resolve(system), surface);
+        theme.pref = pref;
+        theme
     }
 
     fn sans_family() -> &'static str {

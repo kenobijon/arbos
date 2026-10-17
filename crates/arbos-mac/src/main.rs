@@ -19,7 +19,7 @@ use crate::ui::composer;
 use crate::ui::feedback;
 use crate::ui::motion::PulseClock;
 use crate::ui::shell::{self, Shell};
-use crate::ui::theme::{reapply_window_background, Appearance, Surface, Theme};
+use crate::ui::theme::{reapply_window_background, AppearancePref, Surface, Theme};
 use crate::ui::widgets;
 
 fn main() {
@@ -36,11 +36,13 @@ fn main() {
                 Ok("glass") => Surface::Glass,
                 Ok(_) | Err(_) => Surface::Matte,
             };
-            let appearance = match std::env::var("ARBOS_APPEARANCE").as_deref() {
-                Ok("light") => Appearance::Light,
-                Ok(_) | Err(_) => Appearance::Dark,
-            };
-            cx.set_global(Theme::with(appearance, surface));
+            // System is the default (D81); the saved Settings choice wins over it,
+            // `ARBOS_APPEARANCE=system|light|dark` over both (demos, screenshots).
+            let pref = std::env::var("ARBOS_APPEARANCE")
+                .ok()
+                .and_then(|v| AppearancePref::parse(&v))
+                .unwrap_or_else(AppearancePref::load);
+            cx.set_global(Theme::for_pref(pref, surface, cx));
             PulseClock::init(cx);
             bind_keys(cx);
             set_menus(cx);

@@ -33,7 +33,7 @@ use crate::ui::routines::{RoutinesEvent, RoutinesPanel};
 use crate::ui::sidebar;
 use crate::ui::skills::SkillsPanel;
 use crate::ui::theme::{
-    reapply_window_background, Appearance, Surface, Theme, COLUMN_MARGIN, COMPOSER_WIDTH,
+    reapply_window_background, AppearancePref, Surface, Theme, COLUMN_MARGIN, COMPOSER_WIDTH,
     DRAWER_WIDTH, HEADER_HEIGHT, LINE_HEIGHT, PANEL_RADIUS, PLUS_BUTTON, RIGHT_PANEL_WIDTH,
     TAB_BAR_HEIGHT, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
 };
@@ -123,6 +123,7 @@ impl Shell {
             .detach();
         }
         cx.observe(&state, |_, _, cx| cx.notify()).detach();
+        Self::follow_system_appearance(window);
         cx.observe(&voice, |_, _, cx| cx.notify()).detach();
         cx.observe(&composer, |_, _, cx| cx.notify()).detach();
         cx.observe_window_activation(window, |this, window, cx| {
@@ -387,10 +388,34 @@ impl Shell {
         }
     }
 
-    fn set_theme(&mut self, appearance: Appearance, surface: Surface, cx: &mut Context<Self>) {
-        cx.set_global(Theme::with(appearance, surface));
+    fn set_theme(&mut self, pref: AppearancePref, surface: Surface, cx: &mut Context<Self>) {
+        if Theme::of(cx).pref != pref {
+            pref.save();
+        }
+        cx.set_global(Theme::for_pref(pref, surface, cx));
         reapply_window_background(cx);
         cx.notify();
+    }
+
+    /// System follows macOS: re-resolve the theme when its appearance changes (D81).
+    fn follow_system_appearance(window: &mut Window) {
+        window
+            .observe_window_appearance(|window, cx| {
+                let theme = Theme::of(cx);
+                let system = window.appearance();
+                crate::ui::theme::note_system_appearance(system);
+                if theme.pref != AppearancePref::System {
+                    return;
+                }
+                let wanted = AppearancePref::System.resolve(system);
+                if wanted != theme.appearance {
+                    let surface = theme.surface;
+                    cx.set_global(Theme::for_pref(AppearancePref::System, surface, cx));
+                    reapply_window_background(cx);
+                    window.refresh();
+                }
+            })
+            .detach();
     }
 
     /// Everything that floats closes on a click elsewhere.
@@ -1586,33 +1611,22 @@ impl Shell {
         let group = settings_group(&theme)
             .child(seg_row(
                 "Theme",
-                div()
-                    .flex()
-                    .gap(px(2.0))
-                    .child(
-                        glass::segment(
-                            "mode-dark",
-                            "Dark",
-                            theme.appearance == Appearance::Dark,
-                            &theme,
+                div().flex().gap(px(2.0)).children(
+                    [
+                        (AppearancePref::System, "mode-system"),
+                        (AppearancePref::Light, "mode-light"),
+                        (AppearancePref::Dark, "mode-dark"),
+                    ]
+                    .into_iter()
+                    .map(|(pref, id)| {
+                        glass::segment(id, pref.label(), theme.pref == pref, &theme).on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                let s = Theme::of(cx).surface;
+                                this.set_theme(pref, s, cx);
+                            }),
                         )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            let s = Theme::of(cx).surface;
-                            this.set_theme(Appearance::Dark, s, cx);
-                        })),
-                    )
-                    .child(
-                        glass::segment(
-                            "mode-light",
-                            "Light",
-                            theme.appearance == Appearance::Light,
-                            &theme,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            let s = Theme::of(cx).surface;
-                            this.set_theme(Appearance::Light, s, cx);
-                        })),
-                    ),
+                    }),
+                ),
                 &theme,
             ))
             .child(
@@ -1629,7 +1643,7 @@ impl Shell {
                                 &theme,
                             )
                             .on_click(cx.listener(|this, _, _, cx| {
-                                let a = Theme::of(cx).appearance;
+                                let a = Theme::of(cx).pref;
                                 this.set_theme(a, Surface::Matte, cx);
                             })),
                         )
@@ -1641,7 +1655,7 @@ impl Shell {
                                 &theme,
                             )
                             .on_click(cx.listener(|this, _, _, cx| {
-                                let a = Theme::of(cx).appearance;
+                                let a = Theme::of(cx).pref;
                                 this.set_theme(a, Surface::Glass, cx);
                             })),
                         ),

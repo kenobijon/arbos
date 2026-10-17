@@ -230,6 +230,8 @@ class CallState:
     stop_reason: str | None = None
     # True while mute_self has detached our audio output (people cannot hear us).
     muted: bool = False
+    # leave_call: the model said its own goodbye; finish() must not add the canned one.
+    goodbye_said: bool = False
 
 
 class ArbosVoiceAgent(Agent):
@@ -526,11 +528,23 @@ class VoiceCall:
         log.info("leaving call %s: %s", self.call_id, reason)
         try:
             if self.session and reason != "alone" and GOODBYE.get(reason):
-                handle = self.speak_line(GOODBYE[reason], allow_interruptions=False)
-                try:
-                    await asyncio.wait_for(handle.wait_for_playout(), timeout=12.0)
-                except asyncio.TimeoutError:
-                    pass
+                if self.agent_speaking() or self.state.goodbye_said:
+                    # The model is already saying its own goodbye (kill word or leave_call):
+                    # a second response.create would cancel it and be refused; let it finish.
+                    deadline = time.monotonic() + 8.0
+                    while self.agent_speaking() and time.monotonic() < deadline:
+                        await asyncio.sleep(0.05)
+                    # The tool result makes the model answer once more ("Goodbye" again): mute it.
+                    try:
+                        self.session.output.set_audio_enabled(False)
+                    except Exception:
+                        pass
+                else:
+                    handle = self.speak_line(GOODBYE[reason], allow_interruptions=False)
+                    try:
+                        await asyncio.wait_for(handle.wait_for_playout(), timeout=12.0)
+                    except asyncio.TimeoutError:
+                        pass
         except Exception as e:
             log.warning("goodbye failed: %s", e)
         self.event("system", text=f"{self.agent_name} left the call" + ("" if reason in ("alone", "asked", "idle") else f" · {reason.replace('_', ' ')}"))
@@ -983,8 +997,11 @@ class VoiceCall:
         """Dismiss ourselves from the call after the model has said goodbye."""
         if self.state.leaving:
             return "Already leaving."
+        # The model usually says its goodbye before calling; when it calls first, finish() says it.
+        last = self.state.last_reply_ended_at
+        self.state.goodbye_said = self.agent_speaking() or (last is not None and time.monotonic() - last < 4.0)
         self.spawn(self.finish("asked"))
-        return "Leaving the call now."
+        return "You are leaving the call now. Do not say anything else."
 
     # ---- vision ------------------------------------------------------------------------------------
 

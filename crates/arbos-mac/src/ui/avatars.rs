@@ -220,13 +220,21 @@ fn fonts() -> &'static Mutex<(cosmic_text::FontSystem, cosmic_text::SwashCache)>
 }
 
 /// The same disc as a 128 px PNG for notification banners (cached by
-/// gradient + initials under the notify image dir).
-pub fn notification_png(seed: &str, name: &str, index: Option<u8>) -> Option<PathBuf> {
+/// gradient + initials under the notify image dir). `dark` picks the dark
+/// pair: the system draws the banner, so callers pass macOS's own appearance
+/// (`theme::system_is_dark()`), not the in-app theme (D81).
+pub fn notification_png(seed: &str, name: &str, index: Option<u8>, dark: bool) -> Option<PathBuf> {
     let idx = index_for(seed, index);
     let text = initials(name);
-    let key = format!("initials-{idx}-{}", text.to_lowercase());
+    let variant = if dark { "-dark" } else { "" };
+    let key = format!("initials-{idx}-{}{variant}", text.to_lowercase());
     let size = 128u32;
     let g = GRADIENTS[idx as usize];
+    let (top, bottom) = if dark {
+        (g.dark_top, g.dark_bottom)
+    } else {
+        (g.top, g.bottom)
+    };
     let mut out = image::RgbaImage::new(size, size);
     let c = (size as f32 - 1.0) / 2.0;
     let radius = size as f32 / 2.0;
@@ -237,7 +245,7 @@ pub fn notification_png(seed: &str, name: &str, index: Option<u8>) -> Option<Pat
             continue;
         }
         let t = y as f32 / (size as f32 - 1.0);
-        let mix = |i: usize| (g.top[i] as f32 * (1.0 - t) + g.bottom[i] as f32 * t) as u8;
+        let mix = |i: usize| (top[i] as f32 * (1.0 - t) + bottom[i] as f32 * t) as u8;
         *px = image::Rgba([mix(0), mix(1), mix(2), (cover * 255.0) as u8]);
     }
     draw_initials(&mut out, &text);
