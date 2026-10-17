@@ -78,7 +78,7 @@ struct HomeView: View {
                             case .project(let project):
                                 let pinned = model.isHomePinned(projectId: project.id)
                                 Button { openSearchHit(project) } label: {
-                                    AgentRow(project: project, preview: preview(project), time: timeLabel(project),
+                                    AgentRow(project: project, preview: preview(project), previewIcon: previewIcon(project), time: timeLabel(project),
                                              streaming: model.isStreaming(project: project.id),
                                              unread: model.chats(of: project.id).contains { model.chatHasUnread($0) },
                                              pinned: pinned)
@@ -521,15 +521,24 @@ struct HomeView: View {
         return (who.isEmpty ? "" : who + ": ") + HomeView.plain(line)
     }
 
-    /// Newest message with prose across the project's chats.
+    /// Newest message with prose (or an open question) across the project's chats.
     private func latest(_ p: Project) -> Message? {
         var best: Message? = nil
         for chat in model.chats(of: p.id) {
-            if let m = model.messages(of: chat.id).last(where: { !$0.plainText.isEmpty }) {
+            if let m = model.messages(of: chat.id).last(where: { !$0.plainText.isEmpty || $0.openQuestion != nil }) {
                 if best == nil || m.createdAt > best!.createdAt { best = m }
             }
         }
         return best
+    }
+
+    /// Grok puts a small glyph before some previews: a checklist when the bot is
+    /// waiting on a question, a paper plane when it messaged another bot.
+    private func previewIcon(_ p: Project) -> String? {
+        guard let m = latest(p) else { return nil }
+        if m.openQuestion != nil { return "checklist" }
+        if m.role != .user, m.turn == .new, m.subagentName != nil { return "paperplane" }
+        return nil
     }
 
     private func lastActivity(_ p: Project) -> Int64 {
@@ -541,7 +550,11 @@ struct HomeView: View {
         guard let m = latest(p) else {
             return model.isStreaming(project: p.id) ? "\(p.name) is working" : "No messages yet"
         }
+        if let q = m.openQuestion { return HomeView.plain(q.question) }
         let line = m.plainText.split(separator: "\n").first.map(String.init) ?? ""
+        if m.role != .user, m.turn == .new, let name = m.subagentName {
+            return line.isEmpty ? "Messaged \(name)" : "Messaged \(name): \(HomeView.plain(line))"
+        }
         return (m.role == .user ? "You: " : "") + HomeView.plain(line)
     }
 
@@ -610,6 +623,8 @@ struct AgentRow: View {
     @Environment(\.theme) private var theme
     let project: Project
     let preview: String
+    /// SF Symbol drawn before the preview (Grok: checklist / paper plane).
+    var previewIcon: String? = nil
     let time: String
     let streaming: Bool
     let unread: Bool
@@ -639,6 +654,12 @@ struct AgentRow: View {
                         .foregroundStyle(theme.muted)
                 }
                 HStack(spacing: 6) {
+                    if let previewIcon {
+                        Image(systemName: previewIcon)
+                            .font(.system(size: 13, weight: .regular))
+                            .foregroundStyle(theme.muted)
+                            .accessibilityHidden(true)
+                    }
                     Text(preview)
                         .font(.system(size: Theme.small))
                         .foregroundStyle(theme.muted)
