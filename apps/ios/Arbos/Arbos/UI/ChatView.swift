@@ -70,7 +70,7 @@ struct ChatView: View {
     /// Header tap: DM → the other person; group / shared project → the group page; own agent → its page.
     private func openHeaderProfile() {
         if let people {
-            if people.kind == "dm", people.humans.count <= 2, let other = counterpart {
+            if !people.isGroup, let other = counterpart {
                 model.showProfile(.user(ProfilePerson(other)))
             } else {
                 model.showProfile(.group(chatId: chatId, projectId: nil))
@@ -557,7 +557,7 @@ struct ChatView: View {
                 if isPeople {
                     // Calls always start audio-only; turn the camera on from the call screen.
                     Button { startCall(.voice) } label: { Label("Call", systemImage: "phone") }
-                    Button { openHeaderProfile() } label: { Label(people?.kind == "dm" ? "Profile" : "Group info", systemImage: "person.crop.circle") }
+                    Button { openHeaderProfile() } label: { Label(people?.isGroup == true ? "Group info" : "Profile", systemImage: "person.crop.circle") }
                     Button { showSearch = true; DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { searchFocused = true } } label: { Label("Search in chat", systemImage: "magnifyingglass") }
                     Button { showMembers = true } label: { Label("Members & agents", systemImage: "person.2") }
                     if let c = counterpart {

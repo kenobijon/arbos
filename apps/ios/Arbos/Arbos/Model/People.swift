@@ -106,8 +106,9 @@ struct PeopleChat: Identifiable, Equatable {
     var humans: [ChatMember] { members.filter { !$0.isAgent } }
     var agents: [ChatMember] { members.filter { $0.isAgent } }
 
-    /// Several humans (or `kind == group`): show a cluster, not a single person.
-    var isGroup: Bool { kind == "group" || humans.count > 2 }
+    /// Several humans, any agent, or `kind == group`: show a cluster, not a single person.
+    /// Adding an agent to a DM turns the chat into a group for the header and profile.
+    var isGroup: Bool { kind == "group" || humans.count > 2 || !agents.isEmpty }
 
     /// The other person of a DM.
     func counterpart(me: String?) -> ChatMember? {
