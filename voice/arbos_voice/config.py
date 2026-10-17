@@ -35,6 +35,11 @@ class Config:
         default_factory=lambda: _env("ARBOS_VOICE_JUDGE_FALLBACK_MODEL", "anthropic/claude-haiku-5.5")
     )
     usage_every_s: float = field(default_factory=lambda: _env_f("ARBOS_VOICE_USAGE_EVERY_S", 30.0))
+    # 1:1 end-of-turn detection on the speech model: "server_vad:<silence_ms>" (default 300) or
+    # "semantic_vad:<low|medium|high|auto>".
+    turn_detection: str = field(default_factory=lambda: _env("ARBOS_VOICE_TURN_DETECTION", "server_vad:300"))
+    # Group listeners: Silero end-of-speech silence (s) before an utterance is transcribed.
+    group_end_silence_s: float = field(default_factory=lambda: _env_f("ARBOS_VOICE_GROUP_END_SILENCE_S", 0.5))
     # Turn-taking in group calls (spec §3): the agent waits for this much room silence.
     group_silence_s: float = field(default_factory=lambda: _env_f("ARBOS_VOICE_GROUP_SILENCE_S", 0.7))
     # Idle hang-up (spec §6).

@@ -55,7 +55,7 @@ from livekit.agents.voice.events import (
 )
 from livekit.plugins import openai, silero
 from openai.types.realtime.audio_transcription import AudioTranscription
-from openai.types.realtime.realtime_audio_input_turn_detection import ServerVad
+from openai.types.realtime.realtime_audio_input_turn_detection import SemanticVad, ServerVad
 
 from . import __version__
 from .config import CONFIG, Config
@@ -255,7 +255,7 @@ class VoiceCall:
         if self.state.mode == "group":
             await self.start_group_listening()
         self.hook_realtime()
-        log.info("session started in %s mode (humans=%d, chattiness=%s)", self.state.mode, len(self.humans()), self.chattiness)
+        log.info("session started in %s mode (humans=%d, chattiness=%s, turn_detection=%s)", self.state.mode, len(self.humans()), self.chattiness, self.cfg.turn_detection)
         self.spawn(self.usage_loop())
         self.spawn(self.idle_loop())
         await self.greet()
@@ -294,16 +294,24 @@ class VoiceCall:
         )
 
     def turn_detection_for(self, mode: str):
-        if mode == "duplex":
-            return ServerVad(
-                type="server_vad",
-                threshold=0.5,
-                prefix_padding_ms=200,
-                silence_duration_ms=300,
-                create_response=True,
-                interrupt_response=True,
-            )
-        return None
+        if mode != "duplex":
+            return None
+        kind, _, arg = self.cfg.turn_detection.partition(":")
+        if kind == "semantic_vad":
+            eagerness = arg if arg in ("low", "medium", "high", "auto") else "auto"
+            return SemanticVad(type="semantic_vad", eagerness=eagerness, create_response=True, interrupt_response=True)
+        try:
+            silence_ms = int(arg) if arg else 300
+        except ValueError:
+            silence_ms = 300
+        return ServerVad(
+            type="server_vad",
+            threshold=0.5,
+            prefix_padding_ms=200,
+            silence_duration_ms=silence_ms,
+            create_response=True,
+            interrupt_response=True,
+        )
 
     async def greet(self) -> None:
         assert self.session
@@ -541,7 +549,7 @@ class VoiceCall:
         if self.listeners:
             return
         vad = self.ctx.proc.userdata.get("group_vad") or silero.VAD.load(
-            min_speech_duration=GROUP_BARGE_MIN_SPEECH_S, activation_threshold=0.6, min_silence_duration=0.5
+            min_speech_duration=GROUP_BARGE_MIN_SPEECH_S, activation_threshold=0.6, min_silence_duration=self.cfg.group_end_silence_s
         )
         stt = openai.STT(model=self.cfg.stt_model, api_key=self.cfg.openai_api_key, use_realtime=False)
         self.listeners = GroupListeners(
@@ -786,7 +794,7 @@ class VoiceCall:
 
 def prewarm(proc: JobProcess) -> None:
     proc.userdata["group_vad"] = silero.VAD.load(
-        min_speech_duration=GROUP_BARGE_MIN_SPEECH_S, activation_threshold=0.6, min_silence_duration=0.5
+        min_speech_duration=GROUP_BARGE_MIN_SPEECH_S, activation_threshold=0.6, min_silence_duration=CONFIG.group_end_silence_s
     )
 
 

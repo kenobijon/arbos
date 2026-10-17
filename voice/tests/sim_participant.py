@@ -103,6 +103,11 @@ class Participant:
         self.agent_started_at = 0.0
         self.our_speech_ended_at: float | None = None
         self.our_speech_onset_at: float | None = None
+        # Early cut-ins: the agent starts talking before our utterance's last voiced frame.
+        self.saying_until: float | None = None
+        self.early_cut_in_this_turn = False
+        self.early_cut_ins = 0
+        self.turns = 0
         self.ttfa_ms: list[int] = []
         self.barge_ms: list[int] = []
         self.call: dict = {}
@@ -164,6 +169,10 @@ class Participant:
                     self.agent_speaking = True
                     self.agent_started_at = now
                     extra = {}
+                    if self.saying_until is not None and now < self.saying_until - 0.15 and not self.early_cut_in_this_turn:
+                        self.early_cut_in_this_turn = True
+                        self.early_cut_ins += 1
+                        extra["early_cut_in"] = round(self.saying_until - now, 2)
                     if self.our_speech_ended_at is not None:
                         ttfa = int((now - self.our_speech_ended_at) * 1000)
                         self.ttfa_ms.append(ttfa)
@@ -174,9 +183,23 @@ class Participant:
                 self.agent_speaking = False
                 self.event("agent_quiet", spoke_s=round(self.agent_last_audio_at - self.agent_started_at, 2))
 
-    async def say(self, text: str, *, record_end: bool = True) -> None:
-        pcm = await tts(text, self.args.voice, Path(self.args.cache), os.environ["OPENAI_API_KEY"])
+    async def say(self, text, *, record_end: bool = True) -> None:
+        """`text` is a string, or a list of strings and numbers (seconds of silence) so one
+        utterance can hold a mid-sentence pause — the test for early cut-ins."""
+        if isinstance(text, list):
+            parts = []
+            for seg in text:
+                if isinstance(seg, (int, float)):
+                    parts.append(np.zeros(int(float(seg) * SAMPLE_RATE), dtype="<i2"))
+                else:
+                    parts.append(await tts(seg, self.args.voice, Path(self.args.cache), os.environ["OPENAI_API_KEY"]))
+            pcm = np.concatenate(parts)
+            text = " … ".join(str(x) for x in text if isinstance(x, str))
+        else:
+            pcm = await tts(text, self.args.voice, Path(self.args.cache), os.environ["OPENAI_API_KEY"])
         onset, offset = voiced_bounds(pcm)
+        self.saying_until = self.now() + offset
+        self.early_cut_in_this_turn = False
         self.event("say", text=text, seconds=round(len(pcm) / SAMPLE_RATE, 2), onset=round(onset, 2), offset=round(offset, 2))
         t_start = self.now()
         self.our_speech_onset_at = t_start + onset
@@ -194,6 +217,7 @@ class Participant:
             if delay > 0:
                 await asyncio.sleep(delay)
         self.event("said", seconds=round(self.now() - t_start, 2))
+        self.turns += 1
         if record_end:
             # End of speech = the last voiced frame, as a person would hear it.
             self.our_speech_ended_at = t_start + offset
@@ -308,10 +332,14 @@ class Participant:
                 j = min(total, i + len(pcm))
                 buf[i:j] += pcm[: j - i].astype(np.float32)
             wav_write(self.out / "mix.wav", np.clip(buf, -32768, 32767).astype("<i2"))
+        srt = sorted(self.ttfa_ms)
         summary = {
             "call_id": self.call.get("call_id"),
             "ttfa_ms": self.ttfa_ms,
-            "ttfa_p50": sorted(self.ttfa_ms)[len(self.ttfa_ms) // 2] if self.ttfa_ms else None,
+            "ttfa_p50": srt[len(srt) // 2] if srt else None,
+            "ttfa_p95": srt[min(len(srt) - 1, int(round(0.95 * (len(srt) - 1))))] if srt else None,
+            "turns": self.turns,
+            "early_cut_ins": self.early_cut_ins,
             "barge_ms": self.barge_ms,
             "agent_seconds": round(sum(len(p) for p in self.agent_pcm) / SAMPLE_RATE, 1),
             "out": str(self.out),
