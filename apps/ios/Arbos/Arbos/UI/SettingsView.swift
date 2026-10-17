@@ -253,6 +253,8 @@ struct SettingsPage<Content: View>: View {
         }
         .toolbar(.hidden, for: .navigationBar)
         .navigationBarBackButtonHidden(true)
+        // Hiding the system back button also disables the edge-swipe pop; re-enable it.
+        .background(InteractivePopGestureEnabler())
     }
 }
 

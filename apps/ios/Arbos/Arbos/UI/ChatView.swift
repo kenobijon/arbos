@@ -1408,7 +1408,8 @@ private struct WorkingStatusText: View {
 
 /// `.navigationBarBackButtonHidden(true)` turns off the system edge-swipe
 /// back gesture; this turns it back on for the enclosing UINavigationController.
-private struct InteractivePopGestureEnabler: UIViewControllerRepresentable {
+/// Shared with `SettingsPage` (and any other custom-back screen).
+struct InteractivePopGestureEnabler: UIViewControllerRepresentable {
     func makeUIViewController(context: Context) -> Controller { Controller() }
     func updateUIViewController(_ uiViewController: Controller, context: Context) {}
 
