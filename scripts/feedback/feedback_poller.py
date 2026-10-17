@@ -1245,6 +1245,20 @@ class Loop:
             if r["name"] in ("iOS", "CI", "Release") and (r["name"] not in by_name or r["run_number"] > by_name[r["name"]]["run_number"]):
                 by_name[r["name"]] = r
         ios, ci, rel = by_name.get("iOS"), by_name.get("CI"), by_name.get("Release")
+        # A merge-commit push (`git pull --no-rebase` then push) means the fix commit itself never
+        # headed a run — the merge did. The first green run on a descendant counts for it.
+        if st.get("expects_ios") and ios is None and not st.get("ios_done"):
+            later = self.gh.later_ios_build(sha, since)
+            if later:
+                ios = later
+                st["ios_superseded_by"] = later["head_sha"]
+                by_name["iOS"] = later
+        if st.get("expects_ci") and ci is None and not st.get("release_done"):
+            later = self.gh.later_run("ci.yml", "push", sha, since)
+            if later:
+                ci = later
+                st["ci_superseded_by"] = later["head_sha"]
+                by_name["CI"] = later
         st["runs"] = {k: {"url": v["html_url"], "status": v["status"], "conclusion": v["conclusion"]} for k, v in by_name.items()}
         waited = minutes_between(st["pushed_at"], iso())
 
