@@ -73,10 +73,12 @@ pub fn sheet(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
     };
 
     let mut list = div()
+        .id("voice-list")
         .flex()
         .flex_col()
         .rounded(px(14.0))
-        .overflow_hidden()
+        .overflow_y_scroll()
+        .max_h(px(520.0))
         .bg(list_bg)
         .border_1()
         .border_color(palette.hairline);
