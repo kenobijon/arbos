@@ -34,8 +34,8 @@ use crate::ui::sidebar;
 use crate::ui::skills::SkillsPanel;
 use crate::ui::theme::{
     reapply_window_background, Appearance, Surface, Theme, COLUMN_MARGIN, COMPOSER_WIDTH,
-    DRAWER_WIDTH, HEADER_HEIGHT, PANEL_RADIUS, PLUS_BUTTON, RIGHT_PANEL_WIDTH, TAB_BAR_HEIGHT,
-    TEXT_BODY, TEXT_SMALL, TEXT_TINY,
+    DRAWER_WIDTH, HEADER_HEIGHT, LINE_HEIGHT, PANEL_RADIUS, PLUS_BUTTON, RIGHT_PANEL_WIDTH,
+    TAB_BAR_HEIGHT, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
 };
 use crate::ui::transcript::{Transcript, COLUMN_MAX_WIDTH};
 use crate::ui::vault::{VaultEvent, VaultPanel};
@@ -1876,26 +1876,36 @@ impl Shell {
     /// pairing-code entry only appears when the relay runs in paircode mode.
     fn render_pairing(&self, pairing: &crate::app::Pairing, cx: &mut Context<Self>) -> Div {
         let theme = Theme::of(cx).clone();
+        // Grok Mac sign-in (ref 60): the mark inline with a large wordmark, a
+        // two-line tagline in the text colour, one black pill.
         let mark_image = self.state.read(cx).mark.clone();
         let mark = div()
-            .size(px(96.0))
+            .size(px(56.0))
             .flex()
             .items_center()
             .justify_center()
             .map(|el| match mark_image {
                 Some(image) => el.child(
                     gpui::img(image)
-                        .size(px(96.0))
+                        .size(px(56.0))
                         .object_fit(gpui::ObjectFit::Contain),
                 ),
                 None => el
-                    .rounded(px(24.0))
+                    .rounded(px(14.0))
                     .bg(theme.text)
-                    .text_size(px(44.0))
+                    .text_size(px(26.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.bg)
                     .child("Y"),
             });
+        let wordmark = div().flex().items_center().gap(px(14.0)).child(mark).child(
+            div()
+                .text_size(px(44.0))
+                .line_height(px(52.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.text)
+                .child("Arbos"),
+        );
         let screen = div()
             .flex_1()
             .flex()
@@ -1905,24 +1915,19 @@ impl Shell {
             .gap(px(14.0))
             .px(px(28.0))
             .window_control_area(gpui::WindowControlArea::Drag)
-            .child(mark)
+            .child(wordmark)
             .child(
                 div()
-                    .pt(px(6.0))
-                    .text_size(px(26.0))
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .pt(px(18.0))
+                    .text_size(px(TEXT_BODY + 2.0))
+                    .line_height(px(LINE_HEIGHT + 3.0))
                     .text_color(theme.text)
-                    .child("Arbos"),
-            )
-            .child(
-                div()
-                    .text_size(px(TEXT_BODY))
-                    .text_color(theme.text_muted)
                     .text_center()
-                    .max_w(px(380.0))
-                    .child(
-                        "Your agents work from one machine in the cloud. Sign in and start a chat.",
-                    ),
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .child("Your team of always-on agents")
+                    .child("that finish the work."),
             );
         match pairing.mode {
             SignInMode::GitHub => {
@@ -1936,9 +1941,9 @@ impl Shell {
                     },
                     &theme,
                 )
-                .mt(px(12.0))
-                .h(px(44.0))
-                .px(px(24.0))
+                .mt(px(18.0))
+                .h(px(40.0))
+                .px(px(22.0))
                 .text_size(px(TEXT_BODY))
                 .when(busy, |el| el.opacity(0.7))
                 .on_click(cx.listener(|this, _, _, cx| {
