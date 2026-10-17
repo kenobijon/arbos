@@ -144,13 +144,20 @@ def system_prompt(
         out += "\n# About you and your owner\n" + extra.strip() + "\n"
     if people:
         out += "\n# On the call\n"
+        out += (
+            "Address people by their display name (the name after the colon when present), "
+            "never as @handle.\n"
+        )
         for p in people:
-            handle = p.get("handle") or ""
-            label = f"@{handle}" if handle else (p.get("name") or "someone")
+            name = (p.get("name") or "").strip()
+            handle = (p.get("handle") or "").strip()
+            label = name or handle or "someone"
             role = p.get("role") or "member"
             where = _platform_label(p.get("calling_from") or p.get("platform"))
             where_bit = f", calling from {where}" if where else ""
-            out += f"- {label}: {p.get('name') or ''} ({role}{where_bit})\n"
+            # name:handle when both differ so the model has the @handle only as an id.
+            id_bit = f" (@{handle})" if handle and name and name.lower() != handle.lower() else ""
+            out += f"- {label}{id_bit}: ({role}{where_bit})\n"
     return out
 
 

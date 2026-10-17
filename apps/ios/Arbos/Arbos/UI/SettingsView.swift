@@ -186,6 +186,12 @@ struct SettingsView: View {
                         .foregroundStyle(theme.muted)
                         .lineLimit(1)
                         .truncationMode(.middle)
+                    if model.user != nil, !model.isFixture {
+                        Text("Edit name")
+                            .font(.system(size: Theme.tiny, weight: .medium))
+                            .foregroundStyle(theme.accent)
+                            .padding(.top, 2)
+                    }
                 }
             }
             .buttonStyle(.plain)

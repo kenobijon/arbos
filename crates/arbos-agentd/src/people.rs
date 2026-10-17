@@ -10,8 +10,9 @@
 //! "every message". In a people **group** (`kind: group`, or more than one agent), when nothing
 //! addresses this agent, the decision model reads recent chat context and chooses whether this
 //! agent should reply (or stay quiet) so the right agent continues the thread — or none do. Each
-//! human message is labelled with the author's handle and role (`owner` | `guest`) in the prompt —
-//! attribution only; in the permissive v1 a guest gets everything the owner gets. The owner's
+//! human message is labelled with the author's display name (falling back to bare handle) and role
+//! (`owner` | `guest`) in the prompt — attribution only; in the permissive v1 a guest gets
+//! everything the owner gets. Agents address people by display name, never `@handle`. The owner's
 //! credits pay; audit lines carry `asked_by`.
 
 use std::collections::HashMap;
@@ -75,17 +76,45 @@ impl PeopleChatInfo {
         self.handle_of(&self.owner_user)
     }
 
-    /// Human members as `@handle`, for the responder decision's people roster.
+    /// How to speak to / about this person: display name, else bare handle (no `@`).
+    fn spoken_name_of(&self, user_id: &str) -> String {
+        self.members
+            .iter()
+            .find(|m| m["member"].as_str() == Some(&format!("user:{user_id}")))
+            .map(person_spoken_name)
+            .unwrap_or_else(|| self.handle_of(user_id))
+    }
+
+    /// Human members by spoken name, for the responder decision's people roster.
     fn people_labels(&self) -> Vec<String> {
         self.members
             .iter()
             .filter(|m| m["member"].as_str().is_some_and(|s| s.starts_with("user:")))
-            .map(|m| {
-                let h = m["handle"].as_str().unwrap_or("?");
-                format!("@{h}")
-            })
+            .map(person_spoken_name)
             .collect()
     }
+}
+
+/// Prefer display `name`; else bare `handle`. Never `@handle`.
+fn person_spoken_name(m: &Value) -> String {
+    m["name"]
+        .as_str()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(str::to_owned)
+        .or_else(|| m["handle"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| "?".to_owned())
+}
+
+/// Prefer `senderName` on the message; else the fallback (usually bare handle).
+fn message_spoken_name(msg: &MessageView, fallback: &str) -> String {
+    msg.rest
+        .get("senderName")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| fallback.to_owned())
 }
 
 /// True when the message names at least one person and no agent (chip or `@handle`).
@@ -302,8 +331,22 @@ pub struct ReplyAttribution {
 pub struct Asker {
     pub user_id: String,
     pub handle: String,
+    /// Display name when known; empty means speak the bare handle.
+    pub name: String,
     pub role: &'static str,
     pub message_id: String,
+}
+
+impl Asker {
+    /// How to speak about this person: display name, else bare handle (no `@`).
+    pub fn spoken(&self) -> &str {
+        let n = self.name.trim();
+        if n.is_empty() {
+            self.handle.as_str()
+        } else {
+            n
+        }
+    }
 }
 
 #[derive(Default)]
@@ -419,7 +462,8 @@ fn recent_people_context(messages: &[MessageView], up_to: &str, max: usize) -> V
         let from = if m.role == "assistant" {
             format!("@{handle} (agent)")
         } else {
-            format!("@{handle}")
+            // Humans: display name when the client sent it; else bare handle (no @).
+            message_spoken_name(m, handle)
         };
         out.push(json!({ "from": from, "text": text }));
     }
@@ -635,11 +679,12 @@ impl Agent {
         if text.trim().is_empty() {
             return false;
         }
-        let asker = msg
+        let asker_handle = msg
             .rest
             .get("senderHandle")
             .and_then(Value::as_str)
             .unwrap_or("someone");
+        let asker = message_spoken_name(msg, asker_handle);
         let me = self.cfg.project_id.as_str();
         let candidates: Vec<Candidate> = info
             .members
@@ -668,7 +713,7 @@ impl Agent {
             kind: "people_group",
             chat_id: chat_id.to_owned(),
             title: info.kind.clone(),
-            from: format!("@{asker}"),
+            from: asker,
             text,
             recent: recent.to_vec(),
             candidates,
@@ -723,6 +768,7 @@ impl Agent {
             .and_then(Value::as_str)
             .map(str::to_owned)
             .unwrap_or_else(|| info.handle_of(&user_id));
+        let spoken = message_spoken_name(&msg, &info.spoken_name_of(&user_id));
         let role = if user_id == info.owner_user {
             "owner"
         } else {
@@ -731,6 +777,7 @@ impl Agent {
         let asker = Asker {
             user_id,
             handle: handle.clone(),
+            name: spoken.clone(),
             role,
             message_id: user_msg_id.to_owned(),
         };
@@ -745,11 +792,11 @@ impl Agent {
             .iter()
             .filter(|m| m["member"].as_str().is_some_and(|s| s.starts_with("user:")))
             .map(|m| {
-                let h = m["handle"].as_str().unwrap_or("?");
+                let spoken = person_spoken_name(m);
                 if m["member"].as_str() == Some(&format!("user:{}", info.owner_user)) {
-                    format!("@{h} (owner, your Project's user)")
+                    format!("{spoken} (owner, your Project's user)")
                 } else {
-                    format!("@{h} (guest)")
+                    format!("{spoken} (guest)")
                 }
             })
             .collect();
@@ -790,15 +837,14 @@ impl Agent {
         } else {
             ""
         };
+        let owner_spoken = info.spoken_name_of(&info.owner_user);
         let mut prelude = format!(
-            "[People chat with {}. You are @{} (the agent of {}'s Project \"{}\"){}.{} This message is from @{} ({role}); treat it as a request from another person in the conversation and address them by handle. Your reply is read by everyone in the chat.]\n",
+            "[People chat with {}. You are @{} (the agent of {owner_spoken}'s Project \"{}\"){}.{} This message is from {spoken} ({role}); treat it as a request from another person in the conversation and address them by their display name ({spoken}), never as an @handle. Your reply is read by everyone in the chat.]\n",
             people.join(", "),
             info.slug,
-            info.owner_handle(),
             self.cfg.project_id,
             others_clause,
             visibility,
-            handle,
         );
         if !recent.is_empty() {
             prelude.push_str("Recent messages in this shared chat:\n");
@@ -836,18 +882,44 @@ impl Agent {
             .get("senderHandle")
             .and_then(Value::as_str)
             .unwrap_or(user_id);
+        let spoken = message_spoken_name(&msg, handle);
         self.people.askers.lock().expect("people").insert(
             chat_id.to_owned(),
             Asker {
                 user_id: user_id.to_owned(),
                 handle: handle.to_owned(),
+                name: spoken.clone(),
                 role: "guest",
                 message_id: user_msg_id.to_owned(),
             },
         );
         self.people.set_current(Some(chat_id));
         Some(format!(
-            "[This message is from @{handle}, a person the owner of this Project invited to work in it with you. Address them by handle; they have the same say here as the owner.]\n\n"
+            "[This message is from {spoken}, a person the owner of this Project invited to work in it with you. Address them by their display name ({spoken}), never as an @handle; they have the same say here as the owner.]\n\n"
+        ))
+    }
+
+    /// In this Project's own chats: tell the model the owner's display name so it addresses them
+    /// by name, not `@handle`. Call only when people/guest preludes did not already run.
+    /// `None` when the message has no `senderName`.
+    pub async fn owner_address_note(
+        &self,
+        chat_id: &str,
+        host: &SharedHost,
+        user_msg_id: &str,
+    ) -> Option<String> {
+        if self.people.is_people_chat(chat_id) {
+            return None;
+        }
+        let msg = host.lock().await.doc.message(user_msg_id)?;
+        let name = msg
+            .rest
+            .get("senderName")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|n| !n.is_empty())?;
+        Some(format!(
+            "[The user is {name}. Address them as {name}, never as an @handle.]\n\n"
         ))
     }
 
@@ -1120,7 +1192,7 @@ mod tests {
         assert_eq!(ctx[0]["text"], "line 7");
         assert_eq!(ctx[4]["text"], "line 11");
         assert_eq!(ctx[4]["from"], "@bob (agent)");
-        assert_eq!(ctx[3]["from"], "@sam");
+        assert_eq!(ctx[3]["from"], "sam");
         // Unknown id → everything, still capped.
         let all = recent_people_context(&lines, "missing", 3);
         assert_eq!(all.len(), 3);
