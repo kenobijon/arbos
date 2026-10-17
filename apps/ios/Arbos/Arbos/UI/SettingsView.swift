@@ -1,217 +1,90 @@
+// Settings, Apple-Account style in Arbos colours (D80, Jacob 2026-10-17): a
+// centred profile header (large avatar, bold name, grey handle), then a few
+// short grouped cards of icon-tile rows that push to subpages. Everything that
+// was on the old flat form is still here, regrouped:
+//
+//   Account              Credits · Connected apps · On this iPhone
+//   Agents & Computer    Machine
+//   Notifications        Notifications (system permission + relay push)
+//   Appearance           Theme · Surface (Glass / Matte)
+//   Help & About         Send feedback · About · Relay (debug builds)
+//   Sign out
+//
+// Reference: media/design-parity/reference/apple/apple-account-settings-light.png.
+// Page #FCFCFC / #141414, cards = the assistant-bubble grey, our circular back
+// button, 17 pt labels, muted monochrome icon tiles, hairlines inset past the tile.
+
 import SwiftUI
+import UserNotifications
 
 struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
-    #if DEBUG
-    @State private var relayUrl = ""
-    #endif
+    @ObservedObject private var push = PushManager.shared
     @State private var confirmUnpair = false
     /// Connector errors — the root `notice` alert sits under this sheet and looks like a silent fail.
     @State private var connectorError: String?
 
     var body: some View {
         NavigationStack {
-            Form {
-                Section {
-                    HStack(spacing: 14) {
-                        if let url = model.user?.avatarUrl.flatMap(URL.init(string:)) {
-                            AsyncImage(url: url) { img in img.resizable().scaledToFill() } placeholder: { theme.field }
-                                .frame(width: 56, height: 56)
-                                .clipShape(Circle())
-                        } else {
-                            GlassCircle(size: 56) {
-                                Image(systemName: "person.fill").font(.system(size: 22)).foregroundStyle(theme.text)
-                            }
-                        }
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(model.user?.name ?? model.user?.login ?? "Arbos")
-                                .font(.system(size: Theme.body, weight: .semibold)).foregroundStyle(theme.text)
-                            Text(model.user.map { "@\($0.login)" } ?? (model.relayUrl.isEmpty ? "Not signed in" : model.relayUrl))
-                                .font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
-                                .lineLimit(1).truncationMode(.middle)
+            SettingsPage(title: "Settings", onBack: { dismiss() }) {
+                profileHeader
+                SettingsGroup {
+                    NavigationLink { CreditsPage() } label: {
+                        SettingsRow(icon: "creditcard.fill", title: "Credits", value: creditsSummary)
+                    }
+                    if model.credentials != nil {
+                        NavigationLink { ConnectorsPage(connectorError: $connectorError) } label: {
+                            SettingsRow(icon: "link", title: "Connected apps", value: connectorsSummary)
                         }
                     }
-                    .padding(.vertical, 4)
-                    if let c = model.credits {
-                        LabeledContent("Credits", value: String(format: "$%.2f left of $%.0f", c.balanceUsd, c.grantedUsd))
-                        if let cap = c.dailyCapUsd {
-                            LabeledContent("Today", value: String(format: "$%.2f of $%.0f cap", c.spentTodayUsd, cap))
-                        } else {
-                            LabeledContent("Today", value: String(format: "$%.2f", c.spentTodayUsd))
-                        }
+                    if !model.isFixture {
+                        SettingsRow(icon: "iphone", title: "On this iPhone", value: storageLine, chevron: false)
                     }
-                    if model.tokens != nil {
-                        Button("Sign out", role: .destructive) { confirmUnpair = true }
-                    }
-                } header: {
-                    Text("Account")
                 }
-                .listRowBackground(theme.card)
-
-                Section {
-                    HStack {
-                        Text("State")
-                        Spacer()
-                        HStack(spacing: 7) {
-                            if model.machine.alwaysOn, !model.machine.held, model.machineBusy {
-                                ProgressView().controlSize(.mini).tint(theme.muted)
-                                Text("Restarting…").foregroundStyle(theme.muted)
-                            } else {
-                                Circle().fill(machineDotColor(model.machine.state, theme: theme)).frame(width: 8, height: 8)
-                                Text(model.machine.label).foregroundStyle(theme.muted)
-                            }
-                        }
+                SettingsGroup(footer: model.machine.alwaysOn
+                              ? "Your one cloud computer, always on. Agents are workspaces on it."
+                              : "Your one cloud computer. A message to any agent wakes it.") {
+                    NavigationLink { MachinePage() } label: {
+                        SettingsRow(icon: "desktopcomputer", title: "Machine", value: machineSummary, dot: machineDotColor(model.machine.state, theme: theme))
                     }
-                    if let since = model.machine.since, since > 0 {
-                        LabeledContent("Since", value: SettingsView.relative(since))
-                    }
-                    LabeledContent("Spec") {
-                        Text(model.machine.spec.isEmpty ? (model.machineError ?? "Not reported yet") : model.machine.spec)
-                            .multilineTextAlignment(.trailing)
-                    }
-                    if model.machine.reported {
-                        if model.machine.alwaysOn {
-                            LabeledContent("Machine time today") {
-                                VStack(alignment: .trailing, spacing: 2) {
-                                    Text(String(format: "$%.2f", model.machine.machineTodayUsd))
-                                    Text("Not taken from credits").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
-                                }
-                            }
-                        } else {
-                            LabeledContent("Spend today", value: String(format: "$%.2f of $%.0f", model.machine.spendTodayUsd, model.machine.spendCapUsd))
-                        }
-                        LabeledContent("Workspaces", value: "\(model.machine.workspaces.values.filter { $0 == .active }.count) running · \(model.machine.workspaces.count) total")
-                        if let id = model.machine.sandboxId, !id.isEmpty {
-                            LabeledContent("Sandbox") {
-                                Text(id).font(.system(size: 12, design: .monospaced)).lineLimit(1).truncationMode(.middle)
-                            }
-                        }
-                    }
-                    if model.machine.alwaysOn {
-                        if model.machine.held {
-                            Button("Start machine") { model.startMachine() }
-                                .disabled(model.machineBusy)
-                        } else {
-                            Button("Restart machine") { model.restartMachine() }
-                                .disabled(model.machineBusy)
-                        }
-                    } else {
-                        switch model.machine.state {
-                        case .awake, .waking:
-                            Button("Stop machine", role: .destructive) { model.stopMachine() }
-                                .disabled(model.machineBusy)
-                        case .hibernatedLight, .hibernatedDeep, .stoppedByUser, .error:
-                            Button("Start machine") { model.startMachine() }
-                                .disabled(model.machineBusy)
-                        }
-                    }
-                } header: {
-                    Text("Machine")
-                } footer: {
-                    Text(model.machine.alwaysOn
-                         ? "Your one cloud computer, always on. Projects are workspaces on it. Machine time is billed separately from your credits."
-                         : "Your one cloud computer. Projects are workspaces on it; a message to any project wakes it.")
                 }
-                .listRowBackground(theme.card)
-
-                Section {
+                SettingsGroup {
+                    NavigationLink { NotificationsPage() } label: {
+                        SettingsRow(icon: "bell.badge.fill", title: "Notifications", value: notificationsSummary)
+                    }
+                    NavigationLink { AppearancePage() } label: {
+                        SettingsRow(icon: "circle.lefthalf.filled", title: "Appearance", value: appearanceSummary)
+                    }
+                }
+                SettingsGroup {
                     Button {
                         dismiss()
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { FeedbackCenter.shared.open(screen: "settings") }
                     } label: {
-                        Label("Send feedback", systemImage: "exclamationmark.bubble").foregroundStyle(theme.text)
+                        SettingsRow(icon: "exclamationmark.bubble.fill", title: "Send feedback")
                     }
-                } header: {
-                    Text("Help")
-                } footer: {
-                    Text("A screenshot of the screen you were on plus a note. You can also shake the phone.")
+                    .buttonStyle(.plain)
+                    NavigationLink { AboutPage() } label: {
+                        SettingsRow(icon: "info.circle.fill", title: "About", value: SettingsView.versionLine)
+                    }
+                    #if DEBUG
+                    NavigationLink { RelayPage() } label: {
+                        SettingsRow(icon: "network", title: "Relay", value: URL(string: model.relayUrl)?.host ?? model.relayUrl)
+                    }
+                    #endif
                 }
-                .listRowBackground(theme.card)
-
-                Section("Appearance") {
-                    Picker("Theme", selection: $model.appearanceSetting) {
-                        ForEach(Appearance.allCases) { a in Text(a.label).tag(a.rawValue) }
+                SettingsGroup {
+                    Button(role: .destructive) { confirmUnpair = true } label: {
+                        Text(model.tokens != nil ? "Sign out" : "Sign out this device")
+                            .font(.system(size: Theme.body))
+                            .foregroundStyle(theme.danger)
+                            .frame(maxWidth: .infinity, minHeight: SettingsRow.height)
+                            .contentShape(Rectangle())
                     }
-                    Picker("Surface", selection: $model.surfaceSetting) {
-                        ForEach(Surface.allCases) { s in Text(s.label).tag(s.rawValue) }
-                    }
-                    .pickerStyle(.segmented)
-                }
-                .listRowBackground(theme.card)
-
-                if model.credentials != nil {
-                    Section {
-                        ForEach(googleProviders) { p in
-                            connectorRow(p)
-                        }
-                    } header: {
-                        Text("Connectors")
-                    } footer: {
-                        Text("Connect Google so your agents can read Gmail and Calendar. Tokens stay on the relay; the agent asks before it sends.")
-                    }
-                    .listRowBackground(theme.card)
-                }
-
-                if !model.isFixture {
-                    Section {
-                        LabeledContent("On this iPhone", value: storageLine)
-                    } header: {
-                        Text("Storage")
-                    } footer: {
-                        Text("Chats and agents are kept on this iPhone so the app opens instantly and works offline. Signing out removes them.")
-                    }
-                    .listRowBackground(theme.card)
-                }
-
-                #if DEBUG
-                Section {
-                    TextField("https://relay.example.com", text: $relayUrl)
-                        .keyboardType(.URL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .onSubmit(applyRelay)
-                    if RelayEndpoint(relayUrl).httpUrl != model.relayUrl {
-                        Button("Switch relay", action: applyRelay)
-                    }
-                    LabeledContent("Device") {
-                        Text(model.deviceId)
-                            .font(.system(size: 12, design: .monospaced))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-                    LabeledContent("Link", value: linkLabel)
-                } header: {
-                    Text("Advanced · Relay")
-                } footer: {
-                    Text("Self-hosters point the app at their own relay here. Switching relays signs this device out of the current one; sessions stay in the Keychain.")
-                }
-                .listRowBackground(theme.card)
-                #endif
-
-                if model.tokens == nil {
-                    Section {
-                        Button("Sign out this device", role: .destructive) { confirmUnpair = true }
-                    }
-                    .listRowBackground(theme.card)
-                }
-
-                Section("About") {
-                    LabeledContent("Version", value: SettingsView.versionLine)
-                    LabeledContent("Protocol", value: "room proto \(protoVersion) · Loro")
-                }
-                .listRowBackground(theme.card)
-            }
-            .scrollContentBackground(.hidden)
-            .background(theme.bg)
-            .tint(theme.text)
-            .navigationTitle("Settings")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") { dismiss() }
+                    .buttonStyle(.plain)
                 }
             }
             .confirmationDialog("Sign out?", isPresented: $confirmUnpair, titleVisibility: .visible) {
@@ -223,14 +96,15 @@ struct SettingsView: View {
                 Text(model.tokens != nil ? "This device is signed out of the relay; sign in with GitHub to come back." : "You will need a new pairing code to connect again.")
             }
             .onAppear {
-                #if DEBUG
-                relayUrl = model.relayUrl
-                #endif
                 model.refreshConnectors()
+                Task { await push.refreshStatus() }
             }
             // After Google OAuth in Safari, refresh so "Needs sign-in" flips to Connected.
             .onChange(of: scenePhase) { _, phase in
-                if phase == .active { model.refreshConnectors() }
+                if phase == .active {
+                    model.refreshConnectors()
+                    Task { await push.refreshStatus() }
+                }
             }
             // Steal connector notices so they appear above this sheet, not under it.
             .onChange(of: model.notice) { _, n in
@@ -251,26 +125,425 @@ struct SettingsView: View {
                 Text(connectorError ?? "")
             }
         }
-        // Form headers/footers/LabeledContent/segmented pickers use system
-        // label colours. Without this, Light appearance paints theme.card white
-        // while the sheet stays on dark-mode system text (white-on-white).
+        .tint(theme.text)
         .preferredColorScheme(theme.isDark ? .dark : .light)
         .presentationBackground(theme.bg)
+    }
+
+    // MARK: Profile header
+
+    /// Large avatar, bold name, grey handle — Apple's account header.
+    /// The avatar swaps to the D79 `PersonAvatar(url:handle:size:name:id:colorIndex:)` once it lands.
+    private var profileHeader: some View {
+        VStack(spacing: 6) {
+            PersonAvatar(url: model.user?.avatarUrl, handle: model.user?.login ?? "?", size: 104)
+                .padding(.bottom, 8)
+            Text(model.user?.name ?? model.user?.login ?? "Arbos")
+                .font(.system(size: 28, weight: .bold))
+                .foregroundStyle(theme.text)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+            Text(model.user.map { "@\($0.login)" } ?? (model.relayUrl.isEmpty ? "Not signed in" : model.relayUrl))
+                .font(.system(size: Theme.body))
+                .foregroundStyle(theme.muted)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 14)
+        .padding(.bottom, 22)
+    }
+
+    // MARK: Row summaries
+
+    private var creditsSummary: String? {
+        guard let c = model.credits else { return nil }
+        return String(format: "$%.0f left", c.balanceUsd)
+    }
+
+    private var connectorsSummary: String? {
+        let n = model.connectors.items.filter { $0.status == .connected }.count
+        return n == 0 ? nil : "\(n) connected"
+    }
+
+    private var machineSummary: String {
+        if model.machine.alwaysOn, !model.machine.held, model.machineBusy { return "Restarting…" }
+        return model.machine.label
+    }
+
+    private var notificationsSummary: String {
+        switch push.status {
+        case .authorized, .provisional, .ephemeral: return "On"
+        case .denied: return "Off"
+        case .notDetermined: return "Not asked"
+        @unknown default: return ""
+        }
+    }
+
+    private var appearanceSummary: String {
+        let a = Appearance(rawValue: model.appearanceSetting)?.label ?? "System"
+        return "\(a) · \(model.surface.label)"
+    }
+
+    /// "12.4 MB · 23 chats" from the on-device store (#929).
+    private var storageLine: String {
+        let u = model.storeUsage
+        let size = ByteCountFormatter.string(fromByteCount: u.bytes, countStyle: .file)
+        return u.docs == 0 ? "Nothing saved yet" : "\(size) · \(u.docs) chat\(u.docs == 1 ? "" : "s")"
+    }
+
+    static func relative(_ ms: Int64) -> String {
+        let date = Date(timeIntervalSince1970: Double(ms) / 1000)
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .short
+        return f.localizedString(for: date, relativeTo: Date())
+    }
+
+    static var versionLine: String {
+        let info = Bundle.main.infoDictionary
+        let v = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let b = info?["CFBundleVersion"] as? String ?? "?"
+        return "\(v) (\(b))"
+    }
+}
+
+// MARK: - Building blocks (Apple structure, Arbos skin)
+
+/// A settings screen: our circular back button, centred title, scrolling content on the page colour.
+struct SettingsPage<Content: View>: View {
+    @Environment(\.theme) private var theme
+    @Environment(\.dismiss) private var dismiss
+    let title: String
+    var onBack: (() -> Void)? = nil
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            theme.bg.ignoresSafeArea()
+            ScrollView {
+                VStack(spacing: 24) {
+                    Color.clear.frame(height: 48)
+                    content()
+                    Color.clear.frame(height: 24)
+                }
+                .padding(.horizontal, 20)
+            }
+            HStack {
+                Button { (onBack ?? { dismiss() })() } label: {
+                    GlassCircle {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(theme.text)
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Back")
+                Spacer()
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 6)
+            .overlay {
+                Text(title)
+                    .font(.system(size: Theme.body, weight: .semibold))
+                    .foregroundStyle(theme.text)
+                    .padding(.top, 6)
+            }
+        }
+        .toolbar(.hidden, for: .navigationBar)
+        .navigationBarBackButtonHidden(true)
+    }
+}
+
+/// One rounded inset card holding rows, with hairlines inset past the icon tiles and an optional footer.
+struct SettingsGroup<Rows: View>: View {
+    @Environment(\.theme) private var theme
+    var header: String? = nil
+    var footer: String? = nil
+    @ViewBuilder var rows: () -> Rows
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let header {
+                Text(header.uppercased())
+                    .font(.system(size: Theme.tiny, weight: .medium))
+                    .foregroundStyle(theme.muted)
+                    .padding(.leading, 16)
+            }
+            _VariadicView.Tree(SettingsGroupLayout(separator: theme.separator)) { rows() }
+                .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(theme.bubbleAssistant))
+            if let footer {
+                Text(footer)
+                    .font(.system(size: Theme.tiny))
+                    .foregroundStyle(theme.muted)
+                    .padding(.horizontal, 16)
+            }
+        }
+    }
+}
+
+/// Lays the group's children out vertically with a hairline between them, inset to the label.
+private struct SettingsGroupLayout: _VariadicView_UnaryViewRoot {
+    let separator: Color
+
+    @ViewBuilder
+    func body(children: _VariadicView.Children) -> some View {
+        let last = children.last?.id
+        VStack(spacing: 0) {
+            ForEach(children) { child in
+                child
+                if child.id != last {
+                    Rectangle()
+                        .fill(separator)
+                        .frame(height: 1 / UIScreen.main.scale)
+                        .padding(.leading, SettingsRow.separatorInset)
+                }
+            }
+        }
+    }
+}
+
+/// Icon tile · title · optional trailing value · chevron. 48 pt tall.
+struct SettingsRow: View {
+    @Environment(\.theme) private var theme
+    let icon: String
+    let title: String
+    var value: String? = nil
+    var chevron: Bool = true
+    /// Small status dot drawn on the tile (machine state).
+    var dot: Color? = nil
+
+    static let height: CGFloat = 48
+    static let tile: CGFloat = 30
+    /// 16 pt padding + 30 pt tile + 14 pt gap: separators start under the label.
+    static let separatorInset: CGFloat = 60
+
+    var body: some View {
+        HStack(spacing: 14) {
+            ZStack(alignment: .bottomTrailing) {
+                RoundedRectangle(cornerRadius: 7.5, style: .continuous)
+                    .fill(theme.isDark ? Color(hex: "#5C5C60")! : Color(hex: "#6E6E73")!)
+                    .frame(width: Self.tile, height: Self.tile)
+                    .overlay(
+                        Image(systemName: icon)
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(.white)
+                    )
+                if let dot {
+                    Circle().fill(dot).frame(width: 9, height: 9)
+                        .overlay(Circle().strokeBorder(theme.bubbleAssistant, lineWidth: 1.5))
+                        .offset(x: 3, y: 3)
+                }
+            }
+            Text(title)
+                .font(.system(size: Theme.body))
+                .foregroundStyle(theme.text)
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            if let value, !value.isEmpty {
+                Text(value)
+                    .font(.system(size: Theme.body))
+                    .foregroundStyle(theme.muted)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: 170, alignment: .trailing)
+            }
+            if chevron {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(theme.placeholder)
+            }
+        }
+        .padding(.horizontal, 16)
+        .frame(minHeight: Self.height)
+        .contentShape(Rectangle())
+    }
+}
+
+/// Label · trailing value, for information rows inside a subpage card.
+struct SettingsValueRow<Trailing: View>: View {
+    @Environment(\.theme) private var theme
+    let title: String
+    @ViewBuilder var trailing: () -> Trailing
+
+    init(_ title: String, value: String) where Trailing == Text {
+        self.title = title
+        self.trailing = { Text(value) }
+    }
+
+    init(_ title: String, @ViewBuilder trailing: @escaping () -> Trailing) {
+        self.title = title
+        self.trailing = trailing
+    }
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(title).font(.system(size: Theme.body)).foregroundStyle(theme.text)
+            Spacer(minLength: 8)
+            trailing()
+                .font(.system(size: Theme.body))
+                .foregroundStyle(theme.muted)
+                .multilineTextAlignment(.trailing)
+        }
+        .padding(.horizontal, 16)
+        .frame(minHeight: SettingsRow.height)
+    }
+}
+
+/// A row that picks one option (checkmark on the chosen one), Apple's list-picker look.
+struct SettingsChoiceRow: View {
+    @Environment(\.theme) private var theme
+    let title: String
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack {
+                Text(title).font(.system(size: Theme.body)).foregroundStyle(theme.text)
+                Spacer()
+                if selected {
+                    Image(systemName: "checkmark").font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.text)
+                }
+            }
+            .padding(.horizontal, 16)
+            .frame(minHeight: SettingsRow.height)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// A text action row (Start machine, Connect, Switch relay).
+struct SettingsActionRow: View {
+    @Environment(\.theme) private var theme
+    let title: String
+    var destructive: Bool = false
+    var disabled: Bool = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: Theme.body))
+                .foregroundStyle(destructive ? theme.danger : theme.text)
+                .frame(maxWidth: .infinity, minHeight: SettingsRow.height, alignment: .leading)
+                .padding(.horizontal, 16)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+        .opacity(disabled ? 0.5 : 1)
+    }
+}
+
+// MARK: - Subpages
+
+struct CreditsPage: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        SettingsPage(title: "Credits") {
+            if let c = model.credits {
+                SettingsGroup(footer: "Credits pay for your agents' model use. Machine time is billed separately.") {
+                    SettingsValueRow("Balance", value: String(format: "$%.2f left of $%.0f", c.balanceUsd, c.grantedUsd))
+                    if let cap = c.dailyCapUsd {
+                        SettingsValueRow("Today", value: String(format: "$%.2f of $%.0f cap", c.spentTodayUsd, cap))
+                    } else {
+                        SettingsValueRow("Today", value: String(format: "$%.2f", c.spentTodayUsd))
+                    }
+                }
+            } else {
+                SettingsGroup { SettingsValueRow("Balance", value: "Not available yet") }
+            }
+        }
+    }
+}
+
+struct MachinePage: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        SettingsPage(title: "Machine") {
+            SettingsGroup {
+                SettingsValueRow("State") {
+                    HStack(spacing: 7) {
+                        if model.machine.alwaysOn, !model.machine.held, model.machineBusy {
+                            ProgressView().controlSize(.mini).tint(theme.muted)
+                            Text("Restarting…")
+                        } else {
+                            Circle().fill(machineDotColor(model.machine.state, theme: theme)).frame(width: 8, height: 8)
+                            Text(model.machine.label)
+                        }
+                    }
+                }
+                if let since = model.machine.since, since > 0 {
+                    SettingsValueRow("Since", value: SettingsView.relative(since))
+                }
+                SettingsValueRow("Spec", value: model.machine.spec.isEmpty ? (model.machineError ?? "Not reported yet") : model.machine.spec)
+                if model.machine.reported {
+                    if model.machine.alwaysOn {
+                        SettingsValueRow("Machine time today") {
+                            VStack(alignment: .trailing, spacing: 2) {
+                                Text(String(format: "$%.2f", model.machine.machineTodayUsd))
+                                Text("Not taken from credits").font(.system(size: Theme.tiny))
+                            }
+                        }
+                    } else {
+                        SettingsValueRow("Spend today", value: String(format: "$%.2f of $%.0f", model.machine.spendTodayUsd, model.machine.spendCapUsd))
+                    }
+                    SettingsValueRow("Workspaces", value: "\(model.machine.workspaces.values.filter { $0 == .active }.count) running · \(model.machine.workspaces.count) total")
+                    if let id = model.machine.sandboxId, !id.isEmpty {
+                        SettingsValueRow("Sandbox") {
+                            Text(id).font(.system(size: 12, design: .monospaced)).lineLimit(1).truncationMode(.middle)
+                        }
+                    }
+                }
+            }
+            SettingsGroup(footer: model.machine.alwaysOn
+                          ? "Your one cloud computer, always on. Agents are workspaces on it. Machine time is billed separately from your credits."
+                          : "Your one cloud computer. Agents are workspaces on it; a message to any agent wakes it.") {
+                if model.machine.alwaysOn {
+                    if model.machine.held {
+                        SettingsActionRow(title: "Start machine", disabled: model.machineBusy) { model.startMachine() }
+                    } else {
+                        SettingsActionRow(title: "Restart machine", disabled: model.machineBusy) { model.restartMachine() }
+                    }
+                } else {
+                    switch model.machine.state {
+                    case .awake, .waking:
+                        SettingsActionRow(title: "Stop machine", destructive: true, disabled: model.machineBusy) { model.stopMachine() }
+                    case .hibernatedLight, .hibernatedDeep, .stoppedByUser, .error:
+                        SettingsActionRow(title: "Start machine", disabled: model.machineBusy) { model.startMachine() }
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct ConnectorsPage: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    @Binding var connectorError: String?
+
+    var body: some View {
+        SettingsPage(title: "Connected apps") {
+            SettingsGroup(footer: "Connect Google so your agents can read Gmail and Calendar. Tokens stay on the relay; the agent asks before it sends.") {
+                ForEach(googleProviders) { p in
+                    connectorRow(p)
+                }
+            }
+        }
     }
 
     /// Google (Gmail + Calendar) from the catalog, or a local stand-in before load.
     private var googleProviders: [ConnectorProvider] {
         let fromRelay = model.connectors.providers.filter { $0.provider == "google" }
         if !fromRelay.isEmpty { return fromRelay }
-        if model.connectors.loaded {
-            return []
-        }
-        return [ConnectorProvider(
-            provider: "google",
-            label: "Google (Gmail, Calendar)",
-            connect: "oauth",
-            oauthConfigured: true
-        )]
+        if model.connectors.loaded { return [] }
+        return [ConnectorProvider(provider: "google", label: "Google (Gmail, Calendar)", connect: "oauth", oauthConfigured: true)]
     }
 
     @ViewBuilder
@@ -279,27 +552,28 @@ struct SettingsView: View {
         let connected = cn?.status == .connected
         HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(p.label).foregroundStyle(theme.text)
+                Text(p.label).font(.system(size: Theme.body)).foregroundStyle(theme.text)
                 Text(connectorSubline(p, cn: cn))
                     .font(.system(size: Theme.tiny))
                     .foregroundStyle(theme.muted)
             }
             Spacer(minLength: 8)
             if connected, let id = cn?.id {
-                Button("Disconnect") {
-                    model.disconnectConnector(id: id)
-                }
-                .buttonStyle(.borderless)
-                .disabled(model.connectorsBusy)
+                Button("Disconnect") { model.disconnectConnector(id: id) }
+                    .font(.system(size: Theme.small, weight: .semibold))
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(theme.text)
+                    .disabled(model.connectorsBusy)
             } else if p.hasOauth {
-                Button("Connect") {
-                    model.connectConnector(provider: p.provider)
-                }
-                .buttonStyle(.borderless)
-                .foregroundStyle(theme.accent)
-                .disabled(model.connectorsBusy || model.isFixture)
+                Button("Connect") { model.connectConnector(provider: p.provider) }
+                    .font(.system(size: Theme.small, weight: .semibold))
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(theme.accent)
+                    .disabled(model.connectorsBusy || model.isFixture)
             }
         }
+        .padding(.horizontal, 16)
+        .frame(minHeight: 56)
     }
 
     private func connectorSubline(_ p: ConnectorProvider, cn: Connector?) -> String {
@@ -319,15 +593,113 @@ struct SettingsView: View {
         if let cn { return cn.status.label }
         return "Not connected"
     }
+}
 
-    /// "12.4 MB · 23 chats" from the on-device store (#929).
-    private var storageLine: String {
-        let u = model.storeUsage
-        let size = ByteCountFormatter.string(fromByteCount: u.bytes, countStyle: .file)
-        return u.docs == 0 ? "Nothing saved yet" : "\(size) · \(u.docs) chat\(u.docs == 1 ? "" : "s")"
+struct NotificationsPage: View {
+    @Environment(\.theme) private var theme
+    @ObservedObject private var push = PushManager.shared
+
+    var body: some View {
+        SettingsPage(title: "Notifications") {
+            SettingsGroup(footer: "A banner with the sender's picture when an agent finishes or a person writes, only while you are not looking. Permission lives in iOS Settings.") {
+                SettingsValueRow("Allowed", value: permissionLabel)
+                if let relay = push.relayPushEnabled {
+                    SettingsValueRow("Push from the relay", value: relay ? "On" : "Off")
+                }
+                SettingsActionRow(title: "Open iOS Settings") {
+                    if let url = URL(string: UIApplication.openNotificationSettingsURLString) {
+                        UIApplication.shared.open(url)
+                    }
+                }
+            }
+        }
     }
 
-    #if DEBUG
+    private var permissionLabel: String {
+        switch push.status {
+        case .authorized: return "Yes"
+        case .provisional: return "Quietly"
+        case .ephemeral: return "For now"
+        case .denied: return "No"
+        case .notDetermined: return "Not asked yet"
+        @unknown default: return ""
+        }
+    }
+}
+
+struct AppearancePage: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        SettingsPage(title: "Appearance") {
+            SettingsGroup(header: "Theme") {
+                ForEach(Appearance.allCases) { a in
+                    SettingsChoiceRow(title: a.label, selected: model.appearanceSetting == a.rawValue) {
+                        model.appearanceSetting = a.rawValue
+                    }
+                }
+            }
+            SettingsGroup(header: "Surface", footer: "Glass blurs what scrolls under the header and the controls; Matte keeps them solid.") {
+                ForEach(Surface.allCases) { s in
+                    SettingsChoiceRow(title: s.label, selected: model.surfaceSetting == s.rawValue) {
+                        model.surfaceSetting = s.rawValue
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct AboutPage: View {
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        SettingsPage(title: "About") {
+            SettingsGroup {
+                SettingsValueRow("Version", value: SettingsView.versionLine)
+                SettingsValueRow("Protocol", value: "room proto \(protoVersion) · Loro")
+            }
+        }
+    }
+}
+
+#if DEBUG
+/// Self-hosters point the app at their own relay here (debug builds only, as before).
+struct RelayPage: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    @Environment(\.dismiss) private var dismiss
+    @State private var relayUrl = ""
+
+    var body: some View {
+        SettingsPage(title: "Relay") {
+            SettingsGroup(footer: "Switching relays signs this device out of the current one; sessions stay in the Keychain.") {
+                HStack {
+                    TextField("", text: $relayUrl, prompt: Text("https://relay.example.com").foregroundStyle(theme.placeholder))
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .font(.system(size: Theme.body))
+                        .foregroundStyle(theme.text)
+                        .onSubmit(applyRelay)
+                }
+                .padding(.horizontal, 16)
+                .frame(minHeight: SettingsRow.height)
+                if RelayEndpoint(relayUrl).httpUrl != model.relayUrl {
+                    SettingsActionRow(title: "Switch relay", action: applyRelay)
+                }
+            }
+            SettingsGroup {
+                SettingsValueRow("Device") {
+                    Text(model.deviceId).font(.system(size: 12, design: .monospaced)).lineLimit(1).truncationMode(.middle)
+                }
+                SettingsValueRow("Link", value: linkLabel)
+            }
+        }
+        .onAppear { relayUrl = model.relayUrl }
+    }
+
     private var linkLabel: String {
         switch model.link {
         case .connecting: return "Connecting…"
@@ -342,19 +714,5 @@ struct SettingsView: View {
         model.setRelayUrl(trimmed)
         dismiss()
     }
-    #endif
-
-    static func relative(_ ms: Int64) -> String {
-        let date = Date(timeIntervalSince1970: Double(ms) / 1000)
-        let f = RelativeDateTimeFormatter()
-        f.unitsStyle = .short
-        return f.localizedString(for: date, relativeTo: Date())
-    }
-
-    static var versionLine: String {
-        let info = Bundle.main.infoDictionary
-        let v = info?["CFBundleShortVersionString"] as? String ?? "?"
-        let b = info?["CFBundleVersion"] as? String ?? "?"
-        return "\(v) (\(b))"
-    }
 }
+#endif
