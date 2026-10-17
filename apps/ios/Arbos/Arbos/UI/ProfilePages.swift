@@ -64,7 +64,7 @@ struct ProfileTopBar<Trailing: View>: View {
             trailing()
         }
         .padding(.horizontal, 16)
-        .padding(.top, 6)
+        .padding(.top, 16)
     }
 }
 
@@ -430,7 +430,7 @@ struct UserProfileView: View {
             theme.bg.ignoresSafeArea()
             ScrollView {
                 VStack(spacing: 18) {
-                    Color.clear.frame(height: 70)
+                    Color.clear.frame(height: 80)
                     ProfileHeader(name: person.displayName, status: isMe ? "@\(person.handle)" : status.text, statusOnline: status.online) {
                         PersonAvatar(url: person.avatarUrl, handle: person.handle, size: 112, name: person.name, id: person.id, colorIndex: person.avatarColorIndex)
                     }
@@ -628,7 +628,7 @@ struct GroupProfileView: View {
             theme.bg.ignoresSafeArea()
             ScrollView {
                 VStack(spacing: 18) {
-                    Color.clear.frame(height: 70)
+                    Color.clear.frame(height: 80)
                     ProfileHeader(name: title, status: "\(memberCount) member\(memberCount == 1 ? "" : "s")") {
                         if let project {
                             AgentAvatar(project: project, theme: theme, size: 112)

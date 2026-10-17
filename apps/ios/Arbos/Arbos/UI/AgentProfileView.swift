@@ -288,7 +288,7 @@ struct AgentProfileView: View {
             ScrollView {
                 if let project {
                     VStack(spacing: 18) {
-                        Color.clear.frame(height: 70)
+                        Color.clear.frame(height: 80)
                         ProfileHeader(name: project.name, status: statusLine(project), statusOnline: model.isStreaming(project: project.id)) {
                             AgentAvatar(project: project, theme: theme, size: 112, working: model.isStreaming(project: project.id))
                         }
