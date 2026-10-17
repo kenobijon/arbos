@@ -456,8 +456,9 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
         .child(hero)
         .child(actions)
         .children(more)
-        .child(info)
+        // Avatar colour sits right under the big avatar it changes.
         .children(appearance)
+        .child(info)
         .child(tabs)
         .child(body_tab);
     // "Edit" opens the agent editor: the header menu (model, effort, members, avatar).
