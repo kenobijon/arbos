@@ -260,6 +260,7 @@ async fn main() -> anyhow::Result<()> {
         let dt = daytona.ok_or_else(|| anyhow::anyhow!("DAYTONA_API_KEY is required"))?;
         return smoke::run(&dt, snapshot, keep).await;
     }
+    let data_dir_for_voice = args.data.clone();
     let state = AppState {
         db: db.clone(),
         cfg: Arc::new(cfg),
@@ -288,7 +289,7 @@ async fn main() -> anyhow::Result<()> {
         presence_seen: Arc::new(Mutex::new(HashMap::new())),
         activity: Arc::new(Mutex::new(HashMap::new())),
         box_http_seen: Arc::new(Mutex::new(HashMap::new())),
-        voice: Arc::new(voice::cfg_from_env()),
+        voice: Arc::new(voice::cfg_from_env(&data_dir_for_voice)),
         voice_conns: Arc::new(Mutex::new(HashMap::new())),
         voice_dispatched: Arc::new(Mutex::new(HashMap::new())),
     };
@@ -375,6 +376,8 @@ async fn main() -> anyhow::Result<()> {
             "/admin/users/{id}/voice",
             axum::routing::put(voice::put_user_cap),
         )
+        .route("/voices", get(voice::list_voices))
+        .route("/voices/{id}/sample.mp3", get(voice::voice_sample))
         .route(
             "/devices/{id}/push",
             post(notify::register_push).delete(notify::unregister_push),

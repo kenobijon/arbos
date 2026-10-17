@@ -70,6 +70,9 @@ log = logging.getLogger("arbos-voice")
 ATTENTION_WINDOW_S = 20.0
 # Group listeners: speech must last this long before it counts (and before it can barge in).
 GROUP_BARGE_MIN_SPEECH_S = 0.35
+# 1:1 (duplex) server VAD activation (0–1). Higher = less sensitive: ambient noise and
+# speaker echo must be louder before they count as speech and cut the agent mid-sentence.
+DUPLEX_VAD_THRESHOLD = 0.65
 # Until the owner's machine runs an agentd with the voice link (image roll), tools are off.
 NO_LINK_LINE = "I can't run that for you yet on this call."
 
@@ -109,6 +112,29 @@ def label_of(speaker: dict) -> str:
     return f"@{speaker['handle']}" if speaker.get("handle") else (speaker.get("name") or "someone")
 
 
+def _norm_words(text: str) -> list[str]:
+    return [w for w in "".join(c.lower() if c.isalnum() else " " for c in text).split() if w]
+
+
+def similar_reply(a: str, b: str) -> bool:
+    """True when two agent lines are the same idea (interrupt + regenerate, or a near-repeat)."""
+    a, b = a.strip(), b.strip()
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    wa, wb = _norm_words(a), _norm_words(b)
+    if not wa or not wb:
+        return False
+    sa, sb = set(wa), set(wb)
+    overlap = len(sa & sb) / max(len(sa), len(sb))
+    if overlap >= 0.6:
+        return True
+    # Truncated prefix of the regenerate (e.g. "what do you want" vs "what do you want to talk about").
+    shorter, longer = (wa, wb) if len(wa) <= len(wb) else (wb, wa)
+    return len(shorter) >= 3 and longer[: len(shorter)] == shorter
+
+
 @dataclass
 class CallState:
     mode: str = "duplex"  # duplex | group
@@ -125,6 +151,9 @@ class CallState:
     last_trigger_at: float = field(default_factory=time.monotonic)
     last_human_speech_at: float = field(default_factory=time.monotonic)
     window: list[dict] = field(default_factory=list)
+    # Last agent transcript line we wrote (skip interrupted + near-duplicate paraphrases).
+    last_agent_text: str = ""
+    last_agent_at: float = 0.0
     open_work: int = 0
     idle_asked: bool = False
     leaving: bool = False
@@ -149,6 +178,7 @@ class VoiceCall:
         self.agent_name: str = self.agent_sender.get("name") or "Arbos"
         self.chattiness: str = meta.get("chattiness") or "balanced"
         self.wake_name: str | None = meta.get("wake_name")
+        self.voice: str = meta.get("voice") or cfg.voice
         self.relay = Relay(cfg, http)
         self.events = EventBatcher(self.relay, self.call_id, self.project_id)
         self.meter = CallMeter(model=cfg.model, stt_model=cfg.stt_model)
@@ -181,8 +211,22 @@ class VoiceCall:
     def event(self, kind: str, **fields) -> None:
         self.events.push({"kind": kind, **fields})
 
-    def transcript(self, speaker: dict | None, text: str, *, truncated: bool = False) -> None:
+    def transcript(self, speaker: dict | None, text: str, *, truncated: bool = False) -> bool:
+        """Write a transcript line. Returns False when a duplicate/interrupted agent line is dropped."""
+        is_agent = speaker is None or speaker.get("kind") == "agent"
+        if is_agent:
+            # Interrupted mid-sentence replies are followed by a regenerate; keep only the final.
+            if truncated:
+                return False
+            now = time.monotonic()
+            if self.state.last_agent_text and now - self.state.last_agent_at < 8.0 and similar_reply(
+                self.state.last_agent_text, text
+            ):
+                return False
+            self.state.last_agent_text = text
+            self.state.last_agent_at = now
         self.event("transcript", speaker=speaker if speaker else {"kind": "agent"}, text=text, truncated=truncated)
+        return True
 
     def agent_speaking(self) -> bool:
         return self.state.agent_state == "speaking"
@@ -207,6 +251,8 @@ class VoiceCall:
         settings = self.info.get("settings") or {}
         self.chattiness = settings.get("chattiness") or self.chattiness
         self.wake_name = settings.get("wake_name") or self.wake_name
+        # The owner's pick for this agent (GET /voices); read at join, used for this call.
+        self.voice = settings.get("voice") or self.meta.get("voice") or self.cfg.voice
         self.events.start()
         self.event("joined", mode=self.state.mode, version=__version__)
 
@@ -224,7 +270,7 @@ class VoiceCall:
         self.agent = ArbosVoiceAgent(self, instructions)
         self.rt_model = openai.realtime.RealtimeModel(
             model=self.cfg.model,
-            voice=self.cfg.voice,
+            voice=self.voice,
             api_key=self.cfg.openai_api_key,
             turn_detection=self.turn_detection_for(self.state.mode),
             input_audio_transcription=AudioTranscription(model=self.cfg.stt_model),
@@ -255,7 +301,7 @@ class VoiceCall:
         if self.state.mode == "group":
             await self.start_group_listening()
         self.hook_realtime()
-        log.info("session started in %s mode (humans=%d, chattiness=%s, turn_detection=%s)", self.state.mode, len(self.humans()), self.chattiness, self.cfg.turn_detection)
+        log.info("session started in %s mode (humans=%d, chattiness=%s, voice=%s, turn_detection=%s)", self.state.mode, len(self.humans()), self.chattiness, self.voice, self.cfg.turn_detection)
         self.spawn(self.usage_loop())
         self.spawn(self.idle_loop())
         await self.greet()
@@ -306,7 +352,9 @@ class VoiceCall:
             silence_ms = 300
         return ServerVad(
             type="server_vad",
-            threshold=0.5,
+            # Above the OpenAI default (0.5) and the group Silero barge gate (0.6): ambient
+            # noise / speaker echo must be louder before they cut the agent mid-sentence.
+            threshold=DUPLEX_VAD_THRESHOLD,
             prefix_padding_ms=200,
             silence_duration_ms=silence_ms,
             create_response=True,
@@ -324,10 +372,10 @@ class VoiceCall:
             await self.wait_for_silence()
             self.session.say(line, allow_interruptions=True)
         else:
+            # Fixed line (not generate_reply): one greeting, no model paraphrase race with VAD.
             self.event("system", text=f"{self.agent_name} joined the call")
-            self.session.generate_reply(
-                instructions="Greet the person in one short sentence (say hi and ask what they need). No more than twelve words."
-            )
+            line = f"Hey — {self.agent_name} here. What do you need?"
+            self.session.say(line, allow_interruptions=True)
 
     async def finish(self, reason: str) -> None:
         if self.state.leaving:
@@ -430,9 +478,10 @@ class VoiceCall:
             text = (item.text_content or "").strip()
             if not text:
                 return
-            self.transcript(None, text, truncated=bool(getattr(item, "interrupted", False)))
-            self.state.window.append({"from": f"{self.agent_name} (agent)", "text": text})
-            self.state.window = self.state.window[-12:]
+            wrote = self.transcript(None, text, truncated=bool(getattr(item, "interrupted", False)))
+            if wrote:
+                self.state.window.append({"from": f"{self.agent_name} (agent)", "text": text})
+                self.state.window = self.state.window[-12:]
 
         @session.on("speech_created")
         def _speech(ev: SpeechCreatedEvent) -> None:

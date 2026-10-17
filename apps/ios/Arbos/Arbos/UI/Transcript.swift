@@ -873,6 +873,8 @@ private struct ZoomableImageViewer: View {
 }
 
 /// Document card (Grok: icon, title, domain) for a non-audio attachment.
+/// Tap downloads the blob with the device bearer (Safari cannot send auth) and
+/// opens a Quick Look preview so the user can read the file in-app.
 struct FileCard: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -882,9 +884,12 @@ struct FileCard: View {
     let blobRef: String?
     let fromUser: Bool
 
+    @State private var previewURL: URL?
+    @State private var loading = false
+
     var body: some View {
         Button {
-            if let ref = blobRef, let url = model.blobURL(projectId: projectId, key: ref) { UIApplication.shared.open(url) }
+            Task { await open() }
         } label: {
             HStack(spacing: 10) {
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
@@ -895,12 +900,62 @@ struct FileCard: View {
                     Text(name).font(.system(size: Theme.body)).foregroundStyle(fromUser ? theme.userText : theme.text).lineLimit(1)
                     Text(subtitle).font(.system(size: Theme.small)).foregroundStyle(fromUser ? theme.userText.opacity(0.7) : theme.muted).lineLimit(1)
                 }
+                if loading {
+                    ProgressView()
+                        .tint(fromUser ? theme.userText.opacity(0.7) : theme.muted)
+                        .controlSize(.small)
+                }
             }
             .padding(.horizontal, Theme.bubbleHPad)
             .padding(.vertical, Theme.bubbleVPad)
             .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(fromUser ? theme.bubbleUser : theme.bubbleAssistant))
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .disabled(blobRef == nil || loading)
+        .accessibilityLabel(blobRef == nil ? "\(name), unavailable" : "\(name), \(subtitle), tap to open")
+        .quickLookPreview($previewURL)
+    }
+
+    @MainActor
+    private func open() async {
+        // Already on disk from an earlier tap — re-present Quick Look.
+        if let previewURL {
+            present(previewURL)
+            return
+        }
+        guard let ref = blobRef,
+              let url = model.blobURL(projectId: projectId, key: ref) else { return }
+        loading = true
+        defer { loading = false }
+        var req = URLRequest(url: url)
+        for (k, v) in model.authHeaders { req.setValue(v, forHTTPHeaderField: k) }
+        do {
+            let (data, response) = try await URLSession.shared.data(for: req)
+            guard let http = response as? HTTPURLResponse, (200..<400).contains(http.statusCode), !data.isEmpty else {
+                return
+            }
+            let dir = FileManager.default.temporaryDirectory.appendingPathComponent("arbos-files", isDirectory: true)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let safe = (name as NSString).lastPathComponent
+            let file = dir.appendingPathComponent(safe.isEmpty ? "file" : safe)
+            try data.write(to: file, options: .atomic)
+            present(file)
+        } catch {
+            // Leave the card tappable so the user can retry.
+        }
+    }
+
+    /// `.quickLookPreview` only presents when the binding becomes non-nil, so a
+    /// second tap after dismiss must briefly clear it first.
+    @MainActor
+    private func present(_ url: URL) {
+        if previewURL == url {
+            previewURL = nil
+            Task { @MainActor in previewURL = url }
+        } else {
+            previewURL = url
+        }
     }
 }
 
