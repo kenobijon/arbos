@@ -381,7 +381,7 @@ struct HomeView: View {
         HStack(spacing: 10) {
             Button { showSettings = true } label: {
                 ZStack(alignment: .bottomTrailing) {
-                    PersonAvatar(url: model.user?.avatarUrl, handle: model.user?.login ?? "?", size: Theme.control)
+                    PersonAvatar(url: model.user?.avatarUrl, handle: model.user?.login ?? "?", size: Theme.control, name: model.user?.name, id: model.user?.id, colorIndex: model.user?.avatarColorIndexEffective)
                     Circle()
                         .fill(machineDotColor(model.machine.state, theme: theme))
                         .frame(width: 11, height: 11)
@@ -898,7 +898,7 @@ struct PeopleRow: View {
                             .foregroundStyle(theme.muted)
                     }
                 } else {
-                    PersonAvatar(url: other?.avatarUrl, handle: other?.handle ?? "?", size: Theme.rowAvatar)
+                    PersonAvatar(url: other?.avatarUrl, handle: other?.handle ?? "?", size: Theme.rowAvatar, name: other?.name, id: other?.id, colorIndex: other?.avatarColorIndex)
                 }
                 if let a = chat.agents.first?.project {
                     AgentAvatar(project: a, theme: theme, size: 18, still: true)

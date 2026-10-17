@@ -43,20 +43,15 @@
 		A1C0DE5A11B2C3D4E5F60712 /* QuestionCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C0DE5A11B2C3D4E5F60711 /* QuestionCard.swift */; };
 		A1C0DE5A11B2C3D4E5F60912 /* InCallOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C0DE5A11B2C3D4E5F60911 /* InCallOverlay.swift */; };
 		A1C0DE5A11B2C3D4E5F60922 /* VoicePickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C0DE5A11B2C3D4E5F60921 /* VoicePickerView.swift */; };
-		A10E60FCE3B202DF2B19C1F9 /* TreeAvatar.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C2B0533292C517C7A3A463 /* TreeAvatar.swift */; };
 		A1D45695F908DDA32FE43CB7 /* AvatarImage.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B6A97F3E4CCA36512BE56F /* AvatarImage.swift */; };
+		A1D79A0000000000000000B1 /* AvatarPalette.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D79A0000000000000000A1 /* AvatarPalette.swift */; };
 		A1C634E69BCD2C37B7F27346 /* MessageNotification.swift in Sources */ = {isa = PBXBuildFile; fileRef = A189C676F775E104AF2116C8 /* MessageNotification.swift */; };
 		A1E4BA8C12CCEA3325BE2435 /* Loro in Frameworks */ = {isa = PBXBuildFile; productRef = A1636595BB2F59B8CC2A4343 /* Loro */; };
-		A1A6E93FCA4EB187A868F141 /* Lottie in Frameworks */ = {isa = PBXBuildFile; productRef = A1826140A452A6596E8D3496 /* Lottie */; };
 		A142325F91336BDF2882011F /* LiveKit in Frameworks */ = {isa = PBXBuildFile; productRef = A192208521894CF66C53FA38 /* LiveKit */; };
-		A1C2B4D2E940DD983D12AF36 /* lottie in Resources */ = {isa = PBXBuildFile; fileRef = A1E626B934A96ED1554A02FC /* lottie */; };
-		A16D540D32FAED8715DB6E99 /* manifest.json in Resources */ = {isa = PBXBuildFile; fileRef = A18B2A1ED6AC20D525E86040 /* manifest.json */; };
 		A1B67B3F74BDAB239C56AED6 /* NotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10999EDEF21B6240657C678 /* NotificationService.swift */; };
 		A190E060B710273750619338 /* AvatarImage.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B6A97F3E4CCA36512BE56F /* AvatarImage.swift */; };
+		A1D79A0000000000000000B2 /* AvatarPalette.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D79A0000000000000000A1 /* AvatarPalette.swift */; };
 		A10279EE2B8CCA654EC85FF3 /* MessageNotification.swift in Sources */ = {isa = PBXBuildFile; fileRef = A189C676F775E104AF2116C8 /* MessageNotification.swift */; };
-		A11BE44401C0B2BEE1F56890 /* Lottie in Frameworks */ = {isa = PBXBuildFile; productRef = A10D33CF6B79AD48FE412AEF /* Lottie */; };
-		A1D75DC2A425BFEB3A377164 /* lottie in Resources */ = {isa = PBXBuildFile; fileRef = A1E626B934A96ED1554A02FC /* lottie */; };
-		A19B54556CF6D42A3F304660 /* manifest.json in Resources */ = {isa = PBXBuildFile; fileRef = A18B2A1ED6AC20D525E86040 /* manifest.json */; };
 		A1C074DB74357475F6D8CFFE /* ArbosNotificationService.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = A1F36F98FFEAB133710BB7DD /* ArbosNotificationService.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
@@ -123,16 +118,14 @@
 		A1C0DE5A11B2C3D4E5F60711 /* QuestionCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuestionCard.swift; sourceTree = "<group>"; };
 		A1C0DE5A11B2C3D4E5F60911 /* InCallOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InCallOverlay.swift; sourceTree = "<group>"; };
 		A1C0DE5A11B2C3D4E5F60921 /* VoicePickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoicePickerView.swift; sourceTree = "<group>"; };
-		A1C2B0533292C517C7A3A463 /* TreeAvatar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TreeAvatar.swift; sourceTree = "<group>"; };
 		A15C30AC29682FF68428C798 /* Arbos.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Arbos.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A1C864BED8979E7D7306EE37 /* ArbosNotificationService.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = ArbosNotificationService.entitlements; sourceTree = "<group>"; };
 		A1A0DA8EE4AE3E28B6613467 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A10999EDEF21B6240657C678 /* NotificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationService.swift; sourceTree = "<group>"; };
 		A1F36F98FFEAB133710BB7DD /* ArbosNotificationService.appex */ = {isa = PBXFileReference; explicitFileType = wrapper.app-extension; includeInIndex = 0; path = ArbosNotificationService.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		A1B6A97F3E4CCA36512BE56F /* AvatarImage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AvatarImage.swift; sourceTree = "<group>"; };
+		A1D79A0000000000000000A1 /* AvatarPalette.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AvatarPalette.swift; sourceTree = "<group>"; };
 		A189C676F775E104AF2116C8 /* MessageNotification.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageNotification.swift; sourceTree = "<group>"; };
-		A1E626B934A96ED1554A02FC /* lottie */ = {isa = PBXFileReference; lastKnownFileType = folder; name = lottie; path = "../../../assets/avatars/trees/lottie"; sourceTree = SOURCE_ROOT; };
-		A18B2A1ED6AC20D525E86040 /* manifest.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = manifest.json; path = "../../../assets/avatars/trees/manifest.json"; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -141,7 +134,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				A1E4BA8C12CCEA3325BE2435 /* Loro in Frameworks */,
-				A1A6E93FCA4EB187A868F141 /* Lottie in Frameworks */,
 				A142325F91336BDF2882011F /* LiveKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -150,7 +142,6 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				A11BE44401C0B2BEE1F56890 /* Lottie in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -163,8 +154,6 @@
 				A129CE0010199C1F57214B55,
 				A12CE546A1A4EDA93F7ABC69,
 				A13B28988372749C80462C3E,
-				A1E626B934A96ED1554A02FC,
-				A18B2A1ED6AC20D525E86040,
 				A1CA9DEF8434A85687602C88,
 			);
 			sourceTree = "<group>";
@@ -173,6 +162,7 @@
 			isa = PBXGroup;
 			children = (
 				A1B6A97F3E4CCA36512BE56F,
+				A1D79A0000000000000000A1 /* AvatarPalette.swift */,
 				A189C676F775E104AF2116C8,
 			);
 			path = Shared;
@@ -276,7 +266,6 @@
 				A1C0DE5A11B2C3D4E5F60711,
 				A1C0DE5A11B2C3D4E5F60911,
 				A1C0DE5A11B2C3D4E5F60921,
-				A1C2B0533292C517C7A3A463,
 			);
 			path = UI;
 			sourceTree = "<group>";
@@ -311,7 +300,6 @@
 			name = Arbos;
 			packageProductDependencies = (
 				A1636595BB2F59B8CC2A4343 /* Loro */,
-				A1826140A452A6596E8D3496 /* Lottie */,
 				A192208521894CF66C53FA38 /* LiveKit */,
 			);
 			productName = Arbos;
@@ -332,7 +320,6 @@
 			);
 			name = ArbosNotificationService;
 			packageProductDependencies = (
-				A10D33CF6B79AD48FE412AEF /* Lottie */,
 			);
 			productName = ArbosNotificationService;
 			productReference = A1F36F98FFEAB133710BB7DD /* ArbosNotificationService.appex */;
@@ -366,7 +353,6 @@
 			mainGroup = A19BA62AACF9AABB98774F6F;
 			packageReferences = (
 				A1B12C4DAB52DBC6960BE255 /* XCRemoteSwiftPackageReference "loro-swift" */,
-				A1442F24100113CD3717BBCB /* XCRemoteSwiftPackageReference "lottie-spm" */,
 				A15BB86C523299D91321EF64 /* XCRemoteSwiftPackageReference "client-sdk-swift" */,
 			);
 			productRefGroup = A1CA9DEF8434A85687602C88 /* Products */;
@@ -385,8 +371,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				A12DF47CDA1B30754EA90287 /* Assets.xcassets in Resources */,
-				A1C2B4D2E940DD983D12AF36 /* lottie in Resources */,
-				A16D540D32FAED8715DB6E99 /* manifest.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -394,8 +378,6 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				A1D75DC2A425BFEB3A377164 /* lottie in Resources */,
-				A19B54556CF6D42A3F304660 /* manifest.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -441,8 +423,8 @@
 				A1C0DE5A11B2C3D4E5F60712 /* QuestionCard.swift in Sources */,
 				A1C0DE5A11B2C3D4E5F60912 /* InCallOverlay.swift in Sources */,
 				A1C0DE5A11B2C3D4E5F60922 /* VoicePickerView.swift in Sources */,
-				A10E60FCE3B202DF2B19C1F9 /* TreeAvatar.swift in Sources */,
 				A1D45695F908DDA32FE43CB7 /* AvatarImage.swift in Sources */,
+				A1D79A0000000000000000B1 /* AvatarPalette.swift in Sources */,
 				A1C634E69BCD2C37B7F27346 /* MessageNotification.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -453,6 +435,7 @@
 			files = (
 				A1B67B3F74BDAB239C56AED6 /* NotificationService.swift in Sources */,
 				A190E060B710273750619338 /* AvatarImage.swift in Sources */,
+				A1D79A0000000000000000B2 /* AvatarPalette.swift in Sources */,
 				A10279EE2B8CCA654EC85FF3 /* MessageNotification.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -655,14 +638,6 @@
 				version = 1.16.2;
 			};
 		};
-		A1442F24100113CD3717BBCB /* XCRemoteSwiftPackageReference "lottie-spm" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/airbnb/lottie-spm";
-			requirement = {
-				kind = exactVersion;
-				version = 4.6.1;
-			};
-		};
 		A15BB86C523299D91321EF64 /* XCRemoteSwiftPackageReference "client-sdk-swift" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/livekit/client-sdk-swift";
@@ -679,20 +654,10 @@
 			package = A1B12C4DAB52DBC6960BE255 /* XCRemoteSwiftPackageReference "loro-swift" */;
 			productName = Loro;
 		};
-		A1826140A452A6596E8D3496 /* Lottie */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = A1442F24100113CD3717BBCB /* XCRemoteSwiftPackageReference "lottie-spm" */;
-			productName = Lottie;
-		};
 		A192208521894CF66C53FA38 /* LiveKit */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = A15BB86C523299D91321EF64 /* XCRemoteSwiftPackageReference "client-sdk-swift" */;
 			productName = LiveKit;
-		};
-		A10D33CF6B79AD48FE412AEF /* Lottie */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = A1442F24100113CD3717BBCB /* XCRemoteSwiftPackageReference "lottie-spm" */;
-			productName = Lottie;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

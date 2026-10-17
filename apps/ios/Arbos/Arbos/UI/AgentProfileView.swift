@@ -28,37 +28,20 @@ struct AgentEditSheet: View {
                 if let project {
                     VStack(spacing: 0) {
                         hero(project)
-                        if !TreeAvatars.shared.isEmpty {
-                            card {
-                                VStack(alignment: .leading, spacing: 12) {
-                                    if TreeAvatars.shared.colorsTintable, let slug = model.avatarSlug(for: project) {
-                                        Text("Colour").font(.system(size: Theme.body, weight: .medium)).foregroundStyle(theme.text)
-                                        TreeColorGrid(slug: slug, current: model.avatarColor(for: project)) { c in
-                                            guard !project.shared else { return }
-                                            model.pickAvatarColor(projectId, name: c.name)
-                                        }
-                                        .disabled(project.shared)
-                                        Rectangle().fill(theme.separator).frame(height: 0.5).padding(.vertical, 4)
-                                    }
-                                    Text("Character").font(.system(size: Theme.body, weight: .medium)).foregroundStyle(theme.text)
-                                    TreePickerGrid(current: model.avatarSlug(for: project), color: model.avatarColor(for: project)) { slug in
-                                        guard !project.shared else { return }
-                                        model.pickAvatar(projectId, slug: slug)
-                                    }
-                                    .disabled(project.shared)
+                        card {
+                            VStack(alignment: .leading, spacing: 12) {
+                                Text("Avatar colour").font(.system(size: Theme.body, weight: .medium)).foregroundStyle(theme.text)
+                                AvatarColorPicker(name: project.name, id: project.id, current: project.effectiveAvatarColorIndex == project.avatarColorIndex ? project.avatarColorIndex : project.avatarColorIndex) { index in
+                                    guard !project.shared else { return }
+                                    model.pickAvatarColorIndex(projectId, index: index)
                                 }
-                                .padding(.horizontal, 14)
-                                .padding(.vertical, 12)
+                                .disabled(project.shared)
                             }
-                            .padding(.horizontal, 16)
-                            .padding(.top, 26)
-                        } else {
-                            card {
-                                colourRow(project)
-                            }
-                            .padding(.horizontal, 16)
-                            .padding(.top, 26)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 12)
                         }
+                        .padding(.horizontal, 16)
+                        .padding(.top, 26)
 
                         card {
                             Button { showModel = true } label: {
@@ -140,7 +123,7 @@ struct AgentEditSheet: View {
         VStack(spacing: 12) {
             AgentAvatar(project: project, theme: theme, size: 116, dot: machineDotColor(model.machine.state, theme: theme), working: model.isStreaming(project: project.id))
                 .padding(.top, 18)
-                .id("\(model.avatarSlug(for: project) ?? project.color)|\(model.avatarColor(for: project)?.name ?? "mono")")
+                .id("\(project.effectiveAvatarColorIndex.map(String.init) ?? "auto")")
                 .animation(.snappy, value: project.color)
             if editingName {
                 TextField("", text: $name, prompt: Text("Agent name").foregroundStyle(theme.placeholder))
@@ -189,34 +172,6 @@ struct AgentEditSheet: View {
 
     // MARK: Rows
 
-    private func colourRow(_ project: Project) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Colour").font(.system(size: Theme.body, weight: .medium)).foregroundStyle(theme.text)
-            HStack(spacing: 0) {
-                let current = AgentEditSheet.currentHex(project)
-                ForEach(AgentEditSheet.colorHexes, id: \.self) { hex in
-                    let selected = hex.lowercased() == current
-                    Button {
-                        guard !project.shared else { return }
-                        model.updateProject(projectId, color: hex)
-                    } label: {
-                        ZStack {
-                            Circle().fill(Color(hex: hex) ?? .gray).frame(width: 26, height: 26)
-                            if selected {
-                                Circle().strokeBorder(theme.text, lineWidth: 2).frame(width: 34, height: 34)
-                            }
-                        }
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 36)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(project.shared)
-                }
-            }
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-    }
 
     /// The hex the avatar really shows: the project's own colour, or — for the
     /// relay default — the palette entry `Theme.projectColor` hashes to
@@ -431,7 +386,7 @@ struct AgentProfileView: View {
         let status = p.ownerHandle == nil ? ("you", false) : lastSeenLine(person.lastSeenAt, online: person.online)
         return Button { if p.ownerHandle != nil { model.showProfile(.user(person)) } } label: {
             HStack(spacing: 12) {
-                PersonAvatar(url: person.avatarUrl, handle: handle, size: 36)
+                PersonAvatar(url: person.avatarUrl, handle: handle, size: 36, name: person.name, id: person.id, colorIndex: person.avatarColorIndex)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("owner").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
                     HStack(spacing: 6) {

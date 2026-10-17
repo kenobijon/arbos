@@ -136,7 +136,6 @@ final class AppModel: ObservableObject {
     private var refreshTask: Task<Bool, Never>?
     @Published var projects: [Project] = [] {
         didSet {
-            if projects.map(\.id) != oldValue.map(\.id) || projects.map(\.avatar) != oldValue.map(\.avatar) { recomputeAvatars() }
         }
     }
     @Published var chats: [Id: [Chat]] = [:]
@@ -1573,69 +1572,26 @@ final class AppModel: ObservableObject {
         }
     }
 
-    // MARK: Tree avatars
+    // MARK: Avatar colour (D79)
 
-    /// Project id → tree slug (explicit `avatar`, else hashed + deduplicated).
-    /// Recomputed whenever the project list changes.
-    @Published private(set) var avatarMap: [Id: String] = [:]
-
-    /// Picks made on this phone, kept until the relay stores `avatar` itself
-    /// (PATCH /projects/{id} ignores unknown fields on relays without it).
-    private var avatarOverrides: [Id: String] {
-        get { (UserDefaults.standard.dictionary(forKey: "avatarOverrides") as? [String: String]) ?? [:] }
-        set { UserDefaults.standard.set(newValue, forKey: "avatarOverrides") }
-    }
-
-    func avatarSlug(for project: Project) -> String? {
-        if let slug = project.avatar, TreeAvatars.shared.has(slug) { return slug }
-        if let slug = avatarMap[project.id] { return slug }
-        // Agents from other people's lists (shared agents in a DM) are not in
-        // `projects`; the relay's default for them, when the art is bundled.
-        if let slug = TreeAvatars.shared.relayDefault(project.id), TreeAvatars.shared.has(slug) { return slug }
-        return nil
-    }
-
-    func recomputeAvatars() {
-        let overrides = avatarOverrides
-        let withPicks = projects.map { p -> Project in
-            var q = p
-            if q.avatar == nil, let slug = overrides[p.id] { q.avatar = slug }
-            return q
+    /// The owner picks one of the seven palette colours, or Automatic (nil).
+    func pickAvatarColorIndex(_ projectId: Id, index: Int?) {
+        if let i = projects.firstIndex(where: { $0.id == projectId }) {
+            projects[i].avatarColorIndex = index
+            projects[i].avatarColorIndexEffective = index
         }
-        let map = TreeAvatars.shared.assign(withPicks)
-        if map != avatarMap { avatarMap = map }
-    }
-
-    /// Colour picks made on this phone (same fallback as `avatarOverrides`).
-    private var avatarColorOverrides: [Id: String] {
-        get { (UserDefaults.standard.dictionary(forKey: "avatarColorOverrides") as? [String: String]) ?? [:] }
-        set { UserDefaults.standard.set(newValue, forKey: "avatarColorOverrides") }
-    }
-
-    /// The colour set a project's tree is tinted with; nil = mono. A project
-    /// without a chosen colour shows the relay's hash default (D74: coloured,
-    /// never mono); only an explicit "mono" pick draws the white tree.
-    func avatarColor(for project: Project) -> TreeColor? {
-        let name = project.avatarColor ?? avatarColorOverrides[project.id]
-        guard let name else { return TreeAvatars.shared.defaultColor(forProjectId: project.id) }
-        guard name != "mono" else { return nil }
-        return TreeAvatars.shared.color(named: name) ?? TreeAvatars.shared.defaultColor(forProjectId: project.id)
-    }
-
-    func pickAvatarColor(_ projectId: Id, name: String) {
-        var o = avatarColorOverrides
-        o[projectId] = name
-        avatarColorOverrides = o
-        updateProject(projectId, avatarColor: name)
-        objectWillChange.send()
-    }
-
-    func pickAvatar(_ projectId: Id, slug: String) {
-        var o = avatarOverrides
-        o[projectId] = slug
-        avatarOverrides = o
-        updateProject(projectId, avatar: slug)
-        recomputeAvatars()
+        guard !isFixture else { return }
+        Task {
+            do {
+                let kept = try await api.setProjectAvatarColorIndex(projectId, index: index)
+                if let i = projects.firstIndex(where: { $0.id == projectId }) {
+                    projects[i].avatarColorIndexEffective = kept
+                }
+            } catch {
+                notice = Notice(text: "Avatar colour: \(error.localizedDescription)")
+                await refreshRegistry()
+            }
+        }
     }
 
     /// Open (or create) the DM with a handle and navigate to it.
@@ -1956,6 +1912,23 @@ final class AppModel: ObservableObject {
     func showProfile(_ target: ProfileTarget) { profile = target }
 
     /// A sender avatar was tapped: resolve the handle through the chat's members.
+    /// Stable user id for a handle seen in a chat (members first, then the directory); nil when unknown.
+    func personId(handle: String) -> String? {
+        if let me = user, me.login == handle { return me.id }
+        for c in peopleChats {
+            if let m = c.members.first(where: { $0.handle == handle && !$0.isAgent }) { return m.id }
+        }
+        return directory.first { $0.handle == handle }?.id
+    }
+
+    func personName(handle: String) -> String? {
+        if let me = user, me.login == handle { return me.name }
+        for c in peopleChats {
+            if let m = c.members.first(where: { $0.handle == handle && !$0.isAgent }) { return m.name }
+        }
+        return directory.first { $0.handle == handle }?.name
+    }
+
     func openPersonProfile(handle: String, avatarUrl: String?, chatId: String) {
         if let m = peopleChat(chatId)?.members.first(where: { $0.handle == handle && !$0.isAgent }) {
             showProfile(.user(ProfilePerson(m)))
@@ -2059,8 +2032,8 @@ final class AppModel: ObservableObject {
                         body: p.payload["preview"] ?? p.payload["text"] ?? "New message",
                         senderKind: kind, senderId: p.sender["id"] ?? member?.id ?? from,
                         senderName: p.sender["name"] ?? member?.displayName ?? from, senderHandle: from,
-                        avatar: p.sender["avatar"] ?? agent.flatMap { avatarSlug(for: $0) },
-                        avatarColor: p.sender["avatar_color"] ?? agent?.avatarColor,
+                        avatar: p.sender["avatar"],
+                        avatarColor: p.sender["avatar_color"],
                         avatarUrl: p.sender["avatar_url"] ?? member?.avatarUrl)
                     Task { await PushManager.shared.postMessage(id: p.id, info: info) }
                     applyBadge()
@@ -2692,10 +2665,10 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func createProject(name: String, avatar: String? = nil, avatarColor: String? = nil, color: String? = nil) {
+    func createProject(name: String, avatarColorIndex: Int? = nil) {
         Task {
             do {
-                try await api.createProject(name: name, avatar: avatar, avatarColor: avatarColor, color: color)
+                try await api.createProject(name: name, avatarColorIndex: avatarColorIndex)
                 await refreshRegistry()
             } catch {
                 notice = Notice(text: "New project failed: \(error.localizedDescription)")
@@ -2708,8 +2681,6 @@ final class AppModel: ObservableObject {
     func duplicateProject(_ project: Project) {
         guard !project.shared else { return }
         let name = uniqueCopyName(of: project.name)
-        let avatar = avatarSlug(for: project)
-        let colorName = project.avatarColor ?? avatarColorOverrides[project.id]
         let modelId = project.model
         let effort = project.effort
         Task {
@@ -2719,8 +2690,6 @@ final class AppModel: ObservableObject {
                 // model after the copy exists.
                 try await api.createProject(
                     name: name,
-                    avatar: avatar,
-                    avatarColor: colorName,
                     color: project.color,
                     description: project.description,
                     instructions: project.instructions

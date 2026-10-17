@@ -18,15 +18,16 @@ struct ProfilePerson: Identifiable, Equatable, Hashable {
     /// §9 presence as last reported by the relay for this row.
     var lastSeenAt: Int64? = nil
     var online: Bool = false
+    var avatarColorIndex: Int? = nil
 
     var displayName: String { name?.isEmpty == false ? name! : "@\(handle)" }
 
-    init(id: String, handle: String, name: String?, avatarUrl: String?, lastSeenAt: Int64? = nil, online: Bool = false) {
-        self.id = id; self.handle = handle; self.name = name; self.avatarUrl = avatarUrl; self.lastSeenAt = lastSeenAt; self.online = online
+    init(id: String, handle: String, name: String?, avatarUrl: String?, lastSeenAt: Int64? = nil, online: Bool = false, avatarColorIndex: Int? = nil) {
+        self.id = id; self.handle = handle; self.name = name; self.avatarUrl = avatarUrl; self.lastSeenAt = lastSeenAt; self.online = online; self.avatarColorIndex = avatarColorIndex
     }
-    init(_ m: ChatMember) { self.init(id: m.id, handle: m.handle, name: m.name, avatarUrl: m.avatarUrl, lastSeenAt: m.lastSeenAt, online: m.online) }
-    init(_ p: Person) { self.init(id: p.id, handle: p.handle, name: p.name, avatarUrl: p.avatarUrl, lastSeenAt: p.lastSeenAt, online: p.online) }
-    init(_ p: ProjectMember) { self.init(id: p.id, handle: p.handle, name: p.name, avatarUrl: p.avatarUrl, lastSeenAt: p.lastSeenAt, online: p.online) }
+    init(_ m: ChatMember) { self.init(id: m.id, handle: m.handle, name: m.name, avatarUrl: m.avatarUrl, lastSeenAt: m.lastSeenAt, online: m.online, avatarColorIndex: m.avatarColorIndex) }
+    init(_ p: Person) { self.init(id: p.id, handle: p.handle, name: p.name, avatarUrl: p.avatarUrl, lastSeenAt: p.lastSeenAt, online: p.online, avatarColorIndex: p.avatarColorIndex) }
+    init(_ p: ProjectMember) { self.init(id: p.id, handle: p.handle, name: p.name, avatarUrl: p.avatarUrl, lastSeenAt: p.lastSeenAt, online: p.online, avatarColorIndex: p.avatarColorIndex) }
 }
 
 /// What the root view presents.
@@ -364,7 +365,7 @@ struct MemberStatusRow: View {
             if let agent {
                 AgentAvatar(project: agent, theme: theme, size: 40, still: true)
             } else {
-                PersonAvatar(url: person.avatarUrl, handle: person.handle, size: 40)
+                PersonAvatar(url: person.avatarUrl, handle: person.handle, size: 40, name: person.name, id: person.id, colorIndex: person.avatarColorIndex)
             }
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
@@ -421,7 +422,7 @@ struct UserProfileView: View {
                 VStack(spacing: 18) {
                     Color.clear.frame(height: 70)
                     ProfileHeader(name: person.displayName, status: isMe ? "@\(person.handle)" : status.text, statusOnline: status.online) {
-                        PersonAvatar(url: person.avatarUrl, handle: person.handle, size: 112)
+                        PersonAvatar(url: person.avatarUrl, handle: person.handle, size: 112, name: person.name, id: person.id, colorIndex: person.avatarColorIndex)
                     }
                     if !isMe {
                         ProfileActionRow(actions: [

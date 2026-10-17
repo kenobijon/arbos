@@ -459,7 +459,7 @@ struct RowView: View {
         case .other(let text, let handle, let avatar):
             HStack(alignment: .bottom, spacing: 8) {
                 Button { model.openPersonProfile(handle: handle, avatarUrl: avatar, chatId: chatId) } label: {
-                    PersonAvatar(url: avatar, handle: handle, size: 26)
+                    PersonAvatar(url: avatar, handle: handle, size: 26, name: model.personName(handle: handle), id: model.personId(handle: handle))
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("@\(handle), profile")
@@ -582,12 +582,9 @@ struct RowView: View {
         }) {
             AgentAvatar(project: project, theme: theme, size: 26, still: true)
         } else if let avatar, avatar.contains("://") {
-            PersonAvatar(url: avatar, handle: handle, size: 26)
-        } else if let avatar, !avatar.isEmpty, TreeAvatars.shared.has(avatar) {
-            TreeCharacterView(slug: avatar, size: 26,
-                              color: TreeAvatars.shared.defaultColor(forProjectId: handle), still: true)
+            PersonAvatar(url: avatar, handle: handle, size: 26, name: model.personName(handle: handle), id: model.personId(handle: handle))
         } else {
-            PersonAvatar(url: avatar, handle: handle, size: 26)
+            PersonAvatar(url: nil, handle: handle, size: 26, name: model.personName(handle: handle), id: model.personId(handle: handle))
         }
     }
 
@@ -643,11 +640,9 @@ struct RowView: View {
     private func agentGlyph(named name: String) -> some View {
         if let target = model.projects.first(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
             AgentAvatar(project: target, theme: theme, size: 16, still: true)
-        } else if let slug = TreeAvatars.shared.relayDefault(name), TreeAvatars.shared.has(slug) {
-            // An agent we do not list yet still shows as a coloured tree (D74).
-            TreeCharacterView(slug: slug, size: 16, color: TreeAvatars.shared.defaultColor(forProjectId: name), still: true)
         } else {
-            BlobAvatar(color: theme.muted, shape: BlobShape.pick(for: name), size: 16)
+            // An agent we do not list: initials on the colour its name hashes to.
+            InitialsAvatar(name: name, handle: name, id: name, size: 16)
         }
     }
 
@@ -740,23 +735,23 @@ struct BlockView: View {
     }
 }
 
-/// Round avatar for a person (GitHub picture, initials fallback).
+/// Round avatar for a person: the GitHub/uploaded picture when there is one,
+/// else the Telegram-style initials circle (D79). `id` is the stable user id
+/// the colour is derived from; without it the handle stands in.
 struct PersonAvatar: View {
     @Environment(\.theme) private var theme
     let url: String?
     let handle: String
     var size: CGFloat = 40
-
-    /// Initials disc: dark grey in dark mode, Grok's light grey (#E4E4E4) in light.
-    private var fallbackFill: Color { theme.isDark ? Color(hex: "#2A2A2A")! : Color(hex: "#E4E4E4")! }
+    var name: String? = nil
+    var id: String? = nil
+    var colorIndex: Int? = nil
 
     var body: some View {
         ZStack {
-            Circle().fill(fallbackFill)
+            initials
             if let url, let u = URL(string: url) {
                 AsyncImage(url: u) { img in img.resizable().scaledToFill() } placeholder: { initials }
-            } else {
-                initials
             }
         }
         .frame(width: size, height: size)
@@ -764,9 +759,7 @@ struct PersonAvatar: View {
     }
 
     private var initials: some View {
-        Text(String(handle.prefix(1)).uppercased())
-            .font(.system(size: size * 0.42, weight: .semibold))
-            .foregroundStyle(theme.text)
+        InitialsAvatar(name: name, handle: handle, id: id ?? handle, override: colorIndex, size: size)
     }
 }
 
@@ -794,7 +787,7 @@ struct AvatarCluster: View {
         } else {
             HStack(spacing: -size * 0.32) {
                 ForEach(Array(shown.enumerated()), id: \.element.id) { _, m in
-                    PersonAvatar(url: m.avatarUrl, handle: m.handle, size: size)
+                    PersonAvatar(url: m.avatarUrl, handle: m.handle, size: size, name: m.name, id: m.id, colorIndex: m.avatarColorIndex)
                         .overlay(Circle().strokeBorder(theme.bg, lineWidth: max(1, size * 0.06)))
                 }
                 if hasMore {

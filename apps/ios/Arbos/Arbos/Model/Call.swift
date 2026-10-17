@@ -18,6 +18,8 @@ struct CallPerson: Identifiable, Equatable, Hashable {
     var avatar: String?
     var avatarColor: String?
     var avatarUrl: String?
+    /// D79 `avatar_color_index_effective` (nil → derived from `id`).
+    var avatarColorIndex: Int? = nil
 
     var displayName: String { name?.isEmpty == false ? name! : "@\(handle)" }
     var isAgent: Bool { kind == "agent" }
@@ -25,8 +27,10 @@ struct CallPerson: Identifiable, Equatable, Hashable {
     static func parse(_ raw: Any?) -> CallPerson? {
         guard let d = raw as? [String: Any], let id = d["id"] as? String else { return nil }
         func s(_ k: String) -> String? { (d[k] as? String).flatMap { $0.isEmpty ? nil : $0 } }
-        return CallPerson(id: id, kind: s("kind") ?? "user", name: s("name"), handle: s("handle") ?? id,
-                          avatar: s("avatar"), avatarColor: s("avatar_color"), avatarUrl: s("avatar_url"))
+        var p = CallPerson(id: id, kind: s("kind") ?? "user", name: s("name"), handle: s("handle") ?? id,
+                           avatar: s("avatar"), avatarColor: s("avatar_color"), avatarUrl: s("avatar_url"))
+        p.avatarColorIndex = (d["avatar_color_index_effective"] as? NSNumber)?.intValue
+        return p
     }
 
     static func parse(metadata: String?) -> CallPerson? {
@@ -49,8 +53,10 @@ struct CallPerson: Identifiable, Equatable, Hashable {
                               handle: mentionSlug(member.project?.name ?? member.handle),
                               avatar: member.project?.avatar, avatarColor: member.project?.avatarColor, avatarUrl: nil)
         }
-        return CallPerson(id: member.id, kind: "user", name: member.name, handle: member.handle,
-                          avatar: nil, avatarColor: nil, avatarUrl: member.avatarUrl)
+        var p = CallPerson(id: member.id, kind: "user", name: member.name, handle: member.handle,
+                           avatar: nil, avatarColor: nil, avatarUrl: member.avatarUrl)
+        p.avatarColorIndex = member.avatarColorIndex
+        return p
     }
 }
 

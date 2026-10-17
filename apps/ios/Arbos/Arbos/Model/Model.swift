@@ -173,6 +173,11 @@ struct Project: Identifiable, Equatable, Codable {
     var avatar: String? = nil
     /// Colour set name from the manifest (`avatar_color` on the relay); nil → mono.
     var avatarColor: String? = nil
+    /// D79: the owner's palette pick (`avatar_color_index`, 0–6) and the relay's
+    /// `avatar_color_index_effective`; nil → derived from the id (AvatarPalette.index).
+    var avatarColorIndex: Int? = nil
+    var avatarColorIndexEffective: Int? = nil
+    var effectiveAvatarColorIndex: Int? { AvatarPalette.clamp(avatarColorIndexEffective) ?? AvatarPalette.clamp(avatarColorIndex) }
     /// Private standing instructions (owner only).
     var instructions: String = ""
     /// §9 public one-paragraph description (≤500), `PATCH {description}`.

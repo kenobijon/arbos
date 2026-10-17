@@ -24,9 +24,9 @@ extension AppModel {
         var list = [comms, affine, hyper, scout, expense, invoices]
         list[0].description = "Keeps your Discord and email in your voice: short, casual, no sign-offs. Drafts before it sends."
         list[0].machineState = "awake"; list[0].machineClass = "daytona"; list[0].machineSnapshot = "arbos-agent-0.1.11"; list[0].machineAlwaysOn = true
-        // Every agent is a coloured tree (D74); the colours differ so screenshots read well.
-        let tints = ["fx-comms": "blue", "fx-affine": "green", "fx-hyper": "orange", "fx-expense": "pink", "fx-invoices": "teal", "fx-scout": "violet"]
-        for i in list.indices { list[i].avatarColor = tints[list[i].id] }
+        // Distinct palette colours (D79) so screenshots read well.
+        let tints = ["fx-comms": 5, "fx-affine": 3, "fx-hyper": 1, "fx-expense": 6, "fx-invoices": 4, "fx-scout": 2]
+        for i in list.indices { list[i].avatarColorIndexEffective = tints[list[i].id] }
         setFixture(projects: list, now: now)
     }
 
@@ -144,7 +144,7 @@ extension AppModel {
             chatId: "fx-affine-main", projectId: "fx-affine", title: "Affine",
             body: "Shortlist of 6 candidates is ready — two look very strong.",
             senderKind: "agent", senderId: "fx-affine", senderName: "Affine", senderHandle: "affine",
-            avatar: affine.flatMap { avatarSlug(for: $0) } ?? "oak", avatarColor: affine?.avatarColor ?? "green", avatarUrl: nil)
+            avatar: nil, avatarColor: nil, avatarUrl: nil)
         let personInfo = MessagePush.userInfo(
             chatId: "fx-dm-unconst", projectId: peopleSlot, title: "Unconst",
             body: "@main who is in the standup tomorrow?",
