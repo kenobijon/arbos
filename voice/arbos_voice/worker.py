@@ -533,23 +533,31 @@ class VoiceCall:
         log.info("leaving call %s: %s", self.call_id, reason)
         try:
             if self.session and reason != "alone" and GOODBYE.get(reason):
-                if self.agent_speaking() or self.state.goodbye_said:
-                    # The model is already saying its own goodbye (kill word or leave_call):
-                    # a second response.create would cancel it and be refused; let it finish.
+                own = self.agent_speaking() or self.state.goodbye_said
+                if not own and reason == "asked" and self.state.mode == "duplex":
+                    # Kill word in 1:1: the model answers that same utterance itself (server VAD)
+                    # and usually says goodbye; give it a moment before adding our own line.
+                    deadline = time.monotonic() + 2.5
+                    while not self.agent_speaking() and time.monotonic() < deadline:
+                        await asyncio.sleep(0.05)
+                    own = self.agent_speaking()
+                if own:
+                    # The model is saying its own goodbye (kill word or leave_call): a second
+                    # response.create would cancel it and be refused; let it finish.
                     deadline = time.monotonic() + 8.0
                     while self.agent_speaking() and time.monotonic() < deadline:
                         await asyncio.sleep(0.05)
-                    # The tool result makes the model answer once more ("Goodbye" again): mute it.
-                    try:
-                        self.session.output.set_audio_enabled(False)
-                    except Exception:
-                        pass
                 else:
                     handle = self.speak_line(GOODBYE[reason], allow_interruptions=False)
                     try:
                         await asyncio.wait_for(handle.wait_for_playout(), timeout=12.0)
                     except asyncio.TimeoutError:
                         pass
+                # Whatever follows (a leave_call tool result, a second "Goodbye") is not heard.
+                try:
+                    self.session.output.set_audio_enabled(False)
+                except Exception:
+                    pass
         except Exception as e:
             log.warning("goodbye failed: %s", e)
         self.event("system", text=f"{self.agent_name} left the call" + ("" if reason in ("alone", "asked", "idle") else f" · {reason.replace('_', ' ')}"))
