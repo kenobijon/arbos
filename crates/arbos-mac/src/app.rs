@@ -1625,7 +1625,7 @@ impl AppState {
 
     // ----- commands --------------------------------------------------------
 
-    fn command(&self, cmd: ClientCommand) {
+    pub(crate) fn command(&self, cmd: ClientCommand) {
         let _ = self.commands.send(cmd);
     }
 
