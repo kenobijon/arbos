@@ -191,6 +191,9 @@ struct Project: Identifiable, Equatable, Codable {
     var primaryChatId: Id? = nil
     /// §10.3 call voice id (`voice` on the relay); nil = the relay's default voice.
     var voice: String? = nil
+    /// §11 camera vision in agent calls (`vision_enabled`); nil = the relay did not say (on).
+    var visionEnabled: Bool? = nil
+    var visionOn: Bool { visionEnabled ?? true }
     /// §9 machine summary: awake|waking|asleep|error, class, snapshot, always_on.
     var machineState: String? = nil
     var machineClass: String? = nil

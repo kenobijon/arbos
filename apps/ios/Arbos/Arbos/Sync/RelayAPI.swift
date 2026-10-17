@@ -196,6 +196,7 @@ final class RelayAPI {
             project.machineAlwaysOn = (machine["always_on"] as? NSNumber)?.boolValue ?? false
             project.primaryChatId = primaryChat
             project.voice = ((p["voice"] as? String) ?? (detail["voice"] as? String)).flatMap { $0.isEmpty ? nil : $0 }
+            project.visionEnabled = ((p["vision_enabled"] as? NSNumber) ?? (detail["vision_enabled"] as? NSNumber))?.boolValue
             let chats = ((detail["chats"] as? [Any]) ?? []).compactMap(RelayAPI.parseChat)
             out.append(RegistryProject(project: project, chats: chats))
         }
@@ -605,6 +606,14 @@ final class RelayAPI {
         let m = v as? [String: Any]
         let p: [String: Any]? = (m?["project"] as? [String: Any]) ?? m
         return ((p?["avatar_color_index_effective"] as? NSNumber) ?? (p?["avatar_color_index"] as? NSNumber))?.intValue
+    }
+
+    /// §11 `PATCH /projects/{id} {"vision_enabled": bool}` — may the agent sample the camera on calls.
+    func setProjectVision(_ projectId: Id, enabled: Bool) async throws -> Bool? {
+        let v = try await json("PATCH", "/projects/\(projectId)", body: ["vision_enabled": enabled])
+        let m = v as? [String: Any]
+        let p: [String: Any]? = (m?["project"] as? [String: Any]) ?? m
+        return (p?["vision_enabled"] as? NSNumber)?.boolValue
     }
 
     /// §10.3 `PATCH /projects/{id} {"voice": id|null}` (null = the default voice). Returns the

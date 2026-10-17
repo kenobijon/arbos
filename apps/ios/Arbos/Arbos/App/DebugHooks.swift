@@ -22,6 +22,8 @@ enum DebugHooks {
     static var callUrl: String? { value("ARBOS_CALL_URL") }
     static var callToken: String? { value("ARBOS_CALL_TOKEN") }
     static var callKind: String? { value("ARBOS_CALL_KIND") }
+    /// Simulator has no camera: pretend ours is on and the agent reports seeing it (§11 badge screenshots).
+    static var fakeVision: Bool { value("ARBOS_FAKE_VISION") == "1" }
     /// Text to put in the feedback sheet and send as soon as it opens (endpoint check).
     static var autoFeedback: String? { value("ARBOS_AUTO_FEEDBACK") }
     /// Fixture machine reports `always_on` (D73 policy screens).
