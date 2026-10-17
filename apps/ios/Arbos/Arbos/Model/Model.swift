@@ -635,6 +635,7 @@ struct ConnectorProvider: Identifiable, Equatable {
     var oauthConfigured: Bool
 
     var hasOauth: Bool { connect == "oauth" || connect == "oauth_or_token" }
+    var acceptsToken: Bool { connect == "token" || connect == "oauth_or_token" }
 }
 
 /// Settings → Connectors state.

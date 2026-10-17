@@ -593,53 +593,125 @@ struct ConnectorsPage: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     @Binding var connectorError: String?
+    /// Provider whose token paste field is open (`nil` = none).
+    @State private var tokenFor: String?
+    @State private var tokenDraft = ""
 
     var body: some View {
         SettingsPage(title: "Connected apps") {
-            SettingsGroup(footer: "Connect Google so your agents can read Gmail and Calendar. Tokens stay on the relay; the agent asks before it sends.") {
-                ForEach(googleProviders) { p in
+            SettingsGroup(footer: "Connect Gmail, Calendar, Slack, GitHub, or Harness Comms so your agents can use them. Tokens stay on the relay; the agent asks before it sends.") {
+                ForEach(catalogProviders) { p in
                     connectorRow(p)
                 }
             }
         }
+        .onAppear { model.refreshConnectors() }
     }
 
-    /// Google (Gmail + Calendar) from the catalog, or a local stand-in before load.
-    private var googleProviders: [ConnectorProvider] {
-        let fromRelay = model.connectors.providers.filter { $0.provider == "google" }
+    /// Full relay catalog (Google, Slack, GitHub, Harness Comms), or stand-ins before load.
+    private var catalogProviders: [ConnectorProvider] {
+        let fromRelay = model.connectors.providers
         if !fromRelay.isEmpty { return fromRelay }
         if model.connectors.loaded { return [] }
-        return [ConnectorProvider(provider: "google", label: "Google (Gmail, Calendar)", connect: "oauth", oauthConfigured: true)]
+        return [
+            ConnectorProvider(provider: "google", label: "Google (Gmail, Calendar)", connect: "oauth", oauthConfigured: true),
+            ConnectorProvider(provider: "slack", label: "Slack", connect: "oauth_or_token", oauthConfigured: true),
+            ConnectorProvider(provider: "github", label: "GitHub", connect: "oauth_or_token", oauthConfigured: true),
+            ConnectorProvider(provider: "harness_comms", label: "Harness Comms (Beeper + Gmail)", connect: "token", oauthConfigured: true),
+        ]
     }
 
     @ViewBuilder
     private func connectorRow(_ p: ConnectorProvider) -> some View {
         let cn = model.connectors.connector(for: p.provider)
         let connected = cn?.status == .connected
-        HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(p.label).font(.system(size: Theme.body)).foregroundStyle(theme.text)
-                Text(connectorSubline(p, cn: cn))
-                    .font(.system(size: Theme.tiny))
-                    .foregroundStyle(theme.muted)
+        let tokenOpen = tokenFor == p.provider
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(p.label).font(.system(size: Theme.body)).foregroundStyle(theme.text)
+                    Text(connectorSubline(p, cn: cn))
+                        .font(.system(size: Theme.tiny))
+                        .foregroundStyle(theme.muted)
+                }
+                Spacer(minLength: 8)
+                if connected, let id = cn?.id {
+                    Button("Disconnect") { model.disconnectConnector(id: id) }
+                        .font(.system(size: Theme.small, weight: .semibold))
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(theme.text)
+                        .disabled(model.connectorsBusy)
+                } else {
+                    if p.hasOauth {
+                        Button("Connect") { startOauth(p) }
+                            .font(.system(size: Theme.small, weight: .semibold))
+                            .buttonStyle(.borderless)
+                            .foregroundStyle(theme.accent)
+                            .disabled(model.connectorsBusy || model.isFixture)
+                    }
+                    if p.acceptsToken {
+                        Button(tokenOpen ? "Cancel" : "Token…") {
+                            if tokenOpen {
+                                tokenFor = nil
+                                tokenDraft = ""
+                            } else {
+                                tokenFor = p.provider
+                                tokenDraft = ""
+                            }
+                        }
+                        .font(.system(size: Theme.small, weight: .semibold))
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(p.hasOauth ? theme.text : theme.accent)
+                        .disabled(model.connectorsBusy || model.isFixture)
+                    }
+                }
             }
-            Spacer(minLength: 8)
-            if connected, let id = cn?.id {
-                Button("Disconnect") { model.disconnectConnector(id: id) }
-                    .font(.system(size: Theme.small, weight: .semibold))
-                    .buttonStyle(.borderless)
-                    .foregroundStyle(theme.text)
-                    .disabled(model.connectorsBusy)
-            } else if p.hasOauth {
-                Button("Connect") { model.connectConnector(provider: p.provider) }
-                    .font(.system(size: Theme.small, weight: .semibold))
-                    .buttonStyle(.borderless)
-                    .foregroundStyle(theme.accent)
-                    .disabled(model.connectorsBusy || model.isFixture)
+            if tokenOpen {
+                HStack(spacing: 8) {
+                    SecureField("Paste a token, then Save", text: $tokenDraft)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .font(.system(size: Theme.small))
+                        .foregroundStyle(theme.text)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(theme.field, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .strokeBorder(theme.fieldBorder, lineWidth: 1)
+                        )
+                    Button("Save") { saveToken(p) }
+                        .font(.system(size: Theme.small, weight: .semibold))
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(theme.accent)
+                        .disabled(model.connectorsBusy || model.isFixture
+                                  || tokenDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
             }
         }
         .padding(.horizontal, 16)
+        .padding(.vertical, 8)
         .frame(minHeight: 56)
+    }
+
+    private func startOauth(_ p: ConnectorProvider) {
+        // Avoid a silent fail: without a client on the relay, Connect only 409s.
+        if model.connectors.loaded, !p.oauthConfigured, !model.connectors.mock {
+            connectorError = "Connect \(p.label): OAuth client not configured on the relay."
+                + (p.acceptsToken ? " Use Token… with an API key or personal access token instead." : "")
+            return
+        }
+        tokenFor = nil
+        tokenDraft = ""
+        model.connectConnector(provider: p.provider)
+    }
+
+    private func saveToken(_ p: ConnectorProvider) {
+        let token = tokenDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty else { return }
+        tokenFor = nil
+        tokenDraft = ""
+        model.connectConnector(provider: p.provider, token: token)
     }
 
     private func connectorSubline(_ p: ConnectorProvider, cn: Connector?) -> String {
@@ -648,7 +720,13 @@ struct ConnectorsPage: View {
         }
         // Prefer the real reason over a stuck "Needs sign-in" from a failed start.
         if model.connectors.loaded, !p.oauthConfigured, !model.connectors.mock, p.hasOauth {
+            if p.acceptsToken {
+                return "OAuth not configured — connect with a token"
+            }
             return "OAuth client not configured on the relay"
+        }
+        if !p.hasOauth, p.acceptsToken {
+            return "API key: use Token…"
         }
         if let err = cn?.lastError, !err.isEmpty, cn?.status != .connected {
             return err
