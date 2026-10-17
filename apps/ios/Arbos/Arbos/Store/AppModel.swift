@@ -349,7 +349,8 @@ final class AppModel: ObservableObject {
            let data = FileManager.default.contents(atPath: path),
            let v = try? JSONSerialization.jsonObject(with: data),
            let (toks, who) = try? RelayAPI.parseTokens(v, relayUrl: endpoint.httpUrl) {
-            adopt(tokens: toks, user: who)
+            // Unsigned simulator builds have no Keychain: keep the rig session in memory.
+            adopt(tokens: toks, user: who, persist: false)
         }
         #endif
         Task { await probeAuthMode() }
@@ -624,11 +625,13 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func adopt(tokens toks: AuthTokens, user who: AuthUser?) {
+    private func adopt(tokens toks: AuthTokens, user who: AuthUser?, persist: Bool = true) {
         tokens = toks
         if let who { user = who }
-        do { try Keychain.storeAuth(toks) } catch {
-            notice = Notice(text: "Session kept in memory only: \(error.localizedDescription)")
+        if persist {
+            do { try Keychain.storeAuth(toks) } catch {
+                notice = Notice(text: "Session kept in memory only: \(error.localizedDescription)")
+            }
         }
         let wasPaired = credentials != nil
         credentials = DeviceCredentials(relayUrl: toks.relayUrl, deviceId: toks.deviceId, deviceToken: toks.accessToken)
