@@ -40,7 +40,7 @@ struct RootView: View {
             if model.isPaired, let firstLogin = model.firstLogin {
                 FirstLoginView(state: firstLogin)
                     .zIndex(10)
-                    .transition(.opacity)
+                    .transition(.asymmetric(insertion: .identity, removal: .opacity))
             }
         }
         .animation(.easeInOut(duration: 0.25), value: model.firstLogin == nil)
