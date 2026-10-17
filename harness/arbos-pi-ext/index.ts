@@ -308,8 +308,8 @@ export default function arbosPiExt(pi: ExtensionAPI) {
               {
                 type: "text",
                 text: acked
-                  ? `Route accepted: act. Your acknowledgement is already in the chat. Do the work with at most ${ACT_MAX_CALLS} tool calls (send_message only at real milestones), then write only the result.`
-                  : `Route accepted: act. Follow your plan with at most ${ACT_MAX_CALLS} tool calls, then summarize.`,
+                  ? `Route accepted: act. Your acknowledgement is already in the chat. Do the work with at most ${ACT_MAX_CALLS} tool calls (send_message only at real milestones), then write only the conversational result — no thinking aloud, no process narration.`
+                  : `Route accepted: act. Follow your plan with at most ${ACT_MAX_CALLS} tool calls, then write only the conversational result — no thinking aloud.`,
               },
             ],
             details: { action },
