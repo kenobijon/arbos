@@ -1523,7 +1523,6 @@ fn write_greeting(shared: &Arc<Shared>, chat_id: &str, project_id: &str, agent_n
         subagent_id: None,
         subagent_name: None,
         handoff_messages: None,
-        reactions: Default::default(),
         in_reply_to: None,
         routine_name: None,
         sender_icon: None,
