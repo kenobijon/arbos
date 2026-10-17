@@ -176,6 +176,9 @@ impl AppState {
             return;
         }
         self.onboarding = Some(Onboarding::new());
+        // Always-on (D73): the relay starts the machine at sign-in; asking again is
+        // a no-op there and covers relays (and test accounts) that did not.
+        self.command(ClientCommand::MachineStart);
         self.spawn_onboarding_timer(cx);
     }
 

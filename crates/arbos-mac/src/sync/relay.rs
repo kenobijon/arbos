@@ -524,7 +524,29 @@ impl SyncSource for RelaySource {
             });
             let _ = events.send(SyncEvent::Link(Link::Connecting));
 
-            if shared.creds.read().unwrap().is_some() {
+            // Rig hook (D82 first-login recordings): `ARBOS_TEST_TOKENS=<file>` holds a
+            // `/auth/token` response for a test account; it is taken as a sign-in.
+            let test_tokens = std::env::var("ARBOS_TEST_TOKENS")
+                .ok()
+                .filter(|_| shared.creds.read().unwrap().is_none())
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                .and_then(|v| shared.apply_token_response(&v).ok());
+            if let Some(creds) = test_tokens {
+                if let Some(user) = creds.user.clone() {
+                    let _ = shared.events.send(SyncEvent::Account(Some(AccountView {
+                        id: user.id,
+                        login: user.login,
+                        name: user.name,
+                        avatar_url: user.avatar_url,
+                        ..AccountView::default()
+                    })));
+                }
+                let _ = shared.events.send(SyncEvent::Paired {
+                    device_id: creds.device_id,
+                });
+                start_after_pairing(&shared);
+            } else if shared.creds.read().unwrap().is_some() {
                 start_after_pairing(&shared);
             } else {
                 let _ = events.send(SyncEvent::NeedsPairing {

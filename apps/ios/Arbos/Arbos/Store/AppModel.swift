@@ -342,6 +342,16 @@ final class AppModel: ObservableObject {
         if creds != nil {
             startAfterPairing()
         }
+        #if DEBUG
+        // Rig hook (D82 first-login recordings): `ARBOS_TEST_TOKENS=<file>` holds a
+        // `/auth/token` response for a test account; taken as a fresh sign-in.
+        if creds == nil, let path = env["ARBOS_TEST_TOKENS"], !path.isEmpty,
+           let data = FileManager.default.contents(atPath: path),
+           let v = try? JSONSerialization.jsonObject(with: data),
+           let (toks, who) = try? RelayAPI.parseTokens(v, relayUrl: endpoint.httpUrl) {
+            adopt(tokens: toks, user: who)
+        }
+        #endif
         Task { await probeAuthMode() }
         PushManager.shared.visibleChatId = { [weak self] in
             guard let self, self.appActive else { return nil }

@@ -81,6 +81,9 @@ extension AppModel {
         let now = Date()
         firstLogin = FirstLogin(startedAt: now, stageSince: now)
         UserDefaults.standard.set(true, forKey: AppModel.pendingKey)
+        // Always-on (D73): the relay starts the machine at sign-in; asking again is
+        // a no-op there and covers relays (and test accounts) that did not.
+        Task { await startMachineQuietly() }
         startFirstLoginPolling()
     }
 
