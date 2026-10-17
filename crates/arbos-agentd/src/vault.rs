@@ -291,11 +291,17 @@ async fn wait_decision(
 /// `vault_request` and `browser_fill`.
 async fn obtain_grant(
     agent: &Arc<Agent>,
-    chat_id: &str,
+    chat_hint: &str,
     name: &str,
     purpose: &str,
     use_kind: &str,
 ) -> Result<Grant, Value> {
+    // Access cards belong on the pinned main chat (same rule as `approval_chat`).
+    let chat_id = agent
+        .approval_chat(chat_hint)
+        .await
+        .unwrap_or_else(|| chat_hint.to_owned());
+    let chat_id = chat_id.as_str();
     if let Some(g) = grant_for(&agent.cfg.project_id, name, use_kind) {
         return Ok(g);
     }

@@ -2526,6 +2526,9 @@ impl Agent {
     /// `ask_user(question, widget?)` from any harness seam. Writes the `question` part (with the
     /// typed widget when one was given) plus the legacy `waiting_user` status part, and records
     /// the ask so the `answer` command can render the value for the model. Returns the question id.
+    ///
+    /// When the turn is in a side thread but the prompt came from another agent (group /
+    /// Projects ⇄), the card is posted on the pinned main chat so the owner can find it.
     pub async fn hook_ask_user(
         &self,
         question: &str,
@@ -2542,10 +2545,44 @@ impl Agent {
         };
         let widget_json = widget.as_ref().and_then(|w| serde_json::to_value(w).ok());
         let mut tl = self.turn.lock().await;
-        let chat_id = tl
+        let turn_chat = tl
             .as_ref()
             .map(|t| t.chat_id.clone())
             .unwrap_or_else(|| session_id.to_owned());
+        let pinned = self
+            .store
+            .chats()
+            .ok()
+            .and_then(|cs| cs.into_iter().find(|c| c.is_pinned).map(|c| c.id));
+        // Other-agent / system-tab turns: surface the ask on Main, not a buried side thread.
+        let from_other_agent = if let Some(t) = tl.as_ref() {
+            let in_projects = self
+                .groups
+                .kind_of(&t.chat_id)
+                .map(|k| k != "chat")
+                .unwrap_or(false);
+            let cross = if let Some(host) = self.sync.host(&t.chat_id).await {
+                let h = host.lock().await;
+                h.doc
+                    .message(&t.user_msg_id)
+                    .map(|m| {
+                        m.rest.get("groupChatId").is_some()
+                            || m.rest.get("hostProjectId").is_some()
+                            || m.rest.get("groupTitle").is_some()
+                    })
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+            in_projects || cross
+        } else {
+            false
+        };
+        let chat_id = if from_other_agent {
+            pinned.unwrap_or_else(|| turn_chat.clone())
+        } else {
+            turn_chat.clone()
+        };
         let id = ulid();
         self.store.insert_ask(
             &id,
@@ -2556,14 +2593,42 @@ impl Agent {
         )?;
         if let Some(t) = tl.as_mut() {
             t.asked = Some(question.to_owned());
-            if let Some(host) = self.sync.host(&t.chat_id).await {
+            if chat_id == t.chat_id {
+                if let Some(host) = self.sync.host(&t.chat_id).await {
+                    let mut h = host.lock().await;
+                    h.doc.add_question_part(
+                        &t.assistant_msg_id,
+                        &id,
+                        question,
+                        widget_json.as_ref(),
+                    );
+                    h.doc
+                        .add_status_part(&t.assistant_msg_id, "waiting_user", question);
+                    h.doc
+                        .set_message_fields(&t.assistant_msg_id, &[("waitingUser", json!(true))]);
+                }
+            } else if let Some(host) = self.sync.host(&chat_id).await {
+                // Standalone ask on the main chat; the side-thread turn just stops.
                 let mut h = host.lock().await;
+                let last_user = h
+                    .doc
+                    .messages()
+                    .iter()
+                    .rev()
+                    .find(|m| m.role == "user")
+                    .map(|m| m.id.clone())
+                    .unwrap_or_default();
+                let msg_id = ulid();
                 h.doc
-                    .add_question_part(&t.assistant_msg_id, &id, question, widget_json.as_ref());
+                    .start_assistant_message(&msg_id, &last_user, &self.cfg.device_id);
                 h.doc
-                    .add_status_part(&t.assistant_msg_id, "waiting_user", question);
+                    .set_message_fields(&msg_id, &[("turn", json!({ "kind": "ask_user" }))]);
                 h.doc
-                    .set_message_fields(&t.assistant_msg_id, &[("waitingUser", json!(true))]);
+                    .add_question_part(&msg_id, &id, question, widget_json.as_ref());
+                h.doc.add_status_part(&msg_id, "waiting_user", question);
+                h.doc
+                    .set_message_fields(&msg_id, &[("waitingUser", json!(true))]);
+                h.doc.finish_message(&msg_id, MessageStatus::Done);
             }
         }
         let _ = self.store.t3_append(
@@ -2573,10 +2638,11 @@ impl Agent {
             "ask_user",
             Some("assistant"),
             question,
-            widget_json
-                .as_ref()
-                .map(|w| json!({ "question_id": id, "widget": w }))
-                .as_ref(),
+            Some(&json!({
+                "question_id": id,
+                "widget": widget_json,
+                "posted_chat": chat_id,
+            })),
         );
         Ok(id)
     }

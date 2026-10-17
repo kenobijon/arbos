@@ -86,12 +86,19 @@ struct ChatListView: View {
 
     private func row(_ chat: Chat) -> some View {
         Button {
-            model.open(chat: chat)
+            // Dismiss first so ChatView is not torn down mid-sheet when open()
+            // remounts the destination (same agent, different chatId).
+            let target = chat
             dismiss()
+            DispatchQueue.main.async {
+                model.open(chat: target)
+            }
         } label: {
             ChatRow(chat: chat, project: project, preview: ChatListView.preview(of: chat, in: model),
                     time: ChatListView.time(of: chat, in: model), unread: model.chatHasUnread(chat), streaming: model.isStreaming(chat.id))
+                .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
         .listRowBackground(theme.bg)
         .listRowSeparatorTint(theme.separator)
     }
@@ -140,11 +147,17 @@ struct ArchivedChatsView: View {
                 List {
                     ForEach(archived) { chat in
                         Button {
-                            model.open(chat: chat)
+                            let target = chat
+                            dismiss()
+                            DispatchQueue.main.async {
+                                model.open(chat: target)
+                            }
                         } label: {
                             ChatRow(chat: chat, project: project, preview: ChatListView.preview(of: chat, in: model),
                                     time: ChatListView.time(of: chat, in: model), unread: false, streaming: model.isStreaming(chat.id))
+                                .contentShape(Rectangle())
                         }
+                        .buttonStyle(.plain)
                         .listRowBackground(theme.bg)
                         .listRowSeparatorTint(theme.separator)
                         .swipeActions(edge: .trailing, allowsFullSwipe: true) {

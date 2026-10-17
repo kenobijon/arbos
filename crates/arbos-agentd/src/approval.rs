@@ -92,21 +92,22 @@ fn timeout_secs() -> u64 {
 }
 
 impl Agent {
-    /// Chat a card belongs to when the caller only knows a session id: the running turn's chat,
-    /// a known chat id, else the pinned chat.
+    /// Chat a card belongs to when the caller only knows a session id.
+    /// Prefer the pinned ("main") chat so access / approval requests are not buried in a
+    /// side thread the owner is not looking at; fall back to the running turn, a known
+    /// chat id, then any chat.
     pub async fn approval_chat(&self, hint: &str) -> Option<String> {
+        let chats = self.store.chats().ok().unwrap_or_default();
+        if let Some(pinned) = chats.iter().find(|c| c.is_pinned) {
+            return Some(pinned.id.clone());
+        }
         if let Some(t) = self.turn.lock().await.as_ref() {
             return Some(t.chat_id.clone());
         }
         if let Ok(Some(c)) = self.store.chat(hint) {
             return Some(c.id);
         }
-        let chats = self.store.chats().ok()?;
-        chats
-            .iter()
-            .find(|c| c.is_pinned)
-            .or(chats.first())
-            .map(|c| c.id.clone())
+        chats.first().map(|c| c.id.clone())
     }
 
     /// Append one line to `/work/.arbos/audit.jsonl` and mirror it to the relay (`POST
