@@ -15,6 +15,9 @@ pub struct Llm {
     decisions_url: String,
     token: String,
     project_id: String,
+    /// Sent as `x-arbos-purpose`; the relay tags the usage row and ledger entry with it so a
+    /// feature's spend (e.g. `memory-tree`) can be summed exactly.
+    purpose: Option<String>,
 }
 
 /// One answer of a decision model. `noul` questions answer with the yes-probability; `choice`
@@ -47,6 +50,26 @@ impl Llm {
             decisions_url: format!("{}/proxy/decisions", cfg.relay_url),
             token: cfg.box_token.clone(),
             project_id: cfg.project_id.clone(),
+            purpose: None,
+        }
+    }
+
+    /// The same client with every call tagged `x-arbos-purpose: <purpose>`.
+    pub fn with_purpose(&self, purpose: &str) -> Self {
+        Self {
+            http: self.http.clone(),
+            base: self.base.clone(),
+            decisions_url: self.decisions_url.clone(),
+            token: self.token.clone(),
+            project_id: self.project_id.clone(),
+            purpose: Some(purpose.to_owned()),
+        }
+    }
+
+    fn purpose_header(&self, r: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.purpose {
+            Some(p) => r.header("x-arbos-purpose", p),
+            None => r,
         }
     }
 
@@ -63,10 +86,12 @@ impl Llm {
         let t0 = Instant::now();
         let body = json!({ "model": model, "state": state, "questions": questions });
         let resp = self
-            .http
-            .post(&self.decisions_url)
-            .bearer_auth(&self.token)
-            .header("x-arbos-project", &self.project_id)
+            .purpose_header(
+                self.http
+                    .post(&self.decisions_url)
+                    .bearer_auth(&self.token)
+                    .header("x-arbos-project", &self.project_id),
+            )
             .timeout(timeout)
             .json(&body)
             .send()
@@ -131,6 +156,7 @@ impl Llm {
             decisions_url: decisions_url.to_owned(),
             token: token.to_owned(),
             project_id: String::new(),
+            purpose: None,
         }
     }
 
@@ -165,9 +191,11 @@ impl Llm {
             "temperature": 0,
         });
         let resp = self
-            .http
-            .post(format!("{}/chat/completions", self.base))
-            .bearer_auth(&self.token)
+            .purpose_header(
+                self.http
+                    .post(format!("{}/chat/completions", self.base))
+                    .bearer_auth(&self.token),
+            )
             .json(&body)
             .send()
             .await?;

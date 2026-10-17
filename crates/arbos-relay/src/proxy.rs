@@ -421,10 +421,28 @@ async fn forward(
     }
     resp_headers.insert("x-arbos-proxied", HeaderValue::from_static("1"));
 
-    let api_name = match api {
+    // `x-arbos-purpose: <feature>` (agentd's memory tree sends `memory-tree`): the usage row's
+    // `api` becomes `<api>:<feature>` and the ledger reference `<model>|<feature>`, so a feature's
+    // spend sums exactly; untagged calls keep the old shapes.
+    let purpose: Option<String> = headers
+        .get("x-arbos-purpose")
+        .and_then(|v| v.to_str().ok())
+        .map(|p| {
+            p.chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                .take(32)
+                .collect::<String>()
+                .to_ascii_lowercase()
+        })
+        .filter(|p| !p.is_empty());
+    let base_api = match api {
         Api::OpenAi => "openai",
         Api::Anthropic => "anthropic",
         Api::Decisions => "decisions",
+    };
+    let api_name: String = match &purpose {
+        Some(p) => format!("{base_api}:{p}"),
+        None => base_api.to_owned(),
     };
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(64);
     let db = state.db.clone();
@@ -467,7 +485,7 @@ async fn forward(
         if status.is_success() {
             let _ = db.record_usage(
                 &pid,
-                api_name,
+                &api_name,
                 &meter.model,
                 meter.input,
                 meter.output,
@@ -477,13 +495,17 @@ async fn forward(
                 t0.elapsed().as_millis() as i64,
                 ttfb,
             );
+            let reference = match &purpose {
+                Some(p) => format!("{}|{p}", meter.model),
+                None => meter.model.clone(),
+            };
             crate::credits::charge_call(
                 &meter_state,
                 &payer,
                 &pid,
                 meter.usd(),
                 "inference",
-                Some(&meter.model),
+                Some(&reference),
             );
         }
     });
