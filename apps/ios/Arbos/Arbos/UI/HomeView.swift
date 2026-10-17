@@ -246,7 +246,11 @@ struct HomeView: View {
             .navigationDestination(for: AppModel.Route.self) { route in
                 switch route {
                 case .chat(let chatId, let projectId):
+                    // `.id(chatId)` forces a fresh ChatView when switching threads of the
+                    // same agent from the Chats sheet; without it NavigationStack reuses
+                    // the destination and the tap looks like it does nothing.
                     ChatView(chatId: chatId, projectId: projectId)
+                        .id(chatId)
                 }
             }
             .navigationDestination(isPresented: $showHidden) {
