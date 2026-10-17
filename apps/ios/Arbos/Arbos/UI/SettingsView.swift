@@ -267,7 +267,9 @@ struct SettingsPage<Content: View>: View {
             theme.bg.ignoresSafeArea()
             ScrollView {
                 VStack(spacing: 24) {
-                    Color.clear.frame(height: 48)
+                    // Clear the custom header + the soft end of `headerBlur`
+                    // so the first card (Credits Balance, etc.) is not frosted.
+                    Color.clear.frame(height: 72)
                     content()
                     Color.clear.frame(height: 24)
                 }
