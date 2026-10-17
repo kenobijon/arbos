@@ -13,14 +13,18 @@ struct Person: Identifiable, Equatable, Hashable {
     /// §9 presence: last seen (ms, minute-floored; nil = never) and online (< 90 s).
     var lastSeenAt: Int64? = nil
     var online: Bool = false
+    /// D79 `avatar_color_index_effective` from the relay (nil → derived from `id`).
+    var avatarColorIndex: Int? = nil
 
     var displayName: String { name?.isEmpty == false ? name! : handle }
 
     static func parse(_ raw: Any) -> Person? {
         guard let d = raw as? [String: Any], let id = d["id"] as? String, let handle = d["handle"] as? String else { return nil }
-        return Person(id: id, handle: handle, avatarUrl: d["avatar_url"] as? String, name: d["name"] as? String,
-                      status: d["status"] as? String ?? "member",
-                      lastSeenAt: (d["last_seen_at"] as? NSNumber)?.int64Value, online: (d["online"] as? NSNumber)?.boolValue ?? false)
+        var person = Person(id: id, handle: handle, avatarUrl: d["avatar_url"] as? String, name: d["name"] as? String,
+                            status: d["status"] as? String ?? "member",
+                            lastSeenAt: (d["last_seen_at"] as? NSNumber)?.int64Value, online: (d["online"] as? NSNumber)?.boolValue ?? false)
+        person.avatarColorIndex = (d["avatar_color_index_effective"] as? NSNumber)?.intValue
+        return person
     }
 }
 
@@ -46,6 +50,8 @@ struct ChatMember: Identifiable, Equatable {
     var lastSeenAt: Int64? = nil
     var online: Bool = false
     var description: String? = nil
+    /// D79 `avatar_color_index_effective` from the relay (nil → derived from `id`).
+    var avatarColorIndex: Int? = nil
 
     var isAgent: Bool { kind == .agent }
     var displayName: String { kind == .agent ? (project?.name ?? handle) : (name?.isEmpty == false ? name! : handle) }
@@ -61,6 +67,8 @@ struct ChatMember: Identifiable, Equatable {
                               model: "", effort: .low, spendTodayUsd: 0, spendCapUsd: 0,
                               avatar: (p["avatar"] as? String).flatMap { $0.isEmpty ? nil : $0 },
                               avatarColor: ((p["avatar_color"] as? String) ?? (d["avatar_color"] as? String)).flatMap { $0.isEmpty ? nil : $0 })
+            project?.avatarColorIndex = (p["avatar_color_index"] as? NSNumber)?.intValue
+            project?.avatarColorIndexEffective = (p["avatar_color_index_effective"] as? NSNumber)?.intValue
         }
         let settings = d["settings"] as? [String: Any]
         let joinedAt = (d["joined_at"] as? NSNumber)?.int64Value ?? (d["joined_at"] as? Int64) ?? 0
@@ -71,6 +79,7 @@ struct ChatMember: Identifiable, Equatable {
                           replyPolicy: settings?["reply_policy"] as? String)
         m.lastSeenAt = (d["last_seen_at"] as? NSNumber)?.int64Value
         m.online = (d["online"] as? NSNumber)?.boolValue ?? false
+        m.avatarColorIndex = (d["avatar_color_index_effective"] as? NSNumber)?.intValue
         m.description = (d["description"] as? String) ?? ((d["project"] as? [String: Any])?["description"] as? String)
         return m
     }
@@ -133,11 +142,15 @@ struct ProjectMember: Identifiable, Equatable {
     var lastSeenAt: Int64? = nil
     var online: Bool = false
 
+    var avatarColorIndex: Int? = nil
+
     static func parse(_ raw: Any) -> ProjectMember? {
         guard let d = raw as? [String: Any], let id = (d["user_id"] as? String) ?? (d["id"] as? String) else { return nil }
-        return ProjectMember(id: id, handle: d["handle"] as? String ?? "", avatarUrl: d["avatar_url"] as? String, name: d["name"] as? String,
+        var pm = ProjectMember(id: id, handle: d["handle"] as? String ?? "", avatarUrl: d["avatar_url"] as? String, name: d["name"] as? String,
                              status: d["status"] as? String ?? "member", role: d["role"] as? String ?? "member",
                              lastSeenAt: (d["last_seen_at"] as? NSNumber)?.int64Value, online: (d["online"] as? NSNumber)?.boolValue ?? false)
+        pm.avatarColorIndex = (d["avatar_color_index_effective"] as? NSNumber)?.intValue
+        return pm
     }
 }
 

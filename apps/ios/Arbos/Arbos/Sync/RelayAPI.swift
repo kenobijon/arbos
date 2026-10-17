@@ -182,6 +182,8 @@ final class RelayAPI {
             project.ownerHandle = p["owner_handle"] as? String
             project.avatar = (p["avatar"] as? String).flatMap { $0.isEmpty ? nil : $0 }
             project.avatarColor = (p["avatar_color"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            project.avatarColorIndex = (p["avatar_color_index"] as? NSNumber)?.intValue
+            project.avatarColorIndexEffective = (p["avatar_color_index_effective"] as? NSNumber)?.intValue
             project.instructions = (p["instructions"] as? String) ?? ""
             project.description = (p["description"] as? String) ?? ""
             project.ownerName = owner["name"] as? String
@@ -227,15 +229,13 @@ final class RelayAPI {
 
     func createProject(
         name: String,
-        avatar: String? = nil,
-        avatarColor: String? = nil,
+        avatarColorIndex: Int? = nil,
         color: String? = nil,
         description: String? = nil,
         instructions: String? = nil
     ) async throws {
         var body: [String: Any] = ["name": name]
-        if let avatar { body["avatar"] = avatar }
-        if let avatarColor { body["avatar_color"] = avatarColor }
+        if let avatarColorIndex { body["avatar_color_index"] = avatarColorIndex }
         if let color { body["color"] = color }
         if let description, !description.isEmpty { body["description"] = String(description.prefix(500)) }
         if let instructions, !instructions.isEmpty { body["instructions"] = instructions }
@@ -594,6 +594,17 @@ final class RelayAPI {
         if let avatarColor { body["avatar_color"] = avatarColor }
         guard !body.isEmpty else { return }
         _ = try await request("PATCH", "/projects/\(projectId)", body: body)
+    }
+
+    /// D79 `PATCH /projects/{id} {"avatar_color_index": 0–6|null}` (null = automatic). Returns the
+    /// relay's effective index when it echoes one.
+    func setProjectAvatarColorIndex(_ projectId: Id, index: Int?) async throws -> Int? {
+        let value: Any = index.map { $0 as Any } ?? NSNull()
+        let body: [String: Any] = ["avatar_color_index": value]
+        let v = try await json("PATCH", "/projects/\(projectId)", body: body)
+        let m = v as? [String: Any]
+        let p: [String: Any]? = (m?["project"] as? [String: Any]) ?? m
+        return ((p?["avatar_color_index_effective"] as? NSNumber) ?? (p?["avatar_color_index"] as? NSNumber))?.intValue
     }
 
     /// §10.3 `PATCH /projects/{id} {"voice": id|null}` (null = the default voice). Returns the

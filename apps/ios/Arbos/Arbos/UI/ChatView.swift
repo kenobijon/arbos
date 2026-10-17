@@ -498,7 +498,7 @@ struct ChatView: View {
                                     Text(groupSubtitle(people)).font(.system(size: 10)).foregroundStyle(theme.muted)
                                 }
                             } else {
-                                PersonAvatar(url: counterpart?.avatarUrl, handle: counterpart?.handle ?? "?", size: Theme.avatar)
+                                PersonAvatar(url: counterpart?.avatarUrl, handle: counterpart?.handle ?? "?", size: Theme.avatar, name: counterpart?.name, id: counterpart?.id, colorIndex: counterpart?.avatarColorIndex)
                                 VStack(alignment: .leading, spacing: 0) {
                                     Text(counterpart?.displayName ?? people.title)
                                         .font(.system(size: Theme.body, weight: .semibold))
@@ -856,7 +856,7 @@ struct ChatView: View {
                             if m.isAgent, let p = m.project {
                                 AgentAvatar(project: p, theme: theme, size: 18, still: true)
                             } else {
-                                PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 18)
+                                PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 18, name: m.name, id: m.id, colorIndex: m.avatarColorIndex)
                             }
                             Text(m.isAgent ? "@\(mentionSlug(m.project?.name ?? m.handle))" : "@\(m.handle)")
                                 .font(.system(size: Theme.tiny, weight: .medium))
@@ -1217,7 +1217,7 @@ struct ChatView: View {
                         ForEach(items) { m in
                             Button { completeMention(m) } label: {
                                 HStack(spacing: 6) {
-                                    if m.isAgent, let p = m.project { AgentAvatar(project: p, theme: theme, size: 20, still: true) } else { PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 20) }
+                                    if m.isAgent, let p = m.project { AgentAvatar(project: p, theme: theme, size: 20, still: true) } else { PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 20, name: m.name, id: m.id, colorIndex: m.avatarColorIndex) }
                                     Text("@\(m.isAgent ? mentionSlug(m.project?.name ?? m.handle) : m.handle)")
                                         .font(.system(size: Theme.small, weight: .medium)).foregroundStyle(theme.text)
                                 }

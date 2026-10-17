@@ -295,7 +295,7 @@ struct PersonRow: View {
 
     var body: some View {
         HStack(spacing: 14) {
-            PersonAvatar(url: person.avatarUrl, handle: person.handle, size: 44)
+            PersonAvatar(url: person.avatarUrl, handle: person.handle, size: 44, name: person.name, id: person.id, colorIndex: person.avatarColorIndex)
             VStack(alignment: .leading, spacing: 2) {
                 Text(person.displayName).font(.system(size: Theme.body, weight: .medium)).foregroundStyle(theme.text).lineLimit(1)
                 Text("@\(person.handle)").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted).lineLimit(1)
@@ -325,63 +325,28 @@ struct PersonRow: View {
     }
 }
 
-/// New agent: a name (and optional look), then `POST /projects`. The relay
-/// sets up its workspace. Tap the preview to pick the tree and colour.
+/// New agent: a name and an avatar colour, then `POST /projects`. The relay
+/// sets up its workspace. The preview is the Telegram-style initials circle
+/// (D79): Automatic until a swatch is picked.
 struct NewAgentView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     /// Closes the whole sheet (a pushed view's own dismiss only pops).
     let onDone: () -> Void
     @State private var name = ""
-    /// Explicit picks from the look sheet; nil keeps the name-hash preview
-    /// and lets the relay choose the final pair on create.
-    @State private var pickedSlug: String? = nil
-    @State private var pickedColorName: String? = nil
-    @State private var showLook = false
+    /// Explicit swatch pick; nil = Automatic (the relay derives the colour from the new id).
+    @State private var pickedColorIndex: Int? = nil
     @FocusState private var focused: Bool
 
     private var clean: String { name.trimmingCharacters(in: .whitespaces) }
-
-    private var previewSlug: String? {
-        let trees = TreeAvatars.shared.characters
-        guard !trees.isEmpty else { return nil }
-        if let pickedSlug { return pickedSlug }
-        return trees[NewAgentView.stableIndex(clean, trees.count)].slug
-    }
-
-    /// Tint for the preview. Explicit "mono" → nil (white tree); no pick →
-    /// the coloured hash default (D74).
-    private var previewColor: TreeColor? {
-        if let name = pickedColorName {
-            if name == "mono" { return nil }
-            return TreeAvatars.shared.color(named: name)
-        }
-        let palette = TreeAvatars.shared.coloredPalette
-        guard !palette.isEmpty else { return nil }
-        return palette[NewAgentView.stableIndex(clean + ":color", palette.count)]
-    }
+    /// Before the project exists there is no id: preview the name's hash.
+    private var previewIndex: Int { pickedColorIndex ?? AvatarPalette.index(for: clean.isEmpty ? "new" : clean) }
 
     var body: some View {
         VStack(spacing: 18) {
-            Button {
-                focused = false
-                showLook = true
-            } label: {
-                Group {
-                    if let slug = previewSlug {
-                        TreeCharacterView(slug: slug, size: 92, color: previewColor)
-                            .id("\(slug)|\(previewColor?.name ?? "mono")")
-                    } else {
-                        let blob = pickedColorName.flatMap { Color(hex: $0) }
-                            ?? Theme.palette[NewAgentView.stableIndex(clean, Theme.palette.count)]
-                        BlobAvatar(color: blob, shape: BlobShape.pick(for: clean), size: 92)
-                    }
-                }
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Choose look")
-            .padding(.top, 28)
-            .animation(.snappy, value: "\(clean)|\(pickedSlug ?? "")|\(pickedColorName ?? "")")
+            InitialsAvatar(initials: AvatarPalette.initials(name: clean.isEmpty ? "Agent" : clean, handle: nil), colorIndex: previewIndex, size: 92)
+                .padding(.top, 28)
+                .animation(.snappy, value: "\(clean)|\(pickedColorIndex ?? -1)")
             Text(clean.isEmpty ? "Name your agent" : "@\(mentionSlug(clean))")
                 .font(.system(size: Theme.small)).foregroundStyle(theme.muted)
             TextField("", text: $name, prompt: Text("Agent name").foregroundStyle(theme.placeholder))
@@ -394,6 +359,8 @@ struct NewAgentView: View {
                 .background(RoundedRectangle(cornerRadius: 25, style: .continuous).fill(theme.field))
                 .overlay(RoundedRectangle(cornerRadius: 25, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
                 .padding(.horizontal, 24)
+            AvatarColorPicker(name: clean, id: clean.isEmpty ? "new" : clean, current: pickedColorIndex) { pickedColorIndex = $0 }
+                .padding(.horizontal, 24)
             Button(action: create) {
                 Text("Create agent")
                     .font(.system(size: Theme.body, weight: .semibold)).foregroundStyle(theme.onPrimary)
@@ -404,7 +371,7 @@ struct NewAgentView: View {
             .disabled(clean.isEmpty)
             .opacity(clean.isEmpty ? 0.45 : 1)
             .padding(.horizontal, 24)
-            Text("A new agent with its own workspace on your machine. Tap the picture to pick its look. You can rename it and pick its model from its profile.")
+            Text("A new agent with its own workspace on your machine. You can rename it and pick its model from its profile.")
                 .font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
                 .multilineTextAlignment(.center).padding(.horizontal, 36)
             Spacer()
@@ -414,101 +381,13 @@ struct NewAgentView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(theme.bg, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
-        // Push (not a nested sheet): New agent already lives in the New Message sheet.
-        .navigationDestination(isPresented: $showLook) {
-            NewAgentLookView(
-                slug: Binding(
-                    get: { previewSlug },
-                    set: { pickedSlug = $0 }
-                ),
-                colorName: Binding(
-                    get: { pickedColorName ?? previewColor?.name ?? "mono" },
-                    set: { pickedColorName = $0 }
-                )
-            )
-        }
         .onAppear { focused = true }
-    }
-
-    /// FNV-1a so the preview colour is the same on every launch (Swift's
-    /// `hashValue` is seeded per process).
-    static func stableIndex(_ text: String, _ count: Int) -> Int {
-        var h: UInt32 = 2166136261
-        for b in text.utf8 { h = (h ^ UInt32(b)) &* 16777619 }
-        return Int(h % UInt32(max(count, 1)))
     }
 
     private func create() {
         guard !clean.isEmpty else { return }
-        // Hex picks are the blob palette (`color`); slug names are tree tints.
-        let blob = pickedColorName.flatMap { $0.hasPrefix("#") ? $0 : nil }
-        let tint = pickedColorName.flatMap { $0.hasPrefix("#") ? nil : $0 }
-        model.createProject(name: clean, avatar: pickedSlug, avatarColor: tint, color: blob)
+        model.createProject(name: clean, avatarColorIndex: pickedColorIndex)
         onDone()
-    }
-}
-
-/// Character + colour grids for a new agent (same pieces as the agent profile).
-/// Pushed from New agent so it stays inside the New Message navigation stack.
-struct NewAgentLookView: View {
-    @Environment(\.theme) private var theme
-    @Binding var slug: String?
-    @Binding var colorName: String
-
-    /// Tint for the tree preview in the grids; mono → nil (white tree).
-    private var tint: TreeColor? {
-        colorName == "mono" ? nil : TreeAvatars.shared.color(named: colorName)
-    }
-
-    /// Selection ring in the colour grid (includes mono).
-    private var gridColor: TreeColor {
-        if colorName == "mono" { return .mono }
-        return TreeAvatars.shared.color(named: colorName) ?? .mono
-    }
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                if TreeAvatars.shared.isEmpty {
-                    Text("Colour").font(.system(size: Theme.body, weight: .medium)).foregroundStyle(theme.text)
-                    HStack(spacing: 0) {
-                        ForEach(AgentEditSheet.colorHexes, id: \.self) { hex in
-                            let selected = hex.lowercased() == colorName.lowercased()
-                            Button { colorName = hex } label: {
-                                ZStack {
-                                    Circle().fill(Color(hex: hex) ?? .gray).frame(width: 26, height: 26)
-                                    if selected {
-                                        Circle().strokeBorder(theme.text, lineWidth: 2).frame(width: 34, height: 34)
-                                    }
-                                }
-                                .frame(maxWidth: .infinity)
-                                .frame(height: 36)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                } else {
-                    if TreeAvatars.shared.colorsTintable, let slug {
-                        Text("Colour").font(.system(size: Theme.body, weight: .medium)).foregroundStyle(theme.text)
-                        TreeColorGrid(slug: slug, current: gridColor) { c in
-                            colorName = c.name
-                        }
-                    }
-                    Text("Character").font(.system(size: Theme.body, weight: .medium)).foregroundStyle(theme.text)
-                    TreePickerGrid(current: slug, color: tint) { s in
-                        slug = s
-                    }
-                }
-            }
-            .padding(.horizontal, 16)
-            .padding(.top, 12)
-            .padding(.bottom, 28)
-        }
-        .background(theme.bg)
-        .navigationTitle("Look")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(theme.bg, for: .navigationBar)
-        .toolbarBackground(.visible, for: .navigationBar)
     }
 }
 
@@ -561,7 +440,7 @@ struct NewGroupView: View {
                         }
                         ForEach(picked) { p in
                             HStack(spacing: 6) {
-                                PersonAvatar(url: p.avatarUrl, handle: p.handle, size: 22)
+                                PersonAvatar(url: p.avatarUrl, handle: p.handle, size: 22, name: p.name, id: p.id, colorIndex: p.avatarColorIndex)
                                 Text("@\(p.handle)").font(.system(size: Theme.tiny, weight: .medium)).foregroundStyle(theme.text)
                                 Button { toggle(p) } label: { Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).foregroundStyle(theme.muted) }
                                     .buttonStyle(.plain)
@@ -741,7 +620,7 @@ struct MembersSheet: View {
                     Section {
                         ForEach(chat.humans) { m in
                             HStack(spacing: 12) {
-                                Button { model.showProfile(.user(ProfilePerson(m))) } label: { PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 40) }.buttonStyle(.plain)
+                                Button { model.showProfile(.user(ProfilePerson(m))) } label: { PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 40, name: m.name, id: m.id, colorIndex: m.avatarColorIndex) }.buttonStyle(.plain)
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(m.displayName).foregroundStyle(theme.text)
                                     Text("@\(m.handle)\(m.status == "invited" ? " · invited" : "")").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
@@ -1015,7 +894,7 @@ struct ProjectMembersSheet: View {
                             ForEach(suggestions) { p in
                                 Button { invite(p.handle) } label: {
                                     HStack(spacing: 12) {
-                                        PersonAvatar(url: p.avatarUrl, handle: p.handle, size: 40)
+                                        PersonAvatar(url: p.avatarUrl, handle: p.handle, size: 40, name: p.name, id: p.id, colorIndex: p.avatarColorIndex)
                                         VStack(alignment: .leading, spacing: 2) {
                                             Text(p.displayName).foregroundStyle(theme.text)
                                             Text("@\(p.handle)").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
@@ -1042,7 +921,7 @@ struct ProjectMembersSheet: View {
                 Section("Members") {
                     ForEach(members) { m in
                         HStack(spacing: 12) {
-                            Button { model.showProfile(.user(ProfilePerson(m))) } label: { PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 40) }.buttonStyle(.plain)
+                            Button { model.showProfile(.user(ProfilePerson(m))) } label: { PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 40, name: m.name, id: m.id, colorIndex: m.avatarColorIndex) }.buttonStyle(.plain)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(m.name?.isEmpty == false ? m.name! : m.handle).foregroundStyle(theme.text)
                                 Text("@\(m.handle) · \(m.role)\(m.status == "invited" ? " · invited" : "")").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)

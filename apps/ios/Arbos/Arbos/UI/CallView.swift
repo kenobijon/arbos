@@ -14,10 +14,10 @@ struct CallPersonAvatar: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
-        if person.isAgent, let slug = person.avatar, TreeAvatars.shared.has(slug) {
-            TreeCharacterView(slug: slug, size: size, color: person.avatarColor.flatMap { TreeAvatars.shared.color(named: $0) }, still: true)
+        if person.isAgent, let p = model.project(person.id) {
+            AgentAvatar(project: p, theme: Theme.dark, size: size, still: true)
         } else {
-            PersonAvatar(url: person.avatarUrl, handle: person.handle, size: size)
+            PersonAvatar(url: person.avatarUrl, handle: person.handle, size: size, name: person.name, id: person.id, colorIndex: person.avatarColorIndex)
         }
     }
 }

@@ -1,111 +1,121 @@
-// Grok Bot's blob avatars: a coloured shape with two white slanted "eyes".
-// The shape and colour come from the project (its colour, and a stable hash
-// of its id for the shape), so a project looks the same on every device.
+// Telegram-style avatars (D79): a coloured gradient circle with initials.
+// `AgentAvatar` draws a project (name initials, colour from its id or the
+// owner's pick); people go through `PersonAvatar` (picture first). The
+// palette, derivation and initials rule live in Shared/AvatarPalette.swift
+// so the notification extension draws the identical circle.
 
 import SwiftUI
 
-enum BlobShape: CaseIterable {
-    case circle, squircle, cloud, drop, hex, blob
+/// The circle with initials. Size is the diameter; text ≈ 42 % of it.
+struct InitialsAvatar: View {
+    @Environment(\.theme) private var theme
+    let initials: String
+    let colorIndex: Int
+    var size: CGFloat = 48
 
-    static func pick(for id: String) -> BlobShape {
-        var h: UInt32 = 2166136261
-        for b in id.utf8 { h = (h ^ UInt32(b)) &* 16777619 }
-        let all = BlobShape.allCases
-        return all[Int(h % UInt32(all.count))]
-    }
-}
-
-struct BlobAvatar: View {
-    let color: Color
-    let shape: BlobShape
-    var size: CGFloat = Theme.avatar
-    /// Machine/online dot (bottom-right), nil hides it.
-    var dot: Color? = nil
-    /// Ring around the dot: the surface the avatar sits on.
-    var ring: Color = Color(hex: "#141414")!
-
-    init(project: Project, theme: Theme, size: CGFloat = Theme.avatar, dot: Color? = nil) {
-        self.color = theme.projectColor(project)
-        self.shape = BlobShape.pick(for: project.id)
+    init(name: String?, handle: String?, id: String, override: Int? = nil, size: CGFloat = 48) {
+        self.initials = AvatarPalette.initials(name: name, handle: handle)
+        self.colorIndex = AvatarPalette.clamp(override) ?? AvatarPalette.index(for: id)
         self.size = size
-        self.dot = dot
-        self.ring = theme.bg
     }
 
-    init(color: Color, shape: BlobShape, size: CGFloat = Theme.avatar, dot: Color? = nil) {
-        self.color = color
-        self.shape = shape
+    init(initials: String, colorIndex: Int, size: CGFloat = 48) {
+        self.initials = initials
+        self.colorIndex = colorIndex
         self.size = size
-        self.dot = dot
     }
 
     var body: some View {
+        ZStack {
+            Circle().fill(AvatarPalette.gradient(colorIndex, dark: theme.isDark))
+            Text(initials)
+                .font(.system(size: size * (initials.count > 1 ? 0.38 : 0.42), weight: .semibold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+                // Optical centre: cap-height text sits a hair high in a circle.
+                .offset(y: size * 0.01)
+        }
+        .frame(width: size, height: size)
+        .accessibilityHidden(true)
+    }
+}
+
+extension AvatarPalette {
+    static func gradient(_ index: Int, dark: Bool) -> LinearGradient {
+        let s = stops(index, dark: dark)
+        return LinearGradient(colors: [Color(uiColor: s.top), Color(uiColor: s.bottom)], startPoint: .top, endPoint: .bottom)
+    }
+}
+
+/// An agent: initials of its name on its colour, with the optional machine dot.
+/// `working` / `still` are accepted for call-site compatibility (the art no longer animates).
+struct AgentAvatar: View {
+    let project: Project
+    let theme: Theme
+    var size: CGFloat = Theme.avatar
+    var dot: Color? = nil
+    var working: Bool = false
+    var still: Bool = false
+
+    var body: some View {
         ZStack(alignment: .bottomTrailing) {
-            ZStack {
-                blobPath.fill(color)
-                eyes
-            }
-            .frame(width: size, height: size)
+            InitialsAvatar(name: project.name, handle: mentionSlug(project.name), id: project.id,
+                           override: project.effectiveAvatarColorIndex, size: size)
             if let dot {
+                // Grok's status badge is 12 pt on a 48 pt row avatar; smaller avatars scale.
+                let d = min(size * 0.36, 12)
                 Circle()
                     .fill(dot)
-                    .frame(width: size * 0.36, height: size * 0.36)
-                    .overlay(Circle().strokeBorder(ring, lineWidth: max(1.5, size * 0.06)))
+                    .frame(width: d, height: d)
+                    .overlay(Circle().strokeBorder(theme.bg, lineWidth: 2))
                     .offset(x: size * 0.08, y: size * 0.08)
             }
         }
         .frame(width: size, height: size)
     }
+}
 
-    private var eyes: some View {
-        HStack(spacing: size * 0.14) {
-            Capsule().fill(.white).frame(width: size * 0.12, height: size * 0.34)
-            Capsule().fill(.white).frame(width: size * 0.12, height: size * 0.34)
+/// "Automatic" plus the seven swatches; the chosen one is ringed.
+struct AvatarColorPicker: View {
+    @Environment(\.theme) private var theme
+    /// Preview initials / id for the automatic swatch.
+    let name: String
+    let id: String
+    let current: Int?
+    let onPick: (Int?) -> Void
+
+    private var automaticIndex: Int { AvatarPalette.index(for: id) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 9) {
+                swatch(index: automaticIndex, selected: current == nil, label: "Automatic", automatic: true) { onPick(nil) }
+                ForEach(0..<AvatarPalette.count, id: \.self) { i in
+                    swatch(index: i, selected: current == i, label: AvatarPalette.names[i], automatic: false) { onPick(i) }
+                }
+            }
+            Text(current == nil ? "Automatic: the colour comes from the agent's id, the same on every device." : "\(AvatarPalette.names[current!]), chosen by you.")
+                .font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
         }
-        .rotationEffect(.degrees(-18))
-        .offset(x: size * 0.02, y: -size * 0.02)
     }
 
-    private var blobPath: Path {
-        let r = CGRect(x: 0, y: 0, width: size, height: size)
-        switch shape {
-        case .circle:
-            return Path(ellipseIn: r)
-        case .squircle:
-            return Path(roundedRect: r, cornerRadius: size * 0.3, style: .continuous)
-        case .cloud:
-            var p = Path()
-            p.addEllipse(in: CGRect(x: size * 0.02, y: size * 0.30, width: size * 0.56, height: size * 0.56))
-            p.addEllipse(in: CGRect(x: size * 0.42, y: size * 0.30, width: size * 0.56, height: size * 0.56))
-            p.addEllipse(in: CGRect(x: size * 0.20, y: size * 0.08, width: size * 0.60, height: size * 0.60))
-            p.addRect(CGRect(x: size * 0.25, y: size * 0.45, width: size * 0.5, height: size * 0.38))
-            return p
-        case .drop:
-            var p = Path()
-            p.move(to: CGPoint(x: size * 0.5, y: 0))
-            p.addCurve(to: CGPoint(x: size * 0.98, y: size * 0.62), control1: CGPoint(x: size * 0.7, y: size * 0.2), control2: CGPoint(x: size * 0.98, y: size * 0.38))
-            p.addArc(center: CGPoint(x: size * 0.5, y: size * 0.62), radius: size * 0.48, startAngle: .degrees(0), endAngle: .degrees(180), clockwise: false)
-            p.addCurve(to: CGPoint(x: size * 0.5, y: 0), control1: CGPoint(x: size * 0.02, y: size * 0.38), control2: CGPoint(x: size * 0.3, y: size * 0.2))
-            return p
-        case .hex:
-            var p = Path()
-            let half: CGFloat = size / 2
-            for i in 0..<6 {
-                let angle: Double = Double(i) * Double.pi / 3 - Double.pi / 6
-                let dx: CGFloat = CGFloat(cos(angle)) * half
-                let dy: CGFloat = CGFloat(sin(angle)) * half
-                let pt = CGPoint(x: half + dx, y: half + dy)
-                if i == 0 { p.move(to: pt) } else { p.addLine(to: pt) }
+    private func swatch(index: Int, selected: Bool, label: String, automatic: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            ZStack {
+                Circle().fill(AvatarPalette.gradient(index, dark: theme.isDark))
+                if automatic {
+                    Text("A").font(.system(size: 12, weight: .semibold)).foregroundStyle(.white)
+                }
+                if selected {
+                    Circle().strokeBorder(theme.text, lineWidth: 2).frame(width: 32, height: 32)
+                }
             }
-            p.closeSubpath()
-            return p
-        case .blob:
-            var p = Path()
-            p.addEllipse(in: CGRect(x: 0, y: size * 0.12, width: size * 0.72, height: size * 0.76))
-            p.addEllipse(in: CGRect(x: size * 0.30, y: 0, width: size * 0.70, height: size * 0.66))
-            p.addEllipse(in: CGRect(x: size * 0.36, y: size * 0.40, width: size * 0.62, height: size * 0.60))
-            return p
+            .frame(width: 32, height: 32)
+            .contentShape(Circle())
         }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label + (selected ? ", selected" : ""))
     }
 }
 

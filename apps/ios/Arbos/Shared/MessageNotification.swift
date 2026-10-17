@@ -30,6 +30,8 @@ struct MessagePush {
     let avatarSlug: String?
     let avatarColor: String?
     let avatarUrl: String?
+    /// D79 `sender.avatar_color_index_effective` when the relay sends it.
+    let avatarColorIndex: Int?
     let groupName: String?
 
     init?(userInfo: [AnyHashable: Any]) {
@@ -53,6 +55,8 @@ struct MessagePush {
         avatarSlug = s("avatar", "sender_avatar")
         avatarColor = s("avatar_color", "sender_avatar_color")
         avatarUrl = s("avatar_url", "sender_avatar_url")
+        avatarColorIndex = ((sender["avatar_color_index_effective"] as? NSNumber) ?? (sender["avatar_color_index"] as? NSNumber)
+                            ?? (userInfo["sender_avatar_color_index"] as? NSNumber))?.intValue
         groupName = (userInfo["chat_title"] as? String).flatMap { $0.isEmpty ? nil : $0 }
     }
 
@@ -72,13 +76,9 @@ struct MessagePush {
         return info
     }
 
-    /// The agent's tree (tinted) or the person's GitHub picture.
+    /// The person's picture when there is one, else the initials circle (D79).
     @MainActor
     func senderImage() async -> INImage? {
-        if senderKind == "agent", let slug = avatarSlug,
-           let png = AvatarImage.treePNG(slug: slug, colorName: avatarColor, pixels: 192, projectId: senderId) {
-            return INImage(imageData: png)
-        }
         if let urlString = avatarUrl, let url = URL(string: urlString) {
             var req = URLRequest(url: url)
             req.timeoutInterval = 6
@@ -87,7 +87,7 @@ struct MessagePush {
                 return INImage(imageData: round)
             }
         }
-        if let slug = avatarSlug, let png = AvatarImage.treePNG(slug: slug, colorName: avatarColor, pixels: 192, projectId: senderId) {
+        if let png = AvatarPalette.initialsPNG(name: senderName, handle: senderHandle, id: senderId, override: avatarColorIndex, pixels: 192) {
             return INImage(imageData: png)
         }
         return nil

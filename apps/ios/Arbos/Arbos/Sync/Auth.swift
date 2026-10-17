@@ -33,6 +33,8 @@ struct AuthUser: Codable, Equatable {
     var login: String
     var name: String?
     var avatarUrl: String?
+    /// D79 `avatar_color_index_effective` (nil → derived from `id`).
+    var avatarColorIndexEffective: Int? = nil
 }
 
 /// `GET /me` credits block.
