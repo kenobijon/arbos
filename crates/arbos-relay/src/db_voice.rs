@@ -44,6 +44,11 @@ CREATE TABLE IF NOT EXISTS voice_agent_settings (
 );
 "#;
 
+/// Columns added after the first voice release (ALTER is idempotent through the error).
+pub fn migrate_voice(c: &rusqlite::Connection) {
+    let _ = c.execute("ALTER TABLE voice_agent_settings ADD COLUMN voice TEXT", []);
+}
+
 /// What the worker reports for one agent in one call (cumulative since the call began).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VoiceUsage {
@@ -118,6 +123,8 @@ pub struct VoiceAgentSettings {
     pub project_id: String,
     pub chattiness: String,
     pub wake_name: Option<String>,
+    /// Speech-model voice id (`GET /voices`); `None` = the relay default.
+    pub voice: Option<String>,
 }
 
 pub const CHATTINESS_LEVELS: [&str; 3] = ["quiet", "balanced", "chatty"];
@@ -322,17 +329,37 @@ impl Db {
         self.with(|c| {
             let row = c
                 .query_row(
-                    "SELECT chattiness, wake_name FROM voice_agent_settings WHERE project_id = ?1",
+                    "SELECT chattiness, wake_name, voice FROM voice_agent_settings WHERE project_id = ?1",
                     params![project_id],
-                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+                    |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, Option<String>>(1)?,
+                            r.get::<_, Option<String>>(2)?,
+                        ))
+                    },
                 )
                 .optional()?;
-            let (chattiness, wake_name) = row.unwrap_or_else(|| ("balanced".to_owned(), None));
+            let (chattiness, wake_name, voice) =
+                row.unwrap_or_else(|| ("balanced".to_owned(), None, None));
             Ok(VoiceAgentSettings {
                 project_id: project_id.to_owned(),
                 chattiness,
                 wake_name,
+                voice,
             })
+        })
+    }
+
+    /// The agent's call voice (`None` = default).
+    pub fn set_voice_agent_voice(&self, project_id: &str, voice: Option<&str>) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO voice_agent_settings(project_id, voice) VALUES (?1, ?2)
+                 ON CONFLICT(project_id) DO UPDATE SET voice = excluded.voice",
+                params![project_id, voice],
+            )
+            .map(|_| ())
         })
     }
 

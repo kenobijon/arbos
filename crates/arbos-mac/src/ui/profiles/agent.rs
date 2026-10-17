@@ -58,6 +58,7 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
     let current_color = state.avatar_color(&project);
     let avatar_state = state.avatar_state(&project.id);
     let streaming = state.project_is_streaming(&project.id);
+    let voice_text = crate::ui::voicepicker::current_label(&project, &state.voices);
     let machine_state: MachineState = match &project.machine_info {
         Some(m) if !mine => match m.state.as_str() {
             "awake" => MachineState::Awake,
@@ -287,6 +288,48 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
         .child(info_row("owner", owner_text, &theme))
         .child(info_row("machine", machine_text, &theme))
         .child(info_row("model", model_text, &theme));
+    if mine {
+        // Call voice: opens the picker sheet.
+        info = info.child(
+            div()
+                .id("agent-voice-row")
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .px(px(16.0))
+                .py(px(10.0))
+                .border_b_1()
+                .border_color(theme.border)
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.surface_2))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .child(
+                            div()
+                                .text_size(px(TEXT_TINY))
+                                .text_color(theme.text_muted)
+                                .child("voice"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(TEXT_BODY))
+                                .text_color(theme.text)
+                                .child(voice_text),
+                        ),
+                )
+                .child(icon("chevron-right", 14.0, theme.text_faint))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.voice_picker_open = true;
+                    this.state.update(cx, |s, _| s.fetch_voices());
+                    cx.notify();
+                })),
+        );
+    }
     let description = project.description.clone().filter(|d| !d.trim().is_empty());
     if editing {
         // Inline editor: the owner types, Save → PATCH {description}.

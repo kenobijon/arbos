@@ -43,7 +43,7 @@ livekit = { version = "0.9", default-features = false, features = ["native", "ru
 
 # Voice (F11): capture, playback, WAV in memory.
 cpal = "0.15"
-rodio = { version = "0.20", default-features = false, features = ["wav"] }
+rodio = { version = "0.20", default-features = false, features = ["wav", "mp3", "symphonia-wav", "symphonia-isomp4", "symphonia-aac"] }
 hound = "3.5"
 
 # Sign in with GitHub (ASWebAuthenticationSession), notifications
