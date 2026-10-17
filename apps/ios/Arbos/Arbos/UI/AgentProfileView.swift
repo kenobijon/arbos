@@ -150,6 +150,7 @@ struct AgentEditSheet: View {
                     .font(.system(size: 24, weight: .semibold))
                     .foregroundStyle(theme.text)
                     .multilineTextAlignment(.center)
+                    .autocorrectionDisabled()
                     .focused($nameFocused)
                     .submitLabel(.done)
                     .onSubmit(commitName)
