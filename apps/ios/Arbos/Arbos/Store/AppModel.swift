@@ -1476,6 +1476,31 @@ final class AppModel: ObservableObject {
     }
 
     /// Agent profile: rename / recolour a project (`PATCH /projects/{id}`).
+    // MARK: Call voice (§10.3)
+
+    @Published private(set) var voiceCatalog: VoiceCatalog?
+
+    /// `GET /voices` once per launch (the relay caches it for an hour anyway).
+    func loadVoices() async {
+        guard voiceCatalog == nil, !isFixture else { return }
+        voiceCatalog = try? await api.voices()
+    }
+
+    /// Save on tap: show it at once, PATCH, then read back what the relay kept.
+    func setVoice(_ projectId: Id, _ voice: String?) {
+        if let i = projects.firstIndex(where: { $0.id == projectId }) { projects[i].voice = voice }
+        guard !isFixture else { return }
+        Task {
+            do {
+                let kept = try await api.setProjectVoice(projectId, voice: voice)
+                if let i = projects.firstIndex(where: { $0.id == projectId }) { projects[i].voice = kept }
+            } catch {
+                notice = Notice(text: "Voice: \(error.localizedDescription)")
+                await refreshRegistry()
+            }
+        }
+    }
+
     func updateProject(_ projectId: Id, name: String? = nil, color: String? = nil, icon: String? = nil, avatar: String? = nil, avatarColor: String? = nil, description: String? = nil) {
         if let i = projects.firstIndex(where: { $0.id == projectId }) {
             if let description { projects[i].description = description }
