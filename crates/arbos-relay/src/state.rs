@@ -161,6 +161,8 @@ pub struct AppState {
     pub voice_conns: crate::voice::VoiceConns,
     /// `call:project` → when the voice worker was last dispatched for it (no double dispatch).
     pub voice_dispatched: Arc<Mutex<HashMap<String, i64>>>,
+    /// What the voice worker last reported about itself (`POST /voice/worker/hello`).
+    pub voice_worker: Arc<Mutex<Option<serde_json::Value>>>,
 }
 
 /// The agent's current activity as the box last reported it.
@@ -411,6 +413,7 @@ pub(crate) mod test_support {
             voice: Arc::new(crate::voice::VoiceCfg::default()),
             voice_conns: Arc::new(Mutex::new(HashMap::new())),
             voice_dispatched: Arc::new(Mutex::new(HashMap::new())),
+            voice_worker: Arc::new(Mutex::new(None)),
         }
     }
 }

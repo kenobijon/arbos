@@ -292,6 +292,7 @@ async fn main() -> anyhow::Result<()> {
         voice: Arc::new(voice::cfg_from_env(&data_dir_for_voice)),
         voice_conns: Arc::new(Mutex::new(HashMap::new())),
         voice_dispatched: Arc::new(Mutex::new(HashMap::new())),
+        voice_worker: Arc::new(Mutex::new(None)),
     };
     tracing::info!(auth_mode = auth_mode.as_str(), public_url = %state.cfg.public_url, "sign-in");
     if state.cfg.connectors_mock {
@@ -376,6 +377,7 @@ async fn main() -> anyhow::Result<()> {
             "/admin/users/{id}/voice",
             axum::routing::put(voice::put_user_cap),
         )
+        .route("/voice/worker/hello", post(voice::worker_hello))
         .route("/voices", get(voice::list_voices))
         .route("/voices/{id}/sample.mp3", get(voice::voice_sample))
         .route(
