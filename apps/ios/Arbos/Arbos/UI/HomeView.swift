@@ -18,8 +18,10 @@ struct HomeView: View {
     @State private var offlineHint = false
     /// Own-agent Share sheet from the home long-press menu.
     @State private var shareProject: Project? = nil
-    /// Own-agent delete confirmation from the home long-press menu.
+    /// Own-agent delete confirmation from the home long-press / swipe menu.
     @State private var deleteProject: Project? = nil
+    /// People chat delete confirmation from the home long-press / swipe menu.
+    @State private var deletePeople: PeopleChat? = nil
     /// "Hidden chats N ›" footer → the list of archived agents.
     @State private var showHidden = false
 
@@ -83,17 +85,18 @@ struct HomeView: View {
                             switch row {
                             case .project(let project):
                                 let pinned = model.isHomePinned(projectId: project.id)
+                                // borderless (not .plain): .plain steals the list swipe /
+                                // long-press on recent iOS, so archive and the menu fail.
                                 Button { openSearchHit(project) } label: {
                                     AgentRow(project: project, preview: preview(project), previewIcon: previewIcon(project), time: timeLabel(project),
                                              streaming: model.isStreaming(project: project.id),
                                              unread: model.chats(of: project.id).contains { model.chatHasUnread($0) },
                                              pinned: pinned)
                                 }
-                                .buttonStyle(.plain)
+                                .buttonStyle(.borderless)
                                 .contextMenu {
-                                    // Grok Bot home actions for an agent: Pin, Duplicate
-                                    // (fork as a new top-level agent), Archive, Share,
-                                    // Profile, Delete. Groups/people keep a smaller menu.
+                                    // Long-press (Telegram / Grok): Pin, Fork, Archive,
+                                    // Share, Profile, Delete. People rows keep a smaller menu.
                                     Button {
                                         withAnimation {
                                             if pinned { model.unpinHome(projectId: project.id) }
@@ -104,7 +107,7 @@ struct HomeView: View {
                                     }
                                     if !project.shared {
                                         Button { model.duplicateProject(project) } label: {
-                                            Label("Duplicate", systemImage: "plus.square.on.square")
+                                            Label("Fork", systemImage: "arrow.triangle.branch")
                                         }
                                     }
                                     Button {
@@ -129,7 +132,7 @@ struct HomeView: View {
                                 .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
                                 .listRowSeparator(.hidden)
                                 .listRowBackground(theme.bg)
-                                .swipeActions(edge: .leading) {
+                                .swipeActions(edge: .leading, allowsFullSwipe: true) {
                                     Button {
                                         withAnimation {
                                             if pinned { model.unpinHome(projectId: project.id) }
@@ -140,13 +143,15 @@ struct HomeView: View {
                                     }
                                     .tint(Color(hex: "#1084FE")!)
                                 }
+                                // Trailing = swipe left. Full-swipe archives (Telegram-easy).
+                                // Archive alone so a destructive Delete cannot steal the full swipe.
                                 .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                                     Button {
                                         withAnimation { model.archive(project.id) }
                                     } label: {
                                         Label("Archive", systemImage: "archivebox")
                                     }
-                                    .tint(theme.muted)
+                                    .tint(Color(hex: "#636366")!)
                                 }
                             case .people(let chat):
                                 let pinned = model.isHomePinned(peopleChatId: chat.id)
@@ -156,7 +161,7 @@ struct HomeView: View {
                                               count: model.unreadCount(for: chat), me: model.user?.id,
                                               pinned: pinned)
                                 }
-                                .buttonStyle(.plain)
+                                .buttonStyle(.borderless)
                                 .contextMenu {
                                     Button {
                                         withAnimation {
@@ -171,11 +176,14 @@ struct HomeView: View {
                                     } else {
                                         Button { model.showProfile(.group(chatId: chat.id, projectId: nil)) } label: { Label("Group info", systemImage: "person.2") }
                                     }
+                                    Button(role: .destructive) { deletePeople = chat } label: {
+                                        Label("Delete", systemImage: "trash")
+                                    }
                                 }
                                 .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
                                 .listRowSeparator(.hidden)
                                 .listRowBackground(theme.bg)
-                                .swipeActions(edge: .leading) {
+                                .swipeActions(edge: .leading, allowsFullSwipe: true) {
                                     Button {
                                         withAnimation {
                                             if pinned { model.unpinHome(peopleChatId: chat.id) }
@@ -185,6 +193,13 @@ struct HomeView: View {
                                         Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
                                     }
                                     .tint(Color(hex: "#1084FE")!)
+                                }
+                                // People chats have no archive lane; require a tap on Delete
+                                // (no full-swipe) so a casual left swipe cannot wipe a DM.
+                                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                    Button(role: .destructive) { deletePeople = chat } label: {
+                                        Label("Delete", systemImage: "trash")
+                                    }
                                 }
                             }
                         }
@@ -262,6 +277,22 @@ struct HomeView: View {
             } message: {
                 Text("Removes this agent and its chats from your list. Hide it with Archive if you may need it later.")
             }
+            .confirmationDialog(
+                "Delete \(deletePeopleTitle)?",
+                isPresented: Binding(
+                    get: { deletePeople != nil },
+                    set: { if !$0 { deletePeople = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("Delete", role: .destructive) {
+                    if let c = deletePeople { model.deletePeopleChat(c.id) }
+                    deletePeople = nil
+                }
+                Button("Cancel", role: .cancel) { deletePeople = nil }
+            } message: {
+                Text("Removes this chat from your list.")
+            }
         }
         .task {
             if DebugHooks.demo, model.isFixture {
@@ -310,6 +341,13 @@ struct HomeView: View {
     }
 
     // MARK: Top bar
+
+    /// Title used in the people-chat delete confirm (DM name or group title).
+    private var deletePeopleTitle: String {
+        guard let c = deletePeople else { return "this chat" }
+        if c.isGroup { return c.title.isEmpty ? "this group" : c.title }
+        return c.counterpart(me: model.user?.id)?.displayName ?? c.title
+    }
 
     /// Grok's "Hidden chats  N  ›" line under the list (measured: 15 pt muted,
     /// the count a shade dimmer, a small chevron, 27 pt above the bottom).
@@ -696,7 +734,7 @@ struct HiddenChatsView: View {
                         AgentRow(project: project, preview: HiddenChatsView.preview(project, in: model), time: "",
                                  streaming: model.isStreaming(project: project.id), unread: false)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.borderless)
                     .contextMenu {
                         Button { withAnimation { model.unarchive(project.id) } } label: {
                             Label("Unhide", systemImage: "eye")
