@@ -103,6 +103,17 @@ const ICONS: &[(&str, &str)] = &[
     icon!("window", "<rect x=\"3\" y=\"4\" width=\"18\" height=\"16\" rx=\"2\"/><path d=\"M3 9h18\"/>"),
     icon!("minus", "<path d=\"M5 12h14\"/>"),
     icon!(
+        "envelope",
+        "<rect x=\"3\" y=\"5\" width=\"18\" height=\"14\" rx=\"2.5\"/><path d=\"M4 8l8 5.5L20 8\"/>"
+    ),
+    icon!("hash", "<path d=\"M9 4L7 20M17 4l-2 16M4 9h17M3 15h17\" stroke-width=\"2.2\"/>"),
+    icon!("code", "<path d=\"M8 7l-5 5 5 5M16 7l5 5-5 5M13.5 4l-3 16\" stroke-width=\"2.2\"/>"),
+    icon!(
+        "antenna",
+        "<circle cx=\"12\" cy=\"12\" r=\"2\" fill=\"#000\" stroke=\"none\"/><path d=\"M12 14v7M8.5 8.5a5 5 0 0 0 0 7M15.5 8.5a5 5 0 0 1 0 7M5.5 5.5a9 9 0 0 0 0 13M18.5 5.5a9 9 0 0 1 0 13\"/>"
+    ),
+    icon!("puzzle", "<path d=\"M10 3a2 2 0 0 1 2 2v1h3a2 2 0 0 1 2 2v3h1a2 2 0 1 1 0 4h-1v3a2 2 0 0 1-2 2h-3v-1a2 2 0 1 0-4 0v1H5a2 2 0 0 1-2-2v-3h1a2 2 0 1 0 0-4H3V8a2 2 0 0 1 2-2h3V5a2 2 0 0 1 2-2z\"/>"),
+    icon!(
         "face-smile",
         "<circle cx=\"12\" cy=\"12\" r=\"9\"/><path d=\"M8.3 14.3c.9 1.3 2.2 2 3.7 2s2.8-.7 3.7-2\"/><circle cx=\"9.2\" cy=\"9.8\" r=\"1.1\" fill=\"#000\" stroke=\"none\"/><circle cx=\"14.8\" cy=\"9.8\" r=\"1.1\" fill=\"#000\" stroke=\"none\"/>"
     ),

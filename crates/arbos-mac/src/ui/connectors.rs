@@ -13,6 +13,8 @@ use crate::app::AppState;
 use crate::model::{ConnectorProvider, ConnectorStatus, ConnectorsView};
 use crate::ui::composer::ComposerInput;
 use crate::ui::frost::{frosted, MENU_BLUR};
+use crate::ui::glass;
+use crate::ui::icons::icon;
 use crate::ui::theme::{Theme, PANEL_RADIUS, RAIL_WIDTH};
 
 pub enum ConnectorsEvent {
@@ -25,6 +27,10 @@ pub struct ConnectorsPanel {
     token_input: Entity<ComposerInput>,
     /// Provider the token field is for (shown only while `Some`).
     token_for: Option<String>,
+    /// Provider whose Connect menu (sign in / paste a token) is open.
+    menu_for: Option<String>,
+    /// Connected pill clicked: (connector id, provider) awaiting the Disconnect confirmation.
+    disconnecting: Option<(String, String)>,
     open: bool,
     focus_handle: FocusHandle,
 }
@@ -49,6 +55,8 @@ impl ConnectorsPanel {
             state,
             token_input,
             token_for: None,
+            menu_for: None,
+            disconnecting: None,
             open: false,
             focus_handle: cx.focus_handle(),
         }
@@ -67,6 +75,8 @@ impl ConnectorsPanel {
     pub fn hide(&mut self, cx: &mut Context<Self>) {
         self.open = false;
         self.token_for = None;
+        self.menu_for = None;
+        self.disconnecting = None;
         cx.notify();
     }
 
@@ -141,6 +151,11 @@ impl ConnectorsPanel {
             .child(label)
     }
 
+    /// Grok's Plugins row (web-03), the iPhone's it.19 treatment: icon tile, title
+    /// over a one-line status, one pill on the right — "Connect" (grey) or
+    /// "✓ Connected" (green tint). OAuth + token providers open a two-item menu
+    /// under the row, token-only ones open the paste field, and a connected
+    /// pill asks before disconnecting. The token flow itself is unchanged.
     fn render_row(
         &self,
         view: &ConnectorsView,
@@ -150,131 +165,242 @@ impl ConnectorsPanel {
     ) -> Div {
         let cn = view.connector_for(&p.provider);
         let status = cn.map(|c| c.status);
-        let (status_text, fg, bg) = match status {
-            Some(s @ ConnectorStatus::Connected) => (s.label(), theme.accent, theme.accent_soft),
-            Some(s @ ConnectorStatus::NeedsAuth) => (s.label(), theme.warn, theme.surface_2),
-            Some(s @ ConnectorStatus::Error) => (s.label(), theme.danger, theme.danger_soft),
-            Some(s @ ConnectorStatus::Other) => (s.label(), theme.text_muted, theme.surface_2),
-            None => ("Not connected", theme.text_faint, theme.surface_2),
-        };
+        let connected = matches!(status, Some(ConnectorStatus::Connected));
         let approvals = p
             .actions
             .iter()
             .filter(|a| a.kind == "write" || a.kind == "send")
             .count();
-        let sub = match cn {
-            Some(c) if !c.label.is_empty() => c.label.clone(),
-            _ if !p.has_oauth() => "API key: use Token…".to_owned(),
+        let sub = match (cn, status) {
+            (Some(c), Some(ConnectorStatus::Connected)) if !c.label.is_empty() => c.label.clone(),
+            (_, Some(s @ ConnectorStatus::Connected)) => s.label().to_string(),
+            (_, Some(s @ (ConnectorStatus::NeedsAuth | ConnectorStatus::Error))) => {
+                s.label().to_string()
+            }
+            _ if !p.has_oauth() => "Connects with an API key".to_owned(),
             _ if !p.oauth_configured && !view.mock => {
-                "OAuth client not configured on the relay".to_owned()
+                if p.accepts_token() {
+                    "Sign-in not set up — paste a token".to_owned()
+                } else {
+                    "Sign-in not set up on the relay".to_owned()
+                }
             }
             _ => format!("{} actions · {approvals} need approval", p.actions.len()),
         };
+        let sub_color = match status {
+            Some(ConnectorStatus::NeedsAuth) => theme.warn,
+            Some(ConnectorStatus::Error) => theme.danger,
+            _ => theme.text_muted,
+        };
         let provider = p.provider.clone();
-        let connected = matches!(status, Some(ConnectorStatus::Connected));
         let token_open = self.token_for.as_deref() == Some(p.provider.as_str());
+        let menu_open = self.menu_for.as_deref() == Some(p.provider.as_str());
+        let confirm_open = self
+            .disconnecting
+            .as_ref()
+            .is_some_and(|(_, prov)| prov == &p.provider);
 
-        let mut actions = div().flex().items_center().gap(px(5.0));
-        if p.has_oauth() && !connected {
+        let pill: gpui::Stateful<Div> = if token_open || menu_open || confirm_open {
+            Self::pill(
+                format!("cancel-{}", p.provider),
+                "Cancel",
+                false,
+                false,
+                theme,
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.menu_for = None;
+                this.token_for = None;
+                this.disconnecting = None;
+                cx.notify();
+            }))
+        } else if connected {
+            let id = cn.map(|c| c.id.clone()).unwrap_or_default();
             let prov = provider.clone();
-            actions = actions.child(
-                Self::button(format!("connect-{}", p.provider), "Connect", true, theme).on_click(
-                    cx.listener(move |this, _, _, cx| {
-                        this.token_for = None;
-                        let prov = prov.clone();
-                        this.state
-                            .update(cx, |s, cx| s.connect_connector(prov, None, cx));
-                    }),
-                ),
-            );
-        }
-        if p.accepts_token() {
+            Self::pill(
+                format!("connected-{}", p.provider),
+                "Connected",
+                true,
+                true,
+                theme,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.menu_for = None;
+                this.token_for = None;
+                this.disconnecting = Some((id.clone(), prov.clone()));
+                cx.notify();
+            }))
+        } else if p.has_oauth() && p.accepts_token() {
             let prov = provider.clone();
-            actions = actions.child(
-                Self::button(
-                    format!("token-{}", p.provider),
-                    if token_open { "Cancel" } else { "Token…" },
-                    !p.has_oauth() && !connected,
-                    theme,
-                )
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    if this.token_for.as_deref() == Some(prov.as_str()) {
-                        this.token_for = None;
-                    } else {
-                        this.token_for = Some(prov.clone());
-                        let handle = this.token_input.read(cx).focus_handle(cx);
-                        window.focus(&handle, cx);
-                    }
-                    cx.notify();
-                })),
-            );
-        }
-        if let Some(c) = cn {
-            let id = c.id.clone();
-            actions = actions.child(
-                Self::button(
-                    format!("disconnect-{}", p.provider),
-                    "Disconnect",
-                    false,
-                    theme,
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let id = id.clone();
-                    this.state
-                        .update(cx, |s, cx| s.disconnect_connector(id, cx));
-                })),
-            );
-        }
+            Self::pill(
+                format!("connect-{}", p.provider),
+                "Connect",
+                false,
+                false,
+                theme,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.menu_for = Some(prov.clone());
+                cx.notify();
+            }))
+        } else if p.has_oauth() {
+            let prov = provider.clone();
+            Self::pill(
+                format!("connect-{}", p.provider),
+                "Connect",
+                false,
+                false,
+                theme,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.start_oauth(prov.clone(), cx);
+            }))
+        } else {
+            let prov = provider.clone();
+            Self::pill(
+                format!("connect-{}", p.provider),
+                "Connect",
+                false,
+                false,
+                theme,
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.open_token(prov.clone(), window, cx);
+            }))
+        };
 
         let mut row = div()
             .flex()
             .flex_col()
-            .gap(px(4.0))
-            .py(px(7.0))
+            .gap(px(8.0))
+            .py(px(9.0))
             .border_b_1()
             .border_color(theme.border)
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(8.0))
+                    .gap(px(12.0))
+                    .child(glass::icon_tile(Self::glyph(&p.provider), theme))
                     .child(
                         div()
                             .flex_1()
-                            .text_size(px(12.5))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.text)
-                            .child(p.label.clone()),
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .child(
+                                div()
+                                    .text_size(px(12.5))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.text)
+                                    .child(p.label.clone()),
+                            )
+                            .child(div().text_size(px(11.0)).text_color(sub_color).child(sub)),
                     )
-                    .child(Self::chip(theme, status_text, fg, bg)),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_size(px(11.0))
-                            .text_color(theme.text_muted)
-                            .child(sub),
-                    )
-                    .child(actions),
+                    .child(pill),
             );
         if let Some(err) = cn.and_then(|c| c.last_error.clone()) {
             if !connected {
                 row = row.child(
                     div()
+                        .pl(px(42.0))
                         .text_size(px(10.5))
                         .text_color(theme.danger)
                         .child(err),
                 );
             }
         }
+        if menu_open {
+            let (prov_a, prov_b) = (provider.clone(), provider.clone());
+            row = row.child(
+                div()
+                    .ml(px(42.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.0))
+                    .p(px(4.0))
+                    .rounded(px(10.0))
+                    .bg(theme.surface_2)
+                    .border_1()
+                    .border_color(theme.border)
+                    .child(
+                        glass::menu_row(
+                            format!("oauth-{}", p.provider),
+                            "globe",
+                            format!("Sign in with {}", Self::short_name(p)),
+                            false,
+                            theme,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.start_oauth(prov_a.clone(), cx);
+                        })),
+                    )
+                    .child(
+                        glass::menu_row(
+                            format!("paste-{}", p.provider),
+                            "doc",
+                            "Paste a token…",
+                            false,
+                            theme,
+                        )
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.open_token(prov_b.clone(), window, cx);
+                            },
+                        )),
+                    ),
+            );
+        }
+        if confirm_open {
+            let keep = Self::button(format!("keep-{}", p.provider), "Keep", false, theme).on_click(
+                cx.listener(|this, _, _, cx| {
+                    this.disconnecting = None;
+                    cx.notify();
+                }),
+            );
+            let go = Self::button(
+                format!("disconnect-{}", p.provider),
+                "Disconnect",
+                true,
+                theme,
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                if let Some((id, _)) = this.disconnecting.take() {
+                    this.state
+                        .update(cx, |s, cx| s.disconnect_connector(id, cx));
+                }
+                cx.notify();
+            }));
+            row = row.child(
+                div()
+                    .ml(px(42.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(theme.text_muted)
+                            .child(format!(
+                            "Disconnect {}? Your agents stop using it until you connect it again.",
+                            Self::short_name(p)
+                        )),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap(px(6.0))
+                            .child(keep)
+                            .child(go),
+                    ),
+            );
+        }
         if token_open {
             row = row.child(
                 div()
+                    .ml(px(42.0))
                     .flex()
                     .items_center()
                     .gap(px(6.0))
@@ -296,6 +422,82 @@ impl ConnectorsPanel {
             );
         }
         row
+    }
+
+    /// The Grok "Add" / "✓ Added" pill: 26 pt tall, 11.5 pt semibold.
+    fn pill(
+        id: impl Into<gpui::ElementId>,
+        label: &'static str,
+        check: bool,
+        on: bool,
+        theme: &Theme,
+    ) -> gpui::Stateful<Div> {
+        let fg = if on { theme.online } else { theme.text };
+        div()
+            .id(id)
+            .flex_shrink_0()
+            .h(px(26.0))
+            .px(px(11.0))
+            .flex()
+            .items_center()
+            .gap(px(5.0))
+            .rounded_full()
+            .cursor_pointer()
+            .text_size(px(11.5))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(fg)
+            .bg(if on {
+                Theme::with_alpha(theme.online, 0.14)
+            } else {
+                theme.field
+            })
+            .border_1()
+            .border_color(if on {
+                Theme::with_alpha(theme.online, 0.35)
+            } else {
+                theme.field_border
+            })
+            .hover(|s| s.bg(theme.surface_2))
+            .when(check, |el| el.child(icon("check", 11.0, fg)))
+            .child(label)
+    }
+
+    fn glyph(provider: &str) -> &'static str {
+        match provider {
+            "google" => "envelope",
+            "slack" => "hash",
+            "github" => "code",
+            "harness_comms" => "antenna",
+            _ => "puzzle",
+        }
+    }
+
+    fn short_name(p: &ConnectorProvider) -> String {
+        match p.provider.as_str() {
+            "google" => "Google".into(),
+            "slack" => "Slack".into(),
+            "github" => "GitHub".into(),
+            _ => p.label.clone(),
+        }
+    }
+
+    fn start_oauth(&mut self, provider: String, cx: &mut Context<Self>) {
+        self.menu_for = None;
+        self.token_for = None;
+        self.disconnecting = None;
+        self.state
+            .update(cx, |s, cx| s.connect_connector(provider, None, cx));
+        cx.notify();
+    }
+
+    fn open_token(&mut self, provider: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu_for = None;
+        self.disconnecting = None;
+        self.token_for = Some(provider);
+        self.token_input.update(cx, |input, cx| input.clear(cx));
+        let handle = self.token_input.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
     }
 }
 
