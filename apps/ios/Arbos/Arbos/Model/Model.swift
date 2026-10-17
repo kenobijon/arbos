@@ -184,6 +184,8 @@ struct Project: Identifiable, Equatable, Codable {
     var ownerOnline: Bool = false
     /// The relay's `primary_chat` when it sends one; else the app picks (see AppModel.primaryChat).
     var primaryChatId: Id? = nil
+    /// §10.3 call voice id (`voice` on the relay); nil = the relay's default voice.
+    var voice: String? = nil
     /// §9 machine summary: awake|waking|asleep|error, class, snapshot, always_on.
     var machineState: String? = nil
     var machineClass: String? = nil
@@ -217,6 +219,20 @@ struct Chat: Identifiable, Equatable, Codable {
     var isGroup: Bool { kind == "group" }
     /// The agent's "projects" system chat (§9b: shown even with multi-chat off).
     var isSystem: Bool { kind == "projects" }
+}
+
+/// §10.3 one entry of `GET /voices`.
+struct Voice: Identifiable, Equatable {
+    var id: String
+    var name: String
+    var description: String?
+    var seconds: Double?
+    var sampleURL: URL?
+}
+
+struct VoiceCatalog: Equatable {
+    var defaultId: String
+    var voices: [Voice]
 }
 
 enum Role: String, Codable {
