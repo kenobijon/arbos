@@ -62,7 +62,11 @@ final class AppModel: ObservableObject {
     @Published var appearanceSetting: String = UserDefaults.standard.string(forKey: "appearance") ?? Appearance.system.rawValue {
         didSet { UserDefaults.standard.set(appearanceSetting, forKey: "appearance") }
     }
-    @Published var surfaceSetting: String = UserDefaults.standard.string(forKey: "surface") ?? Surface.matte.rawValue {
+    /// Glass is the iPhone default (D10 amendment, 2026-10-17: Grok's header
+    /// blurs the transcript under it). The key is only written when the user
+    /// picks a surface in Settings, so an absent key means "never chose" → Glass,
+    /// and an explicit "matte" stays Matte.
+    @Published var surfaceSetting: String = UserDefaults.standard.string(forKey: "surface") ?? Surface.glass.rawValue {
         didSet { UserDefaults.standard.set(surfaceSetting, forKey: "surface") }
     }
 
@@ -283,7 +287,7 @@ final class AppModel: ObservableObject {
     private static let flushDelayNs: UInt64 = 1_500_000_000
 
     var appearance: Appearance { Appearance(rawValue: appearanceSetting) ?? .system }
-    var surface: Surface { Surface(rawValue: surfaceSetting) ?? .matte }
+    var surface: Surface { Surface(rawValue: surfaceSetting) ?? .glass }
     var isPaired: Bool { credentials != nil }
     var relayUrl: String { api.endpoint.httpUrl }
 
