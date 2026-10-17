@@ -548,11 +548,18 @@ impl Agent {
     /// Router prompt (byte-stable, first) + project instructions + T0/T1 (design §6.9 layout).
     pub fn write_system_prompt(&self) -> Result<()> {
         let mut s = String::from(include_str!("../prompts/router.md"));
+        let talking = self
+            .settings
+            .models
+            .try_read()
+            .map(|m| m.talking.id.clone())
+            .unwrap_or_else(|_| self.cfg.talking_model.clone());
         // One box, many workspaces (D70): the project's files live in its own folder, not /work.
         s.push_str(&format!(
-            "\n\n## This project\n\nProject \"{}\". Its folder is `{}`: every file you create or read for this project goes there (relative paths resolve there; do not use `/work` itself, other folders under `/work` belong to other projects).\n",
+            "\n\n## This project\n\nProject \"{}\". Its folder is `{}`: every file you create or read for this project goes there (relative paths resolve there; do not use `/work` itself, other folders under `/work` belong to other projects). You run on model `{}`.\n",
             self.cfg.project_name,
-            self.cfg.work_dir.display()
+            self.cfg.work_dir.display(),
+            talking
         ));
         s.push('\n');
         s.push_str(&crate::media::prompt_section(&self.cfg));
