@@ -1431,7 +1431,7 @@ class Loop:
                            "reply here, or send the next screenshot feedback. An operator flips it with `arbos-feedback confirm <id>`."
                            if unverified else ""))
         self.gh.ensure_label("shipped-unverified", "C2E0C6", "Built and in TestFlight/edge; needs device-level confirmation (audio/call/haptic/notification)")
-        self.gh.set_labels(st["issue"], ["shipped-unverified"] if unverified else ["shipped"], ["needs-human"])
+        self.gh.set_labels(st["issue"], ["shipped-unverified"] if unverified else ["shipped"], ["needs-human", "landed-not-shipped"])
 
     def fail(self, fid: str, st: dict, error: str, extra: str = "") -> None:
         st.update(status="failed", error=error, failed_at=iso())
