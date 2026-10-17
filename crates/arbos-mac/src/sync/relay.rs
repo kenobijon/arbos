@@ -1541,6 +1541,7 @@ fn write_greeting(shared: &Arc<Shared>, chat_id: &str, project_id: &str, agent_n
         call_id: None,
         activity: None,
         pending: false,
+        reactions: Default::default(),
         parts: vec![Part::Text {
             id: new_id(),
             text: format!(
