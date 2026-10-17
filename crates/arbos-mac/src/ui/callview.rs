@@ -238,8 +238,12 @@ pub fn screen(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> Di
             &theme,
         ));
     }
+    let seeing_agent = active
+        .agent_seeing
+        .then(|| agent_name(shell, active, cx))
+        .flatten();
     if n == 0 {
-        grid = grid.child(tile(
+        let me_big = tile(
             ElementId::Name("tile-me".into()),
             &me_tile,
             my_image.clone(),
@@ -247,7 +251,17 @@ pub fn screen(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> Di
             "You".into(),
             true,
             &theme,
-        ));
+        );
+        grid = grid.child(match seeing_agent.as_deref() {
+            Some(agent) => me_big.child(
+                div()
+                    .absolute()
+                    .top(px(12.0))
+                    .right(px(12.0))
+                    .child(seeing_badge(agent, &theme)),
+            ),
+            None => me_big,
+        });
     }
     let waiting = n == 0 && active.status == CallStatus::Connected;
 
@@ -416,15 +430,27 @@ pub fn screen(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> Di
                 .bottom(px(140.0))
                 .w(px(180.0))
                 .h(px(135.0))
-                .child(tile(
-                    ElementId::Name("tile-me-small".into()),
-                    &me_tile,
-                    my_image,
-                    active.local_video.clone(),
-                    "You".into(),
-                    false,
-                    &theme,
-                )),
+                .child({
+                    let me_small = tile(
+                        ElementId::Name("tile-me-small".into()),
+                        &me_tile,
+                        my_image,
+                        active.local_video.clone(),
+                        "You".into(),
+                        false,
+                        &theme,
+                    );
+                    match seeing_agent.as_deref() {
+                        Some(agent) => me_small.child(
+                            div()
+                                .absolute()
+                                .top(px(8.0))
+                                .right(px(8.0))
+                                .child(seeing_badge(agent, &theme)),
+                        ),
+                        None => me_small,
+                    }
+                }),
         );
     }
     column.child(div().h(px(24.0))).child(controls)
@@ -669,6 +695,9 @@ pub fn pip(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> State
                 .child(icon("camera", 22.0, Theme::with_alpha(gpui::white(), 0.6))),
         );
     }
+    let seeing = (remote.is_none() && active.agent_seeing)
+        .then(|| agent_name(shell, active, cx))
+        .flatten();
     tile.child(
         div()
             .absolute()
@@ -682,6 +711,42 @@ pub fn pip(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> State
             .text_color(gpui::white())
             .child(label),
     )
+    .when_some(seeing, |el, agent| {
+        el.child(
+            div()
+                .absolute()
+                .top(px(8.0))
+                .right(px(8.0))
+                .child(seeing_badge(&agent, &theme)),
+        )
+    })
+}
+
+/// "<Agent> can see" — the voice worker is sampling my camera (voice API §11).
+fn seeing_badge(agent: &str, theme: &Theme) -> Div {
+    let _ = theme;
+    div()
+        .flex()
+        .items_center()
+        .gap(px(5.0))
+        .px(px(8.0))
+        .py(px(3.0))
+        .rounded_full()
+        .bg(Theme::with_alpha(gpui::black(), 0.55))
+        .text_size(px(TEXT_TINY))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(gpui::white())
+        .child(icon("eye", 12.0, gpui::white()))
+        .child(format!("{agent} can see"))
+}
+
+/// The agent's name for the vision badge: the space the call is in.
+fn agent_name(shell: &Shell, active: &ActiveCall, cx: &Context<Shell>) -> Option<String> {
+    let state = shell.state.read(cx);
+    state
+        .project(active.call.space_id())
+        .filter(|p| !p.is_people())
+        .map(|p| p.name.clone())
 }
 
 /// PiP tile size.

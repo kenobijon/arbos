@@ -872,6 +872,28 @@ pub fn menu(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
                         cx.notify();
                     })),
                 )
+                .child({
+                    // Voice API §11: may the agent look through my camera on calls.
+                    let pid = space.id.clone();
+                    let on = space.vision_enabled;
+                    glass::menu_row(
+                        "menu-vision",
+                        "eye",
+                        if on {
+                            "Camera vision · on"
+                        } else {
+                            "Camera vision · off"
+                        },
+                        false,
+                        &theme,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.menu_open = false;
+                        let p = pid.clone();
+                        this.state
+                            .update(cx, |s, cx| s.set_vision_enabled(p, !on, cx));
+                    }))
+                })
                 .child(glass::menu_divider(&theme))
                 .child(
                     glass::menu_row(

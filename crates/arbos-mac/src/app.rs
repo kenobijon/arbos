@@ -411,6 +411,8 @@ pub struct ActiveCall {
     /// missed call" / "Ringing Robert's iPhone" while nobody has picked up
     /// (`None` = they are live).
     pub reachable: Option<String>,
+    /// Voice API §11: the agent is sampling my camera right now ("<Agent> can see").
+    pub agent_seeing: bool,
 }
 
 impl ActiveCall {
@@ -2198,6 +2200,23 @@ impl AppState {
         cx.notify();
     }
 
+    /// Voice API §11: may the agent look through my camera on calls. Optimistic, then PATCH.
+    pub fn set_vision_enabled(&mut self, project_id: Id, enabled: bool, cx: &mut Context<Self>) {
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
+            p.vision_enabled = enabled;
+        }
+        if !enabled {
+            if let Some(c) = self.my_call.as_mut() {
+                c.agent_seeing = false;
+            }
+        }
+        self.command(ClientCommand::SetVisionEnabled {
+            project_id,
+            enabled,
+        });
+        cx.notify();
+    }
+
     /// Ask the relay for the voice list (the picker opening).
     pub fn fetch_voices(&mut self) {
         self.command(ClientCommand::FetchVoices);
@@ -3609,6 +3628,7 @@ impl AppState {
             notice: None,
             outgoing: true,
             reachable: None,
+            agent_seeing: false,
         });
         self.command(ClientCommand::StartCall { chat_id, kind });
         self.sync_tones();
@@ -3638,6 +3658,7 @@ impl AppState {
             notice: None,
             outgoing: false,
             reachable: None,
+            agent_seeing: false,
         });
         self.incoming_call = None;
         self.command(ClientCommand::JoinCall { call_id });
@@ -3750,6 +3771,7 @@ impl AppState {
             c.camera = !c.camera;
             if !c.camera {
                 c.local_video = None;
+                c.agent_seeing = false;
             }
             c.notice = None;
             let _ = self.call_commands.send(CallCmd::SetCamera(c.camera));
@@ -3823,6 +3845,7 @@ impl AppState {
             notice: None,
             outgoing: false,
             reachable: None,
+            agent_seeing: false,
         });
         active.call = call.clone();
         active.status = CallStatus::Connecting;
@@ -4023,6 +4046,8 @@ impl AppState {
 
     /// Events from the LiveKit engine.
     fn apply_call_event(&mut self, event: CallEvent, cx: &mut Context<Self>) {
+        let my_identity = format!("u_{}", self.me_id());
+        let my_handle = self.me_handle();
         let Some(active) = self.my_call.as_mut() else {
             return;
         };
@@ -4103,6 +4128,13 @@ impl AppState {
             CallEvent::Speaking(ids) => {
                 for p in active.participants.iter_mut() {
                     p.speaking = ids.contains(&p.identity);
+                }
+            }
+            CallEvent::AgentVision { identity, seeing } => {
+                // Only about me, and only while my camera is on.
+                let mine = identity == my_identity || identity == "local" || identity == my_handle;
+                if mine {
+                    active.agent_seeing = seeing && active.camera;
                 }
             }
             CallEvent::RemoteMuted { identity, muted } => {
