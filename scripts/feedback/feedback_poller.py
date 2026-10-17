@@ -1596,15 +1596,20 @@ class Loop:
         return any(DEVICE_ONLY_FILES.search(f or "") for f in st.get("files") or [])
 
     @staticmethod
-    def deploy_kind(files: list[str]) -> str | None:
-        """Code that no app build carries: the voice pod (`voice/**`) or the sandbox image (agentd)."""
+    def deploy_kinds(files: list[str]) -> list[str]:
+        """Every service outside the app builds that must be redeployed before this fix is live:
+        the voice pod (`voice/**`), the sandbox image (agentd), the relay."""
+        kinds = []
         if any(f.startswith("voice/") for f in files):
-            return "voice"
+            kinds.append("voice")
         if any(f.startswith("crates/arbos-agentd/") for f in files):
-            return "agentd"
+            kinds.append("agentd")
         if any(f.startswith("crates/arbos-relay/") for f in files):
-            return "relay"
-        return None
+            kinds.append("relay")
+        return kinds
+
+    DEPLOY_WHERE = {"voice": "the voice pod (voice-calls worker deploys it)", "agentd": "the sandbox image (next image roll)",
+                    "relay": "the relay (next relay deploy)"}
 
     def ship(self, fid: str, st: dict, partial: bool = False) -> None:
         info = self.store.submission(fid)
@@ -1622,15 +1627,15 @@ class Loop:
                          elapsed_min=elapsed, commit=st.get("commit"), issue=st.get("issue_url"))
         unverified = self.needs_device_evidence(info, st)
         st["device_evidence"] = "pending" if unverified else "not needed"
-        kind = self.deploy_kind(st.get("files") or [])
-        if kind:
+        kinds = self.deploy_kinds(st.get("files") or [])
+        if kinds:
             # The build artifacts carry the commit, but the code runs on the voice pod / in the sandbox
-            # image: landed, not shipped, until watch_deploys sees a deployed sha that contains it.
-            st["pending_deploy"] = kind
+            # image / the relay: landed, not shipped, until watch_deploys sees every one of those
+            # services on a sha that contains it.
+            st["pending_deploy"] = kinds
             self.store.save_state(fid, st)
-            self.store.event(fid, "landed_not_shipped", deploy=kind, commit=st.get("commit"), issue=st.get("issue_url"))
-            where = {"voice": "the voice pod (voice-calls worker deploys it)", "agentd": "the sandbox image (next image roll)",
-                     "relay": "the relay (next relay deploy)"}[kind]
+            self.store.event(fid, "landed_not_shipped", deploy=kinds, commit=st.get("commit"), issue=st.get("issue_url"))
+            where = " and ".join(self.DEPLOY_WHERE[k] for k in kinds)
             self.gh.ensure_label("landed-not-shipped", "FBCA04", "Fix is on main but not yet in a TestFlight build / release / fleet image")
             self.gh.comment(st["issue"], f"Landed, not shipped: the fix is on `main` ({', '.join(parts) or 'CI green'}) but this code runs on "
                             f"{where}; it is live for users only after that deploy. The loop flips this to shipped when the relay reports "
@@ -1706,26 +1711,36 @@ class Loop:
             relay_sha = Path(RELAY_DEPLOYED_SHA_FILE).read_text().strip()
         targets = {"voice": [voice_sha] if voice_sha else [], "agentd": agentd_shas, "relay": [relay_sha] if relay_sha else []}
         for fid, st in pending:
-            shas = targets.get(st["pending_deploy"]) or []
-            if not shas or not st.get("commit"):
+            kinds = st["pending_deploy"] if isinstance(st["pending_deploy"], list) else [st["pending_deploy"]]
+            if not st.get("commit"):
                 continue
-            contained = []
-            for sha in shas:
-                try:
-                    cmp = self.gh.repo_api("GET", f"/compare/{st['commit']}...{sha}")
-                except HttpError:
-                    contained = []
-                    break
-                contained.append(cmp.get("status") in ("ahead", "identical"))
-            if contained and all(contained):
-                kind = st["pending_deploy"]
-                where = ("the voice pod" if kind == "voice" else "the relay" if kind == "relay"
-                         else f"all {agentd.get('awake') or len(shas)} awake boxes (image {(agentd.get('boxes') or [{}])[0].get('image', '?')})")
-                self.mark_deployed(fid, st, f"{where} now run {shas[0][:8]}" + ("" if len(shas) == 1 else f" and {len(shas) - 1} other sha(s)")
-                                   + f", which contain {st['commit'][:8]}")
+            done_notes, still = [], []
+            for kind in kinds:
+                shas = targets.get(kind) or []
+                contained = []
+                for sha in shas:
+                    try:
+                        cmp = self.gh.repo_api("GET", f"/compare/{st['commit']}...{sha}")
+                    except HttpError:
+                        contained = []
+                        break
+                    contained.append(cmp.get("status") in ("ahead", "identical"))
+                if shas and contained and all(contained):
+                    where = ("the voice pod" if kind == "voice" else "the relay" if kind == "relay"
+                             else f"all {agentd.get('awake') or len(shas)} awake boxes (image {(agentd.get('boxes') or [{}])[0].get('image', '?')})")
+                    done_notes.append(f"{where} runs {shas[0][:8]}" + ("" if len(shas) == 1 else f" (+{len(shas) - 1} sha)"))
+                else:
+                    still.append(kind)
+            if still != kinds:
+                st["pending_deploy"] = still
+                st["deployed_parts"] = (st.get("deployed_parts") or []) + done_notes
+                self.store.save_state(fid, st)
+            if not still:
+                self.mark_deployed(fid, st, "; ".join(st.get("deployed_parts") or done_notes) + f" — all contain {st['commit'][:8]}")
 
     def mark_deployed(self, fid: str, st: dict, note: str) -> None:
         kind = st.pop("pending_deploy", None)
+        st.pop("deployed_parts", None)
         st["deployed_note"] = note
         self.store.save_state(fid, st)
         self.store.event(fid, "deployed", deploy=kind, note=note)
