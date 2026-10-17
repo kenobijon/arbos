@@ -41,6 +41,17 @@ struct RootView: View {
         .alert(item: $model.notice) { n in
             Alert(title: Text("Arbos"), message: Text(n.text), dismissButton: .default(Text("OK")))
         }
+        .sheet(isPresented: $model.needsProfileSetup) {
+            ProfileEditView(onboarding: true)
+                .environmentObject(model)
+                .environment(\.theme, theme)
+                .presentationDetents([.height(420), .large])
+                .presentationDragIndicator(.hidden)
+                .presentationBackground(theme.bg)
+                .presentationCornerRadius(28)
+                .interactiveDismissDisabled(true)
+                .preferredColorScheme(theme.isDark ? .dark : .light)
+        }
         .sheet(isPresented: $showPrimer) {
             NotificationsPrimerView().environment(\.theme, theme)
         }
@@ -94,6 +105,7 @@ struct RootView: View {
                           projectId: model.path.last.map { if case .chat(_, let p) = $0 { return p } else { return "" } })
         }
         .onChange(of: model.isPaired, initial: true) { _, paired in schedulePrimer(paired) }
+        .onChange(of: model.needsProfileSetup) { _, needed in if !needed { schedulePrimer(model.isPaired) } }
         .onChange(of: push.status) { _, _ in schedulePrimer(model.isPaired) }
         .onChange(of: scenePhase) { _, phase in
             // Match Mac `window_active`: only suppress push while the scene is
@@ -114,8 +126,8 @@ struct RootView: View {
     private func schedulePrimer(_ paired: Bool) {
         guard paired, !model.isFixture, !DebugHooks.liveDemo, DebugHooks.show == nil, push.shouldShowPrimer, !showPrimer else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-            // Never on top of another sheet (feedback, settings…).
-            if push.shouldShowPrimer, model.isPaired, !feedback.isPresented { showPrimer = true }
+            // Never on top of another sheet (feedback, settings, profile setup…).
+            if push.shouldShowPrimer, model.isPaired, !feedback.isPresented, !model.needsProfileSetup { showPrimer = true }
         }
     }
 

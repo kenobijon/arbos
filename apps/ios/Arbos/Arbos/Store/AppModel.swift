@@ -132,6 +132,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var authMode: AuthMode = .github
     @Published private(set) var signingIn = false
     @Published private(set) var signInError: String?
+    /// After a fresh GitHub sign-in, ask for display name + handle once (Settings can edit later).
+    @Published var needsProfileSetup = false
     private let webAuth = WebAuth()
     private var refreshTask: Task<Bool, Never>?
     @Published var projects: [Project] = [] {
@@ -588,9 +590,30 @@ final class AppModel: ObservableObject {
                 let code = try await webAuth.signIn(startURL: start)
                 let (toks, who) = try await api.exchange(grantCode: code)
                 adopt(tokens: toks, user: who)
+                needsProfileSetup = true
             } catch {
                 signInError = error.localizedDescription
             }
+        }
+    }
+
+    /// Settings / onboarding: save display name and handle via `PATCH /me`.
+    @discardableResult
+    func updateProfile(name: String, handle: String) async -> String? {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedHandle = handle.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "@"))
+        guard !trimmedHandle.isEmpty else { return "Choose a handle." }
+        do {
+            let who = try await api.patchMe(name: trimmedName, login: trimmedHandle)
+            user = who
+            saveAccountCache()
+            needsProfileSetup = false
+            return nil
+        } catch let e as RelayError {
+            return AuthError.humanize(e.type ?? "", e.message.isEmpty ? "Could not update profile" : e.message)
+        } catch {
+            return error.localizedDescription
         }
     }
 
@@ -679,6 +702,7 @@ final class AppModel: ObservableObject {
         user = nil
         credits = nil
         approvals = []
+        needsProfileSetup = false
         unpair(forget: true)
     }
 

@@ -30,6 +30,7 @@ struct SettingsView: View {
     @State private var connectorError: String?
     @State private var avatarItem: PhotosPickerItem?
     @State private var avatarBusy = false
+    @State private var showProfileEdit = false
 
     var body: some View {
         NavigationStack {
@@ -133,6 +134,17 @@ struct SettingsView: View {
                 guard let item else { return }
                 Task { await applyAvatarPick(item) }
             }
+            .sheet(isPresented: $showProfileEdit) {
+                NavigationStack {
+                    ProfileEditView()
+                }
+                .environmentObject(model)
+                .environment(\.theme, theme)
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+                .presentationBackground(theme.bg)
+                .preferredColorScheme(theme.isDark ? .dark : .light)
+            }
         }
         .tint(theme.text)
         .preferredColorScheme(theme.isDark ? .dark : .light)
@@ -142,7 +154,8 @@ struct SettingsView: View {
     // MARK: Profile header
 
     /// Large avatar (D79: GitHub picture, else the coloured initials circle), bold
-    /// name, grey handle — Apple's account header. Tap the picture to change it.
+    /// name, grey handle — Apple's account header. Tap the picture to change it;
+    /// tap the name/handle to edit them.
     private var profileHeader: some View {
         VStack(spacing: 6) {
             PhotosPicker(selection: $avatarItem, matching: .images) {
@@ -155,16 +168,26 @@ struct SettingsView: View {
             .disabled(model.user == nil || avatarBusy || model.isFixture)
             .accessibilityLabel("Change profile picture")
             .padding(.bottom, 8)
-            Text(model.user?.name ?? model.user?.login ?? "Arbos")
-                .font(.system(size: 28, weight: .bold))
-                .foregroundStyle(theme.text)
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-            Text(model.user.map { "@\($0.login)" } ?? (model.relayUrl.isEmpty ? "Not signed in" : model.relayUrl))
-                .font(.system(size: Theme.body))
-                .foregroundStyle(theme.muted)
-                .lineLimit(1)
-                .truncationMode(.middle)
+            Button {
+                guard model.user != nil, !model.isFixture else { return }
+                showProfileEdit = true
+            } label: {
+                VStack(spacing: 6) {
+                    Text(model.user?.name ?? model.user?.login ?? "Arbos")
+                        .font(.system(size: 28, weight: .bold))
+                        .foregroundStyle(theme.text)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                    Text(model.user.map { "@\($0.login)" } ?? (model.relayUrl.isEmpty ? "Not signed in" : model.relayUrl))
+                        .font(.system(size: Theme.body))
+                        .foregroundStyle(theme.muted)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            .buttonStyle(.plain)
+            .disabled(model.user == nil || model.isFixture)
+            .accessibilityLabel("Edit name and handle")
         }
         .frame(maxWidth: .infinity)
         .padding(.top, 14)
@@ -725,6 +748,177 @@ struct AboutPage: View {
                 SettingsValueRow("Protocol", value: "room proto \(protoVersion) · Loro")
             }
         }
+    }
+}
+
+// MARK: - Profile name / handle
+
+/// Choose or edit display name and @handle — onboarding after GitHub sign-in,
+/// and Settings by tapping the profile name.
+struct ProfileEditView: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    @Environment(\.dismiss) private var dismiss
+
+    /// After sign-in: CTA is "Continue"; sheet cannot be dismissed until saved.
+    var onboarding: Bool = false
+
+    @State private var name: String = ""
+    @State private var handle: String = ""
+    @State private var busy = false
+    @State private var error: String?
+    @FocusState private var focus: Field?
+
+    private enum Field { case name, handle }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if onboarding {
+                Capsule().fill(theme.separator).frame(width: 36, height: 5).padding(.top, 10)
+            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    if onboarding {
+                        Text("Your profile")
+                            .font(.system(size: 22, weight: .semibold))
+                            .foregroundStyle(theme.text)
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 12)
+                        Text("Pick a name and handle people will see. You can change them later in Settings.")
+                            .font(.system(size: Theme.small))
+                            .foregroundStyle(theme.muted)
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: .infinity)
+                    }
+
+                    nameField
+                    handleField
+
+                    if let error {
+                        Text(error)
+                            .font(.system(size: Theme.small))
+                            .foregroundStyle(theme.danger)
+                    }
+
+                    Text("Handle: letters, numbers, and hyphens · up to 39 characters.")
+                        .font(.system(size: Theme.tiny))
+                        .foregroundStyle(theme.muted)
+                }
+                .padding(.horizontal, 24)
+                .padding(.top, onboarding ? 8 : 20)
+                .padding(.bottom, 24)
+            }
+            .scrollDismissesKeyboard(.interactively)
+
+            Button {
+                Task { await save() }
+            } label: {
+                Text(busy ? "Saving…" : (onboarding ? "Continue" : "Save"))
+                    .font(.system(size: Theme.body, weight: .semibold))
+                    .foregroundStyle(theme.onPrimary)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 50)
+                    .background(Capsule().fill(theme.primary))
+            }
+            .buttonStyle(.plain)
+            .disabled(!canSave || busy)
+            .opacity(canSave && !busy ? 1 : 0.45)
+            .padding(.horizontal, 24)
+            .padding(.bottom, onboarding ? 28 : 16)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(theme.bg)
+        .navigationTitle(onboarding ? "" : "Edit profile")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if !onboarding {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Cancel") { dismiss() }.foregroundStyle(theme.text)
+                }
+            }
+        }
+        .interactiveDismissDisabled(onboarding)
+        .onAppear {
+            name = model.user?.name ?? ""
+            handle = model.user?.login ?? ""
+            focus = .name
+        }
+    }
+
+    private var canSave: Bool {
+        let h = handle.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !h.isEmpty && h.count <= 39 && Self.isValidHandle(h)
+    }
+
+    private var nameField: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Name").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+            TextField("", text: $name, prompt: Text("Display name").foregroundStyle(theme.placeholder))
+                .font(.system(size: Theme.body))
+                .foregroundStyle(theme.text)
+                .textContentType(.name)
+                .textInputAutocapitalization(.words)
+                .focused($focus, equals: .name)
+                .submitLabel(.next)
+                .onSubmit { focus = .handle }
+                .padding(.horizontal, 14)
+                .frame(height: Theme.fieldHeight)
+                .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
+                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+        }
+    }
+
+    private var handleField: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Handle").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+            HStack(spacing: 2) {
+                Text("@").font(.system(size: Theme.body)).foregroundStyle(theme.muted)
+                TextField("", text: $handle, prompt: Text("handle").foregroundStyle(theme.placeholder))
+                    .font(.system(size: Theme.body))
+                    .foregroundStyle(theme.text)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .focused($focus, equals: .handle)
+                    .submitLabel(.done)
+                    .onSubmit { Task { await save() } }
+                    .onChange(of: handle) { _, new in
+                        let cleaned = Self.sanitizeHandle(new)
+                        if cleaned != new { handle = cleaned }
+                    }
+            }
+            .padding(.horizontal, 14)
+            .frame(height: Theme.fieldHeight)
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+        }
+    }
+
+    private func save() async {
+        guard canSave, !busy else { return }
+        busy = true
+        error = nil
+        defer { busy = false }
+        if let msg = await model.updateProfile(name: name, handle: handle) {
+            error = msg
+            return
+        }
+        dismiss()
+    }
+
+    static func sanitizeHandle(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: CharacterSet(charactersIn: "@"))
+        let allowed = trimmed.filter { c in
+            c.isASCII && (c.isLetter || c.isNumber || c == "-")
+        }
+        return String(allowed.prefix(39))
+    }
+
+    static func isValidHandle(_ handle: String) -> Bool {
+        !handle.isEmpty
+            && handle.count <= 39
+            && !handle.hasPrefix("-")
+            && !handle.hasSuffix("-")
+            && handle.allSatisfy { c in c.isASCII && (c.isLetter || c.isNumber || c == "-") }
     }
 }
 
