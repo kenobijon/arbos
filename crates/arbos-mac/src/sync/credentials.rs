@@ -166,6 +166,11 @@ fn store_keychain(creds: &DeviceCredentials) -> Result<()> {
 }
 
 /// Where downloaded blobs go.
+/// Cached voice samples (`GET /voices` `sample_url`), keyed by URL hash.
+pub fn voice_sample_cache_dir() -> PathBuf {
+    config_dir().join("voice-samples")
+}
+
 pub fn downloads_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     let dl = PathBuf::from(&home).join("Downloads");

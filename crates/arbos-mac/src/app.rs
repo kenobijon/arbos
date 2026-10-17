@@ -15,7 +15,7 @@ use crate::auth;
 use crate::calls::{self, CallCmd, CallEvent};
 use crate::model::{
     call_ended_line, reachable_line, AccountView, Call, CallEnded, CallKind, CallMissed, Person,
-    Reachable, Sender,
+    Reachable, Sender, Voice,
 };
 use crate::model::{
     new_id, now_ms, AttachmentKind, BoxState, ChannelsView, Chat, ChatKind, ConnectorsView, Effort,
@@ -25,7 +25,7 @@ use crate::model::{
 };
 use crate::sync::{ClientCommand, SyncEvent, SyncSource};
 use crate::ui::notify::{self, Gate, Notifier, NotifyEvent, NotifyKind};
-use crate::ui::tones::{Tone, TonePlayer};
+use crate::ui::tones::{SamplePlayer, Tone, TonePlayer};
 
 /// How often held notification batches are re-checked.
 const NOTIFY_TICK_MS: u64 = 5_000;
@@ -344,6 +344,15 @@ pub struct AppState {
     /// The ring (callee) and ringback (caller) tones while they should sound.
     ring_tone: Option<TonePlayer>,
     ringback_tone: Option<TonePlayer>,
+    /// `GET /voices`: the call voices an agent can use (empty until fetched).
+    pub voices: Vec<Voice>,
+    /// The voice sample playing now (url) and its player; cached paths by url.
+    pub sample_playing: Option<String>,
+    sample_player: Option<SamplePlayer>,
+    sample_paths: HashMap<String, PathBuf>,
+    /// A sample asked for before it was cached: play it when it lands.
+    sample_wanted: Option<String>,
+    voices_requested: bool,
     /// `call_missed` ids whose "Missed call from …" line this device wrote.
     missed_written: HashSet<String>,
     /// `call_missed` pushes that arrived before their chat was loaded (with when).
@@ -557,6 +566,12 @@ impl AppState {
             incoming_since: None,
             ring_tone: None,
             ringback_tone: None,
+            voices: Vec::new(),
+            sample_playing: None,
+            sample_player: None,
+            sample_paths: HashMap::new(),
+            sample_wanted: None,
+            voices_requested: false,
             missed_written: HashSet::new(),
             missed_pending: Vec::new(),
             ended_written: HashSet::new(),
@@ -910,6 +925,11 @@ impl AppState {
                 // Signed in and synced (also the path without a sign-in event).
                 if !projects.is_empty() {
                     self.maybe_prompt_notifications();
+                    // The "Voice · <name>" label needs the list once.
+                    if !self.voices_requested {
+                        self.voices_requested = true;
+                        self.fetch_voices();
+                    }
                 }
                 for p in &projects {
                     let crossed = p.spend_cap_usd > 0.0 && p.spend_today_usd >= p.spend_cap_usd;
@@ -1083,6 +1103,19 @@ impl AppState {
                 }
                 self.chats.insert(project_id.clone(), chats);
                 self.enforce_tab(&project_id);
+                cx.notify();
+            }
+            SyncEvent::Voices(voices) => {
+                self.voices = voices;
+                cx.notify();
+            }
+            SyncEvent::VoiceSample { url, path } => {
+                self.sample_paths.insert(url.clone(), path.clone());
+                if self.sample_wanted.as_deref() == Some(url.as_str()) {
+                    self.sample_wanted = None;
+                    self.sample_player = Some(SamplePlayer::play(path));
+                    self.sample_playing = Some(url);
+                }
                 cx.notify();
             }
             SyncEvent::ChatArchived {
@@ -2148,6 +2181,59 @@ impl AppState {
             effort,
         });
         cx.notify();
+    }
+
+    /// The agent's call voice (`None` = the current default); saved on click.
+    pub fn set_voice(&mut self, project_id: Id, voice: Option<String>, cx: &mut Context<Self>) {
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
+            p.voice = voice.clone();
+        }
+        self.command(ClientCommand::SetVoice { project_id, voice });
+        cx.notify();
+    }
+
+    /// Ask the relay for the voice list (the picker opening).
+    pub fn fetch_voices(&mut self) {
+        self.command(ClientCommand::FetchVoices);
+    }
+
+    /// Play a voice's sample (cached in the config dir after the first fetch);
+    /// playing the one already playing stops it.
+    pub fn toggle_voice_sample(&mut self, url: String, cx: &mut Context<Self>) {
+        if self.sample_playing.as_deref() == Some(url.as_str())
+            && self.sample_player.as_ref().is_some_and(|p| p.is_playing())
+        {
+            self.stop_voice_sample(cx);
+            return;
+        }
+        self.sample_player = None;
+        match self.sample_paths.get(&url).cloned() {
+            Some(path) if path.is_file() => {
+                self.sample_player = Some(SamplePlayer::play(path));
+                self.sample_playing = Some(url);
+                self.sample_wanted = None;
+            }
+            _ => {
+                self.sample_wanted = Some(url.clone());
+                self.sample_playing = Some(url.clone());
+                self.command(ClientCommand::FetchVoiceSample { url });
+            }
+        }
+        cx.notify();
+    }
+
+    pub fn stop_voice_sample(&mut self, cx: &mut Context<Self>) {
+        self.sample_player = None;
+        self.sample_playing = None;
+        self.sample_wanted = None;
+        cx.notify();
+    }
+
+    /// True while `url`'s sample is playing (or being fetched to play).
+    pub fn voice_sample_playing(&self, url: &str) -> bool {
+        self.sample_playing.as_deref() == Some(url)
+            && (self.sample_wanted.is_some()
+                || self.sample_player.as_ref().is_some_and(|p| p.is_playing()))
     }
 
     pub fn set_effort(&mut self, effort: Effort, cx: &mut Context<Self>) {

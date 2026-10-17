@@ -28,4 +28,5 @@ pub mod transcript;
 pub mod vault;
 pub mod veil;
 pub mod voice;
+pub mod voicepicker;
 pub mod widgets;

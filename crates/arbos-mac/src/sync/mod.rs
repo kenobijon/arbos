@@ -20,7 +20,9 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 use tokio::sync::mpsc;
 
-use crate::model::{AccountView, Call, CallEnded, CallKind, CallMissed, Person, Reachable, Sender};
+use crate::model::{
+    AccountView, Call, CallEnded, CallKind, CallMissed, Person, Reachable, Sender, Voice,
+};
 use crate::model::{
     BoxState, ChannelsView, Chat, ConnectorsView, Effort, Id, Link, LocalView, Machine, Message,
     Project, ProjectDocView, Routine, RoutineRun, RoutineTrigger, Skill, VaultNewItem, VaultView,
@@ -104,6 +106,13 @@ pub enum SyncEvent {
     ChatArchived {
         chat_id: Id,
         archived_at: Option<u64>,
+    },
+    /// `GET /voices`: the call voices an agent can use.
+    Voices(Vec<Voice>),
+    /// A voice sample is on disk (fetched and cached), ready to play.
+    VoiceSample {
+        url: String,
+        path: PathBuf,
     },
     /// Bytes and chat count kept on this Mac (Settings → About).
     StoreUsage {
@@ -374,6 +383,17 @@ pub enum ClientCommand {
         project_id: Id,
         model: String,
         effort: Effort,
+    },
+    /// `PATCH /projects/{id} {"voice": id|null}` (null = current default).
+    SetVoice {
+        project_id: Id,
+        voice: Option<String>,
+    },
+    /// `GET /voices` → [`SyncEvent::Voices`].
+    FetchVoices,
+    /// Download (once; cached in the config dir) a voice sample → [`SyncEvent::VoiceSample`].
+    FetchVoiceSample {
+        url: String,
     },
     CreateProject {
         name: String,

@@ -87,6 +87,22 @@ pub struct Project {
     /// most messages, ties → earliest created.
     #[serde(default)]
     pub primary_chat: Option<Id>,
+    /// Call voice (`GET /voices` id); `None` = the current default voice.
+    #[serde(default)]
+    pub voice: Option<String>,
+}
+
+/// One entry of `GET /voices`: a voice the agent can speak with on calls.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Voice {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default, deserialize_with = "null_to_empty")]
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default, deserialize_with = "null_to_empty")]
+    pub sample_url: String,
 }
 
 /// API §9 `project.machine`.

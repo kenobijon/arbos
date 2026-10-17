@@ -64,6 +64,7 @@ const ICONS: &[(&str, &str)] = &[
         "<circle cx=\"9\" cy=\"8\" r=\"3.5\" fill=\"#000\"/><path d=\"M2 20c0-3.5 3.1-6 7-6s7 2.5 7 6z\" fill=\"#000\"/><circle cx=\"17\" cy=\"8.5\" r=\"3\" fill=\"#000\"/><path d=\"M17 14c2.9 0 5 2.2 5 5h-5.5\" fill=\"#000\"/>"
     ),
     icon!("stop", "<rect x=\"6\" y=\"6\" width=\"12\" height=\"12\" rx=\"2\" fill=\"#000\"/>"),
+    icon!("play", "<path d=\"M8 5.5v13l10-6.5z\" fill=\"#000\" stroke-linejoin=\"round\"/>"),
     icon!(
         "paperclip",
         "<path d=\"M20 12.5l-7.8 7.8a5 5 0 0 1-7-7L13.5 5a3.3 3.3 0 0 1 4.7 4.7l-8.3 8.3a1.6 1.6 0 0 1-2.3-2.3L15 8.4\"/>"

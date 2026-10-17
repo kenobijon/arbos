@@ -114,6 +114,60 @@ fn ramp(i: usize, n: usize, edge: usize) -> f32 {
     }
 }
 
+/// Plays one cached voice sample file through the system output, once.
+/// Dropping it (or starting another) stops playback.
+pub struct SamplePlayer {
+    stop: Arc<AtomicBool>,
+    done: Arc<AtomicBool>,
+}
+
+impl SamplePlayer {
+    pub fn play(path: std::path::PathBuf) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(AtomicBool::new(false));
+        let (flag, finished) = (stop.clone(), done.clone());
+        let _ = std::thread::Builder::new()
+            .name("arbos-voice-sample".into())
+            .spawn(move || {
+                let Ok(file) = std::fs::File::open(&path) else {
+                    finished.store(true, Ordering::Relaxed);
+                    return;
+                };
+                let Ok(source) = rodio::Decoder::new(std::io::BufReader::new(file)) else {
+                    finished.store(true, Ordering::Relaxed);
+                    return;
+                };
+                let Ok((_stream, handle)) = rodio::OutputStream::try_default() else {
+                    finished.store(true, Ordering::Relaxed);
+                    return;
+                };
+                let Ok(sink) = rodio::Sink::try_new(&handle) else {
+                    finished.store(true, Ordering::Relaxed);
+                    return;
+                };
+                sink.append(source);
+                sink.play();
+                while !flag.load(Ordering::Relaxed) && !sink.empty() {
+                    std::thread::sleep(Duration::from_millis(40));
+                }
+                sink.stop();
+                finished.store(true, Ordering::Relaxed);
+            });
+        Self { stop, done }
+    }
+
+    /// Still playing (the "stop" glyph on the row).
+    pub fn is_playing(&self) -> bool {
+        !self.done.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for SamplePlayer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
