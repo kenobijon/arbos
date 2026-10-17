@@ -16,6 +16,7 @@ pub mod local;
 pub mod markdown;
 pub mod motion;
 pub mod notify;
+pub mod onboarding;
 pub mod people;
 pub mod profiles;
 pub mod routines;

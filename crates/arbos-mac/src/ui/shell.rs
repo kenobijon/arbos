@@ -16,6 +16,7 @@ use crate::app::{AppState, DetailsTarget};
 use crate::model::{now_ms, CallKind, Link, MachineState};
 use crate::ui::avatars;
 use crate::ui::callview;
+use crate::ui::onboarding;
 use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
 use crate::ui::composer::{Composer, ComposerEvent, ComposerInput};
 use crate::ui::connectors::{ConnectorsEvent, ConnectorsPanel};
@@ -2488,6 +2489,11 @@ impl Render for Shell {
         }
         if let Some(notices) = self.render_notices(cx) {
             root = root.child(notices);
+        }
+        // D82: first sign-in — the terminal screen covers the shell until the
+        // computer, agent and first chat exist, then morphs into the greeting.
+        if let Some(onboarding) = self.state.read(cx).onboarding.clone() {
+            root = root.child(onboarding::render(self, &self.state, &onboarding, window, cx));
         }
         root.into_any_element()
     }
