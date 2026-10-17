@@ -214,7 +214,8 @@ impl AppState {
         .detach();
     }
 
-    pub fn end_onboarding(&mut self, cx: &mut Context<Self>) {
+    pub fn end_onboarding(&mut self, reason: &str, cx: &mut Context<Self>) {
+        eprintln!("first login: end ({reason})");
         self.onboarding = None;
         cx.notify();
     }
@@ -285,13 +286,14 @@ impl AppState {
                 .iter()
                 .any(|p| !p.shared && !p.is_people() && p.name != AGENT_NAME)
         {
-            self.end_onboarding(cx);
+            let names: Vec<&str> = self.projects.iter().map(|p| p.name.as_str()).collect();
+            self.end_onboarding(&format!("account already has agents: {names:?}"), cx);
             return;
         }
 
         if o.stage == Stage::Finishing {
             if o.finished(now) {
-                self.end_onboarding(cx);
+                self.end_onboarding("finished", cx);
             } else {
                 cx.notify();
             }
@@ -427,6 +429,11 @@ impl AppState {
                 Stage::Finishing | Stage::Failed => o.stage,
             };
             o.stage_since = now;
+            eprintln!(
+                "first login: stage → {:?} ({})",
+                o.stage,
+                o.detail.as_deref().unwrap_or("")
+            );
         }
 
         if ready && o.stage == Stage::AlmostReady && held {
@@ -435,6 +442,7 @@ impl AppState {
                 o.stage = Stage::Finishing;
                 o.stage_since = now;
                 o.finish_started_at = Some(now);
+                eprintln!("first login: finishing → chat {:?}", o.chat_id);
                 if let Some(pid) = o.project_id.clone() {
                     if self.selected_project.as_ref() != Some(&pid) {
                         self.select_project(pid, cx);
