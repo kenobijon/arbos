@@ -1893,6 +1893,22 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Owner/admin removes a person from a people chat (`DELETE /chats/{id}/members/{userId}`).
+    func removeMember(chatId: String, userId: String) {
+        Task {
+            do {
+                try await api.removeMember(chatId: chatId, userId: userId)
+                if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
+                    peopleChats[i].members.removeAll { !$0.isAgent && $0.id == userId }
+                }
+            } catch {
+                let e = error as? RelayError
+                notice = Notice(text: e?.type == "owner_only" ? "Only an owner can remove people."
+                                 : "Remove failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
     func removeAgent(chatId: String, projectId: Id) {
         Task {
             do {

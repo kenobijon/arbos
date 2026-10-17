@@ -630,6 +630,11 @@ struct MembersSheet: View {
                             }
                             .swipeActions {
                                 if m.id != model.user?.id {
+                                    if chat.myRole == "owner" || chat.myRole == "admin" {
+                                        Button("Remove", role: .destructive) {
+                                            model.removeMember(chatId: chatId, userId: m.id)
+                                        }
+                                    }
                                     Button("Block") { model.block(m) }.tint(theme.danger)
                                 }
                             }
