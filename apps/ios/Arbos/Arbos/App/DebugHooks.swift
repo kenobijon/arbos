@@ -30,6 +30,8 @@ enum DebugHooks {
     static var alwaysOn: Bool { value("ARBOS_ALWAYS_ON") == "1" }
     /// keyboard | settings | voice | threads | model | profile — opened on the chat screen.
     static var show: String? { value("ARBOS_SHOW") }
+    /// With `ARBOS_SHOW=settings`: the Settings page to land on (`appearance`).
+    static var settingsPage: String? { value("ARBOS_SETTINGS_PAGE") }
     /// Scripted tour for the screen recording (fixture only).
     static var demo: Bool { value("ARBOS_DEMO") == "1" }
     /// Scripted tour against the live relay: sends ARBOS_AUTO_SEND, waits for the reply, tours the sheets.

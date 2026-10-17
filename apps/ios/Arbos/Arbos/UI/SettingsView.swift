@@ -31,6 +31,8 @@ struct SettingsView: View {
     @State private var avatarItem: PhotosPickerItem?
     @State private var avatarBusy = false
     @State private var showProfileEdit = false
+    /// `ARBOS_SETTINGS_PAGE=appearance` lands on that page (screenshot rig).
+    @State private var showAppearancePage = DebugHooks.settingsPage == "appearance"
 
     var body: some View {
         NavigationStack {
@@ -134,6 +136,7 @@ struct SettingsView: View {
                 guard let item else { return }
                 Task { await applyAvatarPick(item) }
             }
+            .navigationDestination(isPresented: $showAppearancePage) { AppearancePage() }
             .sheet(isPresented: $showProfileEdit) {
                 NavigationStack {
                     ProfileEditView()

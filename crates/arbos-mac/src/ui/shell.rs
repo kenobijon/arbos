@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use gpui::{
     actions, div, prelude::*, px, Animation, AnimationExt, App, Context, Div, Entity, FocusHandle,
-    Focusable, FontWeight, Render, Stateful, Window,
+    Focusable, FontWeight, Render, ScrollHandle, Stateful, Window,
 };
 
 use crate::app::SignInMode;
@@ -62,6 +62,7 @@ pub struct Shell {
     local: Entity<LocalPanel>,
     focus_handle: FocusHandle,
     pub(crate) settings_open: bool,
+    settings_scroll: ScrollHandle,
     routines: Entity<RoutinesPanel>,
     routines_open: bool,
     channels: Entity<ChannelsPanel>,
@@ -105,6 +106,13 @@ impl Shell {
     }
 
     pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let open_settings = std::env::var("ARBOS_OPEN_SETTINGS")
+            .ok()
+            .filter(|v| v == "1" || v == "bottom");
+        let settings_scroll = ScrollHandle::new();
+        if open_settings.as_deref() == Some("bottom") {
+            settings_scroll.scroll_to_bottom();
+        }
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
         let voice = cx.new(|cx| Voice::new(state.clone(), cx));
         let composer = cx.new(|cx| Composer::new(state.clone(), voice.clone(), cx));
@@ -277,8 +285,10 @@ impl Shell {
             skills,
             local,
             focus_handle: cx.focus_handle(),
-            // `ARBOS_OPEN_SETTINGS=1` opens the sheet at launch (screenshot rig).
-            settings_open: std::env::var("ARBOS_OPEN_SETTINGS").is_ok_and(|v| v == "1"),
+            // `ARBOS_OPEN_SETTINGS=1|bottom` opens the sheet at launch, `bottom`
+            // scrolled to its end (screenshot rig).
+            settings_open: open_settings.is_some(),
+            settings_scroll,
             row_menu: None,
             group_picker_open: false,
             archived_open: false,
@@ -1368,7 +1378,8 @@ impl Shell {
             .px(px(16.0))
             .pb(px(20.0))
             .min_h_0()
-            .overflow_y_scroll();
+            .overflow_y_scroll()
+            .track_scroll(&self.settings_scroll);
 
         // Profile header (D80, Apple's account screen): big avatar, bold name, grey handle.
         let settings_group = |theme: &Theme| glass::group(theme).bg(theme.bubble_assistant);
