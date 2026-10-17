@@ -353,7 +353,9 @@ struct CallScreen: View {
 }
 
 /// "<Agent> can see" on OUR self-preview while the voice worker reports that the
-/// agent is sampling our camera (§11). Nothing when it is not.
+/// agent is sampling our camera (§11). Nothing when it is not. The compact pill (the 84 pt
+/// self-preview on a 1:1 agent call) has no room for a name: it says "can see"; the
+/// accessibility label still names the agent.
 struct AgentSeesBadge: View {
     @ObservedObject private var calls = CallManager.shared
     var compact: Bool
@@ -362,7 +364,7 @@ struct AgentSeesBadge: View {
         if calls.agentSeeing, calls.cameraOn {
             HStack(spacing: 4) {
                 Image(systemName: "eye.fill").font(.system(size: compact ? 9 : 10, weight: .bold))
-                Text("\(calls.seeingAgentName ?? "Agent") can see")
+                Text(compact ? "can see" : "\(calls.seeingAgentName ?? "Agent") can see")
                     .font(.system(size: compact ? 9 : 11, weight: .semibold))
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
