@@ -406,6 +406,28 @@ final class RelayAPI {
         return key
     }
 
+    /// `PUT /me/avatar` (raw JPEG) → `{avatar_url}`; updates the signed-in user's picture.
+    func putMeAvatar(jpeg: Data) async throws -> String {
+        guard let url = URL(string: "\(endpoint.httpUrl)/me/avatar") else {
+            throw RelayError(status: 0, message: "Bad relay URL")
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "PUT"
+        req.setValue("Bearer \(token())", forHTTPHeaderField: "Authorization")
+        req.setValue("image/jpeg", forHTTPHeaderField: "Content-Type")
+        req.httpBody = jpeg
+        let (body, response) = try await session.data(for: req)
+        guard let http = response as? HTTPURLResponse, http.statusCode < 400 else {
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            throw RelayError(status: status, message: String(data: body, encoding: .utf8) ?? "Avatar upload failed")
+        }
+        guard let m = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              let avatarUrl = m["avatar_url"] as? String, !avatarUrl.isEmpty else {
+            throw RelayError(status: 0, message: "The relay returned no avatar URL")
+        }
+        return avatarUrl
+    }
+
     /// `POST /feedback` (JSON, device token): `{note ≤4000, image: base64 PNG/JPEG ≤15 MB,
     /// mime, app_version, platform: "ios", os, project_id?, width, height}` → 201 `{id, created_at}`.
     /// Feeds the same automatic fix loop as the Mac sheet.
