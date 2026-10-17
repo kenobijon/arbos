@@ -55,8 +55,22 @@ final class CallManager: NSObject, ObservableObject {
     @Published private(set) var cameraOn = false
     @Published private(set) var speakerOn = false
     @Published private(set) var frontCamera = true
-    /// Full-screen call UI wanted (the root view presents it).
+    /// Full-screen call UI wanted (the root view presents it). While a call is
+    /// active and this is false the call is collapsed into `InCallOverlay`
+    /// over the chat; the LiveKit/CallKit session is unaffected either way.
     @Published var isPresented = false
+
+    /// Collapse the call screen into the pill / picture-in-picture tile.
+    func minimize() {
+        guard isActive else { return }
+        isPresented = false
+    }
+
+    /// Bring the full call screen back.
+    func restore() {
+        guard isActive else { return }
+        isPresented = true
+    }
     /// `push` from the VoIP registration: false until the relay has an APNs key.
     @Published private(set) var voipPushEnabled: Bool?
     /// What happened with the VoIP token, for Settings → Help and the logs.
