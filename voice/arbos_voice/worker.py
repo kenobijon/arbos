@@ -112,6 +112,29 @@ def label_of(speaker: dict) -> str:
     return f"@{speaker['handle']}" if speaker.get("handle") else (speaker.get("name") or "someone")
 
 
+def _norm_words(text: str) -> list[str]:
+    return [w for w in "".join(c.lower() if c.isalnum() else " " for c in text).split() if w]
+
+
+def similar_reply(a: str, b: str) -> bool:
+    """True when two agent lines are the same idea (interrupt + regenerate, or a near-repeat)."""
+    a, b = a.strip(), b.strip()
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    wa, wb = _norm_words(a), _norm_words(b)
+    if not wa or not wb:
+        return False
+    sa, sb = set(wa), set(wb)
+    overlap = len(sa & sb) / max(len(sa), len(sb))
+    if overlap >= 0.6:
+        return True
+    # Truncated prefix of the regenerate (e.g. "what do you want" vs "what do you want to talk about").
+    shorter, longer = (wa, wb) if len(wa) <= len(wb) else (wb, wa)
+    return len(shorter) >= 3 and longer[: len(shorter)] == shorter
+
+
 @dataclass
 class CallState:
     mode: str = "duplex"  # duplex | group
@@ -128,6 +151,9 @@ class CallState:
     last_trigger_at: float = field(default_factory=time.monotonic)
     last_human_speech_at: float = field(default_factory=time.monotonic)
     window: list[dict] = field(default_factory=list)
+    # Last agent transcript line we wrote (skip interrupted + near-duplicate paraphrases).
+    last_agent_text: str = ""
+    last_agent_at: float = 0.0
     open_work: int = 0
     idle_asked: bool = False
     leaving: bool = False
@@ -184,8 +210,22 @@ class VoiceCall:
     def event(self, kind: str, **fields) -> None:
         self.events.push({"kind": kind, **fields})
 
-    def transcript(self, speaker: dict | None, text: str, *, truncated: bool = False) -> None:
+    def transcript(self, speaker: dict | None, text: str, *, truncated: bool = False) -> bool:
+        """Write a transcript line. Returns False when a duplicate/interrupted agent line is dropped."""
+        is_agent = speaker is None or speaker.get("kind") == "agent"
+        if is_agent:
+            # Interrupted mid-sentence replies are followed by a regenerate; keep only the final.
+            if truncated:
+                return False
+            now = time.monotonic()
+            if self.state.last_agent_text and now - self.state.last_agent_at < 8.0 and similar_reply(
+                self.state.last_agent_text, text
+            ):
+                return False
+            self.state.last_agent_text = text
+            self.state.last_agent_at = now
         self.event("transcript", speaker=speaker if speaker else {"kind": "agent"}, text=text, truncated=truncated)
+        return True
 
     def agent_speaking(self) -> bool:
         return self.state.agent_state == "speaking"
@@ -309,6 +349,8 @@ class VoiceCall:
             silence_ms = 300
         return ServerVad(
             type="server_vad",
+            # Above the OpenAI default (0.5) and the group Silero barge gate (0.6): ambient
+            # noise / speaker echo must be louder before they cut the agent mid-sentence.
             threshold=DUPLEX_VAD_THRESHOLD,
             prefix_padding_ms=200,
             silence_duration_ms=silence_ms,
@@ -327,10 +369,10 @@ class VoiceCall:
             await self.wait_for_silence()
             self.session.say(line, allow_interruptions=True)
         else:
+            # Fixed line (not generate_reply): one greeting, no model paraphrase race with VAD.
             self.event("system", text=f"{self.agent_name} joined the call")
-            self.session.generate_reply(
-                instructions="Greet the person in one short sentence (say hi and ask what they need). No more than twelve words."
-            )
+            line = f"Hey — {self.agent_name} here. What do you need?"
+            self.session.say(line, allow_interruptions=True)
 
     async def finish(self, reason: str) -> None:
         if self.state.leaving:
@@ -433,9 +475,10 @@ class VoiceCall:
             text = (item.text_content or "").strip()
             if not text:
                 return
-            self.transcript(None, text, truncated=bool(getattr(item, "interrupted", False)))
-            self.state.window.append({"from": f"{self.agent_name} (agent)", "text": text})
-            self.state.window = self.state.window[-12:]
+            wrote = self.transcript(None, text, truncated=bool(getattr(item, "interrupted", False)))
+            if wrote:
+                self.state.window.append({"from": f"{self.agent_name} (agent)", "text": text})
+                self.state.window = self.state.window[-12:]
 
         @session.on("speech_created")
         def _speech(ev: SpeechCreatedEvent) -> None:
