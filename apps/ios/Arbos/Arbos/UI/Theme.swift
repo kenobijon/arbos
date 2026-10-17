@@ -210,6 +210,8 @@ struct GlassCircle<Content: View>: View {
             content()
         }
         .frame(width: size, height: size)
+        // Grok's circles are 42 pt; the touch target stays ≥ 44 without moving layout.
+        .contentShape(Circle().inset(by: -max(0, (44 - size) / 2)))
     }
 }
 

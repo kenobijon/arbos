@@ -76,7 +76,8 @@ struct QuestionCard: View {
                     CloseGlyph(color: palette.close)
                         .frame(width: 12, height: 12)
                         .frame(width: 28, height: 22)
-                        .contentShape(Rectangle())
+                        // 44 pt touch target around the thin ×, no layout change.
+                        .contentShape(Rectangle().inset(by: -11))
                 }
                 .buttonStyle(.plain)
                 .padding(.trailing, -4)

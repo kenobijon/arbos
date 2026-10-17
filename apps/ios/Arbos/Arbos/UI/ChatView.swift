@@ -623,6 +623,7 @@ struct ChatView: View {
                     .foregroundStyle(theme.text)
             }
             .frame(width: Theme.voiceButton, height: Theme.voiceButton)
+            .contentShape(Circle().inset(by: -(44 - Theme.voiceButton) / 2))
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Scroll to bottom")
@@ -845,6 +846,7 @@ struct ChatView: View {
                         .padding(.leading, 6).padding(.trailing, 10).padding(.vertical, 5)
                         .background(Capsule().fill(selected ? theme.bubbleUser.opacity(theme.isDark ? 0.55 : 0.18) : theme.bubbleAssistant))
                         .overlay(Capsule().strokeBorder(selected ? theme.text.opacity(0.35) : Color.clear, lineWidth: 1))
+                        .contentShape(Capsule().inset(by: -8))
                     }
                     .buttonStyle(.plain)
                     .contextMenu {
@@ -948,6 +950,7 @@ struct ChatView: View {
                             .foregroundStyle(theme.text)
                     }
                     .frame(width: Theme.plusButton, height: Theme.plusButton)
+                    .contentShape(Circle().inset(by: -(44 - Theme.plusButton) / 2))
                 }
                 .buttonStyle(.plain)
                 .sheet(isPresented: $showAttach, onDismiss: demoDismissed) {
@@ -1132,6 +1135,7 @@ struct ChatView: View {
                             .font(.system(size: 16, weight: .bold))
                             .foregroundStyle(theme.onPrimary)
                     )
+                    .contentShape(Circle().inset(by: -(44 - Theme.voiceButton) / 2))
             }
             .buttonStyle(.plain)
             .accessibilityLabel((canSend || recorder.recording) ? "Send" : "Call")
