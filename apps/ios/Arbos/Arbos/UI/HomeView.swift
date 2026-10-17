@@ -68,7 +68,7 @@ struct HomeView: View {
                         if searchQuery.isEmpty {
                             ForEach(model.approvals) { device in
                                 ApprovalCard(device: device)
-                                    .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
+                                    .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
                                     .listRowSeparator(.hidden)
                                     .listRowBackground(theme.bg)
                             }
@@ -120,7 +120,7 @@ struct HomeView: View {
                                         }
                                     }
                                 }
-                                .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
+                                .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
                                 .listRowSeparator(.hidden)
                                 .listRowBackground(theme.bg)
                                 .swipeActions(edge: .leading) {
@@ -166,7 +166,7 @@ struct HomeView: View {
                                         Button { model.showProfile(.group(chatId: chat.id, projectId: nil)) } label: { Label("Group info", systemImage: "person.2") }
                                     }
                                 }
-                                .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
+                                .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
                                 .listRowSeparator(.hidden)
                                 .listRowBackground(theme.bg)
                                 .swipeActions(edge: .leading) {
@@ -372,7 +372,8 @@ struct HomeView: View {
                 .buttonStyle(.plain)
             }
         }
-        .padding(.horizontal, 16)
+        // Grok home header: 20 pt side margins, 42 pt circles.
+        .padding(.horizontal, 20)
         .padding(.top, 6)
         .zIndex(1)
     }
@@ -615,9 +616,12 @@ struct AgentRow: View {
     var pinned: Bool = false
 
     var body: some View {
-        HStack(spacing: 14) {
-            AgentAvatar(project: project, theme: theme, size: 46, working: streaming)
-            VStack(alignment: .leading, spacing: 3) {
+        // Grok home row (measured): 48 pt avatar box, text 15 pt after it, name 17
+        // semibold over a 15 pt grey preview, time right, 10 pt unread dot at the far
+        // right of the preview line, 80 pt row pitch.
+        HStack(spacing: 15) {
+            AgentAvatar(project: project, theme: theme, size: Theme.rowAvatar, working: streaming)
+            VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(project.name)
                         .font(.system(size: Theme.body, weight: .semibold))
@@ -639,15 +643,16 @@ struct AgentRow: View {
                         .font(.system(size: Theme.small))
                         .foregroundStyle(theme.muted)
                         .lineLimit(1)
+                    Spacer(minLength: 0)
                     if streaming {
                         PulseDot(color: theme.warn)
                     } else if unread {
-                        Circle().fill(Color(hex: "#1084FE")!).frame(width: 8, height: 8)
+                        Circle().fill(theme.unread).frame(width: Theme.unreadDot, height: Theme.unreadDot)
                     }
                 }
             }
         }
-        .padding(.vertical, 12)
+        .padding(.vertical, Theme.rowVPad)
         .contentShape(Rectangle())
     }
 }
@@ -683,17 +688,17 @@ struct PeopleRow: View {
     }
 
     var body: some View {
-        HStack(spacing: 14) {
+        HStack(spacing: 15) {
             ZStack(alignment: .bottomTrailing) {
                 if chat.isGroup {
                     ZStack {
-                        Circle().fill(theme.card).frame(width: 46, height: 46)
+                        Circle().fill(theme.card).frame(width: Theme.rowAvatar, height: Theme.rowAvatar)
                         Image(systemName: "person.2.fill")
                             .font(.system(size: 17, weight: .medium))
                             .foregroundStyle(theme.muted)
                     }
                 } else {
-                    PersonAvatar(url: other?.avatarUrl, handle: other?.handle ?? "?", size: 46)
+                    PersonAvatar(url: other?.avatarUrl, handle: other?.handle ?? "?", size: Theme.rowAvatar)
                 }
                 if let a = chat.agents.first?.project {
                     AgentAvatar(project: a, theme: theme, size: 18, still: true)
@@ -701,7 +706,7 @@ struct PeopleRow: View {
                         .offset(x: 3, y: 3)
                 }
             }
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(title)
                         .font(.system(size: Theme.body, weight: .semibold))
@@ -729,12 +734,12 @@ struct PeopleRow: View {
                     if count > 0 {
                         UnreadBadge(count: count)
                     } else if unread {
-                        Circle().fill(Color(hex: "#1084FE")!).frame(width: 8, height: 8)
+                        Circle().fill(theme.unread).frame(width: Theme.unreadDot, height: Theme.unreadDot)
                     }
                 }
             }
         }
-        .padding(.vertical, 12)
+        .padding(.vertical, Theme.rowVPad)
         .contentShape(Rectangle())
     }
 }
@@ -755,6 +760,7 @@ struct PulseDot: View {
 
 /// Unread count pill (blue, white digits), capped at 99+.
 struct UnreadBadge: View {
+    @Environment(\.theme) private var theme
     let count: Int
 
     var body: some View {
@@ -763,7 +769,7 @@ struct UnreadBadge: View {
             .foregroundStyle(.white)
             .padding(.horizontal, count > 9 ? 6 : 0)
             .frame(minWidth: 20, minHeight: 20)
-            .background(Capsule().fill(Color(hex: "#1084FE")!))
+            .background(Capsule().fill(theme.unread))
             .accessibilityLabel("\(count) unread")
     }
 }

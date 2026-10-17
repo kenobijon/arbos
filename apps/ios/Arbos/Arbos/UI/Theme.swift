@@ -24,8 +24,10 @@ struct Theme {
     /// Placeholder text.
     let placeholder: Color
     let icon: Color
-    /// Grok's blue: unread dots, links, the caret (Mac `accent`).
+    /// Grok's blue: links, the caret (Mac `accent`).
     let accent: Color
+    /// Home-list unread dot (Grok dark measures #006CEB, a shade deeper than the accent).
+    let unread: Color
     let online: Color
     let warn: Color
     let danger: Color
@@ -38,16 +40,23 @@ struct Theme {
     static let bubbleVPad: CGFloat = 11
     /// 17 pt SF Pro renders a 20.3 pt line in SwiftUI; Grok shows UIKit's 22 pt body pitch.
     static let bodyLineSpacing: CGFloat = 1.7
-    /// Screen width minus 76 pt (16 pt own margin + 60 pt on the other side).
-    static let bubbleInset: CGFloat = 76
+    /// Screen width minus 71 pt (16 pt own margin + 55 pt on the other side; Grok dark, 420 pt screen).
+    static let bubbleInset: CGFloat = 71
     static let body: CGFloat = 17
     static let small: CGFloat = 15
     static let tiny: CGFloat = 13
-    static let control: CGFloat = 44
+    static let control: CGFloat = 42
     static let fieldHeight: CGFloat = 42
     static let voiceButton: CGFloat = 36
-    static let plusButton: CGFloat = 43
+    static let plusButton: CGFloat = 42
     static let avatar: CGFloat = 28
+    /// Composer side inset: Grok uses 31 pt with the keyboard down, 19 pt with it up.
+    static let composerInset: CGFloat = 31
+    static let composerInsetKeyboard: CGFloat = 19
+    /// Home list: 48 pt avatar box, 80 pt row pitch, 10 pt unread dot.
+    static let rowAvatar: CGFloat = 48
+    static let rowVPad: CGFloat = 16
+    static let unreadDot: CGFloat = 10
 
     static let dark = Theme(
         isDark: true, surface: .matte,
@@ -55,12 +64,14 @@ struct Theme {
         bubbleAssistant: Color(hex: "#202020")!,
         bubbleUser: Color(hex: "#5C5C5C")!,
         field: Color(hex: "#181818")!,
-        fieldBorder: Color(hex: "#242424")!,
+        // Grok dark draws no rim on the field or the glass circles; keep a whisper.
+        fieldBorder: Color(hex: "#1A1A1A")!,
         text: .white,
         muted: Color(hex: "#95959B")!,
         placeholder: Color(hex: "#58585B")!,
         icon: Color(hex: "#96969C")!,
         accent: Color(hex: "#1084FE")!,
+        unread: Color(hex: "#006CEB")!,
         online: Color(hex: "#34C759")!,
         warn: Color(hex: "#FFB340")!,
         danger: Color(hex: "#FF453A")!,
@@ -83,6 +94,7 @@ struct Theme {
         placeholder: Color(hex: "#A0A0A5")!,
         icon: Color(hex: "#6E6E73")!,
         accent: Color(hex: "#1084FE")!,
+        unread: Color(hex: "#1084FE")!,
         online: Color(hex: "#34C759")!,
         warn: Color(hex: "#E59A00")!,
         danger: Color(hex: "#D7332A")!,

@@ -1,8 +1,11 @@
 // The Grok Bot question card, measured from internal/refs/grokbot-question-card-light.jpg
-// (@3x): one rounded card in the assistant-bubble grey (24 pt radius, 14 pt padding),
-// a semibold 17.5 pt question, a thin grey × top-right, and a white (dark: slightly lighter)
-// inner list (14 pt radius) of 41 pt rows — a 24 pt grey lettered badge, 17 pt text,
-// hairline separators. Nothing else: no icons, chips, coloured buttons or hints.
+// and media/design-parity/reference/grokbot-ios-dark/chat-question-card-dark.png (@3x):
+// one rounded card in the assistant-bubble grey (24 pt radius, 14 pt padding), a semibold
+// 17.5 pt question, a thin grey × top-right, an inner list (14 pt radius) of 41 pt rows —
+// a 24 pt lettered badge, 17 pt text, hairline separators — and, while open, the muted
+// line "Or answer in the chat below". Dark: the list is the page colour (#141414) inset
+// into the #202020 card, badges are card-coloured with #5D5D60 letters. No icons, chips
+// or coloured buttons.
 //
 // Tapping a row answers the question (`answer { questionId, value }`); × hides the card
 // for this session, the composer still answers. An answered card keeps the picked row
@@ -42,6 +45,13 @@ struct QuestionCard: View {
                 header
                 if !options.isEmpty {
                     list
+                }
+                if open && !options.isEmpty {
+                    Text("Or answer in the chat below")
+                        .font(.system(size: Theme.small))
+                        .foregroundStyle(palette.badgeInk)
+                        .padding(.top, 4)
+                        .padding(.leading, 1)
                 }
             }
             .padding(.top, Self.pad)
@@ -91,7 +101,7 @@ struct QuestionCard: View {
     }
 
     private var hairline: some View {
-        Rectangle().fill(palette.hairline).frame(height: 1 / UIScreen.main.scale)
+        Rectangle().fill(palette.hairline).frame(height: theme.isDark ? 1 : 1 / UIScreen.main.scale)
     }
 
     private func optionRow(ix: Int, option: ChoiceOption) -> some View {
@@ -172,9 +182,11 @@ struct QuestionCard: View {
 
     private var palette: Palette {
         if theme.isDark {
-            return Palette(outer: theme.bubbleAssistant, inner: Color(hex: "#2C2C2C")!, badge: Color(hex: "#3A3A3C")!,
-                           badgeInk: Color(hex: "#8E8E93")!, close: Color(hex: "#8E8E93")!,
-                           hairline: Color.white.opacity(0.08), press: Color.white.opacity(0.06))
+            // Measured on the real app: list = page #141414, badge = card #202020,
+            // letters / × / footnote #5D5D60, separators in the card colour.
+            return Palette(outer: theme.bubbleAssistant, inner: theme.bg, badge: theme.bubbleAssistant,
+                           badgeInk: Color(hex: "#5D5D60")!, close: Color(hex: "#5D5D60")!,
+                           hairline: theme.bubbleAssistant, press: Color.white.opacity(0.06))
         }
         return Palette(outer: theme.bubbleAssistant, inner: .white, badge: Color(hex: "#F1F1F3")!,
                        badgeInk: Color(hex: "#B4B4B8")!, close: Color(hex: "#B4B4B8")!,

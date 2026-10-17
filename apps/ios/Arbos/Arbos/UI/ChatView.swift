@@ -29,6 +29,8 @@ struct ChatView: View {
     @State private var showFiles = false
     @State private var showAttach = false
     @State private var scroller: ScrollViewProxy?
+    /// Scrolled more than ~120 pt above the end: show Grok's round chevron.
+    @State private var awayFromBottom = false
     @State private var demoRan = false
     @State private var demoQueue: [String] = []
     @StateObject private var recorder = MemoRecorder()
@@ -249,9 +251,20 @@ struct ChatView: View {
                 }
             }
         }
+        .overlay(alignment: .bottomTrailing) {
+            if awayFromBottom {
+                scrollToBottomButton
+                    .padding(.trailing, composerSideInset)
+                    .padding(.bottom, 10)
+                    .transition(.opacity.combined(with: .scale(scale: 0.8)))
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: awayFromBottom)
         .safeAreaInset(edge: .bottom, spacing: 0) {
             composer
-                .padding(.horizontal, 18)
+                // Grok: 31 pt side inset with the keyboard down, 19 pt with it up.
+                .padding(.horizontal, composerSideInset)
+                .animation(.easeOut(duration: 0.25), value: composerFocused)
                 .padding(.top, 8)
                 .padding(.bottom, composerFocused ? 0 : 2)
                 .background(alignment: .top) {
@@ -367,6 +380,8 @@ struct ChatView: View {
                         startCall(.voice)
                         #endif
                     case "recording": recorder.start()
+                    case "scrollup":
+                        if let first = rows.first { withAnimation { scroller?.scrollTo(first.id, anchor: .top) } }
                     case "pending":
                         pending = [.init(name: "Q3 board deck v5.pdf", mime: "application/pdf", data: Data()),
                                    .init(name: "Photo Oct 15.jpg", mime: "image/jpeg", data: Data())]
@@ -590,6 +605,29 @@ struct ChatView: View {
         .padding(.top, 6)
     }
 
+    private var composerSideInset: CGFloat {
+        composerFocused ? Theme.composerInsetKeyboard : Theme.composerInset
+    }
+
+    /// Grok's scroll-to-bottom control: a 36 pt field-coloured circle with a
+    /// chevron, right-aligned with the composer, 18 pt above it.
+    private var scrollToBottomButton: some View {
+        Button {
+            withAnimation(.easeOut(duration: 0.3)) { scroller?.scrollTo("bottom", anchor: .bottom) }
+        } label: {
+            ZStack {
+                Circle().fill(theme.field)
+                Circle().strokeBorder(theme.fieldBorder, lineWidth: 1)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(theme.text)
+            }
+            .frame(width: Theme.voiceButton, height: Theme.voiceButton)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Scroll to bottom")
+    }
+
     // MARK: Chat navigation swipes
 
     /// Swipe right goes back to Home (#916/#925). There is no swipe between
@@ -677,6 +715,7 @@ struct ChatView: View {
             }
             .defaultScrollAnchor(.bottom)
             .scrollDismissesKeyboard(.interactively)
+            .modifier(AwayFromBottomReporter(away: $awayFromBottom))
             // Mask stays in the scroll view's bounds — `ignoresSafeArea` on the
             // mask mis-samples the fade when the composer/keyboard inset changes
             // and can blank the whole transcript (white screen mid-type).
@@ -1462,5 +1501,23 @@ struct ModelPickerView: View {
             .onAppear { effort = project.effort }
         }
         .presentationDetents([.medium, .large])
+    }
+}
+
+/// Reports when the scroll view sits more than 120 pt above its end (iOS 18+;
+/// earlier systems never show the chevron).
+private struct AwayFromBottomReporter: ViewModifier {
+    @Binding var away: Bool
+
+    func body(content: Content) -> some View {
+        if #available(iOS 18, *) {
+            content.onScrollGeometryChange(for: Bool.self) { g in
+                g.contentOffset.y + g.containerSize.height < g.contentSize.height - 120
+            } action: { _, isAway in
+                away = isAway
+            }
+        } else {
+            content
+        }
     }
 }
