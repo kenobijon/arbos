@@ -406,10 +406,10 @@ enum Markdown {
         return (try? JSONSerialization.jsonObject(with: data)) != nil
     }
 
-    /// Inline markdown with Mac-parity link paint: accent colour + underline so
-    /// links stay visible under the bubble's body colour (and under the app's
-    /// text-coloured tint). Bare `http(s)://` URLs are linked too.
-    static func inline(_ text: String, color: Color, link: Color) -> AttributedString {
+    /// Inline markdown with Mac-parity link paint and Grok-style code chips:
+    /// accent + underline on links; monospaced (a point under body) on a soft
+    /// wash for ``code``. Bare `http(s)://` URLs are linked too.
+    static func inline(_ text: String, color: Color, link: Color, codeChip: Color) -> AttributedString {
         var attr = (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
             ?? AttributedString(text)
         linkBareURLs(&attr)
@@ -420,6 +420,12 @@ enum Markdown {
                 attr[range].underlineStyle = .single
             } else {
                 attr[range].swiftUI.foregroundColor = color
+            }
+            // Default markdown mono ignores the bubble's 17 pt body and looks
+            // undersized next to SF Pro; pin size and chip like Mac / M-101.
+            if run.inlinePresentationIntent?.contains(.code) == true {
+                attr[range].swiftUI.font = .system(size: Theme.code, design: .monospaced)
+                attr[range].swiftUI.backgroundColor = codeChip
             }
         }
         return attr
@@ -469,7 +475,7 @@ struct RowView: View {
         case .user(let text, let pending):
             HStack {
                 Spacer(minLength: 0)
-                Text(Markdown.inline(text, color: theme.userText, link: theme.accent))
+                Text(Markdown.inline(text, color: theme.userText, link: theme.accent, codeChip: theme.userCodeChip))
                     .font(.system(size: Theme.body))
                     .lineSpacing(Theme.bodyLineSpacing)
                     .tint(theme.accent)
@@ -492,7 +498,7 @@ struct RowView: View {
                         .font(.system(size: Theme.tiny, weight: .medium))
                         .foregroundStyle(theme.muted)
                         .padding(.leading, 4)
-                    Text(Markdown.inline(text, color: theme.text, link: theme.accent))
+                    Text(Markdown.inline(text, color: theme.text, link: theme.accent, codeChip: theme.codeChip))
                         .font(.system(size: Theme.body))
                         .lineSpacing(Theme.bodyLineSpacing)
                         .tint(theme.accent)
@@ -750,14 +756,14 @@ struct BlockView: View {
                 StreamingText(text: text, font: .system(size: Theme.body), color: theme.text)
                     .lineSpacing(Theme.bodyLineSpacing)
             } else {
-                Text(Markdown.inline(text, color: theme.text, link: theme.accent))
+                Text(Markdown.inline(text, color: theme.text, link: theme.accent, codeChip: theme.codeChip))
                     .font(.system(size: Theme.body))
                     .lineSpacing(Theme.bodyLineSpacing)
                     .tint(theme.accent)
                     .textSelection(.enabled)
             }
         case .heading(_, let text):
-            Text(Markdown.inline(text, color: theme.text, link: theme.accent))
+            Text(Markdown.inline(text, color: theme.text, link: theme.accent, codeChip: theme.codeChip))
                 .font(.system(size: Theme.body, weight: .semibold))
                 .tint(theme.accent)
         case .bullets(let items), .numbered(let items):
@@ -772,7 +778,7 @@ struct BlockView: View {
                         if live && i == items.count - 1 {
                             StreamingText(text: item, font: .system(size: Theme.body), color: theme.text)
                         } else {
-                            Text(Markdown.inline(item, color: theme.text, link: theme.accent))
+                            Text(Markdown.inline(item, color: theme.text, link: theme.accent, codeChip: theme.codeChip))
                                 .font(.system(size: Theme.body))
                                 .tint(theme.accent)
                         }
