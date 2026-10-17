@@ -80,10 +80,22 @@ if command -v op >/dev/null 2>&1 && [[ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; th
   : "${GITHUB_TOKEN:=$(opread 'op://Arbos/gefompyaklwbv2iuyyb4z5rvbm/credential' | tr -d '[:space:]')}"
   : "${ARBOS_RELAY_ADMIN_TOKEN:=$(opread 'op://Arbos/pjwsl7tjrhcbzbqos2masde2u4/credential' | tr -d '[:space:]')}"
   : "${OPENROUTER_API_KEY:=$(opread 'op://Arbos/xbirrctuljw2m6aieoway2szom/credential' | tr -d '[:space:]')}"
+  # iOS pre-merge gate: the EC2 Mac's ssh key (vault document "SSH — EC2 Mac arbos-mobile … ec2-user private key").
+  if [[ ! -s /etc/arbos/ec2-mac.pem ]]; then
+    if op document get l6zmhcj7thvr6bi7xdfr36akc4 --vault Arbos > /etc/arbos/ec2-mac.pem.tmp 2>/dev/null && [[ -s /etc/arbos/ec2-mac.pem.tmp ]]; then
+      mv /etc/arbos/ec2-mac.pem.tmp /etc/arbos/ec2-mac.pem
+    else
+      rm -f /etc/arbos/ec2-mac.pem.tmp
+    fi
+  fi
+fi
+if [[ -s /etc/arbos/ec2-mac.pem ]]; then
+  chown root:"$SVC_USER" /etc/arbos/ec2-mac.pem; chmod 0640 /etc/arbos/ec2-mac.pem
+  : "${IOS_GATE_SSH:=ec2-user@13.217.52.163}"
 fi
 if [[ -f "$ENV_FILE" ]]; then
   keep() { local k=$1; [[ -n "${!k:-}" ]] || printf -v "$k" '%s' "$(sed -n "s/^$k=//p" "$ENV_FILE" | head -1)"; }
-  for k in ASC_KEY_P8_B64 CURSOR_API_KEY GITHUB_TOKEN ARBOS_RELAY_ADMIN_TOKEN OPENROUTER_API_KEY FEEDBACK_PRIORITY FEEDBACK_AGENT_MODEL FEEDBACK_SCREEN_MODEL FEEDBACK_MIN_INTERVAL_S FEEDBACK_MAX_PER_DAY FEEDBACK_TESTER_MAX_PER_DAY FEEDBACK_DEDUPE_DAYS; do keep "$k"; done
+  for k in ASC_KEY_P8_B64 CURSOR_API_KEY GITHUB_TOKEN ARBOS_RELAY_ADMIN_TOKEN OPENROUTER_API_KEY FEEDBACK_PRIORITY FEEDBACK_AGENT_MODEL FEEDBACK_SCREEN_MODEL FEEDBACK_MIN_INTERVAL_S FEEDBACK_MAX_PER_DAY FEEDBACK_TESTER_MAX_PER_DAY FEEDBACK_DEDUPE_DAYS IOS_GATE_SSH IOS_GATE_TIMEOUT_S TESTFLIGHT_PUBLIC_GROUP_ID; do keep "$k"; done
 fi
 missing=()
 [[ -n "${ASC_KEY_P8_B64:-}" ]] || missing+=(ASC_KEY_P8_B64)
@@ -117,6 +129,11 @@ FEEDBACK_MIN_INTERVAL_S=${FEEDBACK_MIN_INTERVAL_S:-90}
 FEEDBACK_MAX_PER_DAY=${FEEDBACK_MAX_PER_DAY:-120}
 FEEDBACK_TESTER_MAX_PER_DAY=${FEEDBACK_TESTER_MAX_PER_DAY:-20}
 FEEDBACK_DEDUPE_DAYS=${FEEDBACK_DEDUPE_DAYS:-7}
+TESTFLIGHT_PUBLIC_GROUP_ID=${TESTFLIGHT_PUBLIC_GROUP_ID:-}
+# iOS pre-merge gate (EC2 Mac over ssh; empty = merge without compiling, CI catches it later)
+IOS_GATE_SSH=${IOS_GATE_SSH:-}
+IOS_GATE_KEY=/etc/arbos/ec2-mac.pem
+IOS_GATE_TIMEOUT_S=${IOS_GATE_TIMEOUT_S:-900}
 EOF
 chmod 0600 "$ENV_FILE"
 umask 022
