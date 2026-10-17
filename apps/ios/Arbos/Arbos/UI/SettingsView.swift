@@ -132,11 +132,13 @@ struct SettingsView: View {
 
     // MARK: Profile header
 
-    /// Large avatar, bold name, grey handle — Apple's account header.
-    /// The avatar swaps to the D79 `PersonAvatar(url:handle:size:name:id:colorIndex:)` once it lands.
+    /// Large avatar (D79: GitHub picture, else the coloured initials circle), bold
+    /// name, grey handle — Apple's account header.
     private var profileHeader: some View {
         VStack(spacing: 6) {
-            PersonAvatar(url: model.user?.avatarUrl, handle: model.user?.login ?? "?", size: 104)
+            PersonAvatar(url: model.user?.avatarUrl, handle: model.user?.login ?? "?", size: 104,
+                         name: model.user?.name, id: model.user?.id,
+                         colorIndex: model.user?.avatarColorIndexEffective)
                 .padding(.bottom, 8)
             Text(model.user?.name ?? model.user?.login ?? "Arbos")
                 .font(.system(size: 28, weight: .bold))
