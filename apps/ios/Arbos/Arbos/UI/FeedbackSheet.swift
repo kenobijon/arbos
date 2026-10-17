@@ -38,7 +38,7 @@ struct FeedbackSheet: View {
                         }
                         screenshotCard
                         noteField
-                        Text("Your screenshot and note go to the Arbos team, with the app version and device. An agent on our side reads every one.")
+                        Text("Your screenshot and note go to the Arbos team, with the app version and device. An agent on our side reads every one and fixes what it can.")
                             .font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
                             .multilineTextAlignment(.center)
                             .padding(.horizontal, 28)
