@@ -20,7 +20,7 @@ export const ROUTE_PARAMS = Type.Object(
     harness: Type.Optional(Type.Union([Type.Literal("prime"), Type.Literal("claude_code"), Type.Literal("pi"), Type.Null()])),
     isolate: Type.Optional(Type.Boolean()),
     data_heavy: Type.Optional(Type.Boolean()),
-    reply: Type.Optional(Type.Union([Type.String(), Type.Null()], { description: "reply: short answer text" })),
+    reply: Type.Optional(Type.Union([Type.String(), Type.Null()], { description: "reply: exact user-facing answer only (no thinking aloud)" })),
   },
   { additionalProperties: false },
 );

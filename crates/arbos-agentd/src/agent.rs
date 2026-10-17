@@ -162,8 +162,9 @@ impl ReplyExtractor {
 }
 
 /// Cheap post-check on main-agent prose as it streams into the doc (demo review v2): drops
-/// leading boilerplate lines ("Called 3 tools", "Running the tests…", "Route accepted: …") and
-/// whole ```json fences. Text is held back only until a line boundary, so streaming stays live.
+/// leading boilerplate lines ("Called 3 tools", "Running the tests…", "Route accepted: …"),
+/// leading thought-aloud sentences ("The user is asking…", "I should reply…"), and whole
+/// ```json fences. Text is held back only until a line boundary, so streaming stays live.
 #[derive(Default)]
 pub struct ProseFilter {
     pending: String,
@@ -230,6 +231,90 @@ impl ProseFilter {
         tool_count || mechanics || narration
     }
 
+    /// A sentence that is the model talking to itself, not to the user.
+    fn is_thought_sentence(sentence: &str) -> bool {
+        let l = sentence
+            .trim()
+            .trim_start_matches(['*', '_', '#', '>', '-', ' '])
+            .trim_end_matches(['.', '!', '?', '…'])
+            .to_ascii_lowercase();
+        if l.is_empty() {
+            return true;
+        }
+        let starts = |p: &[&str]| p.iter().any(|x| l.starts_with(x));
+        // Keep these narrow: a real reply can start with "I should…" or "I need to…".
+        starts(&[
+            "the user is",
+            "the user asked",
+            "the user wants",
+            "the user would",
+            "i should reply",
+            "i should answer",
+            "i will reply",
+            "i'll reply",
+            "i will answer",
+            "i'll answer",
+            "let me think",
+            "thinking:",
+            "this is a simple",
+            "this is a factual",
+            "this is straightforward",
+            "this is an easy",
+        ])
+    }
+
+    /// Split off the first sentence. Treats ".Austin" (period, no space, capital) as a boundary
+    /// so a glued thought+answer still separates.
+    fn split_first_sentence(s: &str) -> Option<(&str, &str)> {
+        let bytes = s.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if b == b'.' || b == b'!' || b == b'?' {
+                let after = &s[i + 1..];
+                if after.is_empty() {
+                    return None;
+                }
+                if after.starts_with(' ') || after.starts_with('\n') || after.starts_with('\r') {
+                    return Some((&s[..=i], after));
+                }
+                if let Some(c) = after.chars().next() {
+                    if c.is_uppercase() {
+                        return Some((&s[..=i], after));
+                    }
+                }
+            }
+            i += utf8_len(bytes[i]);
+        }
+        None
+    }
+
+    /// Drop leading thought-aloud sentences; keep the user-facing answer.
+    fn strip_thought_prefix(text: &str) -> String {
+        let (body, nl) = match text.strip_suffix('\n') {
+            Some(b) => match b.strip_suffix('\r') {
+                Some(b2) => (b2, "\r\n"),
+                None => (b, "\n"),
+            },
+            None => (text, ""),
+        };
+        let mut rest = body.trim_start();
+        while let Some((sentence, after)) = Self::split_first_sentence(rest) {
+            if !Self::is_thought_sentence(sentence) {
+                break;
+            }
+            rest = after.trim_start();
+        }
+        if rest.is_empty() {
+            return String::new();
+        }
+        if Self::is_thought_sentence(rest) && Self::split_first_sentence(rest).is_none() {
+            // Whole remainder is one thought sentence (no answer after).
+            return String::new();
+        }
+        format!("{rest}{nl}")
+    }
+
     fn take_line(&mut self, line: &str) -> Option<String> {
         let t = line.trim_start();
         if self.in_fence {
@@ -259,7 +344,12 @@ impl ProseFilter {
             if Self::is_boilerplate(line) {
                 return None;
             }
+            let cleaned = Self::strip_thought_prefix(line);
+            if cleaned.trim().is_empty() {
+                return None;
+            }
             self.started = true;
+            return Some(cleaned);
         }
         Some(line.to_owned())
     }
@@ -284,8 +374,14 @@ impl ProseFilter {
             if Self::is_boilerplate(&self.pending) {
                 self.pending.clear();
             } else {
-                self.started = true;
-                out.push_str(&std::mem::take(&mut self.pending));
+                let cleaned = Self::strip_thought_prefix(&self.pending);
+                self.pending.clear();
+                if cleaned.trim().is_empty() {
+                    // Entire buffer was thought-aloud; keep waiting for real prose.
+                } else {
+                    self.started = true;
+                    out.push_str(&cleaned);
+                }
             }
         }
         out
