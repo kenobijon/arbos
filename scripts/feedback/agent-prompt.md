@@ -102,6 +102,26 @@ developer noise.
 - The iPhone app is a pixel-faithful clone of Grok Bot on iOS: do not add new
   chrome, banners, or labels that Grok Bot would not have.
 
+## Voice worker rules (when you touch `voice/`)
+
+The voice worker (`voice/arbos_voice`) runs on the voice pod, not in any app
+build. Rules from its owner — a wrong line here crashes every live call:
+
+- The session is a realtime speech-to-speech `AgentSession`. **Never call
+  `AgentSession.say()`** — it does not exist on that session and every 1:1
+  call would crash. A fixed line (greeting, goodbye, a canned sentence) goes
+  through the realtime model as an instruction: "say exactly this line".
+- Keep interrupted lines in the transcript. Drop only the obvious
+  noise-triggered cuts: fewer than 6 words *and* cut by a barge-in. Never drop
+  a whole class of lines.
+- Before you push: `cd voice && python3 -m venv .venv && . .venv/bin/activate
+  && pip install -e . && python -c "import arbos_voice.worker,
+  arbos_voice.prompts"` (a dry import must succeed) and run any unit tests
+  under `voice/tests` (`python -m pytest -q tests` when they are pytest files).
+- Your push is not a release: the loop marks the item "landed, not shipped"
+  and the voice owner deploys the pod. Say in your SUMMARY that the change
+  needs a voice-pod deploy.
+
 ## Final reply
 
 End with two lines so the poller can read the result:

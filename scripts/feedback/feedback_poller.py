@@ -1420,6 +1420,15 @@ class Loop:
             return True
         return any(DEVICE_ONLY_FILES.search(f or "") for f in st.get("files") or [])
 
+    @staticmethod
+    def deploy_kind(files: list[str]) -> str | None:
+        """Code that no app build carries: the voice pod (`voice/**`) or the sandbox image (agentd)."""
+        if any(f.startswith("voice/") for f in files):
+            return "voice"
+        if any(f.startswith("crates/arbos-agentd/") for f in files):
+            return "agentd"
+        return None
+
     def ship(self, fid: str, st: dict, partial: bool = False) -> None:
         info = self.store.submission(fid)
         parts = []
@@ -1436,6 +1445,20 @@ class Loop:
                          elapsed_min=elapsed, commit=st.get("commit"), issue=st.get("issue_url"))
         unverified = self.needs_device_evidence(info, st)
         st["device_evidence"] = "pending" if unverified else "not needed"
+        kind = self.deploy_kind(st.get("files") or [])
+        if kind:
+            # The build artifacts carry the commit, but the code runs on the voice pod / in the sandbox
+            # image: landed, not shipped, until watch_deploys sees a deployed sha that contains it.
+            st["pending_deploy"] = kind
+            self.store.save_state(fid, st)
+            self.store.event(fid, "landed_not_shipped", kind=kind, commit=st.get("commit"), issue=st.get("issue_url"))
+            where = {"voice": "the voice pod (voice-calls worker deploys it)", "agentd": "the sandbox image (next image roll)"}[kind]
+            self.gh.ensure_label("landed-not-shipped", "FBCA04", "Fix is on main but not yet in a TestFlight build / release / fleet image")
+            self.gh.comment(st["issue"], f"Landed, not shipped: the fix is on `main` ({', '.join(parts) or 'CI green'}) but this code runs on "
+                            f"{where}; it is live for users only after that deploy. The loop flips this to shipped when the relay reports "
+                            f"a deployed sha that contains {str(st.get('commit'))[:8]}.\n\nCommit {st.get('commit_url')} · agent {st.get('agent_url')}")
+            self.gh.set_labels(st["issue"], ["landed-not-shipped"], ["needs-human"])
+            return
         self.store.save_state(fid, st)
         self.gh.comment(st["issue"], ("Shipped" if not partial else "Shipped (partially)") + ": " + (", ".join(parts) or "see runs above")
                         + f".\n\nScreenshot → installable build: **{elapsed} min** "
@@ -1510,8 +1533,9 @@ class Loop:
         self.store.event(fid, "deployed", kind=kind, note=note)
         if st.get("issue"):
             unverified = st.get("device_evidence") == "pending"
-            self.gh.comment(st["issue"], f"Live for users: {note}." + (
-                " Still `shipped-unverified`: please confirm on a device." if unverified else ""))
+            self.gh.comment(st["issue"], f"Shipped — live for users: {note}." + (
+                " This is an audio / call / notification change the simulator cannot prove, so it is `shipped-unverified` "
+                "until the reporter confirms it on a device." if unverified else ""))
             self.gh.set_labels(st["issue"], ["shipped-unverified"] if unverified else ["shipped"], ["landed-not-shipped"])
         log(f"[{fid}] deployed: {note}")
 
@@ -1615,7 +1639,9 @@ def tester_summary(store: Store) -> list[dict]:
         if st.get("issue"):
             row["issues"] += 1
         status = st.get("status", "?")
-        if status == "shipped":
+        if status == "shipped" and st.get("pending_deploy"):
+            row["other"]["landed-not-shipped"] = row["other"].get("landed-not-shipped", 0) + 1
+        elif status == "shipped":
             if st.get("device_evidence") == "pending":
                 row["shipped_unverified"] += 1
             else:
