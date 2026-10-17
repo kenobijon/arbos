@@ -1045,6 +1045,24 @@ pub async fn put_user_cap(
     .into_response()
 }
 
+/// `POST /voice/worker/hello {sha, version, model}` (admin token): the worker says which build
+/// it runs; shown as `voice.worker_sha` / `voice.worker` in `GET /admin/calls`.
+pub async fn worker_hello(
+    State(state): State<AppState>,
+    principal: Principal,
+    Json(b): Json<Value>,
+) -> Response {
+    if let Err(r) = worker_only(&principal) {
+        return *r;
+    }
+    let info = json!({
+        "sha": b["sha"], "version": b["version"], "model": b["model"], "hello_at": now_ms(),
+    });
+    tracing::info!(sha = %b["sha"], version = %b["version"], "voice worker hello");
+    *state.voice_worker.lock().await = Some(info.clone());
+    Json(info).into_response()
+}
+
 /// The voice part of `GET /admin/calls`: config and the last agent calls with their cost log.
 pub fn admin_json(state: &AppState) -> Value {
     let recent: Vec<Value> = state
@@ -1070,8 +1088,16 @@ pub fn admin_json(state: &AppState) -> Value {
             })
         })
         .collect();
+    let worker = state
+        .voice_worker
+        .try_lock()
+        .ok()
+        .and_then(|w| w.clone())
+        .unwrap_or(Value::Null);
     json!({
         "enabled": state.voice.enabled && state.livekit.is_some(),
+        "worker_sha": worker["sha"].clone(),
+        "worker": worker,
         "agent_name": state.voice.agent_name,
         "model": state.voice.model,
         "default_voice": state.voice.default_voice,
