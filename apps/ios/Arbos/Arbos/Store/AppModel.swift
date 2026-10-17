@@ -8,14 +8,16 @@ import SwiftUI
 import UIKit
 import os
 
+/// Theme choice (D81): System follows the device and is the default; the order
+/// is the Settings order (System first, then Light, then Dark).
 enum Appearance: String, CaseIterable, Identifiable {
-    case system, dark, light
+    case system, light, dark
     var id: String { rawValue }
     var label: String {
         switch self {
         case .system: return "System"
-        case .dark: return "Dark"
         case .light: return "Light"
+        case .dark: return "Dark"
         }
     }
 }
@@ -59,6 +61,9 @@ final class AppModel: ObservableObject {
     /// The hosted relay; self-hosters change it under Advanced.
     static let defaultRelayUrl = "https://relay.arbos.life"
 
+    /// D81: System is the default; the key is only written when the user picks a
+    /// theme in Settings, so an absent key means "never chose" → System, and an
+    /// explicit "dark" or "light" stays.
     @Published var appearanceSetting: String = UserDefaults.standard.string(forKey: "appearance") ?? Appearance.system.rawValue {
         didSet { UserDefaults.standard.set(appearanceSetting, forKey: "appearance") }
     }
@@ -132,6 +137,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var authMode: AuthMode = .github
     @Published private(set) var signingIn = false
     @Published private(set) var signInError: String?
+    /// After a fresh GitHub sign-in, ask for display name + handle once (Settings can edit later).
+    @Published var needsProfileSetup = false
     private let webAuth = WebAuth()
     private var refreshTask: Task<Bool, Never>?
     @Published var projects: [Project] = [] {
@@ -220,7 +227,14 @@ final class AppModel: ObservableObject {
         Set(UserDefaults.standard.stringArray(forKey: "archivedProjects") ?? [])
     }()
 
+    /// People DMs/groups hidden from home until found in search (or opened).
+    @Published private(set) var archivedPeopleChatIds: Set<Id> = {
+        Set(UserDefaults.standard.stringArray(forKey: "archivedPeopleChats") ?? [])
+    }()
+
     func isArchived(_ projectId: Id) -> Bool { archivedProjectIds.contains(projectId) }
+
+    func isArchived(peopleChatId: Id) -> Bool { archivedPeopleChatIds.contains(peopleChatId) }
 
     func archive(_ projectId: Id) {
         guard !archivedProjectIds.contains(projectId) else { return }
@@ -230,10 +244,23 @@ final class AppModel: ObservableObject {
         unpinHome(projectId: projectId)
     }
 
+    func archive(peopleChatId: Id) {
+        guard !archivedPeopleChatIds.contains(peopleChatId) else { return }
+        archivedPeopleChatIds.insert(peopleChatId)
+        UserDefaults.standard.set(Array(archivedPeopleChatIds), forKey: "archivedPeopleChats")
+        unpinHome(peopleChatId: peopleChatId)
+    }
+
     func unarchive(_ projectId: Id) {
         guard archivedProjectIds.contains(projectId) else { return }
         archivedProjectIds.remove(projectId)
         UserDefaults.standard.set(Array(archivedProjectIds), forKey: "archivedProjects")
+    }
+
+    func unarchive(peopleChatId: Id) {
+        guard archivedPeopleChatIds.contains(peopleChatId) else { return }
+        archivedPeopleChatIds.remove(peopleChatId)
+        UserDefaults.standard.set(Array(archivedPeopleChatIds), forKey: "archivedPeopleChats")
     }
 
     // MARK: Home pins (device-local)
@@ -253,7 +280,10 @@ final class AppModel: ObservableObject {
 
     func unpinHome(projectId: Id) { setHomePinned("p:" + projectId, false) }
 
-    func pinHome(peopleChatId: Id) { setHomePinned("c:" + peopleChatId, true) }
+    func pinHome(peopleChatId: Id) {
+        unarchive(peopleChatId: peopleChatId)
+        setHomePinned("c:" + peopleChatId, true)
+    }
     func unpinHome(peopleChatId: Id) { setHomePinned("c:" + peopleChatId, false) }
 
     private func setHomePinned(_ key: String, _ pinned: Bool) {
@@ -619,9 +649,30 @@ final class AppModel: ObservableObject {
                 let code = try await webAuth.signIn(startURL: start)
                 let (toks, who) = try await api.exchange(grantCode: code)
                 adopt(tokens: toks, user: who)
+                needsProfileSetup = true
             } catch {
                 signInError = error.localizedDescription
             }
+        }
+    }
+
+    /// Settings / onboarding: save display name and handle via `PATCH /me`.
+    @discardableResult
+    func updateProfile(name: String, handle: String) async -> String? {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedHandle = handle.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "@"))
+        guard !trimmedHandle.isEmpty else { return "Choose a handle." }
+        do {
+            let who = try await api.patchMe(name: trimmedName, login: trimmedHandle)
+            user = who
+            saveAccountCache()
+            needsProfileSetup = false
+            return nil
+        } catch let e as RelayError {
+            return AuthError.humanize(e.type ?? "", e.message.isEmpty ? "Could not update profile" : e.message)
+        } catch {
+            return error.localizedDescription
         }
     }
 
@@ -716,6 +767,7 @@ final class AppModel: ObservableObject {
         user = nil
         credits = nil
         approvals = []
+        needsProfileSetup = false
         unpair(forget: true)
     }
 
@@ -1351,6 +1403,8 @@ final class AppModel: ObservableObject {
     // MARK: Connectors (F1)
 
     /// Load the relay's connector catalog + connected accounts for Settings.
+    /// Failures stay quiet — opening Settings must not alert on a transient TLS
+    /// blip. Connect / Disconnect still set `notice` themselves.
     func refreshConnectors() {
         guard credentials != nil, !isFixture else { return }
         Task {
@@ -1360,21 +1414,31 @@ final class AppModel: ObservableObject {
                 // Older relays have no connectors route.
                 connectors = ConnectorsView(loaded: true)
             } catch {
-                notice = Notice(text: "Connectors: \(error.localizedDescription)")
+                // Same as refreshConnectorsOnce: leave prior state, no alert.
             }
         }
     }
 
-    /// Start Google (etc.) OAuth in the system auth sheet. The relay finishes the
-    /// HTTPS callback, then redirects to `arbos://connectors/callback` so the sheet
+    /// Start OAuth in the system auth sheet, or store a pasted token. The relay finishes
+    /// the HTTPS callback, then redirects to `arbos://connectors/callback` so the sheet
     /// closes and we land back in Settings. Falls back to Safari if the sheet cannot
     /// start. Errors go through `notice` — Settings shows them itself (the root alert
     /// sits under the sheet and looks like a silent fail).
-    func connectConnector(provider: String) {
+    func connectConnector(provider: String, token: String? = nil) {
         guard !connectorsBusy, credentials != nil, !isFixture else { return }
         connectorsBusy = true
         Task { @MainActor in
             do {
+                if let token, !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    _ = try await api.connectConnector(provider: provider, token: token)
+                    connectorsBusy = false
+                    await refreshConnectorsOnce()
+                    if connectors.connector(for: provider)?.status != .connected {
+                        let err = connectors.connector(for: provider)?.lastError ?? ""
+                        notice = Notice(text: "Connect \(provider): \(err.isEmpty ? "token was not accepted" : err)")
+                    }
+                    return
+                }
                 guard let urlStr = try await api.connectConnector(provider: provider),
                       let url = URL(string: urlStr) else {
                     connectorsBusy = false
@@ -1421,15 +1485,24 @@ final class AppModel: ObservableObject {
                     }
                 } catch {
                     connectorsBusy = false
-                    notice = Notice(text: "Connect \(provider): \(error.localizedDescription)")
+                    notice = Notice(text: Self.connectErrorText(provider: provider, error: error))
                     await refreshConnectorsOnce()
                 }
             } catch {
                 connectorsBusy = false
-                notice = Notice(text: "Connect \(provider): \(error.localizedDescription)")
+                notice = Notice(text: Self.connectErrorText(provider: provider, error: error))
                 await refreshConnectorsOnce()
             }
         }
+    }
+
+    /// Drop relay env-var names from the Settings alert when Google OAuth is missing.
+    private static func connectErrorText(provider: String, error: Error) -> String {
+        let raw = error.localizedDescription
+        if raw.localizedCaseInsensitiveContains("OAuth client not configured") {
+            return "Connect \(provider): OAuth client not configured on the relay."
+        }
+        return "Connect \(provider): \(raw)"
     }
 
     func disconnectConnector(id: Id) {
@@ -1667,6 +1740,7 @@ final class AppModel: ObservableObject {
     }
 
     func open(peopleChat chat: PeopleChat) {
+        unarchive(peopleChatId: chat.id)
         path = [.chat(chatId: chat.id, projectId: peopleSlot)]
     }
 
@@ -2028,6 +2102,11 @@ final class AppModel: ObservableObject {
         rooms[chatId]?.stop(); rooms[chatId] = nil; docs[chatId] = nil; messages[chatId] = nil
         unacked[chatId] = nil
         forgetDoc(chatId)
+        if archivedPeopleChatIds.contains(chatId) {
+            archivedPeopleChatIds.remove(chatId)
+            UserDefaults.standard.set(Array(archivedPeopleChatIds), forKey: "archivedPeopleChats")
+        }
+        unpinHome(peopleChatId: chatId)
         path = []
         Task {
             do { try await api.deleteChat(chatId) } catch { notice = Notice(text: "Delete failed: \(error.localizedDescription)") }
@@ -2321,6 +2400,29 @@ final class AppModel: ObservableObject {
     func chats(of projectId: Id) -> [Chat] { chats[projectId] ?? [] }
 
     func messages(of chatId: Id) -> [Message] { messages[chatId] ?? [] }
+
+    /// Add or remove an emoji reaction on a message. Multiple different emojis
+    /// can be active on the same message; tapping the same emoji again clears it.
+    func toggleReaction(chatId: Id, messageId: Id, emoji: String) {
+        guard let me = myUserId, !emoji.isEmpty else { return }
+        #if DEBUG
+        if isFixture {
+            guard var list = messages[chatId], let i = list.firstIndex(where: { $0.id == messageId }) else { return }
+            list[i].reactions = MessageReaction.toggling(list[i].reactions, emoji: emoji, sender: me)
+            messages[chatId] = list
+            Haptics.pick()
+            return
+        }
+        #endif
+        guard let doc = docs[chatId] else { return }
+        do {
+            try doc.toggleReaction(messageId: messageId, emoji: emoji, sender: me)
+            doc.commit()
+            Haptics.pick()
+        } catch {
+            notice = Notice(text: "Could not update the reaction: \(error.localizedDescription)")
+        }
+    }
 
     /// Paint any room doc that already has rows but no published transcript yet
     /// (checkpoint landed, catch-up still in flight). Home search reads
@@ -2830,22 +2932,26 @@ final class AppModel: ObservableObject {
     }
 
     /// Grok Bot "Duplicate": a new top-level agent with the same profile, look,
-    /// model, and instructions — not the chat history. Own agents only.
+    /// model, instructions, and workspace context (files + memory) — not the
+    /// chat transcript. Own agents only.
     func duplicateProject(_ project: Project) {
         guard !project.shared else { return }
         let name = uniqueCopyName(of: project.name)
         let modelId = project.model
         let effort = project.effort
+        let sourceId = project.id
         Task {
             do {
                 // Do not pass `models` on create: a partial map would drop the
                 // relay's default subagent/decision slots. Set the talking
-                // model after the copy exists.
+                // model after the copy exists. `sourceProjectId` asks the
+                // relay to copy the source agent's project folder and memory.
                 try await api.createProject(
                     name: name,
                     color: project.color,
                     description: project.description,
-                    instructions: project.instructions
+                    instructions: project.instructions,
+                    sourceProjectId: sourceId
                 )
                 await refreshRegistry()
                 if let copy = projects.first(where: { $0.name == name && !$0.shared }) {

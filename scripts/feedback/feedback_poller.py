@@ -93,6 +93,7 @@ ASC_API = "https://api.appstoreconnect.apple.com/v1"
 CURSOR_API = "https://api.cursor.com/v1"
 GITHUB_API = "https://api.github.com"
 ASSET_RELEASE_TAG = "feedback-screenshots"
+RELAY_DEPLOYED_SHA_FILE = "/etc/arbos/relay.deployed-sha"  # written by scripts/deploy/relay-server.sh
 USER_AGENT = "arbos-feedback-poller/1 (+https://github.com/unarbos/arbos)"
 
 TERMINAL = {"shipped", "failed", "ignored", "rejected", "duplicate", "no_change", "handed_off", "deferred"}
@@ -1601,6 +1602,8 @@ class Loop:
             return "voice"
         if any(f.startswith("crates/arbos-agentd/") for f in files):
             return "agentd"
+        if any(f.startswith("crates/arbos-relay/") for f in files):
+            return "relay"
         return None
 
     def ship(self, fid: str, st: dict, partial: bool = False) -> None:
@@ -1626,7 +1629,8 @@ class Loop:
             st["pending_deploy"] = kind
             self.store.save_state(fid, st)
             self.store.event(fid, "landed_not_shipped", deploy=kind, commit=st.get("commit"), issue=st.get("issue_url"))
-            where = {"voice": "the voice pod (voice-calls worker deploys it)", "agentd": "the sandbox image (next image roll)"}[kind]
+            where = {"voice": "the voice pod (voice-calls worker deploys it)", "agentd": "the sandbox image (next image roll)",
+                     "relay": "the relay (next relay deploy)"}[kind]
             self.gh.ensure_label("landed-not-shipped", "FBCA04", "Fix is on main but not yet in a TestFlight build / release / fleet image")
             self.gh.comment(st["issue"], f"Landed, not shipped: the fix is on `main` ({', '.join(parts) or 'CI green'}) but this code runs on "
                             f"{where}; it is live for users only after that deploy. The loop flips this to shipped when the relay reports "
@@ -1697,7 +1701,10 @@ class Loop:
         else:
             agentd_shas = sorted({b["sha"] for b in agentd.get("boxes") or [] if b.get("sha") and b.get("state", "awake") == "awake"}
                                  or set(agentd.get("shas") or []))
-        targets = {"voice": [voice_sha] if voice_sha else [], "agentd": agentd_shas}
+        relay_sha = ""
+        with contextlib.suppress(OSError):
+            relay_sha = Path(RELAY_DEPLOYED_SHA_FILE).read_text().strip()
+        targets = {"voice": [voice_sha] if voice_sha else [], "agentd": agentd_shas, "relay": [relay_sha] if relay_sha else []}
         for fid, st in pending:
             shas = targets.get(st["pending_deploy"]) or []
             if not shas or not st.get("commit"):
@@ -1711,7 +1718,8 @@ class Loop:
                     break
                 contained.append(cmp.get("status") in ("ahead", "identical"))
             if contained and all(contained):
-                where = ("the voice pod" if st["pending_deploy"] == "voice"
+                kind = st["pending_deploy"]
+                where = ("the voice pod" if kind == "voice" else "the relay" if kind == "relay"
                          else f"all {agentd.get('awake') or len(shas)} awake boxes (image {(agentd.get('boxes') or [{}])[0].get('image', '?')})")
                 self.mark_deployed(fid, st, f"{where} now run {shas[0][:8]}" + ("" if len(shas) == 1 else f" and {len(shas) - 1} other sha(s)")
                                    + f", which contain {st['commit'][:8]}")

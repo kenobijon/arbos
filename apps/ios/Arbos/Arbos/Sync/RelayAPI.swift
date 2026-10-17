@@ -237,13 +237,16 @@ final class RelayAPI {
         avatarColorIndex: Int? = nil,
         color: String? = nil,
         description: String? = nil,
-        instructions: String? = nil
+        instructions: String? = nil,
+        sourceProjectId: Id? = nil
     ) async throws {
         var body: [String: Any] = ["name": name]
         if let avatarColorIndex { body["avatar_color_index"] = avatarColorIndex }
         if let color { body["color"] = color }
         if let description, !description.isEmpty { body["description"] = String(description.prefix(500)) }
         if let instructions, !instructions.isEmpty { body["instructions"] = instructions }
+        // Fork: relay copies the source agent's workspace (files + memory) into the new one.
+        if let sourceProjectId { body["source_project_id"] = sourceProjectId }
         _ = try await json("POST", "/projects", body: body)
     }
 

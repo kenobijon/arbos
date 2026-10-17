@@ -53,6 +53,20 @@ struct RootView: View {
         .alert(item: $model.notice) { n in
             Alert(title: Text("Arbos"), message: Text(n.text), dismissButton: .default(Text("OK")))
         }
+        // Profile setup waits for the first-login screen (D82): the terminal and the
+        // greeting hand-off come first, then the name/handle sheet, then the primer.
+        .sheet(isPresented: Binding(get: { model.needsProfileSetup && model.firstLogin == nil },
+                                    set: { model.needsProfileSetup = $0 })) {
+            ProfileEditView(onboarding: true)
+                .environmentObject(model)
+                .environment(\.theme, theme)
+                .presentationDetents([.height(420), .large])
+                .presentationDragIndicator(.hidden)
+                .presentationBackground(theme.bg)
+                .presentationCornerRadius(28)
+                .interactiveDismissDisabled(true)
+                .preferredColorScheme(theme.isDark ? .dark : .light)
+        }
         .sheet(isPresented: $showPrimer) {
             NotificationsPrimerView().environment(\.theme, theme)
         }
@@ -107,6 +121,7 @@ struct RootView: View {
         }
         .onChange(of: model.isPaired, initial: true) { _, paired in schedulePrimer(paired) }
         .onChange(of: model.firstLogin == nil) { _, _ in schedulePrimer(model.isPaired) }
+        .onChange(of: model.needsProfileSetup) { _, needed in if !needed { schedulePrimer(model.isPaired) } }
         .onChange(of: push.status) { _, _ in schedulePrimer(model.isPaired) }
         .onChange(of: scenePhase) { _, phase in
             // Match Mac `window_active`: only suppress push while the scene is
@@ -128,8 +143,8 @@ struct RootView: View {
         guard paired, !model.isFixture, !DebugHooks.liveDemo, DebugHooks.show == nil, push.shouldShowPrimer, !showPrimer,
               model.firstLogin == nil else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-            // Never on top of another sheet (feedback, settings…) or the first-login screen.
-            if push.shouldShowPrimer, model.isPaired, !feedback.isPresented, model.firstLogin == nil { showPrimer = true }
+            // Never on top of another sheet (feedback, settings, profile setup…) or the first-login screen.
+            if push.shouldShowPrimer, model.isPaired, !feedback.isPresented, !model.needsProfileSetup, model.firstLogin == nil { showPrimer = true }
         }
     }
 

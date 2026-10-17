@@ -50,6 +50,10 @@ struct Theme {
     let dangerSoft: Color
     let card: Color
     let separator: Color
+    /// Soft wash behind inline ``code`` in assistant / other bubbles (Mac `code_bg`).
+    let codeChip: Color
+    /// Soft wash behind inline ``code`` on the dark user bubble.
+    let userCodeChip: Color
 
     static let bubbleRadius: CGFloat = 20
     static let bubbleHPad: CGFloat = 14
@@ -59,6 +63,8 @@ struct Theme {
     /// Screen width minus 71 pt (16 pt own margin + 55 pt on the other side; Grok dark, 420 pt screen).
     static let bubbleInset: CGFloat = 71
     static let body: CGFloat = 17
+    /// Inline code sits a point under body so SF Mono matches the prose cap height.
+    static let code: CGFloat = 16
     static let small: CGFloat = 15
     static let tiny: CGFloat = 13
     static let control: CGFloat = 42
@@ -93,7 +99,9 @@ struct Theme {
         danger: Color(hex: "#FF453A")!,
         dangerSoft: Color(hex: "#FF453A")!.opacity(0.14),
         card: Color(hex: "#1C1C1C")!,
-        separator: Color.white.opacity(0.08)
+        separator: Color.white.opacity(0.08),
+        codeChip: Color.black.opacity(0.28),
+        userCodeChip: Color.white.opacity(0.14)
     )
 
     // Light, measured from Grok's App Store shots: page #FCFCFC, assistant
@@ -116,7 +124,9 @@ struct Theme {
         danger: Color(hex: "#D7332A")!,
         dangerSoft: Color(hex: "#D7332A")!.opacity(0.10),
         card: .white,
-        separator: Color.black.opacity(0.08)
+        separator: Color.black.opacity(0.08),
+        codeChip: Color.black.opacity(0.06),
+        userCodeChip: Color.white.opacity(0.14)
     )
 
     static func resolve(appearance: Appearance, surface: Surface, systemDark: Bool) -> Theme {
@@ -184,7 +194,8 @@ extension Color {
 }
 
 private struct ThemeKey: EnvironmentKey {
-    static let defaultValue = Theme.dark
+    /// Views shown without an injected theme fall back to Light, never Dark (D81).
+    static let defaultValue = Theme.light
 }
 
 extension EnvironmentValues {

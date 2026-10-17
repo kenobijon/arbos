@@ -352,6 +352,7 @@ struct NewAgentView: View {
             TextField("", text: $name, prompt: Text("Agent name").foregroundStyle(theme.placeholder))
                 .font(.system(size: Theme.body)).foregroundStyle(theme.text)
                 .multilineTextAlignment(.center)
+                .autocorrectionDisabled()
                 .focused($focused)
                 .submitLabel(.done)
                 .onSubmit(create)

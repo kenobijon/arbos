@@ -367,6 +367,42 @@ enum Part: Equatable {
     }
 }
 
+/// One emoji reaction on a message: who picked this emoji (sender ids like `user:…`).
+/// Several different emojis can sit on the same message at once.
+struct MessageReaction: Equatable, Hashable {
+    var emoji: String
+    var senders: [String]
+
+    /// iMessage-style set that renders cleanly in SwiftUI context menus.
+    static let palette: [String] = ["👍", "❤️", "😂", "😮", "😢", "🙏"]
+
+    /// Toggle `sender` on/off for `emoji`, keeping other emoji reactions intact.
+    static func toggling(_ list: [MessageReaction], emoji: String, sender: String) -> [MessageReaction] {
+        var byEmoji: [String: [String]] = [:]
+        for r in list where !r.emoji.isEmpty && !r.senders.isEmpty {
+            byEmoji[r.emoji] = r.senders
+        }
+        var people = byEmoji[emoji] ?? []
+        if let i = people.firstIndex(of: sender) {
+            people.remove(at: i)
+        } else {
+            people.append(sender)
+        }
+        if people.isEmpty {
+            byEmoji.removeValue(forKey: emoji)
+        } else {
+            byEmoji[emoji] = people
+        }
+        return MessageReaction.palette.compactMap { e in
+            guard let s = byEmoji[e], !s.isEmpty else { return nil }
+            return MessageReaction(emoji: e, senders: s)
+        } + byEmoji.keys.filter { !MessageReaction.palette.contains($0) }.sorted().compactMap { e in
+            guard let s = byEmoji[e], !s.isEmpty else { return nil }
+            return MessageReaction(emoji: e, senders: s)
+        }
+    }
+}
+
 struct Message: Identifiable, Equatable {
     var id: Id
     var chatId: Id
@@ -406,6 +442,8 @@ struct Message: Identifiable, Equatable {
     /// D82: the agent's canned first line, written by the device that created the
     /// project (`greeting: true`); written once per chat, never treated as user text.
     var greeting: Bool = false
+    /// Emoji reactions on this message (`reactions` map in the chat doc). Multiple emojis allowed.
+    var reactions: [MessageReaction] = []
 
     var isStreaming: Bool { status == .streaming }
 
@@ -503,8 +541,35 @@ enum DocJSON {
             replyTo: str(m["replyTo"]),
             activity: str(m["activity"]).flatMap { $0.isEmpty ? nil : $0 },
             voice: bool(m["voice"]) || str(m["source"]) == "voice",
-            greeting: bool(m["greeting"])
+            greeting: bool(m["greeting"]),
+            reactions: reactions(m["reactions"])
         )
+    }
+
+    /// `reactions` is a map of emoji → map of sender id → true (additive; unknown shapes ignored).
+    static func reactions(_ raw: Any?) -> [MessageReaction] {
+        guard let map = raw as? [String: Any] else { return [] }
+        var byEmoji: [String: [String]] = [:]
+        for (emoji, v) in map {
+            guard !emoji.isEmpty else { continue }
+            var senders: [String] = []
+            if let people = v as? [String: Any] {
+                for (sid, flag) in people {
+                    guard !sid.isEmpty else { continue }
+                    if bool(flag) { senders.append(sid) }
+                }
+            }
+            if !senders.isEmpty { byEmoji[emoji] = senders.sorted() }
+        }
+        let ordered = MessageReaction.palette.compactMap { e -> MessageReaction? in
+            guard let s = byEmoji[e] else { return nil }
+            return MessageReaction(emoji: e, senders: s)
+        }
+        let rest = byEmoji.keys.filter { !MessageReaction.palette.contains($0) }.sorted().compactMap { e -> MessageReaction? in
+            guard let s = byEmoji[e] else { return nil }
+            return MessageReaction(emoji: e, senders: s)
+        }
+        return ordered + rest
     }
 
     static func part(_ pm: [String: Any]) -> Part {
@@ -647,6 +712,7 @@ struct ConnectorProvider: Identifiable, Equatable {
     var oauthConfigured: Bool
 
     var hasOauth: Bool { connect == "oauth" || connect == "oauth_or_token" }
+    var acceptsToken: Bool { connect == "token" || connect == "oauth_or_token" }
 }
 
 /// Settings → Connectors state.

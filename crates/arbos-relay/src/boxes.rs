@@ -901,6 +901,169 @@ pub async fn sweep_box_liveness(state: &AppState) {
     }
 }
 
+/// Safe project-id path segment: ulids and similar ids only (no `/`, `..`, or whitespace).
+fn safe_work_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Ask agentd to stop (hold) or restart (release) one workspace on the user box.
+async fn hold_workspace(
+    state: &AppState,
+    sb: &Sandbox,
+    project_id: &str,
+    hold: bool,
+) -> Result<()> {
+    let Some(url) = &sb.box_url else {
+        return Err(anyhow!("user box has no url yet"));
+    };
+    let verb = if hold { "hold" } else { "release" };
+    let mut req = state
+        .http
+        .post(format!("{url}/w/{project_id}/{verb}"))
+        .bearer_auth(&sb.mcp_token)
+        .timeout(Duration::from_secs(60));
+    if let Some(t) = &sb.preview_token {
+        req = req.header("x-daytona-preview-token", t);
+    }
+    let r = req
+        .send()
+        .await
+        .with_context(|| format!("{verb} workspace"))?;
+    if !r.status().is_success() {
+        return Err(anyhow!("{verb} workspace: HTTP {}", r.status()));
+    }
+    Ok(())
+}
+
+/// Drop pi/Prime session files on a forked workspace so the new agent keeps files and memory
+/// (the project's context) but does not resume the source agent's live chat session.
+fn scrub_fork_sessions(dst: &std::path::Path) {
+    for rel in [
+        ".arbos/pi/sessions",
+        ".arbos/prime/sessions",
+        ".arbos/claude/sessions",
+    ] {
+        let p = dst.join(rel);
+        let _ = std::fs::remove_dir_all(&p);
+        let _ = std::fs::create_dir_all(&p);
+    }
+    let _ = std::fs::remove_file(dst.join(".arbos/.owner"));
+}
+
+/// Copy `/work/<source>` → `/work/<dest>` on the user's box when forking an agent.
+///
+/// The fork keeps the source project's folder and durable memory; chat UI history stays empty
+/// (new pinned chat on the relay). Best effort: missing source dir is a no-op; failures are
+/// logged. Waits briefly for the box to be reachable after a wake.
+pub async fn copy_workspace_for_fork(
+    state: &AppState,
+    user_id: &str,
+    source_project_id: &str,
+    dest_project_id: &str,
+) {
+    if !safe_work_id(source_project_id) || !safe_work_id(dest_project_id) {
+        tracing::warn!(%user_id, source_project_id, dest_project_id, "fork copy: bad project id");
+        return;
+    }
+    if source_project_id == dest_project_id {
+        return;
+    }
+    // Up to ~90s for a just-woken box to expose box_url / toolbox.
+    let mut sb = None;
+    for _ in 0..45 {
+        match state.db.user_box(user_id) {
+            Ok(Some(s)) if s.box_url.is_some() || s.provider != "daytona" => {
+                sb = Some(s);
+                break;
+            }
+            Ok(other) => sb = other,
+            Err(_) => {}
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    let Some(sb) = sb else {
+        tracing::info!(%user_id, "fork copy: no box yet; nothing to copy");
+        return;
+    };
+    match (
+        Provider::parse(&sb.provider),
+        &state.daytona,
+        &sb.sandbox_id,
+    ) {
+        (Some(Provider::Daytona), Some(dt), Some(id)) => {
+            // Hold both so agentd does not seed an empty dest while we copy, and so the
+            // source SQLite is quiet enough for a consistent folder copy.
+            let _ = hold_workspace(state, &sb, dest_project_id, true).await;
+            let _ = hold_workspace(state, &sb, source_project_id, true).await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let cmd = format!(
+                "sudo -n sh -c 'if [ ! -d /work/{src} ]; then echo missing; exit 0; fi; \
+                 for i in 1 2 3 4 5; do sudo -n rm -rf /work/{dst} && break; sleep 1; done; \
+                 sudo -n cp -a /work/{src} /work/{dst} && \
+                 sudo -n rm -rf /work/{dst}/.arbos/pi/sessions /work/{dst}/.arbos/prime/sessions \
+                   /work/{dst}/.arbos/claude/sessions 2>/dev/null; \
+                 sudo -n mkdir -p /work/{dst}/.arbos/pi/sessions; \
+                 sudo -n rm -f /work/{dst}/.arbos/.owner; echo ok'",
+                src = source_project_id,
+                dst = dest_project_id
+            );
+            let result = dt.toolbox_exec(id, &cmd, 600).await;
+            let _ = hold_workspace(state, &sb, source_project_id, false).await;
+            let _ = hold_workspace(state, &sb, dest_project_id, false).await;
+            match result {
+                Ok(v) => {
+                    let text = v
+                        .get("result")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim()
+                        .to_owned();
+                    if text.contains("missing") {
+                        tracing::info!(%user_id, source_project_id, "fork copy: source workspace empty");
+                    } else if v.get("exitCode").and_then(Value::as_i64).unwrap_or(1) != 0 {
+                        tracing::warn!(%user_id, source_project_id, dest_project_id, %text, "fork copy failed");
+                    } else {
+                        tracing::info!(%user_id, source_project_id, dest_project_id, "fork copy done");
+                    }
+                }
+                Err(e) => tracing::warn!(%user_id, error = %e, "fork copy"),
+            }
+        }
+        (Some(Provider::Process), _, _) | (Some(Provider::Docker), _, _) => {
+            let base = state.cfg.data_dir.join("boxes").join(user_id).join("work");
+            let src = base.join(source_project_id);
+            let dst = base.join(dest_project_id);
+            if !src.is_dir() {
+                tracing::info!(%user_id, source_project_id, "fork copy: source workspace empty");
+                return;
+            }
+            let _ = hold_workspace(state, &sb, dest_project_id, true).await;
+            let _ = hold_workspace(state, &sb, source_project_id, true).await;
+            let _ = std::fs::remove_dir_all(&dst);
+            if let Some(parent) = dst.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let st = tokio::process::Command::new("cp")
+                .args(["-a", &src.display().to_string(), &dst.display().to_string()])
+                .status()
+                .await;
+            if matches!(&st, Ok(s) if s.success()) {
+                scrub_fork_sessions(&dst);
+                tracing::info!(%user_id, source_project_id, dest_project_id, "fork copy done");
+            } else {
+                tracing::warn!(%user_id, source_project_id, dest_project_id, ?st, "fork copy failed");
+            }
+            let _ = hold_workspace(state, &sb, source_project_id, false).await;
+            let _ = hold_workspace(state, &sb, dest_project_id, false).await;
+        }
+        _ => tracing::warn!(%user_id, provider = %sb.provider, "fork copy: unsupported provider"),
+    }
+}
+
 /// Move a deleted project's `/work/<id>` to `/work/.archive/<id>` on the user's box (Daytona
 /// through the toolbox shell, local providers on disk). Best effort: the purge removes whatever
 /// is left seven days later.

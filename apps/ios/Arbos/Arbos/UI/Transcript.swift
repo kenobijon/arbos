@@ -41,6 +41,8 @@ struct Row: Identifiable, Equatable {
     var messageId: Id
     var role: Role
     var kind: RowKind
+    /// Emoji reactions shown under this bubble (stamped on the last prose/media row of a message).
+    var reactions: [MessageReaction] = []
 }
 
 enum Transcript {
@@ -188,6 +190,15 @@ enum Transcript {
                 }
             }
             guard !chunk.isEmpty else { continue }
+            if !message.reactions.isEmpty,
+               let ix = chunk.lastIndex(where: {
+                   switch $0.kind {
+                   case .user, .other, .member, .assistant, .image, .file, .voiceMemo: return true
+                   default: return false
+                   }
+               }) {
+                chunk[ix].reactions = message.reactions
+            }
             // Joins that happened before this message land first (Grok: "@bob joined").
             if message.createdAt > 0 { flushJoins(before: message.createdAt) }
             // Date separators when the gap is over an hour (Grok: "Today 8:00 AM").
@@ -395,10 +406,10 @@ enum Markdown {
         return (try? JSONSerialization.jsonObject(with: data)) != nil
     }
 
-    /// Inline markdown with Mac-parity link paint: accent colour + underline so
-    /// links stay visible under the bubble's body colour (and under the app's
-    /// text-coloured tint). Bare `http(s)://` URLs are linked too.
-    static func inline(_ text: String, color: Color, link: Color) -> AttributedString {
+    /// Inline markdown with Mac-parity link paint and Grok-style code chips:
+    /// accent + underline on links; monospaced (a point under body) on a soft
+    /// wash for ``code``. Bare `http(s)://` URLs are linked too.
+    static func inline(_ text: String, color: Color, link: Color, codeChip: Color) -> AttributedString {
         var attr = (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
             ?? AttributedString(text)
         linkBareURLs(&attr)
@@ -409,6 +420,12 @@ enum Markdown {
                 attr[range].underlineStyle = .single
             } else {
                 attr[range].swiftUI.foregroundColor = color
+            }
+            // Default markdown mono ignores the bubble's 17 pt body and looks
+            // undersized next to SF Pro; pin size and chip like Mac / M-101.
+            if run.inlinePresentationIntent?.contains(.code) == true {
+                attr[range].swiftUI.font = .system(size: Theme.code, design: .monospaced)
+                attr[range].swiftUI.backgroundColor = codeChip
             }
         }
         return attr
@@ -448,11 +465,21 @@ struct RowView: View {
     }
 
     var body: some View {
+        VStack(spacing: 4) {
+            bubble
+            if !row.reactions.isEmpty {
+                reactionChips
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var bubble: some View {
         switch row.kind {
         case .user(let text, let pending):
             HStack {
                 Spacer(minLength: 0)
-                Text(Markdown.inline(text, color: theme.userText, link: theme.accent))
+                Text(Markdown.inline(text, color: theme.userText, link: theme.accent, codeChip: theme.userCodeChip))
                     .font(.system(size: Theme.body))
                     .lineSpacing(Theme.bodyLineSpacing)
                     .tint(theme.accent)
@@ -475,7 +502,7 @@ struct RowView: View {
                         .font(.system(size: Theme.tiny, weight: .medium))
                         .foregroundStyle(theme.muted)
                         .padding(.leading, 4)
-                    Text(Markdown.inline(text, color: theme.text, link: theme.accent))
+                    Text(Markdown.inline(text, color: theme.text, link: theme.accent, codeChip: theme.codeChip))
                         .font(.system(size: Theme.body))
                         .lineSpacing(Theme.bodyLineSpacing)
                         .tint(theme.accent)
@@ -592,6 +619,51 @@ struct RowView: View {
         }
     }
 
+    /// Compact chips under the bubble (iMessage-style). Tap toggles your own reaction.
+    private var reactionChips: some View {
+        let mine = model.myUserId
+        return HStack(spacing: 4) {
+            if row.role == .user { Spacer(minLength: 0) }
+            ForEach(row.reactions, id: \.emoji) { reaction in
+                let mineOn = mine.map { reaction.senders.contains($0) } ?? false
+                Button {
+                    model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: reaction.emoji)
+                } label: {
+                    HStack(spacing: 3) {
+                        Text(reaction.emoji).font(.system(size: 14))
+                        if reaction.senders.count > 1 {
+                            Text("\(reaction.senders.count)")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(theme.muted)
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(mineOn ? theme.accent.opacity(0.22) : theme.card)
+                    )
+                    .overlay(
+                        Capsule(style: .continuous)
+                            .strokeBorder(mineOn ? theme.accent.opacity(0.55) : theme.separator, lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(reaction.emoji) reaction, \(reaction.senders.count)")
+            }
+            if row.role != .user { Spacer(minLength: 0) }
+        }
+        .padding(.leading, reactionLeading)
+    }
+
+    /// Match the avatar offset used by people-chat bubbles (26 pt + 8 pt gap).
+    private var reactionLeading: CGFloat {
+        switch row.kind {
+        case .other, .member: return 34
+        default: return 0
+        }
+    }
+
     /// Avatar for a people-chat agent: project tree when we know it, else sender slug / initials.
     @ViewBuilder
     private func peopleAvatar(handle: String, avatar: String?) -> some View {
@@ -699,14 +771,14 @@ struct BlockView: View {
                 StreamingText(text: text, font: .system(size: Theme.body), color: theme.text)
                     .lineSpacing(Theme.bodyLineSpacing)
             } else {
-                Text(Markdown.inline(text, color: theme.text, link: theme.accent))
+                Text(Markdown.inline(text, color: theme.text, link: theme.accent, codeChip: theme.codeChip))
                     .font(.system(size: Theme.body))
                     .lineSpacing(Theme.bodyLineSpacing)
                     .tint(theme.accent)
                     .textSelection(.enabled)
             }
         case .heading(_, let text):
-            Text(Markdown.inline(text, color: theme.text, link: theme.accent))
+            Text(Markdown.inline(text, color: theme.text, link: theme.accent, codeChip: theme.codeChip))
                 .font(.system(size: Theme.body, weight: .semibold))
                 .tint(theme.accent)
         case .bullets(let items), .numbered(let items):
@@ -721,7 +793,7 @@ struct BlockView: View {
                         if live && i == items.count - 1 {
                             StreamingText(text: item, font: .system(size: Theme.body), color: theme.text)
                         } else {
-                            Text(Markdown.inline(item, color: theme.text, link: theme.accent))
+                            Text(Markdown.inline(item, color: theme.text, link: theme.accent, codeChip: theme.codeChip))
                                 .font(.system(size: Theme.body))
                                 .tint(theme.accent)
                         }
@@ -895,6 +967,7 @@ struct ImageBubble: View {
 }
 
 /// Full-screen image: pinch to zoom, drag to pan when zoomed, double-tap to toggle.
+/// At 1×: swipe down or swipe right from the left edge to dismiss.
 private struct ZoomableImageViewer: View {
     let image: UIImage
     let onClose: () -> Void
@@ -907,21 +980,27 @@ private struct ZoomableImageViewer: View {
     private let minScale: CGFloat = 1
     private let maxScale: CGFloat = 5
     private let doubleTapScale: CGFloat = 2.5
+    /// Vertical drag past this distance dismisses when not zoomed.
+    private let dismissDownThreshold: CGFloat = 120
+    /// Horizontal drag past this distance dismisses from the left edge.
+    private let dismissEdgeThreshold: CGFloat = 100
+    /// Start must be within this many points of the leading edge for edge swipe.
+    private let edgeSwipeWidth: CGFloat = 28
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
-            Color.black.ignoresSafeArea()
+            Color.black.opacity(backdropOpacity).ignoresSafeArea()
             Image(uiImage: image)
                 .resizable()
                 .scaledToFit()
-                .scaleEffect(scale)
+                .scaleEffect(scale * dismissScale)
                 .offset(offset)
                 .ignoresSafeArea()
                 .gesture(magnifyGesture)
                 .simultaneousGesture(panGesture)
                 .onTapGesture(count: 2, perform: toggleZoom)
                 .accessibilityLabel("Image")
-                .accessibilityHint("Pinch to zoom, double tap to zoom in or out")
+                .accessibilityHint("Pinch to zoom, double tap to zoom in or out, swipe down or from the left edge to close")
             Button(action: onClose) {
                 Image(systemName: "xmark")
                     .font(.system(size: 15, weight: .semibold))
@@ -933,6 +1012,22 @@ private struct ZoomableImageViewer: View {
             .padding(16)
             .accessibilityLabel("Close")
         }
+    }
+
+    /// Fade the black backdrop while the user drags to dismiss at 1×.
+    private var backdropOpacity: Double {
+        guard scale <= minScale + 0.01 else { return 1 }
+        let distance = max(offset.height, offset.width)
+        guard distance > 0 else { return 1 }
+        return max(0.35, 1 - Double(distance) / 400)
+    }
+
+    /// Slight shrink while dragging to dismiss, matching the Photos-style feel.
+    private var dismissScale: CGFloat {
+        guard scale <= minScale + 0.01 else { return 1 }
+        let distance = max(offset.height, offset.width)
+        guard distance > 0 else { return 1 }
+        return max(0.85, 1 - distance / 1000)
     }
 
     private var magnifyGesture: some Gesture {
@@ -951,14 +1046,42 @@ private struct ZoomableImageViewer: View {
     private var panGesture: some Gesture {
         DragGesture()
             .onChanged { value in
-                guard scale > minScale else { return }
-                offset = CGSize(
-                    width: baseOffset.width + value.translation.width,
-                    height: baseOffset.height + value.translation.height
-                )
+                if scale > minScale {
+                    offset = CGSize(
+                        width: baseOffset.width + value.translation.width,
+                        height: baseOffset.height + value.translation.height
+                    )
+                    return
+                }
+                // At 1×: follow a dismiss drag (down anywhere, or right from the left edge).
+                let t = value.translation
+                if t.height > 0, t.height >= abs(t.width) {
+                    offset = CGSize(width: 0, height: t.height)
+                } else if value.startLocation.x <= edgeSwipeWidth,
+                          t.width > 0,
+                          t.width >= abs(t.height) {
+                    offset = CGSize(width: t.width, height: 0)
+                }
             }
-            .onEnded { _ in
-                baseOffset = offset
+            .onEnded { value in
+                if scale > minScale {
+                    baseOffset = offset
+                    return
+                }
+                let t = value.translation
+                let dismissDown = t.height > dismissDownThreshold
+                    && t.height > abs(t.width) * 1.5
+                let dismissEdge = value.startLocation.x <= edgeSwipeWidth
+                    && t.width > dismissEdgeThreshold
+                    && t.width > abs(t.height) * 1.25
+                if dismissDown || dismissEdge {
+                    onClose()
+                } else {
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        offset = .zero
+                        baseOffset = .zero
+                    }
+                }
             }
     }
 

@@ -30,6 +30,9 @@ struct SettingsView: View {
     @State private var connectorError: String?
     @State private var avatarItem: PhotosPickerItem?
     @State private var avatarBusy = false
+    @State private var showProfileEdit = false
+    /// `ARBOS_SETTINGS_PAGE=appearance` lands on that page (screenshot rig).
+    @State private var showAppearancePage = DebugHooks.settingsPage == "appearance"
 
     var body: some View {
         NavigationStack {
@@ -133,6 +136,18 @@ struct SettingsView: View {
                 guard let item else { return }
                 Task { await applyAvatarPick(item) }
             }
+            .navigationDestination(isPresented: $showAppearancePage) { AppearancePage() }
+            .sheet(isPresented: $showProfileEdit) {
+                NavigationStack {
+                    ProfileEditView()
+                }
+                .environmentObject(model)
+                .environment(\.theme, theme)
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+                .presentationBackground(theme.bg)
+                .preferredColorScheme(theme.isDark ? .dark : .light)
+            }
         }
         .tint(theme.text)
         .preferredColorScheme(theme.isDark ? .dark : .light)
@@ -142,7 +157,8 @@ struct SettingsView: View {
     // MARK: Profile header
 
     /// Large avatar (D79: GitHub picture, else the coloured initials circle), bold
-    /// name, grey handle — Apple's account header. Tap the picture to change it.
+    /// name, grey handle — Apple's account header. Tap the picture to change it;
+    /// tap the name/handle to edit them.
     private var profileHeader: some View {
         VStack(spacing: 6) {
             PhotosPicker(selection: $avatarItem, matching: .images) {
@@ -155,16 +171,32 @@ struct SettingsView: View {
             .disabled(model.user == nil || avatarBusy || model.isFixture)
             .accessibilityLabel("Change profile picture")
             .padding(.bottom, 8)
-            Text(model.user?.name ?? model.user?.login ?? "Arbos")
-                .font(.system(size: 28, weight: .bold))
-                .foregroundStyle(theme.text)
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-            Text(model.user.map { "@\($0.login)" } ?? (model.relayUrl.isEmpty ? "Not signed in" : model.relayUrl))
-                .font(.system(size: Theme.body))
-                .foregroundStyle(theme.muted)
-                .lineLimit(1)
-                .truncationMode(.middle)
+            Button {
+                guard model.user != nil, !model.isFixture else { return }
+                showProfileEdit = true
+            } label: {
+                VStack(spacing: 6) {
+                    Text(model.user?.name ?? model.user?.login ?? "Arbos")
+                        .font(.system(size: 28, weight: .bold))
+                        .foregroundStyle(theme.text)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                    Text(model.user.map { "@\($0.login)" } ?? (model.relayUrl.isEmpty ? "Not signed in" : model.relayUrl))
+                        .font(.system(size: Theme.body))
+                        .foregroundStyle(theme.muted)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if model.user != nil, !model.isFixture {
+                        Text("Edit name")
+                            .font(.system(size: Theme.tiny, weight: .medium))
+                            .foregroundStyle(theme.accent)
+                            .padding(.top, 2)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .disabled(model.user == nil || model.isFixture)
+            .accessibilityLabel("Edit name and handle")
         }
         .frame(maxWidth: .infinity)
         .padding(.top, 14)
@@ -507,11 +539,12 @@ struct SettingsActionRow: View {
 struct CreditsPage: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
+    @State private var showTopUpFeedback = false
 
     var body: some View {
         SettingsPage(title: "Credits") {
             if let c = model.credits {
-                SettingsGroup(footer: "Credits pay for your agents' model use. Machine time is billed separately.") {
+                SettingsGroup(footer: "Credits pay for your agents' model use. Machine time is billed separately. During the beta, usage credit is included — request a top-up when you run low.") {
                     SettingsValueRow("Balance", value: String(format: "$%.2f left of $%.0f", c.balanceUsd, c.grantedUsd))
                     if let cap = c.dailyCapUsd {
                         SettingsValueRow("Today", value: String(format: "$%.2f of $%.0f cap", c.spentTodayUsd, cap))
@@ -522,6 +555,18 @@ struct CreditsPage: View {
             } else {
                 SettingsGroup { SettingsValueRow("Balance", value: "Not available yet") }
             }
+            SettingsGroup {
+                SettingsActionRow(title: "Request a top-up") {
+                    FeedbackCenter.shared.context = FeedbackCenter.Context(screen: "credits")
+                    FeedbackCenter.shared.screenshot = FeedbackCenter.captureScreen()
+                    showTopUpFeedback = true
+                }
+            }
+        }
+        .sheet(isPresented: $showTopUpFeedback) {
+            FeedbackSheet()
+                .environmentObject(model)
+                .environment(\.theme, theme)
         }
     }
 }
@@ -593,53 +638,139 @@ struct ConnectorsPage: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     @Binding var connectorError: String?
+    /// Provider whose token paste field is open (`nil` = none).
+    @State private var tokenFor: String?
+    @State private var tokenDraft = ""
 
     var body: some View {
         SettingsPage(title: "Connected apps") {
-            SettingsGroup(footer: "Connect Google so your agents can read Gmail and Calendar. Tokens stay on the relay; the agent asks before it sends.") {
-                ForEach(googleProviders) { p in
+            SettingsGroup(footer: "Connect Gmail, Calendar, Slack, GitHub, or Harness Comms so your agents can use them. Tokens stay on the relay; the agent asks before it sends.") {
+                ForEach(catalogProviders) { p in
                     connectorRow(p)
                 }
             }
         }
+        .onAppear { model.refreshConnectors() }
     }
 
-    /// Google (Gmail + Calendar) from the catalog, or a local stand-in before load.
-    private var googleProviders: [ConnectorProvider] {
-        let fromRelay = model.connectors.providers.filter { $0.provider == "google" }
+    /// Full relay catalog (Google, Slack, GitHub, Harness Comms), or stand-ins before load.
+    private var catalogProviders: [ConnectorProvider] {
+        let fromRelay = model.connectors.providers
         if !fromRelay.isEmpty { return fromRelay }
         if model.connectors.loaded { return [] }
-        return [ConnectorProvider(provider: "google", label: "Google (Gmail, Calendar)", connect: "oauth", oauthConfigured: true)]
+        // oauthConfigured: false until the catalog says otherwise — Connect
+        // before load used to 409 with ARBOS_GOOGLE_CLIENT_* in the alert.
+        return [
+            ConnectorProvider(provider: "google", label: "Google (Gmail, Calendar)", connect: "oauth", oauthConfigured: false),
+            ConnectorProvider(provider: "slack", label: "Slack", connect: "oauth_or_token", oauthConfigured: false),
+            ConnectorProvider(provider: "github", label: "GitHub", connect: "oauth_or_token", oauthConfigured: false),
+            ConnectorProvider(provider: "harness_comms", label: "Harness Comms (Beeper + Gmail)", connect: "token", oauthConfigured: true),
+        ]
     }
 
     @ViewBuilder
     private func connectorRow(_ p: ConnectorProvider) -> some View {
         let cn = model.connectors.connector(for: p.provider)
         let connected = cn?.status == .connected
-        HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(p.label).font(.system(size: Theme.body)).foregroundStyle(theme.text)
-                Text(connectorSubline(p, cn: cn))
-                    .font(.system(size: Theme.tiny))
-                    .foregroundStyle(theme.muted)
+        let tokenOpen = tokenFor == p.provider
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(p.label).font(.system(size: Theme.body)).foregroundStyle(theme.text)
+                    Text(connectorSubline(p, cn: cn))
+                        .font(.system(size: Theme.tiny))
+                        .foregroundStyle(theme.muted)
+                }
+                Spacer(minLength: 8)
+                if connected, let id = cn?.id {
+                    Button("Disconnect") { model.disconnectConnector(id: id) }
+                        .font(.system(size: Theme.small, weight: .semibold))
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(theme.text)
+                        .disabled(model.connectorsBusy)
+                } else {
+                    if p.hasOauth {
+                        Button("Connect") { startOauth(p) }
+                            .font(.system(size: Theme.small, weight: .semibold))
+                            .buttonStyle(.borderless)
+                            .foregroundStyle(theme.accent)
+                            .disabled(model.connectorsBusy || model.isFixture)
+                    }
+                    if p.acceptsToken {
+                        Button(tokenOpen ? "Cancel" : "Token…") {
+                            if tokenOpen {
+                                tokenFor = nil
+                                tokenDraft = ""
+                            } else {
+                                tokenFor = p.provider
+                                tokenDraft = ""
+                            }
+                        }
+                        .font(.system(size: Theme.small, weight: .semibold))
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(p.hasOauth ? theme.text : theme.accent)
+                        .disabled(model.connectorsBusy || model.isFixture)
+                    }
+                }
             }
-            Spacer(minLength: 8)
-            if connected, let id = cn?.id {
-                Button("Disconnect") { model.disconnectConnector(id: id) }
-                    .font(.system(size: Theme.small, weight: .semibold))
-                    .buttonStyle(.borderless)
-                    .foregroundStyle(theme.text)
-                    .disabled(model.connectorsBusy)
-            } else if p.hasOauth {
-                Button("Connect") { model.connectConnector(provider: p.provider) }
-                    .font(.system(size: Theme.small, weight: .semibold))
-                    .buttonStyle(.borderless)
-                    .foregroundStyle(theme.accent)
-                    .disabled(model.connectorsBusy || model.isFixture)
+            if tokenOpen {
+                HStack(spacing: 8) {
+                    SecureField("Paste a token, then Save", text: $tokenDraft)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .font(.system(size: Theme.small))
+                        .foregroundStyle(theme.text)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(theme.field, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .strokeBorder(theme.fieldBorder, lineWidth: 1)
+                        )
+                    Button("Save") { saveToken(p) }
+                        .font(.system(size: Theme.small, weight: .semibold))
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(theme.accent)
+                        .disabled(model.connectorsBusy || model.isFixture
+                                  || tokenDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
             }
         }
         .padding(.horizontal, 16)
+        .padding(.vertical, 8)
         .frame(minHeight: 56)
+    }
+
+    private func startOauth(_ p: ConnectorProvider) {
+        tokenFor = nil
+        tokenDraft = ""
+        // Stand-ins claim oauth is ready; tapping Connect before the catalog
+        // lands hits a 409 and surfaces env-var names. Wait, then explain.
+        if !model.connectors.mock {
+            if !model.connectors.loaded {
+                model.refreshConnectors()
+                connectorError = "Still loading connected apps. Try Connect again in a moment."
+                return
+            }
+            // Prefer the live catalog row (oauthConfigured) over a stale stand-in.
+            let live = model.connectors.providers.first(where: { $0.provider == p.provider }) ?? p
+            if !live.oauthConfigured {
+                connectorError = "Connect \(live.label): OAuth client not configured on the relay."
+                    + (live.acceptsToken ? " Use Token… with an API key or personal access token instead." : "")
+                return
+            }
+            model.connectConnector(provider: live.provider)
+            return
+        }
+        model.connectConnector(provider: p.provider)
+    }
+
+    private func saveToken(_ p: ConnectorProvider) {
+        let token = tokenDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty else { return }
+        tokenFor = nil
+        tokenDraft = ""
+        model.connectConnector(provider: p.provider, token: token)
     }
 
     private func connectorSubline(_ p: ConnectorProvider, cn: Connector?) -> String {
@@ -648,7 +779,13 @@ struct ConnectorsPage: View {
         }
         // Prefer the real reason over a stuck "Needs sign-in" from a failed start.
         if model.connectors.loaded, !p.oauthConfigured, !model.connectors.mock, p.hasOauth {
+            if p.acceptsToken {
+                return "OAuth not configured — connect with a token"
+            }
             return "OAuth client not configured on the relay"
+        }
+        if !p.hasOauth, p.acceptsToken {
+            return "API key: use Token…"
         }
         if let err = cn?.lastError, !err.isEmpty, cn?.status != .connected {
             return err
@@ -727,6 +864,177 @@ struct AboutPage: View {
                 SettingsValueRow("Protocol", value: "room proto \(protoVersion) · Loro")
             }
         }
+    }
+}
+
+// MARK: - Profile name / handle
+
+/// Choose or edit display name and @handle — onboarding after GitHub sign-in,
+/// and Settings by tapping the profile name.
+struct ProfileEditView: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    @Environment(\.dismiss) private var dismiss
+
+    /// After sign-in: CTA is "Continue"; sheet cannot be dismissed until saved.
+    var onboarding: Bool = false
+
+    @State private var name: String = ""
+    @State private var handle: String = ""
+    @State private var busy = false
+    @State private var error: String?
+    @FocusState private var focus: Field?
+
+    private enum Field { case name, handle }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if onboarding {
+                Capsule().fill(theme.separator).frame(width: 36, height: 5).padding(.top, 10)
+            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    if onboarding {
+                        Text("Your profile")
+                            .font(.system(size: 22, weight: .semibold))
+                            .foregroundStyle(theme.text)
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 12)
+                        Text("Pick a name and handle people will see. You can change them later in Settings.")
+                            .font(.system(size: Theme.small))
+                            .foregroundStyle(theme.muted)
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: .infinity)
+                    }
+
+                    nameField
+                    handleField
+
+                    if let error {
+                        Text(error)
+                            .font(.system(size: Theme.small))
+                            .foregroundStyle(theme.danger)
+                    }
+
+                    Text("Handle: letters, numbers, and hyphens · up to 39 characters.")
+                        .font(.system(size: Theme.tiny))
+                        .foregroundStyle(theme.muted)
+                }
+                .padding(.horizontal, 24)
+                .padding(.top, onboarding ? 8 : 20)
+                .padding(.bottom, 24)
+            }
+            .scrollDismissesKeyboard(.interactively)
+
+            Button {
+                Task { await save() }
+            } label: {
+                Text(busy ? "Saving…" : (onboarding ? "Continue" : "Save"))
+                    .font(.system(size: Theme.body, weight: .semibold))
+                    .foregroundStyle(theme.onPrimary)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 50)
+                    .background(Capsule().fill(theme.primary))
+            }
+            .buttonStyle(.plain)
+            .disabled(!canSave || busy)
+            .opacity(canSave && !busy ? 1 : 0.45)
+            .padding(.horizontal, 24)
+            .padding(.bottom, onboarding ? 28 : 16)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(theme.bg)
+        .navigationTitle(onboarding ? "" : "Edit profile")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if !onboarding {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Cancel") { dismiss() }.foregroundStyle(theme.text)
+                }
+            }
+        }
+        .interactiveDismissDisabled(onboarding)
+        .onAppear {
+            name = model.user?.name ?? ""
+            handle = model.user?.login ?? ""
+            focus = .name
+        }
+    }
+
+    private var canSave: Bool {
+        let h = handle.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !h.isEmpty && h.count <= 39 && Self.isValidHandle(h)
+    }
+
+    private var nameField: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Name").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+            TextField("", text: $name, prompt: Text("Display name").foregroundStyle(theme.placeholder))
+                .font(.system(size: Theme.body))
+                .foregroundStyle(theme.text)
+                .textContentType(.name)
+                .textInputAutocapitalization(.words)
+                .focused($focus, equals: .name)
+                .submitLabel(.next)
+                .onSubmit { focus = .handle }
+                .padding(.horizontal, 14)
+                .frame(height: Theme.fieldHeight)
+                .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
+                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+        }
+    }
+
+    private var handleField: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Handle").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+            HStack(spacing: 2) {
+                Text("@").font(.system(size: Theme.body)).foregroundStyle(theme.muted)
+                TextField("", text: $handle, prompt: Text("handle").foregroundStyle(theme.placeholder))
+                    .font(.system(size: Theme.body))
+                    .foregroundStyle(theme.text)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .focused($focus, equals: .handle)
+                    .submitLabel(.done)
+                    .onSubmit { Task { await save() } }
+                    .onChange(of: handle) { _, new in
+                        let cleaned = Self.sanitizeHandle(new)
+                        if cleaned != new { handle = cleaned }
+                    }
+            }
+            .padding(.horizontal, 14)
+            .frame(height: Theme.fieldHeight)
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+        }
+    }
+
+    private func save() async {
+        guard canSave, !busy else { return }
+        busy = true
+        error = nil
+        defer { busy = false }
+        if let msg = await model.updateProfile(name: name, handle: handle) {
+            error = msg
+            return
+        }
+        dismiss()
+    }
+
+    static func sanitizeHandle(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: CharacterSet(charactersIn: "@"))
+        let allowed = trimmed.filter { c in
+            c.isASCII && (c.isLetter || c.isNumber || c == "-")
+        }
+        return String(allowed.prefix(39))
+    }
+
+    static func isValidHandle(_ handle: String) -> Bool {
+        !handle.isEmpty
+            && handle.count <= 39
+            && !handle.hasPrefix("-")
+            && !handle.hasSuffix("-")
+            && handle.allSatisfy { c in c.isASCII && (c.isLetter || c.isNumber || c == "-") }
     }
 }
 

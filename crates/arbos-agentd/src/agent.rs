@@ -1257,12 +1257,15 @@ impl Agent {
             return Ok(());
         }
         // People chats (D72): who is asking, in what role; the reply is attributed to them.
+        // Otherwise: guests get a label; the owner gets an address-by-display-name note.
         if let Some(prelude) = self.people_turn_context(chat_id, host, &user_msg_id).await {
             prompt_text = format!("{prelude}{prompt_text}");
         } else if let Some(note) = self
             .shared_project_guest_note(chat_id, host, &user_msg_id)
             .await
         {
+            prompt_text = format!("{note}{prompt_text}");
+        } else if let Some(note) = self.owner_address_note(chat_id, host, &user_msg_id).await {
             prompt_text = format!("{note}{prompt_text}");
         }
         if !attachments.notes.is_empty() {
@@ -1539,7 +1542,7 @@ impl Agent {
                 m.decision_cfg.scorer.clone(),
                 self.people
                     .asker(chat_id)
-                    .map(|a| format!("@{} ({})", a.handle, a.role))
+                    .map(|a| format!("{} ({})", a.spoken(), a.role))
                     .unwrap_or_else(|| "the project owner".to_owned()),
             )
         };

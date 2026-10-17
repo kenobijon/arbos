@@ -189,6 +189,34 @@ final class ChatDoc {
         _ = try map.insertContainer(key: "hiddenParts", child: LoroList())
     }
 
+    /// Find a message map by id (client writes reactions onto existing rows).
+    func findMessage(_ id: Id) -> LoroMap? {
+        let list = messages
+        let n = Int(list.len())
+        guard n > 0 else { return nil }
+        for i in 0..<n {
+            guard let map = list.get(index: UInt32(i))?.asLoroMap() else { continue }
+            if case .string(let s) = map.get(key: "id")?.asValue(), s == id {
+                return map
+            }
+        }
+        return nil
+    }
+
+    /// Toggle one emoji reaction for `sender` on a message. Several emojis may
+    /// sit on the same message. Shape: `reactions: Map { emoji: Map { sender: true } }`.
+    /// Does not commit.
+    func toggleReaction(messageId: Id, emoji: String, sender: String) throws {
+        guard !emoji.isEmpty, !sender.isEmpty, let map = findMessage(messageId) else { return }
+        let reactions = try map.getOrCreateContainer(key: "reactions", child: LoroMap())
+        let bucket = try reactions.getOrCreateContainer(key: emoji, child: LoroMap())
+        if case .bool(true) = bucket.get(key: sender)?.asValue() {
+            try bucket.delete(key: sender)
+        } else {
+            try bucket.insert(key: sender, v: true)
+        }
+    }
+
     /// Append a `commands` row (`send`, `stop`, `answer`, `retry`, `retitle`). Does not commit.
     func pushCommand(_ kind: String, payload: [String: Any], device: String) throws {
         let list = commands

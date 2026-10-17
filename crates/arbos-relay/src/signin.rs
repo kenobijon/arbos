@@ -675,6 +675,91 @@ fn is_jpeg(bytes: &[u8]) -> bool {
     bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF
 }
 
+/// `PATCH /me {name?, login?}`: set display name and/or handle. At least one field required.
+#[derive(Deserialize)]
+pub struct PatchMeBody {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub login: Option<String>,
+}
+
+fn valid_handle(handle: &str) -> bool {
+    !handle.is_empty()
+        && handle.len() <= 39
+        && handle
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        && !handle.starts_with('-')
+        && !handle.ends_with('-')
+}
+
+pub async fn patch_me(
+    State(state): State<AppState>,
+    principal: Principal,
+    Json(body): Json<PatchMeBody>,
+) -> Response {
+    let user_id = match &principal {
+        Principal::Device { user_id, .. } => user_id.clone(),
+        Principal::Box { .. } | Principal::Admin => {
+            return api_error(StatusCode::FORBIDDEN, "forbidden", "device token required")
+        }
+    };
+    if body.name.is_none() && body.login.is_none() {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "provide name and/or login",
+        );
+    }
+
+    // Trim and cap the display name; empty clears it (clients show @handle).
+    let name: Option<String> = body.name.as_ref().map(|s| {
+        let t = s.trim();
+        if t.len() > 80 {
+            t.chars().take(80).collect()
+        } else {
+            t.to_owned()
+        }
+    });
+
+    let login = match body.login.as_ref() {
+        None => None,
+        Some(raw) => {
+            let handle = raw.trim().trim_start_matches('@').to_owned();
+            if !valid_handle(&handle) {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "bad_handle",
+                    "handle must be 1–39 letters, numbers, or hyphens",
+                );
+            }
+            if let Ok(Some(other)) = state.db.user_by_handle(&handle) {
+                let other_id = other.get("id").and_then(Value::as_str).unwrap_or("");
+                if other_id != user_id {
+                    return api_error(
+                        StatusCode::CONFLICT,
+                        "handle_taken",
+                        "that handle is already taken",
+                    );
+                }
+            }
+            Some(handle)
+        }
+    };
+
+    match state
+        .db
+        .set_user_profile(&user_id, name.as_deref(), login.as_deref())
+    {
+        Ok(()) => Json(json!({ "user": user_json(&state, &user_id) })).into_response(),
+        Err(e) if e.to_string() == "no such user" => {
+            api_error(StatusCode::NOT_FOUND, "not_found", "no such user")
+        }
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    }
+}
+
 /// `PUT /me/avatar`: raw JPEG body → public `{public_url}/avatars/{user_id}.jpg?v=…`.
 pub async fn put_avatar(
     State(state): State<AppState>,

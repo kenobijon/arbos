@@ -153,7 +153,12 @@ def speaker_of(participant: rtc.RemoteParticipant | None, identity: str) -> dict
 
 
 def label_of(speaker: dict) -> str:
-    return f"@{speaker['handle']}" if speaker.get("handle") else (speaker.get("name") or "someone")
+    """How to speak about someone: display name, else bare handle (never @handle)."""
+    name = (speaker.get("name") or "").strip()
+    if name:
+        return name
+    handle = (speaker.get("handle") or "").strip()
+    return handle or "someone"
 
 
 def _norm_words(text: str) -> list[str]:
@@ -507,7 +512,7 @@ class VoiceCall:
         assert self.session
         humans = self.info.get("humans") or []
         owner = next((h for h in humans if h.get("role") == "owner"), None)
-        owner_label = f"@{owner['handle']}" if owner and owner.get("handle") else "the owner"
+        owner_label = label_of(owner) if owner else "the owner"
         if self.state.mode == "group":
             line = f"{self.agent_name}, {owner_label}'s agent, has joined and can hear this call."
             self.event("system", text=line)
@@ -1122,27 +1127,65 @@ class VoiceCall:
         log.info("ask_agent[%s] done in %d ms: %s", request_id, ms, text[:120])
         return f"Result from the agent (summarise it in one or two spoken sentences; the full text is already in the chat):\n{text[:3000]}"
 
+    async def wait_for_agent_idle(self, max_wait: float = 15.0) -> None:
+        """Do not start a new spoken reply while we are still talking (a second
+        generate_reply cancels the first and is often refused)."""
+        deadline = time.monotonic() + max_wait
+        while self.agent_speaking() and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
+
     async def deliver_later(self, task: asyncio.Task, request_id: str, speaker: dict) -> None:
+        """Spoken call-back after ask_agent outlasts the quick wait: the model already
+        said it would report back; when the box finishes, say the answer on the call."""
+        label = label_of(speaker) if speaker else "them"
         try:
             result = await task
         except ToolPending:
             self.state.open_work -= 1
+            # Relay timed out; the answer may still land in chat. Tell them so out loud —
+            # previously we returned silently and the call-back never happened.
+            log.warning("deferred tool %s still pending after relay wait; prompting chat fallback", request_id)
+            await self._speak_callback(
+                f"Your earlier task for {label} is still running. Tell {label} in one short sentence "
+                f"that the answer will show up in the chat when it is ready."
+            )
             return
         except Exception as e:
             self.state.open_work -= 1
             log.warning("deferred tool %s failed: %s", request_id, e)
             return
         self.state.open_work -= 1
-        if self.state.leaving or not self.session:
-            return
         text = (result.get("text") or "").strip() if result.get("ok") else f"it failed: {result.get('error')}"
         self.event("tool", name="ask_agent", status="done" if result.get("ok") else "failed", request_id=request_id, message_id=result.get("message_id"), deferred=True)
-        label = label_of(speaker) if speaker else "them"
+        log.info("deferred tool %s done; speaking call-back", request_id)
+        await self._speak_callback(
+            f"Your earlier task for {label} finished. Tell {label} what matters in one or two spoken sentences "
+            f"(the full text is in the chat). Result:\n{text[:3000]}"
+        )
+
+    async def _speak_callback(self, instructions: str) -> None:
+        """Speak a deferred call-back: wait out our own 'I'll report back' line, then play the answer."""
+        if self.state.leaving or not self.session or self.state.muted:
+            return
         async with self._speak_lock:
+            if self.state.leaving or not self.session or self.state.muted:
+                return
             await self.wait_for_silence()
-            self.session.generate_reply(
-                instructions=f"Your earlier task for {label} finished. Tell {label} what matters in one or two spoken sentences (the full text is in the chat). Result:\n{text[:3000]}"
-            )
+            await self.wait_for_agent_idle()
+            if self.state.leaving or not self.session or self.state.muted:
+                return
+            if self.agent_speaking():
+                # Still talking after the wait — cut it so the result can play.
+                try:
+                    self.session.interrupt()
+                except Exception as e:
+                    log.warning("interrupt before call-back failed: %s", e)
+                await asyncio.sleep(0.15)
+            try:
+                handle = self.session.generate_reply(instructions=instructions)
+                await asyncio.wait_for(handle.wait_for_playout(), timeout=45.0)
+            except Exception as e:
+                log.warning("spoken call-back failed: %s", e)
 
     # ---- loops ----------------------------------------------------------------------------------------
 

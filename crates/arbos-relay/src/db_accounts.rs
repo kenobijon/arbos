@@ -263,11 +263,13 @@ impl Db {
                     } else {
                         gh.avatar_url.clone()
                     };
+                    // Keep name/handle (PATCH /me or the invited placeholder); only
+                    // refresh avatar (unless custom) and last_login_at.
                     c.execute(
-                        "UPDATE users SET login = ?2, avatar_url = ?3, name = ?4, last_login_at = ?5, status = 'member',
-                            spend_cap_usd = CASE WHEN status = 'invited' THEN ?6 ELSE spend_cap_usd END
+                        "UPDATE users SET avatar_url = ?2, last_login_at = ?3, status = 'member',
+                            spend_cap_usd = CASE WHEN status = 'invited' THEN ?4 ELSE spend_cap_usd END
                          WHERE github_id = ?1",
-                        params![gh.id, gh.login, avatar, gh.name, now, default_daily_cap_usd],
+                        params![gh.id, avatar, now, default_daily_cap_usd],
                     )?;
                     Ok(first)
                 }
@@ -359,6 +361,40 @@ impl Db {
                 "UPDATE users SET avatar_url = ?2 WHERE id = ?1",
                 params![user_id, avatar_url],
             )
+        })?;
+        if n == 0 {
+            return Err(anyhow!("no such user"));
+        }
+        Ok(())
+    }
+
+    /// Display name and/or handle (`PATCH /me`). `login` must already be validated and unique.
+    /// `None` for a field leaves it unchanged; empty `name` stores NULL (clients show `@handle`).
+    pub fn set_user_profile(
+        &self,
+        user_id: &str,
+        name: Option<&str>,
+        login: Option<&str>,
+    ) -> Result<()> {
+        if name.is_none() && login.is_none() {
+            return Ok(());
+        }
+        let name_sql: Option<Option<&str>> =
+            name.map(|s| if s.is_empty() { None } else { Some(s) });
+        let n = self.with(|c| match (name_sql, login) {
+            (Some(name), Some(login)) => c.execute(
+                "UPDATE users SET name = ?2, login = ?3 WHERE id = ?1",
+                params![user_id, name, login],
+            ),
+            (Some(name), None) => c.execute(
+                "UPDATE users SET name = ?2 WHERE id = ?1",
+                params![user_id, name],
+            ),
+            (None, Some(login)) => c.execute(
+                "UPDATE users SET login = ?2 WHERE id = ?1",
+                params![user_id, login],
+            ),
+            (None, None) => Ok(0),
         })?;
         if n == 0 {
             return Err(anyhow!("no such user"));

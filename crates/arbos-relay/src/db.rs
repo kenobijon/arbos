@@ -182,6 +182,10 @@ CREATE TABLE IF NOT EXISTS vault_requests (
   status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, decided_at INTEGER, expires_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS vault_requests_project ON vault_requests(project_id, created_at);
+-- Fork lineage: dest project → source project, until the workspace copy finishes (or forever as a hint).
+CREATE TABLE IF NOT EXISTS project_forks (
+  project_id TEXT PRIMARY KEY, source_project_id TEXT NOT NULL, created_at INTEGER NOT NULL
+);
 "#;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1227,6 +1231,30 @@ impl Db {
                 params![project_id, state],
             )
             .map(|_| ())
+        })
+    }
+
+    /// Record that `project_id` should receive a copy of `source_project_id`'s workspace (fork).
+    pub fn set_project_fork(&self, project_id: &str, source_project_id: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO project_forks(project_id, source_project_id, created_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(project_id) DO UPDATE SET source_project_id = excluded.source_project_id",
+                params![project_id, source_project_id, now_ms()],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// Source project id for a pending/recorded fork, if any.
+    pub fn project_fork_source(&self, project_id: &str) -> Result<Option<String>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT source_project_id FROM project_forks WHERE project_id = ?1",
+                params![project_id],
+                |r| r.get(0),
+            )
+            .optional()
         })
     }
 

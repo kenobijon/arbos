@@ -299,12 +299,10 @@ pub async fn connect(
         // Mock: the browser lands straight on our callback, which mints a fake token.
         format!("{redirect}?state={st}&code=mock")
     } else {
+        // Keep env var names out of the client alert (Settings shows this text).
         let (client_id, _) = oauth.client().ok_or((
             StatusCode::CONFLICT,
-            format!(
-                "{provider} OAuth client not configured: set {} and {}",
-                oauth.client_id_env, oauth.client_secret_env
-            ),
+            format!("{provider} OAuth client not configured on the relay"),
         ))?;
         let mut url = reqwest::Url::parse(oauth.auth_url).map_err(internal)?;
         {

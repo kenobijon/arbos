@@ -87,10 +87,20 @@ struct MessagePush {
                 return INImage(imageData: round)
             }
         }
-        if let png = AvatarPalette.initialsPNG(name: senderName, handle: senderHandle, id: senderId, override: avatarColorIndex, pixels: 192) {
+        if let png = AvatarPalette.initialsPNG(name: senderName, handle: senderHandle, id: senderId, override: avatarColorIndex,
+                                               pixels: 192, dark: Self.systemIsDark) {
             return INImage(imageData: png)
         }
         return nil
+    }
+
+    /// The device's light/dark setting (D81): the system draws the banner, so the
+    /// circle takes the dark stops when the device is dark, whatever the in-app theme.
+    @MainActor
+    static var systemIsDark: Bool {
+        let current = UITraitCollection.current.userInterfaceStyle
+        let style = current == .unspecified ? UIScreen.main.traitCollection.userInterfaceStyle : current
+        return style == .dark
     }
 
     /// Donates an INSendMessageIntent and returns the content the system
