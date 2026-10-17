@@ -230,6 +230,9 @@ struct SettingsPage<Content: View>: View {
                 }
                 .padding(.horizontal, 20)
             }
+            // Apple Account pull-down: frosted fade under the title so the
+            // avatar softens as it scrolls / rubber-bands into the header.
+            headerBlur
             HStack {
                 Button { (onBack ?? { dismiss() })() } label: {
                     GlassCircle {
@@ -255,6 +258,20 @@ struct SettingsPage<Content: View>: View {
         .navigationBarBackButtonHidden(true)
         // Hiding the system back button also disables the edge-swipe pop; re-enable it.
         .background(InteractivePopGestureEnabler())
+    }
+
+    /// Strip under the back button + title — Apple Account always frosts what
+    /// peeks under the nav on pull-down, so Settings keeps the material even
+    /// when the rest of the app is on Matte.
+    private var headerBlur: some View {
+        ZStack {
+            Rectangle().fill(.ultraThinMaterial)
+            theme.bg.opacity(0.78)
+        }
+        .frame(height: 110)
+        .mask(LinearGradient(colors: [.black, .black, .clear], startPoint: .top, endPoint: .bottom))
+        .ignoresSafeArea(edges: .top)
+        .allowsHitTesting(false)
     }
 }
 
