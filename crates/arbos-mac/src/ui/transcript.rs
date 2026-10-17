@@ -4,11 +4,12 @@
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gpui::{
-    div, list, prelude::*, px, AnyElement, Context, Div, Entity, FontWeight, ListAlignment,
-    ListScrollEvent, ListState, Render, SharedString, Stateful, StyledText, TextRun, Window,
+    div, list, prelude::*, px, Animation, AnimationExt, AnyElement, Context, Div, Entity,
+    FontWeight, ListAlignment, ListScrollEvent, ListState, Render, SharedString, Stateful,
+    StyledText, TextRun, Window,
 };
 
 use crate::app::{AppEvent, AppState, DetailsTarget};
@@ -20,6 +21,7 @@ use crate::ui::attachments;
 use crate::ui::cards;
 use crate::ui::frost::edge_faded;
 use crate::ui::groups;
+use crate::ui::icons::icon;
 use crate::ui::markdown::{inline_spans, split_blocks, Block};
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
@@ -156,6 +158,8 @@ struct StickSpring {
 const SPRING_STIFFNESS: f32 = 0.22;
 const SPRING_DAMPING: f32 = 0.55;
 pub const STICK_THRESHOLD_PX: f32 = 70.0;
+/// How far above the end the user must be before the ↓ button shows.
+const JUMP_BUTTON_AFTER_PX: f32 = 160.0;
 
 /// Right-click / control-click on a bubble: the shell opens the react menu there.
 pub enum TranscriptEvent {
@@ -324,6 +328,15 @@ impl Transcript {
             self.list.reset(self.rows.len());
             self.pinned_to_bottom = true;
             self.list.scroll_to_end();
+            // `ARBOS_SCROLL_UP=1`: open at the top instead (screenshot rig; the
+            // GUI session accepts no synthetic wheel events).
+            if std::env::var("ARBOS_SCROLL_UP").is_ok_and(|v| v == "1") {
+                self.pinned_to_bottom = false;
+                self.list.scroll_to(gpui::ListOffset {
+                    item_ix: 0,
+                    offset_in_item: px(0.0),
+                });
+            }
             cx.notify();
             return;
         }
@@ -552,13 +565,45 @@ impl Transcript {
                     .when(!last, |el| el.pb(px(3.0)))
                     .bg(theme.bubble_assistant)
                     .child(render_block(&row.id, &block, veil.as_ref(), now, &theme));
+                // Grok Mac (ref 58): a muted react glyph appears right of the
+                // bubble on hover; it opens the same bar as a right-click.
+                let hover_react = (last && !live).then(|| {
+                    let chat_id = self.chat_id.clone();
+                    let message_id = row.message_id.clone();
+                    div()
+                        .id(SharedString::from(format!("{}#react", row.id)))
+                        .ml(px(8.0))
+                        .size(px(24.0))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .cursor_pointer()
+                        .opacity(0.0)
+                        .group_hover("bubble-row", |s| s.opacity(1.0))
+                        .hover(|s| s.bg(theme.surface_2))
+                        .child(icon("face-smile", 16.0, theme.text_muted))
+                        .on_click(cx.listener(move |_, event: &gpui::ClickEvent, _, cx| {
+                            if let Some(chat_id) = chat_id.clone() {
+                                cx.emit(TranscriptEvent::ReactMenu {
+                                    chat_id,
+                                    message_id: message_id.clone(),
+                                    position: event.position(),
+                                });
+                            }
+                        }))
+                });
                 div()
+                    .group("bubble-row")
                     .w_full()
                     .flex()
+                    .items_center()
                     .justify_start()
                     .when(first, |el| el.pt(px(6.0)))
                     .when(last, |el| el.pb(px(6.0)))
                     .child(bubble)
+                    .children(hover_react)
                     .into_any_element()
             }
             RowKind::Stamp { label } => div()
@@ -975,7 +1020,14 @@ fn relative_width(fraction: f32) -> gpui::DefiniteLength {
 impl Render for Transcript {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.step_spring(window, cx);
+        let theme = Theme::of(cx).clone();
+        // Grok Mac (ref 58): a 40 pt ↓ circle centred above the composer once
+        // the user has scrolled up; clicking re-pins and the spring glides down.
+        let max = f32::from(self.list.max_offset_for_scrollbar().y);
+        let cur = -f32::from(self.list.scroll_px_offset_for_scrollbar().y);
+        let show_jump = !self.pinned_to_bottom && max - cur > JUMP_BUTTON_AFTER_PX;
         div()
+            .relative()
             .size_full()
             .on_scroll_wheel(cx.listener(|this, event, _, cx| this.on_wheel(event, cx)))
             .child(edge_faded(
@@ -984,6 +1036,43 @@ impl Render for Transcript {
                 false,
                 list(self.list.clone(), cx.processor(Self::render_row)).size_full(),
             ))
+            .when(show_jump, |el| {
+                el.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .bottom(px(12.0))
+                        .flex()
+                        .justify_center()
+                        .child(
+                            div()
+                                .id("jump-to-latest")
+                                .size(px(40.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_full()
+                                .bg(theme.card())
+                                .border_1()
+                                .border_color(theme.border_strong)
+                                .shadow_md()
+                                .cursor_pointer()
+                                .hover(|s| s.bg(theme.surface_2))
+                                .child(icon("arrow-down", 15.0, theme.text))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.pinned_to_bottom = true;
+                                    this.repin_check_pending = false;
+                                    cx.notify();
+                                }))
+                                .with_animation(
+                                    "jump-in",
+                                    Animation::new(Duration::from_millis(180)),
+                                    |el, t| el.opacity(t),
+                                ),
+                        ),
+                )
+            })
     }
 }
 
