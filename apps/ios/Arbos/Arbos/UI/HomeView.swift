@@ -22,12 +22,19 @@ struct HomeView: View {
     @State private var deleteProject: Project? = nil
     /// People chat delete confirmation from the home long-press / swipe menu.
     @State private var deletePeople: PeopleChat? = nil
-    /// "Hidden chats N ›" footer → the list of archived agents.
+    /// "Hidden chats N ›" footer → the list of archived agents and people chats.
     @State private var showHidden = false
 
     private var hiddenProjects: [Project] {
         model.projects.filter { model.isArchived($0.id) }.sorted { lastActivity($0) > lastActivity($1) }
     }
+
+    private var hiddenPeople: [PeopleChat] {
+        model.peopleChats.filter { model.isArchived(peopleChatId: $0.id) }
+            .sorted { peopleActivity($0) > peopleActivity($1) }
+    }
+
+    private var hiddenCount: Int { hiddenProjects.count + hiddenPeople.count }
     @FocusState private var searchFocused: Bool
 
     private var projects: [Project] {
@@ -163,6 +170,7 @@ struct HomeView: View {
                                 }
                                 .buttonStyle(.borderless)
                                 .contextMenu {
+                                    // Long-press: Pin, Archive, Profile/Group info, Delete.
                                     Button {
                                         withAnimation {
                                             if pinned { model.unpinHome(peopleChatId: chat.id) }
@@ -170,6 +178,11 @@ struct HomeView: View {
                                         }
                                     } label: {
                                         Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
+                                    }
+                                    Button {
+                                        withAnimation { model.archive(peopleChatId: chat.id) }
+                                    } label: {
+                                        Label("Archive", systemImage: "archivebox")
                                     }
                                     if chat.kind == "dm", let other = chat.counterpart(me: model.user?.id) {
                                         Button { model.showProfile(.user(ProfilePerson(other))) } label: { Label("Profile", systemImage: "person.crop.circle") }
@@ -194,16 +207,19 @@ struct HomeView: View {
                                     }
                                     .tint(Color(hex: "#1084FE")!)
                                 }
-                                // People chats have no archive lane; require a tap on Delete
-                                // (no full-swipe) so a casual left swipe cannot wipe a DM.
-                                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                                    Button(role: .destructive) { deletePeople = chat } label: {
-                                        Label("Delete", systemImage: "trash")
+                                // Trailing = swipe left. Full-swipe archives (same as agents).
+                                // Archive alone so Delete stays on long-press / Hidden chats.
+                                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                    Button {
+                                        withAnimation { model.archive(peopleChatId: chat.id) }
+                                    } label: {
+                                        Label("Archive", systemImage: "archivebox")
                                     }
+                                    .tint(Color(hex: "#636366")!)
                                 }
                             }
                         }
-                        if searchQuery.isEmpty, !hiddenProjects.isEmpty {
+                        if searchQuery.isEmpty, hiddenCount > 0 {
                             hiddenFooter
                                 .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
                                 .listRowSeparator(.hidden)
@@ -361,7 +377,7 @@ struct HomeView: View {
                 Text("Hidden chats")
                     .font(.system(size: Theme.small))
                     .foregroundStyle(theme.muted)
-                Text("\(hiddenProjects.count)")
+                Text("\(hiddenCount)")
                     .font(.system(size: Theme.small))
                     .foregroundStyle(theme.placeholder)
                 Image(systemName: "chevron.right")
@@ -374,7 +390,7 @@ struct HomeView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Hidden chats, \(hiddenProjects.count)")
+        .accessibilityLabel("Hidden chats, \(hiddenCount)")
     }
 
     private var topBar: some View {
@@ -533,6 +549,8 @@ struct HomeView: View {
             (model.isHomePinned(projectId: $0.id), lastActivity($0), .project($0))
         }
         for c in model.peopleChats where matchesPeople(c, q: q) {
+            // Archived people stay out of the home list until search (or open).
+            if q.isEmpty && model.isArchived(peopleChatId: c.id) { continue }
             rows.append((model.isHomePinned(peopleChatId: c.id), peopleActivity(c), .people(c)))
         }
         return rows.sorted {
@@ -703,15 +721,34 @@ struct ApprovalCard: View {
     }
 }
 
-/// Archived ("hidden") agents, Grok's "Hidden chats" page: the same rows as home,
-/// tap opens the agent, swipe or long-press unhides it.
+/// Archived ("hidden") chats, Grok's "Hidden chats" page: agents and people,
+/// tap opens, swipe/long-press Unhide, Delete removes for good.
 struct HiddenChatsView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
+    @State private var deleteProject: Project? = nil
+    @State private var deletePeople: PeopleChat? = nil
 
-    private var hidden: [Project] {
-        model.projects.filter { model.isArchived($0.id) }.sorted { $0.name < $1.name }
+    private enum HiddenRow: Identifiable {
+        case project(Project)
+        case people(PeopleChat)
+        var id: String {
+            switch self {
+            case .project(let p): return "p:" + p.id
+            case .people(let c): return "c:" + c.id
+            }
+        }
+    }
+
+    private var hidden: [HiddenRow] {
+        let projects = model.projects.filter { model.isArchived($0.id) }
+            .sorted { $0.name < $1.name }
+            .map { HiddenRow.project($0) }
+        let people = model.peopleChats.filter { model.isArchived(peopleChatId: $0.id) }
+            .sorted { peopleTitle($0) < peopleTitle($1) }
+            .map { HiddenRow.people($0) }
+        return projects + people
     }
 
     var body: some View {
@@ -733,25 +770,66 @@ struct HiddenChatsView: View {
                         .listRowSeparator(.hidden)
                         .listRowBackground(Color.clear)
                 }
-                ForEach(hidden) { project in
-                    Button { model.open(project: project) } label: {
-                        AgentRow(project: project, preview: HiddenChatsView.preview(project, in: model), time: "",
-                                 streaming: model.isStreaming(project: project.id), unread: false)
-                    }
-                    .buttonStyle(.borderless)
-                    .contextMenu {
-                        Button { withAnimation { model.unarchive(project.id) } } label: {
-                            Label("Unhide", systemImage: "eye")
+                ForEach(hidden) { row in
+                    switch row {
+                    case .project(let project):
+                        Button { model.open(project: project) } label: {
+                            AgentRow(project: project, preview: HiddenChatsView.preview(project, in: model), time: "",
+                                     streaming: model.isStreaming(project: project.id), unread: false)
                         }
-                    }
-                    .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
-                    .listRowSeparator(.hidden)
-                    .listRowBackground(theme.bg)
-                    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                        Button { withAnimation { model.unarchive(project.id) } } label: {
-                            Label("Unhide", systemImage: "eye")
+                        .buttonStyle(.borderless)
+                        .contextMenu {
+                            Button { withAnimation { model.unarchive(project.id) } } label: {
+                                Label("Unhide", systemImage: "eye")
+                            }
+                            if !project.shared {
+                                Button(role: .destructive) { deleteProject = project } label: {
+                                    Label("Delete", systemImage: "trash")
+                                }
+                            }
                         }
-                        .tint(theme.unread)
+                        .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(theme.bg)
+                        // Unhide first = full-swipe restores; Delete needs a tap.
+                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                            Button { withAnimation { model.unarchive(project.id) } } label: {
+                                Label("Unhide", systemImage: "eye")
+                            }
+                            .tint(theme.unread)
+                            if !project.shared {
+                                Button(role: .destructive) { deleteProject = project } label: {
+                                    Label("Delete", systemImage: "trash")
+                                }
+                            }
+                        }
+                    case .people(let chat):
+                        Button { model.open(peopleChat: chat) } label: {
+                            PeopleRow(chat: chat, preview: HiddenChatsView.peoplePreview(chat, in: model), time: "",
+                                      unread: false, count: 0, me: model.user?.id)
+                        }
+                        .buttonStyle(.borderless)
+                        .contextMenu {
+                            Button { withAnimation { model.unarchive(peopleChatId: chat.id) } } label: {
+                                Label("Unhide", systemImage: "eye")
+                            }
+                            Button(role: .destructive) { deletePeople = chat } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                        }
+                        .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(theme.bg)
+                        // Unhide first = full-swipe restores; Delete needs a tap.
+                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                            Button { withAnimation { model.unarchive(peopleChatId: chat.id) } } label: {
+                                Label("Unhide", systemImage: "eye")
+                            }
+                            .tint(theme.unread)
+                            Button(role: .destructive) { deletePeople = chat } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                        }
                     }
                 }
             }
@@ -783,6 +861,48 @@ struct HiddenChatsView: View {
             .padding(.top, 6)
         }
         .toolbar(.hidden, for: .navigationBar)
+        .confirmationDialog(
+            "Delete \(deleteProject?.name ?? "this agent")?",
+            isPresented: Binding(
+                get: { deleteProject != nil },
+                set: { if !$0 { deleteProject = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive) {
+                if let p = deleteProject { model.deleteProject(p.id) }
+                deleteProject = nil
+            }
+            Button("Cancel", role: .cancel) { deleteProject = nil }
+        } message: {
+            Text("Removes this agent and its chats from your list.")
+        }
+        .confirmationDialog(
+            "Delete \(deletePeopleTitle)?",
+            isPresented: Binding(
+                get: { deletePeople != nil },
+                set: { if !$0 { deletePeople = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive) {
+                if let c = deletePeople { model.deletePeopleChat(c.id) }
+                deletePeople = nil
+            }
+            Button("Cancel", role: .cancel) { deletePeople = nil }
+        } message: {
+            Text("Removes this chat from your list.")
+        }
+    }
+
+    private var deletePeopleTitle: String {
+        guard let c = deletePeople else { return "this chat" }
+        return peopleTitle(c)
+    }
+
+    private func peopleTitle(_ c: PeopleChat) -> String {
+        if c.isGroup { return c.title.isEmpty ? "Group" : c.title }
+        return c.counterpart(me: model.user?.id)?.displayName ?? c.title
     }
 
     /// Last line of prose in the agent's chats, as on home.
@@ -795,6 +915,15 @@ struct HiddenChatsView: View {
         guard let m = best else { return "No messages yet" }
         let line = m.plainText.split(separator: "\n").first.map(String.init) ?? ""
         return (m.role == .user ? "You: " : "") + HomeView.plain(line)
+    }
+
+    static func peoplePreview(_ c: PeopleChat, in model: AppModel) -> String {
+        guard let m = model.messages(of: c.id).last(where: { !$0.voice && !$0.plainText.isEmpty }) else {
+            return c.pending ? "Invited · opens when they sign in" : "Say hi"
+        }
+        let line = m.plainText.split(separator: "\n").first.map(String.init) ?? ""
+        let who = m.sender == model.myUserId ? "You" : (m.senderHandle.map { "@\($0)" } ?? "")
+        return (who.isEmpty ? "" : who + ": ") + HomeView.plain(line)
     }
 }
 
