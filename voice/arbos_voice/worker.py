@@ -534,6 +534,11 @@ class VoiceCall:
                     deadline = time.monotonic() + 8.0
                     while self.agent_speaking() and time.monotonic() < deadline:
                         await asyncio.sleep(0.05)
+                    # The tool result makes the model answer once more ("Goodbye" again): mute it.
+                    try:
+                        self.session.output.set_audio_enabled(False)
+                    except Exception:
+                        pass
                 else:
                     handle = self.speak_line(GOODBYE[reason], allow_interruptions=False)
                     try:
