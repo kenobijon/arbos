@@ -41,6 +41,8 @@ struct Row: Identifiable, Equatable {
     var messageId: Id
     var role: Role
     var kind: RowKind
+    /// Emoji reactions shown under this bubble (stamped on the last prose/media row of a message).
+    var reactions: [MessageReaction] = []
 }
 
 enum Transcript {
@@ -188,6 +190,15 @@ enum Transcript {
                 }
             }
             guard !chunk.isEmpty else { continue }
+            if !message.reactions.isEmpty,
+               let ix = chunk.lastIndex(where: {
+                   switch $0.kind {
+                   case .user, .other, .member, .assistant, .image, .file, .voiceMemo: return true
+                   default: return false
+                   }
+               }) {
+                chunk[ix].reactions = message.reactions
+            }
             // Joins that happened before this message land first (Grok: "@bob joined").
             if message.createdAt > 0 { flushJoins(before: message.createdAt) }
             // Date separators when the gap is over an hour (Grok: "Today 8:00 AM").
@@ -444,6 +455,16 @@ struct RowView: View {
     private var maxBubble: CGFloat { max(200, width - Theme.bubbleInset) }
 
     var body: some View {
+        VStack(spacing: 4) {
+            bubble
+            if !row.reactions.isEmpty {
+                reactionChips
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var bubble: some View {
         switch row.kind {
         case .user(let text, let pending):
             HStack {
@@ -574,6 +595,51 @@ struct RowView: View {
             }
             .padding(.horizontal, Theme.bubbleHPad).padding(.vertical, 10)
             .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.dangerSoft))
+        }
+    }
+
+    /// Compact chips under the bubble (iMessage-style). Tap toggles your own reaction.
+    private var reactionChips: some View {
+        let mine = model.myUserId
+        return HStack(spacing: 4) {
+            if row.role == .user { Spacer(minLength: 0) }
+            ForEach(row.reactions, id: \.emoji) { reaction in
+                let mineOn = mine.map { reaction.senders.contains($0) } ?? false
+                Button {
+                    model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: reaction.emoji)
+                } label: {
+                    HStack(spacing: 3) {
+                        Text(reaction.emoji).font(.system(size: 14))
+                        if reaction.senders.count > 1 {
+                            Text("\(reaction.senders.count)")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(theme.muted)
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(mineOn ? theme.accent.opacity(0.22) : theme.card)
+                    )
+                    .overlay(
+                        Capsule(style: .continuous)
+                            .strokeBorder(mineOn ? theme.accent.opacity(0.55) : theme.separator, lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(reaction.emoji) reaction, \(reaction.senders.count)")
+            }
+            if row.role != .user { Spacer(minLength: 0) }
+        }
+        .padding(.leading, reactionLeading)
+    }
+
+    /// Match the avatar offset used by people-chat bubbles (26 pt + 8 pt gap).
+    private var reactionLeading: CGFloat {
+        switch row.kind {
+        case .other, .member: return 34
+        default: return 0
         }
     }
 
