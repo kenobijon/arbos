@@ -20,6 +20,12 @@ struct HomeView: View {
     @State private var shareProject: Project? = nil
     /// Own-agent delete confirmation from the home long-press menu.
     @State private var deleteProject: Project? = nil
+    /// "Hidden chats N ›" footer → the list of archived agents.
+    @State private var showHidden = false
+
+    private var hiddenProjects: [Project] {
+        model.projects.filter { model.isArchived($0.id) }.sorted { lastActivity($0) > lastActivity($1) }
+    }
     @FocusState private var searchFocused: Bool
 
     private var projects: [Project] {
@@ -182,6 +188,12 @@ struct HomeView: View {
                                 }
                             }
                         }
+                        if searchQuery.isEmpty, !hiddenProjects.isEmpty {
+                            hiddenFooter
+                                .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
+                                .listRowSeparator(.hidden)
+                                .listRowBackground(theme.bg)
+                        }
                         // Launch timing: the populated list is on screen.
                         Color.clear.frame(height: 1)
                             .listRowInsets(EdgeInsets())
@@ -221,6 +233,9 @@ struct HomeView: View {
                 case .chat(let chatId, let projectId):
                     ChatView(chatId: chatId, projectId: projectId)
                 }
+            }
+            .navigationDestination(isPresented: $showHidden) {
+                HiddenChatsView().environmentObject(model).environment(\.theme, theme)
             }
             .sheet(isPresented: $showSettings) {
                 SettingsView().environmentObject(model).environment(\.theme, theme)
@@ -263,6 +278,9 @@ struct HomeView: View {
             if DebugHooks.show == "newchat", DebugHooks.openProject == nil {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showNewChat = true }
             }
+            if DebugHooks.show == "hidden", DebugHooks.openProject == nil {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showHidden = true }
+            }
             #if DEBUG
             if DebugHooks.show == "notify", DebugHooks.openProject == nil {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { model.postSampleNotifications() }
@@ -292,6 +310,30 @@ struct HomeView: View {
     }
 
     // MARK: Top bar
+
+    /// Grok's "Hidden chats  N  ›" line under the list (measured: 15 pt muted,
+    /// the count a shade dimmer, a small chevron, 27 pt above the bottom).
+    private var hiddenFooter: some View {
+        Button { showHidden = true } label: {
+            HStack(spacing: 8) {
+                Text("Hidden chats")
+                    .font(.system(size: Theme.small))
+                    .foregroundStyle(theme.muted)
+                Text("\(hiddenProjects.count)")
+                    .font(.system(size: Theme.small))
+                    .foregroundStyle(theme.placeholder)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(theme.placeholder)
+                Spacer(minLength: 0)
+            }
+            .padding(.top, 14)
+            .padding(.bottom, 20)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Hidden chats, \(hiddenProjects.count)")
+    }
 
     private var topBar: some View {
         HStack(spacing: 10) {
@@ -616,6 +658,101 @@ struct ApprovalCard: View {
         .padding(14)
         .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
         .padding(.top, 10)
+    }
+}
+
+/// Archived ("hidden") agents, Grok's "Hidden chats" page: the same rows as home,
+/// tap opens the agent, swipe or long-press unhides it.
+struct HiddenChatsView: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    @Environment(\.dismiss) private var dismiss
+
+    private var hidden: [Project] {
+        model.projects.filter { model.isArchived($0.id) }.sorted { $0.name < $1.name }
+    }
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            theme.bg.ignoresSafeArea()
+            List {
+                Color.clear.frame(height: 66)
+                    .listRowInsets(EdgeInsets())
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                    .accessibilityHidden(true)
+                if hidden.isEmpty {
+                    Text("No hidden chats")
+                        .font(.system(size: Theme.small))
+                        .foregroundStyle(theme.muted)
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 80)
+                        .listRowInsets(EdgeInsets())
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
+                }
+                ForEach(hidden) { project in
+                    Button { model.open(project: project) } label: {
+                        AgentRow(project: project, preview: HiddenChatsView.preview(project, in: model), time: "",
+                                 streaming: model.isStreaming(project: project.id), unread: false)
+                    }
+                    .buttonStyle(.plain)
+                    .contextMenu {
+                        Button { withAnimation { model.unarchive(project.id) } } label: {
+                            Label("Unhide", systemImage: "eye")
+                        }
+                    }
+                    .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(theme.bg)
+                    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                        Button { withAnimation { model.unarchive(project.id) } } label: {
+                            Label("Unhide", systemImage: "eye")
+                        }
+                        .tint(theme.unread)
+                    }
+                }
+            }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .background(theme.bg)
+            // Grok page header: back circle left, title centred in a pill.
+            HStack {
+                Button { dismiss() } label: {
+                    GlassCircle {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(theme.text)
+                    }
+                }
+                .buttonStyle(.plain)
+                Spacer()
+                GlassPill {
+                    Text("Hidden chats")
+                        .font(.system(size: Theme.body, weight: .semibold))
+                        .foregroundStyle(theme.text)
+                        .padding(.horizontal, 16)
+                        .frame(height: Theme.control)
+                }
+                Spacer()
+                Color.clear.frame(width: Theme.control, height: Theme.control)
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 6)
+        }
+        .toolbar(.hidden, for: .navigationBar)
+    }
+
+    /// Last line of prose in the agent's chats, as on home.
+    static func preview(_ p: Project, in model: AppModel) -> String {
+        var best: Message? = nil
+        for chat in model.chats(of: p.id) {
+            if let m = model.messages(of: chat.id).last(where: { !$0.plainText.isEmpty }),
+               best == nil || m.createdAt > best!.createdAt { best = m }
+        }
+        guard let m = best else { return "No messages yet" }
+        let line = m.plainText.split(separator: "\n").first.map(String.init) ?? ""
+        return (m.role == .user ? "You: " : "") + HomeView.plain(line)
     }
 }
 
