@@ -52,7 +52,7 @@ enum Transcript {
     }
 
     /// `me` = my `user:<id>` in a people chat; nil in project chats (every user row is mine).
-    /// `joins` = people-chat membership events (agents added mid-chat) merged by time.
+    /// `joins` = people-chat membership events (people/agents added mid-chat) merged by time.
     static func rows(_ messages: [Message], projectId: Id, subagentNames: [String: String] = [:], me: String? = nil, people: Bool = false, joins: [Join] = []) -> [Row] {
         var rows: [Row] = []
         var lastAt: Int64 = 0
