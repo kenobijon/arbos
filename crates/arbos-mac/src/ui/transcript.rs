@@ -1804,7 +1804,23 @@ fn render_block(
                     } else {
                         lang.clone()
                     })
-                    .child(div().child("Copy")),
+                    .child({
+                        // Copies the block (Grok's code header); the label is the hit target.
+                        let source = code.clone();
+                        div()
+                            .id(SharedString::from(format!("{row_id}#copy")))
+                            .px(px(6.0))
+                            .py(px(2.0))
+                            .rounded(px(5.0))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme.surface_2).text_color(theme.text))
+                            .child("Copy")
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                    source.clone(),
+                                ));
+                            })
+                    }),
             );
             let mono = gpui::Font {
                 family: theme.font_mono.into(),
