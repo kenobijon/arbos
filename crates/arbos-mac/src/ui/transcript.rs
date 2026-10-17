@@ -12,7 +12,9 @@ use gpui::{
 };
 
 use crate::app::{AppEvent, AppState, DetailsTarget};
-use crate::model::{Attachment, Id, Message, MessageStatus, Part, Person, Role, StatusKind};
+use crate::model::{
+    Attachment, Id, Message, MessageStatus, Part, Person, Role, StatusKind, TurnKind,
+};
 use crate::ui::approve::{approval_card, ApprovalView};
 use crate::ui::attachments;
 use crate::ui::cards;
@@ -60,6 +62,11 @@ pub enum RowKind {
     /// Centered muted time line ("Today 9:39 PM").
     Stamp {
         label: String,
+    },
+    /// Grok's hand-off line: "Messaged ◉ A" / "N messages with ◉ A, ◉ B and ◉ C".
+    Handoff {
+        names: Vec<String>,
+        total: u32,
     },
     /// A file the agent produced for the user.
     Attachment {
@@ -496,6 +503,71 @@ impl Transcript {
                 .text_color(theme.text_muted)
                 .child(label)
                 .into_any_element(),
+            RowKind::Handoff { names, total } => {
+                // "Messaged ◉ A" while only the brief went out; "N messages with
+                // ◉ A, ◉ B and ◉ C" once replies came back (Grok refs 13/58).
+                let state = self.state.read(cx);
+                let lead = if total <= names.len() as u32 {
+                    "Messaged".to_string()
+                } else {
+                    format!("{total} messages with")
+                };
+                let mut line = div()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .text_size(px(TEXT_SMALL))
+                    .text_color(theme.text_muted)
+                    .child(lead);
+                let n = names.len();
+                for (i, name) in names.iter().enumerate() {
+                    let glyph: AnyElement = match state
+                        .projects
+                        .iter()
+                        .find(|p| p.name.eq_ignore_ascii_case(name))
+                    {
+                        Some(space) => crate::ui::avatars::element(
+                            state.avatar_slug(space).as_deref(),
+                            space.avatar_color.as_deref(),
+                            crate::ui::avatars::AvatarState::Idle,
+                            16.0,
+                            &space.icon,
+                            groups::project_color(&space.color, theme.accent),
+                            &theme,
+                        )
+                        .into_any_element(),
+                        None => {
+                            // Not one of my projects (a subagent): a lettered disc.
+                            let initial: String =
+                                name.chars().take(1).flat_map(char::to_uppercase).collect();
+                            crate::ui::avatars::element(
+                                None,
+                                None,
+                                crate::ui::avatars::AvatarState::Idle,
+                                16.0,
+                                &initial,
+                                theme.text_muted,
+                                &theme,
+                            )
+                            .into_any_element()
+                        }
+                    };
+                    line = line.child(glyph).child(div().child(name.clone()));
+                    if n >= 2 && i + 2 == n {
+                        line = line.child(div().child("and"));
+                    } else if i + 2 < n {
+                        line = line.child(div().ml(px(-5.0)).child(","));
+                    }
+                }
+                div()
+                    .w_full()
+                    .flex()
+                    .justify_center()
+                    .pt(px(10.0))
+                    .pb(px(6.0))
+                    .child(line)
+                    .into_any_element()
+            }
             RowKind::Attachment { attachment } => {
                 let thumbnail = attachment
                     .blob_ref
@@ -1003,6 +1075,48 @@ pub fn build_rows(
             Role::Assistant | Role::Project => {
                 if streaming {
                     running = true;
+                }
+                if matches!(
+                    message.turn,
+                    Some(TurnKind::New | TurnKind::Spawn | TurnKind::Wake)
+                ) {
+                    // The box writes `subagentName` on the row; older fixtures only
+                    // name it on the spawn tool call.
+                    let named = message.subagent_name.clone().or_else(|| {
+                        message.parts.iter().find_map(|p| match p {
+                            Part::Tool {
+                                subagent_name: Some(n),
+                                ..
+                            } => Some(n.clone()),
+                            _ => None,
+                        })
+                    });
+                    if let Some(name) = named {
+                        let count = message.handoff_messages.unwrap_or(1).max(1);
+                        // Consecutive hand-offs merge into one line.
+                        if let Some(Row {
+                            kind: RowKind::Handoff { names, total },
+                            version,
+                            ..
+                        }) = rows.last_mut()
+                        {
+                            if !names.contains(&name) {
+                                names.push(name);
+                            }
+                            *total += count;
+                            *version = hash_version(&(&*names, *total), false);
+                        } else {
+                            rows.push(Row {
+                                version: hash_version(&(&name, count), false),
+                                id: format!("{}#handoff", message.id),
+                                message_id: message.id.clone(),
+                                kind: RowKind::Handoff {
+                                    names: vec![name],
+                                    total: count,
+                                },
+                            });
+                        }
+                    }
                 }
                 if message.role == Role::Project {
                     let name = message

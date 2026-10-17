@@ -1082,6 +1082,9 @@ pub struct Message {
     pub subagent_id: Option<String>,
     #[serde(default)]
     pub subagent_name: Option<String>,
+    /// Messages exchanged with the subagent on a hand-off row (1 = brief sent, 2 = result back).
+    #[serde(default)]
+    pub handoff_messages: Option<u32>,
     #[serde(default)]
     pub in_reply_to: Option<String>,
     /// Set on user messages a routine injected (`sender: routine:<id>`, F3).
