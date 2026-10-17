@@ -527,7 +527,7 @@ class GitHub:
         return None
 
     def releases(self) -> list[dict]:
-        return self.repo_api("GET", "/releases?per_page=15")
+        return self.repo_api("GET", "/releases?per_page=60")
 
 
 # ---------------------------------------------------------------- Cursor
@@ -1067,8 +1067,8 @@ class Loop:
         if info.get("screenshots"):
             shot_line = f"{dims or 'unknown size'} (attached)"
         else:
-            shot_line = ("none — this is a text report relayed from a chat message; the comment is all the "
-                         "evidence, so find the screen it describes in the code")
+            shot_line = ("none — a text-only report (TestFlight without a screenshot, or words relayed from a chat); "
+                         "the comment is all the evidence, so find the screen it describes in the code")
         repl = {
             "FEEDBACK_ID": fid, "COMMENT": info["comment"].strip() or "(no comment)", "SOURCE": src,
             "DEVICE": info.get("device") or "?", "OS_VERSION": info.get("os") or "?", "TESTER": st.get("tester", "tester"),
@@ -1103,10 +1103,12 @@ class Loop:
                 log(f"[{fid}] deferred: {reason}")
             return
         shots = self.store.screenshots(fid)
-        if not shots and not (info.get("source") == "inbox" and info.get("handle")):
-            st.update(status="failed", error="no screenshot file")
+        # TestFlight lets a tester send words without a screenshot; the comment is the evidence then
+        # (same as a relayed chat report). Only an item with neither image nor words cannot run.
+        if not shots and not (info.get("comment") or "").strip():
+            st.update(status="failed", error="no screenshot and no comment")
             self.store.save_state(fid, st)
-            self.store.event(fid, "failed", error="no screenshot file")
+            self.store.event(fid, "failed", error="no screenshot and no comment")
             return
 
         # 1. screenshot assets + issue

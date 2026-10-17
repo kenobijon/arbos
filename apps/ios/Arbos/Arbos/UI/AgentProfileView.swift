@@ -306,6 +306,7 @@ struct AgentProfileView: View {
     var fallback: Project? = nil
     @State private var tab = "Media"
     @State private var showEdit = false
+    @State private var showModel = false
     @State private var showVoice = false
     @State private var showDescription = false
     @State private var descriptionDraft = ""
@@ -344,6 +345,7 @@ struct AgentProfileView: View {
                             ProfileInfoRow(label: "machine", value: machineLine(project))
                             ProfileRowDivider()
                             ProfileInfoRow(label: "model", value: "\(project.shortModel) · \(project.effort.label)")
+                                .onTapGesture { if isMine { showModel = true } }
                             ProfileRowDivider()
                             ProfileInfoRow(label: "voice", value: voiceLine(project))
                                 .onTapGesture { if isMine { showVoice = true } }
@@ -381,6 +383,9 @@ struct AgentProfileView: View {
             }
         }
         .task { await model.loadVoices() }
+        .sheet(isPresented: $showModel) {
+            if let project = model.project(projectId) { ModelPickerView(project: project).environmentObject(model).environment(\.theme, theme) }
+        }
         .sheet(isPresented: $showVoice) {
             if let project = model.project(projectId) { VoicePickerView(project: project).environmentObject(model).environment(\.theme, theme) }
         }

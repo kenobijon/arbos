@@ -10,7 +10,7 @@ pub mod crypto;
 pub mod providers;
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{header, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::Json;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
@@ -381,13 +381,37 @@ pub struct CallbackQuery {
     pub error_description: Option<String>,
 }
 
+/// Success / error HTML after Google (etc.) consent. Redirects to
+/// `arbos://connectors/callback` so iOS `ASWebAuthenticationSession` (and the
+/// Mac/iPhone URL scheme) bring the user back into Arbos instead of leaving
+/// them on a dead Safari tab.
 fn page(title: &str, body: &str) -> Response {
-    Html(format!(
-        "<!doctype html><meta charset=utf-8><title>Arbos · {title}</title>\
-         <body style=\"font:15px system-ui;max-width:32em;margin:12vh auto;color:#222\">\
-         <h2 style=\"font-weight:600\">{title}</h2><p>{body}</p><p style=\"color:#777\">You can close this tab and return to Arbos.</p></body>"
-    ))
-    .into_response()
+    done_page(title, body, None, false)
+}
+
+fn done_page(title: &str, body: &str, provider: Option<&str>, ok: bool) -> Response {
+    let mut href = format!(
+        "arbos://connectors/callback?ok={}",
+        if ok { "1" } else { "0" }
+    );
+    if let Some(p) = provider {
+        href.push_str("&provider=");
+        href.push_str(p);
+    }
+    // 302 to arbos:// so ASWebAuthenticationSession closes (same hop as GitHub sign-in).
+    // HTML body is a fallback if a desktop browser ignores the custom-scheme Location.
+    (
+        StatusCode::FOUND,
+        [(header::LOCATION, href.clone())],
+        Html(format!(
+            "<!doctype html><meta charset=utf-8><title>Arbos · {title}</title>\
+             <body style=\"font:15px system-ui;max-width:32em;margin:12vh auto;color:#222\">\
+             <h2 style=\"font-weight:600\">{title}</h2><p>{body}</p>\
+             <p><a href=\"{href}\">Return to Arbos</a></p>\
+             <p style=\"color:#777\">You can close this tab if Arbos is already open.</p></body>"
+        )),
+    )
+        .into_response()
 }
 
 /// `GET /connectors/oauth/callback?code=&state=`: the browser lands here after consent.
@@ -405,7 +429,7 @@ pub async fn oauth_callback(
         );
     };
     let Some(p) = Provider::parse(&os.provider) else {
-        return page("Unknown provider", &os.provider);
+        return done_page("Unknown provider", &os.provider, Some(&os.provider), false);
     };
     let mark_error = |e: &str| {
         if let Ok(Some(c)) = state.db.connector_by_provider(p.as_str()) {
@@ -415,10 +439,20 @@ pub async fn oauth_callback(
     if let Some(err) = q.error {
         let detail = q.error_description.unwrap_or_default();
         mark_error(&format!("{err} {detail}"));
-        return page("Connection refused", &format!("{err} {detail}"));
+        return done_page(
+            "Connection refused",
+            &format!("{err} {detail}"),
+            Some(p.as_str()),
+            false,
+        );
     }
     let Some(code) = q.code.as_deref() else {
-        return page("Missing code", "The redirect had no authorization code.");
+        return done_page(
+            "Missing code",
+            "The redirect had no authorization code.",
+            Some(p.as_str()),
+            false,
+        );
     };
 
     if mock_on(&state) {
@@ -431,19 +465,31 @@ pub async fn oauth_callback(
             label: format!("{} · mock", p.label()),
         };
         return match store_token(&state, p, &grant, json!({})) {
-            Ok(_) => page(
+            Ok(_) => done_page(
                 &format!("{} connected (mock)", p.label()),
                 "Mock mode: a fake token was stored; every action returns canned data.",
+                Some(p.as_str()),
+                true,
             ),
-            Err(e) => page("Could not store the token", &e.to_string()),
+            Err(e) => done_page(
+                "Could not store the token",
+                &e.to_string(),
+                Some(p.as_str()),
+                false,
+            ),
         };
     }
 
     let Auth::Oauth(oauth) = p.auth() else {
-        return page("Not an OAuth provider", p.label());
+        return done_page("Not an OAuth provider", p.label(), Some(p.as_str()), false);
     };
     let Some((client_id, client_secret)) = oauth.client() else {
-        return page("OAuth client not configured", oauth.client_id_env);
+        return done_page(
+            "OAuth client not configured",
+            oauth.client_id_env,
+            Some(p.as_str()),
+            false,
+        );
     };
     let form = [
         ("grant_type", "authorization_code"),
@@ -465,15 +511,22 @@ pub async fn oauth_callback(
             Ok(v) => v,
             Err(e) => {
                 mark_error(&e.to_string());
-                return page(
+                return done_page(
                     "Token exchange failed",
                     "The provider's reply was not JSON.",
+                    Some(p.as_str()),
+                    false,
                 );
             }
         },
         Err(e) => {
             mark_error(&e.to_string());
-            return page("Token exchange failed", &e.to_string());
+            return done_page(
+                "Token exchange failed",
+                &e.to_string(),
+                Some(p.as_str()),
+                false,
+            );
         }
     };
     match providers::parse_token_response(p, &v) {
@@ -482,16 +535,23 @@ pub async fn oauth_callback(
                 grant.scopes = os.scopes;
             }
             match store_token(&state, p, &grant, json!({})) {
-                Ok(_) => page(
+                Ok(_) => done_page(
                     &format!("{} connected", p.label()),
                     "Arbos can now act on your behalf through the relay.",
+                    Some(p.as_str()),
+                    true,
                 ),
-                Err(e) => page("Could not store the token", &e.to_string()),
+                Err(e) => done_page(
+                    "Could not store the token",
+                    &e.to_string(),
+                    Some(p.as_str()),
+                    false,
+                ),
             }
         }
         Err(e) => {
             mark_error(&e);
-            page("Token exchange failed", &e)
+            done_page("Token exchange failed", &e, Some(p.as_str()), false)
         }
     }
 }
