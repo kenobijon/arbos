@@ -141,6 +141,10 @@ pub struct CreateProjectBody {
     /// Short public blurb for the agent's profile (≤ 500 chars).
     #[serde(default)]
     pub description: Option<String>,
+    /// Fork: copy the source project's workspace folder (files + memory) into the new agent.
+    /// Own projects only; chat UI history is not copied (the new pinned chat stays empty).
+    #[serde(default)]
+    pub source_project_id: Option<String>,
 }
 
 /// Profile blurbs are short and single-paragraph.
@@ -266,6 +270,25 @@ pub async fn create_project(
             format!("you already have a project named \"{}\"", project.name),
         ));
     }
+    let fork_from = b
+        .source_project_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    if let Some(src_id) = &fork_from {
+        let src = state
+            .db
+            .project(src_id)
+            .map_err(internal)?
+            .ok_or((StatusCode::NOT_FOUND, "source project not found".to_owned()))?;
+        if src.user_id != project.user_id {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "can only fork your own project".into(),
+            ));
+        }
+    }
     state
         .db
         .insert_project(&project)
@@ -289,6 +312,19 @@ pub async fn create_project(
     let sb = state.db.user_box(&project.user_id).map_err(internal)?;
     if sb.is_some() {
         boxes::ensure_awake(&state, &project.user_id, "api").await;
+    }
+    // Fork: record lineage so `/box/projects` can tell agentd to clone locally, and kick a
+    // relay-side copy in the background (covers older agentd builds; stays under the iOS
+    // create timeout). The fork row stays as lineage; agentd only clones when the dest
+    // folder is still missing.
+    if let Some(src_id) = fork_from {
+        let _ = state.db.set_project_fork(&project.id, &src_id);
+        let state2 = state.clone();
+        let owner = project.user_id.clone();
+        let dest = project.id.clone();
+        tokio::spawn(async move {
+            boxes::copy_workspace_for_fork(&state2, &owner, &src_id, &dest).await;
+        });
     }
     Ok(Json(json!({
         "project": project_json(&state, &project).await,
@@ -1332,6 +1368,9 @@ fn workspace_json(state: &AppState, p: &Project) -> Result<Value, (StatusCode, S
     // relay enforces the single-chat rule itself in `create_chat` (plain chats only), so the box
     // needs no gate; newer agentd ignores the field.
     project["multi_chat"] = json!(true);
+    if let Ok(Some(src)) = state.db.project_fork_source(&p.id) {
+        project["forked_from"] = json!(src);
+    }
     Ok(json!({
         "project": project,
         "chats": chats,
@@ -1401,6 +1440,9 @@ pub async fn box_projects(State(state): State<AppState>, principal: Principal) -
             .clone()
             .unwrap_or_else(|| crate::avatar::default_for(&p.id, &state.cfg.avatar_slugs)));
         project["skills_rev"] = json!(state.db.skills_rev(Some(&p.id)).map_err(internal)?);
+        if let Ok(Some(src)) = state.db.project_fork_source(&p.id) {
+            project["forked_from"] = json!(src);
+        }
         let people_chats = crate::people::people_chats_of_project(&state, &p.id, user_id);
         out.push(json!({ "project": project, "chats": chats, "people_chats": people_chats }));
     }
