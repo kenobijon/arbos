@@ -1,7 +1,7 @@
 //! Telegram-style initials avatars (D79): a disc with one of seven vertical
 //! gradients, picked from the stable id (agents: project id; people: user id)
 //! unless the agent's owner chose one (`avatar_color_index`), with white
-//! semibold initials (one or two letters) at ~42 % of the diameter. A photo
+//! semibold initials (one or two letters) at 44.5 % of the diameter. A photo
 //! (GitHub avatar) always wins over initials — see [`crate::ui::people::avatar`].
 //! The brand mark is the only image left in the app; no character art.
 
@@ -86,6 +86,10 @@ pub const GRADIENTS: [Gradient; 7] = [
     },
 ];
 
+/// Initials size as a fraction of the disc (Telegram: SF Semibold at 44.5 %,
+/// one and two letters alike); the iPhone shares this constant.
+pub const INITIALS_SCALE: f32 = 0.445;
+
 /// `(sum of the id's UTF-8 bytes) mod 7` — the same rule on every client.
 pub fn color_index(seed: &str) -> u8 {
     (seed.bytes().map(u32::from).sum::<u32>() % 7) as u8
@@ -144,9 +148,7 @@ pub fn initials(name: &str) -> String {
 pub fn element(seed: &str, name: &str, index: Option<u8>, size: f32, theme: &Theme) -> Div {
     let (top, bottom) = gradient(index_for(seed, index), theme);
     let text = initials(name);
-    let letters = text.chars().count().max(1) as f32;
-    // ~42 % of the diameter for one letter; two letters sit a touch smaller.
-    let font = size * if letters > 1.0 { 0.38 } else { 0.42 };
+    let font = size * INITIALS_SCALE;
     div()
         .size(px(size))
         .flex_shrink_0()
@@ -248,7 +250,7 @@ fn draw_initials(out: &mut image::RgbaImage, text: &str) {
     };
     let (font_system, cache) = &mut *guard;
     let size = out.width() as f32;
-    let font_px = size * if text.chars().count() > 1 { 0.38 } else { 0.42 };
+    let font_px = size * INITIALS_SCALE;
     let metrics = Metrics::new(font_px, font_px * 1.2);
     let mut buffer = Buffer::new(font_system, metrics);
     buffer.set_size(Some(size), Some(size));
