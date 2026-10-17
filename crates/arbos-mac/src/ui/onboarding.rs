@@ -92,8 +92,10 @@ fn alpha(c: Hsla, a: f32) -> Hsla {
     Theme::with_alpha(c, a.clamp(0.0, 1.0))
 }
 
-/// The greeting bubble as the transcript lays it out: left column margin, under
-/// the header and the "Today" stamp, one line of body text.
+/// The greeting bubble as the transcript lays it out: the transcript is
+/// bottom-anchored, so the only message sits just above the composer, left
+/// in the centred 820 px column (measured on a 1180×780 window: left 328,
+/// bottom 74.5 above the window edge, 42.5 tall for one line).
 fn bubble_target(viewport: gpui::Size<Pixels>, sidebar: bool, text_px: f32) -> Bounds<Pixels> {
     let left = if sidebar { SIDEBAR_WIDTH } else { 0.0 };
     let center_w = f32::from(viewport.width) - left;
@@ -101,11 +103,13 @@ fn bubble_target(viewport: gpui::Size<Pixels>, sidebar: bool, text_px: f32) -> B
     let column_x = left + (center_w - column_w) / 2.0;
     let width = (text_px + 28.0).min(ASSISTANT_MAX_WIDTH);
     let lines = (text_px / (ASSISTANT_MAX_WIDTH - 28.0)).ceil().max(1.0);
+    let height = 22.0 + 21.0 * lines;
+    let bottom = f32::from(viewport.height) - 74.5;
     Bounds {
-        origin: Point::new(px(column_x), px(HEADER_HEIGHT + 48.0)),
+        origin: Point::new(px(column_x), px((bottom - height).max(HEADER_HEIGHT + 8.0))),
         size: gpui::Size {
             width: px(width),
-            height: px(22.0 + 21.0 * lines),
+            height: px(height),
         },
     }
 }
@@ -138,7 +142,7 @@ pub fn render(
         "Hi, I’m {}. Your computer is ready — what should we build first?",
         o.agent_name
     );
-    let text_px = greeting.chars().count() as f32 * 7.3;
+    let text_px = greeting.chars().count() as f32 * 6.75;
     let sidebar_shown = {
         let s = state.read(cx);
         !(s.rail_collapsed || s.window_is_narrow(vw))
