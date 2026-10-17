@@ -2404,6 +2404,17 @@ impl AppState {
         cx.notify();
     }
 
+    /// Settings header: save my display name and handle (`PATCH /me`); the
+    /// relay answers with the account, errors arrive as a notice.
+    pub fn update_profile(&mut self, name: String, handle: String, cx: &mut Context<Self>) {
+        if let Some(a) = self.account.as_mut() {
+            a.name = name.clone();
+            a.login = handle.clone();
+        }
+        self.command(ClientCommand::UpdateProfile { name, handle });
+        cx.notify();
+    }
+
     pub fn set_profile_editing_description(&mut self, on: bool, cx: &mut Context<Self>) {
         self.profile_editing_description = on;
         cx.notify();

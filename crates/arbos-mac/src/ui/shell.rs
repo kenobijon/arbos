@@ -87,6 +87,10 @@ pub struct Shell {
     pub people_input: Entity<ComposerInput>,
     /// Agent profile page: inline description editor.
     pub(crate) description_input: Entity<ComposerInput>,
+    /// Settings header: editing my display name and handle (`PATCH /me`).
+    profile_edit_open: bool,
+    name_input: Entity<ComposerInput>,
+    handle_input: Entity<ComposerInput>,
     pub add_agent_open: bool,
     pub members_open: bool,
     /// The agent's "Archived" chats list (header strip / "…" menu).
@@ -207,6 +211,20 @@ impl Shell {
         });
         cx.observe(&description_input, |_, _, cx| cx.notify())
             .detach();
+        let name_input = cx.new(ComposerInput::new);
+        name_input.update(cx, |input, _| input.set_placeholder("Display name"));
+        cx.observe(&name_input, |_, _, cx| cx.notify()).detach();
+        let handle_input = cx.new(ComposerInput::new);
+        {
+            let weak = cx.weak_entity();
+            handle_input.update(cx, |input, _| {
+                input.set_placeholder("handle");
+                input.on_submit = Some(Rc::new(move |_window, cx| {
+                    let _ = weak.update(cx, |this, cx| this.save_profile(cx));
+                }));
+            });
+        }
+        cx.observe(&handle_input, |_, _, cx| cx.notify()).detach();
         let people_input = cx.new(ComposerInput::new);
         {
             let weak = cx.entity().downgrade();
@@ -327,6 +345,9 @@ impl Shell {
             menu_open: false,
             people_input,
             description_input,
+            profile_edit_open: false,
+            name_input,
+            handle_input,
             add_agent_open: false,
             members_open: false,
             feedback,
@@ -1394,6 +1415,52 @@ impl Shell {
         frosted(0.0, PANEL_BLUR, drawer)
     }
 
+    // ----- profile edit ---------------------------------------------------------------
+    /// Settings header pencil: load the current name and handle into the fields.
+    fn start_profile_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (name, handle) = {
+            let state = self.state.read(cx);
+            state
+                .account
+                .as_ref()
+                .map(|a| (a.name.clone(), a.login.clone()))
+                .unwrap_or_default()
+        };
+        self.name_input
+            .update(cx, |input, cx| input.set_text(name, cx));
+        self.handle_input
+            .update(cx, |input, cx| input.set_text(handle, cx));
+        self.profile_edit_open = true;
+        let focus = self.name_input.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    fn save_profile(&mut self, cx: &mut Context<Self>) {
+        if !self.profile_edit_open {
+            return;
+        }
+        let name = self.name_input.read(cx).text().trim().to_string();
+        let handle = self
+            .handle_input
+            .read(cx)
+            .text()
+            .trim()
+            .trim_start_matches('@')
+            .to_string();
+        if handle.is_empty() {
+            self.state.update(cx, |s, cx| {
+                s.push_notice("Choose a handle.");
+                cx.notify();
+            });
+            return;
+        }
+        self.profile_edit_open = false;
+        self.state
+            .update(cx, |s, cx| s.update_profile(name, handle, cx));
+        cx.notify();
+    }
+
     // ----- settings sheet -----------------------------------------------------------
 
     fn render_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1497,38 +1564,109 @@ impl Shell {
                 online: false,
                 avatar_color_index: None,
             };
-            body = body.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap(px(4.0))
-                    .pt(px(6.0))
-                    .pb(px(2.0))
-                    .child(div().pb(px(8.0)).child(people::avatar(
-                        account_image,
-                        &person,
-                        88.0,
-                        &theme,
-                    )))
+            let mut header = div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(4.0))
+                .pt(px(6.0))
+                .pb(px(2.0))
+                .child(div().pb(px(8.0)).child(people::avatar(
+                    account_image,
+                    &person,
+                    88.0,
+                    &theme,
+                )));
+            if self.profile_edit_open {
+                // iPhone parity: name and handle are editable (`PATCH /me`).
+                let field = |input: Entity<ComposerInput>, theme: &Theme| {
+                    div()
+                        .w(px(260.0))
+                        .px(px(10.0))
+                        .py(px(7.0))
+                        .rounded(px(10.0))
+                        .bg(theme.field)
+                        .border_1()
+                        .border_color(theme.field_border)
+                        .text_size(px(TEXT_BODY))
+                        .child(input)
+                };
+                header = header
+                    .child(field(self.name_input.clone(), &theme))
                     .child(
                         div()
-                            .text_size(px(22.0))
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(theme.text)
-                            .child(if account.name.trim().is_empty() {
-                                who.clone()
-                            } else {
-                                account.name.clone()
-                            }),
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(
+                                div()
+                                    .text_size(px(TEXT_BODY))
+                                    .text_color(theme.text_muted)
+                                    .child("@"),
+                            )
+                            .child(field(self.handle_input.clone(), &theme)),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(8.0))
+                            .pt(px(6.0))
+                            .child(
+                                glass::quiet_button("profile-edit-cancel", "Cancel", &theme)
+                                    .h(px(32.0))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.profile_edit_open = false;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                glass::primary_button("profile-edit-save", "Save", &theme)
+                                    .h(px(32.0))
+                                    .on_click(cx.listener(|this, _, _, cx| this.save_profile(cx))),
+                            ),
+                    );
+            } else {
+                header = header
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(
+                                div()
+                                    .text_size(px(22.0))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(theme.text)
+                                    .child(if account.name.trim().is_empty() {
+                                        who.clone()
+                                    } else {
+                                        account.name.clone()
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .id("profile-edit")
+                                    .size(px(22.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_full()
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(theme.surface_2))
+                                    .child(icon("square-pencil", 14.0, theme.text_muted))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.start_profile_edit(window, cx)
+                                    })),
+                            ),
                     )
                     .child(
                         div()
                             .text_size(px(TEXT_BODY))
                             .text_color(theme.text_muted)
                             .child(who.clone()),
-                    ),
-            );
+                    );
+            }
+            body = body.child(header);
             if account.balance_usd > 0.0 || account.daily_cap_usd.is_some() {
                 let mut group = settings_group(&theme).child(
                     glass::row("Credits", &theme)
@@ -2395,6 +2533,16 @@ impl Render for Shell {
                         return;
                     }
                     if this.routines_open && this.routines.read(cx).has_focus(window, cx) {
+                        return;
+                    }
+                    if this.profile_edit_open
+                        && (this.name_input.read(cx).focus_handle(cx).is_focused(window)
+                            || this
+                                .handle_input
+                                .read(cx)
+                                .focus_handle(cx)
+                                .is_focused(window))
+                    {
                         return;
                     }
                     if this.state.read(cx).pairing.is_none() {

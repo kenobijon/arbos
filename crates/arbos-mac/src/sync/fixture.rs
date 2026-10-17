@@ -719,6 +719,21 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             }
             emit_projects(shared);
         }
+        ClientCommand::UpdateProfile { name, handle } => {
+            // The fixture keeps it: Settings shows the new name and handle.
+            let _ = shared
+                .events
+                .send(SyncEvent::Account(Some(crate::model::AccountView {
+                    id: ME_ID.into(),
+                    login: handle,
+                    name,
+                    avatar_url: String::new(),
+                    device_name: "Fixture".into(),
+                    balance_usd: 84.5,
+                    spent_today_usd: 1.6,
+                    daily_cap_usd: Some(20.0),
+                })));
+        }
         ClientCommand::SetDescription {
             project_id,
             description,

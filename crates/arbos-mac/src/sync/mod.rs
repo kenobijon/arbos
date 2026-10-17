@@ -440,6 +440,11 @@ pub enum ClientCommand {
     FocusChat {
         chat_id: Option<Id>,
     },
+    /// Settings header: `PATCH /me {name, login}` — my display name and handle.
+    UpdateProfile {
+        name: String,
+        handle: String,
+    },
     /// Agent page: `PATCH /projects/{id} {description}` (API §9; `""` clears).
     SetDescription {
         project_id: Id,

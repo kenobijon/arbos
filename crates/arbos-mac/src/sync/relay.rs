@@ -4055,6 +4055,29 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             });
         }
+        ClientCommand::UpdateProfile { name, handle } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                match shared
+                    .patch_json("/me", json!({ "name": name, "login": handle }))
+                    .await
+                {
+                    Ok(_) => refresh_me(&shared).await,
+                    Err(err) => {
+                        let text = format!("{err:#}");
+                        let human = if text.contains("handle_taken") {
+                            "That handle is already taken.".to_string()
+                        } else if text.contains("bad_handle") {
+                            "Handle must be 1–39 letters, numbers, or hyphens.".to_string()
+                        } else {
+                            format!("Profile: {text}")
+                        };
+                        shared.notice(human);
+                        refresh_me(&shared).await;
+                    }
+                }
+            });
+        }
         ClientCommand::SetDescription {
             project_id,
             description,
