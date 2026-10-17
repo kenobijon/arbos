@@ -4,6 +4,7 @@
 // Prose only: tool calls, status noise, usage and JSON never render.
 
 import AVFoundation
+import QuickLook
 import SwiftUI
 import UIKit
 
