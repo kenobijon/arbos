@@ -51,6 +51,40 @@ pub enum Surface {
     Glass,
 }
 
+const SURFACE_FILE: &str = "surface";
+
+impl Surface {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "matte" => Some(Self::Matte),
+            "glass" => Some(Self::Glass),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Matte => "matte",
+            Self::Glass => "glass",
+        }
+    }
+
+    /// The saved choice, or Matte (D10). Saved as one word in `<config>/surface`
+    /// only when picked in Settings, like the appearance.
+    pub fn load() -> Self {
+        std::fs::read_to_string(config_dir().join(SURFACE_FILE))
+            .ok()
+            .and_then(|s| Self::parse(&s))
+            .unwrap_or(Self::Matte)
+    }
+
+    pub fn save(self) {
+        let dir = config_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join(SURFACE_FILE), self.as_str());
+    }
+}
+
 /// What the window is drawn in right now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Appearance {

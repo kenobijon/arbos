@@ -399,8 +399,12 @@ impl Shell {
     }
 
     fn set_theme(&mut self, pref: AppearancePref, surface: Surface, cx: &mut Context<Self>) {
-        if Theme::of(cx).pref != pref {
+        let current = Theme::of(cx);
+        if current.pref != pref {
             pref.save();
+        }
+        if current.surface != surface {
+            surface.save();
         }
         cx.set_global(Theme::for_pref(pref, surface, cx));
         reapply_window_background(cx);
