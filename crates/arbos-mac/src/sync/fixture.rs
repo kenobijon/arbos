@@ -128,7 +128,12 @@ impl SyncSource for FixtureSource {
                 local: Mutex::new(seed_local()),
                 voice_blobs: Mutex::new(HashMap::new()),
                 machine: Mutex::new(Machine {
-                    state: MachineState::Awake,
+                    // `ARBOS_FIXTURE_MACHINE=error|waking` seeds a banner state (screenshot rig).
+                    state: match std::env::var("ARBOS_FIXTURE_MACHINE").as_deref() {
+                        Ok("error") => MachineState::Error,
+                        Ok("waking") => MachineState::Waking,
+                        _ => MachineState::Awake,
+                    },
                     since: Some(now_ms().saturating_sub(42 * 60_000)),
                     spec: Some("4 vCPU · 8 GiB · 10 GiB".into()),
                     class: Some("arbos-agent-0.1.7".into()),

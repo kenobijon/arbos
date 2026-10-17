@@ -526,27 +526,55 @@ impl Shell {
                     ),
                 )
             }
-            MachineState::Error => Some(
-                banner(theme.danger_soft, theme.text)
-                    .child(div().text_color(theme.danger).child("✗"))
-                    .child(
-                        machine
-                            .detail
-                            .clone()
-                            .unwrap_or_else(|| "Your machine could not start.".to_string()),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .id("banner-retry")
-                            .text_color(theme.accent)
-                            .cursor_pointer()
-                            .child("Retry")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.state.update(cx, |s, cx| s.machine_start(cx));
-                            })),
-                    ),
-            ),
+            // Grok (refs 69/70): no red strip — a quiet block with a small
+            // monitor glyph, a short title, the reason in muted text and a
+            // capsule "Retry".
+            MachineState::Error => {
+                let detail = machine.detail.clone().unwrap_or_else(|| {
+                    "Your agents are safe — their machine just can't be reached right now."
+                        .to_string()
+                });
+                Some(
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.0))
+                        .px(px(COLUMN_MARGIN))
+                        .pt(px(12.0))
+                        .pb(px(8.0))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .text_size(px(TEXT_SMALL))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme.text)
+                                .child(icon("window", 13.0, theme.text_muted))
+                                .child("Can't reach your machine"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(TEXT_TINY + 0.5))
+                                .text_color(theme.text_muted)
+                                .max_w(px(480.0))
+                                .child(detail),
+                        )
+                        .child(
+                            div().pt(px(4.0)).flex().child(
+                                glass::quiet_button("banner-retry", "Retry", &theme)
+                                    .h(px(30.0))
+                                    .px(px(14.0))
+                                    .bg(theme.surface_2)
+                                    .border_color(gpui::transparent_black())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.state.update(cx, |s, cx| s.machine_start(cx));
+                                    })),
+                            ),
+                        ),
+                )
+            }
             MachineState::Asleep
             | MachineState::Awake
             | MachineState::Stopped
