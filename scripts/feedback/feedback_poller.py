@@ -106,7 +106,8 @@ MALICE_PATTERNS = [
     r"\b(disable|remove|bypass|turn off|skip)\b.{0,40}\b(auth|login|sign[- ]?in|billing|credit|limit|cap|kill ?switch|rate limit|check)\b",
     r"\b(give|grant|add|set)\b.{0,30}\b(me|my|user|account)\b.{0,30}\b(credits?|admin|unlimited|free|access)\b",
     r"\b(backdoor|reverse shell|hidden endpoint|keylog|cryptominer|miner)\b",
-    r"\b(delete|drop|wipe|truncate|rm -rf)\b.{0,30}\b(all|every|users?|database|db|data|table|accounts?)\b",
+    # "drop down"/"dropdown" is UI talk ("it should drop down available users"), not a DROP TABLE.
+    r"\b(delete|drop(?![ -]?down)|wipe|truncate|rm -rf)\b.{0,30}\b(all|every|users?|database|db|data|table|accounts?)\b",
     r"\b(curl|wget)\b.{0,80}\|\s*(ba)?sh\b",
     r"\bignore (all |the )?(previous|above|prior) instructions\b",
 ]
