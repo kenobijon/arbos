@@ -3,14 +3,16 @@
 //! owner's box for it) and answers the humans there.
 //!
 //! Mention to reply (default): a human message is for this agent when its `mentions` carry
-//! `agent:<project>`, or the text says `@<slug>` (the Project's name as a handle), or it replies to
-//! one of this agent's messages, or it says `@arbos` and this is the only agent in the chat; the
-//! owner can switch the agent to "every message". In a people **group** (`kind: group`, or more
-//! than one agent), when nothing addresses this agent, the decision model reads recent chat
-//! context and chooses whether this agent should reply (or stay quiet) so the right agent
-//! continues the thread — or none do. Each human message is labelled with the author's handle
-//! and role (`owner` | `guest`) in the prompt — attribution only; in the permissive v1 a guest
-//! gets everything the owner gets. The owner's credits pay; audit lines carry `asked_by`.
+//! `agent:<project>`, or the text says `@<slug>` (the Project's name as a handle), or the text
+//! opens with this agent's bare name/handle ("Bob?", "hey Bob …"), or it addresses agents
+//! collectively ("can the agents…", "hey agents"), or it replies to one of this agent's messages,
+//! or it says `@arbos` and this is the only agent in the chat; the owner can switch the agent to
+//! "every message". In a people **group** (`kind: group`, or more than one agent), when nothing
+//! addresses this agent, the decision model reads recent chat context and chooses whether this
+//! agent should reply (or stay quiet) so the right agent continues the thread — or none do. Each
+//! human message is labelled with the author's handle and role (`owner` | `guest`) in the prompt —
+//! attribution only; in the permissive v1 a guest gets everything the owner gets. The owner's
+//! credits pay; audit lines carry `asked_by`.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -191,6 +193,88 @@ fn text_names_people(msg: &MessageView, info: &PeopleChatInfo) -> bool {
                 .next()
                 .is_some_and(|first| first == token)
             {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// True when the prose addresses this agent at the start by handle, slug, or display/first name
+/// ("Bob", "Bob?", "hey Bob what do you think?") without needing `@`. A leading person name
+/// wins when the same token could match a human in the chat.
+fn text_names_this_agent(msg: &MessageView, info: &PeopleChatInfo, project_id: &str) -> bool {
+    if text_names_people(msg, info) {
+        return false;
+    }
+    let Some(token) = leading_address_token(&msg.text()) else {
+        return false;
+    };
+    let me = format!("agent:{project_id}");
+    for m in &info.members {
+        let Some(member) = m["member"].as_str() else {
+            continue;
+        };
+        if member != me {
+            continue;
+        }
+        let handle = m["handle"].as_str().unwrap_or("").to_lowercase();
+        if !handle.is_empty() && handle == token {
+            return true;
+        }
+        if !info.slug.is_empty() && info.slug.eq_ignore_ascii_case(&token) {
+            return true;
+        }
+        let name = m["project"]["name"]
+            .as_str()
+            .or_else(|| m["name"].as_str())
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
+        if name.is_empty() {
+            continue;
+        }
+        if name == token {
+            return true;
+        }
+        // Same slug rule as iOS `mentionSlug`: lower-case, spaces → "-".
+        if name.replace(' ', "-") == token {
+            return true;
+        }
+        if name
+            .split_whitespace()
+            .next()
+            .is_some_and(|first| first == token)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// "hey agents" / "can the agents…" / "all agents" — address every agent, no `@` required.
+fn text_addresses_agents_collectively(msg: &MessageView) -> bool {
+    let trimmed = msg.text().trim().to_lowercase();
+    if trimmed.is_empty() {
+        return false;
+    }
+    for g in [
+        "hey agents",
+        "hi agents",
+        "hello agents",
+        "yo agents",
+        "ok agents",
+        "okay agents",
+        "all agents",
+        "the agents",
+        "can the agents",
+        "can agents",
+    ] {
+        if trimmed == g {
+            return true;
+        }
+        for sep in [" ", ",", "!", "?", ":", "—", "-"] {
+            if trimmed.starts_with(&(g.to_owned() + sep)) {
                 return true;
             }
         }
@@ -513,6 +597,13 @@ impl Agent {
             every,
             replied_to_mine,
         ) {
+            return true;
+        }
+        // Bare agent name / collective address ("Bob?", "hey Bob …", "can the agents respond?")
+        // — same as an @mention, including in DMs where the decision model does not run.
+        if text_names_this_agent(&msg, &info, &self.cfg.project_id)
+            || text_addresses_agents_collectively(&msg)
+        {
             return true;
         }
         // A person chip / @handle with no agent address is for humans — stay quiet even in a
@@ -978,6 +1069,37 @@ mod tests {
             &msg("what's 2+2?", json!({ "mentions": ["agent:01HPROJ"] })),
             &info
         ));
+
+        // Bare agent name — same as @bob (DM + group). Person name still wins on collision.
+        assert!(text_names_this_agent(&msg("Bob?", json!({})), &info, P));
+        assert!(text_names_this_agent(
+            &msg("hey Bob what do you think?", json!({})),
+            &info,
+            P
+        ));
+        assert!(!text_names_this_agent(&msg("Allan?", json!({})), &info, P));
+        assert!(!text_names_this_agent(
+            &msg("can you see @jo?", json!({})),
+            &info,
+            P
+        ));
+        assert!(!text_names_this_agent(
+            &msg("Bob?", json!({})),
+            &info,
+            "OTHER"
+        ));
+        assert!(text_addresses_agents_collectively(&msg(
+            "can the agents respond?",
+            json!({})
+        )));
+        assert!(text_addresses_agents_collectively(&msg(
+            "hey agents",
+            json!({})
+        )));
+        assert!(!text_addresses_agents_collectively(&msg(
+            "Allan?",
+            json!({})
+        )));
     }
 
     #[test]
