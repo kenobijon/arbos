@@ -207,15 +207,18 @@ struct ChatView: View {
         }
     }
 
-    /// Rebuild transcript rows, including "@agent joined" lines for people-chat agents.
+    /// Rebuild transcript rows, including "@handle joined" lines for people-chat members.
     private func refreshRows() {
         // Agents are always added after the chat exists (never founders), so every agent
-        // gets a centred "@handle joined" line at its membership time.
-        let joins: [Transcript.Join] = (people?.agents ?? []).compactMap { a in
-            guard a.joinedAt > 0 else { return nil }
-            let handle = mentionSlug(a.project?.name ?? a.handle)
+        // gets a centred "@handle joined" line at its membership time. Humans who join
+        // later (after create) get the same line; founders (joined_at ≈ created_at) do not.
+        let createdAt = people?.createdAt ?? 0
+        let joins: [Transcript.Join] = (people?.members ?? []).compactMap { m in
+            guard m.joinedAt > 0 else { return nil }
+            if !m.isAgent, m.joinedAt <= createdAt + 5_000 { return nil }
+            let handle = m.isAgent ? mentionSlug(m.project?.name ?? m.handle) : m.handle
             guard !handle.isEmpty else { return nil }
-            return Transcript.Join(id: a.id, handle: handle, at: a.joinedAt)
+            return Transcript.Join(id: m.id, handle: handle, at: m.joinedAt)
         }
         rows = Transcript.rows(messages, projectId: isPeople ? "\(peopleSlot):\(chatId)" : projectId,
                                me: model.myUserId, people: isPeople, joins: joins)
@@ -407,8 +410,8 @@ struct ChatView: View {
             model.markRead(chatId: chatId)
             if isPeople { model.markPeopleRead(chatId) }
         }
-        // Adding an agent updates membership without a new message — rebuild so "@bob joined" appears.
-        .onChange(of: people?.agents.map { "\($0.id):\($0.joinedAt)" } ?? []) { _, _ in
+        // Adding a person or agent updates membership without a new message — rebuild so "@handle joined" appears.
+        .onChange(of: people?.members.map { "\($0.id):\($0.joinedAt)" } ?? []) { _, _ in
             refreshRows()
         }
         .onChange(of: model.caughtUp.contains(chatId), initial: true) { _, ready in
