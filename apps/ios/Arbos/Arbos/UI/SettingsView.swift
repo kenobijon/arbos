@@ -33,6 +33,7 @@ struct SettingsView: View {
     @State private var showProfileEdit = false
     /// `ARBOS_SETTINGS_PAGE=appearance` lands on that page (screenshot rig).
     @State private var showAppearancePage = DebugHooks.settingsPage == "appearance"
+    @State private var showConnectorsPage = DebugHooks.settingsPage == "connectors"
 
     var body: some View {
         NavigationStack {
@@ -137,6 +138,7 @@ struct SettingsView: View {
                 Task { await applyAvatarPick(item) }
             }
             .navigationDestination(isPresented: $showAppearancePage) { AppearancePage() }
+            .navigationDestination(isPresented: $showConnectorsPage) { ConnectorsPage(connectorError: $connectorError) }
             .sheet(isPresented: $showProfileEdit) {
                 NavigationStack {
                     ProfileEditView()
