@@ -2,8 +2,6 @@ import SwiftUI
 
 struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
-    @ObservedObject private var push = PushManager.shared
-    @ObservedObject private var calls = CallManager.shared
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
     @State private var relayUrl = ""
@@ -115,12 +113,6 @@ struct SettingsView: View {
                 .listRowBackground(theme.card)
 
                 Section {
-                    LabeledContent("Notifications") {
-                        Text(notificationsLine).foregroundStyle(theme.muted).multilineTextAlignment(.trailing)
-                    }
-                    LabeledContent("Call ringing") {
-                        Text(calls.voipStatus).foregroundStyle(theme.muted).multilineTextAlignment(.trailing)
-                    }
                     Button {
                         dismiss()
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { FeedbackCenter.shared.open(screen: "settings") }
@@ -327,20 +319,6 @@ struct SettingsView: View {
         guard !trimmed.isEmpty else { return }
         model.setRelayUrl(trimmed)
         dismiss()
-    }
-
-    /// System permission × relay capability, in one line.
-    private var notificationsLine: String {
-        switch push.status {
-        case .denied: return "Off in iOS Settings"
-        case .notDetermined: return "Not asked yet"
-        default:
-            switch push.relayPushEnabled {
-            case .some(false): return "On · relay push key pending"
-            case .some(true): return "On"
-            case .none: return push.apnsToken == nil ? "On · registering…" : "On"
-            }
-        }
     }
 
     static func relative(_ ms: Int64) -> String {
