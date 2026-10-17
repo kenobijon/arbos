@@ -1329,6 +1329,11 @@ async fn fetch_avatar(shared: Arc<Shared>, url: String) {
 async fn fetch_voices(shared: &Arc<Shared>) {
     match shared.get_json("/voices").await {
         Ok(v) => {
+            let default = v
+                .get("default")
+                .and_then(Value::as_str)
+                .filter(|d| !d.is_empty())
+                .map(str::to_string);
             let list = v.get("voices").cloned().unwrap_or(v);
             let voices: Vec<Voice> = list
                 .as_array()
@@ -1336,10 +1341,20 @@ async fn fetch_voices(shared: &Arc<Shared>) {
                     a.iter()
                         .filter_map(|x| serde_json::from_value::<Voice>(x.clone()).ok())
                         .filter(|x| !x.id.is_empty())
+                        .map(|mut x| {
+                            // Relative sample paths live on the relay.
+                            if x.sample_url.starts_with('/') {
+                                x.sample_url = format!("{}{}", shared.http_url, x.sample_url);
+                            } else if x.sample_url.is_empty() {
+                                x.sample_url =
+                                    format!("{}/voices/{}/sample.mp3", shared.http_url, x.id);
+                            }
+                            x
+                        })
                         .collect()
                 })
                 .unwrap_or_default();
-            let _ = shared.events.send(SyncEvent::Voices(voices));
+            let _ = shared.events.send(SyncEvent::Voices { default, voices });
         }
         Err(err) => {
             if !err.to_string().contains("HTTP 404") {

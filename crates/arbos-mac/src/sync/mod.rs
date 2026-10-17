@@ -107,8 +107,11 @@ pub enum SyncEvent {
         chat_id: Id,
         archived_at: Option<u64>,
     },
-    /// `GET /voices`: the call voices an agent can use.
-    Voices(Vec<Voice>),
+    /// `GET /voices`: the call voices an agent can use, and the default's id.
+    Voices {
+        default: Option<String>,
+        voices: Vec<Voice>,
+    },
     /// A voice sample is on disk (fetched and cached), ready to play.
     VoiceSample {
         url: String,

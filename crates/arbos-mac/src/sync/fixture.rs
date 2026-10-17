@@ -573,7 +573,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         }
         ClientCommand::MarkRead { chat_id } => mark_read(shared, &chat_id),
         ClientCommand::FetchVoices => {
-            let _ = shared.events.send(SyncEvent::Voices(fixture_voices()));
+            let _ = shared.events.send(SyncEvent::Voices {
+                default: Some("ara".into()),
+                voices: fixture_voices(),
+            });
         }
         ClientCommand::FetchVoiceSample { url } => {
             // The demo has no samples to fetch; a short synthesised tone stands in.

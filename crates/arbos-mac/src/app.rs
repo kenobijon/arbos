@@ -344,8 +344,10 @@ pub struct AppState {
     /// The ring (callee) and ringback (caller) tones while they should sound.
     ring_tone: Option<TonePlayer>,
     ringback_tone: Option<TonePlayer>,
-    /// `GET /voices`: the call voices an agent can use (empty until fetched).
+    /// `GET /voices`: the call voices an agent can use (empty until fetched),
+    /// and the id the relay uses when an agent has none set.
     pub voices: Vec<Voice>,
+    pub default_voice: Option<String>,
     /// The voice sample playing now (url) and its player; cached paths by url.
     pub sample_playing: Option<String>,
     sample_player: Option<SamplePlayer>,
@@ -567,6 +569,7 @@ impl AppState {
             ring_tone: None,
             ringback_tone: None,
             voices: Vec::new(),
+            default_voice: None,
             sample_playing: None,
             sample_player: None,
             sample_paths: HashMap::new(),
@@ -1105,8 +1108,9 @@ impl AppState {
                 self.enforce_tab(&project_id);
                 cx.notify();
             }
-            SyncEvent::Voices(voices) => {
+            SyncEvent::Voices { default, voices } => {
                 self.voices = voices;
+                self.default_voice = default;
                 cx.notify();
             }
             SyncEvent::VoiceSample { url, path } => {

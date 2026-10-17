@@ -20,6 +20,20 @@ pub fn sheet(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
     let voices: Vec<Voice> = state.voices.clone();
     let selected = space.voice.clone();
     let pid = space.id.clone();
+    let default_voice = state
+        .default_voice
+        .as_deref()
+        .and_then(|id| voices.iter().find(|v| v.id == id))
+        .cloned();
+    let default_label = match &default_voice {
+        Some(v) => format!("Default ({})", v.name),
+        None => "Default".to_string(),
+    };
+    let default_desc = default_voice
+        .as_ref()
+        .and_then(|v| v.description.clone())
+        .filter(|d| !d.trim().is_empty())
+        .unwrap_or_else(|| "The relay's current default voice for calls".into());
     // White in light, near-black in dark (the question-card palette).
     let list_bg = match theme.appearance {
         Appearance::Light => palette.inner,
@@ -67,13 +81,60 @@ pub fn sheet(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
         .border_1()
         .border_color(palette.hairline);
 
-    // "Default" first: the voice the relay / voice worker uses when none is set.
+    let play_button = |id: ElementId, url: Option<String>, playing: bool, theme: &Theme| {
+        let has = url.is_some();
+        div()
+            .id(id)
+            .flex_shrink_0()
+            .size(px(34.0))
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(if playing {
+                theme.text
+            } else {
+                Theme::with_alpha(theme.text, 0.08)
+            })
+            .when(!has, |el| el.opacity(0.35))
+            .hover(|s| s.opacity(0.85))
+            .child(icon(
+                if playing { "stop" } else { "play" },
+                13.0,
+                if playing { theme.bg } else { theme.text },
+            ))
+            .when_some(url, |el, url| {
+                el.on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.state
+                            .update(cx, |s, cx| s.toggle_voice_sample(url.clone(), cx));
+                    }),
+                )
+            })
+    };
+
+    // "Default (Marin)" first: what the relay uses when the agent has none set.
     {
         let p = pid.clone();
+        let url = default_voice
+            .as_ref()
+            .map(|v| v.sample_url.clone())
+            .filter(|u| !u.is_empty());
+        let playing = url
+            .as_deref()
+            .is_some_and(|u| state.voice_sample_playing(u));
         list = list.child(
             row_base(ElementId::Name("voice-default".into()), &theme)
                 .border_b_1()
                 .border_color(palette.hairline)
+                .child(play_button(
+                    ElementId::Name("voice-play-default".into()),
+                    url,
+                    playing,
+                    &theme,
+                ))
                 .child(
                     div()
                         .flex_1()
@@ -86,13 +147,13 @@ pub fn sheet(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
                                 .text_size(px(TEXT_BODY))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme.text)
-                                .child("Default"),
+                                .child(default_label),
                         )
                         .child(
                             div()
                                 .text_size(px(TEXT_TINY))
                                 .text_color(theme.text_muted)
-                                .child("The current default voice for calls"),
+                                .child(default_desc),
                         ),
                 )
                 .child(check(selected.is_none(), &theme))
@@ -119,7 +180,6 @@ pub fn sheet(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
         let p = pid.clone();
         let vid = v.id.clone();
         let url = v.sample_url.clone();
-        let has_sample = !v.sample_url.is_empty();
         let mut row = row_base(
             ElementId::Name(SharedString::from(format!("voice-{}", v.id))),
             &theme,
@@ -127,41 +187,12 @@ pub fn sheet(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
         .when(i + 1 < n, |el| {
             el.border_b_1().border_color(palette.hairline)
         })
-        .child(
-            div()
-                .id(ElementId::Name(SharedString::from(format!(
-                    "voice-play-{}",
-                    v.id
-                ))))
-                .flex_shrink_0()
-                .size(px(34.0))
-                .rounded_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(if playing {
-                    theme.text
-                } else {
-                    Theme::with_alpha(theme.text, 0.08)
-                })
-                .when(!has_sample, |el| el.opacity(0.35))
-                .hover(|s| s.opacity(0.85))
-                .child(icon(
-                    if playing { "stop" } else { "play" },
-                    13.0,
-                    if playing { theme.bg } else { theme.text },
-                ))
-                .when(has_sample, |el| {
-                    el.on_mouse_down(
-                        gpui::MouseButton::Left,
-                        cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.state
-                                .update(cx, |s, cx| s.toggle_voice_sample(url.clone(), cx));
-                        }),
-                    )
-                }),
-        )
+        .child(play_button(
+            ElementId::Name(SharedString::from(format!("voice-play-{}", v.id))),
+            Some(url).filter(|u| !u.is_empty()),
+            playing,
+            &theme,
+        ))
         .child(
             div()
                 .flex_1()
