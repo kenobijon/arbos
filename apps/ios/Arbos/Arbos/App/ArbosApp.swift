@@ -45,7 +45,10 @@ struct RootView: View {
         }
         .animation(.easeInOut(duration: 0.25), value: model.firstLogin == nil)
         .onAppear {
-            if DebugHooks.show == "onboarding" { model.demoFirstLogin(stage: DebugHooks.onboardingStage) }
+            if DebugHooks.show == "onboarding" {
+                model.demoFirstLogin(stage: DebugHooks.onboardingStage)
+                if DebugHooks.onboardingProfile { model.needsProfileSetup = true }
+            }
         }
         .environment(\.theme, theme)
         .preferredColorScheme(preferredScheme)

@@ -33,6 +33,8 @@ enum DebugHooks {
     static var show: String? { value("ARBOS_SHOW") }
     static var onboardingStage: String? { value("ARBOS_ONBOARDING_STAGE") }
     static var onboardingAutoplay: Bool { value("ARBOS_ONBOARDING_AUTOPLAY") == "1" }
+    /// With `ARBOS_SHOW=onboarding`: also present the name/handle sheet over the terminal (rig).
+    static var onboardingProfile: Bool { value("ARBOS_ONBOARDING_PROFILE") == "1" }
     /// With `ARBOS_SHOW=settings`: the Settings page to land on (`appearance`).
     static var settingsPage: String? { value("ARBOS_SETTINGS_PAGE") }
     /// Scripted tour for the screen recording (fixture only).
