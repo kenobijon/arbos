@@ -1323,16 +1323,26 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Start Google (etc.) OAuth in the system auth sheet. The relay finishes the
-    /// HTTPS callback, then redirects to `arbos://connectors/callback` so the sheet
+    /// Start OAuth in the system auth sheet, or store a pasted token. The relay finishes
+    /// the HTTPS callback, then redirects to `arbos://connectors/callback` so the sheet
     /// closes and we land back in Settings. Falls back to Safari if the sheet cannot
     /// start. Errors go through `notice` — Settings shows them itself (the root alert
     /// sits under the sheet and looks like a silent fail).
-    func connectConnector(provider: String) {
+    func connectConnector(provider: String, token: String? = nil) {
         guard !connectorsBusy, credentials != nil, !isFixture else { return }
         connectorsBusy = true
         Task { @MainActor in
             do {
+                if let token, !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    _ = try await api.connectConnector(provider: provider, token: token)
+                    connectorsBusy = false
+                    await refreshConnectorsOnce()
+                    if connectors.connector(for: provider)?.status != .connected {
+                        let err = connectors.connector(for: provider)?.lastError ?? ""
+                        notice = Notice(text: "Connect \(provider): \(err.isEmpty ? "token was not accepted" : err)")
+                    }
+                    return
+                }
                 guard let urlStr = try await api.connectConnector(provider: provider),
                       let url = URL(string: urlStr) else {
                     connectorsBusy = false
