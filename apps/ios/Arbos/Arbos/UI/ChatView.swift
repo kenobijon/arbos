@@ -1180,9 +1180,8 @@ struct ChatView: View {
         !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pending.isEmpty
     }
 
-    /// Idle round button: Grok's waveform (voice mode with the bot); a people chat
-    /// starts a real call, so it keeps the phone.
-    private var idleButtonGlyph: String { isPeople ? "phone.fill" : "waveform" }
+    /// Idle round button: phone — starts a voice call (agent or people chat).
+    private var idleButtonGlyph: String { "phone.fill" }
 
     /// Members whose handle/slug starts with the typed `@` prefix; agents first.
     private func mentionList(_ people: PeopleChat, query: String) -> some View {
