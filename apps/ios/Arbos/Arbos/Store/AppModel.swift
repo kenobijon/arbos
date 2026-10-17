@@ -1361,6 +1361,8 @@ final class AppModel: ObservableObject {
     // MARK: Connectors (F1)
 
     /// Load the relay's connector catalog + connected accounts for Settings.
+    /// Failures stay quiet — opening Settings must not alert on a transient TLS
+    /// blip. Connect / Disconnect still set `notice` themselves.
     func refreshConnectors() {
         guard credentials != nil, !isFixture else { return }
         Task {
@@ -1370,7 +1372,7 @@ final class AppModel: ObservableObject {
                 // Older relays have no connectors route.
                 connectors = ConnectorsView(loaded: true)
             } catch {
-                notice = Notice(text: "Connectors: \(error.localizedDescription)")
+                // Same as refreshConnectorsOnce: leave prior state, no alert.
             }
         }
     }
