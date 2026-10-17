@@ -12,8 +12,8 @@ use gpui::{hsla, rgb, rgba, App, Global, Hsla, WindowBackgroundAppearance};
 pub const SIDEBAR_WIDTH: f32 = 296.0;
 /// Kept for the settings sub-panels, which open just right of the sidebar.
 pub const RAIL_WIDTH: f32 = SIDEBAR_WIDTH;
-/// The slim conversation header (avatar + name left, icon buttons right).
-pub const HEADER_HEIGHT: f32 = 50.0;
+/// The slim conversation header (avatar + name left, icon buttons right); Grok Mac: 44 pt.
+pub const HEADER_HEIGHT: f32 = 44.0;
 pub const TAB_BAR_HEIGHT: f32 = HEADER_HEIGHT;
 /// Composer: one pill with the "+" circle inside left and mic / send inside right.
 pub const COMPOSER_WIDTH: f32 = 820.0;
@@ -39,7 +39,7 @@ pub const TEXT_TINY: f32 = 11.5;
 pub const LINE_HEIGHT: f32 = 21.0;
 /// Avatar sizes: list row (Grok Mac: 33 pt blobs in a 58 pt row), header, inline sender.
 pub const AVATAR_ROW: f32 = 36.0;
-pub const AVATAR_HEADER: f32 = 26.0;
+pub const AVATAR_HEADER: f32 = 22.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Surface {
