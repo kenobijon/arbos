@@ -29,7 +29,6 @@
 		A1B0F9F54DB2257BA4BA7B63 /* AgentProfileView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A124D4FA40F4E5025A2B2C9D /* AgentProfileView.swift */; };
 		A143D97A2803EDDA4BEA6B67 /* Avatar.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EE5A7A5FF12E4EF7FE7B27 /* Avatar.swift */; };
 		A11149E871067930CB116885 /* CallView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1686D5A87F44B94E76A8761 /* CallView.swift */; };
-		A1953B70D02D6BA87E3679F0 /* ChatListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15AADDA918609E3CF8ABB86 /* ChatListView.swift */; };
 		A17FC3E175B29A6CC8654F7C /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D946C1D0D3D6797F9935E9 /* ChatView.swift */; };
 		A10A6AAB1A89692C252B33E4 /* FeedbackSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A19A848187E4B392C3266926 /* FeedbackSheet.swift */; };
 		A19DEA501A654ADE6E17D7D0 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1838A1C2D1E07CD3A2A2B9D /* HomeView.swift */; };
@@ -110,7 +109,6 @@
 		A124D4FA40F4E5025A2B2C9D /* AgentProfileView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentProfileView.swift; sourceTree = "<group>"; };
 		A1EE5A7A5FF12E4EF7FE7B27 /* Avatar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Avatar.swift; sourceTree = "<group>"; };
 		A1686D5A87F44B94E76A8761 /* CallView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallView.swift; sourceTree = "<group>"; };
-		A15AADDA918609E3CF8ABB86 /* ChatListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatListView.swift; sourceTree = "<group>"; };
 		A1D946C1D0D3D6797F9935E9 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
 		A19A848187E4B392C3266926 /* FeedbackSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedbackSheet.swift; sourceTree = "<group>"; };
 		A1838A1C2D1E07CD3A2A2B9D /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
@@ -264,7 +262,6 @@
 				A124D4FA40F4E5025A2B2C9D,
 				A1EE5A7A5FF12E4EF7FE7B27,
 				A1686D5A87F44B94E76A8761,
-				A15AADDA918609E3CF8ABB86,
 				A1D946C1D0D3D6797F9935E9,
 				A19A848187E4B392C3266926,
 				A1838A1C2D1E07CD3A2A2B9D,
@@ -430,7 +427,6 @@
 				A1B0F9F54DB2257BA4BA7B63 /* AgentProfileView.swift in Sources */,
 				A143D97A2803EDDA4BEA6B67 /* Avatar.swift in Sources */,
 				A11149E871067930CB116885 /* CallView.swift in Sources */,
-				A1953B70D02D6BA87E3679F0 /* ChatListView.swift in Sources */,
 				A17FC3E175B29A6CC8654F7C /* ChatView.swift in Sources */,
 				A10A6AAB1A89692C252B33E4 /* FeedbackSheet.swift in Sources */,
 				A19DEA501A654ADE6E17D7D0 /* HomeView.swift in Sources */,

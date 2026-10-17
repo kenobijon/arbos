@@ -33,8 +33,8 @@ final class PushManager: NSObject, ObservableObject, UNUserNotificationCenterDel
     /// The chat on screen while the scene is active; banners for it are swallowed.
     /// Nil when backgrounded so a remote/local alert still shows a banner.
     var visibleChatId: () -> String? = { nil }
-    /// §9c: archived chats never show a banner here (the relay stops pushing them too).
-    var isChatArchived: (String) -> Bool = { _ in false }
+    /// D78: an agent's hidden plain chats (not its one chat) never show a banner here.
+    var isHiddenChat: (String) -> Bool = { _ in false }
     private var registeredToken: String?
     /// chat_id → when a local `/me/pushes` banner was posted; swallows a matching
     /// APNs alert that lands a moment later for the same chat.
@@ -171,7 +171,7 @@ final class PushManager: NSObject, ObservableObject, UNUserNotificationCenterDel
         let chatId = info["chat_id"] as? String
         let silent = await MainActor.run { () -> Bool in
             guard let chatId else { return false }
-            if chatId == visibleChatId() || isChatArchived(chatId) { return true }
+            if chatId == visibleChatId() || isHiddenChat(chatId) { return true }
             // Local `/me/pushes` banner already shown for this chat — skip the APNs twin.
             if let at = localBannerAt[chatId], CFAbsoluteTimeGetCurrent() - at < PushManager.localBannerDedupe {
                 return true

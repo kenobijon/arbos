@@ -19,7 +19,6 @@ struct ChatView: View {
     @State private var draft = ""
     @State private var rows: [Row] = []
     @State private var showModelPicker = false
-    @State private var showThreads = false
     @State private var showSettings = false
     @State private var sentOnce = false
     @State private var transcribing = false
@@ -291,9 +290,6 @@ struct ChatView: View {
                 ModelPickerView(project: project).environmentObject(model).environment(\.theme, theme)
             }
         }
-        .sheet(isPresented: $showThreads, onDismiss: demoDismissed) {
-            ChatListView(projectId: projectId).environmentObject(model).environment(\.theme, theme)
-        }
         .sheet(isPresented: $showSettings) {
             SettingsView().environmentObject(model).environment(\.theme, theme)
         }
@@ -349,10 +345,6 @@ struct ChatView: View {
             try? await Task.sleep(nanoseconds: 300_000_000)
             composerFocused = false
             try? await Task.sleep(nanoseconds: 7_500_000_000)
-            showThreads = true
-            try? await Task.sleep(nanoseconds: 2_200_000_000)
-            showThreads = false
-            try? await Task.sleep(nanoseconds: 800_000_000)
             dismiss()
         }
         .onAppear {
@@ -367,7 +359,6 @@ struct ChatView: View {
                     case "keyboard": composerFocused = true
                     case "settings": showSettings = true
                     case "voice": startCall(.voice)
-                    case "threads": if model.multiChatEnabled { showThreads = true }
                     case "model": showModelPicker = true
                     case "profile": openHeaderProfile()
                     case "edit": showProfile = true
@@ -418,8 +409,20 @@ struct ChatView: View {
         }
         .onChange(of: model.caughtUp.contains(chatId), initial: true) { _, ready in
             if ready, !sentOnce, !DebugHooks.liveDemo, let text = DebugHooks.autoSend, DebugHooks.openChat == chatId {
-                draft = text
+                // Several messages separated by " ||| " go out a few seconds apart
+                // (multitasking checks: the composer never waits for a reply).
+                let parts = text.components(separatedBy: " ||| ").filter { !$0.isEmpty }
+                draft = parts.first ?? text
                 send()
+                if parts.count > 1 {
+                    Task {
+                        for p in parts.dropFirst() {
+                            try? await Task.sleep(nanoseconds: 3_000_000_000)
+                            draft = p
+                            send()
+                        }
+                    }
+                }
             }
         }
     }
@@ -432,7 +435,6 @@ struct ChatView: View {
         let hold: Double = step == "voice" ? 3.5 : 3.0
         switch step {
         case "model": showModelPicker = true
-        case "threads": showThreads = true
         case "attach": showAttach = true
         case "voice": startCall(.voice)
         case "settings": showSettings = true
@@ -442,7 +444,6 @@ struct ChatView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + hold) {
             switch step {
             case "model": showModelPicker = false
-            case "threads": showThreads = false
             case "attach": showAttach = false
             case "voice": break
             default: break
@@ -537,18 +538,6 @@ struct ChatView: View {
                 .contentShape(Capsule())
             }
             Spacer()
-            if !isPeople && model.multiChatEnabled {
-                // Outside the agent pill, same trailing slot as the members button on group chats.
-                Button { showThreads = true } label: {
-                    GlassCircle {
-                        Image(systemName: "bubble.left.and.bubble.right")
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(theme.text)
-                    }
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Chats with \(project?.name ?? "this agent")")
-            }
             if isPeople || project?.shared == true {
                 Button { showMembers = true } label: {
                     GlassCircle {
@@ -571,19 +560,15 @@ struct ChatView: View {
                         Button(role: .destructive) { model.block(c) } label: { Label("Block @\(c.handle)", systemImage: "hand.raised") }
                     }
                 } else {
-                    if model.multiChatEnabled {
-                        Button { showThreads = true } label: { Label("Chats", systemImage: "bubble.left.and.bubble.right") }
-                    } else {
-                        // Single-chat mode: the agent's "projects" system chat and its groups stay reachable.
-                        if let sys = model.chats(of: projectId).first(where: { $0.isSystem }), sys.id != chatId {
-                            Button { model.open(chat: sys) } label: { Label("Projects", systemImage: "square.grid.2x2") }
-                        }
-                        if chat?.isGroup == true || chat?.isSystem == true, let primary = model.primaryChat(of: projectId), primary.id != chatId {
-                            Button { model.open(chat: primary) } label: { Label("Chat with \(project?.name ?? "agent")", systemImage: "bubble.left") }
-                        }
-                        ForEach(model.chats(of: projectId).filter { $0.isGroup && $0.id != chatId }) { g in
-                            Button { model.open(chat: g) } label: { Label(g.title.isEmpty ? "Group" : g.title, systemImage: "person.2") }
-                        }
+                    // One chat per agent (D78); its "projects" system chat and its groups stay reachable here.
+                    if let sys = model.chats(of: projectId).first(where: { $0.isSystem }), sys.id != chatId {
+                        Button { model.open(chat: sys) } label: { Label("Projects", systemImage: "square.grid.2x2") }
+                    }
+                    if chat?.isGroup == true || chat?.isSystem == true, let single = model.singleChat(of: projectId), single.id != chatId {
+                        Button { model.open(chat: single) } label: { Label("Chat with \(project?.name ?? "agent")", systemImage: "bubble.left") }
+                    }
+                    ForEach(model.chats(of: projectId).filter { $0.isGroup && $0.id != chatId }) { g in
+                        Button { model.open(chat: g) } label: { Label(g.title.isEmpty ? "Group" : g.title, systemImage: "person.2") }
                     }
                     Button { showModelPicker = true } label: { Label("Model · \(project?.shortModel ?? "")", systemImage: "cpu") }
                     // Calls Phase 2: every project chat is callable; the agent joins the room

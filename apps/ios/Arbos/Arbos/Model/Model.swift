@@ -211,10 +211,6 @@ struct Chat: Identifiable, Equatable, Codable {
     var kind: String = "chat"
     /// Other projects in an agent-hosted group.
     var participants: [Id] = []
-    /// §9c: when this user archived the chat (relay, synced across devices);
-    /// nil = not archived. `archiveSynced` says the relay sent the field at all.
-    var archivedAt: Int64? = nil
-    var archiveSynced: Bool = false
 
     var isGroup: Bool { kind == "group" }
     /// The agent's "projects" system chat (§9b: shown even with multi-chat off).
@@ -233,6 +229,10 @@ struct Voice: Identifiable, Equatable {
 struct VoiceCatalog: Equatable {
     var defaultId: String
     var voices: [Voice]
+}
+
+extension Chat: Hashable {
+    func hash(into hasher: inout Hasher) { hasher.combine(id) }
 }
 
 enum Role: String, Codable {
