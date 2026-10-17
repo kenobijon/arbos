@@ -92,9 +92,16 @@ struct RootView: View {
     }
 
     /// Who the call screen shows before anyone joins: the DM peer, or (for a
-    /// people group) every other human plus the agents in that chat.
+    /// people group) every other human plus the agents in that chat; for a
+    /// project chat the project's agent (Calls Phase 2).
     private var expectedPeople: [CallPerson] {
-        guard let c = calls.call, let chat = model.peopleChat(c.chatId) else { return [] }
+        guard let c = calls.call else { return [] }
+        guard let chat = model.peopleChat(c.chatId) else {
+            if !c.agents.isEmpty { return c.agents }
+            guard let project = model.project(c.projectId) else { return [] }
+            return [CallPerson(id: project.id, kind: "agent", name: project.name, handle: mentionSlug(project.name),
+                               avatar: project.avatar, avatarColor: project.avatarColor, avatarUrl: nil)]
+        }
         let me = model.user?.id
         if chat.isGroup {
             return chat.members.filter { $0.id != me }.map(CallPerson.from(member:))

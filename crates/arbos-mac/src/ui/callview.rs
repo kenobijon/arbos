@@ -18,11 +18,16 @@ use crate::ui::icons::icon;
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
 use crate::ui::shell::Shell;
+use crate::ui::theme::Appearance;
 use crate::ui::theme::{Theme, HEADER_HEIGHT, PANEL_RADIUS, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
+use crate::ui::widgets::CardPalette;
 
 /// Chats where a call can start: every people chat and every shared project.
+/// Every space takes a call: people chats and shared projects ring their humans; a project
+/// chat with nobody else in it is a voice call with the agent (Calls Phase 2, D75).
 pub fn callable(space: &Project) -> bool {
-    space.is_people() || space.shared || space.is_guest() || !space.people.is_empty()
+    let _ = space;
+    true
 }
 
 fn mmss(ms: u64) -> String {
@@ -431,72 +436,154 @@ pub fn screen(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> Di
     column.child(div().h(px(24.0))).child(controls)
 }
 
-/// Slim bar under the header while I am in this chat's call and the screen is collapsed.
-pub fn bar(active: &ActiveCall, cx: &mut Context<Shell>) -> Stateful<Div> {
+/// The in-call bar under the header while the call screen is collapsed: the
+/// chat stays fully usable below it. Grok question-card palette (white in
+/// light, near-black in dark): picture, "Voice call · Alice", who is speaking,
+/// timer, mute, hang up; a click anywhere else restores the full screen.
+pub fn bar(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> Stateful<Div> {
     let theme = Theme::of(cx).clone();
+    let palette = CardPalette::of(&theme);
     PulseClock::request(cx);
+    let state = shell.state.read(cx);
     let elapsed = now_ms().saturating_sub(active.joined_at);
-    let who: Vec<String> = active
+    let space_name = state
+        .project(active.call.space_id())
+        .map(|p| {
+            if p.is_people() && !p.is_people_group() {
+                p.person()
+                    .map(|x| x.display_name())
+                    .unwrap_or_else(|| p.name.clone())
+            } else {
+                p.name.clone()
+            }
+        })
+        .unwrap_or_else(|| "call".into());
+    let title = format!("{} · {}", active.call.kind.label_title(), space_name);
+    let speaking: Vec<String> = active
         .participants
         .iter()
+        .filter(|p| p.speaking)
         .map(|p| p.sender.display_name())
         .collect();
-    let text = match active.status {
+    let sub = match &active.status {
         CallStatus::Connecting => "Connecting…".to_string(),
-        CallStatus::Failed(_) => "Call failed".to_string(),
-        CallStatus::Connected if who.is_empty() => format!("In call · {}", mmss(elapsed)),
-        CallStatus::Connected => format!("In call with {} · {}", who.join(", "), mmss(elapsed)),
+        CallStatus::Failed(why) => format!("Could not connect · {why}"),
+        CallStatus::Connected if !speaking.is_empty() => {
+            format!("{} speaking", speaking.join(", "))
+        }
+        CallStatus::Connected if active.participants.is_empty() => {
+            if let Some(r) = &active.reachable {
+                r.clone()
+            } else {
+                "Waiting for others to join…".to_string()
+            }
+        }
+        CallStatus::Connected => {
+            let who: Vec<String> = active
+                .participants
+                .iter()
+                .map(|p| p.sender.display_name())
+                .collect();
+            format!("With {}", who.join(", "))
+        }
     };
-    let small = |id: &'static str, glyph: &str, on: bool, theme: &Theme| {
+    let first = active.participants.first().cloned();
+    let picture_el = match &first {
+        Some(p) => {
+            let image = state.avatar(&p.sender.avatar_url);
+            picture(&p.sender, image, 30.0, &theme)
+        }
+        None => div()
+            .size(px(30.0))
+            .rounded_full()
+            .bg(theme.online)
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(icon("phone", 14.0, gpui::white())),
+    };
+    let bg = match theme.appearance {
+        Appearance::Light => palette.inner,
+        Appearance::Dark => palette.outer,
+    };
+    let round = |id: &'static str, glyph: &str, fill: gpui::Hsla, ink: gpui::Hsla| {
         div()
             .id(id)
-            .size(px(28.0))
+            .size(px(30.0))
             .rounded_full()
+            .flex_shrink_0()
             .flex()
             .items_center()
             .justify_center()
             .cursor_pointer()
-            .bg(if on {
-                theme.text
-            } else {
-                Theme::with_alpha(theme.text, 0.12)
-            })
+            .bg(fill)
             .hover(|s| s.opacity(0.85))
-            .child(icon(glyph, 14.0, if on { theme.bg } else { theme.text }))
+            .child(icon(glyph, 14.0, ink))
     };
     div()
         .id("call-bar")
         .mx(px(16.0))
+        .mt(px(6.0))
         .mb(px(8.0))
-        .h(px(40.0))
-        .pl(px(12.0))
-        .pr(px(6.0))
+        .h(px(52.0))
+        .pl(px(10.0))
+        .pr(px(8.0))
         .flex()
         .items_center()
         .gap(px(10.0))
-        .rounded_full()
-        .bg(theme.online)
+        .rounded(px(16.0))
+        .bg(bg)
+        .border_1()
+        .border_color(palette.hairline)
+        .shadow_md()
         .cursor_pointer()
         .on_click(cx.listener(|this, _, _, cx| {
             this.state.update(cx, |s, cx| s.toggle_call_expanded(cx));
         }))
-        .child(icon("phone", 14.0, theme.bg))
+        .child(picture_el)
         .child(
             div()
                 .flex_1()
                 .min_w_0()
-                .truncate()
-                .text_size(px(TEXT_SMALL))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.bg)
-                .child(text),
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .truncate()
+                        .text_size(px(TEXT_SMALL))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.text)
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .truncate()
+                        .text_size(px(TEXT_TINY))
+                        .text_color(if speaking.is_empty() {
+                            theme.text_muted
+                        } else {
+                            theme.online
+                        })
+                        .child(sub),
+                ),
         )
         .child(
-            small(
+            div()
+                .flex_shrink_0()
+                .text_size(px(TEXT_SMALL))
+                .text_color(theme.text_muted)
+                .child(mmss(elapsed)),
+        )
+        .child(
+            round(
                 "bar-mute",
                 if active.muted { "mic-off" } else { "mic" },
-                active.muted,
-                &theme,
+                if active.muted {
+                    theme.text
+                } else {
+                    Theme::with_alpha(theme.text, 0.1)
+                },
+                if active.muted { theme.bg } else { theme.text },
             )
             .on_mouse_down(
                 gpui::MouseButton::Left,
@@ -507,31 +594,105 @@ pub fn bar(active: &ActiveCall, cx: &mut Context<Shell>) -> Stateful<Div> {
             ),
         )
         .child(
-            div()
-                .id("bar-hangup")
-                .h(px(28.0))
-                .px(px(12.0))
-                .rounded_full()
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .cursor_pointer()
-                .bg(theme.danger)
-                .text_size(px(TEXT_TINY))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.text)
-                .hover(|s| s.opacity(0.85))
-                .child(icon("phone-down", 13.0, theme.text))
-                .child("Hang up")
-                .on_mouse_down(
-                    gpui::MouseButton::Left,
-                    cx.listener(|this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.state.update(cx, |s, cx| s.leave_call(cx));
-                    }),
-                ),
+            round("bar-hangup", "phone-down", theme.danger, gpui::white()).on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.state.update(cx, |s, cx| s.leave_call(cx));
+                }),
+            ),
+        )
+        .child(
+            round(
+                "bar-expand",
+                "chevron-up",
+                gpui::transparent_black(),
+                theme.text_muted,
+            )
+            .hover(|s| s.bg(Theme::with_alpha(theme.text, 0.08))),
         )
 }
+
+/// Picture-in-picture while a video call is collapsed: the remote camera (else
+/// mine, else the picture) in a small tile floating over the chat. Drag it by
+/// its body; a plain click restores the full call screen.
+pub fn pip(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> Stateful<Div> {
+    let theme = Theme::of(cx).clone();
+    let state = shell.state.read(cx);
+    let remote = active.participants.iter().find(|p| p.video.is_some());
+    let video = remote
+        .and_then(|p| p.video.clone())
+        .or_else(|| active.local_video.clone());
+    let label = remote
+        .map(|p| p.sender.display_name())
+        .unwrap_or_else(|| "You".into());
+    let (right, bottom) = shell.pip_offset;
+    let mut tile = div()
+        .id("call-pip")
+        .absolute()
+        .right(px(right))
+        .bottom(px(bottom))
+        .w(px(PIP_W))
+        .h(px(PIP_H))
+        .rounded(px(14.0))
+        .overflow_hidden()
+        .bg(gpui::black())
+        .border_1()
+        .border_color(Theme::with_alpha(gpui::white(), 0.18))
+        .shadow_lg()
+        .cursor_pointer()
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            cx.listener(|this, ev: &gpui::MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.pip_drag = Some((ev.position, this.pip_offset, false));
+                cx.notify();
+            }),
+        );
+    if let Some(frame) = video {
+        tile = tile.child(
+            gpui::img(frame)
+                .size_full()
+                .object_fit(gpui::ObjectFit::Cover),
+        );
+    } else if let Some(p) = active.participants.first() {
+        let image = state.avatar(&p.sender.avatar_url);
+        tile = tile.child(
+            div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(picture(&p.sender, image, 56.0, &theme)),
+        );
+    } else {
+        tile = tile.child(
+            div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(icon("camera", 22.0, Theme::with_alpha(gpui::white(), 0.6))),
+        );
+    }
+    tile.child(
+        div()
+            .absolute()
+            .left(px(8.0))
+            .bottom(px(6.0))
+            .px(px(7.0))
+            .py(px(2.0))
+            .rounded_full()
+            .bg(Theme::with_alpha(gpui::black(), 0.55))
+            .text_size(px(TEXT_TINY))
+            .text_color(gpui::white())
+            .child(label),
+    )
+}
+
+/// PiP tile size.
+pub const PIP_W: f32 = 200.0;
+pub const PIP_H: f32 = 150.0;
 
 /// "On a call · Join" for a live call in this chat that I am not in.
 pub fn join_bar(call: &Call, cx: &mut Context<Shell>) -> Div {

@@ -309,8 +309,8 @@ struct AgentProfileView: View {
                             AgentAvatar(project: project, theme: theme, size: 112, working: model.isStreaming(project: project.id))
                         }
                         ProfileActionRow(actions: [
-                            ProfileAction(icon: "phone.fill", label: "call", enabled: false, soon: true) { },
-                            ProfileAction(icon: "waveform", label: "voice", enabled: false, soon: true) { },
+                            ProfileAction(icon: "phone.fill", label: "call") { call(project, .voice) },
+                            ProfileAction(icon: "video.fill", label: "video") { call(project, .video) },
                             ProfileAction(icon: muted ? "bell.slash.fill" : "bell.fill", label: muted ? "unmute" : "mute") { muted.toggle() },
                             ProfileAction(icon: "magnifyingglass", label: "search") { search(project) },
                             ProfileAction(icon: "ellipsis", label: "more") { showEdit = true },
@@ -365,6 +365,13 @@ struct AgentProfileView: View {
             Button("Save") { model.updateProject(projectId, description: descriptionDraft.trimmingCharacters(in: .whitespacesAndNewlines)) }
             Button("Cancel", role: .cancel) { }
         } message: { Text("Shown to everyone who can see this agent (up to 500 characters).") }
+    }
+
+    /// Calls Phase 2: a call in the agent's chat; the voice worker joins as the agent.
+    private func call(_ project: Project, _ kind: CallKind) {
+        guard let chat = model.primaryChat(of: project.id) ?? model.chats(of: project.id).first else { return }
+        dismiss()
+        Task { await CallManager.shared.start(chatId: chat.id, projectId: project.id, kind: kind, title: project.name) }
     }
 
     private func statusLine(_ p: Project) -> String {

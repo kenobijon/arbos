@@ -13,7 +13,7 @@ use gpui::{
 
 use crate::app::SignInMode;
 use crate::app::{AppState, DetailsTarget};
-use crate::model::{now_ms, Link, MachineState};
+use crate::model::{now_ms, CallKind, Link, MachineState};
 use crate::ui::avatars;
 use crate::ui::callview;
 use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
@@ -80,6 +80,11 @@ pub struct Shell {
     pub members_open: bool,
     /// The agent's "Archived" chats list (header strip / "…" menu).
     pub(crate) archived_open: bool,
+    /// Video picture-in-picture while the call screen is collapsed: offset
+    /// from the window's bottom-right (right, bottom), and the drag in flight
+    /// (mouse start, offset start, moved past the click threshold).
+    pub(crate) pip_offset: (f32, f32),
+    pub(crate) pip_drag: Option<(gpui::Point<gpui::Pixels>, (f32, f32), bool)>,
     /// ⌘⇧F "Send feedback" sheet (self-contained in `ui::feedback`).
     feedback: Entity<FeedbackSheet>,
 }
@@ -269,6 +274,8 @@ impl Shell {
             settings_open: false,
             group_picker_open: false,
             archived_open: false,
+            pip_offset: (24.0, 96.0),
+            pip_drag: None,
             routines,
             routines_open: false,
             channels,
@@ -657,10 +664,10 @@ impl Shell {
         let call_here = self.state.read(cx).calls_in_chat.get(&space.id).cloned();
         let screen_open = my_call
             .as_ref()
-            .map(|c| c.expanded && c.call.chat_id == space.id)
+            .map(|c| c.expanded && c.call.space_id() == space.id)
             .unwrap_or(false);
         if let Some(active) = my_call.as_ref().filter(|_| !screen_open) {
-            column = column.child(callview::bar(active, cx));
+            column = column.child(callview::bar(self, active, cx));
         } else if let Some(call) = call_here.filter(|c| {
             c.is_live()
                 && my_call
@@ -2354,6 +2361,54 @@ impl Render for Shell {
         }
         if self.feedback.read(cx).is_open() {
             root = root.child(self.feedback.clone());
+        }
+        // Collapsed video call: the camera keeps showing in a draggable tile.
+        let collapsed_video = self
+            .state
+            .read(cx)
+            .my_call
+            .clone()
+            .filter(|c| !c.expanded && c.call.kind == CallKind::Video);
+        if let Some(active) = collapsed_video.as_ref() {
+            root = root.child(callview::pip(self, active, cx));
+        }
+        if self.pip_drag.is_some() {
+            root = root
+                .on_mouse_move(cx.listener(|this, ev: &gpui::MouseMoveEvent, window, cx| {
+                    let Some((start, (r0, b0), moved)) = this.pip_drag else {
+                        return;
+                    };
+                    let dx = f32::from(ev.position.x - start.x);
+                    let dy = f32::from(ev.position.y - start.y);
+                    let moved = moved || dx.abs() > 4.0 || dy.abs() > 4.0;
+                    let size = window.viewport_size();
+                    let max_r = f32::from(size.width) - callview::PIP_W - 8.0;
+                    let max_b = f32::from(size.height) - callview::PIP_H - 8.0;
+                    let r = (r0 - dx).clamp(8.0, max_r.max(8.0));
+                    let b = (b0 - dy).clamp(8.0, max_b.max(8.0));
+                    this.pip_offset = (r, b);
+                    this.pip_drag = Some((start, (r0, b0), moved));
+                    cx.notify();
+                }))
+                .on_mouse_up(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        if let Some((_, _, moved)) = this.pip_drag.take() {
+                            if !moved {
+                                // A plain click: back to the full call screen.
+                                this.state.update(cx, |s, cx| s.toggle_call_expanded(cx));
+                            }
+                            cx.notify();
+                        }
+                    }),
+                )
+                .on_mouse_up_out(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.pip_drag = None;
+                        cx.notify();
+                    }),
+                );
         }
         let incoming = self.state.read(cx).incoming_call.clone();
         if let Some((call, sender)) = incoming.as_ref() {

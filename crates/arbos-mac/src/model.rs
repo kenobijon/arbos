@@ -328,6 +328,21 @@ impl Call {
     pub fn is_live(&self) -> bool {
         self.ended_at.is_none()
     }
+
+    /// The rail space this call belongs to: the chat itself for people chats, the project for
+    /// project chats (Calls Phase 2: a call in an agent's chat).
+    pub fn space_id(&self) -> &str {
+        space_of(&self.project_id, &self.chat_id)
+    }
+}
+
+/// `people` (or nothing) means the chat is its own space; else the project is.
+pub fn space_of<'a>(project_id: &'a str, chat_id: &'a str) -> &'a str {
+    if project_id.is_empty() || project_id == "people" {
+        chat_id
+    } else {
+        project_id
+    }
 }
 
 /// `POST /calls/{id}/leave` answer.

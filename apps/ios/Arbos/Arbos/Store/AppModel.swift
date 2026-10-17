@@ -183,6 +183,8 @@ final class AppModel: ObservableObject {
         guard !archivedProjectIds.contains(projectId) else { return }
         archivedProjectIds.insert(projectId)
         UserDefaults.standard.set(Array(archivedProjectIds), forKey: "archivedProjects")
+        // Archive clears a home pin — the row is hidden until search/open.
+        unpinHome(projectId: projectId)
     }
 
     func unarchive(_ projectId: Id) {
@@ -191,11 +193,45 @@ final class AppModel: ObservableObject {
         UserDefaults.standard.set(Array(archivedProjectIds), forKey: "archivedProjects")
     }
 
+    // MARK: Home pins (device-local)
+
+    /// Home-list keys (`p:<projectId>` / `c:<peopleChatId>`) kept at the top.
+    @Published private(set) var pinnedHomeIds: Set<String> = {
+        Set(UserDefaults.standard.stringArray(forKey: "pinnedHome") ?? [])
+    }()
+
+    func isHomePinned(projectId: Id) -> Bool { pinnedHomeIds.contains("p:" + projectId) }
+    func isHomePinned(peopleChatId: Id) -> Bool { pinnedHomeIds.contains("c:" + peopleChatId) }
+
+    func pinHome(projectId: Id) {
+        unarchive(projectId)
+        setHomePinned("p:" + projectId, true)
+    }
+
+    func unpinHome(projectId: Id) { setHomePinned("p:" + projectId, false) }
+
+    func pinHome(peopleChatId: Id) { setHomePinned("c:" + peopleChatId, true) }
+    func unpinHome(peopleChatId: Id) { setHomePinned("c:" + peopleChatId, false) }
+
+    private func setHomePinned(_ key: String, _ pinned: Bool) {
+        if pinned {
+            guard !pinnedHomeIds.contains(key) else { return }
+            pinnedHomeIds.insert(key)
+        } else {
+            guard pinnedHomeIds.contains(key) else { return }
+            pinnedHomeIds.remove(key)
+        }
+        UserDefaults.standard.set(Array(pinnedHomeIds), forKey: "pinnedHome")
+    }
+
     @Published private(set) var machineError: String?
     @Published var notice: Notice?
     @Published private(set) var pairingBusy = false
     @Published private(set) var pairingError: String?
     @Published private(set) var registryError: String?
+    /// Settings → Connectors (Google Gmail/Calendar, …). Empty until first refresh.
+    @Published private(set) var connectors = ConnectorsView()
+    @Published private(set) var connectorsBusy = false
 
     private var api: RelayAPI
     private var docs: [Id: ChatDoc] = [:]
@@ -456,7 +492,17 @@ final class AppModel: ObservableObject {
     var unreadTotal: Int {
         // Archived agent chats never badge (§9c).
         if !unreadCounts.isEmpty {
-            return unreadCounts.reduce(0) { $0 + (isChatArchived($1.key) ? 0 : $1.value) }
+            var total = unreadCounts.reduce(0) { $0 + (isChatArchived($1.key) ? 0 : $1.value) }
+            // Live Loro rows can mark unread before /me/unread has the event.
+            for id in peopleUnread where !isChatArchived(id) && (unreadCounts[id] ?? 0) == 0 {
+                total += 1
+            }
+            for list in chats.values {
+                for c in list where c.unread && !isChatArchived(c.id) && (unreadCounts[c.id] ?? 0) == 0 {
+                    total += 1
+                }
+            }
+            return total
         }
         let people = peopleChats.reduce(0) { $0 + unreadCount(for: $1) }
         let projects = chats.values.flatMap { $0 }.filter { $0.unread && !isChatArchived($0.id) }.count
@@ -473,9 +519,12 @@ final class AppModel: ObservableObject {
     func unreadCount(for chat: PeopleChat) -> Int {
         // On screen: never show a stale remote count (notify can lag behind Loro).
         if chat.id == visibleChatId { return 0 }
-        if let n = unreadCounts[chat.id] { return n }
         let bySeq = Int(max(0, chat.headSeq - chat.readSeq))
-        return bySeq > 0 ? bySeq : (peopleUnread.contains(chat.id) ? 1 : 0)
+        let local = bySeq > 0 ? bySeq : (peopleUnread.contains(chat.id) ? 1 : 0)
+        // Loro can light peopleUnread before GET /me/unread catches up — never let a
+        // stale remote 0 hide the blue circle / count.
+        if let n = unreadCounts[chat.id] { return max(n, local) }
+        return local
     }
 
     func applyBadge() {
@@ -687,6 +736,8 @@ final class AppModel: ObservableObject {
         }
         credentials = nil
         link = .connecting
+        connectors = ConnectorsView()
+        connectorsBusy = false
     }
 
     private func startAfterPairing() {
@@ -935,8 +986,17 @@ final class AppModel: ObservableObject {
                 } else if touched.listChanged {
                     self.emitSnapshot(key)
                     self.markActivity(chatId: key)
+                    // Loro is live; /me/pushes and /me/unread can lag — light the
+                    // blue circle and drain the push queue as soon as a new row lands.
+                    if self.caughtUp.contains(key) {
+                        self.noteLiveUnread(chatId: key)
+                    }
                 } else if !touched.messages.isEmpty {
                     self.emitMessages(key, indexes: touched.messages)
+                } else if self.messages[key] == nil, let doc = self.docs[key], doc.count > 0 {
+                    // Checkpoint / bulk import sometimes reports no list path —
+                    // still paint so home search can see the transcript.
+                    self.emitSnapshot(key)
                 }
             }
         }
@@ -946,10 +1006,20 @@ final class AppModel: ObservableObject {
         }
         room.onCursorMoved = { [weak self] in self?.markDirty(key) }
         room.onPendingChanged = { [weak self] batches in self?.store?.savePending(key: key, batches: batches) }
-        room.onLink = { [weak self] l in self?.link = l }
+        room.onLink = { [weak self] l in
+            guard let self else { return }
+            self.link = l
+            // Backfill rows after a reconnect must not light unread; only live
+            // rows after the next catch-up do (Loro is ahead of /me/unread).
+            if l != .live { self.caughtUp.remove(key) }
+        }
         room.presenceUser = { [weak self] in self?.user.map { ($0.id, $0.login) } }
         room.onBoxState = { [weak self] state, detail in
             self?.setProjectState(projectId, state, detail: detail)
+        }
+        room.onDocPaint = { [weak self] in
+            guard let self, !isProjectDoc else { return }
+            self.emitSnapshot(key)
         }
         room.onCaughtUp = { [weak self] in
             guard let self else { return }
@@ -1040,6 +1110,48 @@ final class AppModel: ObservableObject {
                 return
             }
         }
+    }
+
+    /// A live Loro row landed while this chat is not on screen: show the blue
+    /// circle immediately and drain `/me/pushes` so the banner does not wait
+    /// for the 15 s registry poll (notify / APNs can lag the row).
+    private func noteLiveUnread(chatId: Id) {
+        guard !isWatching(chatId), !isChatArchived(chatId) else { return }
+        if let last = messages[chatId]?.last {
+            if last.pending { return }
+            if last.role == .system { return }
+            if let me = myUserId, last.sender == me { return }
+            // Project-chat echoes from this device use sender "user".
+            if peopleChat(chatId) == nil, last.role == .user, last.sender == "user" || last.sender.isEmpty {
+                return
+            }
+        }
+        var changed = false
+        if peopleChat(chatId) != nil {
+            if !peopleUnread.contains(chatId) {
+                peopleUnread.insert(chatId)
+                changed = true
+            }
+            if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
+                peopleChats[i].lastActivityAt = nowMs()
+                if peopleChats[i].headSeq <= peopleChats[i].readSeq {
+                    peopleChats[i].headSeq = peopleChats[i].readSeq + 1
+                    changed = true
+                }
+            }
+        } else {
+            for (pid, list) in chats {
+                if let i = list.firstIndex(where: { $0.id == chatId }), !list[i].unread {
+                    var updated = list
+                    updated[i].unread = true
+                    chats[pid] = updated
+                    changed = true
+                    break
+                }
+            }
+        }
+        if changed { applyBadge() }
+        Task { await drainPushes() }
     }
 
     /// Project doc (crdt-sync §6.3): `settings.modelNote`, plus the D70
@@ -1158,6 +1270,74 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: Connectors (F1)
+
+    /// Load the relay's connector catalog + connected accounts for Settings.
+    func refreshConnectors() {
+        guard credentials != nil, !isFixture else { return }
+        Task {
+            do {
+                connectors = try await api.connectors()
+            } catch let e as RelayError where e.status == 404 {
+                // Older relays have no connectors route.
+                connectors = ConnectorsView(loaded: true)
+            } catch {
+                notice = Notice(text: "Connectors: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Start Google OAuth in Safari; the relay finishes the callback, then we poll.
+    func connectConnector(provider: String) {
+        guard !connectorsBusy, credentials != nil, !isFixture else { return }
+        connectorsBusy = true
+        Task {
+            defer { connectorsBusy = false }
+            do {
+                if let urlStr = try await api.connectConnector(provider: provider),
+                   let url = URL(string: urlStr) {
+                    await UIApplication.shared.open(url)
+                }
+                for wait in [0, 4, 8, 15, 30] as [UInt64] {
+                    if wait > 0 { try? await Task.sleep(nanoseconds: wait * 1_000_000_000) }
+                    do {
+                        connectors = try await api.connectors()
+                    } catch { break }
+                    if connectors.connector(for: provider)?.status == .connected { break }
+                }
+            } catch {
+                notice = Notice(text: "Connect \(provider): \(error.localizedDescription)")
+                await refreshConnectorsOnce()
+            }
+        }
+    }
+
+    func disconnectConnector(id: Id) {
+        guard !connectorsBusy, credentials != nil, !isFixture else { return }
+        connectorsBusy = true
+        var next = connectors
+        next.items.removeAll { $0.id == id }
+        connectors = next
+        Task {
+            defer { connectorsBusy = false }
+            do {
+                try await api.disconnectConnector(id: id)
+            } catch {
+                notice = Notice(text: "Disconnect: \(error.localizedDescription)")
+            }
+            await refreshConnectorsOnce()
+        }
+    }
+
+    private func refreshConnectorsOnce() async {
+        guard credentials != nil, !isFixture else { return }
+        do {
+            connectors = try await api.connectors()
+        } catch let e as RelayError where e.status == 404 {
+            connectors = ConnectorsView(loaded: true)
+        } catch {}
+    }
+
     // MARK: People chats (D72)
 
     var myUserId: String? { user.map { "user:\($0.id)" } }
@@ -1173,7 +1353,16 @@ final class AppModel: ObservableObject {
             let list = raw.compactMap(PeopleChat.parse)
             peopleChats = list
             for c in list where c.unread { peopleUnread.insert(c.id) }
-            for c in list where !c.unread && visibleChatId != c.id { peopleUnread.remove(c.id) }
+            for c in list where !c.unread && visibleChatId != c.id {
+                // Loro can mark unread before the people list's head_seq catches up;
+                // keep the blue circle while the latest row is still incoming.
+                if peopleUnread.contains(c.id), let last = messages[c.id]?.last,
+                   !last.pending, last.role != .system,
+                   myUserId == nil || last.sender != myUserId {
+                    continue
+                }
+                peopleUnread.remove(c.id)
+            }
             for c in list { ensureRoom(projectId: peopleSlot, key: c.id, roomChat: c.id) }
             savePeopleCache(raw)
         } catch {
@@ -1215,7 +1404,9 @@ final class AppModel: ObservableObject {
     /// People group: `POST /chats {kind: group, members}`. Relays that still
     /// return 501 for that route: open a DM with the first person, then add the
     /// rest (`POST /chats/{id}/members` turns a DM into a group on the third person).
-    func createGroup(handles: [String]) async -> Bool {
+    /// Optional `agentIds` are added afterwards (`POST /chats/{id}/agents`) so the
+    /// group can start with people and your agents in one step.
+    func createGroup(handles: [String], agentIds: [Id] = []) async -> Bool {
         let cleaned = handles
             .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "@ ")) }
             .filter { !$0.isEmpty }
@@ -1224,11 +1415,18 @@ final class AppModel: ObservableObject {
             return false
         }
         do {
-            let chat: PeopleChat
+            var chat: PeopleChat
             do {
                 chat = try await api.createGroup(handles: cleaned)
             } catch let e as RelayError where e.status == 404 || e.status == 405 || e.status == 501 {
                 chat = try await createGroupViaDm(handles: cleaned)
+            }
+            for pid in agentIds {
+                do {
+                    chat = try await api.addAgent(chatId: chat.id, projectId: pid)
+                } catch {
+                    notice = Notice(text: "Group created, but adding an agent failed: \(error.localizedDescription)")
+                }
             }
             if let i = peopleChats.firstIndex(where: { $0.id == chat.id }) {
                 peopleChats[i] = chat
@@ -1975,6 +2173,32 @@ final class AppModel: ObservableObject {
     func chats(of projectId: Id) -> [Chat] { chats[projectId] ?? [] }
 
     func messages(of chatId: Id) -> [Message] { messages[chatId] ?? [] }
+
+    /// Paint any room doc that already has rows but no published transcript yet
+    /// (checkpoint landed, catch-up still in flight). Home search reads
+    /// `messages`, so this must run when the search field becomes active.
+    func paintTranscriptsForSearch() {
+        for (key, doc) in docs {
+            guard rooms[key]?.roomChat != projectDocChatId else { continue }
+            if messages[key] == nil, doc.count > 0 {
+                emitSnapshot(key)
+            }
+        }
+    }
+
+    /// Lowercased blob of every loaded message in a chat (for home search).
+    /// Falls back to a one-shot doc read when the published array is still nil.
+    func searchableMessageText(of chatId: Id) -> String {
+        let list: [Message]
+        if let published = messages[chatId] {
+            list = published
+        } else if let doc = docs[chatId], doc.count > 0 {
+            list = doc.readAll()
+        } else {
+            list = []
+        }
+        return list.map(\.plainText).joined(separator: "\n").lowercased()
+    }
 
     /// S8: the last assistant message asked a question and nothing was sent since.
     func chatNeedsAnswer(_ chatId: Id) -> Bool {

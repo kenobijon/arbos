@@ -18,3 +18,8 @@ harness/**/dist/
 /keys/
 /secrets/
 __pycache__/
+
+# voice worker (python)
+voice/.venv/
+voice/**/__pycache__/
+voice/tests/fixtures/judge-results.json

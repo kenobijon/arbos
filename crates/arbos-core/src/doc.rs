@@ -280,6 +280,22 @@ impl ChatDoc {
         t.insert(0, text).ok();
     }
 
+    /// Box write (Calls Phase 2): one finished line of a voice call — what a human said
+    /// (`role: "user"`) or what the agent said (`role: "assistant"`) — with no `send` command, so
+    /// it never drives a turn. `extra` carries `voice: true`, `callId`, speaker attribution.
+    pub fn append_voice_line(
+        &self,
+        role: &str,
+        msg_id: &str,
+        text: &str,
+        device_id: &str,
+        sender: &str,
+        extra: &[(&str, Value)],
+    ) {
+        self.append_done_message(role, msg_id, text, device_id, sender, extra);
+        self.doc.commit();
+    }
+
     /// Box write: a one-line `system` message with a `note` status part (the transcript renders
     /// it as a thin note). Used for "a routine ran while you were away" in the pinned tab.
     pub fn append_system_note(&self, msg_id: &str, sender: &str, text: &str, device_id: &str) {

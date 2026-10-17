@@ -24,6 +24,8 @@ struct Theme {
     /// Placeholder text.
     let placeholder: Color
     let icon: Color
+    /// Grok's blue: unread dots, links, the caret (Mac `accent`).
+    let accent: Color
     let online: Color
     let warn: Color
     let danger: Color
@@ -58,6 +60,7 @@ struct Theme {
         muted: Color(hex: "#95959B")!,
         placeholder: Color(hex: "#58585B")!,
         icon: Color(hex: "#96969C")!,
+        accent: Color(hex: "#1084FE")!,
         online: Color(hex: "#34C759")!,
         warn: Color(hex: "#FFB340")!,
         danger: Color(hex: "#FF453A")!,
@@ -77,6 +80,7 @@ struct Theme {
         muted: Color(hex: "#8A8A8E")!,
         placeholder: Color(hex: "#A0A0A5")!,
         icon: Color(hex: "#6E6E73")!,
+        accent: Color(hex: "#1084FE")!,
         online: Color(hex: "#34C759")!,
         warn: Color(hex: "#E59A00")!,
         danger: Color(hex: "#D7332A")!,

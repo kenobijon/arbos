@@ -63,6 +63,10 @@ const EPISODE_GAP_MS: i64 = 30 * 60 * 1000;
 const SETTLE_MS: i64 = 90 * 1000;
 const THREAD_CARD_DEBOUNCE_MS: i64 = 10 * 60 * 1000;
 const ROOT_CARD_DEBOUNCE_MS: i64 = 30 * 60 * 1000;
+/// A card call that failed (model answered no JSON, upstream error) is retried no sooner than
+/// this. Without it a node whose card keeps failing was retried on every 60 s build pass — one
+/// Haiku call a minute per workspace, forever, with nothing new to summarise.
+const CARD_FAIL_BACKOFF_MS: i64 = 60 * 60 * 1000;
 const MAX_CARDS_PER_PASS: usize = 40;
 const PAGE_CARD_MIN_CHARS: usize = 1500;
 const PAGE_CARD_CLIP: usize = 7000;
@@ -588,7 +592,10 @@ impl Tree {
         let who = leaf.role.clone().unwrap_or_else(|| leaf.kind.clone());
         let mut s = format!("[{}] {who} ({}): ", fmt_ts(leaf.at), leaf.kind);
         if let Some((page, facts)) = self.page_card(&leaf.id) {
-            s.push_str(&format!("〔{page}〕 "));
+            // a parked (failed) page card is empty: show nothing rather than an empty bracket
+            if !page.is_empty() {
+                s.push_str(&format!("〔{page}〕 "));
+            }
             if !facts.is_empty() {
                 s.push_str(&format!("facts: {} — ", facts.join(" | ")));
             }
@@ -864,8 +871,20 @@ impl Tree {
                         stats["page_cards"] = json!(stats["page_cards"].as_i64().unwrap_or(0) + 1);
                     }
                     Err(e) => {
-                        tracing::debug!(error = %e, "page card");
-                        break;
+                        // Park the page (empty card) so the same leaf is not re-sent on every
+                        // pass; a later identical output reuses the empty card and costs nothing.
+                        tracing::warn!(error = %e, leaf = %leaf.id, "page card failed; parked");
+                        let _ = self.store.with(|c| {
+                            c.execute(
+                                "INSERT OR IGNORE INTO tree_page_cards(page_key, page, facts, created_at) VALUES (?1, '', '[]', ?2)",
+                                params![key, now_ms()],
+                            )
+                        });
+                        errors += 1;
+                        calls += 1;
+                        if errors >= 3 {
+                            break;
+                        }
                     }
                 }
             }
@@ -882,9 +901,10 @@ impl Tree {
         }
         // 3. episode cards: closed episodes, or open ones that settled
         let settle_before = now_ms() - SETTLE_MS;
+        let retry_before = now_ms() - CARD_FAIL_BACKOFF_MS;
         let todo = self.nodes_where(
             "level = 'episode' AND (status = 'closed' OR (status = 'open' AND t1 < ?1) OR (status = 'card_failed' AND updated_at < ?2)) ORDER BY t1 DESC LIMIT 60",
-            &[&settle_before, &(now_ms() - THREAD_CARD_DEBOUNCE_MS)],
+            &[&settle_before, &retry_before],
         );
         for mut ep in todo {
             if calls >= MAX_CARDS_PER_PASS {
@@ -929,8 +949,9 @@ impl Tree {
                     stats["cards"] = json!(stats["cards"].as_i64().unwrap_or(0) + 1);
                 }
                 Err(e) => {
-                    tracing::debug!(error = %e, node = %ep.id, "episode card");
+                    tracing::warn!(error = %e, node = %ep.id, "episode card failed; retry in an hour");
                     errors += 1;
+                    calls += 1;
                     self.set_status(&ep.id, "card_failed");
                     if errors >= 3 {
                         break;
@@ -941,8 +962,8 @@ impl Tree {
         // 4. thread cards (debounced) from episode cards
         let debounce = now_ms() - THREAD_CARD_DEBOUNCE_MS;
         let threads = self.nodes_where(
-            "level = 'thread' AND status = 'stale' AND (updated_at < ?1 OR heading = '') ORDER BY t1 DESC LIMIT 20",
-            &[&debounce],
+            "level = 'thread' AND ((status = 'stale' AND (updated_at < ?1 OR heading = '')) OR (status = 'card_failed' AND updated_at < ?2)) ORDER BY t1 DESC LIMIT 20",
+            &[&debounce, &retry_before],
         );
         for mut th in threads {
             if calls >= MAX_CARDS_PER_PASS {
@@ -987,8 +1008,11 @@ impl Tree {
                     stats["cards"] = json!(stats["cards"].as_i64().unwrap_or(0) + 1);
                 }
                 Err(e) => {
-                    tracing::debug!(error = %e, node = %th.id, "thread card");
+                    tracing::warn!(error = %e, node = %th.id, "thread card failed; retry in an hour");
                     errors += 1;
+                    calls += 1;
+                    // `stale` is restored by the next episode card, so new content still wins.
+                    self.set_status(&th.id, "card_failed");
                     if errors >= 3 {
                         break;
                     }
@@ -998,7 +1022,10 @@ impl Tree {
         // 5. the root card (debounced harder)
         if calls < MAX_CARDS_PER_PASS {
             if let Some(mut root) = self.node(ROOT_ID) {
-                if root.status == "stale" && root.updated_at < now_ms() - ROOT_CARD_DEBOUNCE_MS {
+                let due = (root.status == "stale"
+                    && root.updated_at < now_ms() - ROOT_CARD_DEBOUNCE_MS)
+                    || (root.status == "card_failed" && root.updated_at < retry_before);
+                if due {
                     let kids: Vec<Node> = root
                         .children
                         .iter()
@@ -1018,7 +1045,7 @@ impl Tree {
                                 )
                             })
                             .collect();
-                        if let Ok(card) = self
+                        match self
                             .write_card(
                                 &model,
                                 "project",
@@ -1027,14 +1054,22 @@ impl Tree {
                             )
                             .await
                         {
-                            root.heading = card.0;
-                            root.summary = card.1;
-                            root.entities = card.2;
-                            root.t0 = kids.iter().map(|k| k.t0).min().unwrap_or(0);
-                            root.t1 = kids.iter().map(|k| k.t1).max().unwrap_or(0);
-                            root.status = "ready".into();
-                            root.updated_at = now_ms();
-                            self.upsert_node(&root);
+                            Ok(card) => {
+                                root.heading = card.0;
+                                root.summary = card.1;
+                                root.entities = card.2;
+                                root.t0 = kids.iter().map(|k| k.t0).min().unwrap_or(0);
+                                root.t1 = kids.iter().map(|k| k.t1).max().unwrap_or(0);
+                                root.status = "ready".into();
+                                root.updated_at = now_ms();
+                                self.upsert_node(&root);
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "project card failed; retry in an hour");
+                                // A thread card sets the root back to `stale`, so new content
+                                // still refreshes it before the backoff ends.
+                                self.set_status(ROOT_ID, "card_failed");
+                            }
                         }
                     }
                 }

@@ -1,0 +1,6 @@
+[
+  {"barge": "Sorry to interrupt. Quick one, what day is it today?", "ask": "Tell me the whole story of how lighthouses were invented, with lots of detail.", "after_ms": 2500, "max": 40},
+  {"barge": "Hang on, stop there. What time is it in Tokyo?", "ask": "Now explain in detail how a steam engine works, step by step.", "after_ms": 2000, "max": 40},
+  {"barge": "One more thing. Say goodbye.", "ask": "Describe the history of the Roman Empire in detail.", "after_ms": 1800, "max": 40},
+  {"hangup": true}
+]

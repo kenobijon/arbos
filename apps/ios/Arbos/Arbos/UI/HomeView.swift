@@ -19,13 +19,20 @@ struct HomeView: View {
     @FocusState private var searchFocused: Bool
 
     private var projects: [Project] {
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        let q = searchQuery
         let sorted = model.projects.sorted { lastActivity($0) > lastActivity($1) }
         if q.isEmpty {
             // Archived agents stay out of the home list until search (or open).
             return sorted.filter { !model.isArchived($0.id) }
         }
-        return sorted.filter { $0.name.lowercased().contains(q) }
+        return sorted.filter { matchesProject($0, q: q) }
+    }
+
+    /// Trimmed, lowercased query; leading `@` stripped so "@robert" finds the row.
+    private var searchQuery: String {
+        query.trimmingCharacters(in: .whitespaces)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "@"))
+            .lowercased()
     }
 
     var body: some View {
@@ -43,8 +50,18 @@ struct HomeView: View {
                             .listRowInsets(EdgeInsets())
                             .listRowSeparator(.hidden)
                             .listRowBackground(Color.clear)
+                    } else if homeRows.isEmpty, !searchQuery.isEmpty {
+                        Text("No conversations match \"\(query.trimmingCharacters(in: .whitespaces))\"")
+                            .font(.system(size: Theme.small))
+                            .foregroundStyle(theme.muted)
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 80)
+                            .listRowInsets(EdgeInsets())
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
+                            .accessibilityIdentifier("home-search-empty")
                     } else {
-                        if query.isEmpty {
+                        if searchQuery.isEmpty {
                             ForEach(model.approvals) { device in
                                 ApprovalCard(device: device)
                                     .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
@@ -55,18 +72,39 @@ struct HomeView: View {
                         ForEach(homeRows) { row in
                             switch row {
                             case .project(let project):
-                                Button { model.open(project: project) } label: {
+                                let pinned = model.isHomePinned(projectId: project.id)
+                                Button { openSearchHit(project) } label: {
                                     AgentRow(project: project, preview: preview(project), time: timeLabel(project),
                                              streaming: model.isStreaming(project: project.id),
-                                             unread: model.chats(of: project.id).contains { model.chatHasUnread($0) })
+                                             unread: model.chats(of: project.id).contains { model.chatHasUnread($0) },
+                                             pinned: pinned)
                                 }
                                 .buttonStyle(.plain)
                                 .contextMenu {
+                                    Button {
+                                        withAnimation {
+                                            if pinned { model.unpinHome(projectId: project.id) }
+                                            else { model.pinHome(projectId: project.id) }
+                                        }
+                                    } label: {
+                                        Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
+                                    }
                                     Button { model.showProfile(.agent(projectId: project.id)) } label: { Label("Profile", systemImage: "person.crop.circle") }
                                 }
                                 .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
                                 .listRowSeparator(.hidden)
                                 .listRowBackground(theme.bg)
+                                .swipeActions(edge: .leading) {
+                                    Button {
+                                        withAnimation {
+                                            if pinned { model.unpinHome(projectId: project.id) }
+                                            else { model.pinHome(projectId: project.id) }
+                                        }
+                                    } label: {
+                                        Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
+                                    }
+                                    .tint(Color(hex: "#1084FE")!)
+                                }
                                 .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                                     Button {
                                         withAnimation { model.archive(project.id) }
@@ -76,13 +114,23 @@ struct HomeView: View {
                                     .tint(theme.muted)
                                 }
                             case .people(let chat):
+                                let pinned = model.isHomePinned(peopleChatId: chat.id)
                                 Button { model.open(peopleChat: chat) } label: {
                                     PeopleRow(chat: chat, preview: peoplePreview(chat), time: timeLabel(ms: peopleActivity(chat)),
                                               unread: model.peopleUnread.contains(chat.id) || model.unreadCount(for: chat) > 0,
-                                              count: model.unreadCount(for: chat), me: model.user?.id)
+                                              count: model.unreadCount(for: chat), me: model.user?.id,
+                                              pinned: pinned)
                                 }
                                 .buttonStyle(.plain)
                                 .contextMenu {
+                                    Button {
+                                        withAnimation {
+                                            if pinned { model.unpinHome(peopleChatId: chat.id) }
+                                            else { model.pinHome(peopleChatId: chat.id) }
+                                        }
+                                    } label: {
+                                        Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
+                                    }
                                     if chat.kind == "dm", let other = chat.counterpart(me: model.user?.id) {
                                         Button { model.showProfile(.user(ProfilePerson(other))) } label: { Label("Profile", systemImage: "person.crop.circle") }
                                     } else {
@@ -92,6 +140,17 @@ struct HomeView: View {
                                 .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
                                 .listRowSeparator(.hidden)
                                 .listRowBackground(theme.bg)
+                                .swipeActions(edge: .leading) {
+                                    Button {
+                                        withAnimation {
+                                            if pinned { model.unpinHome(peopleChatId: chat.id) }
+                                            else { model.pinHome(peopleChatId: chat.id) }
+                                        }
+                                    } label: {
+                                        Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
+                                    }
+                                    .tint(Color(hex: "#1084FE")!)
+                                }
                             }
                         }
                         // Launch timing: the populated list is on screen.
@@ -177,6 +236,11 @@ struct HomeView: View {
                 model.open(peopleChat: c)
             }
         }
+        .onChange(of: query) { _, _ in
+            // Rooms may finish a checkpoint while the field is focused — paint
+            // any still-unpublished transcripts so message search can see them.
+            if searching, !searchQuery.isEmpty { model.paintTranscriptsForSearch() }
+        }
     }
 
     // MARK: Top bar
@@ -199,18 +263,23 @@ struct HomeView: View {
             if searching {
                 HStack(spacing: 8) {
                     Image(systemName: "magnifyingglass").foregroundStyle(theme.icon)
-                    TextField("Search", text: $query)
+                    TextField("", text: $query, prompt: Text("Search").foregroundStyle(theme.placeholder))
                         .font(.system(size: Theme.body))
                         .foregroundStyle(theme.text)
                         .focused($searchFocused)
                         .submitLabel(.search)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .accessibilityIdentifier("home-search-field")
                     Button {
                         query = ""
                         searching = false
+                        searchFocused = false
                     } label: {
                         Image(systemName: "xmark.circle.fill").foregroundStyle(theme.icon)
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("Clear search")
                 }
                 .padding(.horizontal, 14)
                 .frame(height: Theme.control)
@@ -232,8 +301,10 @@ struct HomeView: View {
                         }
                     }
                 Button {
+                    model.paintTranscriptsForSearch()
                     withAnimation(.easeOut(duration: 0.18)) { searching = true }
-                    searchFocused = true
+                    // Focus after the field is in the tree (same pattern as in-chat search).
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { searchFocused = true }
                 } label: {
                     GlassCircle {
                         Image(systemName: "magnifyingglass")
@@ -242,6 +313,7 @@ struct HomeView: View {
                     }
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Search conversations")
                 Button { showNewChat = true } label: {
                     GlassCircle {
                         Image(systemName: "plus")
@@ -254,6 +326,7 @@ struct HomeView: View {
         }
         .padding(.horizontal, 16)
         .padding(.top, 6)
+        .zIndex(1)
     }
 
     // MARK: Empty / error
@@ -320,14 +393,59 @@ struct HomeView: View {
         var activity: Int64 { 0 }
     }
 
-    /// Projects and DMs in one list, newest activity first.
+    /// Projects and DMs in one list: pinned first, then newest activity.
     private var homeRows: [HomeRow] {
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        var rows: [(Int64, HomeRow)] = projects.map { (lastActivity($0), .project($0)) }
-        for c in model.peopleChats where q.isEmpty || c.title.lowercased().contains(q) || c.humans.contains { $0.handle.lowercased().contains(q) } {
-            rows.append((peopleActivity(c), .people(c)))
+        let q = searchQuery
+        var rows: [(Bool, Int64, HomeRow)] = projects.map {
+            (model.isHomePinned(projectId: $0.id), lastActivity($0), .project($0))
         }
-        return rows.sorted { $0.0 > $1.0 }.map(\.1)
+        for c in model.peopleChats where matchesPeople(c, q: q) {
+            rows.append((model.isHomePinned(peopleChatId: c.id), peopleActivity(c), .people(c)))
+        }
+        return rows.sorted {
+            if $0.0 != $1.0 { return $0.0 && !$1.0 }
+            return $0.1 > $1.1
+        }.map(\.2)
+    }
+
+    /// Match the names shown on the row (agent name, person name/@handle, group title),
+    /// a chat title under the agent, or any loaded message text in that conversation.
+    private func matchesProject(_ p: Project, q: String) -> Bool {
+        if p.name.lowercased().contains(q) { return true }
+        return model.chats(of: p.id).contains {
+            $0.title.lowercased().contains(q) || messagesMatch($0.id, q: q)
+        }
+    }
+
+    private func matchesPeople(_ c: PeopleChat, q: String) -> Bool {
+        if q.isEmpty { return true }
+        if c.title.lowercased().contains(q) { return true }
+        if c.humans.contains(where: {
+            $0.handle.lowercased().contains(q) || $0.displayName.lowercased().contains(q)
+        }) { return true }
+        // Shared chats also list agents on the row badge — find those by name too.
+        if c.agents.contains(where: {
+            ($0.project?.name ?? $0.handle).lowercased().contains(q)
+        }) { return true }
+        return messagesMatch(c.id, q: q)
+    }
+
+    private func messagesMatch(_ chatId: Id, q: String) -> Bool {
+        model.searchableMessageText(of: chatId).contains(q)
+    }
+
+    /// Open the chat that matched the query (title or message), else the agent's landing chat.
+    private func openSearchHit(_ project: Project) {
+        let q = searchQuery
+        if !q.isEmpty {
+            let chats = model.chats(of: project.id)
+            if let hit = chats.first(where: { $0.title.lowercased().contains(q) })
+                ?? chats.first(where: { messagesMatch($0.id, q: q) }) {
+                model.open(chat: hit)
+                return
+            }
+        }
+        model.open(project: project)
     }
 
     private func chatActivity(_ c: Chat) -> Int64 {
@@ -446,6 +564,7 @@ struct AgentRow: View {
     let time: String
     let streaming: Bool
     let unread: Bool
+    var pinned: Bool = false
 
     var body: some View {
         HStack(spacing: 14) {
@@ -457,6 +576,12 @@ struct AgentRow: View {
                         .foregroundStyle(theme.text)
                         .lineLimit(1)
                     Spacer()
+                    if pinned {
+                        Image(systemName: "pin.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(theme.muted)
+                            .accessibilityLabel("Pinned")
+                    }
                     Text(time)
                         .font(.system(size: Theme.small))
                         .foregroundStyle(theme.muted)
@@ -479,7 +604,8 @@ struct AgentRow: View {
     }
 }
 
-/// A DM in the home list: round avatar (vs the agents' blobs), name + @handle.
+/// A people chat in the home list: DMs show the other person; groups show the
+/// chat title (custom name, or member handles from the relay) and a member count.
 struct PeopleRow: View {
     @Environment(\.theme) private var theme
     let chat: PeopleChat
@@ -489,13 +615,38 @@ struct PeopleRow: View {
     /// Unread messages (Grok/Telegram-style count pill); 0 → the dot only.
     var count: Int = 0
     let me: String?
+    var pinned: Bool = false
 
     private var other: ChatMember? { chat.counterpart(me: me) }
+
+    /// Groups name the chat, not the first other human (same rule as CallKit).
+    private var title: String {
+        if chat.isGroup { return chat.title.isEmpty ? "Group" : chat.title }
+        return other?.displayName ?? chat.title
+    }
+
+    /// Same-line muted label: @handle for a DM, member count for a group.
+    private var label: String {
+        if chat.isGroup {
+            let n = chat.humans.count
+            return "\(n) member\(n == 1 ? "" : "s")"
+        }
+        return "@\(other?.handle ?? chat.title)"
+    }
 
     var body: some View {
         HStack(spacing: 14) {
             ZStack(alignment: .bottomTrailing) {
-                PersonAvatar(url: other?.avatarUrl, handle: other?.handle ?? "?", size: 46)
+                if chat.isGroup {
+                    ZStack {
+                        Circle().fill(theme.card).frame(width: 46, height: 46)
+                        Image(systemName: "person.2.fill")
+                            .font(.system(size: 17, weight: .medium))
+                            .foregroundStyle(theme.muted)
+                    }
+                } else {
+                    PersonAvatar(url: other?.avatarUrl, handle: other?.handle ?? "?", size: 46)
+                }
                 if let a = chat.agents.first?.project {
                     AgentAvatar(project: a, theme: theme, size: 18, still: true)
                         .overlay(Circle().strokeBorder(theme.bg, lineWidth: 2))
@@ -504,15 +655,21 @@ struct PeopleRow: View {
             }
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline) {
-                    Text(other?.displayName ?? chat.title)
+                    Text(title)
                         .font(.system(size: Theme.body, weight: .semibold))
                         .foregroundStyle(theme.text)
                         .lineLimit(1)
-                    Text("@\(other?.handle ?? chat.title)")
+                    Text(label)
                         .font(.system(size: Theme.tiny))
                         .foregroundStyle(theme.muted)
                         .lineLimit(1)
                     Spacer()
+                    if pinned {
+                        Image(systemName: "pin.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(theme.muted)
+                            .accessibilityLabel("Pinned")
+                    }
                     Text(time).font(.system(size: Theme.small)).foregroundStyle(theme.muted)
                 }
                 HStack(spacing: 6) {

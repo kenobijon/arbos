@@ -764,9 +764,10 @@ impl AppState {
             SyncEvent::CallMissed(missed) => self.on_call_missed(missed, cx),
             SyncEvent::CallInfo(call) => self.on_call_info(call, cx),
             SyncEvent::CallSeen { chat_id, call_id } => {
+                let space = self.space_of_chat(&chat_id);
                 let known = self
                     .calls_in_chat
-                    .get(&chat_id)
+                    .get(&space)
                     .map(|c| c.call_id == call_id)
                     .unwrap_or(false);
                 if !known {
@@ -1448,6 +1449,15 @@ impl AppState {
 
     pub fn active_chat_id(&self) -> Option<Id> {
         self.active_chat().map(|c| c.id.clone())
+    }
+
+    /// The rail space a chat lives in: its project for project chats, itself for people chats.
+    pub fn space_of_chat(&self, chat_id: &str) -> Id {
+        self.chats
+            .iter()
+            .find(|(_, tabs)| tabs.iter().any(|c| c.id == chat_id))
+            .map(|(space, _)| space.clone())
+            .unwrap_or_else(|| chat_id.to_owned())
     }
 
     pub fn messages_of(&self, chat_id: &str) -> &[Message] {
@@ -2312,7 +2322,7 @@ impl AppState {
         cx.notify();
     }
 
-    /// Profile pages: call a person (their DM) or an agent (Phase 2 — not yet).
+    /// Profile pages: call a person (their DM) or an agent (its chat; Calls Phase 2).
     pub fn start_call(&mut self, target: CallTarget, video: bool, cx: &mut Context<Self>) {
         let kind = if video {
             CallKind::Video
@@ -2337,12 +2347,10 @@ impl AppState {
                 }
             }
             CallTarget::Agent(project_id) => {
-                let name = self
-                    .project(&project_id)
-                    .map(|p| p.name.clone())
-                    .unwrap_or_else(|| "this agent".into());
-                self.push_notice(format!("Calls with {name} are coming soon."));
-                cx.notify();
+                // Calls Phase 2: a call in the agent's chat; the voice worker joins as the agent.
+                self.close_profile(cx);
+                self.select_project(project_id, cx);
+                self.start_call_in_chat(kind, cx);
             }
         }
     }
@@ -3499,17 +3507,32 @@ impl AppState {
 
     /// Start a call in the selected chat (or join the live one).
     pub fn start_call_in_chat(&mut self, kind: CallKind, cx: &mut Context<Self>) {
-        let Some(chat_id) = self.selected_project.clone() else {
+        let Some(space_id) = self.selected_project.clone() else {
             return;
         };
         if self.my_call.is_some() {
             return;
         }
         // Already a live call here: join it instead of starting another.
-        if let Some(call) = self.calls_in_chat.get(&chat_id).cloned() {
+        if let Some(call) = self.calls_in_chat.get(&space_id).cloned() {
             self.join_call(call.call_id.clone(), cx);
             return;
         }
+        // People chats are their own room; a project space calls in its open (or primary) chat,
+        // where the project's agent joins through the voice worker (Calls Phase 2).
+        let is_people = self.project(&space_id).is_some_and(|p| p.is_people());
+        let chat_id = if is_people {
+            space_id
+        } else {
+            match self
+                .active_chat_id()
+                .filter(|c| self.tabs(&space_id).iter().any(|ch| &ch.id == c))
+                .or_else(|| self.primary_chat(&space_id).map(|c| c.id.clone()))
+            {
+                Some(c) => c,
+                None => return,
+            }
+        };
         self.my_call = Some(ActiveCall {
             call: Call {
                 chat_id: chat_id.clone(),
@@ -3568,7 +3591,7 @@ impl AppState {
         if self.my_call.is_some() {
             self.leave_call(cx);
         }
-        self.select_project(call.chat_id.clone(), cx);
+        self.select_project(call.space_id().to_owned(), cx);
         self.join_call(call.call_id, cx);
     }
 
@@ -3703,7 +3726,7 @@ impl AppState {
         cx: &mut Context<Self>,
     ) {
         self.calls_in_chat
-            .insert(call.chat_id.clone(), call.clone());
+            .insert(call.space_id().to_owned(), call.clone());
         if created {
             let line = format!(
                 "{} started a {}",
@@ -3758,7 +3781,7 @@ impl AppState {
 
     fn on_call_started(&mut self, call: Call, sender: Sender, cx: &mut Context<Self>) {
         self.calls_in_chat
-            .insert(call.chat_id.clone(), call.clone());
+            .insert(call.space_id().to_owned(), call.clone());
         let in_it = self
             .my_call
             .as_ref()
@@ -3781,7 +3804,7 @@ impl AppState {
 
     fn on_call_ended(&mut self, ended: CallEnded, cx: &mut Context<Self>) {
         let chat_id = if !ended.chat_id.is_empty() {
-            Some(ended.chat_id.clone())
+            Some(crate::model::space_of(&ended.project_id, &ended.chat_id).to_owned())
         } else {
             self.calls_in_chat
                 .iter()
@@ -3791,7 +3814,7 @@ impl AppState {
                     self.my_call
                         .as_ref()
                         .filter(|c| c.call.call_id == ended.call_id)
-                        .map(|c| c.call.chat_id.clone())
+                        .map(|c| c.call.space_id().to_owned())
                 })
         };
         if let Some(chat) = &chat_id {
@@ -3922,7 +3945,7 @@ impl AppState {
                 active.call.participants = call.participants.clone();
                 active.call.ended_at = None;
             }
-            self.calls_in_chat.insert(call.chat_id.clone(), call);
+            self.calls_in_chat.insert(call.space_id().to_owned(), call);
         } else {
             self.calls_in_chat.retain(|_, c| c.call_id != call.call_id);
             if self

@@ -26,6 +26,7 @@ mod store;
 mod sync;
 mod tree;
 mod vault;
+mod voice;
 mod workspace;
 
 use std::time::{Duration, Instant};
@@ -342,6 +343,8 @@ async fn boot() -> Result<()> {
         .unwrap_or("u_default")
         .to_owned();
     sup.apply_listing(&listing).await;
+    // Calls Phase 2: the relay's voice link (tool calls and transcript rows from the voice worker).
+    voice::spawn_voice_link(sup.clone());
     let n = sup.list().await.len();
     tracing::info!(
         user = %user_id,

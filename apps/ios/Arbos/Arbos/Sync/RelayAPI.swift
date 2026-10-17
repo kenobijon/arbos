@@ -625,6 +625,53 @@ final class RelayAPI {
         ((try await json("GET", "/me/pushes")) as? [Any] ?? []).compactMap(PushItem.parse)
     }
 
+    // MARK: Connectors (F1)
+
+    /// `GET /connectors/catalog` + `GET /connectors` → one view for Settings.
+    func connectors() async throws -> ConnectorsView {
+        let catalog = (try await json("GET", "/connectors/catalog")) as? [String: Any] ?? [:]
+        let list = (try await json("GET", "/connectors")) as? [String: Any] ?? [:]
+        let providers: [ConnectorProvider] = ((catalog["providers"] as? [Any]) ?? []).compactMap { raw in
+            guard let m = raw as? [String: Any], let provider = m["provider"] as? String else { return nil }
+            return ConnectorProvider(
+                provider: provider,
+                label: m["label"] as? String ?? provider,
+                connect: m["connect"] as? String ?? "oauth",
+                oauthConfigured: (m["oauth_configured"] as? NSNumber)?.boolValue ?? false
+            )
+        }
+        let items: [Connector] = ((list["items"] as? [Any]) ?? []).compactMap { raw in
+            guard let m = raw as? [String: Any], let id = m["id"] as? String, let provider = m["provider"] as? String else { return nil }
+            return Connector(
+                id: id,
+                provider: provider,
+                label: m["label"] as? String ?? provider,
+                status: ConnectorStatus(wire: m["status"] as? String ?? ""),
+                lastError: m["last_error"] as? String,
+                mock: (m["mock"] as? NSNumber)?.boolValue ?? false
+            )
+        }
+        return ConnectorsView(
+            mock: (list["mock"] as? NSNumber)?.boolValue ?? (catalog["mock"] as? NSNumber)?.boolValue ?? false,
+            providers: providers,
+            items: items,
+            loaded: true
+        )
+    }
+
+    /// Start OAuth (`authUrl`) or store a pasted token. Google uses OAuth only.
+    func connectConnector(provider: String, token: String? = nil) async throws -> String? {
+        var body: [String: Any] = [:]
+        if let token, !token.isEmpty { body["token"] = token }
+        let v = try await json("POST", "/connectors/\(provider)/connect", body: body)
+        let m = v as? [String: Any]
+        return m?["authUrl"] as? String
+    }
+
+    func disconnectConnector(id: String) async throws {
+        _ = try await request("DELETE", "/connectors/\(id)")
+    }
+
     // Projects together (step 3)
     func projectMembers(_ projectId: Id) async throws -> [ProjectMember] {
         let v = try await json("GET", "/projects/\(projectId)/members")
