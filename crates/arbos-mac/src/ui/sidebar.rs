@@ -15,6 +15,7 @@ use crate::model::{Id, MachineState, Message, Project, Role};
 use crate::ui::avatars;
 use crate::ui::composer::Composer;
 use crate::ui::frost::edge_faded;
+use crate::ui::glass;
 use crate::ui::icons::icon;
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
@@ -509,6 +510,8 @@ fn render_row(row: RowView, theme: &Theme, cx: &mut Context<Shell>) -> impl Into
         avatar_state,
     } = row;
     let id: Id = space.id.clone();
+    let menu_id: Id = space.id.clone();
+    let ctrl_menu_id: Id = space.id.clone();
     if streaming || typing || avatar_state != avatars::AvatarState::Idle {
         PulseClock::request(cx);
     }
@@ -606,10 +609,37 @@ fn render_row(row: RowView, theme: &Theme, cx: &mut Context<Shell>) -> impl Into
         .cursor_pointer()
         .on_click(cx.listener(move |this, _, window, cx| {
             this.menu_open = false;
+            this.row_menu = None;
             this.state
                 .update(cx, |s, cx| s.select_project(id.clone(), cx));
             Composer::focus(&this.composer, window, cx);
         }))
+        // Grok Mac: right-click (or control-click) a row for its menu (ref 48).
+        .on_mouse_down(
+            gpui::MouseButton::Right,
+            cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.menu_open = false;
+                this.row_menu = Some((menu_id.clone(), event.position));
+                cx.notify();
+            }),
+        )
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                eprintln!(
+                    "row-menu: left down ctrl={} at {:?}",
+                    event.modifiers.control, event.position
+                );
+                if !event.modifiers.control {
+                    return;
+                }
+                cx.stop_propagation();
+                this.menu_open = false;
+                this.row_menu = Some((ctrl_menu_id.clone(), event.position));
+                cx.notify();
+            }),
+        )
         .child(picture)
         .child(
             div()
@@ -683,4 +713,106 @@ fn render_row(row: RowView, theme: &Theme, cx: &mut Context<Shell>) -> impl Into
                         }),
                 ),
         )
+}
+
+/// The right-click menu of a sidebar row (Grok Mac, ref 48): profile, mute,
+/// new chat — existing actions only, anchored at the click.
+pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
+    let (space_id, at) = shell.row_menu.clone()?;
+    let theme = Theme::of(cx).clone();
+    let state = shell.state.read(cx);
+    let space = state.projects.iter().find(|p| p.id == space_id)?.clone();
+    let muted = state.is_muted(&space.id);
+    let is_people = space.is_people();
+    let person = space.person().cloned();
+
+    let profile_id = space.id.clone();
+    let profile_page = if is_people {
+        match person {
+            Some(p) if !space.is_people_group() => crate::app::ProfilePage::User {
+                handle: p.handle.clone(),
+                space_id: Some(space.id.clone()),
+            },
+            _ => crate::app::ProfilePage::Group {
+                space_id: space.id.clone(),
+            },
+        }
+    } else if space.shared {
+        crate::app::ProfilePage::Group {
+            space_id: space.id.clone(),
+        }
+    } else {
+        crate::app::ProfilePage::Agent {
+            project_id: space.id.clone(),
+        }
+    };
+    let mute_id = space.id.clone();
+    let chat_id = space.id.clone();
+
+    let mut body = div().flex().flex_col().gap(px(1.0));
+    body = body.child(
+        glass::menu_row(
+            "row-menu-profile",
+            "person",
+            if is_people {
+                "Profile"
+            } else {
+                "Agent profile"
+            },
+            false,
+            &theme,
+        )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.row_menu = None;
+            let (page, id) = (profile_page.clone(), profile_id.clone());
+            this.state.update(cx, |s, cx| {
+                s.select_project(id, cx);
+                s.open_profile(page, cx);
+            });
+        })),
+    );
+    body = body.child(
+        glass::menu_row(
+            "row-menu-mute",
+            if muted { "bell" } else { "bell-slash" },
+            if muted { "Unmute" } else { "Mute" },
+            false,
+            &theme,
+        )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.row_menu = None;
+            let id = mute_id.clone();
+            this.state.update(cx, |s, cx| s.toggle_mute(id, cx));
+        })),
+    );
+    if !is_people {
+        body = body.child(glass::menu_divider(&theme)).child(
+            glass::menu_row(
+                "row-menu-new-chat",
+                "square-pencil",
+                "New chat",
+                false,
+                &theme,
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.row_menu = None;
+                let id = chat_id.clone();
+                this.state.update(cx, |s, cx| {
+                    s.select_project(id, cx);
+                    s.new_tab(cx);
+                });
+                Composer::focus(&this.composer, window, cx);
+            })),
+        );
+    }
+    // Appended straight to the root: taffy places an absolute child relative
+    // to its parent, so a static wrapper would push the menu off to the right.
+    Some(
+        div()
+            .absolute()
+            .left(at.x)
+            .top(at.y)
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(glass::frosted_menu(200.0, &theme, body)),
+    )
 }

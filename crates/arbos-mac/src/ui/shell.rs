@@ -73,6 +73,8 @@ pub struct Shell {
     signing_in: bool,
     /// The header's "…" menu.
     pub(crate) menu_open: bool,
+    /// Right-click menu on a sidebar row: the space and where the click landed.
+    pub(crate) row_menu: Option<(crate::model::Id, gpui::Point<gpui::Pixels>)>,
     /// People chats (D72): the @search field, the header pickers.
     pub people_input: Entity<ComposerInput>,
     /// Agent profile page: inline description editor.
@@ -275,6 +277,7 @@ impl Shell {
             local,
             focus_handle: cx.focus_handle(),
             settings_open: false,
+            row_menu: None,
             group_picker_open: false,
             archived_open: false,
             voice_picker_open: false,
@@ -353,8 +356,11 @@ impl Shell {
 
     /// Escape closes whatever floats: menus, then sheets.
     fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
-        let floating =
-            self.menu_open || self.members_open || self.add_agent_open || self.group_picker_open;
+        let floating = self.menu_open
+            || self.members_open
+            || self.add_agent_open
+            || self.group_picker_open
+            || self.row_menu.is_some();
         self.close_popovers(cx);
         if floating {
             return;
@@ -393,12 +399,14 @@ impl Shell {
             || self.add_agent_open
             || self.group_picker_open
             || self.archived_open
+            || self.row_menu.is_some()
         {
             self.menu_open = false;
             self.members_open = false;
             self.add_agent_open = false;
             self.group_picker_open = false;
             self.archived_open = false;
+            self.row_menu = None;
             cx.notify();
         }
         if self.composer.read(cx).open_picker.is_some() {
@@ -2311,6 +2319,9 @@ impl Render for Shell {
             if let Some(space) = selected.as_ref() {
                 root = root.child(glass::popover(header::archived_list(self, space, cx)));
             }
+        }
+        if let Some(menu) = sidebar::row_menu(self, cx) {
+            root = root.child(menu);
         }
         if self.group_picker_open {
             let right = if panel_open {
