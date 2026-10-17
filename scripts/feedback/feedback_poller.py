@@ -57,7 +57,7 @@ origin.txt (where it came from, shown as the issue's Source). `inject` writes on
 
 CLI:  feedback_poller.py [run] | status | testers | set-cursor <ISO-8601>
       | inject <image|-> "<comment>" [ios|mac] [--handle <login>] [--origin "<text>"] [--email <tester email, grouping only>]
-      | requeue <id>… | prioritize <id>… | confirm <id> [note] | handoff <id> [label]
+      | requeue <id>… | prioritize <id>… | confirm <id> [note] | handoff <id> [label] | deployed <id> [note]
 """
 
 from __future__ import annotations
@@ -1472,7 +1472,48 @@ class Loop:
             self.reconcile_testflight()
         except Exception as e:  # noqa: BLE001
             log(f"TestFlight reconciliation failed: {e}")
+        try:
+            self.watch_deploys()
+        except Exception as e:  # noqa: BLE001
+            log(f"deploy watch failed: {e}")
         return 0
+
+    # ---- landed-not-shipped: code that is on main but runs somewhere no build carries ------------
+
+    def watch_deploys(self) -> None:
+        """Items whose fix runs on the voice pod (`voice/**`) or in the sandbox image (`crates/arbos-agentd`)
+        are live only after that service is redeployed. The audit marks them `pending_deploy`; this clears
+        the mark when the relay reports a deployed sha that contains the commit (voice: GET /admin/calls
+        `voice.worker_sha`; agentd: `agentd.sha` when the relay exposes it). The operator can also clear it
+        by hand: `arbos-feedback deployed <id> <note>`."""
+        pending = [(fid, st) for fid in self.store.items() for st in [self.store.state(fid)] if st.get("pending_deploy")]
+        if not pending or not (self.cfg.relay_url and self.cfg.relay_admin_token):
+            return
+        hdrs = {"Authorization": f"Bearer {self.cfg.relay_admin_token}"}
+        doc = http_json("GET", f"{self.cfg.relay_url}/admin/calls", headers=hdrs)
+        deployed = {"voice": (doc.get("voice") or {}).get("worker_sha"), "agentd": (doc.get("agentd") or {}).get("sha")}
+        for fid, st in pending:
+            sha = deployed.get(st["pending_deploy"])
+            if not sha or not st.get("commit"):
+                continue
+            try:
+                cmp = self.gh.repo_api("GET", f"/compare/{st['commit']}...{sha}")
+            except HttpError:
+                continue
+            if cmp.get("status") in ("ahead", "identical"):
+                self.mark_deployed(fid, st, f"{st['pending_deploy']} now runs {sha[:8]}, which contains {st['commit'][:8]}")
+
+    def mark_deployed(self, fid: str, st: dict, note: str) -> None:
+        kind = st.pop("pending_deploy", None)
+        st["deployed_note"] = note
+        self.store.save_state(fid, st)
+        self.store.event(fid, "deployed", kind=kind, note=note)
+        if st.get("issue"):
+            unverified = st.get("device_evidence") == "pending"
+            self.gh.comment(st["issue"], f"Live for users: {note}." + (
+                " Still `shipped-unverified`: please confirm on a device." if unverified else ""))
+            self.gh.set_labels(st["issue"], ["shipped-unverified"] if unverified else ["shipped"], ["landed-not-shipped"])
+        log(f"[{fid}] deployed: {note}")
 
     # ---- TestFlight public group: nothing stays unsubmitted --------------------------------------
 
@@ -1667,6 +1708,18 @@ def main(argv: list[str]) -> int:
             loop.gh.comment(st["issue"], f"Confirmed on a device: {note}.")
             loop.gh.set_labels(st["issue"], ["shipped"], ["shipped-unverified"])
         print(f"{fid}: shipped (device evidence: {note})")
+        return 0
+    if cmd == "deployed":
+        # The service that runs this fix (voice pod / sandbox image) was redeployed with it.
+        store = Store(cfg)
+        loop = Loop(cfg)
+        fid, note = argv[2], (" ".join(argv[3:]) or "redeployed by the operator")
+        st = store.state(fid)
+        if not st:
+            print(f"{fid}: unknown")
+            return 2
+        loop.mark_deployed(fid, st, note)
+        print(f"{fid}: deployed ({note})")
         return 0
     if cmd == "handoff":
         # A dedicated worker owns this item: cancel the agent run, stop tracking, label the issue.
