@@ -133,6 +133,12 @@ impl Supervisor {
         let t0 = Instant::now();
         let mut cfg = self.cfg.workspace(project, index);
         tracing::info!(project = %project_id, dir = %cfg.work_dir.display(), mcp = cfg.mcp_port, "starting workspace");
+        // Fork: copy the source agent's folder (files + memory) before first-boot seed.
+        if let Some(src_id) = project.get("forked_from").and_then(Value::as_str) {
+            if let Err(e) = clone_forked_workspace(&self.cfg.work_root, src_id, &cfg.work_dir) {
+                tracing::warn!(project = %project_id, source = %src_id, error = %e, "fork clone");
+            }
+        }
         seed_state(&cfg)?;
         if self.isolation.enabled {
             let ra = self
@@ -503,6 +509,63 @@ impl Workspace {
             }
         }
     }
+}
+
+/// Copy `/work/<source>` into a brand-new fork workspace. Skips when the dest already exists
+/// (already seeded or cloned). Clears pi/Prime sessions so the new agent keeps files and
+/// memory but does not resume the source chat session.
+fn clone_forked_workspace(
+    work_root: &std::path::Path,
+    source_id: &str,
+    dest: &std::path::Path,
+) -> Result<()> {
+    if dest.exists() {
+        return Ok(());
+    }
+    if source_id.is_empty()
+        || source_id.len() > 64
+        || !source_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(anyhow::anyhow!("bad forked_from id"));
+    }
+    let src = work_root.join(source_id);
+    if !src.is_dir() {
+        tracing::info!(source = %source_id, "fork clone: source workspace missing");
+        return Ok(());
+    }
+    // Refuse to leave the work root (symlink / `..` games).
+    let src_canon = src.canonicalize().unwrap_or(src.clone());
+    let root_canon = work_root
+        .canonicalize()
+        .unwrap_or_else(|_| work_root.to_path_buf());
+    if !src_canon.starts_with(&root_canon) {
+        return Err(anyhow::anyhow!("fork source outside work root"));
+    }
+    tracing::info!(source = %source_id, dest = %dest.display(), "fork clone: copying workspace");
+    let st = std::process::Command::new("cp")
+        .args([
+            "-a",
+            &src.display().to_string(),
+            &dest.display().to_string(),
+        ])
+        .status()
+        .context("cp -a for fork")?;
+    if !st.success() {
+        return Err(anyhow::anyhow!("cp -a failed for fork"));
+    }
+    for rel in [
+        ".arbos/pi/sessions",
+        ".arbos/prime/sessions",
+        ".arbos/claude/sessions",
+    ] {
+        let p = dest.join(rel);
+        let _ = std::fs::remove_dir_all(&p);
+        let _ = std::fs::create_dir_all(&p);
+    }
+    let _ = std::fs::remove_file(dest.join(".arbos/.owner"));
+    Ok(())
 }
 
 /// First-boot seeding of one workspace (sandbox-image.md §4 step 5): pi seed → state dir,

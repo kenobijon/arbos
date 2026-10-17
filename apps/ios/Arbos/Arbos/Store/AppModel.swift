@@ -2888,22 +2888,26 @@ final class AppModel: ObservableObject {
     }
 
     /// Grok Bot "Duplicate": a new top-level agent with the same profile, look,
-    /// model, and instructions — not the chat history. Own agents only.
+    /// model, instructions, and workspace context (files + memory) — not the
+    /// chat transcript. Own agents only.
     func duplicateProject(_ project: Project) {
         guard !project.shared else { return }
         let name = uniqueCopyName(of: project.name)
         let modelId = project.model
         let effort = project.effort
+        let sourceId = project.id
         Task {
             do {
                 // Do not pass `models` on create: a partial map would drop the
                 // relay's default subagent/decision slots. Set the talking
-                // model after the copy exists.
+                // model after the copy exists. `sourceProjectId` asks the
+                // relay to copy the source agent's project folder and memory.
                 try await api.createProject(
                     name: name,
                     color: project.color,
                     description: project.description,
-                    instructions: project.instructions
+                    instructions: project.instructions,
+                    sourceProjectId: sourceId
                 )
                 await refreshRegistry()
                 if let copy = projects.first(where: { $0.name == name && !$0.shared }) {
