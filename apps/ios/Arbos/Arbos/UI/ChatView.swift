@@ -1007,12 +1007,21 @@ struct ChatView: View {
                 .buttonStyle(.plain)
                 .padding(.leading, 14)
                 Circle().fill(theme.danger).frame(width: 8, height: 8)
-                HStack(spacing: 2) {
-                    ForEach(Array(recorder.levels.enumerated()), id: \.offset) { _, l in
-                        Capsule().fill(theme.text).frame(width: 3, height: 4 + CGFloat(l) * 20)
+                // Level bars drawn into whatever width is left (newest on the right),
+                // so the recorder row never pushes the composer past the screen edge.
+                Canvas { ctx, size in
+                    let pitch: CGFloat = 5, w: CGFloat = 3
+                    let levels = recorder.levels
+                    let n = min(levels.count, max(0, Int(size.width / pitch)))
+                    for i in 0..<n {
+                        let l = CGFloat(levels[levels.count - n + i])
+                        let h = min(size.height, 4 + l * 20)
+                        let x = size.width - CGFloat(n - i) * pitch
+                        let rect = CGRect(x: x, y: (size.height - h) / 2, width: w, height: h)
+                        ctx.fill(Path(roundedRect: rect, cornerRadius: w / 2), with: .color(theme.text))
                     }
                 }
-                .frame(maxWidth: .infinity)
+                .frame(maxWidth: .infinity, maxHeight: 24)
                 Text(recorder.timeLabel)
                     .font(.system(size: Theme.small, design: .monospaced))
                     .foregroundStyle(theme.text)
