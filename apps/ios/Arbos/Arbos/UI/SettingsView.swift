@@ -5,7 +5,9 @@ struct SettingsView: View {
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
+    #if DEBUG
     @State private var relayUrl = ""
+    #endif
     @State private var confirmUnpair = false
     /// Connector errors — the root `notice` alert sits under this sheet and looks like a silent fail.
     @State private var connectorError: String?
@@ -175,6 +177,7 @@ struct SettingsView: View {
                     .listRowBackground(theme.card)
                 }
 
+                #if DEBUG
                 Section {
                     TextField("https://relay.example.com", text: $relayUrl)
                         .keyboardType(.URL)
@@ -197,6 +200,7 @@ struct SettingsView: View {
                     Text("Self-hosters point the app at their own relay here. Switching relays signs this device out of the current one; sessions stay in the Keychain.")
                 }
                 .listRowBackground(theme.card)
+                #endif
 
                 if model.tokens == nil {
                     Section {
@@ -230,7 +234,9 @@ struct SettingsView: View {
                 Text(model.tokens != nil ? "This device is signed out of the relay; sign in with GitHub to come back." : "You will need a new pairing code to connect again.")
             }
             .onAppear {
+                #if DEBUG
                 relayUrl = model.relayUrl
+                #endif
                 model.refreshConnectors()
             }
             // After Google OAuth in Safari, refresh so "Needs sign-in" flips to Connected.
@@ -332,6 +338,7 @@ struct SettingsView: View {
         return u.docs == 0 ? "Nothing saved yet" : "\(size) · \(u.docs) chat\(u.docs == 1 ? "" : "s")"
     }
 
+    #if DEBUG
     private var linkLabel: String {
         switch model.link {
         case .connecting: return "Connecting…"
@@ -346,6 +353,7 @@ struct SettingsView: View {
         model.setRelayUrl(trimmed)
         dismiss()
     }
+    #endif
 
     static func relative(_ ms: Int64) -> String {
         let date = Date(timeIntervalSince1970: Double(ms) / 1000)
