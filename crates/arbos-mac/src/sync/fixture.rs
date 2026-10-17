@@ -156,6 +156,17 @@ impl SyncSource for FixtureSource {
             shared.chats.lock().unwrap().extend(seed_people_chats());
 
             let _ = events.send(SyncEvent::Link(Link::Connecting));
+            // The signed-in user, so Settings shows its profile header and credits.
+            let _ = events.send(SyncEvent::Account(Some(crate::model::AccountView {
+                id: ME_ID.into(),
+                login: ME_HANDLE.into(),
+                name: "Jacob Steeves".into(),
+                avatar_url: String::new(),
+                device_name: "Fixture".into(),
+                balance_usd: 84.5,
+                spent_today_usd: 1.6,
+                daily_cap_usd: Some(20.0),
+            })));
             emit_projects(&shared);
             emit_people_seed(&shared);
             emit_machine(&shared);

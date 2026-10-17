@@ -276,7 +276,8 @@ impl Shell {
             skills,
             local,
             focus_handle: cx.focus_handle(),
-            settings_open: false,
+            // `ARBOS_OPEN_SETTINGS=1` opens the sheet at launch (screenshot rig).
+            settings_open: std::env::var("ARBOS_OPEN_SETTINGS").is_ok_and(|v| v == "1"),
             row_menu: None,
             group_picker_open: false,
             archived_open: false,
@@ -1344,7 +1345,9 @@ impl Shell {
             .min_h_0()
             .overflow_y_scroll();
 
-        // Account.
+        // Profile header (D80, Apple's account screen): big avatar, bold name, grey handle.
+        let settings_group = |theme: &Theme| glass::group(theme).bg(theme.bubble_assistant);
+        let mut sign_out: Option<Div> = None;
         if let Some(account) = account.clone() {
             let who = if account.login.is_empty() {
                 "Signed in".to_string()
@@ -1362,47 +1365,44 @@ impl Shell {
                 online: false,
                 avatar_color_index: None,
             };
-            let mut group = glass::group(&theme).child(
+            body = body.child(
                 div()
                     .flex()
+                    .flex_col()
                     .items_center()
-                    .gap(px(14.0))
-                    .px(px(16.0))
-                    .py(px(14.0))
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .child(people::avatar(account_image, &person, 56.0, &theme))
+                    .gap(px(4.0))
+                    .pt(px(6.0))
+                    .pb(px(2.0))
+                    .child(div().pb(px(8.0)).child(people::avatar(
+                        account_image,
+                        &person,
+                        88.0,
+                        &theme,
+                    )))
                     .child(
                         div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .text_size(px(TEXT_BODY + 1.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme.text)
-                                    .child(if account.name.trim().is_empty() {
-                                        who.clone()
-                                    } else {
-                                        account.name.clone()
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(TEXT_SMALL))
-                                    .text_color(theme.text_muted)
-                                    .child(who.clone()),
-                            ),
+                            .text_size(px(22.0))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(theme.text)
+                            .child(if account.name.trim().is_empty() {
+                                who.clone()
+                            } else {
+                                account.name.clone()
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(TEXT_BODY))
+                            .text_color(theme.text_muted)
+                            .child(who.clone()),
                     ),
             );
             if account.balance_usd > 0.0 || account.daily_cap_usd.is_some() {
-                group = group.child(
+                let mut group = settings_group(&theme).child(
                     glass::row("Credits", &theme)
                         .child(value(format!("${:.2} left", account.balance_usd), &theme)),
                 );
-                group = group.child(glass::row("Today", &theme).child(value(
+                group = group.child(glass::row("Today", &theme).border_b_0().child(value(
                     match account.daily_cap_usd {
                         Some(cap) => {
                             format!("${:.2} of ${cap:.0} cap", account.spent_today_usd)
@@ -1411,16 +1411,27 @@ impl Shell {
                     },
                     &theme,
                 )));
+                body = body.child(section("Account", group, None, &theme));
             }
-            group = group.child(glass::row("", &theme).border_b_0().child(
-                link_button("sign-out", "Sign out", true, &theme).on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.settings_open = false;
-                        this.state.update(cx, |s, cx| s.sign_out(cx));
-                    },
-                )),
-            ));
-            body = body.child(section("Account", group, None, &theme));
+            sign_out = Some(
+                settings_group(&theme).child(
+                    div()
+                        .id("sign-out")
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .min_h(px(44.0))
+                        .text_size(px(TEXT_BODY))
+                        .text_color(theme.danger)
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.surface_2))
+                        .child("Sign out")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.settings_open = false;
+                            this.state.update(cx, |s, cx| s.sign_out(cx));
+                        })),
+                ),
+            );
         }
 
         // Machine.
@@ -1430,7 +1441,7 @@ impl Shell {
             .filter(|_| shown == MachineState::Awake)
             .map(|since| fmt_uptime(now_ms().saturating_sub(since)))
             .unwrap_or_else(|| "—".into());
-        let mut group = glass::group(&theme)
+        let mut group = settings_group(&theme)
             .child(
                 glass::row("State", &theme).child(
                     div()
@@ -1572,7 +1583,7 @@ impl Shell {
                     .child(segs),
             )
         };
-        let group = glass::group(&theme)
+        let group = settings_group(&theme)
             .child(seg_row(
                 "Theme",
                 div()
@@ -1653,7 +1664,7 @@ impl Shell {
         ));
 
         // Notifications.
-        let group = glass::group(&theme).child(
+        let group = settings_group(&theme).child(
             seg_row(
                 "Notifications",
                 div()
@@ -1717,7 +1728,7 @@ impl Shell {
                 ),
             );
         }
-        let group = glass::group(&theme).child(
+        let group = settings_group(&theme).child(
             div()
                 .flex()
                 .items_center()
@@ -1742,38 +1753,36 @@ impl Shell {
         body = body.child(section("Updates", group, None, &theme));
 
         // More: the feature panels.
-        let group = glass::group(&theme)
+        let group = settings_group(&theme)
             .child(
-                glass::nav_row("settings-connectors", "Connectors", None, &theme).on_click(
-                    cx.listener(|this, _, _, cx| {
+                glass::nav_row_icon("settings-connectors", "link", "Connectors", None, &theme)
+                    .on_click(cx.listener(|this, _, _, cx| {
                         this.settings_open = false;
                         this.connectors.update(cx, |p, cx| p.show(cx));
                         cx.notify();
-                    }),
-                ),
+                    })),
             )
             .child(
-                glass::nav_row("settings-routines", "Routines", None, &theme).on_click(
-                    cx.listener(|this, _, _, cx| {
+                glass::nav_row_icon("settings-routines", "sparkles", "Routines", None, &theme)
+                    .on_click(cx.listener(|this, _, _, cx| {
                         this.settings_open = false;
                         this.routines_open = true;
                         this.routines.update(cx, |p, cx| p.open(cx));
                         cx.notify();
-                    }),
-                ),
+                    })),
             )
             .child(
-                glass::nav_row("settings-channels", "Channels", None, &theme).on_click(
-                    cx.listener(|this, _, _, cx| {
+                glass::nav_row_icon("settings-channels", "globe", "Channels", None, &theme)
+                    .on_click(cx.listener(|this, _, _, cx| {
                         this.settings_open = false;
                         this.channels.update(cx, |p, cx| p.show(cx));
                         cx.notify();
-                    }),
-                ),
+                    })),
             )
             .child(
-                glass::nav_row(
+                glass::nav_row_icon(
                     "settings-skills",
+                    "cpu",
                     "Skills",
                     Some(format!("{skill_count} in library")),
                     &theme,
@@ -1785,26 +1794,27 @@ impl Shell {
                 })),
             )
             .child(
-                glass::nav_row("settings-local", "This Mac", None, &theme).on_click(cx.listener(
-                    |this, _, _, cx| {
+                glass::nav_row_icon("settings-local", "window", "This Mac", None, &theme).on_click(
+                    cx.listener(|this, _, _, cx| {
                         this.settings_open = false;
                         this.local.update(cx, |p, cx| p.show(cx));
                         cx.notify();
-                    },
-                )),
+                    }),
+                ),
             )
             .child(
-                glass::nav_row("settings-vault", "Vault", None, &theme).on_click(cx.listener(
-                    |this, _, _, cx| {
+                glass::nav_row_icon("settings-vault", "doc", "Vault", None, &theme).on_click(
+                    cx.listener(|this, _, _, cx| {
                         this.settings_open = false;
                         this.vault.update(cx, |p, cx| p.show(cx));
                         cx.notify();
-                    },
-                )),
+                    }),
+                ),
             )
             .child(
-                glass::nav_row(
+                glass::nav_row_icon(
                     "settings-feedback",
+                    "square-pencil",
                     "Send feedback",
                     Some("⌘⇧F".into()),
                     &theme,
@@ -1812,10 +1822,10 @@ impl Shell {
                 .border_b_0()
                 .on_click(cx.listener(|this, _, window, cx| this.open_feedback(window, cx))),
             );
-        body = body.child(section("More", group, None, &theme));
+        body = body.child(section("Apps & tools", group, None, &theme));
 
         // Debug + about.
-        let group = glass::group(&theme)
+        let group = settings_group(&theme)
             .child(seg_row(
                 "Turn details",
                 div()
@@ -1867,7 +1877,7 @@ impl Shell {
                 &theme,
             )));
         body = body.child(section(
-            "About",
+            "Help & about",
             group,
             Some(footnote(
                 "Turn details adds a \"Show details\" line under each reply with the model, \
@@ -1877,6 +1887,9 @@ impl Shell {
             )),
             &theme,
         ));
+        if let Some(sign_out) = sign_out {
+            body = body.child(sign_out);
+        }
 
         let header = glass::sheet_header(
             "Settings",

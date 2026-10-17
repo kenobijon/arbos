@@ -116,9 +116,47 @@ pub fn row(label: impl Into<SharedString>, theme: &Theme) -> Div {
         .child(div().flex_1().min_w_0().child(label.into()))
 }
 
+/// Apple-style icon tile for settings rows: 30 px rounded square, muted
+/// monochrome fill, white glyph (D80).
+pub fn icon_tile(glyph: &str, theme: &Theme) -> Div {
+    div()
+        .size(px(30.0))
+        .flex_shrink_0()
+        .rounded(px(7.5))
+        .bg(match theme.appearance {
+            crate::ui::theme::Appearance::Dark => gpui::Hsla::from(gpui::rgb(0x5c5c60)),
+            crate::ui::theme::Appearance::Light => gpui::Hsla::from(gpui::rgb(0x6e6e73)),
+        })
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(icon(glyph, 15.0, gpui::white()))
+}
+
 /// A tappable row: label, optional detail, chevron.
 pub fn nav_row(
     id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    detail: Option<String>,
+    theme: &Theme,
+) -> Stateful<Div> {
+    nav_row_with(id, None, label, detail, theme)
+}
+
+/// `nav_row` with an Apple-style icon tile in front of the label (D80 settings).
+pub fn nav_row_icon(
+    id: impl Into<ElementId>,
+    glyph: &str,
+    label: impl Into<SharedString>,
+    detail: Option<String>,
+    theme: &Theme,
+) -> Stateful<Div> {
+    nav_row_with(id, Some(glyph), label, detail, theme)
+}
+
+fn nav_row_with(
+    id: impl Into<ElementId>,
+    glyph: Option<&str>,
     label: impl Into<SharedString>,
     detail: Option<String>,
     theme: &Theme,
@@ -136,6 +174,7 @@ pub fn nav_row(
         .text_color(theme.text)
         .cursor_pointer()
         .hover(|s| s.bg(theme.surface_2))
+        .when_some(glyph, |el, g| el.child(icon_tile(g, theme)))
         .child(div().flex_1().min_w_0().child(label.into()))
         .when_some(detail, |el, d| {
             el.child(
@@ -168,9 +207,15 @@ pub fn segment(id: impl Into<ElementId>, label: &str, on: bool, theme: &Theme) -
         } else {
             gpui::transparent_black()
         })
-        .text_color(if on { theme.text } else { theme.text_muted })
+        // The on-segment sits on the user-bubble colour (black in light), so it
+        // takes the bubble's text colour, not the page text colour.
+        .text_color(if on {
+            theme.bubble_text()
+        } else {
+            theme.text_muted
+        })
         .cursor_pointer()
-        .hover(|s| s.text_color(theme.text))
+        .when(!on, |el| el.hover(|s| s.text_color(theme.text)))
         .child(label.to_string())
 }
 
