@@ -1,0 +1,56 @@
+{"id": 1, "from": "@sam", "text": "ok so the deploy is tomorrow at ten", "label": "silent", "note": "planning between humans"}
+{"id": 2, "from": "@kate", "text": "yeah I still need to check the staging logs before that", "label": "silent", "note": "human intent, not a request to the agent"}
+{"id": 3, "from": "@sam", "text": "can someone check whether the staging box is still up", "label": "act", "note": "implicit request to anyone; needs a tool"}
+{"id": 4, "from": "@kate", "text": "thanks that would help", "label": "silent", "note": "acknowledgement"}
+{"id": 5, "from": "@jacob", "text": "Arbos, what did we decide about the retry limit last week", "label": "speak", "note": "addressed by name; knowledge question"}
+{"id": 6, "from": "@sam", "text": "I think it was eight calls a minute but I'm not sure", "label": "silent", "note": "human answer to another human; agent may know but was not asked", "recent": [{"from": "@jacob", "text": "what did we decide about the retry limit last week"}]}
+{"id": 7, "from": "@kate", "text": "did anyone look at the error rate on the relay this morning", "label": "act", "note": "implicit lookup request to the group"}
+{"id": 8, "from": "@jacob", "text": "my kid has a school thing at three so I'll drop early", "label": "silent", "note": "small talk"}
+{"id": 9, "from": "@sam", "text": "haha same, Friday brain", "label": "silent", "note": "banter"}
+{"id": 10, "from": "@kate", "text": "Arbos can you pull the last twenty lines of the relay log", "label": "act", "note": "direct work request"}
+{"id": 11, "from": "@sam", "text": "Kate, can you send me the invoice later", "label": "silent", "note": "request to another named person"}
+{"id": 12, "from": "@jacob", "text": "we need the current disk usage on the box before we decide", "label": "act", "note": "we need X — implicit request"}
+{"id": 13, "from": "@kate", "text": "is the LiveKit server on version one thirteen or one twelve", "label": "speak", "note": "factual question the agent can answer from context or memory"}
+{"id": 14, "from": "@sam", "text": "no wait, don't ask Arbos, I'll do it myself", "label": "silent", "note": "negated mention"}
+{"id": 15, "from": "@jacob", "text": "what's the capital of Australia again, Canberra right", "label": "silent", "note": "rhetorical trivia between humans; not addressed"}
+{"id": 16, "from": "@kate", "text": "somebody should look up how much we spent on OpenAI this month", "label": "act", "note": "somebody should — implicit request"}
+{"id": 17, "from": "@sam", "text": "Arbos stop", "label": "stop", "note": "kill word"}
+{"id": 18, "from": "@sam", "text": "Arbos, leave the call please", "label": "leave", "note": "kill word"}
+{"id": 19, "from": "@jacob", "text": "did the agent finish cloning the repo", "label": "speak", "note": "asks about the agent's own work", "agent_has_open_work": true}
+{"id": 20, "from": "@kate", "text": "actually the cap is ten dollars a day not five", "label": "speak", "note": "wrong fact about something the agent knows; group needs the correction", "recent": [{"from": "@sam", "text": "the voice cap is five a day"}, {"from": "Arbos (agent)", "text": "Right, the default is five dollars a day per user."}]}
+{"id": 21, "from": "@sam", "text": "let's grab lunch after this", "label": "silent", "note": "social plan"}
+{"id": 22, "from": "@jacob", "text": "can we get the list of open issues labelled bug", "label": "act", "note": "can we get — implicit request needing a tool"}
+{"id": 23, "from": "@kate", "text": "I'll write the release notes tonight", "label": "silent", "note": "human commitment"}
+{"id": 24, "from": "@sam", "text": "Forest, how long did the last build take", "label": "speak", "note": "addressed by wake name; the answer may need a lookup but the question is for the agent"}
+{"id": 25, "from": "@jacob", "text": "hmm", "label": "silent", "note": "filler"}
+{"id": 26, "from": "@kate", "text": "run the tests on the voice branch and tell us if anything fails", "label": "act", "note": "direct imperative; only the agent can"}
+{"id": 27, "from": "@sam", "text": "Jacob did you push your branch", "label": "silent", "note": "question to a named human"}
+{"id": 28, "from": "@jacob", "text": "yes an hour ago", "label": "silent", "note": "human answer"}
+{"id": 29, "from": "@kate", "text": "what does the error 'bad_signature' on the webhook mean", "label": "speak", "note": "technical question the agent can answer"}
+{"id": 30, "from": "@sam", "text": "post a summary of this call in the chat when we're done", "label": "act", "note": "action in the chat"}
+{"id": 31, "from": "@jacob", "text": "I love this new call screen honestly", "label": "silent", "note": "opinion"}
+{"id": 32, "from": "@kate", "text": "Arbos, are you there", "label": "speak", "note": "addressed by name; presence check"}
+{"id": 33, "from": "@sam", "text": "we should probably not deploy on a Friday", "label": "silent", "note": "human opinion"}
+{"id": 34, "from": "@jacob", "text": "how many users signed up this week", "label": "act", "note": "a number only the agent can fetch"}
+{"id": 35, "from": "@kate", "text": "the agent said earlier that the box was up, right", "label": "speak", "note": "asks the group to confirm what the agent said; agent is the source", "recent": [{"from": "Arbos (agent)", "text": "The staging box is up, load is low."}]}
+{"id": 36, "from": "@sam", "text": "I quoted Arbos in the doc, hope that's ok", "label": "silent", "note": "mention in passing"}
+{"id": 37, "from": "@jacob", "text": "okay next topic, pricing", "label": "silent", "note": "agenda"}
+{"id": 38, "from": "@kate", "text": "can you two hear me ok", "label": "silent", "note": "addressed to the humans"}
+{"id": 39, "from": "@sam", "text": "yeah you're fine", "label": "silent", "note": "human answer"}
+{"id": 40, "from": "@jacob", "text": "look up the LiveKit pricing page and read us the per minute cost", "label": "act", "note": "fetch on the web"}
+{"id": 41, "from": "@kate", "text": "and then open an issue for the TURN cert sync bug", "label": "act", "note": "follow-up action to the agent's previous task", "recent": [{"from": "@kate", "text": "Arbos can you pull the last twenty lines of the relay log"}, {"from": "Arbos (agent)", "text": "Here they are; the last error is the TURN certificate sync at 02:14."}]}
+{"id": 42, "from": "@sam", "text": "sorry I was on mute", "label": "silent", "note": "aside"}
+{"id": 43, "from": "@jacob", "text": "what time is it in Tokyo right now", "label": "speak", "note": "simple question nobody else answers; agent can"}
+{"id": 44, "from": "@kate", "text": "I asked Sam to review it yesterday", "label": "silent", "note": "narration"}
+{"id": 45, "from": "@sam", "text": "who owns the relay deploy script", "label": "speak", "note": "project knowledge question"}
+{"id": 46, "from": "@jacob", "text": "arbos remind me at four to call the bank", "label": "act", "note": "routine creation"}
+{"id": 47, "from": "@kate", "text": "I don't think that's right, the webhook uses the API secret not a separate key", "label": "silent", "note": "human correcting a human; agent not needed", "recent": [{"from": "@sam", "text": "the webhook has its own secret"}]}
+{"id": 48, "from": "@sam", "text": "oh nice, did you see the new avatars", "label": "silent", "note": "chit chat"}
+{"id": 49, "from": "@jacob", "text": "check if the TestFlight build finished processing", "label": "act", "note": "imperative check"}
+{"id": 50, "from": "@kate", "text": "is anyone else getting echo", "label": "silent", "note": "call quality aside"}
+{"id": 51, "from": "@sam", "text": "thanks Arbos, that's all we needed", "label": "silent", "note": "thanks to the agent; polite close; a reply would be noise", "recent": [{"from": "Arbos (agent)", "text": "Done — the issue is open as number 950."}]}
+{"id": 52, "from": "@jacob", "text": "what did the tests say", "label": "speak", "note": "asks for the result of the agent's work", "agent_has_open_work": true, "recent": [{"from": "@kate", "text": "run the tests on the voice branch"}, {"from": "Arbos (agent)", "text": "On it."}]}
+{"id": 53, "from": "@kate", "text": "we could ask the agent to draft the announcement", "label": "silent", "note": "humans discussing whether to ask; not yet a request"}
+{"id": 54, "from": "@sam", "text": "yeah do that, draft a short announcement for the voice feature", "label": "act", "note": "the request follows", "recent": [{"from": "@kate", "text": "we could ask the agent to draft the announcement"}]}
+{"id": 55, "from": "@jacob", "text": "wait what's the difference between server VAD and semantic VAD", "label": "speak", "note": "conceptual question the agent is best placed to answer"}
+{"id": 56, "from": "@kate", "text": "I'll take that one, I read the docs yesterday", "label": "silent", "note": "a human claims the question", "recent": [{"from": "@jacob", "text": "what's the difference between server VAD and semantic VAD"}]}

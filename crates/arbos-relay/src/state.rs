@@ -155,6 +155,12 @@ pub struct AppState {
     /// user_id → last HTTP call from that user's box (`/box/hello`, `/box/projects`,
     /// `/box/keepalive`). A box with no project opens no room socket; this is its heartbeat.
     pub box_http_seen: Arc<Mutex<HashMap<String, i64>>>,
+    /// Agent voice calls (Phase 2): caps and the LiveKit agent name.
+    pub voice: Arc<crate::voice::VoiceCfg>,
+    /// user_id → the box's `WS /box/voice` link (tool calls and transcript rows to agentd).
+    pub voice_conns: crate::voice::VoiceConns,
+    /// `call:project` → when the voice worker was last dispatched for it (no double dispatch).
+    pub voice_dispatched: Arc<Mutex<HashMap<String, i64>>>,
 }
 
 /// The agent's current activity as the box last reported it.
@@ -402,6 +408,9 @@ pub(crate) mod test_support {
             presence_seen: Arc::new(Mutex::new(HashMap::new())),
             activity: Arc::new(Mutex::new(HashMap::new())),
             box_http_seen: Arc::new(Mutex::new(HashMap::new())),
+            voice: Arc::new(crate::voice::VoiceCfg::default()),
+            voice_conns: Arc::new(Mutex::new(HashMap::new())),
+            voice_dispatched: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }

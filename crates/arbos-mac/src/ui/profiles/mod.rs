@@ -134,6 +134,8 @@ impl Action {
         }
     }
 
+    /// A disabled action with a "soon" caption (none today: voice calls landed with D75).
+    #[allow(dead_code)]
     pub fn soon(mut self) -> Self {
         self.enabled = false;
         self.note = Some("soon");

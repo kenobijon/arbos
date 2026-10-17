@@ -1,0 +1,8 @@
+[
+  {"sleep": 3},
+  {"say": "Hi everyone.", "wait": false},
+  {"sleep": 70},
+  {"say": "Sounds good, see you all tomorrow.", "wait": false},
+  {"sleep": 10},
+  {"hangup": true}
+]

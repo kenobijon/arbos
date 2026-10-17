@@ -91,6 +91,9 @@ final class CallManager: NSObject, ObservableObject {
     private var ringbackPlayer: AVAudioPlayer?
     /// True between CallKit `didActivate` and `didDeactivate` — LiveKit's engine may run only then.
     private var callKitOwnsAudio = false
+    #if DEBUG
+    private var micInjector: MicInjector?
+    #endif
 
     private override init() {
         let config = CXProviderConfiguration()
@@ -446,6 +449,20 @@ final class CallManager: NSObject, ObservableObject {
         guard let token = c.token, let url = URL(string: c.livekitUrl) else {
             throw RelayError(status: 0, message: "The call has no join token")
         }
+        #if DEBUG
+        if let dir = DebugHooks.micDir {
+            // No audio device on a headless simulator: the engine renders without one and the
+            // "microphone" is whatever MicInjector feeds from `dir`.
+            LiveKitSDK.setLogLevel(.debug)
+            if DebugHooks.micManual {
+                do { try AudioManager.shared.setManualRenderingMode(true) } catch { audioLog.error("manual rendering: \(error.localizedDescription, privacy: .public)") }
+            }
+            AudioManager.shared.mixer.micVolume = 0
+            AudioManager.shared.mixer.appVolume = 1
+            do { try AudioManager.shared.startLocalRecording() } catch { audioLog.error("startLocalRecording: \(error.localizedDescription, privacy: .public)") }
+            micInjector = MicInjector(directory: dir)
+        }
+        #endif
         let roomOptions = RoomOptions(
             defaultCameraCaptureOptions: CameraCaptureOptions(position: frontCamera ? .front : .back, dimensions: .h720_169, fps: 30),
             defaultAudioCaptureOptions: AudioCaptureOptions(),
@@ -457,6 +474,9 @@ final class CallManager: NSObject, ObservableObject {
         if room.remoteParticipants.isEmpty { armOutgoingTimeout() } else { anyoneJoined = true }
         if let uuid = cxUUID { provider.reportOutgoingCall(with: uuid, connectedAt: Date()) }
         try? await room.localParticipant.setMicrophone(enabled: !muted)
+        #if DEBUG
+        micInjector?.start()
+        #endif
         if video, AVCaptureDevice.authorizationStatus(for: .video) == .authorized {
             do { try await room.localParticipant.setCamera(enabled: true); cameraOn = true } catch { cameraOn = false }
         }
@@ -473,6 +493,10 @@ final class CallManager: NSObject, ObservableObject {
     }
 
     private func teardown(leave: Bool, reason: CXCallEndedReason = .remoteEnded) async {
+        #if DEBUG
+        micInjector?.stop()
+        micInjector = nil
+        #endif
         ringbackWanted = false
         stopRingback()
         outgoingTimeout?.cancel()
@@ -924,7 +948,13 @@ extension CallManager: RoomDelegate {
 
 extension CallManager: CXProviderDelegate {
     nonisolated func providerDidReset(_ provider: CXProvider) {
-        Task { @MainActor in await self.teardown(leave: true, reason: .failed) }
+        // CallKit lost its state (its daemon restarted; routine on the simulator). The LiveKit
+        // call is fine: forget the CallKit handle and keep talking rather than hang up on
+        // everyone. The system call UI simply stops tracking this call.
+        Task { @MainActor in
+            log.notice("CallKit provider reset; keeping the call without a CallKit handle")
+            self.cxUUID = nil
+        }
     }
 
     nonisolated func provider(_ provider: CXProvider, perform action: CXStartCallAction) {
@@ -1049,3 +1079,56 @@ extension CallManager: PKPushRegistryDelegate {
         }
     }
 }
+
+#if DEBUG
+/// Simulator-only microphone: WAV files that appear in a directory are mixed into the local
+/// audio track (`AudioManager.shared.mixer.capture(appAudio:)`), in name order, once each.
+/// Lets a headless simulator take part in a real call for proof recordings.
+@MainActor
+final class MicInjector {
+    private let directory: URL
+    private var timer: Timer?
+    private var played: Set<String> = []
+
+    init(directory: String) {
+        self.directory = URL(fileURLWithPath: directory, isDirectory: true)
+    }
+
+    func start() {
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        // Files already there are a backlog from a previous run; skip them.
+        played = Set(pending())
+        timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.tick() }
+        }
+        audioLog.notice("mic injector watching \(self.directory.path, privacy: .public)")
+    }
+
+    func stop() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    private func pending() -> [String] {
+        ((try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? [])
+            .filter { $0.hasSuffix(".wav") }
+            .sorted()
+    }
+
+    private func tick() {
+        for name in pending() where !played.contains(name) {
+            played.insert(name)
+            let url = directory.appendingPathComponent(name)
+            do {
+                let file = try AVAudioFile(forReading: url)
+                guard let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length)) else { continue }
+                try file.read(into: buffer)
+                AudioManager.shared.mixer.capture(appAudio: buffer)
+                audioLog.notice("mic injector: playing \(name, privacy: .public) (\(Double(file.length) / file.processingFormat.sampleRate, format: .fixed(precision: 2)) s)")
+            } catch {
+                audioLog.error("mic injector: \(name, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+}
+#endif

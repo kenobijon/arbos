@@ -20,9 +20,6 @@ struct ChatView: View {
     @State private var rows: [Row] = []
     @State private var showModelPicker = false
     @State private var showThreads = false
-    @State private var showVoice = false
-    /// When `showVoice` opens, present video-call chrome instead of voice-only.
-    @State private var callVideo = false
     @State private var showSettings = false
     @State private var sentOnce = false
     @State private var transcribing = false
@@ -35,8 +32,14 @@ struct ChatView: View {
     @State private var demoRan = false
     @State private var demoQueue: [String] = []
     @StateObject private var recorder = MemoRecorder()
-    /// Finger is down on the mic hold-to-talk gesture (release sends the memo).
+    /// Finger is down on the mic (hold-to-talk or click-to-toggle).
     @State private var memoHoldActive = false
+    /// Second tap while recording: stop on press and ignore the matching release.
+    @State private var memoIgnoreRelease = false
+    /// Hold ended before mic permission returned; finish once recording starts.
+    @State private var memoFinishWhenPermission = false
+    /// When the current mic press began (for hold-vs-tap).
+    @State private var memoPressStartedAt: Date?
     @FocusState private var composerFocused: Bool
 
     @State private var showMembers = false
@@ -271,29 +274,6 @@ struct ChatView: View {
         .sheet(isPresented: $showProfile) {
             AgentEditSheet(projectId: projectId).environmentObject(model).environment(\.theme, theme)
         }
-        .fullScreenCover(isPresented: $showVoice, onDismiss: {
-            callVideo = false
-            demoDismissed()
-        }) {
-            // Always emit a real view. A ViewBuilder that falls through to
-            // EmptyView presents a blank white full-screen cover (no Hang up).
-            Group {
-                if let project {
-                    VoiceModeView(project: project, video: callVideo)
-                } else {
-                    VoiceModeView(
-                        peerName: counterpart?.displayName ?? people?.title ?? name,
-                        peerHandle: counterpart?.handle ?? "",
-                        peerAvatarUrl: counterpart?.avatarUrl,
-                        video: callVideo
-                    )
-                }
-            }
-            .environmentObject(model)
-            .environment(\.theme, theme)
-            .preferredColorScheme(theme.isDark ? .dark : .light)
-            .presentationBackground(theme.bg)
-        }
         .task {
             guard DebugHooks.liveDemo, !model.demoStarted, DebugHooks.openChat == chatId || DebugHooks.openChat == nil, let text = DebugHooks.autoSend else { return }
             model.demoStarted = true
@@ -346,13 +326,13 @@ struct ChatView: View {
             model.visibleChatId = chatId
             if isPeople { model.markPeopleRead(chatId) }
             openPendingSearchIfNeeded()
-            if isPeople || project?.shared == true { Task { await model.refreshActiveCall(chatId: chatId, projectId: isPeople ? nil : projectId) } }
+            Task { await model.refreshActiveCall(chatId: chatId, projectId: isPeople ? nil : projectId) }
             if let show = DebugHooks.show {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
                     switch show {
                     case "keyboard": composerFocused = true
                     case "settings": showSettings = true
-                    case "voice": showVoice = true
+                    case "voice": startCall(.voice)
                     case "threads": if model.multiChatEnabled { showThreads = true }
                     case "model": showModelPicker = true
                     case "profile": openHeaderProfile()
@@ -416,7 +396,7 @@ struct ChatView: View {
         case "model": showModelPicker = true
         case "threads": showThreads = true
         case "attach": showAttach = true
-        case "voice": showVoice = true
+        case "voice": startCall(.voice)
         case "settings": showSettings = true
         default: break
         }
@@ -426,7 +406,7 @@ struct ChatView: View {
             case "model": showModelPicker = false
             case "threads": showThreads = false
             case "attach": showAttach = false
-            case "voice": showVoice = false
+            case "voice": break
             default: break
             }
         }
@@ -579,16 +559,11 @@ struct ChatView: View {
                         }
                     }
                     Button { showModelPicker = true } label: { Label("Model · \(project?.shortModel ?? "")", systemImage: "cpu") }
-                    if project?.shared == true {
-                        // People in a shared project talk to each other; the agent joins in Phase 2.
-                        Button { startCall(.video) } label: { Label("Video call", systemImage: "video") }
-                        Button { startCall(.voice) } label: { Label("Voice call", systemImage: "phone") }
-                    } else {
-                        Button {
-                            callVideo = true
-                            showVoice = true
-                        } label: { Label("Video call", systemImage: "video") }
-                    }
+                    // Calls Phase 2: every project chat is callable; the agent joins the room
+                    // through the voice worker (1:1 = a voice call with the agent; shared
+                    // projects = people plus the agent).
+                    Button { startCall(.voice) } label: { Label(project?.shared == true ? "Voice call" : "Call \(project?.name ?? "agent")", systemImage: "phone") }
+                    Button { startCall(.video) } label: { Label("Video call", systemImage: "video") }
                     Button { showShare = true } label: { Label(project?.shared == true ? "Members" : "Share project…", systemImage: "person.2.badge.plus") }
                     if streaming {
                         Button(role: .destructive) { stop() } label: { Label("Stop \(name)", systemImage: "stop.circle") }
@@ -929,8 +904,7 @@ struct ChatView: View {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showFiles = true }
                     } onVoice: {
                         showAttach = false
-                        callVideo = false
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showVoice = true }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { startCall(.voice) }
                     }
                     .environment(\.theme, theme)
                 }
@@ -979,7 +953,13 @@ struct ChatView: View {
     private var textField: some View {
         HStack(spacing: 8) {
             if recorder.recording {
-                Button { memoHoldActive = false; recorder.cancel() } label: {
+                Button {
+                    memoHoldActive = false
+                    memoIgnoreRelease = false
+                    memoFinishWhenPermission = false
+                    memoPressStartedAt = nil
+                    recorder.cancel()
+                } label: {
                     Image(systemName: "xmark").font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.icon)
                 }
                 .buttonStyle(.plain)
@@ -1015,42 +995,67 @@ struct ChatView: View {
                     }
             }
             if draft.isEmpty || recorder.recording {
-                // Hold ≥0.25s to record; release sends the transcript. The mic stays
-                // mounted while recording so this gesture is not cancelled when the
-                // waveform replaces the text field.
+                // Press/release like Mac: tap toggles recording on; hold ≥0.25s then
+                // release sends. highPriorityGesture so a focused TextField cannot
+                // steal the touch. The mic stays mounted while recording so release
+                // can finish without a second tap.
                 Image(systemName: "mic")
                     .font(.system(size: 17))
                     .foregroundStyle(recorder.recording ? theme.danger : theme.icon)
-                    .padding(.trailing, 4)
+                    .frame(width: 44, height: Theme.fieldHeight)
                     .contentShape(Rectangle())
+                    .padding(.trailing, 2)
                     .id("memo-mic")
-                    .gesture(
-                        LongPressGesture(minimumDuration: 0.25, maximumDistance: 40)
-                            .sequenced(before: DragGesture(minimumDistance: 0))
-                            .onChanged { value in
-                                if case .second(true, _) = value {
-                                    memoHoldActive = true
-                                    if !recorder.recording { recorder.start() }
+                    .highPriorityGesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { _ in
+                                guard !memoHoldActive else { return }
+                                memoHoldActive = true
+                                memoPressStartedAt = Date()
+                                memoFinishWhenPermission = false
+                                if recorder.recording {
+                                    memoIgnoreRelease = true
+                                    finishMemoHold()
+                                } else {
+                                    memoIgnoreRelease = false
+                                    recorder.start()
                                 }
                             }
                             .onEnded { _ in
+                                let held = Date().timeIntervalSince(memoPressStartedAt ?? Date())
                                 memoHoldActive = false
-                                finishMemoHold()
+                                memoPressStartedAt = nil
+                                if memoIgnoreRelease {
+                                    memoIgnoreRelease = false
+                                    return
+                                }
+                                // Hold-to-talk: release after the threshold sends.
+                                if held >= 0.25 {
+                                    if recorder.recording {
+                                        finishMemoHold()
+                                    } else {
+                                        // Permission still pending; finish when it starts.
+                                        memoFinishWhenPermission = true
+                                    }
+                                }
+                                // Short tap: leave recording on (click-to-toggle).
                             }
                     )
             }
             // While recording: tap send also finishes (same as release). Otherwise
             // Grok keeps the composer usable while the bot works: text sends, an
-            // empty field starts voice chat. Stop lives in the … menu.
+            // empty field starts a voice call with the agent. Stop lives in the … menu.
             Button(action: {
                 if recorder.recording {
                     memoHoldActive = false
+                    memoIgnoreRelease = false
+                    memoFinishWhenPermission = false
+                    memoPressStartedAt = nil
                     finishMemoHold()
                 } else if canSend {
                     send()
                 } else {
-                    callVideo = false
-                    showVoice = true
+                    startCall(.voice)
                 }
             }) {
                 Circle()
@@ -1082,10 +1087,11 @@ struct ChatView: View {
         } message: {
             Text("Allow the microphone in Settings to record a voice memo.")
         }
-        // Permission can return after the finger is already up; finish then so the
-        // memo does not keep recording with no gesture holding it.
+        // Hold released before permission returned: finish once recording starts.
+        // A short tap leaves recording on (click-to-toggle), so do not auto-finish then.
         .onChange(of: recorder.recording) { _, isOn in
-            guard isOn, !memoHoldActive else { return }
+            guard isOn, memoFinishWhenPermission else { return }
+            memoFinishWhenPermission = false
             finishMemoHold()
         }
     }

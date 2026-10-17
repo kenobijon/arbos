@@ -1,13 +1,14 @@
 // People-chat sheets (D72): New Message (Telegram-style: search, New agent,
-// New group, every Arbos user), members (people, add-person, agents, add-agent picker, block, leave/delete) and
+// New group, your agents, every Arbos user), members (people, add-person, agents, add-agent picker, block, leave/delete) and
 // project members (invite by handle).
 
 import SwiftUI
 
 /// "+" on home — Telegram's "New Message" sheet in Grok's dark skin: rises
-/// from the bottom, search on top, then New agent / New group, then every
-/// other Arbos user. Typing filters the directory and also asks
-/// `GET /users/search`, so a GitHub handle not on Arbos yet can be invited.
+/// from the bottom, search on top, then New agent / New group, then your
+/// agents, then every other Arbos user. Typing filters agents and the
+/// directory and also asks `GET /users/search`, so a GitHub handle not on
+/// Arbos yet can be invited.
 struct NewChatSheet: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -21,6 +22,17 @@ struct NewChatSheet: View {
 
     private var trimmed: String {
         query.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "@"))
+    }
+
+    /// Own + shared agents (home list order by name). Empty query hides archived;
+    /// a search finds them again, same as the home list.
+    private var agents: [Project] {
+        let q = trimmed.lowercased()
+        let base = model.projects.filter { q.isEmpty ? !model.isArchived($0.id) : true }
+        let filtered = q.isEmpty ? base : base.filter {
+            $0.name.lowercased().contains(q) || mentionSlug($0.name).contains(q)
+        }
+        return filtered.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
     /// Directory hits first (alphabetical), then remote hits not already listed.
@@ -63,18 +75,35 @@ struct NewChatSheet: View {
                         .padding(.bottom, 22)
                     }
 
-                    sectionHeader(trimmed.isEmpty ? "Arbos users" : "People")
-                    if people.isEmpty {
-                        peopleEmpty
-                    } else {
+                    if !agents.isEmpty {
+                        sectionHeader(trimmed.isEmpty ? "Your agents" : "Agents")
                         card {
-                            ForEach(Array(people.enumerated()), id: \.element.id) { i, p in
-                                Button { open(p) } label: { PersonRow(person: p) }
+                            ForEach(Array(agents.enumerated()), id: \.element.id) { i, p in
+                                Button { openAgent(p) } label: { AgentPickRow(project: p) }
                                     .buttonStyle(.plain)
-                                if i < people.count - 1 { rowDivider }
+                                if i < agents.count - 1 { rowDivider }
                             }
                         }
                         .padding(.horizontal, 16)
+                        .padding(.bottom, 22)
+                    }
+
+                    // Keep the people block when the directory is empty (invite copy),
+                    // but skip a redundant "no match" under Agents when a search hit only agents.
+                    if !people.isEmpty || agents.isEmpty || trimmed.isEmpty {
+                        sectionHeader(trimmed.isEmpty ? "Arbos users" : "People")
+                        if people.isEmpty {
+                            peopleEmpty
+                        } else {
+                            card {
+                                ForEach(Array(people.enumerated()), id: \.element.id) { i, p in
+                                    Button { open(p) } label: { PersonRow(person: p) }
+                                        .buttonStyle(.plain)
+                                    if i < people.count - 1 { rowDivider }
+                                }
+                            }
+                            .padding(.horizontal, 16)
+                        }
                     }
                     Color.clear.frame(height: 40)
                 }
@@ -108,14 +137,18 @@ struct NewChatSheet: View {
     private var searchField: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass").font(.system(size: 15, weight: .medium)).foregroundStyle(theme.muted)
-            TextField("", text: $query, prompt: Text("Search people").foregroundStyle(theme.placeholder))
+            TextField("", text: $query, prompt: Text("Search people or agents").foregroundStyle(theme.placeholder))
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .font(.system(size: Theme.body))
                 .foregroundStyle(theme.text)
                 .focused($focused)
                 .submitLabel(.go)
-                .onSubmit { if let first = people.first { open(first) } else if !trimmed.isEmpty { openHandle(trimmed) } }
+                .onSubmit {
+                    if let first = agents.first { openAgent(first) }
+                    else if let first = people.first { open(first) }
+                    else if !trimmed.isEmpty { openHandle(trimmed) }
+                }
             if searching {
                 ProgressView().controlSize(.small).tint(theme.muted)
             } else if !query.isEmpty {
@@ -214,6 +247,14 @@ struct NewChatSheet: View {
 
     private func open(_ p: Person) { openHandle(p.handle) }
 
+    private func openAgent(_ p: Project) {
+        guard !opening else { return }
+        opening = true
+        model.open(project: p)
+        dismiss()
+        opening = false
+    }
+
     private func openHandle(_ handle: String) {
         guard !opening else { return }
         opening = true
@@ -221,6 +262,28 @@ struct NewChatSheet: View {
             if await model.openDM(handle: handle) != nil { dismiss() }
             opening = false
         }
+    }
+}
+
+/// One of my agents in the New Message / New group lists: tree avatar, name, @slug.
+struct AgentPickRow: View {
+    @Environment(\.theme) private var theme
+    let project: Project
+    var trailing: AnyView? = nil
+
+    var body: some View {
+        HStack(spacing: 14) {
+            AgentAvatar(project: project, theme: theme, size: 44, still: true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(project.name).font(.system(size: Theme.body, weight: .medium)).foregroundStyle(theme.text).lineLimit(1)
+                Text("@\(mentionSlug(project.name))").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted).lineLimit(1)
+            }
+            Spacer()
+            if let trailing { trailing }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .contentShape(Rectangle())
     }
 }
 
@@ -449,7 +512,7 @@ struct NewAgentLookView: View {
     }
 }
 
-/// New group: pick people from the directory (or search), then create.
+/// New group: pick people (and your own agents), then create.
 struct NewGroupView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -457,11 +520,21 @@ struct NewGroupView: View {
     @State private var query = ""
     @State private var remote: [Person] = []
     @State private var picked: [Person] = []
+    @State private var pickedAgents: [Project] = []
     @State private var creating = false
     /// Shown on this screen — the root notice alert sits under the sheet and looks like a silent fail.
     @State private var errorText: String?
 
     private var trimmed: String { query.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "@")) }
+
+    /// Own agents only (same as Members → Add agent); shared ones cannot be re-shared here.
+    private var agentCandidates: [Project] {
+        let q = trimmed.lowercased()
+        let base = model.projects.filter { !$0.shared && !model.isArchived($0.id) }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        if q.isEmpty { return base }
+        return base.filter { $0.name.lowercased().contains(q) || mentionSlug($0.name).contains(q) }
+    }
 
     private var candidates: [Person] {
         let q = trimmed.lowercased()
@@ -473,9 +546,19 @@ struct NewGroupView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if !picked.isEmpty {
+            if !picked.isEmpty || !pickedAgents.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
+                        ForEach(pickedAgents) { p in
+                            HStack(spacing: 6) {
+                                AgentAvatar(project: p, theme: theme, size: 22, still: true)
+                                Text("@\(mentionSlug(p.name))").font(.system(size: Theme.tiny, weight: .medium)).foregroundStyle(theme.text)
+                                Button { toggleAgent(p) } label: { Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).foregroundStyle(theme.muted) }
+                                    .buttonStyle(.plain)
+                            }
+                            .padding(.leading, 4).padding(.trailing, 10).frame(height: 32)
+                            .background(Capsule().fill(theme.field))
+                        }
                         ForEach(picked) { p in
                             HStack(spacing: 6) {
                                 PersonAvatar(url: p.avatarUrl, handle: p.handle, size: 22)
@@ -493,7 +576,7 @@ struct NewGroupView: View {
             }
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass").font(.system(size: 15, weight: .medium)).foregroundStyle(theme.muted)
-                TextField("", text: $query, prompt: Text("Add people").foregroundStyle(theme.placeholder))
+                TextField("", text: $query, prompt: Text("Add people or agents").foregroundStyle(theme.placeholder))
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
                     .font(.system(size: Theme.body)).foregroundStyle(theme.text)
             }
@@ -513,27 +596,64 @@ struct NewGroupView: View {
             }
 
             ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(Array(candidates.enumerated()), id: \.element.id) { i, p in
-                        Button { toggle(p) } label: {
-                            PersonRow(person: p, trailing: AnyView(
-                                Image(systemName: picked.contains(p) ? "checkmark.circle.fill" : "circle")
-                                    .font(.system(size: 22))
-                                    .foregroundStyle(picked.contains(p) ? theme.text : theme.muted.opacity(0.5))
-                            ))
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    if !agentCandidates.isEmpty {
+                        Text("YOUR AGENTS")
+                            .font(.system(size: 12, weight: .medium))
+                            .kerning(0.4)
+                            .foregroundStyle(theme.muted)
+                            .padding(.horizontal, 16)
+                            .padding(.bottom, 8)
+                        VStack(spacing: 0) {
+                            ForEach(Array(agentCandidates.enumerated()), id: \.element.id) { i, p in
+                                Button { toggleAgent(p) } label: {
+                                    AgentPickRow(project: p, trailing: AnyView(
+                                        Image(systemName: pickedAgents.contains(where: { $0.id == p.id }) ? "checkmark.circle.fill" : "circle")
+                                            .font(.system(size: 22))
+                                            .foregroundStyle(pickedAgents.contains(where: { $0.id == p.id }) ? theme.text : theme.muted.opacity(0.5))
+                                    ))
+                                }
+                                .buttonStyle(.plain)
+                                if i < agentCandidates.count - 1 { Rectangle().fill(theme.separator).frame(height: 0.5).padding(.leading, 72) }
+                            }
                         }
-                        .buttonStyle(.plain)
-                        if i < candidates.count - 1 { Rectangle().fill(theme.separator).frame(height: 0.5).padding(.leading, 72) }
+                        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(theme.card))
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 18)
                     }
-                    if candidates.isEmpty {
-                        Text(trimmed.isEmpty ? "No one else on Arbos yet. Search a GitHub username." : "No one matches @\(trimmed).")
-                            .font(.system(size: Theme.small)).foregroundStyle(theme.muted)
-                            .multilineTextAlignment(.center).padding(.horizontal, 36).padding(.top, 24)
+
+                    if !candidates.isEmpty || agentCandidates.isEmpty {
+                        if !agentCandidates.isEmpty {
+                            Text("PEOPLE")
+                                .font(.system(size: 12, weight: .medium))
+                                .kerning(0.4)
+                                .foregroundStyle(theme.muted)
+                                .padding(.horizontal, 16)
+                                .padding(.bottom, 8)
+                        }
+                        VStack(spacing: 0) {
+                            ForEach(Array(candidates.enumerated()), id: \.element.id) { i, p in
+                                Button { toggle(p) } label: {
+                                    PersonRow(person: p, trailing: AnyView(
+                                        Image(systemName: picked.contains(p) ? "checkmark.circle.fill" : "circle")
+                                            .font(.system(size: 22))
+                                            .foregroundStyle(picked.contains(p) ? theme.text : theme.muted.opacity(0.5))
+                                    ))
+                                }
+                                .buttonStyle(.plain)
+                                if i < candidates.count - 1 { Rectangle().fill(theme.separator).frame(height: 0.5).padding(.leading, 72) }
+                            }
+                            if candidates.isEmpty {
+                                Text(trimmed.isEmpty ? "No one else on Arbos yet. Search a GitHub username." : "No one matches @\(trimmed).")
+                                    .font(.system(size: Theme.small)).foregroundStyle(theme.muted)
+                                    .multilineTextAlignment(.center).padding(.horizontal, 36).padding(.vertical, 24)
+                            }
+                        }
+                        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(theme.card))
+                        .padding(.horizontal, 16)
                     }
+                    Color.clear.frame(height: 40)
                 }
-                .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(theme.card))
-                .padding(.horizontal, 16)
-                Color.clear.frame(height: 40)
             }
         }
         .background(theme.bg)
@@ -564,6 +684,11 @@ struct NewGroupView: View {
         errorText = nil
     }
 
+    private func toggleAgent(_ p: Project) {
+        if let i = pickedAgents.firstIndex(where: { $0.id == p.id }) { pickedAgents.remove(at: i) } else { pickedAgents.append(p) }
+        errorText = nil
+    }
+
     private func search() {
         let q = trimmed
         guard q.count >= 2 else { remote = []; return }
@@ -578,8 +703,9 @@ struct NewGroupView: View {
         guard !picked.isEmpty, !creating else { return }
         creating = true
         errorText = nil
+        let agentIds = pickedAgents.map(\.id)
         Task {
-            if await model.createGroup(handles: picked.map(\.handle)) {
+            if await model.createGroup(handles: picked.map(\.handle), agentIds: agentIds) {
                 onDone()
             } else {
                 // Copy onto this screen: RootView's alert is behind the sheet.

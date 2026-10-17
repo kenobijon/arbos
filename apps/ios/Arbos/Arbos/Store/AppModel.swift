@@ -183,6 +183,8 @@ final class AppModel: ObservableObject {
         guard !archivedProjectIds.contains(projectId) else { return }
         archivedProjectIds.insert(projectId)
         UserDefaults.standard.set(Array(archivedProjectIds), forKey: "archivedProjects")
+        // Archive clears a home pin — the row is hidden until search/open.
+        unpinHome(projectId: projectId)
     }
 
     func unarchive(_ projectId: Id) {
@@ -191,11 +193,45 @@ final class AppModel: ObservableObject {
         UserDefaults.standard.set(Array(archivedProjectIds), forKey: "archivedProjects")
     }
 
+    // MARK: Home pins (device-local)
+
+    /// Home-list keys (`p:<projectId>` / `c:<peopleChatId>`) kept at the top.
+    @Published private(set) var pinnedHomeIds: Set<String> = {
+        Set(UserDefaults.standard.stringArray(forKey: "pinnedHome") ?? [])
+    }()
+
+    func isHomePinned(projectId: Id) -> Bool { pinnedHomeIds.contains("p:" + projectId) }
+    func isHomePinned(peopleChatId: Id) -> Bool { pinnedHomeIds.contains("c:" + peopleChatId) }
+
+    func pinHome(projectId: Id) {
+        unarchive(projectId)
+        setHomePinned("p:" + projectId, true)
+    }
+
+    func unpinHome(projectId: Id) { setHomePinned("p:" + projectId, false) }
+
+    func pinHome(peopleChatId: Id) { setHomePinned("c:" + peopleChatId, true) }
+    func unpinHome(peopleChatId: Id) { setHomePinned("c:" + peopleChatId, false) }
+
+    private func setHomePinned(_ key: String, _ pinned: Bool) {
+        if pinned {
+            guard !pinnedHomeIds.contains(key) else { return }
+            pinnedHomeIds.insert(key)
+        } else {
+            guard pinnedHomeIds.contains(key) else { return }
+            pinnedHomeIds.remove(key)
+        }
+        UserDefaults.standard.set(Array(pinnedHomeIds), forKey: "pinnedHome")
+    }
+
     @Published private(set) var machineError: String?
     @Published var notice: Notice?
     @Published private(set) var pairingBusy = false
     @Published private(set) var pairingError: String?
     @Published private(set) var registryError: String?
+    /// Settings → Connectors (Google Gmail/Calendar, …). Empty until first refresh.
+    @Published private(set) var connectors = ConnectorsView()
+    @Published private(set) var connectorsBusy = false
 
     private var api: RelayAPI
     private var docs: [Id: ChatDoc] = [:]
@@ -700,6 +736,8 @@ final class AppModel: ObservableObject {
         }
         credentials = nil
         link = .connecting
+        connectors = ConnectorsView()
+        connectorsBusy = false
     }
 
     private func startAfterPairing() {
@@ -1232,6 +1270,74 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: Connectors (F1)
+
+    /// Load the relay's connector catalog + connected accounts for Settings.
+    func refreshConnectors() {
+        guard credentials != nil, !isFixture else { return }
+        Task {
+            do {
+                connectors = try await api.connectors()
+            } catch let e as RelayError where e.status == 404 {
+                // Older relays have no connectors route.
+                connectors = ConnectorsView(loaded: true)
+            } catch {
+                notice = Notice(text: "Connectors: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Start Google OAuth in Safari; the relay finishes the callback, then we poll.
+    func connectConnector(provider: String) {
+        guard !connectorsBusy, credentials != nil, !isFixture else { return }
+        connectorsBusy = true
+        Task {
+            defer { connectorsBusy = false }
+            do {
+                if let urlStr = try await api.connectConnector(provider: provider),
+                   let url = URL(string: urlStr) {
+                    await UIApplication.shared.open(url)
+                }
+                for wait in [0, 4, 8, 15, 30] as [UInt64] {
+                    if wait > 0 { try? await Task.sleep(nanoseconds: wait * 1_000_000_000) }
+                    do {
+                        connectors = try await api.connectors()
+                    } catch { break }
+                    if connectors.connector(for: provider)?.status == .connected { break }
+                }
+            } catch {
+                notice = Notice(text: "Connect \(provider): \(error.localizedDescription)")
+                await refreshConnectorsOnce()
+            }
+        }
+    }
+
+    func disconnectConnector(id: Id) {
+        guard !connectorsBusy, credentials != nil, !isFixture else { return }
+        connectorsBusy = true
+        var next = connectors
+        next.items.removeAll { $0.id == id }
+        connectors = next
+        Task {
+            defer { connectorsBusy = false }
+            do {
+                try await api.disconnectConnector(id: id)
+            } catch {
+                notice = Notice(text: "Disconnect: \(error.localizedDescription)")
+            }
+            await refreshConnectorsOnce()
+        }
+    }
+
+    private func refreshConnectorsOnce() async {
+        guard credentials != nil, !isFixture else { return }
+        do {
+            connectors = try await api.connectors()
+        } catch let e as RelayError where e.status == 404 {
+            connectors = ConnectorsView(loaded: true)
+        } catch {}
+    }
+
     // MARK: People chats (D72)
 
     var myUserId: String? { user.map { "user:\($0.id)" } }
@@ -1298,7 +1404,9 @@ final class AppModel: ObservableObject {
     /// People group: `POST /chats {kind: group, members}`. Relays that still
     /// return 501 for that route: open a DM with the first person, then add the
     /// rest (`POST /chats/{id}/members` turns a DM into a group on the third person).
-    func createGroup(handles: [String]) async -> Bool {
+    /// Optional `agentIds` are added afterwards (`POST /chats/{id}/agents`) so the
+    /// group can start with people and your agents in one step.
+    func createGroup(handles: [String], agentIds: [Id] = []) async -> Bool {
         let cleaned = handles
             .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "@ ")) }
             .filter { !$0.isEmpty }
@@ -1307,11 +1415,18 @@ final class AppModel: ObservableObject {
             return false
         }
         do {
-            let chat: PeopleChat
+            var chat: PeopleChat
             do {
                 chat = try await api.createGroup(handles: cleaned)
             } catch let e as RelayError where e.status == 404 || e.status == 405 || e.status == 501 {
                 chat = try await createGroupViaDm(handles: cleaned)
+            }
+            for pid in agentIds {
+                do {
+                    chat = try await api.addAgent(chatId: chat.id, projectId: pid)
+                } catch {
+                    notice = Notice(text: "Group created, but adding an agent failed: \(error.localizedDescription)")
+                }
             }
             if let i = peopleChats.firstIndex(where: { $0.id == chat.id }) {
                 peopleChats[i] = chat

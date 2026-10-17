@@ -1,0 +1,12 @@
+[
+  {"say": "Hi there. In one short sentence, what is a lighthouse?"},
+  {"say": ["I was wondering", 0.9, "whether you could tell me what day of the week it is today. One sentence."]},
+  {"say": "Name three colours. Just the three words."},
+  {"say": ["So, the thing is", 1.2, "I need a two-word summary of what you do. Two words only."]},
+  {"say": "What is seven times eight? Answer with the number only."},
+  {"say": ["Give me", 0.7, "one word that rhymes with cat."]},
+  {"say": "Say the word hello once, nothing else."},
+  {"say": ["Okay, last one", 1.0, "which is bigger, a mouse or a horse? One word."]},
+  {"sleep": 1},
+  {"hangup": true}
+]

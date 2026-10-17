@@ -35,11 +35,11 @@ pub fn render(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
     let in_call = shell.voice.read(cx).in_call();
     let menu_open = shell.menu_open;
     let panel_open = state.right_panel_open;
-    // Calls v1: start a voice / video call in a people chat or a shared project.
+    // Calls: start a voice / video call in a people chat, a shared project, or with the agent.
     let in_call_here = state
         .my_call
         .as_ref()
-        .map(|c| c.call.chat_id == space.id)
+        .map(|c| c.call.space_id() == space.id)
         .unwrap_or(false);
 
     // ----- left: avatar + name (click an agent to open its profile) -----------

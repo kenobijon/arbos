@@ -156,6 +156,19 @@ struct SettingsView: View {
                 }
                 .listRowBackground(theme.card)
 
+                if model.credentials != nil {
+                    Section {
+                        ForEach(googleProviders) { p in
+                            connectorRow(p)
+                        }
+                    } header: {
+                        Text("Connectors")
+                    } footer: {
+                        Text("Connect Google so your agents can read Gmail and Calendar. Tokens stay on the relay; the agent asks before it sends.")
+                    }
+                    .listRowBackground(theme.card)
+                }
+
                 if !model.isFixture {
                     Section {
                         LabeledContent("On this iPhone", value: storageLine)
@@ -221,13 +234,74 @@ struct SettingsView: View {
             } message: {
                 Text(model.tokens != nil ? "This device is signed out of the relay; sign in with GitHub to come back." : "You will need a new pairing code to connect again.")
             }
-            .onAppear { relayUrl = model.relayUrl }
+            .onAppear {
+                relayUrl = model.relayUrl
+                model.refreshConnectors()
+            }
         }
         // Form headers/footers/LabeledContent/segmented pickers use system
         // label colours. Without this, Light appearance paints theme.card white
         // while the sheet stays on dark-mode system text (white-on-white).
         .preferredColorScheme(theme.isDark ? .dark : .light)
         .presentationBackground(theme.bg)
+    }
+
+    /// Google (Gmail + Calendar) from the catalog, or a local stand-in before load.
+    private var googleProviders: [ConnectorProvider] {
+        let fromRelay = model.connectors.providers.filter { $0.provider == "google" }
+        if !fromRelay.isEmpty { return fromRelay }
+        if model.connectors.loaded {
+            return []
+        }
+        return [ConnectorProvider(
+            provider: "google",
+            label: "Google (Gmail, Calendar)",
+            connect: "oauth",
+            oauthConfigured: true
+        )]
+    }
+
+    @ViewBuilder
+    private func connectorRow(_ p: ConnectorProvider) -> some View {
+        let cn = model.connectors.connector(for: p.provider)
+        let connected = cn?.status == .connected
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(p.label).foregroundStyle(theme.text)
+                Text(connectorSubline(p, cn: cn))
+                    .font(.system(size: Theme.tiny))
+                    .foregroundStyle(theme.muted)
+            }
+            Spacer(minLength: 8)
+            if connected, let id = cn?.id {
+                Button("Disconnect") {
+                    model.disconnectConnector(id: id)
+                }
+                .disabled(model.connectorsBusy)
+            } else if p.hasOauth {
+                Button("Connect") {
+                    model.connectConnector(provider: p.provider)
+                }
+                .disabled(model.connectorsBusy || model.isFixture || (!p.oauthConfigured && model.connectors.loaded && !model.connectors.mock))
+            }
+        }
+    }
+
+    private func connectorSubline(_ p: ConnectorProvider, cn: Connector?) -> String {
+        if let cn, cn.status == .connected {
+            return cn.label.isEmpty ? ConnectorStatus.connected.label : cn.label
+        }
+        if let cn, cn.status == .needsAuth {
+            return ConnectorStatus.needsAuth.label
+        }
+        if let err = cn?.lastError, !err.isEmpty, cn?.status != .connected {
+            return err
+        }
+        if model.connectors.loaded, !p.oauthConfigured, !model.connectors.mock, p.hasOauth {
+            return "OAuth client not configured on the relay"
+        }
+        if let cn { return cn.status.label }
+        return "Not connected"
     }
 
     /// "12.4 MB · 23 chats" from the on-device store (#929).
