@@ -1061,6 +1061,11 @@ fn people_space_from(shared: &Shared, v: &Value) -> Option<(Project, Chat)> {
                     .to_string(),
                 last_seen_at: m.get("last_seen_at").and_then(Value::as_i64),
                 online: m.get("online").and_then(Value::as_bool).unwrap_or(false),
+                avatar_color_index: m
+                    .get("avatar_color_index_effective")
+                    .or_else(|| m.get("avatar_color_index"))
+                    .and_then(Value::as_u64)
+                    .map(|i| (i % 7) as u8),
             });
         } else if let Some(pid) = member.strip_prefix("agent:") {
             let project = m.get("project").cloned().unwrap_or(Value::Null);
@@ -1126,8 +1131,14 @@ fn people_space_from(shared: &Shared, v: &Value) -> Option<(Project, Chat)> {
                     .or_else(|| m.get("avatar_color"))
                     .and_then(Value::as_str)
                     .filter(|a| !a.is_empty())
-                    .map(str::to_string)
-                    .or_else(|| crate::ui::avatars::default_color_for(pid)),
+                    .map(str::to_string),
+                avatar_color_index: project
+                    .get("avatar_color_index_effective")
+                    .or_else(|| project.get("avatar_color_index"))
+                    .or_else(|| m.get("avatar_color_index_effective"))
+                    .or_else(|| m.get("avatar_color_index"))
+                    .and_then(Value::as_u64)
+                    .map(|i| (i % 7) as u8),
             });
         }
     }
@@ -1181,6 +1192,8 @@ fn people_space_from(shared: &Shared, v: &Value) -> Option<(Project, Chat)> {
             .unwrap_or(false),
         primary_chat: None,
         voice: None,
+        avatar_color_index: None,
+        avatar_color_override: None,
     };
     let previous_unread = shared
         .chats
@@ -1600,6 +1613,11 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
                                 status: "member".into(),
                                 last_seen_at: m.get("last_seen_at").and_then(Value::as_i64),
                                 online: m.get("online").and_then(Value::as_bool).unwrap_or(false),
+                                avatar_color_index: m
+                                    .get("avatar_color_index_effective")
+                                    .or_else(|| m.get("avatar_color_index"))
+                                    .and_then(Value::as_u64)
+                                    .map(|i| (i % 7) as u8),
                                 role: m
                                     .get("role")
                                     .and_then(Value::as_str)
@@ -1629,9 +1647,7 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
                 .and_then(Value::as_str)
                 .filter(|a| !a.is_empty())
                 .map(str::to_string)
-                .or_else(|| previous.as_ref().and_then(|x| x.avatar_color.clone()))
-                // A relay that sends no colour still gets a coloured tree (D74).
-                .or_else(|| crate::ui::avatars::default_color_for(id)),
+                .or_else(|| previous.as_ref().and_then(|x| x.avatar_color.clone())),
             description: p
                 .get("description")
                 .or_else(|| item.get("description"))
@@ -1667,6 +1683,21 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
                 .and_then(Value::as_str)
                 .filter(|v| !v.is_empty())
                 .map(str::to_string),
+            // D79: the relay's effective index when it sends one, else the
+            // owner's pick, else derived from the id (the same rule everywhere).
+            avatar_color_index: [&p, &item]
+                .iter()
+                .find_map(|v| {
+                    v.get("avatar_color_index_effective")
+                        .or_else(|| v.get("avatar_color_index"))
+                        .and_then(Value::as_u64)
+                })
+                .map(|i| (i % 7) as u8)
+                .or_else(|| Some(crate::ui::avatars::color_index(id))),
+            avatar_color_override: [&p, &item]
+                .iter()
+                .find_map(|v| v.get("avatar_color_index").and_then(Value::as_u64))
+                .map(|i| (i % 7) as u8),
         });
         let chats: Vec<Chat> = detail
             .get("chats")
@@ -3854,71 +3885,30 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             });
         }
-        ClientCommand::SetAvatar { project_id, slug } => {
+        ClientCommand::SetAvatarColorIndex { project_id, index } => {
             {
                 let mut projects = shared.projects.lock().unwrap();
                 if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
-                    p.avatar = Some(slug.clone());
+                    p.avatar_color_override = index;
+                    p.avatar_color_index = Some(crate::ui::avatars::index_for(&project_id, index));
                 }
                 let snapshot = projects.clone();
                 drop(projects);
                 let _ = shared.events.send(SyncEvent::Projects(snapshot));
             }
-            // Mirror into the project doc too, so a relay without the column
-            // still carries the choice to other devices.
-            {
-                let docs = shared.docs.lock().unwrap();
-                if let Some(doc) = docs.get(&project_doc_key(&project_id)) {
-                    let settings = doc.doc.get_map("settings");
-                    let _ = settings.insert("avatar", slug.as_str());
-                    doc.commit();
-                }
-            }
             let shared = shared.clone();
             tokio::spawn(async move {
-                if let Err(err) = shared
-                    .patch_json(
-                        &format!("/projects/{project_id}"),
-                        json!({ "avatar": slug }),
-                    )
+                let body = json!({ "avatar_color_index": index });
+                match shared
+                    .patch_json(&format!("/projects/{project_id}"), body)
                     .await
                 {
-                    // Older relays reject the field; the doc mirror still holds it.
-                    if !format!("{err:#}").contains("HTTP 400") {
-                        shared.notice(format!("Avatar: {err:#}"));
-                    }
-                }
-            });
-        }
-        ClientCommand::SetAvatarColor { project_id, color } => {
-            {
-                let mut projects = shared.projects.lock().unwrap();
-                if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
-                    p.avatar_color = Some(color.clone());
-                }
-                let snapshot = projects.clone();
-                drop(projects);
-                let _ = shared.events.send(SyncEvent::Projects(snapshot));
-            }
-            {
-                let docs = shared.docs.lock().unwrap();
-                if let Some(doc) = docs.get(&project_doc_key(&project_id)) {
-                    let settings = doc.doc.get_map("settings");
-                    let _ = settings.insert("avatarColor", color.as_str());
-                    doc.commit();
-                }
-            }
-            let shared = shared.clone();
-            tokio::spawn(async move {
-                if let Err(err) = shared
-                    .patch_json(
-                        &format!("/projects/{project_id}"),
-                        json!({ "avatar_color": color }),
-                    )
-                    .await
-                {
-                    if !format!("{err:#}").contains("HTTP 400") {
-                        shared.notice(format!("Avatar colour: {err:#}"));
+                    Ok(_) => {}
+                    Err(err) => {
+                        if !err.to_string().contains("HTTP 404") {
+                            shared
+                                .notice(format!("Avatar colour not saved: {}", people_error(&err)));
+                        }
                     }
                 }
             });

@@ -381,6 +381,7 @@ dependencies = [
  "base64 0.22.1",
  "block2 0.6.2",
  "chrono",
+ "cosmic-text",
  "cpal",
  "env_logger",
  "futures",

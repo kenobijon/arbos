@@ -43,6 +43,8 @@ livekit = { version = "0.9", default-features = false, features = ["native", "ru
 
 # Voice (F11): capture, playback, WAV in memory.
 cpal = "0.15"
+# D79 initials avatars: the notification PNG draws its letters through the system sans-serif.
+cosmic-text = { version = "0.19", default-features = false, features = ["std", "swash"] }
 rodio = { version = "0.20", default-features = false, features = ["wav", "mp3", "symphonia-wav", "symphonia-isomp4", "symphonia-aac"] }
 hound = "3.5"
 

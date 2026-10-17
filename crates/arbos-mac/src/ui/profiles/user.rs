@@ -6,9 +6,8 @@ use gpui::{div, prelude::*, px, ClipboardItem, Context, Div, ElementId, Focusabl
 
 use crate::app::{CallTarget, ProfilePage};
 use crate::model::{Person, Project};
-use crate::ui::avatars::{self, AvatarState};
+use crate::ui::avatars;
 use crate::ui::glass;
-use crate::ui::groups;
 use crate::ui::icons::icon;
 use crate::ui::people;
 use crate::ui::shell::Shell;
@@ -74,7 +73,6 @@ pub(super) fn page(
                 .collect()
         })
         .collect();
-    let group_slugs: Vec<Option<String>> = groups.iter().map(|p| state.avatar_slug(p)).collect();
 
     // Links this person shared, across every chat we hold.
     let all_chats: Vec<&crate::model::Chat> =
@@ -289,16 +287,7 @@ pub(super) fn page(
                     let leading = if p.is_people() {
                         people::avatar_stack(&group_images[i], 36.0, 3, &theme).into_any_element()
                     } else {
-                        avatars::element(
-                            group_slugs[i].as_deref(),
-                            p.avatar_color.as_deref(),
-                            AvatarState::Idle,
-                            40.0,
-                            &p.icon,
-                            groups::project_color(&p.color, theme.accent),
-                            &theme,
-                        )
-                        .into_any_element()
+                        avatars::project(p, 40.0, &theme).into_any_element()
                     };
                     let sub = if p.is_people() {
                         format!("{} members", p.people.len() + 1)

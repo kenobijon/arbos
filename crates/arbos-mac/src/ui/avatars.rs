@@ -1,27 +1,20 @@
-//! Tree-character avatars for agents (assets/avatars/trees). The characters
-//! ship as pre-rendered PNG frame strips per animation state; GPUI's
-//! multi-frame `RenderImage` plays them (and honours reduced motion by
-//! holding the first frame), so no Lottie runtime is needed in the app.
-//!
-//! Every project gets a character on creation: a hash of its id picks one,
-//! skipping characters already used in this user's rail. The owner can change
-//! it in the Avatar picker (`PATCH /projects/{id} {avatar}`).
+//! Telegram-style initials avatars (D79): a disc with one of seven vertical
+//! gradients, picked from the stable id (agents: project id; people: user id)
+//! unless the agent's owner chose one (`avatar_color_index`), with white
+//! semibold initials (one or two letters) at ~42 % of the diameter. A photo
+//! (GitHub avatar) always wins over initials — see [`crate::ui::people::avatar`].
+//! The brand mark is the only image left in the app; no character art.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
-use gpui::{div, prelude::*, px, Div, Hsla, RenderImage};
-use image::Delay;
-use serde::Deserialize;
+use gpui::{div, linear_color_stop, linear_gradient, prelude::*, px, Div, FontWeight, Hsla};
 
-use crate::model::Project;
-use crate::ui::theme::Theme;
+use crate::model::{AgentMember, Person, Project, Sender};
+use crate::ui::theme::{Appearance, Theme};
 
-mod embedded {
-    include!(concat!(env!("OUT_DIR"), "/tree_avatars.rs"));
-}
-
-/// What the character is doing (chosen from the agent's status).
+/// What the agent is doing (from its status). Kept for callers that pulse
+/// while an agent works; the disc itself does not animate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AvatarState {
     Idle,
@@ -29,625 +22,131 @@ pub enum AvatarState {
     Reply,
 }
 
-impl AvatarState {
-    fn key(self) -> &'static str {
-        match self {
-            AvatarState::Idle => "idle",
-            AvatarState::Working => "working",
-            AvatarState::Reply => "reply",
-        }
+/// One Telegram gradient: light and dark (HSL lightness −7 %, the relay's
+/// `GET /avatar-colors` table) top/bottom pairs, and its name for the picker.
+#[derive(Clone, Copy, Debug)]
+pub struct Gradient {
+    pub name: &'static str,
+    pub top: [u8; 3],
+    pub bottom: [u8; 3],
+    pub dark_top: [u8; 3],
+    pub dark_bottom: [u8; 3],
+}
+
+/// The seven Telegram peer colours, in Telegram's order (indices 0–6).
+pub const GRADIENTS: [Gradient; 7] = [
+    Gradient {
+        name: "Red",
+        top: [0xFF, 0x84, 0x5E],
+        bottom: [0xD4, 0x52, 0x46],
+        dark_top: [0xFF, 0x69, 0x3A],
+        dark_bottom: [0xC8, 0x3B, 0x2E],
+    },
+    Gradient {
+        name: "Orange",
+        top: [0xFE, 0xBB, 0x5B],
+        bottom: [0xF6, 0x81, 0x36],
+        dark_top: [0xFE, 0xAC, 0x38],
+        dark_bottom: [0xF4, 0x6C, 0x14],
+    },
+    Gradient {
+        name: "Violet",
+        top: [0xB6, 0x94, 0xF9],
+        bottom: [0x6C, 0x61, 0xDF],
+        dark_top: [0x9F, 0x72, 0xF7],
+        dark_bottom: [0x50, 0x43, 0xD9],
+    },
+    Gradient {
+        name: "Green",
+        top: [0x9A, 0xD1, 0x64],
+        bottom: [0x46, 0xBA, 0x43],
+        dark_top: [0x88, 0xC9, 0x48],
+        dark_bottom: [0x3C, 0xA0, 0x3A],
+    },
+    Gradient {
+        name: "Cyan",
+        top: [0x53, 0xED, 0xD6],
+        bottom: [0x28, 0xC9, 0xB7],
+        dark_top: [0x33, 0xEA, 0xCE],
+        dark_bottom: [0x22, 0xAB, 0x9C],
+    },
+    Gradient {
+        name: "Blue",
+        top: [0x5C, 0xAF, 0xFA],
+        bottom: [0x40, 0x8A, 0xCF],
+        dark_top: [0x39, 0x9E, 0xF9],
+        dark_bottom: [0x2F, 0x78, 0xBC],
+    },
+    Gradient {
+        name: "Pink",
+        top: [0xFF, 0x8A, 0xA5],
+        bottom: [0xE0, 0x5F, 0x8E],
+        dark_top: [0xFF, 0x66, 0x8A],
+        dark_bottom: [0xDA, 0x41, 0x79],
+    },
+];
+
+/// `(sum of the id's UTF-8 bytes) mod 7` — the same rule on every client.
+pub fn color_index(seed: &str) -> u8 {
+    (seed.bytes().map(u32::from).sum::<u32>() % 7) as u8
+}
+
+/// The gradient for a seed, or the owner's override when there is one.
+pub fn index_for(seed: &str, override_index: Option<u8>) -> u8 {
+    match override_index {
+        Some(i) if i < 7 => i,
+        _ => color_index(seed),
     }
 }
 
-/// One character from manifest.json.
-#[derive(Clone, Debug)]
-pub struct Character {
-    pub slug: String,
-    pub name: String,
-    /// `ready: false` in the manifest = placeholder art, files may be missing.
-    pub ready: bool,
-    /// frames per second per state (default 30).
-    fps: HashMap<String, f32>,
+fn rgb(c: [u8; 3]) -> Hsla {
+    gpui::Rgba {
+        r: c[0] as f32 / 255.0,
+        g: c[1] as f32 / 255.0,
+        b: c[2] as f32 / 255.0,
+        a: 1.0,
+    }
+    .into()
 }
 
-#[derive(Deserialize)]
-struct Manifest {
-    #[serde(default)]
-    characters: Vec<ManifestCharacter>,
-    /// mono + accents: `{ slug, name, bg, ring, tree, face }` hex colours.
-    #[serde(default)]
-    colors: Vec<ManifestColor>,
-    /// The manifest fallback palette (null since D74: a project without
-    /// `avatar_color` shows [`default_color_for`], a coloured pick).
-    #[serde(default)]
-    default_color: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct ManifestColor {
-    #[serde(default, alias = "slug", alias = "key")]
-    id: Option<String>,
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    bg: Option<String>,
-    #[serde(default)]
-    ring: Option<String>,
-    #[serde(default)]
-    ring_opacity: Option<f32>,
-    #[serde(default)]
-    tree: Option<String>,
-    #[serde(default)]
-    tree_dark: Option<String>,
-    #[serde(default)]
-    tree_light: Option<String>,
-    #[serde(default)]
-    face: Option<String>,
-}
-
-/// One avatar colour (manifest `colors[]`). The tree carries the colour; the
-/// disc stays neutral black with a thin neutral ring. The `-tree` strips are
-/// grayscale levels — base 255, light 220, dark 170, face 0 — that
-/// [`decode_strip`] maps onto `tree` / `tree_light` / `tree_dark` / `face`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Palette {
-    pub id: String,
-    pub name: String,
-    pub bg: [u8; 3],
-    pub ring: [u8; 3],
-    /// Ring alpha, 0–255 (manifest `ring_opacity`, default opaque).
-    pub ring_alpha: u8,
-    pub tree: [u8; 3],
-    pub tree_dark: [u8; 3],
-    pub tree_light: [u8; 3],
-    pub face: [u8; 3],
-    /// The manifest's `default_color` entry (the fallback when nothing is known).
-    pub is_default: bool,
-}
-
-/// Grayscale level → palette hue, in level order (see [`Palette`]).
-const LEVELS: [u8; 4] = [0, 170, 220, 255];
-
-/// The one colour that is selectable but never a default (D74).
-pub const MONO: &str = "mono";
-
-impl Palette {
-    /// Black disc, white ring and tree: the look without any manifest colours.
-    pub fn mono() -> Palette {
-        Palette {
-            id: "mono".into(),
-            name: "Mono".into(),
-            bg: [0, 0, 0],
-            ring: [255, 255, 255],
-            ring_alpha: 255,
-            tree: [255, 255, 255],
-            tree_dark: [170, 170, 170],
-            tree_light: [220, 220, 220],
-            face: [0, 0, 0],
-            is_default: true,
-        }
-    }
-
-    /// The hue for one strip pixel: its gray level, interpolated between the
-    /// two nearest encoded levels so anti-aliased edges stay smooth.
-    fn ink(&self, level: u8) -> [u8; 3] {
-        let hues = [self.face, self.tree_dark, self.tree_light, self.tree];
-        let hi = LEVELS.iter().position(|l| level <= *l).unwrap_or(3);
-        if hi == 0 || LEVELS[hi] == level {
-            return hues[hi];
-        }
-        let (l0, l1) = (LEVELS[hi - 1] as u32, LEVELS[hi] as u32);
-        let t = level as u32 - l0;
-        let span = l1 - l0;
-        let mut out = [0u8; 3];
-        for i in 0..3 {
-            let a = hues[hi - 1][i] as u32;
-            let b = hues[hi][i] as u32;
-            out[i] = ((a * (span - t) + b * t + span / 2) / span) as u8;
-        }
-        out
-    }
-
-    /// The white-on-black look: drawn from the shipped disc strips as is. Only
-    /// the `mono` entry itself — the manifest default is no longer mono (D74).
-    pub fn is_mono(&self) -> bool {
-        self.id.eq_ignore_ascii_case(MONO)
-    }
-
-    pub fn bg_hsla(&self) -> Hsla {
-        rgb_hsla(self.bg)
-    }
-
-    pub fn ring_hsla(&self) -> Hsla {
-        let mut c = rgb_hsla(self.ring);
-        c.a = self.ring_alpha as f32 / 255.0;
-        c
+/// Top and bottom colours of gradient `index` for the current appearance.
+pub fn gradient(index: u8, theme: &Theme) -> (Hsla, Hsla) {
+    let g = GRADIENTS[(index as usize) % 7];
+    match theme.appearance {
+        Appearance::Light => (rgb(g.top), rgb(g.bottom)),
+        Appearance::Dark => (rgb(g.dark_top), rgb(g.dark_bottom)),
     }
 }
 
-/// `rgb` scaled by `level / 255` — the shade a gray level would show in mono.
-fn scale_rgb(rgb: [u8; 3], level: u8) -> [u8; 3] {
-    rgb.map(|v| ((v as u32 * level as u32 + 127) / 255) as u8)
-}
-
-fn rgb_hsla(c: [u8; 3]) -> Hsla {
-    gpui::rgb(((c[0] as u32) << 16) | ((c[1] as u32) << 8) | c[2] as u32).into()
-}
-
-/// `#rrggbb` / `rrggbb` / `#rgb` → bytes.
-pub fn parse_hex(s: &str) -> Option<[u8; 3]> {
-    let h = s.trim().trim_start_matches('#');
-    let h = match h.len() {
-        3 => h.chars().flat_map(|c| [c, c]).collect::<String>(),
-        6 => h.to_string(),
-        _ => return None,
-    };
-    let v = u32::from_str_radix(&h, 16).ok()?;
-    Some([(v >> 16) as u8, (v >> 8) as u8, v as u8])
-}
-
-fn palettes() -> &'static [Palette] {
-    static COLORS: OnceLock<Vec<Palette>> = OnceLock::new();
-    COLORS.get_or_init(|| {
-        let parsed: Option<Manifest> = serde_json::from_str(embedded::MANIFEST_JSON).ok();
-        let (colors, default) = parsed
-            .map(|m| (m.colors, m.default_color))
-            .unwrap_or_default();
-        let mut out: Vec<Palette> = Vec::new();
-        for (i, c) in colors.into_iter().enumerate() {
-            let mono = Palette::mono();
-            let id =
-                c.id.or_else(|| c.name.clone().map(|n| n.to_lowercase().replace(' ', "-")))
-                    .unwrap_or_else(|| {
-                        if i == 0 {
-                            "mono".into()
-                        } else {
-                            format!("c{i}")
-                        }
-                    });
-            let tree = c.tree.as_deref().and_then(parse_hex).unwrap_or(mono.tree);
-            out.push(Palette {
-                name: c.name.unwrap_or_else(|| title(&id)),
-                bg: c.bg.as_deref().and_then(parse_hex).unwrap_or(mono.bg),
-                ring: c.ring.as_deref().and_then(parse_hex).unwrap_or(mono.ring),
-                ring_alpha: c
-                    .ring_opacity
-                    .map(|o| (o.clamp(0.0, 1.0) * 255.0).round() as u8)
-                    .unwrap_or(255),
-                tree,
-                tree_dark: c
-                    .tree_dark
-                    .as_deref()
-                    .and_then(parse_hex)
-                    .unwrap_or_else(|| scale_rgb(tree, 170)),
-                tree_light: c
-                    .tree_light
-                    .as_deref()
-                    .and_then(parse_hex)
-                    .unwrap_or_else(|| scale_rgb(tree, 220)),
-                face: c.face.as_deref().and_then(parse_hex).unwrap_or(mono.face),
-                is_default: match &default {
-                    Some(d) => d.eq_ignore_ascii_case(&id),
-                    None => i == 0,
-                },
-                id,
-            });
-        }
-        if out.is_empty() {
-            out.push(Palette::mono());
-        }
-        // Manifest order is a contract (the relay hashes over `colors[]`
-        // without mono); do not reorder. Exactly one entry is the fallback.
-        if !out.iter().any(|p| p.is_default) {
-            out[0].is_default = true;
-        }
-        out
-    })
-}
-
-/// The fallback palette (manifest `default_color`, else the first entry):
-/// what a tree shows when nothing at all is known about its colour.
-fn fallback_palette() -> &'static Palette {
-    let all = palettes();
-    all.iter().find(|p| p.is_default).unwrap_or(&all[0])
-}
-
-/// Every colour, for the picker (manifest order; `mono` is selectable, never a default).
-pub fn colors() -> &'static [Palette] {
-    palettes()
-}
-
-/// Colours exist to choose from (more than the mono default).
-pub fn colors_available() -> bool {
-    palettes().len() > 1 && embedded::STRIPS.iter().any(|(_, _, _, _, tree, _)| *tree)
-}
-
-/// The colour a project without `avatar_color` shows — the relay's
-/// `default_color_for` (`avatar.rs`): `coloured[fnv1a64(id + ":color") % n]`
-/// over the manifest colours without `mono`, so the Mac, the iPhone and the
-/// relay agree without a round trip (D74: a default is never mono). `None`
-/// only when the manifest ships no colours at all.
-pub fn default_color_for(project_id: &str) -> Option<String> {
-    let coloured: Vec<&Palette> = palettes().iter().filter(|p| !p.is_mono()).collect();
-    if coloured.is_empty() || !colors_available() {
-        return None;
-    }
-    let i = (fnv1a64(&format!("{project_id}:color")) % coloured.len() as u64) as usize;
-    Some(coloured[i].id.clone())
-}
-
-/// The palette for a project's `avatar_color`: a manifest id, else a raw hex
-/// accent (tree + ring in that colour on the mono disc), else the fallback.
-/// Callers that know the project pass a colour (the relay always sends one;
-/// `sync` fills [`default_color_for`] when it does not), so `None` here is
-/// only the no-information case.
-pub fn palette_for(color: Option<&str>) -> Palette {
-    let base = fallback_palette();
-    let Some(c) = color.map(str::trim).filter(|c| !c.is_empty()) else {
-        return base.clone();
-    };
-    if let Some(p) = palettes().iter().find(|p| p.id.eq_ignore_ascii_case(c)) {
-        return p.clone();
-    }
-    match parse_hex(c) {
-        Some(rgb) => Palette {
-            id: c.to_string(),
-            name: c.to_string(),
-            bg: base.bg,
-            ring: base.ring,
-            ring_alpha: base.ring_alpha,
-            tree: rgb,
-            tree_dark: scale_rgb(rgb, 170),
-            tree_light: scale_rgb(rgb, 220),
-            face: base.face,
-            is_default: false,
-        },
-        None => base.clone(),
-    }
-}
-
-#[derive(Deserialize)]
-struct ManifestCharacter {
-    slug: String,
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default = "yes")]
-    ready: bool,
-    #[serde(default)]
-    frames: HashMap<String, StateMeta>,
-    #[serde(default)]
-    fps: Option<f32>,
-}
-
-fn yes() -> bool {
-    true
-}
-
-#[derive(Deserialize)]
-struct StateMeta {
-    #[serde(default)]
-    fps: Option<f32>,
-}
-
-fn characters() -> &'static [Character] {
-    static CHARS: OnceLock<Vec<Character>> = OnceLock::new();
-    CHARS.get_or_init(|| {
-        let parsed: Option<Manifest> = serde_json::from_str(embedded::MANIFEST_JSON).ok();
-        let mut out: Vec<Character> = parsed
-            .map(|m| {
-                m.characters
-                    .into_iter()
-                    .map(|c| Character {
-                        name: c.name.clone().unwrap_or_else(|| title(&c.slug)),
-                        ready: c.ready,
-                        fps: c
-                            .frames
-                            .iter()
-                            .map(|(k, v)| (k.clone(), v.fps.or(c.fps).unwrap_or(30.0)))
-                            .collect(),
-                        slug: c.slug,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        // Strips without a manifest entry still count as characters.
-        let mut seen: HashSet<String> = out.iter().map(|c| c.slug.clone()).collect();
-        for (slug, _, _, _, _, _) in embedded::STRIPS {
-            if seen.insert((*slug).to_string()) {
-                out.push(Character {
-                    slug: (*slug).to_string(),
-                    name: title(slug),
-                    ready: true,
-                    fps: HashMap::new(),
-                });
-            }
-        }
-        // Manifest order is a contract (the relay picks slugs[fnv1a64(id) % n]); do not sort.
-        out
-    })
-}
-
-fn title(slug: &str) -> String {
-    slug.split(['-', '_'])
+/// One or two letters: the first letter of the first two words ("Growth Lab"
+/// → "GL"), one for a single word ("Arbos" → "A"). Leading `@` and
+/// punctuation are skipped; an empty name gives "?".
+pub fn initials(name: &str) -> String {
+    let words: Vec<&str> = name
+        .split(|c: char| c.is_whitespace() || c == '-' || c == '_' || c == '·' || c == '/')
+        .map(|w| w.trim_start_matches(|c: char| !c.is_alphanumeric()))
         .filter(|w| !w.is_empty())
-        .map(|w| {
-            let mut c = w.chars();
-            match c.next() {
-                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// Every character, for the picker.
-pub fn all() -> &'static [Character] {
-    characters()
-}
-
-/// FNV-1a 64 over the UTF-8 bytes — the relay's `avatar.rs` arithmetic.
-pub fn fnv1a64(s: &str) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in s.as_bytes() {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    h
-}
-
-/// The relay's default: `slugs[fnv1a64(project_id) % n]` in manifest order.
-/// Only when the relay sent no avatar at all does the client walk forward to
-/// the next character not already used in this rail (the relay itself does
-/// not dedupe, so a relay-sent slug is always shown as is).
-pub fn assign(project_id: &str, taken: &HashSet<String>) -> Option<String> {
-    let chars = characters();
-    if chars.is_empty() {
-        return None;
-    }
-    let start = (fnv1a64(project_id) % chars.len() as u64) as usize;
-    for i in 0..chars.len() {
-        let c = &chars[(start + i) % chars.len()];
-        if !taken.contains(&c.slug) {
-            return Some(c.slug.clone());
-        }
-    }
-    Some(chars[start].slug.clone())
-}
-
-/// The character a project shows: its own choice, else the hash pick (the
-/// rest of this user's rail counts as taken so auto picks stay distinct).
-pub fn slug_for(project: &Project, all_projects: &[Project]) -> Option<String> {
-    if let Some(slug) = project.avatar.as_deref().filter(|s| !s.is_empty()) {
-        return Some(slug.to_string());
-    }
-    let taken: HashSet<String> = all_projects
-        .iter()
-        .filter(|p| p.id != project.id && !p.is_people())
-        .filter_map(|p| p.avatar.clone())
         .collect();
-    assign(&project.id, &taken)
+    let first = |w: &str| {
+        w.chars()
+            .next()
+            .map(|c| c.to_uppercase().collect::<String>())
+            .unwrap_or_default()
+    };
+    match words.as_slice() {
+        [] => "?".into(),
+        [one] => first(one),
+        [a, b, ..] => format!("{}{}", first(a), first(b)),
+    }
 }
 
-/// (slug, state, rail, scale, colour id or "" for the shipped disc strip)
-type Key = (String, &'static str, bool, u32, String);
-
-fn cache() -> &'static Mutex<HashMap<Key, Option<Arc<RenderImage>>>> {
-    static CACHE: OnceLock<Mutex<HashMap<Key, Option<Arc<RenderImage>>>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// The decoded strip for (slug, state, rail size, scale), falling back to the
-/// other scale, then to the idle strip, then to the non-rail size.
-pub fn image(slug: &str, state: AvatarState, rail: bool) -> Option<Arc<RenderImage>> {
-    image_tinted(slug, state, rail, None)
-}
-
-/// Like [`image`], in a colour: the tree-only strip (white on transparent)
-/// multiplied by the palette's tree ink, cached per (slug, state, colour).
-/// Mono, or a character without a tree-only strip, draws the shipped disc.
-pub fn image_tinted(
-    slug: &str,
-    state: AvatarState,
-    rail: bool,
-    palette: Option<&Palette>,
-) -> Option<Arc<RenderImage>> {
-    // Chat sizes draw the 56 px strip, rail tiles the 72 px one (see build.rs).
-    let scale = if rail { 1u32 } else { 2u32 };
-    let tint = palette.filter(|p| !p.is_mono() && has_tree_strip(slug));
-    let color_key = tint.map(|p| p.id.clone()).unwrap_or_default();
-    let key: Key = (slug.to_string(), state.key(), rail, scale, color_key);
-    if let Some(hit) = cache().lock().unwrap().get(&key) {
-        return hit.clone();
-    }
-    let fps = characters()
-        .iter()
-        .find(|c| c.slug == slug)
-        .and_then(|c| c.fps.get(state.key()).copied())
-        .unwrap_or(30.0);
-    let other = if rail { 2u32 } else { 1u32 };
-    let candidates: [(&str, bool, u32); 6] = [
-        (state.key(), rail, scale),
-        (state.key(), rail, other),
-        ("idle", rail, scale),
-        ("idle", rail, other),
-        (state.key(), !rail, if rail { 2 } else { 1 }),
-        ("idle", !rail, if rail { 2 } else { 1 }),
-    ];
-    let want_tree = tint.is_some();
-    let mut decoded = None;
-    for (st, r, sc) in candidates {
-        if let Some((_, _, _, _, _, bytes)) =
-            embedded::STRIPS.iter().find(|(s, k, rr, ss, t, _)| {
-                *s == slug && *k == st && *rr == r && *ss == sc && *t == want_tree
-            })
-        {
-            decoded = decode_strip(bytes, fps, tint).map(Arc::new);
-            if decoded.is_some() {
-                break;
-            }
-        }
-    }
-    cache().lock().unwrap().insert(key, decoded.clone());
-    decoded
-}
-
-/// The character ships a tree-only strip (needed to recolour it).
-fn has_tree_strip(slug: &str) -> bool {
-    embedded::STRIPS
-        .iter()
-        .any(|(s, _, _, _, tree, _)| *s == slug && *tree)
-}
-
-/// Does this project draw its own disc + ring (coloured tree) rather than
-/// the shipped disc strip?
-pub fn draws_disc(slug: &str, palette: &Palette) -> bool {
-    !palette.is_mono() && has_tree_strip(slug)
-}
-
-/// A horizontal strip of square frames → BGRA frames with a uniform delay.
-/// With `tint`, every pixel's gray level picks its hue from the palette (the
-/// `-tree` strips are gray levels on transparent; alpha is kept as is).
-fn decode_strip(bytes: &[u8], fps: f32, tint: Option<&Palette>) -> Option<RenderImage> {
-    let img = image::load_from_memory(bytes).ok()?.into_rgba8();
-    let (w, h) = img.dimensions();
-    if h == 0 || w < h {
-        return None;
-    }
-    let n = (w / h).max(1);
-    let delay = Delay::from_numer_denom_ms(1000, fps.max(1.0) as u32);
-    let mut frames = Vec::with_capacity(n as usize);
-    for i in 0..n {
-        let sub = image::imageops::crop_imm(&img, i * h, 0, h, h).to_image();
-        let mut raw = sub.into_raw();
-        for px in raw.chunks_exact_mut(4) {
-            if let Some(p) = tint {
-                if px[3] > 0 {
-                    let level = px[0].max(px[1]).max(px[2]);
-                    px[..3].copy_from_slice(&p.ink(level));
-                }
-            }
-            px.swap(0, 2);
-        }
-        let buffer = image::RgbaImage::from_raw(h, h, raw)?;
-        frames.push(image::Frame::from_parts(buffer, 0, 0, delay));
-    }
-    Some(RenderImage::new(frames))
-}
-
-/// The avatar as a still PNG for a system notification: the first idle frame
-/// at rail size, with the disc and ring drawn under a coloured tree exactly as
-/// [`element`] shows it. Written once per (slug, colour) to the notify cache.
-pub fn notification_png(slug: &str, avatar_color: Option<&str>) -> Option<std::path::PathBuf> {
-    let palette = palette_for(avatar_color);
-    let disc = draws_disc(slug, &palette);
-    let key = format!(
-        "tree-{slug}-{}",
-        if disc { palette.id.as_str() } else { "mono" }
-    );
-    let (_, _, _, _, _, bytes) = embedded::STRIPS
-        .iter()
-        .find(|(s, k, r, _, t, _)| *s == slug && *k == "idle" && *r && *t == disc)
-        .or_else(|| {
-            embedded::STRIPS
-                .iter()
-                .find(|(s, k, _, _, t, _)| *s == slug && *k == "idle" && *t == disc)
-        })?;
-    let strip = image::load_from_memory(bytes).ok()?.into_rgba8();
-    let (w, h) = strip.dimensions();
-    if h == 0 || w < h {
-        return None;
-    }
-    let mut tree = image::imageops::crop_imm(&strip, 0, 0, h, h).to_image();
-    if !disc {
-        return crate::ui::notify::image_file(&key, h, h, tree.as_raw());
-    }
-    for px in tree.pixels_mut() {
-        if px[3] > 0 {
-            let level = px[0].max(px[1]).max(px[2]);
-            let [r, g, b] = palette.ink(level);
-            *px = image::Rgba([r, g, b, px[3]]);
-        }
-    }
-    // Disc + ring (2 px at this size, like the shipped art), then the tree.
-    let mut out = image::RgbaImage::new(h, h);
-    let c = (h as f32 - 1.0) / 2.0;
-    let radius = h as f32 / 2.0;
-    let ring_w = 2.0;
-    let ring_a = palette.ring_alpha as f32 / 255.0;
-    for (x, y, px) in out.enumerate_pixels_mut() {
-        let d = ((x as f32 - c).powi(2) + (y as f32 - c).powi(2)).sqrt();
-        let cover = (radius - d + 0.5).clamp(0.0, 1.0);
-        if cover <= 0.0 {
-            continue;
-        }
-        let in_ring = ((d - (radius - ring_w)) + 0.5).clamp(0.0, 1.0) * ring_a;
-        let mix = |i: usize| {
-            (palette.bg[i] as f32 * (1.0 - in_ring) + palette.ring[i] as f32 * in_ring) as u8
-        };
-        *px = image::Rgba([mix(0), mix(1), mix(2), (cover * 255.0) as u8]);
-    }
-    image::imageops::overlay(&mut out, &tree, 0, 0);
-    crate::ui::notify::image_file(&key, h, h, out.as_raw())
-}
-
-/// Length of one pass of the reply reaction, for the "play once" window.
-pub fn reply_duration_ms(slug: &str) -> u64 {
-    image(slug, AvatarState::Reply, false)
-        .map(|img| {
-            let n = img.frame_count() as u64;
-            let fps = characters()
-                .iter()
-                .find(|c| c.slug == slug)
-                .and_then(|c| c.fps.get("reply").copied())
-                .unwrap_or(30.0);
-            (n * 1000) / fps.max(1.0) as u64
-        })
-        .unwrap_or(1000)
-}
-
-/// The avatar element: the animated character when assets exist, otherwise
-/// the project's glyph in its colour circle (the pre-avatar look). A coloured
-/// avatar (`avatar_color`; `None` = the fallback palette) is a GPUI disc (`bg`, neutral
-/// black) with a thin ring under the level-mapped tree; mono draws the
-/// shipped strip as is.
-#[allow(clippy::too_many_arguments)]
-pub fn element(
-    slug: Option<&str>,
-    avatar_color: Option<&str>,
-    state: AvatarState,
-    size: f32,
-    fallback_glyph: &str,
-    color: Hsla,
-    theme: &Theme,
-) -> Div {
-    let rail = size >= 48.0;
-    let palette = palette_for(avatar_color);
-    if let Some(slug) = slug {
-        if let Some(img) = image_tinted(slug, state, rail, Some(&palette)) {
-            let disc = draws_disc(slug, &palette);
-            // The art's ring is a 2 px stroke at the 56/72 px strip sizes;
-            // match that weight when we draw it ourselves.
-            let ring = (size / 20.0).clamp(1.0, 2.0);
-            return div()
-                .size(px(size))
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .when(disc, |el| {
-                    el.rounded_full()
-                        .bg(palette.bg_hsla())
-                        .border(px(ring))
-                        .border_color(palette.ring_hsla())
-                })
-                .child(
-                    gpui::img(img)
-                        .size(px(if disc { size - 2.0 * ring } else { size }))
-                        .object_fit(gpui::ObjectFit::Contain),
-                );
-        }
-    }
+/// The avatar disc: gradient `index` (or the seed's) with the name's initials.
+pub fn element(seed: &str, name: &str, index: Option<u8>, size: f32, theme: &Theme) -> Div {
+    let (top, bottom) = gradient(index_for(seed, index), theme);
+    let text = initials(name);
+    let letters = text.chars().count().max(1) as f32;
+    // ~42 % of the diameter for one letter; two letters sit a touch smaller.
+    let font = size * if letters > 1.0 { 0.38 } else { 0.42 };
     div()
         .size(px(size))
         .flex_shrink_0()
@@ -655,10 +154,175 @@ pub fn element(
         .items_center()
         .justify_center()
         .rounded_full()
-        .bg(Theme::with_alpha(color, 0.18))
-        .border_1()
-        .border_color(Theme::with_alpha(color, 0.8))
-        .text_size(px(size * 0.55))
-        .text_color(theme.text)
-        .child(fallback_glyph.to_owned())
+        .bg(linear_gradient(
+            180.0,
+            linear_color_stop(top, 0.0),
+            linear_color_stop(bottom, 1.0),
+        ))
+        .text_size(px(font))
+        .line_height(px(font * 1.1))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(gpui::white())
+        .child(text)
+}
+
+/// An agent (project): its id seeds the colour, the owner's pick overrides.
+pub fn project(p: &Project, size: f32, theme: &Theme) -> Div {
+    element(&p.id, &p.name, p.avatar_color_index, size, theme)
+}
+
+/// An agent shared into a people chat.
+pub fn agent_member(a: &AgentMember, size: f32, theme: &Theme) -> Div {
+    element(&a.project_id, &a.name, a.avatar_color_index, size, theme)
+}
+
+/// Who started a call / sits in it (users and agents).
+pub fn sender(s: &Sender, size: f32, theme: &Theme) -> Div {
+    element(&s.id, &s.display_name(), s.avatar_color_index, size, theme)
+}
+
+/// A person without a photo.
+pub fn person(p: &Person, size: f32, theme: &Theme) -> Div {
+    let seed = if p.id.is_empty() { &p.handle } else { &p.id };
+    element(seed, &p.display_name(), None, size, theme)
+}
+
+/// A picker swatch: the plain gradient disc, no letters.
+pub fn swatch(index: u8, size: f32, theme: &Theme) -> Div {
+    let (top, bottom) = gradient(index, theme);
+    div()
+        .size(px(size))
+        .flex_shrink_0()
+        .rounded_full()
+        .bg(linear_gradient(
+            180.0,
+            linear_color_stop(top, 0.0),
+            linear_color_stop(bottom, 1.0),
+        ))
+}
+
+// ----- notification attachment --------------------------------------------------
+
+fn fonts() -> &'static Mutex<(cosmic_text::FontSystem, cosmic_text::SwashCache)> {
+    static FONTS: OnceLock<Mutex<(cosmic_text::FontSystem, cosmic_text::SwashCache)>> =
+        OnceLock::new();
+    FONTS.get_or_init(|| {
+        Mutex::new((
+            cosmic_text::FontSystem::new(),
+            cosmic_text::SwashCache::new(),
+        ))
+    })
+}
+
+/// The same disc as a 128 px PNG for notification banners (cached by
+/// gradient + initials under the notify image dir).
+pub fn notification_png(seed: &str, name: &str, index: Option<u8>) -> Option<PathBuf> {
+    let idx = index_for(seed, index);
+    let text = initials(name);
+    let key = format!("initials-{idx}-{}", text.to_lowercase());
+    let size = 128u32;
+    let g = GRADIENTS[idx as usize];
+    let mut out = image::RgbaImage::new(size, size);
+    let c = (size as f32 - 1.0) / 2.0;
+    let radius = size as f32 / 2.0;
+    for (x, y, px) in out.enumerate_pixels_mut() {
+        let d = ((x as f32 - c).powi(2) + (y as f32 - c).powi(2)).sqrt();
+        let cover = (radius - d + 0.5).clamp(0.0, 1.0);
+        if cover <= 0.0 {
+            continue;
+        }
+        let t = y as f32 / (size as f32 - 1.0);
+        let mix = |i: usize| (g.top[i] as f32 * (1.0 - t) + g.bottom[i] as f32 * t) as u8;
+        *px = image::Rgba([mix(0), mix(1), mix(2), (cover * 255.0) as u8]);
+    }
+    draw_initials(&mut out, &text);
+    crate::ui::notify::image_file(&key, size, size, out.as_raw())
+}
+
+/// White semibold initials centred on the disc, through cosmic-text and the
+/// system's sans-serif.
+fn draw_initials(out: &mut image::RgbaImage, text: &str) {
+    use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Weight};
+    let Ok(mut guard) = fonts().lock() else {
+        return;
+    };
+    let (font_system, cache) = &mut *guard;
+    let size = out.width() as f32;
+    let font_px = size * if text.chars().count() > 1 { 0.38 } else { 0.42 };
+    let metrics = Metrics::new(font_px, font_px * 1.2);
+    let mut buffer = Buffer::new(font_system, metrics);
+    buffer.set_size(Some(size), Some(size));
+    buffer.set_text(
+        text,
+        &Attrs::new()
+            .family(Family::SansSerif)
+            .weight(Weight::SEMIBOLD),
+        Shaping::Advanced,
+        None,
+    );
+    buffer.shape_until_scroll(font_system, false);
+    // Centre: measure the laid-out run, then offset while drawing.
+    let (mut width, mut ascent, mut descent) = (0.0f32, 0.0f32, 0.0f32);
+    for run in buffer.layout_runs() {
+        width = width.max(run.line_w);
+        ascent = ascent.max(run.line_y - run.line_top);
+        descent = descent.max(run.line_height - (run.line_y - run.line_top));
+    }
+    let text_h = ascent + descent;
+    let dx = ((size - width) / 2.0).round() as i32;
+    let dy = ((size - text_h) / 2.0).round() as i32;
+    let white = cosmic_text::Color::rgb(255, 255, 255);
+    let (w, h) = (out.width() as i32, out.height() as i32);
+    buffer.draw(font_system, cache, white, |x, y, bw, bh, color| {
+        let a = color.a() as f32 / 255.0;
+        if a <= 0.0 {
+            return;
+        }
+        for yy in y..y + bh as i32 {
+            for xx in x..x + bw as i32 {
+                let (px_x, px_y) = (xx + dx, yy + dy);
+                if px_x < 0 || px_y < 0 || px_x >= w || px_y >= h {
+                    continue;
+                }
+                let p = out.get_pixel_mut(px_x as u32, px_y as u32);
+                let blend = |c: u8| (c as f32 * (1.0 - a) + 255.0 * a) as u8;
+                *p = image::Rgba([
+                    blend(p[0]),
+                    blend(p[1]),
+                    blend(p[2]),
+                    p[3].max((a * 255.0) as u8),
+                ]);
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initials_follow_the_rule() {
+        assert_eq!(initials("Growth Lab"), "GL");
+        assert_eq!(initials("Arbos"), "A");
+        assert_eq!(initials("@alpha-lab"), "AL");
+        assert_eq!(initials("sam rivera jones"), "SR");
+        assert_eq!(initials(""), "?");
+    }
+
+    #[test]
+    fn colour_index_is_byte_sum_mod_seven() {
+        assert_eq!(color_index(""), 0);
+        assert_eq!(color_index("a"), (97 % 7) as u8);
+        // Reference values from the relay's spec.
+        assert_eq!(color_index("gh_1"), 1);
+        assert_eq!(color_index("u_mac"), 6);
+        assert_eq!(
+            color_index("01M50W7HPM0KCFVMQ32HXNTN5S"),
+            color_index("01M50W7HPM0KCFVMQ32HXNTN5S")
+        );
+        assert!(color_index("01M50W7HPM0KCFVMQ32HXNTN5S") < 7);
+        assert_eq!(index_for("x", Some(3)), 3);
+        assert_eq!(index_for("x", Some(9)), color_index("x"));
+    }
 }

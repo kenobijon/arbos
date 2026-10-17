@@ -666,20 +666,12 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             set_machine(shared, MachineState::Stopped, Some("Stopped by you"), None);
         }
         ClientCommand::FocusChat { .. } => {}
-        ClientCommand::SetAvatar { project_id, slug } => {
+        ClientCommand::SetAvatarColorIndex { project_id, index } => {
             {
                 let mut projects = shared.projects.lock().unwrap();
                 if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
-                    p.avatar = Some(slug);
-                }
-            }
-            emit_projects(shared);
-        }
-        ClientCommand::SetAvatarColor { project_id, color } => {
-            {
-                let mut projects = shared.projects.lock().unwrap();
-                if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
-                    p.avatar_color = Some(color);
+                    p.avatar_color_override = index;
+                    p.avatar_color_index = Some(crate::ui::avatars::index_for(&project_id, index));
                 }
             }
             emit_projects(shared);
@@ -756,6 +748,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 muted: false,
                 primary_chat: None,
                 voice: None,
+                avatar_color_index: None,
+                avatar_color_override: None,
             });
             let chat_id = new_id();
             shared.chats.lock().unwrap().push(Chat {
@@ -3046,6 +3040,8 @@ fn seed_projects() -> Vec<Project> {
             muted: false,
             primary_chat: None,
             voice: None,
+            avatar_color_index: None,
+            avatar_color_override: None,
         },
         Project {
             id: PROJECT_COMMS.into(),
@@ -3073,6 +3069,8 @@ fn seed_projects() -> Vec<Project> {
             muted: false,
             primary_chat: None,
             voice: None,
+            avatar_color_index: None,
+            avatar_color_override: None,
         },
         Project {
             id: PROJECT_ARBOS.into(),
@@ -3100,6 +3098,8 @@ fn seed_projects() -> Vec<Project> {
             muted: false,
             primary_chat: None,
             voice: None,
+            avatar_color_index: None,
+            avatar_color_override: None,
         },
     ]
 }
@@ -4005,6 +4005,7 @@ fn person(id: &str, handle: &str, name: Option<&str>, status: &str) -> Person {
             now_ms() as i64 - 3 * 3_600_000
         }),
         online: handle == "sam",
+        avatar_color_index: None,
     }
 }
 
@@ -4054,6 +4055,8 @@ fn people_space(id: &str, other: Person, agents: Vec<AgentMember>) -> Project {
         muted: false,
         primary_chat: None,
         voice: None,
+        avatar_color_index: None,
+        avatar_color_override: None,
     }
 }
 
@@ -4088,6 +4091,8 @@ fn seed_people_projects() -> Vec<Project> {
             muted: false,
             primary_chat: None,
             voice: None,
+            avatar_color_index: None,
+            avatar_color_override: None,
         },
     ]
 }
@@ -4391,6 +4396,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                         reply_policy: ReplyPolicy::Mention,
                         avatar: p.avatar.clone(),
                         avatar_color: p.avatar_color.clone(),
+                        avatar_color_index: p.avatar_color_index,
                         description: None,
                         model: None,
                         owner: None,
@@ -4494,6 +4500,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                                 reply_policy: ReplyPolicy::EveryMessage,
                                 avatar: p.avatar.clone(),
                                 avatar_color: p.avatar_color.clone(),
+                                avatar_color_index: p.avatar_color_index,
                                 description: None,
                                 model: None,
                                 owner: None,
@@ -4723,6 +4730,7 @@ fn sender_of(p: &Person) -> Sender {
         handle: p.handle.clone(),
         avatar: None,
         avatar_color: None,
+        avatar_color_index: None,
         avatar_url: p.avatar_url.clone(),
     }
 }

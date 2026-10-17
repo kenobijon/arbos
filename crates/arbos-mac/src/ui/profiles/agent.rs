@@ -3,18 +3,17 @@
 //! description), an Appearance section holding the tree + colour picker,
 //! then Media / Files / Links from its chats.
 
-use gpui::{div, prelude::*, px, Context, Div, ElementId, Focusable, FontWeight, SharedString};
+use gpui::{div, prelude::*, px, Context, Div, ElementId, Focusable, SharedString};
 
 use crate::app::{CallTarget, ProfilePage};
 use crate::model::{Id, MachineState, Person, Project};
 use crate::ui::avatars::{self, AvatarState};
 use crate::ui::glass;
-use crate::ui::groups;
 use crate::ui::icons::icon;
 use crate::ui::motion::PulseClock;
 use crate::ui::shell::Shell;
 use crate::ui::sidebar::machine_dot;
-use crate::ui::theme::{Theme, PANEL_RADIUS, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
+use crate::ui::theme::{Theme, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
 use super::{
     action_button, action_row, card, chats_of, collect, file_list, frame, hero, info_row,
@@ -54,8 +53,6 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
         Some(p) => (p.clone(), !p.is_guest()),
         None => (project_from_member(state, project_id)?, false),
     };
-    let current = state.avatar_slug(&project);
-    let current_color = state.avatar_color(&project);
     let avatar_state = state.avatar_state(&project.id);
     let streaming = state.project_is_streaming(&project.id);
     let voice_text = crate::ui::voicepicker::current_label(&project, &state.voices);
@@ -129,7 +126,6 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
     let editing = state.profile_editing_description && mine;
     let muted = state.is_muted(&project.id);
     let content = collect(state, &chats_of(state, &project.id));
-    let fallback = groups::project_color(&project.color, theme.accent);
     let pid: Id = project.id.clone();
 
     if avatar_state != AvatarState::Idle {
@@ -140,15 +136,7 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
     let avatar = div()
         .relative()
         .size(px(112.0))
-        .child(avatars::element(
-            current.as_deref(),
-            current_color.as_deref(),
-            avatar_state,
-            112.0,
-            &project.icon,
-            fallback,
-            &theme,
-        ))
+        .child(avatars::project(&project, 112.0, &theme))
         .child(
             div()
                 .absolute()
@@ -420,25 +408,18 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
         }
     }
 
-    // ----- appearance (mine only): the tree + colour picker, folded ----------
+    // ----- appearance (mine only): Automatic + the seven gradients, folded ----
     let appearance = mine.then(|| {
+        let current_index = avatars::index_for(&project.id, project.avatar_color_override);
+        let label = match project.avatar_color_override {
+            None => format!("Automatic · {}", avatars::GRADIENTS[current_index as usize].name),
+            Some(i) => avatars::GRADIENTS[(i as usize) % 7].name.to_string(),
+        };
         let mut section = card(&theme).child(
             glass::nav_row(
                 "profile-appearance",
-                "Appearance",
-                Some(if picker_open {
-                    "tree & colour".into()
-                } else {
-                    format!(
-                        "{} · {}",
-                        current
-                            .as_deref()
-                            .and_then(|s| avatars::all().iter().find(|c| c.slug == s))
-                            .map(|c| c.name.clone())
-                            .unwrap_or_else(|| "tree".into()),
-                        avatars::palette_for(current_color.as_deref()).name
-                    )
-                }),
+                "Avatar colour",
+                Some(if picker_open { "pick".into() } else { label }),
                 &theme,
             )
             .on_click(cx.listener(|this, _, _, cx| {
@@ -447,18 +428,14 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
         );
         if picker_open {
             section = section
-                .child(heading("Colour", &theme))
-                .child(colour_row(&project, current.as_deref(), current_color.as_deref(), fallback, &theme, cx))
-                .child(div().h(px(1.0)).mx(px(16.0)).bg(theme.border))
-                .child(heading("Character", &theme))
-                .child(tree_grid(&project, current.as_deref(), current_color.as_deref(), fallback, &theme, cx))
+                .child(colour_row(&project, &theme, cx))
                 .child(
                     div()
                         .px(px(16.0))
                         .pb(px(12.0))
                         .text_size(px(TEXT_TINY))
                         .text_color(theme.text_muted)
-                        .child("Picked for you from the agent's id; choose any tree and colour to make it yours."),
+                        .child("Automatic picks the colour from the agent's id, the same on every device; choose one to make it yours."),
                 );
         }
         section
@@ -503,153 +480,98 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
     Some(frame(body, edit, &theme, cx))
 }
 
-fn heading(text: &str, theme: &Theme) -> Div {
-    div()
-        .px(px(16.0))
-        .pt(px(14.0))
-        .pb(px(10.0))
-        .text_size(px(TEXT_BODY + 1.0))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(theme.text)
-        .child(text.to_string())
-}
-
-/// Every palette entry, drawn as the current character; one click sets it.
-fn colour_row(
-    project: &Project,
-    current: Option<&str>,
-    current_color: Option<&str>,
-    fallback: gpui::Hsla,
-    theme: &Theme,
-    cx: &mut Context<Shell>,
-) -> Div {
+fn colour_row(project: &Project, theme: &Theme, cx: &mut Context<Shell>) -> Div {
     let mut colours = div()
         .flex()
         .flex_wrap()
+        .items_center()
         .gap(px(10.0))
         .px(px(16.0))
         .pb(px(14.0));
-    let palette = avatars::palette_for(current_color);
-    // Mono is the brand mark's look, never an agent's (D74): only real colours.
-    for p in avatars::colors().iter().filter(|p| !p.is_mono()) {
-        let selected = p.id == palette.id;
+    let auto_index = avatars::color_index(&project.id);
+    let override_index = project.avatar_color_override;
+    let ring = |selected: bool, theme: &Theme| {
+        div()
+            .size(px(52.0))
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .border_2()
+            .border_color(if selected {
+                theme.text
+            } else {
+                gpui::transparent_black()
+            })
+            .cursor_pointer()
+            .hover(|st| st.border_color(theme.border_strong))
+    };
+    // "Automatic": the id-derived gradient with the agent's initials.
+    {
         let pid = project.id.clone();
-        let id = p.id.clone();
         colours = colours.child(
             div()
-                .id(ElementId::Name(SharedString::from(format!(
-                    "avatar-color-{}",
-                    p.id
-                ))))
-                .size(px(52.0))
-                .rounded_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .border_2()
-                .border_color(if selected {
-                    theme.text
-                } else {
-                    gpui::transparent_black()
-                })
-                .cursor_pointer()
-                .hover(|st| st.border_color(theme.border_strong))
-                .child(avatars::element(
-                    current,
-                    Some(&p.id),
-                    AvatarState::Idle,
-                    44.0,
-                    &project.icon,
-                    fallback,
-                    theme,
-                ))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let p = pid.clone();
-                    let c = id.clone();
-                    this.state
-                        .update(cx, |st, cx| st.set_avatar_color(p, c, cx));
-                })),
-        );
-    }
-    colours
-}
-
-/// Every character in the current colour; one click sets it (the page stays open).
-fn tree_grid(
-    project: &Project,
-    current: Option<&str>,
-    current_color: Option<&str>,
-    fallback: gpui::Hsla,
-    theme: &Theme,
-    cx: &mut Context<Shell>,
-) -> Div {
-    let mut grid = div()
-        .flex()
-        .flex_wrap()
-        .gap(px(6.0))
-        .px(px(10.0))
-        .pb(px(10.0));
-    for c in avatars::all() {
-        let slug = c.slug.clone();
-        let selected = current == Some(c.slug.as_str());
-        let pid = project.id.clone();
-        grid = grid.child(
-            div()
-                .id(ElementId::Name(SharedString::from(format!(
-                    "avatar-pick-{}",
-                    c.slug
-                ))))
-                .w(px(96.0))
                 .flex()
                 .flex_col()
                 .items_center()
-                .gap(px(6.0))
-                .py(px(10.0))
-                .rounded(px(PANEL_RADIUS - 2.0))
-                .when(!c.ready, |el| el.opacity(0.6))
-                .bg(if selected {
-                    theme.surface_2
-                } else {
-                    gpui::transparent_black()
-                })
-                .cursor_pointer()
-                .hover(|st| st.bg(theme.surface_2))
-                .child(avatars::element(
-                    Some(&c.slug),
-                    current_color,
-                    AvatarState::Idle,
-                    60.0,
-                    "·",
-                    fallback,
-                    theme,
-                ))
+                .gap(px(4.0))
+                .child(
+                    ring(override_index.is_none(), theme)
+                        .id("avatar-color-auto")
+                        .child(avatars::element(
+                            &project.id,
+                            &project.name,
+                            None,
+                            44.0,
+                            theme,
+                        ))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let p = pid.clone();
+                            this.state
+                                .update(cx, |st, cx| st.set_avatar_color_index(p, None, cx));
+                        })),
+                )
                 .child(
                     div()
                         .text_size(px(TEXT_TINY))
-                        .text_color(if selected {
+                        .text_color(theme.text_muted)
+                        .child("Automatic"),
+                ),
+        );
+    }
+    for (i, g) in avatars::GRADIENTS.iter().enumerate() {
+        let index = i as u8;
+        let selected = override_index == Some(index);
+        let pid = project.id.clone();
+        colours = colours.child(
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(4.0))
+                .child(
+                    ring(selected, theme)
+                        .id(ElementId::Name(SharedString::from(format!(
+                            "avatar-color-{index}"
+                        ))))
+                        .child(avatars::swatch(index, 44.0, theme))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let p = pid.clone();
+                            this.state
+                                .update(cx, |st, cx| st.set_avatar_color_index(p, Some(index), cx));
+                        })),
+                )
+                .child(
+                    div()
+                        .text_size(px(TEXT_TINY))
+                        .text_color(if index == auto_index && override_index.is_none() {
                             theme.text
                         } else {
                             theme.text_muted
                         })
-                        .max_w(px(88.0))
-                        .truncate()
-                        .child(c.name.clone()),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let p = pid.clone();
-                    let sl = slug.clone();
-                    this.state.update(cx, |st, cx| {
-                        st.set_avatar(p, sl, cx);
-                        // Keep the page open: picking a tree then a colour is one visit.
-                        st.avatar_picker = Some(pid.clone());
-                        st.profile = Some(ProfilePage::Agent {
-                            project_id: pid.clone(),
-                        });
-                        cx.notify();
-                    });
-                })),
+                        .child(g.name),
+                ),
         );
     }
-    let _ = icon;
-    grid
+    colours
 }

@@ -77,22 +77,9 @@ pub fn tab_glyphs(chat: &Chat, projects: &[Project], theme: &Theme) -> Option<Di
                 .w(px(width))
                 .h(px(GLYPH));
             for (i, id) in chat.participants.iter().take(MAX_GLYPHS).enumerate() {
-                let found = projects.iter().find(|p| &p.id == id);
-                let (icon, color) = found
-                    .map(|p| (p.icon.clone(), project_color(&p.color, theme.accent)))
-                    .unwrap_or_else(|| ("·".to_owned(), sender_color(id, theme)));
-                let slug = found.and_then(|p| crate::ui::avatars::slug_for(p, projects));
-                let head = match slug {
-                    Some(slug) => crate::ui::avatars::element(
-                        Some(&slug),
-                        found.and_then(|p| p.avatar_color.as_deref()),
-                        crate::ui::avatars::AvatarState::Idle,
-                        GLYPH,
-                        &icon,
-                        color,
-                        theme,
-                    ),
-                    None => glyph(&icon, color, GLYPH, theme),
+                let head = match projects.iter().find(|p| &p.id == id) {
+                    Some(p) => crate::ui::avatars::project(p, GLYPH, theme),
+                    None => crate::ui::avatars::element(id, id, None, GLYPH, theme),
                 };
                 row = row.child(head.absolute().left(px(step * i as f32)).top(px(0.0)));
             }
@@ -126,30 +113,15 @@ pub fn tab_glyphs(chat: &Chat, projects: &[Project], theme: &Theme) -> Option<Di
     }
 }
 
-/// The caption above another Project's message: its glyph and name.
-/// The sender chip above another agent's message, with its tree avatar when it has one.
-#[allow(clippy::too_many_arguments)]
+/// The sender chip above another agent's message: its initials disc
+/// (`seed` = the agent's project id) and name.
 pub fn sender_chip_with(
     name: &str,
-    icon: Option<&str>,
-    color: Hsla,
-    avatar: Option<&str>,
-    avatar_color: Option<&str>,
-    state: crate::ui::avatars::AvatarState,
+    seed: &str,
+    avatar_color_index: Option<u8>,
     theme: &Theme,
 ) -> Div {
-    let head = match avatar {
-        Some(slug) => crate::ui::avatars::element(
-            Some(slug),
-            avatar_color,
-            state,
-            GLYPH + 4.0,
-            icon.unwrap_or("·"),
-            color,
-            theme,
-        ),
-        None => glyph(icon.unwrap_or("·"), color, GLYPH, theme),
-    };
+    let head = crate::ui::avatars::element(seed, name, avatar_color_index, GLYPH + 4.0, theme);
     div()
         .w_full()
         .flex()

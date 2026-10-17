@@ -9,9 +9,8 @@ use gpui::{div, prelude::*, px, Context, Div, ElementId, Focusable, RenderImage,
 
 use crate::app::{AppState, ProfilePage};
 use crate::model::{Person, Project};
-use crate::ui::avatars::{self, AvatarState};
+use crate::ui::avatars;
 use crate::ui::glass;
-use crate::ui::groups;
 use crate::ui::icons::icon;
 use crate::ui::people;
 use crate::ui::shell::Shell;
@@ -58,6 +57,7 @@ fn members(state: &AppState, space: &Project) -> Vec<Person> {
         },
         last_seen_at: None,
         online: true,
+        avatar_color_index: None,
     });
     out.extend(space.people.iter().cloned());
     if let Some(me) = me {
@@ -102,23 +102,6 @@ pub(super) fn page(space_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> Op
             n => format!(" · {n} agents"),
         }
     );
-    let slug = state.avatar_slug(&space);
-    let agent_slugs: Vec<Option<String>> = space
-        .agents
-        .iter()
-        .map(|a| {
-            a.avatar.clone().or_else(|| {
-                state
-                    .project(&a.project_id)
-                    .and_then(|p| state.avatar_slug(p))
-            })
-        })
-        .collect();
-    let agent_states: Vec<AvatarState> = space
-        .agents
-        .iter()
-        .map(|a| state.avatar_state(&a.project_id))
-        .collect();
     let content = collect(state, &chats_of(state, &space.id));
 
     // ----- hero: stacked people for a group, the tree for a shared project ----
@@ -137,16 +120,7 @@ pub(super) fn page(space_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> Op
             .child(people::avatar_stack(&stack, 72.0, 3, &theme))
             .into_any_element()
     } else {
-        avatars::element(
-            slug.as_deref(),
-            space.avatar_color.as_deref(),
-            AvatarState::Idle,
-            112.0,
-            &space.icon,
-            groups::project_color(&space.color, theme.accent),
-            &theme,
-        )
-        .into_any_element()
+        avatars::project(&space, 112.0, &theme).into_any_element()
     };
     let hero = hero(avatar, &space.name, &count_text, theme.text_muted, &theme);
 
@@ -342,7 +316,7 @@ pub(super) fn page(space_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> Op
             }
             // Agents in the chat (people groups) — or the project's own agent.
             if is_people {
-                for (i, a) in space.agents.iter().enumerate() {
+                for a in space.agents.iter() {
                     let pid = a.project_id.clone();
                     let sub = format!("agent · owned by @{}", a.owner_handle);
                     list = list.child(
@@ -351,16 +325,7 @@ pub(super) fn page(space_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> Op
                                 "profile-agent-{}",
                                 a.project_id
                             ))),
-                            avatars::element(
-                                agent_slugs[i].as_deref(),
-                                a.avatar_color.as_deref(),
-                                agent_states[i],
-                                40.0,
-                                &a.icon,
-                                groups::project_color(&a.color, theme.accent),
-                                &theme,
-                            )
-                            .into_any_element(),
+                            avatars::agent_member(a, 40.0, &theme).into_any_element(),
                             a.name.clone(),
                             sub,
                             theme.text_muted,
@@ -382,16 +347,7 @@ pub(super) fn page(space_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> Op
                 list = list.child(
                     list_row(
                         "profile-agent-self",
-                        avatars::element(
-                            slug.as_deref(),
-                            space.avatar_color.as_deref(),
-                            AvatarState::Idle,
-                            40.0,
-                            &space.icon,
-                            groups::project_color(&space.color, theme.accent),
-                            &theme,
-                        )
-                        .into_any_element(),
+                        avatars::project(&space, 40.0, &theme).into_any_element(),
                         space.name.clone(),
                         "the project's agent",
                         theme.text_muted,

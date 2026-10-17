@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use gpui::{
-    div, prelude::*, px, Context, Div, ElementId, Entity, Focusable as _, FontWeight, RenderImage,
+    div, prelude::*, px, Context, Div, ElementId, Entity, Focusable as _, RenderImage,
     SharedString, Stateful,
 };
 
@@ -14,7 +14,7 @@ use crate::model::{AgentMember, Person, Project};
 use crate::ui::composer::ComposerInput;
 use crate::ui::frost::{frosted, MENU_BLUR};
 use crate::ui::glass;
-use crate::ui::groups::{project_color, sender_color};
+use crate::ui::groups::project_color;
 use crate::ui::icons::icon;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, PANEL_RADIUS, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
@@ -39,47 +39,14 @@ pub fn avatar(image: Option<Arc<RenderImage>>, person: &Person, size: f32, theme
                 .rounded_full()
                 .object_fit(gpui::ObjectFit::Cover),
         ),
-        None => {
-            let color = sender_color(&person.handle, theme);
-            base.bg(Theme::with_alpha(color, 0.25))
-                .border_1()
-                .border_color(Theme::with_alpha(color, 0.8))
-                .text_size(px(size * 0.46))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.text)
-                .child(person.initial())
-        }
+        // D79: Telegram-style initials on the id's gradient.
+        None => crate::ui::avatars::person(person, size, theme),
     }
 }
 
-/// A small square glyph for a shared agent (its Project's icon and colour),
-/// or its tree avatar when the agent carries one.
+/// A shared agent's avatar: its initials disc (D79).
 pub fn agent_glyph(agent: &AgentMember, size: f32, theme: &Theme) -> Div {
-    let color = project_color(&agent.color, theme.accent);
-    if let Some(slug) = agent.avatar.as_deref() {
-        return crate::ui::avatars::element(
-            Some(slug),
-            agent.avatar_color.as_deref(),
-            crate::ui::avatars::AvatarState::Idle,
-            size,
-            &agent.icon,
-            color,
-            theme,
-        );
-    }
-    div()
-        .size(px(size))
-        .flex_shrink_0()
-        .rounded(px(size * 0.28))
-        .bg(Theme::with_alpha(color, 0.18))
-        .border_1()
-        .border_color(Theme::with_alpha(color, 0.8))
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_size(px(size * 0.55))
-        .text_color(theme.text)
-        .child(agent.icon.clone())
+    crate::ui::avatars::agent_member(agent, size, theme)
 }
 
 /// The "New Message" sheet (iPhone / Telegram layout): Cancel · title, a

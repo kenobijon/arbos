@@ -620,11 +620,6 @@ impl Shell {
         // Everything the empty-state hero needs, read before `cx` is borrowed mutably.
         let hero_data = project.as_ref().map(|space| {
             (
-                if space.is_people() {
-                    None
-                } else {
-                    state.avatar_slug(space)
-                },
                 state.avatar_state(&space.id),
                 space
                     .person()
@@ -744,18 +739,11 @@ impl Shell {
                 format!("Ask {name} anything. It plans, delegates, or just answers.")
             };
             let mut hero = div().flex().flex_col().items_center().gap(px(10.0));
-            let (slug, avatar_state, person_image) =
-                hero_data.unwrap_or((None, avatars::AvatarState::Idle, None));
+            let (avatar_state, person_image) =
+                hero_data.unwrap_or((avatars::AvatarState::Idle, None));
+            let _ = avatar_state;
             if !is_people {
-                hero = hero.child(avatars::element(
-                    slug.as_deref(),
-                    space.avatar_color.as_deref(),
-                    avatar_state,
-                    88.0,
-                    &space.icon,
-                    groups::project_color(&space.color, theme.accent),
-                    &theme,
-                ));
+                hero = hero.child(avatars::project(&space, 88.0, &theme));
             } else if let Some(person) = space.person() {
                 hero = hero.child(people::avatar(person_image, person, 88.0, &theme));
             }
@@ -1372,6 +1360,7 @@ impl Shell {
                 role: String::new(),
                 last_seen_at: None,
                 online: false,
+                avatar_color_index: None,
             };
             let mut group = glass::group(&theme).child(
                 div()

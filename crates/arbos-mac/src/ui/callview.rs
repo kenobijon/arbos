@@ -41,18 +41,11 @@ fn mmss(ms: u64) -> String {
 
 /// A participant's picture: GitHub photo, coloured tree, or the initial.
 fn picture(sender: &Sender, image: Option<Arc<RenderImage>>, size: f32, theme: &Theme) -> Div {
-    if let Some(slug) = sender.avatar.as_deref().filter(|s| !s.is_empty()) {
-        return avatars::element(
-            Some(slug),
-            sender.avatar_color.as_deref(),
-            avatars::AvatarState::Idle,
-            size,
-            "·",
-            theme.accent,
-            theme,
-        );
+    // A photo wins; otherwise the sender's initials disc (agents and people alike).
+    if image.is_some() {
+        return people::avatar(image, &sender.as_person(), size, theme);
     }
-    people::avatar(image, &sender.as_person(), size, theme)
+    avatars::sender(sender, size, theme)
 }
 
 /// One tile: the camera when it is on, else the picture on a dark card.
@@ -200,6 +193,7 @@ pub fn screen(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> Di
         handle: state.me_handle(),
         avatar: None,
         avatar_color: None,
+        avatar_color_index: None,
         avatar_url: state
             .account
             .as_ref()

@@ -526,31 +526,12 @@ impl Transcript {
                         .iter()
                         .find(|p| p.name.eq_ignore_ascii_case(name))
                     {
-                        Some(space) => crate::ui::avatars::element(
-                            state.avatar_slug(space).as_deref(),
-                            space.avatar_color.as_deref(),
-                            crate::ui::avatars::AvatarState::Idle,
-                            16.0,
-                            &space.icon,
-                            groups::project_color(&space.color, theme.accent),
-                            &theme,
-                        )
-                        .into_any_element(),
-                        None => {
-                            // Not one of my projects (a subagent): a lettered disc.
-                            let initial: String =
-                                name.chars().take(1).flat_map(char::to_uppercase).collect();
-                            crate::ui::avatars::element(
-                                None,
-                                None,
-                                crate::ui::avatars::AvatarState::Idle,
-                                16.0,
-                                &initial,
-                                theme.text_muted,
-                                &theme,
-                            )
-                            .into_any_element()
+                        Some(space) => {
+                            crate::ui::avatars::project(space, 16.0, &theme).into_any_element()
                         }
+                        // Not one of my projects (a subagent): initials on the name's gradient.
+                        None => crate::ui::avatars::element(name, name, None, 16.0, &theme)
+                            .into_any_element(),
                     };
                     line = line.child(glyph).child(div().child(name.clone()));
                     if n >= 2 && i + 2 == n {
@@ -693,21 +674,10 @@ impl Transcript {
                             .map(|a| people::agent_glyph(a, 20.0, &theme));
                         (agent, glyph)
                     }
-                    Some(space) => {
-                        let slug = state.avatar_slug(space);
-                        (
-                            space.name.clone(),
-                            Some(crate::ui::avatars::element(
-                                slug.as_deref(),
-                                space.avatar_color.as_deref(),
-                                state.avatar_state(&space.id),
-                                20.0,
-                                &space.icon,
-                                groups::project_color(&space.color, theme.accent),
-                                &theme,
-                            )),
-                        )
-                    }
+                    Some(space) => (
+                        space.name.clone(),
+                        Some(crate::ui::avatars::project(space, 20.0, &theme)),
+                    ),
                     None => ("Agent".into(), None),
                 };
                 cards::working_line(&name, picture, queued, activity.as_deref(), &theme, cx)
@@ -755,74 +725,43 @@ impl Transcript {
                             .map(|p| groups::project_color(&p.color, theme.accent))
                     })
                     .unwrap_or_else(|| groups::sender_color(&seed, &theme));
-                // The sender's tree avatar: a shared agent's own slug, else my project's.
-                let avatar_slug = avatar.or_else(|| {
-                    seed.strip_prefix("agent:")
-                        .or_else(|| seed.strip_prefix("project:"))
-                        .and_then(|pid| {
-                            state
-                                .selected()
-                                .and_then(|space| space.agents.iter().find(|a| a.project_id == pid))
-                                .and_then(|a| a.avatar.clone())
-                                .or_else(|| {
-                                    state
-                                        .projects
-                                        .iter()
-                                        .find(|p| p.id == pid)
-                                        .and_then(|p| state.avatar_slug(p))
-                                })
-                        })
-                });
-                let avatar_color = avatar_color.or_else(|| {
-                    seed.strip_prefix("agent:")
-                        .or_else(|| seed.strip_prefix("project:"))
-                        .and_then(|pid| {
-                            state
-                                .selected()
-                                .and_then(|space| space.agents.iter().find(|a| a.project_id == pid))
-                                .and_then(|a| a.avatar_color.clone())
-                                .or_else(|| {
-                                    state
-                                        .projects
-                                        .iter()
-                                        .find(|p| p.id == pid)
-                                        .and_then(|p| state.avatar_color(p))
-                                })
-                        })
-                });
-                let avatar_state = seed
-                    .strip_prefix("agent:")
-                    .or_else(|| seed.strip_prefix("project:"))
-                    .map(|pid| state.avatar_state(pid))
-                    .unwrap_or(crate::ui::avatars::AvatarState::Idle);
-                // Click the chip → the agent's profile page.
-                let agent_pid = seed
+                // The sender's disc: a shared agent's own gradient, else my project's.
+                let agent_pid_seed = seed
                     .strip_prefix("agent:")
                     .or_else(|| seed.strip_prefix("project:"))
                     .map(str::to_string);
-                let open_state = self.state.clone();
-                let chip = groups::sender_chip_with(
-                    &name,
-                    icon.as_deref(),
-                    color,
-                    avatar_slug.as_deref(),
-                    avatar_color.as_deref(),
-                    avatar_state,
-                    &theme,
-                )
-                .id(SharedString::from(format!("{}#chip", row.id)))
-                .when(agent_pid.is_some(), |el| {
-                    el.cursor_pointer().on_click(move |_, _, cx| {
-                        if let Some(pid) = agent_pid.clone() {
-                            open_state.update(cx, |s, cx| {
-                                s.open_profile(
-                                    crate::app::ProfilePage::Agent { project_id: pid },
-                                    cx,
-                                )
-                            });
-                        }
-                    })
+                let avatar_color_index = agent_pid_seed.as_deref().and_then(|pid| {
+                    state
+                        .selected()
+                        .and_then(|space| space.agents.iter().find(|a| a.project_id == pid))
+                        .and_then(|a| a.avatar_color_index)
+                        .or_else(|| {
+                            state
+                                .projects
+                                .iter()
+                                .find(|p| p.id == pid)
+                                .and_then(|p| p.avatar_color_index)
+                        })
                 });
+                let disc_seed = agent_pid_seed.clone().unwrap_or_else(|| seed.clone());
+                let _ = (&avatar, &avatar_color, &color, &icon);
+                // Click the chip → the agent's profile page.
+                let agent_pid = agent_pid_seed;
+                let open_state = self.state.clone();
+                let chip = groups::sender_chip_with(&name, &disc_seed, avatar_color_index, &theme)
+                    .id(SharedString::from(format!("{}#chip", row.id)))
+                    .when(agent_pid.is_some(), |el| {
+                        el.cursor_pointer().on_click(move |_, _, cx| {
+                            if let Some(pid) = agent_pid.clone() {
+                                open_state.update(cx, |s, cx| {
+                                    s.open_profile(
+                                        crate::app::ProfilePage::Agent { project_id: pid },
+                                        cx,
+                                    )
+                                });
+                            }
+                        })
+                    });
                 match note {
                     Some(note) => chip
                         .child(
@@ -1025,6 +964,7 @@ pub fn build_rows(
                         role: String::new(),
                         last_seen_at: None,
                         online: false,
+                        avatar_color_index: None,
                     })
                 } else {
                     None

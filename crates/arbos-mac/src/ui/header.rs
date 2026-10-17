@@ -170,7 +170,6 @@ pub fn render(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
                 });
             }));
     } else {
-        let slug = state.avatar_slug(space);
         let avatar_state = state.avatar_state(&space.id);
         let streaming = state.project_is_streaming(&space.id);
         let machine = state.machine.shown_state();
@@ -195,15 +194,7 @@ pub fn render(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
                     .relative()
                     .size(px(AVATAR_HEADER))
                     .flex_shrink_0()
-                    .child(avatars::element(
-                        slug.as_deref(),
-                        space.avatar_color.as_deref(),
-                        avatar_state,
-                        AVATAR_HEADER,
-                        &space.icon,
-                        groups::project_color(&space.color, theme.accent),
-                        &theme,
-                    ))
+                    .child(avatars::project(space, AVATAR_HEADER, &theme))
                     .child(
                         div()
                             .absolute()

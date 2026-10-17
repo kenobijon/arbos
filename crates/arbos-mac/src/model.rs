@@ -90,6 +90,13 @@ pub struct Project {
     /// Call voice (`GET /voices` id); `None` = the current default voice.
     #[serde(default)]
     pub voice: Option<String>,
+    /// D79: the avatar gradient in effect (0–6): the owner's pick, else the
+    /// id-derived one (`avatar_color_index_effective` from the relay).
+    #[serde(default)]
+    pub avatar_color_index: Option<u8>,
+    /// D79: the owner's explicit pick (`avatar_color_index`), `None` = automatic.
+    #[serde(default)]
+    pub avatar_color_override: Option<u8>,
 }
 
 /// One entry of `GET /voices`: a voice the agent can speak with on calls.
@@ -191,6 +198,9 @@ pub struct Person {
     /// Empty when GitHub has none (the relay sends `null`): initials are drawn instead.
     #[serde(default, deserialize_with = "null_to_empty")]
     pub avatar_url: String,
+    /// D79: the avatar gradient in effect (0–6) when the relay sends it.
+    #[serde(default, alias = "avatar_color_index_effective")]
+    pub avatar_color_index: Option<u8>,
     /// `member` (has signed in) or `invited` (placeholder).
     #[serde(default)]
     pub status: String,
@@ -268,6 +278,9 @@ pub struct Sender {
     pub avatar: Option<String>,
     #[serde(default)]
     pub avatar_color: Option<String>,
+    /// D79: the agent's avatar gradient in effect (0–6), when the relay sends it.
+    #[serde(default, alias = "avatar_color_index_effective")]
+    pub avatar_color_index: Option<u8>,
     #[serde(default, deserialize_with = "null_to_empty")]
     pub avatar_url: String,
 }
@@ -293,6 +306,7 @@ impl Sender {
             role: String::new(),
             last_seen_at: None,
             online: false,
+            avatar_color_index: None,
         }
     }
 
@@ -553,6 +567,9 @@ pub struct AgentMember {
     pub avatar: Option<String>,
     #[serde(default)]
     pub avatar_color: Option<String>,
+    /// D79: the agent's avatar gradient in effect (0–6).
+    #[serde(default, alias = "avatar_color_index_effective")]
+    pub avatar_color_index: Option<u8>,
     /// API §9: the agent's description and talking model.
     #[serde(default)]
     pub description: Option<String>,

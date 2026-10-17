@@ -411,11 +411,6 @@ pub enum ClientCommand {
     FocusChat {
         chat_id: Option<Id>,
     },
-    /// Avatar picker: `PATCH /projects/{id} {avatar: slug}` (mirrored into the doc).
-    SetAvatar {
-        project_id: Id,
-        slug: String,
-    },
     /// Agent page: `PATCH /projects/{id} {description}` (API §9; `""` clears).
     SetDescription {
         project_id: Id,
@@ -427,10 +422,11 @@ pub enum ClientCommand {
         space_id: Id,
         muted: bool,
     },
-    /// Avatar picker colour row: `PATCH /projects/{id} {avatar_color: id}` (mirrored into the doc).
-    SetAvatarColor {
+    /// Avatar picker (D79): `PATCH /projects/{id} {avatar_color_index: 0–6|null}`;
+    /// `None` = automatic (derived from the project id).
+    SetAvatarColorIndex {
         project_id: Id,
-        color: String,
+        index: Option<u8>,
     },
     FetchBlob {
         project_id: Id,

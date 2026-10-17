@@ -2275,11 +2275,6 @@ impl AppState {
 
     // ----- avatars
 
-    /// Character slug a project shows (own choice or the hash pick).
-    pub fn avatar_slug(&self, project: &Project) -> Option<String> {
-        crate::ui::avatars::slug_for(project, &self.projects)
-    }
-
     /// Animation state for a project's avatar from what its agent is doing.
     pub fn avatar_state(&self, project_id: &str) -> crate::ui::avatars::AvatarState {
         use crate::ui::avatars::AvatarState;
@@ -2292,28 +2287,18 @@ impl AppState {
         }
     }
 
-    /// Avatar colour id a project shows (`None` = mono / manifest default).
-    pub fn avatar_color(&self, project: &Project) -> Option<String> {
-        project
-            .avatar_color
-            .clone()
-            .filter(|c| !c.trim().is_empty())
-    }
-
-    pub fn set_avatar_color(&mut self, project_id: Id, color: String, cx: &mut Context<Self>) {
+    /// D79: the owner's avatar gradient pick (`None` = automatic). Optimistic, then PATCH.
+    pub fn set_avatar_color_index(
+        &mut self,
+        project_id: Id,
+        index: Option<u8>,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
-            p.avatar_color = Some(color.clone());
+            p.avatar_color_override = index;
+            p.avatar_color_index = Some(crate::ui::avatars::index_for(&project_id, index));
         }
-        self.command(ClientCommand::SetAvatarColor { project_id, color });
-        cx.notify();
-    }
-
-    pub fn set_avatar(&mut self, project_id: Id, slug: String, cx: &mut Context<Self>) {
-        if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
-            p.avatar = Some(slug.clone());
-        }
-        self.avatar_picker = None;
-        self.command(ClientCommand::SetAvatar { project_id, slug });
+        self.command(ClientCommand::SetAvatarColorIndex { project_id, index });
         cx.notify();
     }
 
@@ -2577,7 +2562,7 @@ impl AppState {
             let cover = (r - d + 0.5).clamp(0.0, 1.0);
             px[3] = (px[3] as f32 * cover) as u8;
         }
-        let key = format!("person-{:016x}", crate::ui::avatars::fnv1a64(url));
+        let key = format!("person-{:016x}", fnv1a64(url));
         notify::image_file(&key, w, h, &rgba)
     }
 
@@ -2588,45 +2573,37 @@ impl AppState {
         let project = self.projects.iter().find(|p| p.id == project_id);
         // `agent:<pid>` in a people chat → that member; `project:<pid>` in a
         // group chat → that project of mine.
+        // (seed id, name, gradient override) of whoever wrote it.
         let shared_agent = message
             .sender
             .strip_prefix("agent:")
             .and_then(|pid| {
                 project
                     .and_then(|p| p.agents.iter().find(|a| a.project_id == pid))
-                    .map(|a| (a.name.clone(), a.avatar.clone(), a.avatar_color.clone()))
+                    .map(|a| (a.project_id.clone(), a.name.clone(), a.avatar_color_index))
             })
             .or_else(|| {
                 let pid = message.sender.strip_prefix("project:")?;
                 let other = self.projects.iter().find(|p| p.id == pid)?;
                 Some((
+                    other.id.clone(),
                     other.name.clone(),
-                    self.avatar_slug(other),
-                    self.avatar_color(other),
+                    other.avatar_color_index,
                 ))
             });
         let name = message
             .sender_name
             .clone()
             .filter(|n| !n.is_empty())
-            .or_else(|| shared_agent.as_ref().map(|(n, _, _)| n.clone()))
+            .or_else(|| shared_agent.as_ref().map(|(_, n, _)| n.clone()))
             .or_else(|| project.map(|p| p.name.clone()))
             .unwrap_or_else(|| "Agent".to_string());
-        let slug = message
-            .sender_avatar
-            .clone()
-            .filter(|a| !a.is_empty() && !a.contains("://"))
-            .or_else(|| shared_agent.as_ref().and_then(|(_, s, _)| s.clone()))
-            .or_else(|| project.and_then(|p| self.avatar_slug(p)));
-        let color = message
-            .sender_avatar_color
-            .clone()
-            .filter(|c| !c.is_empty())
-            .or_else(|| shared_agent.as_ref().and_then(|(_, _, c)| c.clone()))
-            .or_else(|| project.and_then(|p| self.avatar_color(p)));
-        let image = slug
-            .as_deref()
-            .and_then(|s| crate::ui::avatars::notification_png(s, color.as_deref()));
+        let (seed, index) = shared_agent
+            .as_ref()
+            .map(|(s, _, i)| (s.clone(), *i))
+            .or_else(|| project.map(|p| (p.id.clone(), p.avatar_color_index)))
+            .unwrap_or_else(|| (project_id.to_string(), None));
+        let image = crate::ui::avatars::notification_png(&seed, &name, index);
         (name, image)
     }
 
@@ -2727,18 +2704,9 @@ impl AppState {
             return;
         }
         if message.role == Role::Assistant && was_streaming {
-            // The avatar's short reply reaction, once per completed turn.
-            let slug = self
-                .projects
-                .iter()
-                .find(|p| p.id == project_id)
-                .and_then(|p| self.avatar_slug(p));
-            let len = slug
-                .as_deref()
-                .map(crate::ui::avatars::reply_duration_ms)
-                .unwrap_or(1000);
+            // The avatar's short reply pulse, once per completed turn.
             self.avatar_reply_until
-                .insert(project_id.clone(), now_ms() + len);
+                .insert(project_id.clone(), now_ms() + 1000);
         }
         if message.role == Role::Project || sender.starts_with("project:") {
             let (sender, image) = self.agent_identity(&project_id, message);
@@ -3806,6 +3774,7 @@ impl AppState {
             handle: self.me_handle(),
             avatar: None,
             avatar_color: None,
+            avatar_color_index: None,
             avatar_url: account.map(|a| a.avatar_url).unwrap_or_default(),
         }
     }
@@ -3883,9 +3852,9 @@ impl AppState {
             // Ring: the card in the window plus the native banner with Accept / Decline.
             let title = sender.display_name();
             let body = format!("Incoming {}", call.kind.label());
-            let image = self.avatar_file_for(&sender.avatar_url).or_else(|| {
-                self.tree_png_for(sender.avatar.as_deref(), sender.avatar_color.as_deref())
-            });
+            let image = self
+                .avatar_file_for(&sender.avatar_url)
+                .or_else(|| self.sender_png_for(&sender));
             notify::deliver_call(&call.call_id, &call.chat_id, &title, &body, image);
             self.incoming_call = Some((call, sender));
             self.incoming_since = Some(now_ms());
@@ -4008,12 +3977,9 @@ impl AppState {
                 text: missed.line(),
                 call_id: Some(missed.call_id.clone()),
             });
-            let image = self.avatar_file_for(&missed.from.avatar_url).or_else(|| {
-                self.tree_png_for(
-                    missed.from.avatar.as_deref(),
-                    missed.from.avatar_color.as_deref(),
-                )
-            });
+            let image = self
+                .avatar_file_for(&missed.from.avatar_url)
+                .or_else(|| self.sender_png_for(&missed.from));
             notify::deliver(&notify::Notification {
                 project_id: missed.project_id.clone(),
                 title: missed.from.display_name(),
@@ -4182,10 +4148,24 @@ impl AppState {
         self.person_notification_png(url)
     }
 
-    fn tree_png_for(&self, slug: Option<&str>, color: Option<&str>) -> Option<PathBuf> {
-        let slug = slug?;
-        crate::ui::avatars::notification_png(slug, color)
+    /// A sender's initials disc for a notification banner (no photo case).
+    fn sender_png_for(&self, sender: &Sender) -> Option<PathBuf> {
+        crate::ui::avatars::notification_png(
+            &sender.id,
+            &sender.display_name(),
+            sender.avatar_color_index,
+        )
     }
+}
+
+/// FNV-1a 64 for cache keys.
+pub fn fnv1a64(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
 }
 
 pub fn title_from(text: &str) -> String {

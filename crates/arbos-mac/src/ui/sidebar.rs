@@ -181,7 +181,6 @@ struct RowView {
     time: String,
     person_image: Option<Arc<RenderImage>>,
     guests: people::PeopleWithAvatars,
-    avatar_slug: Option<String>,
     avatar_state: avatars::AvatarState,
 }
 
@@ -206,7 +205,6 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
                 continue;
             }
         }
-        let is_people = p.is_people();
         let streaming = state.project_is_streaming(&p.id);
         let shown_people: Vec<_> = if p.is_guest() {
             p.owner().cloned().into_iter().collect()
@@ -228,11 +226,6 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
                     (person, img)
                 })
                 .collect(),
-            avatar_slug: if is_people {
-                None
-            } else {
-                state.avatar_slug(p)
-            },
             avatar_state: state.avatar_state(&p.id),
             space: p.clone(),
         };
@@ -401,6 +394,7 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
                     role: String::new(),
                     last_seen_at: None,
                     online: false,
+                    avatar_color_index: None,
                 };
                 let img = s.avatar(&a.avatar_url);
                 (who, Some(person), img)
@@ -506,7 +500,6 @@ fn render_row(row: RowView, theme: &Theme, cx: &mut Context<Shell>) -> impl Into
         time,
         person_image,
         guests,
-        avatar_slug,
         avatar_state,
     } = row;
     let id: Id = space.id.clone();
@@ -539,20 +532,11 @@ fn render_row(row: RowView, theme: &Theme, cx: &mut Context<Shell>) -> impl Into
         }
         pic
     } else {
-        let mut pic =
-            div()
-                .relative()
-                .size(px(AVATAR_ROW))
-                .flex_shrink_0()
-                .child(avatars::element(
-                    avatar_slug.as_deref(),
-                    space.avatar_color.as_deref(),
-                    avatar_state,
-                    AVATAR_ROW,
-                    &space.icon,
-                    crate::ui::groups::project_color(&space.color, theme.accent),
-                    theme,
-                ));
+        let mut pic = div()
+            .relative()
+            .size(px(AVATAR_ROW))
+            .flex_shrink_0()
+            .child(avatars::project(&space, AVATAR_ROW, theme));
         if !guests.is_empty() {
             pic = pic.child(
                 div()
