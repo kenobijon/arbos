@@ -822,6 +822,8 @@ final class AppModel: ObservableObject {
                 var p = item.project
                 if let prev = projects.first(where: { $0.id == p.id }) {
                     p.modelNote = prev.modelNote
+                    // A relay without §11 yet: keep the toggle as set here.
+                    if p.visionEnabled == nil { p.visionEnabled = prev.visionEnabled }
                     if p.state == prev.state { p.stateDetail = prev.stateDetail }
                 }
                 newProjects.append(p)
@@ -1530,6 +1532,22 @@ final class AppModel: ObservableObject {
     }
 
     /// Agent profile: rename / recolour a project (`PATCH /projects/{id}`).
+    // MARK: Camera vision (§11)
+
+    func setVision(_ projectId: Id, enabled: Bool) {
+        if let i = projects.firstIndex(where: { $0.id == projectId }) { projects[i].visionEnabled = enabled }
+        guard !isFixture else { return }
+        Task {
+            do {
+                if let kept = try await api.setProjectVision(projectId, enabled: enabled),
+                   let i = projects.firstIndex(where: { $0.id == projectId }) { projects[i].visionEnabled = kept }
+            } catch {
+                notice = Notice(text: "Camera vision: \(error.localizedDescription)")
+                await refreshRegistry()
+            }
+        }
+    }
+
     // MARK: Call voice (§10.3)
 
     @Published private(set) var voiceCatalog: VoiceCatalog?

@@ -494,6 +494,14 @@ final class CallManager: NSObject, ObservableObject {
         if video, AVCaptureDevice.authorizationStatus(for: .video) == .authorized {
             do { try await room.localParticipant.setCamera(enabled: true); cameraOn = true } catch { cameraOn = false }
         }
+        #if DEBUG
+        if DebugHooks.fakeVision {
+            // No camera on the simulator: pretend ours is on and the agent sees it (§11 badge).
+            cameraOn = true
+            agentSeeing = true
+            seeingAgentName = c.agents.first?.displayName ?? "Agent"
+        }
+        #endif
         speakerOn = video
         // Prefer CallKit's didActivate to open the engine; if it has not run yet
         // (slow CXStartCallAction, in-app accept without CallKit, debug join),
@@ -551,6 +559,8 @@ final class CallManager: NSObject, ObservableObject {
         tiles = []
         connectedAt = nil
         cameraOn = false
+        agentSeeing = false
+        seeingAgentName = nil
         muted = false
         anyoneJoined = false
         phase = .idle
@@ -565,13 +575,68 @@ final class CallManager: NSObject, ObservableObject {
 
     func toggleCamera() async {
         if !cameraOn, !(await CallManager.cameraGranted()) { error = "Camera access is off in Settings."; return }
+        let turningOn = !cameraOn
+        if !turningOn {
+            // Off means off at once: the indicator drops now, and the camera track is
+            // unpublished (not just muted) so the agent's vision sampler gets nothing.
+            agentSeeing = false
+            cameraOn = false
+            objectWillChange.send()
+        }
         do {
-            try await room.localParticipant.setCamera(enabled: !cameraOn)
-            cameraOn.toggle()
+            try await room.localParticipant.setCamera(enabled: turningOn)
+            if !turningOn {
+                for pub in room.localParticipant.videoTracks where pub.source == .camera {
+                    if let local = pub as? LocalTrackPublication { try? await room.localParticipant.unpublish(publication: local) }
+                }
+            }
+            cameraOn = turningOn
         } catch {
             self.error = CallManager.describe(error)
         }
         objectWillChange.send()
+    }
+
+    // MARK: Agent camera vision (§11)
+
+    /// The voice worker says the agent is sampling OUR camera: `agent_vision`
+    /// `{participant_identity, seeing}` as a data message (topic `agent_vision`)
+    /// or as the agent participant's `agent_vision` attribute. True only while
+    /// our camera is on; camera off, `seeing:false` or the agent leaving clears it.
+    @Published private(set) var agentSeeing = false
+    /// Which agent reported it (name for the "<Agent> can see" badge).
+    @Published private(set) var seeingAgentName: String?
+
+    private func applyAgentVision(_ obj: Any?, from participant: Participant?) {
+        guard let d = obj as? [String: Any] else { return }
+        let payload = (d["agent_vision"] as? [String: Any]) ?? d
+        guard d["type"] as? String == "agent_vision" || d["agent_vision"] != nil || payload["seeing"] != nil else { return }
+        let target = payload["participant_identity"] as? String
+        let me = room.localParticipant.identity?.stringValue
+        guard target == nil || target == me else { return }
+        let seeing = (payload["seeing"] as? Bool) ?? ((payload["seeing"] as? NSNumber)?.boolValue ?? false)
+        agentSeeing = seeing && cameraOn
+        if seeing {
+            let identity = participant?.identity?.stringValue ?? ""
+            seeingAgentName = (payload["agent_name"] as? String)
+                ?? tiles.first { $0.id == identity }?.person.displayName
+                ?? call?.agents.first?.displayName
+        }
+    }
+
+    fileprivate func handleData(_ data: Data, topic: String, from participant: RemoteParticipant?) {
+        guard topic == "agent_vision" || topic.isEmpty,
+              let obj = try? JSONSerialization.jsonObject(with: data) else { return }
+        applyAgentVision(obj, from: participant)
+    }
+
+    fileprivate func handleAttributes(_ attributes: [String: String], of participant: Participant) {
+        guard let raw = attributes["agent_vision"] else { return }
+        if raw == "true" || raw == "false" {
+            applyAgentVision(["seeing": raw == "true"], from: participant)
+        } else if let data = raw.data(using: .utf8), let obj = try? JSONSerialization.jsonObject(with: data) {
+            applyAgentVision(obj, from: participant)
+        }
     }
 
     func toggleSpeaker() {
@@ -934,7 +999,21 @@ extension CallManager: RoomDelegate {
     }
 
     nonisolated func room(_ room: LiveKit.Room, participantDidDisconnect participant: RemoteParticipant) {
-        Task { @MainActor in self.refreshTiles() }
+        Task { @MainActor in
+            self.refreshTiles()
+            // The agent that was watching left: nothing is seeing us now.
+            if participant.identity?.stringValue.hasPrefix("a_") == true || self.tiles.allSatisfy({ !$0.person.isAgent }) {
+                self.agentSeeing = false
+            }
+        }
+    }
+
+    nonisolated func room(_ room: LiveKit.Room, participant: RemoteParticipant?, didReceiveData data: Data, forTopic topic: String, encryptionType: EncryptionType) {
+        Task { @MainActor in self.handleData(data, topic: topic, from: participant) }
+    }
+
+    nonisolated func room(_ room: LiveKit.Room, participant: Participant, didUpdateAttributes attributes: [String: String]) {
+        Task { @MainActor in self.handleAttributes(attributes, of: participant) }
     }
 
     nonisolated func room(_ room: LiveKit.Room, participant: RemoteParticipant, didSubscribeTrack publication: RemoteTrackPublication) {
