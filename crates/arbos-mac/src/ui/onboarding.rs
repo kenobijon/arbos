@@ -16,7 +16,9 @@ use crate::app::AppState;
 use crate::onboarding::{Onboarding, Stage};
 use crate::ui::motion::PulseClock;
 use crate::ui::shell::Shell;
-use crate::ui::theme::{Theme, BUBBLE_RADIUS, COLUMN_MARGIN, HEADER_HEIGHT, SIDEBAR_WIDTH, TEXT_BODY, TEXT_SMALL};
+use crate::ui::theme::{
+    Theme, BUBBLE_RADIUS, COLUMN_MARGIN, HEADER_HEIGHT, SIDEBAR_WIDTH, TEXT_BODY, TEXT_SMALL,
+};
 use crate::ui::transcript::{ASSISTANT_MAX_WIDTH, COLUMN_MAX_WIDTH};
 
 const CARD_W: f32 = 256.0;
@@ -64,7 +66,9 @@ fn ease(x: f32) -> f32 {
     let mut t = x;
     for _ in 0..10 {
         let cx = 3.0 * x1 * (1.0 - t) * (1.0 - t) * t + 3.0 * x2 * (1.0 - t) * t * t + t * t * t;
-        let dx = 3.0 * (1.0 - t) * (1.0 - t) * x1 + 6.0 * (1.0 - t) * t * (x2 - x1) + 3.0 * t * t * (1.0 - x2);
+        let dx = 3.0 * (1.0 - t) * (1.0 - t) * x1
+            + 6.0 * (1.0 - t) * t * (x2 - x1)
+            + 3.0 * t * t * (1.0 - x2);
         if dx.abs() < 1e-6 {
             break;
         }
@@ -121,7 +125,10 @@ pub fn render(
     let vh = f32::from(viewport.height);
     let card_center = (vw / 2.0, vh * 0.42);
     let loop_rect = Bounds {
-        origin: Point::new(px(card_center.0 - CARD_W / 2.0), px(card_center.1 - CARD_H / 2.0)),
+        origin: Point::new(
+            px(card_center.0 - CARD_W / 2.0),
+            px(card_center.1 - CARD_H / 2.0),
+        ),
         size: gpui::Size {
             width: px(CARD_W),
             height: px(CARD_H),
@@ -140,12 +147,32 @@ pub fn render(
 
     let p = o.finish_progress(now).map(ease);
     let reduce = o.reduce_motion;
-    let morph = if reduce { 0.0 } else { p.map(|p| ramp(p, 0.15, 0.5)).unwrap_or(0.0) };
-    let content_alpha = if reduce { 1.0 } else { p.map(|p| 1.0 - ramp(p, 0.0, 0.25)).unwrap_or(1.0) };
-    let greeting_alpha = if reduce { 0.0 } else { p.map(|p| ramp(p, 0.5, 0.7)).unwrap_or(0.0) };
+    let morph = if reduce {
+        0.0
+    } else {
+        p.map(|p| ramp(p, 0.15, 0.5)).unwrap_or(0.0)
+    };
+    let content_alpha = if reduce {
+        1.0
+    } else {
+        p.map(|p| 1.0 - ramp(p, 0.0, 0.25)).unwrap_or(1.0)
+    };
+    let greeting_alpha = if reduce {
+        0.0
+    } else {
+        p.map(|p| ramp(p, 0.5, 0.7)).unwrap_or(0.0)
+    };
     let page_alpha = p.map(|p| 1.0 - ramp(p, 0.6, 1.0)).unwrap_or(1.0);
-    let whole_alpha = if reduce { p.map(|p| 1.0 - p).unwrap_or(1.0) } else { 1.0 };
-    let t = if reduce { 2.0 } else { now.duration_since(o.started_at).as_secs_f32() };
+    let whole_alpha = if reduce {
+        p.map(|p| 1.0 - p).unwrap_or(1.0)
+    } else {
+        1.0
+    };
+    let t = if reduce {
+        2.0
+    } else {
+        now.duration_since(o.started_at).as_secs_f32()
+    };
     let rect = lerp_bounds(loop_rect, target, morph);
     let radius = CARD_R + (BUBBLE_RADIUS - CARD_R) * morph;
 
@@ -165,7 +192,9 @@ pub fn render(
                 sb.origin.y += px(12.0);
                 sb.size.width -= px(16.0);
                 sb.size.height -= px(8.0);
-                window.paint_quad(fill(sb, alpha(gpui::black(), shadow_alpha)).corner_radii(px(radius)));
+                window.paint_quad(
+                    fill(sb, alpha(gpui::black(), shadow_alpha)).corner_radii(px(radius)),
+                );
             }
             window.paint_quad(fill(rect, alpha(surface, whole_alpha)).corner_radii(px(radius)));
             if content_alpha > 0.0 {
@@ -175,7 +204,15 @@ pub fn render(
                 clip.size.width -= px(8.0);
                 clip.size.height -= px(8.0);
                 window.with_content_mask(Some(gpui::ContentMask { bounds: clip }), |window| {
-                    paint_terminal(window, loop_rect, t, ink, dark, frozen, content_alpha * whole_alpha);
+                    paint_terminal(
+                        window,
+                        loop_rect,
+                        t,
+                        ink,
+                        dark,
+                        frozen,
+                        content_alpha * whole_alpha,
+                    );
                 });
             }
         },
@@ -208,8 +245,16 @@ pub fn render(
 
     if o.stage != Stage::Finishing {
         let since = now.duration_since(o.stage_since).as_secs_f32();
-        let title_alpha = if reduce { 1.0 } else { (since / 0.35).clamp(0.0, 1.0) };
-        let title_dy = if reduce { 0.0 } else { 6.0 * (1.0 - smooth(title_alpha)) };
+        let title_alpha = if reduce {
+            1.0
+        } else {
+            (since / 0.35).clamp(0.0, 1.0)
+        };
+        let title_dy = if reduce {
+            0.0
+        } else {
+            6.0 * (1.0 - smooth(title_alpha))
+        };
         let block_top = card_center.1 + CARD_H / 2.0 + 44.0;
         let mut block = div()
             .absolute()
@@ -292,7 +337,15 @@ pub fn render(
 /// The terminal's bars, prompt and cursor at loop time `t` (same numbers as the
 /// approved Lottie concept `terminal-boot`: 4 s loop, six lines, a new line
 /// every 0.667 s, 24 px pitch, linear typing, fade at the top).
-fn paint_terminal(window: &mut Window, card: Bounds<Pixels>, t: f32, ink: Hsla, dark: bool, frozen: bool, a: f32) {
+fn paint_terminal(
+    window: &mut Window,
+    card: Bounds<Pixels>,
+    t: f32,
+    ink: Hsla,
+    dark: bool,
+    frozen: bool,
+    a: f32,
+) {
     let cx = f32::from(card.origin.x) + CARD_W / 2.0;
     let cy = f32::from(card.origin.y) + CARD_H / 2.0;
     let x0 = -CARD_W / 2.0 + 22.0;
@@ -336,7 +389,9 @@ fn paint_terminal(window: &mut Window, card: Bounds<Pixels>, t: f32, ink: Hsla, 
                     height: px(BAR_H),
                 },
             };
-            window.paint_quad(fill(b, alpha(ink, seg_a * alpha_scale * line_alpha * a)).corner_radii(px(4.0)));
+            window.paint_quad(
+                fill(b, alpha(ink, seg_a * alpha_scale * line_alpha * a)).corner_radii(px(4.0)),
+            );
         }
     }
 
@@ -363,12 +418,17 @@ fn paint_terminal(window: &mut Window, card: Bounds<Pixels>, t: f32, ink: Hsla, 
     let on = frozen || ((t * 2.0) as i32) % 2 == 0;
     if on {
         let b = Bounds {
-            origin: Point::new(px(cx + bar_x + total_a * progress + 6.0 * progress + 4.0), px(cy + slot_y(0) - 7.0)),
+            origin: Point::new(
+                px(cx + bar_x + total_a * progress + 6.0 * progress + 4.0),
+                px(cy + slot_y(0) - 7.0),
+            ),
             size: gpui::Size {
                 width: px(8.0),
                 height: px(14.0),
             },
         };
-        window.paint_quad(fill(b, alpha(ink, if dark { 0.85 } else { 0.7 } * a)).corner_radii(px(2.0)));
+        window.paint_quad(
+            fill(b, alpha(ink, if dark { 0.85 } else { 0.7 } * a)).corner_radii(px(2.0)),
+        );
     }
 }

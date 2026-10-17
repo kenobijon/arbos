@@ -191,7 +191,11 @@ impl AppState {
                         if s.onboarding.is_none() {
                             return false;
                         }
-                        if n % 3 == 0 && s.onboarding.as_ref().is_some_and(|o| !o.demo && o.stage.rank() < 3) {
+                        if n % 3 == 0
+                            && s.onboarding
+                                .as_ref()
+                                .is_some_and(|o| !o.demo && o.stage.rank() < 3)
+                        {
                             s.command(ClientCommand::PollNow);
                         }
                         s.onboarding_tick(cx);
@@ -349,7 +353,10 @@ impl AppState {
         let workspace_fallback = o
             .awake_since
             .is_some_and(|t| now.duration_since(t) > WORKSPACE_FALLBACK);
-        let chat_synced = o.chat_id.as_ref().is_some_and(|c| o.synced_chats.contains(c));
+        let chat_synced = o
+            .chat_id
+            .as_ref()
+            .is_some_and(|c| o.synced_chats.contains(c));
 
         if chat_synced && !o.greeting_written {
             if let Some(chat_id) = o.chat_id.clone() {

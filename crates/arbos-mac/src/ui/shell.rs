@@ -16,7 +16,6 @@ use crate::app::{AppState, DetailsTarget};
 use crate::model::{now_ms, CallKind, Link, MachineState};
 use crate::ui::avatars;
 use crate::ui::callview;
-use crate::ui::onboarding;
 use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
 use crate::ui::composer::{Composer, ComposerEvent, ComposerInput};
 use crate::ui::connectors::{ConnectorsEvent, ConnectorsPanel};
@@ -28,6 +27,7 @@ use crate::ui::header;
 use crate::ui::icons::icon;
 use crate::ui::local::{LocalEvent, LocalPanel};
 use crate::ui::motion::{ease_out_cubic, PulseClock, COMPOSER_DROP_MS, SHAKE_MS};
+use crate::ui::onboarding;
 use crate::ui::people;
 use crate::ui::profiles;
 use crate::ui::routines::{RoutinesEvent, RoutinesPanel};
@@ -2493,7 +2493,13 @@ impl Render for Shell {
         // D82: first sign-in — the terminal screen covers the shell until the
         // computer, agent and first chat exist, then morphs into the greeting.
         if let Some(onboarding) = self.state.read(cx).onboarding.clone() {
-            root = root.child(onboarding::render(self, &self.state, &onboarding, window, cx));
+            root = root.child(onboarding::render(
+                self,
+                &self.state,
+                &onboarding,
+                window,
+                cx,
+            ));
         }
         root.into_any_element()
     }

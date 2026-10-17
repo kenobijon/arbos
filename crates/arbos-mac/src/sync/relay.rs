@@ -1514,7 +1514,9 @@ fn write_greeting(shared: &Arc<Shared>, chat_id: &str, project_id: &str, agent_n
         pending: false,
         parts: vec![Part::Text {
             id: new_id(),
-            text: format!("Hi, I’m {agent_name}. Your computer is ready — what should we build first?"),
+            text: format!(
+                "Hi, I’m {agent_name}. Your computer is ready — what should we build first?"
+            ),
         }],
         hidden_parts: Vec::new(),
         greeting: true,
@@ -2279,7 +2281,10 @@ async fn refresh_machine(shared: &Arc<Shared>) {
         }
         if let Some(spec) = spec_obj {
             m.cpu = spec.get("cpu").and_then(Value::as_u64).map(|v| v as u32);
-            m.mem_gib = spec.get("mem_gib").and_then(Value::as_u64).map(|v| v as u32);
+            m.mem_gib = spec
+                .get("mem_gib")
+                .and_then(Value::as_u64)
+                .map(|v| v as u32);
         }
         if let Some(img) = value
             .pointer("/image/current")
