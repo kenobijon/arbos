@@ -399,20 +399,30 @@ struct UserProfileView: View {
     @State private var sharedProjects: [Project] = []
     @State private var confirmBlock = false
 
+    /// Stable user id: prefer a fresh card, then a handle lookup (agent-owner rows
+    /// sometimes open this page with `id == handle`), then the value we were given.
+    private var peerId: String { fresh?.id ?? model.personId(handle: person.handle) ?? person.id }
+    private var peerHandle: String { fresh?.handle ?? person.handle }
+    private func isPeer(_ m: ChatMember) -> Bool {
+        m.id == peerId || m.id == person.id
+            || m.handle.caseInsensitiveCompare(peerHandle) == .orderedSame
+    }
     private var dm: PeopleChat? {
-        model.peopleChats.first { $0.kind == "dm" && $0.humans.contains { $0.id == person.id } }
+        model.peopleChats.first { $0.kind == "dm" && $0.humans.contains(where: isPeer) }
     }
     @State private var fresh: Person?
     private var status: (text: String, online: Bool) {
-        lastSeenLine(max(fresh?.lastSeenAt ?? 0, person.lastSeenAt ?? 0, model.lastSeen[person.id] ?? 0), online: fresh?.online ?? person.online)
+        lastSeenLine(max(fresh?.lastSeenAt ?? 0, person.lastSeenAt ?? 0, model.lastSeen[peerId] ?? 0), online: fresh?.online ?? person.online)
     }
-    private var isMe: Bool { person.id == model.user?.id }
+    private var isMe: Bool { peerId == model.user?.id || person.id == model.user?.id }
     private var items: [ChatItem] {
         guard let dm else { return [] }
         return ChatMedia.items(messages: model.messages(of: dm.id), slot: "\(peopleSlot):\(dm.id)", model: model)
     }
+    /// People groups we share — same rule as Mac: every non-DM space that lists this person.
+    /// Match by id or handle; `isGroup` covers `kind == group` and multi-human chats whose kind lagged.
     private var sharedGroups: [PeopleChat] {
-        model.peopleChats.filter { $0.kind != "dm" && $0.humans.contains { $0.id == person.id } }
+        model.peopleChats.filter { $0.isGroup && $0.humans.contains(where: isPeer) }
     }
 
     var body: some View {
@@ -456,14 +466,25 @@ struct UserProfileView: View {
         }
         .confirmationDialog("Block @\(person.handle)?", isPresented: $confirmBlock, titleVisibility: .visible) {
             Button("Block", role: .destructive) {
-                if let m = dm?.humans.first(where: { $0.id == person.id }) { model.block(m) } else { model.block(handle: person.handle) }
+                if let m = dm?.humans.first(where: isPeer) { model.block(m) } else { model.block(handle: peerHandle) }
                 dismiss()
             }
         } message: { Text("They cannot message you or add you to chats.") }
         .task {
             muted = dm?.muted ?? false
-            fresh = await model.fetchUser(person.id)
-            sharedProjects = await model.sharedProjects(with: person)
+            await model.refreshPeople()
+            let id = model.personId(handle: person.handle) ?? person.id
+            fresh = await model.fetchUser(id)
+            let who = ProfilePerson(
+                id: fresh?.id ?? id,
+                handle: fresh?.handle ?? person.handle,
+                name: fresh?.name ?? person.name,
+                avatarUrl: fresh?.avatarUrl ?? person.avatarUrl,
+                lastSeenAt: fresh?.lastSeenAt ?? person.lastSeenAt,
+                online: fresh?.online ?? person.online,
+                avatarColorIndex: fresh?.avatarColorIndex ?? person.avatarColorIndex
+            )
+            sharedProjects = await model.sharedProjects(with: who)
         }
     }
 
