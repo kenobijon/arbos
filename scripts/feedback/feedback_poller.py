@@ -1607,7 +1607,7 @@ class Loop:
             # image: landed, not shipped, until watch_deploys sees a deployed sha that contains it.
             st["pending_deploy"] = kind
             self.store.save_state(fid, st)
-            self.store.event(fid, "landed_not_shipped", kind=kind, commit=st.get("commit"), issue=st.get("issue_url"))
+            self.store.event(fid, "landed_not_shipped", deploy=kind, commit=st.get("commit"), issue=st.get("issue_url"))
             where = {"voice": "the voice pod (voice-calls worker deploys it)", "agentd": "the sandbox image (next image roll)"}[kind]
             self.gh.ensure_label("landed-not-shipped", "FBCA04", "Fix is on main but not yet in a TestFlight build / release / fleet image")
             self.gh.comment(st["issue"], f"Landed, not shipped: the fix is on `main` ({', '.join(parts) or 'CI green'}) but this code runs on "
@@ -1686,7 +1686,7 @@ class Loop:
         kind = st.pop("pending_deploy", None)
         st["deployed_note"] = note
         self.store.save_state(fid, st)
-        self.store.event(fid, "deployed", kind=kind, note=note)
+        self.store.event(fid, "deployed", deploy=kind, note=note)
         if st.get("issue"):
             unverified = st.get("device_evidence") == "pending"
             self.gh.comment(st["issue"], f"Shipped — live for users: {note}." + (
