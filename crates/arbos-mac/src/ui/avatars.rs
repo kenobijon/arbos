@@ -162,7 +162,10 @@ pub fn element(seed: &str, name: &str, index: Option<u8>, size: f32, theme: &The
             linear_color_stop(bottom, 1.0),
         ))
         .text_size(px(font))
-        .line_height(px(font * 1.1))
+        // A tight line box: with the 1.1× box GPUI centred, SF's ascent pushed
+        // the caps ~0.75 pt below the disc centre (parity pass, Telegram ≈ 0.17 pt).
+        .line_height(px(font))
+        .pb(px(size * 0.02))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(gpui::white())
         .child(text)
