@@ -599,11 +599,13 @@ fn render_row(row: RowView, theme: &Theme, cx: &mut Context<Shell>) -> impl Into
         } else {
             gpui::transparent_black()
         })
+        // Hover is a lighter tint of the selected fill in both modes (in light,
+        // the old white hover read brighter than the selected row).
         .hover(|s| {
             s.bg(if selected {
                 theme.surface_2
             } else {
-                theme.surface_1
+                Theme::with_alpha(theme.surface_2, 0.55)
             })
         })
         .cursor_pointer()
