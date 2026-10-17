@@ -1,5 +1,5 @@
 //! The composer, Grok Bot layout: a "+" circle for attachments, the pill
-//! field ("Ask <name>") with the hold-to-talk mic, and the round white button
+//! field ("Message <name>") with the hold-to-talk mic, and the round white button
 //! that sends text, stops a running turn, or starts a voice call when empty.
 //! Hand-rolled multi-line text input with IME (`EntityInputHandler`,
 //! zeron-study §4.6). Enter sends, Shift+Enter inserts a newline. The model
@@ -1360,8 +1360,8 @@ impl Render for Composer {
                 ComposerMode::Approve => "Approve or reject the card above".to_string(),
                 ComposerMode::Send if transcribing => "Transcribing…".to_string(),
                 ComposerMode::Send if voice_mode => "Speak or type…".to_string(),
-                ComposerMode::Send if name.starts_with('@') => format!("Message {name}"),
-                ComposerMode::Send => format!("Ask {name}"),
+                // Grok Mac says "Message <bot>" (the iPhone says "Ask <bot>").
+                ComposerMode::Send => format!("Message {name}"),
             });
         });
 
@@ -1425,7 +1425,8 @@ impl Render for Composer {
                 ButtonAction::Call => this.voice.update(cx, |v, cx| v.toggle_call(cx)),
             }));
 
-        // Hold to record a voice memo, or click to toggle recording.
+        // Hold to record a voice memo, or click to toggle recording. Idle it is
+        // Grok Mac's filled round mic (black on light, white on dark).
         let mic_button = div()
             .id("composer-mic")
             .size(px(SEND_BUTTON))
@@ -1435,8 +1436,14 @@ impl Render for Composer {
             .items_center()
             .justify_center()
             .cursor_pointer()
-            .when(recording, |el| el.bg(theme.danger_soft))
-            .hover(|s| s.bg(theme.surface_2))
+            .bg(if recording {
+                theme.danger_soft
+            } else if transcribing {
+                theme.surface_2
+            } else {
+                theme.primary
+            })
+            .hover(|s| s.opacity(0.88))
             .child(icon(
                 if recording { "stop" } else { "mic" },
                 16.0,
@@ -1445,7 +1452,7 @@ impl Render for Composer {
                 } else if transcribing {
                     theme.text_faint
                 } else {
-                    theme.text_muted
+                    theme.on_primary
                 },
             ))
             .on_mouse_down(
@@ -1477,8 +1484,8 @@ impl Render for Composer {
             .items_center()
             .justify_center()
             .cursor_pointer()
-            .hover(|s| s.bg(theme.bubble))
-            .child(icon("plus", 16.0, theme.text))
+            .hover(|s| s.bg(theme.border_strong))
+            .child(icon("plus", 16.0, theme.text_muted))
             .on_click(cx.listener(|this, _, _, cx| this.attach(cx)));
 
         let field_body = if recording {
