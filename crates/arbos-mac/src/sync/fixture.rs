@@ -294,7 +294,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         // Calls v1 against a local `livekit-server --dev` (devkey/secret):
         // the fixture mints the join token itself.
         ClientCommand::StartCall { chat_id, kind } => {
-            let call = fixture_call(&chat_id, kind);
+            let call = fixture_call(shared, &chat_id, kind);
             let _ = shared.events.send(SyncEvent::CallReady {
                 call: call.clone(),
                 created: true,
@@ -316,7 +316,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 .unwrap_or(DM_SAM)
                 .to_string();
             let _ = shared.events.send(SyncEvent::CallReady {
-                call: fixture_call(&chat_id, CallKind::Video),
+                call: fixture_call(shared, &chat_id, CallKind::Video),
                 created: false,
                 reachable: Vec::new(),
             });
@@ -341,7 +341,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 .strip_prefix("call_fixture_")
                 .unwrap_or(DM_SAM)
                 .to_string();
-            let mut call = fixture_call(&chat_id, CallKind::Voice);
+            let mut call = fixture_call(shared, &chat_id, CallKind::Voice);
             call.token = None;
             let _ = shared.events.send(SyncEvent::CallInfo(call));
         }
@@ -4807,17 +4807,28 @@ fn sender_of(p: &Person) -> Sender {
 
 /// `ARBOS_FIXTURE_LIVEKIT_URL` (default the dev server), identity
 /// `ARBOS_FIXTURE_IDENTITY` (so two fixture instances can share a room).
-fn fixture_call(chat_id: &str, kind: CallKind) -> Call {
+fn fixture_call(shared: &Arc<Shared>, chat_id: &str, kind: CallKind) -> Call {
     let url =
         std::env::var("ARBOS_FIXTURE_LIVEKIT_URL").unwrap_or_else(|_| "ws://127.0.0.1:7880".into());
     let identity = std::env::var("ARBOS_FIXTURE_IDENTITY").unwrap_or_else(|_| format!("u_{ME_ID}"));
     let me = me();
     let room = format!("call_fixture_{chat_id}");
     let metadata = serde_json::to_string(&sender_of(&me)).unwrap_or_default();
+    // An agent chat's call belongs to its project (the §11 badge names the
+    // agent from it); people chats stay in the `people` space.
+    let project_id = shared
+        .chats
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|c| c.id == chat_id)
+        .map(|c| c.project_id.clone())
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| "people".into());
     Call {
         call_id: room.clone(),
         chat_id: chat_id.to_string(),
-        project_id: "people".into(),
+        project_id,
         kind,
         room: room.clone(),
         livekit_url: url,
