@@ -1831,6 +1831,8 @@ def tester_summary(store: Store) -> list[dict]:
         status = st.get("status", "?")
         if status == "shipped" and st.get("pending_deploy"):
             row["other"]["landed-not-shipped"] = row["other"].get("landed-not-shipped", 0) + 1
+        elif status == "shipped" and st.get("superseded"):
+            row["other"]["superseded"] = row["other"].get("superseded", 0) + 1
         elif status == "shipped":
             if st.get("device_evidence") == "pending":
                 row["shipped_unverified"] += 1
