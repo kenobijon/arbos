@@ -1140,6 +1140,10 @@ pub async fn agent_add(
     {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
     }
+    // Same as adding a person: a DM with an agent is a group (header, members, profile).
+    if cm.chat.kind == "dm" {
+        let _ = state.db.set_people_chat_kind(&id, "group");
+    }
     let _ = state
         .db
         .enqueue_push(&project.id, "people_agent_added", &json!({ "chat_id": id }));
