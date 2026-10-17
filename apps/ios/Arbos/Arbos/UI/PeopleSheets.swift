@@ -18,6 +18,8 @@ struct NewChatSheet: View {
     @State private var searching = false
     @State private var opening = false
     @State private var loadingDirectory = false
+    /// `ARBOS_SHOW=newagent` lands on the New agent page (screenshot rig).
+    @State private var showNewAgent = DebugHooks.show == "newagent"
     @FocusState private var focused: Bool
 
     private var trimmed: String {
@@ -112,6 +114,7 @@ struct NewChatSheet: View {
             .background(theme.bg)
             .navigationTitle("New Message")
             .navigationBarTitleDisplayMode(.inline)
+            .navigationDestination(isPresented: $showNewAgent) { NewAgentView(onDone: { dismiss() }) }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) { Button("Cancel") { dismiss() }.foregroundStyle(theme.text) }
             }

@@ -326,7 +326,7 @@ struct HomeView: View {
             }
         }
         .onAppear {
-            if DebugHooks.show == "newchat", DebugHooks.openProject == nil {
+            if DebugHooks.show == "newchat" || DebugHooks.show == "newagent", DebugHooks.openProject == nil {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showNewChat = true }
             }
             if DebugHooks.show == "hidden", DebugHooks.openProject == nil {
