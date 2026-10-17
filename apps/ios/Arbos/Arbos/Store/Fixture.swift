@@ -174,8 +174,8 @@ extension AppModel {
         Task { await fixtureReply(chatId: chatId) }
     }
 
-    /// Grok Bot reply flow: an ack bubble at once, a working line that names
-    /// the current activity, a milestone bubble, then the result bubble.
+    /// Grok Bot reply flow for a cloning exercise: one short ack, a working
+    /// line, then a conversational result — no thoughts, no milestone boilerplate.
     private func fixtureReply(chatId: Id) async {
         func append(_ m: Message) { messages[chatId, default: []].append(m) }
         func replace(_ m: Message) { if let i = messages[chatId]?.firstIndex(where: { $0.id == m.id }) { messages[chatId]?[i] = m } }
@@ -188,37 +188,44 @@ extension AppModel {
         let request = messages[chatId]?.last(where: { $0.role == .user })?.plainText.lowercased() ?? ""
         let clone = request.contains("pull") || request.contains("clone") || request.contains("subtensor")
         try? await Task.sleep(nanoseconds: 900_000_000)
-        // 1. Ack.
-        append(bubble(clone ? "On it — pulling RaoFoundation/subtensor into your project folder." : "On it."))
-        // 2. Working, with the activity the harness reports.
+        // 1. Ack — one short present-tense sentence, nothing else.
+        append(bubble(clone ? "Cloning it now." : "On it."))
+        // 2. Working line only (no milestone bubble for a quick clone).
         let workId = newId()
         var work = Message(id: workId, chatId: chatId, role: .assistant, sender: "agent", status: .streaming, turn: .act, decision: nil,
                            subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: nowMs(),
                            completedAt: nil, pending: false, parts: [.status(id: "\(workId)-s", code: .working, message: "Working")], hiddenCount: 0)
         append(work)
         let steps = clone
-            ? ["Cloning RaoFoundation/subtensor", "Checking out main", "Reading the latest commit"]
+            ? ["Cloning RaoFoundation/subtensor"]
             : ["Reading your Discord style", "Drafting the rewrite rule"]
         for step in steps {
-            try? await Task.sleep(nanoseconds: 1_600_000_000)
+            try? await Task.sleep(nanoseconds: clone ? 2_200_000_000 : 1_600_000_000)
             work.activity = step
             replace(work)
         }
-        try? await Task.sleep(nanoseconds: 1_400_000_000)
-        // 3. Milestone bubble: the working row becomes a short progress note.
-        work.activity = nil
-        work.status = .done
-        work.completedAt = nowMs()
-        work.parts = [.text(id: "\(workId)-t", text: clone ? "Cloned — shallow, `main`, 1 commit. Reading it now." : "Got your style from 40 recent messages.")]
-        replace(work)
-        // 4. Result, streamed.
+        try? await Task.sleep(nanoseconds: clone ? 800_000_000 : 1_400_000_000)
+        if clone {
+            // Quick clone: drop the working row; result is the only follow-up.
+            if let i = messages[chatId]?.firstIndex(where: { $0.id == workId }) {
+                messages[chatId]?.remove(at: i)
+            }
+        } else {
+            // Longer act: working row becomes a short progress note.
+            work.activity = nil
+            work.status = .done
+            work.completedAt = nowMs()
+            work.parts = [.text(id: "\(workId)-t", text: "Got your style from 40 recent messages.")]
+            replace(work)
+        }
+        // 3. Result, streamed — clone stays short and conversational.
         let resultText = clone
-            ? "The RaoFoundation/subtensor repo is in your project folder at `subtensor/`, on `main`. Latest commit: \"etao: per-subnet emission weights (spec 480)\". Shallow clone to keep it quick — say the word if you need the full history."
+            ? "Got `subtensor/` on main. What do you want to do with it?"
             : "Done. Short replies from now on, and I'll keep anything that goes out on Discord to one or two casual lines in your voice."
         var result = bubble("", done: false)
         result.parts = [.status(id: "\(result.id)-s", code: .working, message: "Working")]
         append(result)
-        try? await Task.sleep(nanoseconds: 700_000_000)
+        try? await Task.sleep(nanoseconds: clone ? 500_000_000 : 700_000_000)
         var text = ""
         for w in resultText.split(separator: " ") {
             text += (text.isEmpty ? "" : " ") + w

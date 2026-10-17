@@ -9,7 +9,8 @@ export const ROUTE_PARAMS = Type.Object(
     action: Type.Union([Type.Literal("reply"), Type.Literal("act"), Type.Literal("wake"), Type.Literal("new")]),
     ack: Type.Optional(
       Type.Union([Type.String(), Type.Null()], {
-        description: "act/new/wake: one short sentence to the user saying what you are about to do (shown at once, before any tool runs). Not for reply.",
+        description:
+          "act/new/wake: one short user-facing sentence saying what you are about to do (shown at once, before any tool runs). No thinking aloud. Not for reply.",
       }),
     ),
     subagent_id: Type.Optional(Type.Union([Type.String(), Type.Null()], { description: "wake: which subagent" })),
