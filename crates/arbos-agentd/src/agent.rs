@@ -2885,6 +2885,9 @@ impl Agent {
                     ),
                     ("escalated_from_act", json!(escalated)),
                     ("model", json!(subagent_model)),
+                    // Messages exchanged with the subagent so far: the brief now, the
+                    // result later (clients say "Messaged X" / "N messages with X").
+                    ("handoffMessages", json!(1)),
                 ],
             );
         }
@@ -3336,6 +3339,11 @@ impl Agent {
         drop(_box_slot);
         drop(_slot);
         // The user hears about it from the main agent, in prose, in this chat.
+        {
+            let mut h = host.lock().await;
+            h.doc
+                .set_message_fields(&msg_id, &[("handoffMessages", json!(2))]);
+        }
         let result_text = match &contract {
             Some(c) => format!("{text}\n\nParsed return contract:\n{c}"),
             None => text.clone(),
