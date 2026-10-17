@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -894,7 +895,7 @@ async def entrypoint(ctx: JobContext) -> None:
         await call.run()
 
 
-async def hello_relay() -> None:
+async def hello_relay() -> bool:
     """Tell the relay which build is running (`voice.worker_sha` in GET /admin/calls)."""
     try:
         async with aiohttp.ClientSession() as http:
@@ -902,8 +903,27 @@ async def hello_relay() -> None:
                 "POST", "/voice/worker/hello", {"sha": WORKER_SHA, "version": __version__, "model": CONFIG.model}, timeout=5.0
             )
         log.info("relay told: worker sha=%s version=%s", WORKER_SHA, __version__)
+        return True
     except Exception as e:
         log.warning("relay hello failed: %s", e)
+        return False
+
+
+HELLO_EVERY_S = 300.0
+HELLO_RETRY_S = 30.0
+
+
+def start_hello_heartbeat() -> None:
+    """Re-send the hello every 5 min (30 s after a failure) from a side thread, so a relay
+    restart never leaves `voice.worker` blank. The worker has no persistent relay connection;
+    the heartbeat is the reconnect."""
+
+    async def loop() -> None:
+        while True:
+            ok = await hello_relay()
+            await asyncio.sleep(HELLO_EVERY_S if ok else HELLO_RETRY_S)
+
+    threading.Thread(target=lambda: asyncio.run(loop()), name="relay-hello", daemon=True).start()
 
 
 def main() -> None:
@@ -917,7 +937,7 @@ def main() -> None:
         log.error("missing configuration: %s", ", ".join(missing))
         raise SystemExit(2)
     if len(sys.argv) > 1 and sys.argv[1] in ("start", "dev"):
-        asyncio.run(hello_relay())
+        start_hello_heartbeat()
     cli.run_app(
         WorkerOptions(
             entrypoint_fnc=entrypoint,

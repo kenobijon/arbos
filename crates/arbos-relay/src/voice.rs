@@ -1059,6 +1059,7 @@ pub async fn worker_hello(
         "sha": b["sha"], "version": b["version"], "model": b["model"], "hello_at": now_ms(),
     });
     tracing::info!(sha = %b["sha"], version = %b["version"], "voice worker hello");
+    let _ = state.db.set_voice_worker(&info);
     *state.voice_worker.lock().await = Some(info.clone());
     Json(info).into_response()
 }
@@ -1088,11 +1089,13 @@ pub fn admin_json(state: &AppState) -> Value {
             })
         })
         .collect();
+    // Memory first, else the last hello persisted before a relay restart.
     let worker = state
         .voice_worker
         .try_lock()
         .ok()
         .and_then(|w| w.clone())
+        .or_else(|| state.db.voice_worker().ok().flatten())
         .unwrap_or(Value::Null);
     json!({
         "enabled": state.voice.enabled && state.livekit.is_some(),
