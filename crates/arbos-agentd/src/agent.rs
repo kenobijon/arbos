@@ -2471,6 +2471,11 @@ impl Agent {
     // ---- hooks called by arbos-pi-ext ---------------------------------------------------------
 
     /// `/hook/route`: validate; one retry; a second failure is treated as `reply` (design §6.2).
+    ///
+    /// For `act` / `new` / `wake`, the ack bubble must land here — not only from streamed
+    /// tool-arg deltas. Many providers deliver the full `route` arguments only when the
+    /// tool runs, so `ToolcallDelta` never feeds `ack_extractor`; without this, the chat
+    /// shows a bare "Working…" line until the result (agent-flow contract §1).
     pub async fn hook_route(&self, args: &Value) -> Result<(), String> {
         let mut tl = self.turn.lock().await;
         let Some(t) = tl.as_mut() else {
@@ -2479,21 +2484,32 @@ impl Agent {
         t.route_attempts += 1;
         match validate(args) {
             Ok(r) => {
-                tracing::info!(
-                    route = route_name(&r),
-                    attempt = t.route_attempts,
-                    "route accepted"
-                );
+                let action = route_name(&r);
+                tracing::info!(route = action, attempt = t.route_attempts, "route accepted");
                 let _ = self.store.t3_append(
                     &t.chat_id,
                     None,
                     Some(&t.chat_id),
                     "route",
                     Some("system"),
-                    &format!("route {}: {}", route_name(&r), args),
+                    &format!("route {action}: {args}"),
                     None,
                 );
                 t.route = Some(r);
+                if action != "reply" {
+                    if let Some(host) = self.sync.host(&t.chat_id).await {
+                        if t.ack_text.trim().is_empty() {
+                            let ack = args
+                                .get("ack")
+                                .and_then(Value::as_str)
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or("On it.");
+                            self.write_ack(&host, t, ack).await;
+                        }
+                        self.maybe_split_ack(&host, t, true).await;
+                    }
+                }
                 Ok(())
             }
             Err(e) => {
