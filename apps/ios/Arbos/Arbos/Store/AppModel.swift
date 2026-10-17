@@ -1327,17 +1327,29 @@ final class AppModel: ObservableObject {
     }
 
     /// Start Google OAuth in Safari; the relay finishes the callback, then we poll.
+    /// Busy clears as soon as Safari opens so Connect is not stuck disabled while the
+    /// user is signing in. Errors go through `notice` — Settings shows them itself
+    /// (the root alert sits under the sheet and looks like a silent fail).
     func connectConnector(provider: String) {
         guard !connectorsBusy, credentials != nil, !isFixture else { return }
         connectorsBusy = true
-        Task {
-            defer { connectorsBusy = false }
+        Task { @MainActor in
             do {
-                if let urlStr = try await api.connectConnector(provider: provider),
-                   let url = URL(string: urlStr) {
-                    await UIApplication.shared.open(url)
+                guard let urlStr = try await api.connectConnector(provider: provider),
+                      let url = URL(string: urlStr) else {
+                    connectorsBusy = false
+                    notice = Notice(text: "Connect \(provider): the relay sent no sign-in URL")
+                    await refreshConnectorsOnce()
+                    return
                 }
-                for wait in [0, 4, 8, 15, 30] as [UInt64] {
+                let opened = await UIApplication.shared.open(url)
+                connectorsBusy = false
+                guard opened else {
+                    notice = Notice(text: "Connect \(provider): could not open the sign-in page")
+                    return
+                }
+                // Match Mac: keep polling after the user returns from Safari.
+                for wait in [0, 4, 8, 15, 30, 60] as [UInt64] {
                     if wait > 0 { try? await Task.sleep(nanoseconds: wait * 1_000_000_000) }
                     do {
                         connectors = try await api.connectors()
@@ -1345,6 +1357,7 @@ final class AppModel: ObservableObject {
                     if connectors.connector(for: provider)?.status == .connected { break }
                 }
             } catch {
+                connectorsBusy = false
                 notice = Notice(text: "Connect \(provider): \(error.localizedDescription)")
                 await refreshConnectorsOnce()
             }
