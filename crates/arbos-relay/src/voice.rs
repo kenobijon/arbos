@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use futures::{SinkExt, StreamExt};
@@ -66,6 +66,11 @@ pub struct VoiceCfg {
     pub enabled: bool,
     /// Speech model the worker is expected to use (for the admin view and the docs).
     pub model: String,
+    /// Directory with `voices.json` and `<id>.mp3` samples (`ARBOS_VOICES_DIR`, default
+    /// `<data>/voices`), made once by `voice/tools/make_voice_samples.py`.
+    pub voices_dir: std::path::PathBuf,
+    /// Voice used when a project has none (`ARBOS_VOICE_VOICE`, default `marin`).
+    pub default_voice: String,
 }
 
 impl Default for VoiceCfg {
@@ -76,6 +81,8 @@ impl Default for VoiceCfg {
             call_cap_usd: 1.5,
             enabled: true,
             model: "gpt-realtime-2.1".to_owned(),
+            voices_dir: std::path::PathBuf::from("voices"),
+            default_voice: "marin".to_owned(),
         }
     }
 }
@@ -88,9 +95,18 @@ fn env_f64(k: &str, default: f64) -> f64 {
         .unwrap_or(default)
 }
 
-pub fn cfg_from_env() -> VoiceCfg {
+pub fn cfg_from_env(data_dir: &std::path::Path) -> VoiceCfg {
     let d = VoiceCfg::default();
     let cfg = VoiceCfg {
+        voices_dir: std::env::var("ARBOS_VOICES_DIR")
+            .ok()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| data_dir.join("voices")),
+        default_voice: std::env::var("ARBOS_VOICE_VOICE")
+            .ok()
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty())
+            .unwrap_or(d.default_voice),
         agent_name: std::env::var("ARBOS_VOICE_AGENT_NAME")
             .ok()
             .map(|v| v.trim().to_owned())
@@ -109,9 +125,95 @@ pub fn cfg_from_env() -> VoiceCfg {
     };
     tracing::info!(
         agent = %cfg.agent_name, model = %cfg.model, daily_cap = cfg.daily_cap_usd,
-        call_cap = cfg.call_cap_usd, enabled = cfg.enabled, "agent voice calls"
+        call_cap = cfg.call_cap_usd, enabled = cfg.enabled, voices = %cfg.voices_dir.display(),
+        default_voice = %cfg.default_voice, "agent voice calls"
     );
     cfg
+}
+
+// ---- voices catalogue ---------------------------------------------------------------------------
+
+/// `voices.json` as written by `voice/tools/make_voice_samples.py`: `{ default, voices: [{id, name,
+/// description, seconds, line, model}] }`. Read on every call (it is tiny and changes only on deploy).
+pub fn voice_catalogue(state: &AppState) -> Vec<Value> {
+    let path = state.voice.voices_dir.join("voices.json");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&text) else {
+        return Vec::new();
+    };
+    v["voices"].as_array().cloned().unwrap_or_default()
+}
+
+/// Is `id` a voice the catalogue offers?
+pub fn valid_voice(state: &AppState, id: &str) -> bool {
+    voice_catalogue(state)
+        .iter()
+        .any(|v| v["id"].as_str() == Some(id))
+}
+
+/// The voice the worker should use for a project: its own choice or the relay default.
+pub fn voice_for(state: &AppState, project_id: &str) -> String {
+    state
+        .db
+        .voice_agent_settings(project_id)
+        .ok()
+        .and_then(|s| s.voice)
+        .filter(|v| valid_voice(state, v))
+        .unwrap_or_else(|| state.voice.default_voice.clone())
+}
+
+/// `GET /voices` (no auth) → `{ default, voices: [{ id, name, description, seconds, sample_url }] }`.
+pub async fn list_voices(State(state): State<AppState>) -> Response {
+    let base = state.cfg.public_url.trim_end_matches('/');
+    let voices: Vec<Value> = voice_catalogue(&state)
+        .into_iter()
+        .map(|v| {
+            let id = v["id"].as_str().unwrap_or_default().to_owned();
+            json!({
+                "id": id, "name": v["name"], "description": v["description"], "seconds": v["seconds"],
+                "sample_url": format!("{base}/voices/{id}/sample.mp3"),
+            })
+        })
+        .collect();
+    let mut resp =
+        Json(json!({ "default": state.voice.default_voice, "voices": voices })).into_response();
+    resp.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=3600"),
+    );
+    resp
+}
+
+/// `GET /voices/{id}/sample.mp3` (no auth): the pre-made sample, cached for a year.
+pub async fn voice_sample(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        || !valid_voice(&state, &id)
+    {
+        return api_error(StatusCode::NOT_FOUND, "not_found", "no such voice");
+    }
+    let path = state.voice.voices_dir.join(format!("{id}.mp3"));
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => (
+            [
+                (header::CONTENT_TYPE, HeaderValue::from_static("audio/mpeg")),
+                (
+                    header::CACHE_CONTROL,
+                    HeaderValue::from_static("public, max-age=31536000, immutable"),
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(_) => api_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no sample for this voice",
+        ),
+    }
 }
 
 // ---- box link ------------------------------------------------------------------------------------
@@ -376,6 +478,7 @@ async fn dispatch_missing(state: &AppState, call: &CallRow) -> Vec<Value> {
             "identity": agent_identity(&project.id),
             "chattiness": settings.as_ref().map(|s| s.chattiness.clone()).unwrap_or_else(|| "balanced".to_owned()),
             "wake_name": settings.and_then(|s| s.wake_name),
+            "voice": voice_for(state, &project.id),
             "started_at": call.started_at,
         });
         match lk
@@ -535,8 +638,8 @@ pub async fn call_info(
     let settings = state
         .db
         .voice_agent_settings(&project.id)
-        .map(|s| json!({ "chattiness": s.chattiness, "wake_name": s.wake_name }))
-        .unwrap_or_else(|_| json!({ "chattiness": "balanced", "wake_name": null }));
+        .map(|s| json!({ "chattiness": s.chattiness, "wake_name": s.wake_name, "voice": voice_for(&state, &project.id) }))
+        .unwrap_or_else(|_| json!({ "chattiness": "balanced", "wake_name": null, "voice": state.voice.default_voice }));
     let online = box_online(&state, &project.user_id).await;
     let context = if online {
         box_request(
@@ -838,7 +941,7 @@ where
 }
 
 fn settings_json(s: &crate::db_voice::VoiceAgentSettings) -> Value {
-    json!({ "project_id": s.project_id, "chattiness": s.chattiness, "wake_name": s.wake_name, "levels": CHATTINESS_LEVELS })
+    json!({ "project_id": s.project_id, "chattiness": s.chattiness, "wake_name": s.wake_name, "voice": s.voice, "levels": CHATTINESS_LEVELS })
 }
 
 /// `GET /projects/{id}/voice` → `{ chattiness, wake_name }` (owner, guests, the box, the admin).
@@ -971,6 +1074,8 @@ pub fn admin_json(state: &AppState) -> Value {
         "enabled": state.voice.enabled && state.livekit.is_some(),
         "agent_name": state.voice.agent_name,
         "model": state.voice.model,
+        "default_voice": state.voice.default_voice,
+        "voices": voice_catalogue(state).len(),
         "daily_cap_usd": state.voice.daily_cap_usd,
         "call_cap_usd": state.voice.call_cap_usd,
         "call_max_minutes": CALL_MAX_MINUTES,

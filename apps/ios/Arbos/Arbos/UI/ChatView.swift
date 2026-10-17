@@ -1,7 +1,7 @@
 // One conversation, Grok Bot layout: floating glass header (back circle,
 // avatar + name pill, "…" circle), messages scrolling underneath with a top
 // fade, "<Project> is working" while a turn runs, and the composer ("+",
-// "Ask <Project>" field with mic, white voice button) floating above the
+// "Ask <Project>" field with mic, white call button) floating above the
 // keyboard.
 
 import PhotosUI
@@ -1032,7 +1032,8 @@ struct ChatView: View {
             }
             // While recording: tap send also finishes (same as release). Otherwise
             // Grok keeps the composer usable while the bot works: text sends, an
-            // empty field starts a voice call with the agent. Stop lives in the … menu.
+            // empty field starts a voice call with the agent (phone icon next to mic).
+            // Stop lives in the … menu.
             Button(action: {
                 if recorder.recording {
                     memoHoldActive = false
@@ -1050,12 +1051,13 @@ struct ChatView: View {
                     .fill(theme.primary)
                     .frame(width: Theme.voiceButton, height: Theme.voiceButton)
                     .overlay(
-                        Image(systemName: (canSend || recorder.recording) ? "arrow.up" : "waveform")
+                        Image(systemName: (canSend || recorder.recording) ? "arrow.up" : "phone.fill")
                             .font(.system(size: 16, weight: .bold))
                             .foregroundStyle(theme.onPrimary)
                     )
             }
             .buttonStyle(.plain)
+            .accessibilityLabel((canSend || recorder.recording) ? "Send" : "Call")
             .padding(.trailing, 3)
         }
         // Hard max so a TextField layout glitch cannot paint over the transcript.

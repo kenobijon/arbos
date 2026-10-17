@@ -485,6 +485,7 @@ impl Db {
         c.execute_batch(crate::db_calls::CALLS_SCHEMA)?;
         crate::db_calls::migrate_calls(&c);
         c.execute_batch(crate::db_voice::VOICE_SCHEMA)?;
+        crate::db_voice::migrate_voice(&c);
         Ok(Self(Arc::new(Mutex::new(c))))
     }
 
