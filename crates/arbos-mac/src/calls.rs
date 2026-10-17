@@ -69,11 +69,13 @@ pub enum CallEvent {
     },
     /// Who is talking right now.
     Speaking(Vec<String>),
-    /// Agent vision (voice API §11): the voice worker is (not) sampling
-    /// `identity`'s camera into the model.
+    /// Agent vision (voice API §11): the voice worker is (not) sampling a
+    /// participant's camera. `identity` is the one the message is about;
+    /// `seeing_identities` is the full set (late joiners read the attribute).
     AgentVision {
         identity: String,
         seeing: bool,
+        seeing_identities: Vec<String>,
     },
     /// A remote mic was muted / unmuted.
     RemoteMuted {
@@ -504,13 +506,22 @@ async fn stop_camera(room: &Room, c: CameraPublish) {
         .await;
 }
 
-/// `{"agent_vision": {"participant_identity": "...", "seeing": true}}` or the
-/// bare `{"participant_identity", "seeing"}` object → [`CallEvent::AgentVision`].
+/// §11: `{"type":"agent_vision","participant_identity":"u_…","seeing":bool,
+/// "agent_name":…,"agent":"a_…","seeing_identities":[…]}` — the data message
+/// (topic `agent_vision`) and the agent participant's `agent_vision`
+/// attribute carry the same JSON → [`CallEvent::AgentVision`].
 fn emit_agent_vision(events: &mpsc::UnboundedSender<CallEvent>, raw: &str) {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else {
         return;
     };
     let inner = v.get("agent_vision").unwrap_or(&v);
+    if inner
+        .get("type")
+        .and_then(|t| t.as_str())
+        .is_some_and(|t| t != "agent_vision")
+    {
+        return;
+    }
     let identity = inner
         .get("participant_identity")
         .or_else(|| inner.get("identity"))
@@ -521,10 +532,23 @@ fn emit_agent_vision(events: &mpsc::UnboundedSender<CallEvent>, raw: &str) {
         .get("seeing")
         .and_then(|x| x.as_bool())
         .unwrap_or(false);
-    if identity.is_empty() {
+    let seeing_identities: Vec<String> = inner
+        .get("seeing_identities")
+        .and_then(|x| x.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    if identity.is_empty() && seeing_identities.is_empty() {
         return;
     }
-    let _ = events.send(CallEvent::AgentVision { identity, seeing });
+    let _ = events.send(CallEvent::AgentVision {
+        identity,
+        seeing,
+        seeing_identities,
+    });
 }
 
 /// RGB → I420 (BT.601), the shape `NativeVideoSource` wants.

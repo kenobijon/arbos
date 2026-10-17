@@ -4130,11 +4130,19 @@ impl AppState {
                     p.speaking = ids.contains(&p.identity);
                 }
             }
-            CallEvent::AgentVision { identity, seeing } => {
-                // Only about me, and only while my camera is on.
-                let mine = identity == my_identity || identity == "local" || identity == my_handle;
-                if mine {
+            CallEvent::AgentVision {
+                identity,
+                seeing,
+                seeing_identities,
+            } => {
+                // §11: about me when it names my identity, or when I am (not) in the
+                // full set; only while my camera is on.
+                let is_me = |id: &str| id == my_identity || id == "local" || id == my_handle;
+                if is_me(&identity) {
                     active.agent_seeing = seeing && active.camera;
+                } else if !seeing_identities.is_empty() || identity.is_empty() {
+                    let listed = seeing_identities.iter().any(|id| is_me(id));
+                    active.agent_seeing = listed && active.camera;
                 }
             }
             CallEvent::RemoteMuted { identity, muted } => {
