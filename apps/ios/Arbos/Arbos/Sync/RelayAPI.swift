@@ -196,7 +196,7 @@ final class RelayAPI {
             project.machineAlwaysOn = (machine["always_on"] as? NSNumber)?.boolValue ?? false
             project.primaryChatId = primaryChat
             project.voice = ((p["voice"] as? String) ?? (detail["voice"] as? String)).flatMap { $0.isEmpty ? nil : $0 }
-            project.visionEnabled = ((p["vision_enabled"] as? NSNumber) ?? (detail["vision_enabled"] as? NSNumber))?.boolValue
+            project.visionEnabled = ((p["vision_enabled"] as? NSNumber) ?? (detail["vision_enabled"] as? NSNumber))?.boolValue ?? true
             let chats = ((detail["chats"] as? [Any]) ?? []).compactMap(RelayAPI.parseChat)
             out.append(RegistryProject(project: project, chats: chats))
         }

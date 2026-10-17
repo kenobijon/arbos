@@ -822,8 +822,6 @@ final class AppModel: ObservableObject {
                 var p = item.project
                 if let prev = projects.first(where: { $0.id == p.id }) {
                     p.modelNote = prev.modelNote
-                    // A relay without §11 yet: keep the toggle as set here.
-                    if p.visionEnabled == nil { p.visionEnabled = prev.visionEnabled }
                     if p.state == prev.state { p.stateDetail = prev.stateDetail }
                 }
                 newProjects.append(p)

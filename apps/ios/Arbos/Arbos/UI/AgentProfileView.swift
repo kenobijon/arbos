@@ -65,7 +65,7 @@ struct AgentEditSheet: View {
                                         .font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
                                 }
                                 Spacer()
-                                Toggle("", isOn: Binding(get: { project.visionOn }, set: { model.setVision(projectId, enabled: $0) }))
+                                Toggle("", isOn: Binding(get: { project.visionEnabled }, set: { model.setVision(projectId, enabled: $0) }))
                                     .labelsHidden()
                                     .tint(theme.online)
                                     .disabled(project.shared)
