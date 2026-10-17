@@ -1418,15 +1418,24 @@ final class AppModel: ObservableObject {
                     }
                 } catch {
                     connectorsBusy = false
-                    notice = Notice(text: "Connect \(provider): \(error.localizedDescription)")
+                    notice = Notice(text: Self.connectErrorText(provider: provider, error: error))
                     await refreshConnectorsOnce()
                 }
             } catch {
                 connectorsBusy = false
-                notice = Notice(text: "Connect \(provider): \(error.localizedDescription)")
+                notice = Notice(text: Self.connectErrorText(provider: provider, error: error))
                 await refreshConnectorsOnce()
             }
         }
+    }
+
+    /// Drop relay env-var names from the Settings alert when Google OAuth is missing.
+    private static func connectErrorText(provider: String, error: Error) -> String {
+        let raw = error.localizedDescription
+        if raw.localizedCaseInsensitiveContains("OAuth client not configured") {
+            return "Connect \(provider): OAuth client not configured on the relay."
+        }
+        return "Connect \(provider): \(raw)"
     }
 
     func disconnectConnector(id: Id) {
