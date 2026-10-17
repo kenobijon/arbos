@@ -166,6 +166,13 @@ struct ChatView: View {
         if transcribing { return "Transcribing…" }
         if !isPeople { return needsAnswer ? "Answer \(name)" : "Ask \(name)" }
         if AppModel.addressesEveryone(draft) || talkTo == "everyone" { return "Message everyone" }
+        // Bare person name in the draft ("Allan?") overrides a sticky agent chip.
+        if let people {
+            let named = AppModel.namedPeople(in: draft, members: people.members)
+            if let member = people.members.first(where: { named.contains($0.member) }) {
+                return "Message \(member.displayName)"
+            }
+        }
         if let member = people?.members.first(where: { $0.member == effectiveTalkTo }) {
             let slug = member.isAgent ? mentionSlug(member.project?.name ?? member.handle) : member.handle
             return "Message @\(slug)"
@@ -1173,8 +1180,16 @@ struct ChatView: View {
     }
 
     /// Chip / inferred agent, or `"everyone"` when the draft says so — matches `composerPrompt`.
+    /// A bare person name in the text drops a sticky agent so bob does not answer "Allan?".
     private func sendAddress(for text: String) -> String? {
         if AppModel.addressesEveryone(text) || talkTo == "everyone" { return "everyone" }
+        let members = people?.members ?? []
+        if AppModel.mentions(in: text, members: members).contains(where: { $0.hasPrefix("agent:") }) {
+            return effectiveTalkTo
+        }
+        if !AppModel.namedPeople(in: text, members: members).isEmpty {
+            return nil
+        }
         return effectiveTalkTo
     }
 

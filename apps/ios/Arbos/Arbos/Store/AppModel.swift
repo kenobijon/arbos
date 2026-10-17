@@ -1559,20 +1559,29 @@ final class AppModel: ObservableObject {
     func sendPeople(chatId: String, text: String, replyTo: String?, address: String? = nil, attachments: [PendingAttachment] = []) {
         guard let doc = docs[chatId], let chat = peopleChat(chatId), let me = user else { return }
         var mentions = AppModel.mentions(in: text, members: chat.members)
-        // Only agent @mentions count as an address. A person @handle (e.g. "@jo") must not
-        // block the chip / talk-to target — otherwise "Message @bob" + "can you see @jo?"
-        // reaches nobody and the decision model never sees the intended agent.
+        // Leading bare person names ("Allan", "Allan?", "Yo Allan …") count as addressing
+        // that person — so a sticky "Message @bob" chip does not wake the agent. A mid-line
+        // @handle ("can you see @jo?") still keeps the chip target.
+        let leadingPeople = AppModel.namedPeople(in: text, members: chat.members)
+        for person in leadingPeople where !mentions.contains(person) {
+            mentions.append(person)
+        }
+        // Only agent @mentions in the typed text count as an address. A leading person name
+        // must not keep a sticky agent chip — otherwise "Message @bob" + "Allan?" wakes bob.
+        // A person @handle mid-line must not block the chip (bob still answers about @jo).
         let addressedAgent = mentions.contains { $0.hasPrefix("agent:") }
         if !addressedAgent, let address {
             if address == "everyone" {
                 mentions.append(contentsOf: chat.agents.map(\.member).filter { !mentions.contains($0) })
+            } else if address.hasPrefix("agent:"), !leadingPeople.isEmpty {
+                // Text opens by naming a person; leave the sticky agent out of mentions.
             } else if chat.members.contains(where: { $0.member == address }), !mentions.contains(address) {
                 mentions.append(address)
             }
         }
         // In a DM, carry on with the agent who last spoke when nothing addresses an agent
-        // and the message is not aimed at a person. A person chip / @handle must not also
-        // ping the last agent — otherwise "Message Allan" still wakes bob.
+        // and the message is not aimed at a person. A person chip / @handle / bare name must
+        // not also ping the last agent — otherwise "Message Allan" still wakes bob.
         // In a group, leave the message unaddressed (unless a chip / @agent set one) so the
         // box decision model can choose which agent replies from chat context.
         var reply = replyTo
@@ -1675,6 +1684,37 @@ final class AppModel: ObservableObject {
             }
         }
         return false
+    }
+
+    /// Human members addressed at the start of the text without `@` — "Allan", "Allan?",
+    /// "Allan. we are…", "Yo Allan …". Mid-line names ("ask Allan later") do not count, so a
+    /// sticky agent chip still receives "can you see @jo?".
+    static func namedPeople(in text: String, members: [ChatMember]) -> [String] {
+        let humans = members.filter { !$0.isAgent }
+        guard !humans.isEmpty else { return [] }
+        var lower = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !lower.isEmpty else { return [] }
+        for g in ["yo ", "hey ", "hi ", "hello ", "ok ", "okay "] {
+            if lower.hasPrefix(g) { lower = String(lower.dropFirst(g.count)); break }
+        }
+        let first = lower.split(whereSeparator: { $0.isWhitespace }).first.map(String.init) ?? ""
+        let token = first.trimmingCharacters(in: CharacterSet(charactersIn: ".,!?:;"))
+        guard token.count >= 2 else { return [] }
+        var out: [String] = []
+        for h in humans {
+            var needles: [String] = [h.handle.lowercased()]
+            if let name = h.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+                let n = name.lowercased()
+                needles.append(n)
+                if let firstName = n.split(whereSeparator: { $0.isWhitespace }).first, firstName.count >= 2 {
+                    needles.append(String(firstName))
+                }
+            }
+            if Set(needles).contains(token), !out.contains(h.member) {
+                out.append(h.member)
+            }
+        }
+        return out
     }
 
     /// Mark a people chat read up to the relay head (cross-launch cursor).

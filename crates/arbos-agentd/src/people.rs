@@ -107,6 +107,106 @@ fn addressed_only_to_people(msg: &MessageView) -> bool {
     saw_person
 }
 
+/// Leading token of the message (optional yo/hey/hi… greeting), lower-cased, punctuation stripped.
+fn leading_address_token(text: &str) -> Option<String> {
+    let mut lower = text.trim().to_lowercase();
+    if lower.is_empty() {
+        return None;
+    }
+    for g in ["yo ", "hey ", "hi ", "hello ", "ok ", "okay "] {
+        if let Some(rest) = lower.strip_prefix(g) {
+            lower = rest.to_owned();
+            break;
+        }
+    }
+    let first = lower
+        .split_whitespace()
+        .next()?
+        .trim_matches(|c| matches!(c, '.' | ',' | '!' | '?' | ':' | ';'));
+    if first.chars().count() < 2 {
+        return None;
+    }
+    Some(first.to_owned())
+}
+
+/// True when the prose `@`-mentions an agent in this chat (not a sticky chip mention alone).
+fn text_mentions_agent(msg: &MessageView, info: &PeopleChatInfo) -> bool {
+    let text = msg.text().to_lowercase();
+    let has = |token: &str| {
+        let t = format!("@{token}");
+        text.match_indices(&t).any(|(i, _)| {
+            let after = text[i + t.len()..].chars().next();
+            after.is_none_or(|c| !(c.is_alphanumeric() || c == '-' || c == '_'))
+        })
+    };
+    if !info.slug.is_empty() && has(&info.slug) {
+        return true;
+    }
+    for m in &info.members {
+        let Some(member) = m["member"].as_str() else {
+            continue;
+        };
+        if !member.starts_with("agent:") {
+            continue;
+        }
+        let handle = m["handle"].as_str().unwrap_or("").to_lowercase();
+        if !handle.is_empty() && has(&handle) {
+            return true;
+        }
+        // Same slug rule as iOS `mentionSlug`: lower-case, spaces → "-".
+        if let Some(name) = m["project"]["name"].as_str() {
+            let slug = name.to_lowercase().replace(' ', "-");
+            if !slug.is_empty() && has(&slug) {
+                return true;
+            }
+        }
+    }
+    info.agents() == 1 && has("arbos")
+}
+
+/// True when the prose addresses a human at the start by handle or display/first name
+/// ("Allan", "Allan?", "Allan. we are…", "Yo Allan") without needing `@`.
+fn text_names_people(msg: &MessageView, info: &PeopleChatInfo) -> bool {
+    let Some(token) = leading_address_token(&msg.text()) else {
+        return false;
+    };
+    for m in &info.members {
+        let Some(member) = m["member"].as_str() else {
+            continue;
+        };
+        if !member.starts_with("user:") {
+            continue;
+        }
+        let handle = m["handle"].as_str().unwrap_or("").to_lowercase();
+        if handle == token {
+            return true;
+        }
+        if let Some(name) = m["name"].as_str() {
+            let name = name.trim().to_lowercase();
+            if name == token {
+                return true;
+            }
+            if name
+                .split_whitespace()
+                .next()
+                .is_some_and(|first| first == token)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Leading person ping in the prose (or people-only mentions) and no agent `@` in the text.
+/// Sticky chip / reply-to agent mentions must not wake an agent for "Allan?".
+fn people_ping_not_for_agents(msg: &MessageView, info: &PeopleChatInfo) -> bool {
+    if text_mentions_agent(msg, info) {
+        return false;
+    }
+    addressed_only_to_people(msg) || text_names_people(msg, info)
+}
+
 /// What a reply in a people chat carries: message fields for the clients.
 /// Clients show `inReplyTo` / `askedByHandle` as a reply chip; the prose stays clean.
 pub struct ReplyAttribution {
@@ -399,6 +499,12 @@ impl Agent {
             (msg, replied_to_mine, recent)
         };
         let every = info.settings["reply_policy"].as_str() == Some("every_message");
+        // Bare person name / people-only address in the prose ("Allan?", "Ken") wins over a
+        // sticky agent chip or reply-to, unless the text @-mentions an agent or the policy is
+        // every_message. The decision model must not wake bob for a ping meant for Allan.
+        if !every && people_ping_not_for_agents(&msg, &info) {
+            return false;
+        }
         if addressed(
             &msg,
             &self.cfg.project_id,
@@ -827,6 +933,51 @@ mod tests {
             "hey",
             json!({ "mentions": ["agent:01HPROJ"] })
         )));
+
+        // Leading person name — even with a sticky agent mention — is for humans.
+        let info = PeopleChatInfo {
+            members: vec![
+                json!({ "member": "user:allan", "handle": "catoneone", "name": "Allan" }),
+                json!({ "member": "agent:01HPROJ", "handle": "bob" }),
+            ],
+            slug: "bob".into(),
+            kind: "dm".into(),
+            ..Default::default()
+        };
+        assert_eq!(leading_address_token("Allan?").as_deref(), Some("allan"));
+        assert_eq!(
+            leading_address_token("Allan. we are adding the notifications").as_deref(),
+            Some("allan")
+        );
+        assert_eq!(leading_address_token("Yo Allan").as_deref(), Some("allan"));
+        assert_eq!(
+            leading_address_token("can you see @jo?").as_deref(),
+            Some("can")
+        );
+        assert!(text_names_people(&msg("Allan?", json!({})), &info));
+        assert!(people_ping_not_for_agents(
+            &msg("Allan?", json!({ "mentions": ["agent:01HPROJ"] })),
+            &info
+        ));
+        // Mid-line person @handle keeps a sticky agent (bob still answers about @jo).
+        assert!(!people_ping_not_for_agents(
+            &msg(
+                "can you see @jo?",
+                json!({ "mentions": ["user:jo", "agent:01HPROJ"] })
+            ),
+            &info
+        ));
+        assert!(!people_ping_not_for_agents(
+            &msg(
+                "@bob what about Allan?",
+                json!({ "mentions": ["agent:01HPROJ"] })
+            ),
+            &info
+        ));
+        assert!(!people_ping_not_for_agents(
+            &msg("what's 2+2?", json!({ "mentions": ["agent:01HPROJ"] })),
+            &info
+        ));
     }
 
     #[test]
