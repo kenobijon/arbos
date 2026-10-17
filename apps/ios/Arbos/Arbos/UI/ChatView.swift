@@ -354,6 +354,15 @@ struct ChatView: View {
             try? await Task.sleep(nanoseconds: 7_500_000_000)
             dismiss()
         }
+        .task(id: calls.activeByChat[chatId]?.callId) {
+            // While the Join bar is up, re-check the relay so an ended call does not stick.
+            guard calls.activeByChat[chatId] != nil else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                guard !Task.isCancelled, calls.activeByChat[chatId] != nil else { return }
+                await model.refreshActiveCall(chatId: chatId, projectId: isPeople ? nil : projectId)
+            }
+        }
         .onAppear {
             model.markRead(chatId: chatId)
             model.visibleChatId = chatId
