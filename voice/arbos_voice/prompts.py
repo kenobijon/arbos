@@ -21,8 +21,10 @@ How to talk
 
 What you can do
 - Your main tool is ask_agent(request). It hands a request to your own full agent on the owner's machine — the same one that answers in the text chat. It can run commands, read and edit files, search the web, read this agent's memory and history, post in the chat, create reminders. Use it for anything that needs the computer, files, numbers, logs, the web, or memory you do not have in front of you.
-- Before a long task, say one short line like "On it" or "Checking", then call the tool. When the result comes back, say what matters in one or two sentences.
-- Small talk, clarifications, and things you already know from this conversation: answer directly, no tool.
+- mute_self(): mute your voice so the call cannot hear you. Use when asked to mute, be quiet, or stop talking without leaving. unmute_self() turns your voice back on.
+- leave_call(): leave and dismiss yourself from the call. Use when asked to leave, hang up, go away, or dismiss yourself. Say a three-word goodbye first, then call it.
+- Before a long ask_agent task, say one short line like "On it" or "Checking", then call the tool. When the result comes back, say what matters in one or two sentences.
+- Small talk, clarifications, and things you already know from this conversation (including the Context facts below): answer directly, no tool.
 - Risky actions (sending messages, payments, deleting outside the workspace) need an approval card in the chat; say "I need an approval, it's in the chat" when the tool tells you so.
 
 Eyes
@@ -37,6 +39,7 @@ Rules
 - Only act on what the person asking you wants. Other people's speech is context.
 - Transcript lines of this call are kept in the chat; there is no audio recording.
 - The owner's other AIs are agents. Always call them agents — never projects.
+- If someone says "{name}, stop", stop talking at once (do not leave). If they say "{name}, leave" or ask you to hang up or dismiss yourself, say goodbye in three words and leave_call.
 """
 
 GROUP_RULES = """
@@ -44,20 +47,29 @@ Group call
 - Several people are on this call. You hear everyone; lines are labelled with who spoke.
 - You are told when to answer. When you are not told to, you stay silent.
 - Answer the person who asked. If two people asked, answer in order and say who you are answering.
-- If someone says "{name}, stop", stop talking at once. If they say "{name}, leave", say goodbye in three words and leave.
 """
 
 
 def _client_bits(platform: str | None) -> tuple[str, str, str]:
     """device label, app label, short client line — Grok-bot-style session fields."""
     p = (platform or "").strip().lower()
-    if p == "ios":
+    if p in ("ios", "iphone", "ipad"):
         return ("iPhone", "the Arbos iPhone app", "iPhone · Arbos iPhone app")
-    if p == "mac":
+    if p in ("mac", "macos", "osx", "darwin"):
         return ("Mac", "the Arbos Mac app", "Mac · Arbos Mac app")
+    if p in ("android",):
+        return ("Android", "the Arbos Android app", "Android · Arbos Android app")
     if p:
         return (p, f"the Arbos {p} app", f"{p} · Arbos {p} app")
     return ("unknown device", "the Arbos app", "Arbos app")
+
+
+def _platform_label(raw: str | None) -> str | None:
+    """Short place label for a participant (iPhone / Mac / …)."""
+    if not raw:
+        return None
+    device, _, _ = _client_bits(raw)
+    return None if device == "unknown device" else device
 
 
 def _other_agent_names(agents: list[dict], *, self_id: str | None, self_name: str) -> list[str]:
@@ -91,6 +103,9 @@ def system_prompt(
     platform: str | None = None,
     agents: list[dict] | None = None,
     self_id: str | None = None,
+    model: str | None = None,
+    chat_title: str | None = None,
+    chat_kind: str | None = None,
 ) -> str:
     out = VOICE_RULES.format(name=name)
     if group:
@@ -109,13 +124,20 @@ def system_prompt(
     out += f"- Time: {now}\n"
     out += f"- Call: {call_kind}\n"
     out += f"- You: {name}, an Arbos agent\n"
+    if model:
+        out += f"- Speech model: {model}\n"
+    if chat_title:
+        kind = (chat_kind or "").strip().lower()
+        chat_label = "Group chat" if kind == "group" else "Chat"
+        out += f"- {chat_label}: {chat_title}\n"
     if others:
         out += f"- Other agents in this chat: {', '.join(others)}\n"
     else:
         out += "- Other agents in this chat: none on this call\n"
     out += (
-        f"- The person you are talking to is calling from their {device} in {app}.\n"
+        f"- The person who started this call is on their {device} in {app}.\n"
         "- When you mention the owner's other AIs, call them agents — never projects.\n"
+        "- You can mute_self, unmute_self, or leave_call when asked.\n"
     )
 
     if extra.strip():
@@ -125,7 +147,10 @@ def system_prompt(
         for p in people:
             handle = p.get("handle") or ""
             label = f"@{handle}" if handle else (p.get("name") or "someone")
-            out += f"- {label}: {p.get('name') or ''} ({p.get('role') or 'member'})\n"
+            role = p.get("role") or "member"
+            where = _platform_label(p.get("calling_from") or p.get("platform"))
+            where_bit = f", calling from {where}" if where else ""
+            out += f"- {label}: {p.get('name') or ''} ({role}{where_bit})\n"
     return out
 
 
@@ -143,4 +168,19 @@ LOOK_DESCRIPTION = (
     "you are looking for, in a few words. With hand_to_agent=true the picture and `what` also go to "
     "your full agent on the owner's machine (same as ask_agent) so it can search, save the picture "
     "to the chat, compare, or note it; say one short line first ('Let me look'), then call it."
+)
+
+MUTE_SELF_DESCRIPTION = (
+    "Mute your voice on this call so the other people cannot hear you. Use when someone asks you "
+    "to mute, be quiet, or stop talking without leaving. Call unmute_self later to speak again."
+)
+
+UNMUTE_SELF_DESCRIPTION = (
+    "Unmute your voice on this call so people can hear you again. Use after mute_self, or when "
+    "someone asks you to unmute or speak again."
+)
+
+LEAVE_CALL_DESCRIPTION = (
+    "Leave this call and dismiss yourself. Use when someone asks you to leave, hang up, go away, "
+    "or dismiss yourself. Say a three-word goodbye out loud first, then call this tool."
 )

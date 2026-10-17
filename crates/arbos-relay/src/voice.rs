@@ -407,6 +407,91 @@ fn humans_json(state: &AppState, chat: &ChatRef, agent: &Project) -> Vec<Value> 
         .collect()
 }
 
+/// Best-effort where a human is calling from (`ios` / `mac` / …) for the voice prompt.
+fn calling_from_of(state: &AppState, call: &CallRow, user_id: &str) -> Option<String> {
+    if call.started_by == user_id {
+        if let Some(p) = call.platform.as_ref().filter(|p| !p.is_empty()) {
+            return Some(p.clone());
+        }
+    }
+    let rows = state.db.device_reach_rows(user_id).ok()?;
+    // VoIP / iOS push → iPhone; otherwise a live device with no iOS push is treated as Mac.
+    if rows
+        .iter()
+        .any(|(_, _, _, _, platform, _, voip)| *voip || platform.as_deref() == Some("ios"))
+    {
+        return Some("ios".to_owned());
+    }
+    if rows.iter().any(|(_, _, _, seen, _, _, _)| seen.is_some()) {
+        return Some("mac".to_owned());
+    }
+    None
+}
+
+fn enrich_humans_calling_from(state: &AppState, call: &CallRow, humans: &mut [Value]) {
+    let live: std::collections::HashSet<String> = state
+        .db
+        .call_participants(&call.id)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|p| p.left_at.is_none())
+        .map(|p| p.user_id)
+        .collect();
+    for h in humans.iter_mut() {
+        let Some(id) = h.get("id").and_then(Value::as_str).map(str::to_owned) else {
+            continue;
+        };
+        if !live.contains(&id) && call.started_by != id {
+            continue;
+        }
+        if let Some(platform) = calling_from_of(state, call, &id) {
+            h["platform"] = json!(platform);
+            h["calling_from"] = json!(platform);
+        }
+    }
+}
+
+/// What the voice agent should call this chat: project chat title, or people-chat title / handles.
+fn voice_chat_title(state: &AppState, chat: &ChatRef) -> String {
+    match &chat.project_id {
+        Some(pid) => state
+            .db
+            .chat(pid, &chat.chat_id)
+            .ok()
+            .flatten()
+            .map(|c| c.title)
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or_else(|| "this chat".to_owned()),
+        None => {
+            if let Some(t) = state
+                .db
+                .people_chat(&chat.chat_id)
+                .ok()
+                .flatten()
+                .and_then(|c| c.title)
+                .map(|t| t.trim().to_owned())
+                .filter(|t| !t.is_empty())
+            {
+                return t;
+            }
+            let handles: Vec<String> = state
+                .db
+                .members_of(&chat.chat_id)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|m| m.user_id())
+                .map(|u| format!("@{}", Sender::user(state, u).handle))
+                .filter(|h| h != "@")
+                .collect();
+            if handles.is_empty() {
+                "this chat".to_owned()
+            } else {
+                handles.join(", ")
+            }
+        }
+    }
+}
+
 /// Identity the worker joins with.
 pub fn agent_identity(project_id: &str) -> String {
     format!("a_{project_id}")
@@ -641,7 +726,8 @@ pub async fn call_info(
         Ok(v) => v,
         Err(r) => return *r,
     };
-    let humans = humans_json(&state, &chat, &project);
+    let mut humans = humans_json(&state, &chat, &project);
+    enrich_humans_calling_from(&state, &call, &mut humans);
     let settings = state
         .db
         .voice_agent_settings(&project.id)
@@ -681,6 +767,7 @@ pub async fn call_info(
             .map(|c| c.kind)
             .unwrap_or_else(|| "dm".to_owned()),
     };
+    let chat_title = voice_chat_title(&state, &chat);
     let agents: Vec<Value> = agents_in_chat(&state, &chat)
         .iter()
         .map(|p| Sender::agent(&state, p).json())
@@ -694,7 +781,12 @@ pub async fn call_info(
             "sender": Sender::agent(&state, &project).json(),
             "identity": agent_identity(&project.id),
         },
-        "chat": { "chat_id": chat.chat_id, "project_id": chat.project_label(), "kind": chat_kind },
+        "chat": {
+            "chat_id": chat.chat_id,
+            "project_id": chat.project_label(),
+            "kind": chat_kind,
+            "title": chat_title,
+        },
         "humans": humans,
         "agents": agents,
         "settings": settings,
