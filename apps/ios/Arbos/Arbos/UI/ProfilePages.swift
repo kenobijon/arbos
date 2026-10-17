@@ -818,6 +818,7 @@ struct GroupEditSheet: View {
                         TextField("", text: $name, prompt: Text("Name this group").foregroundStyle(theme.placeholder))
                             .font(.system(size: Theme.body))
                             .foregroundStyle(theme.text)
+                            .autocorrectionDisabled()
                             .focused($nameFocused)
                             .padding(.horizontal, 14).frame(height: Theme.fieldHeight)
                             .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
