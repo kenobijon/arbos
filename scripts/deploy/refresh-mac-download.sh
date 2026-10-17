@@ -2,10 +2,10 @@
 # Rewrite /etc/arbos/download.caddy so that https://relay.arbos.life/download/mac (and
 # https://arbos.life/download/mac) 302-redirect to the newest Mac DMG, then reload Caddy.
 #
-# Which release wins: the newest STABLE release (tag v<semver>, not a prerelease, not a draft,
-# with a .dmg asset) when its version is at least the newest edge release's base version;
-# otherwise the newest edge release (edge-<semver>.<build>). So v0.2.112 never beats
-# edge-0.3.0.286, but v0.4.0 beats edge-0.3.0.x the moment it publishes.
+# Which release wins: always the latest STABLE release — GitHub's /releases/latest (the newest
+# release that is neither a prerelease nor a draft; our tags are v<semver>) when it carries a .dmg.
+# Edge releases (edge-<semver>.<build>, prereleases) are never offered on the public download, even
+# when newer; they are only the fallback while no stable release exists at all.
 #
 # Also serves the chosen version as plain text at /download/mac/version (the site shows it on
 # the Download button). Installed as /usr/local/bin/arbos-refresh-mac-download by
@@ -15,12 +15,18 @@ OUT=/etc/arbos/download.caddy
 RELOAD=1
 [[ "${1:-}" == "--no-reload" ]] && RELOAD=0
 
-json=$(curl -fsSL "https://api.github.com/repos/unarbos/arbos/releases?per_page=40")
-pick=$(printf '%s' "$json" | python3 -c '
-import re, sys, json
+api=https://api.github.com/repos/unarbos/arbos
+latest=$(curl -fsSL "$api/releases/latest" 2>/dev/null || true)
+# older stables + edges, for the fallbacks
+json=$(curl -fsSL "$api/releases?per_page=60")
+pick=$(printf '%s' "$json" | LATEST_JSON="$latest" python3 -c '
+import os, re, sys, json
+
+latest_raw = os.environ.get("LATEST_JSON", "")
+rest = sys.stdin.read()
 
 def dmg(r):
-    for a in r["assets"]:
+    for a in r.get("assets", []):
         if a["name"].endswith(".dmg"):
             return a["browser_download_url"]
     return None
@@ -29,21 +35,26 @@ def ver(tag, prefix):
     m = re.fullmatch(prefix + r"(\d+(?:\.\d+)*)", tag)
     return tuple(int(x) for x in m.group(1).split(".")) if m else None
 
-stable, edge = [], []
-for r in json.load(sys.stdin):
-    if r.get("draft") or not dmg(r):
-        continue
-    t = r["tag_name"]
-    if not r.get("prerelease") and (v := ver(t, "v")):
-        stable.append((v, dmg(r), t))
-    elif v := ver(t, "edge-"):
-        edge.append((v, dmg(r), t))
-stable.sort(reverse=True); edge.sort(reverse=True)
+def stable(r):
+    return (not r.get("prerelease") and not r.get("draft") and ver(r["tag_name"], "v") and dmg(r))
+
 best = None
-if stable and (not edge or stable[0][0] >= edge[0][0][:3]):
-    best = stable[0]
-elif edge:
-    best = edge[0]
+try:
+    latest = json.loads(latest_raw) if latest_raw.strip() else {}
+except ValueError:
+    latest = {}
+if latest and stable(latest):
+    best = (ver(latest["tag_name"], "v"), dmg(latest), latest["tag_name"])
+else:
+    rels = json.loads(rest)
+    stables = sorted(((ver(r["tag_name"], "v"), dmg(r), r["tag_name"]) for r in rels if stable(r)), reverse=True)
+    if stables:
+        best = stables[0]
+    else:
+        edges = sorted(((ver(r["tag_name"], "edge-"), dmg(r), r["tag_name"]) for r in rels
+                        if not r.get("draft") and dmg(r) and ver(r["tag_name"], "edge-")), reverse=True)
+        if edges:
+            best = edges[0]
 if best:
     v, url, tag = best
     print(url); print(".".join(str(x) for x in v)); print(tag)
