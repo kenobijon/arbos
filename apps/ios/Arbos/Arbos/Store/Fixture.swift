@@ -8,6 +8,8 @@ import Foundation
 extension AppModel {
     func loadFixture() {
         isFixture = true
+        // The signed-in user (D79 initials at home and in Settings; reactions need `myUserId`).
+        setFixtureUser(AuthUser(id: "fx-me", login: "jacob", name: "Jacob Steeves"))
         let now = nowMs()
         let comms = Project(id: "fx-comms", name: "Comms", icon: "Co", color: "#1084FE", state: .awake, stateSince: now - 3_600_000,
                             stateDetail: nil, model: "anthropic/claude-haiku-5.5", effort: .low, spendTodayUsd: 0.4, spendCapUsd: 25)
@@ -94,7 +96,7 @@ extension AppModel {
                           workspaces: Dictionary(uniqueKeysWithValues: list.map { ($0.id, $0.id == "fx-comms" ? WorkspaceState.active : .idle) }),
                           alwaysOn: DebugHooks.alwaysOn, machineTodayUsd: 2.88, reported: true)
         // One DM with three unread messages, for the count pill and the notification screens.
-        let meMember = ChatMember(id: "fx-me", kind: .user, member: "user:fx-me", role: "owner", handle: "you", avatarUrl: nil, name: "You", status: "member",
+        let meMember = ChatMember(id: "fx-me", kind: .user, member: "user:fx-me", role: "owner", handle: "jacob", avatarUrl: nil, name: "Jacob Steeves", status: "member",
                                   joinedAt: now - 40 * 60_000, project: nil, ownerId: nil, ownerHandle: nil, replyPolicy: nil)
         let unconst = ChatMember(id: "gh_32490803", kind: .user, member: "user:gh_32490803", role: "member", handle: "unconst",
                                  avatarUrl: "https://avatars.githubusercontent.com/u/32490803?v=4", name: "Unconst", status: "member",
@@ -107,7 +109,7 @@ extension AppModel {
                              joinedAt: now - 3 * 86_400_000, project: nil, ownerId: nil, ownerHandle: nil, replyPolicy: nil, lastSeenAt: now - 2 * 86_400_000, online: false)
         var meOwner = meMember; meOwner.role = "owner"
         let commsAgent = ChatMember(id: "fx-comms", kind: .agent, member: "agent:fx-comms", role: "agent", handle: "comms", avatarUrl: nil, name: "Comms", status: "member",
-                                    joinedAt: now - 86_400_000, project: list.first { $0.id == "fx-comms" }, ownerId: "fx-me", ownerHandle: "you", replyPolicy: "mention")
+                                    joinedAt: now - 86_400_000, project: list.first { $0.id == "fx-comms" }, ownerId: "fx-me", ownerHandle: "jacob", replyPolicy: "mention")
         let group = PeopleChat(id: "fx-group-launch", kind: "group", createdBy: "fx-me", createdAt: now - 3 * 86_400_000, title: "Launch week",
                                pending: false, members: [meOwner, unconst, mira, sam, commsAgent], headSeq: 40, readSeq: 40, unread: false,
                                lockState: "visible_to_agents", lastActivityAt: now - 50 * 60_000, myRole: "owner", muted: false)
@@ -129,7 +131,7 @@ extension AppModel {
         caughtUp.insert("fx-group-launch")
         directory = [
             Person(id: "fx-u1", handle: "alex-rivera", avatarUrl: nil, name: "Alex Rivera", status: "member"),
-            Person(id: "fx-u2", handle: "jacob", avatarUrl: nil, name: "Jacob Steeves", status: "member"),
+            Person(id: "fx-u2", handle: "jen", avatarUrl: nil, name: "Jen Park", status: "member"),
             Person(id: "fx-u3", handle: "mira-k", avatarUrl: nil, name: "Mira Kaplan", status: "member"),
             Person(id: "fx-u4", handle: "sam", avatarUrl: nil, name: "Sam Okafor", status: "invited"),
             Person(id: "fx-u5", handle: "tobias", avatarUrl: nil, name: "Tobias Lund", status: "member"),

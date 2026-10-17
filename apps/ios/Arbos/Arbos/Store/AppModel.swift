@@ -80,6 +80,10 @@ final class AppModel: ObservableObject {
     /// mirrors its access token so every existing call path keeps working.
     @Published private(set) var tokens: AuthTokens?
     @Published private(set) var user: AuthUser?
+    #if DEBUG
+    /// Fixture only: the signed-in user (D79 initials, `myUserId` for reactions).
+    func setFixtureUser(_ who: AuthUser) { user = who }
+    #endif
     @Published private(set) var credits: Credits?
     @Published private(set) var approvals: [PendingDevice] = []
     /// People chats (D72): DMs I am a member of, newest activity first.
