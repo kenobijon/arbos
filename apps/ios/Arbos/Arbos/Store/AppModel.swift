@@ -193,13 +193,13 @@ final class AppModel: ObservableObject {
 
     func open(chat: Chat) {
         unarchive(chat.projectId)
-        rememberOpened(chat)
         path = [.chat(chatId: chat.id, projectId: chat.projectId)]
     }
 
+    /// Tapping an agent opens its one chat (D78).
     func open(project: Project) {
         unarchive(project.id)
-        if let chat = landingChat(of: project.id) {
+        if let chat = singleChat(of: project.id) {
             open(chat: chat)
         } else {
             // No landing chat yet — open a local thread at once (Mac `new_tab`).
@@ -341,7 +341,7 @@ final class AppModel: ObservableObject {
             guard let self, self.appActive else { return nil }
             return self.visibleChatId
         }
-        PushManager.shared.isChatArchived = { [weak self] id in self?.isChatArchived(id) ?? false }
+        PushManager.shared.isHiddenChat = { [weak self] id in self?.isHiddenChat(id) ?? false }
         NotificationCenter.default.addObserver(forName: PushManager.openChat, object: nil, queue: .main) { [weak self] n in
             guard let self, let cid = n.userInfo?["chat_id"] as? String else { return }
             let pid = (n.userInfo?["project_id"] as? String) ?? peopleSlot
@@ -527,28 +527,28 @@ final class AppModel: ObservableObject {
 
     /// Everything unread: people chats by sequence, project chats by flag.
     var unreadTotal: Int {
-        // Archived agent chats never badge (§9c).
+        // Hidden plain chats (D78: not the agent's one chat) never badge.
         if !unreadCounts.isEmpty {
-            var total = unreadCounts.reduce(0) { $0 + (isChatArchived($1.key) ? 0 : $1.value) }
+            var total = unreadCounts.reduce(0) { $0 + (isHiddenChat($1.key) ? 0 : $1.value) }
             // Live Loro rows can mark unread before /me/unread has the event.
-            for id in peopleUnread where !isChatArchived(id) && (unreadCounts[id] ?? 0) == 0 {
+            for id in peopleUnread where !isHiddenChat(id) && (unreadCounts[id] ?? 0) == 0 {
                 total += 1
             }
             for list in chats.values {
-                for c in list where c.unread && !isChatArchived(c.id) && (unreadCounts[c.id] ?? 0) == 0 {
+                for c in list where c.unread && !isHiddenChat(c.id) && (unreadCounts[c.id] ?? 0) == 0 {
                     total += 1
                 }
             }
             return total
         }
         let people = peopleChats.reduce(0) { $0 + unreadCount(for: $1) }
-        let projects = chats.values.flatMap { $0 }.filter { $0.unread && !isChatArchived($0.id) }.count
+        let projects = chats.values.flatMap { $0 }.filter { $0.unread && !isHiddenChat($0.id) }.count
         return people + projects
     }
 
-    /// Unread rows of one agent chat for its dot: none while archived.
+    /// Unread rows of one agent chat for its dot: none for a hidden plain chat.
     func chatHasUnread(_ chat: Chat) -> Bool {
-        if isChatArchived(chat.id) { return false }
+        if isHiddenChat(chat.id) { return false }
         // On screen: never keep a stale local/remote flag (same rule as people chats).
         if chat.id == visibleChatId { return false }
         if chat.unread { return true }
@@ -846,9 +846,7 @@ final class AppModel: ObservableObject {
             }
             projects = newProjects.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
             chats = newChats
-            adoptRelayArchiveState(newChats)
             saveRegistryCache()
-            await flushArchiveWrites()
             await refreshMachine()
             for p in newProjects {
                 ensureRoom(projectId: p.id, key: projectDocKey(p.id), roomChat: projectDocChatId)
@@ -1155,7 +1153,7 @@ final class AppModel: ObservableObject {
     /// circle immediately and drain `/me/pushes` so the banner does not wait
     /// for the 15 s registry poll (notify / APNs can lag the row).
     private func noteLiveUnread(chatId: Id) {
-        guard !isWatching(chatId), !isChatArchived(chatId) else { return }
+        guard !isWatching(chatId), !isHiddenChat(chatId) else { return }
         if let last = messages[chatId]?.last {
             if last.pending { return }
             if last.role == .system { return }
@@ -2062,8 +2060,6 @@ final class AppModel: ObservableObject {
                 await refreshRegistry()
             case "project_member_removed":
                 await refreshRegistry()
-            case "chat_archived":
-                applyArchivePush(p)
             default:
                 break
             }
@@ -2099,156 +2095,43 @@ final class AppModel: ObservableObject {
         ["Authorization": "Bearer \(credentials?.deviceToken ?? "")"]
     }
 
-    // MARK: One chat per agent (D-single-chat)
+    // MARK: One chat per agent (D78)
 
-    /// Multi-chat UI (new chat / chat switcher / thread swipes / chat list /
-    /// chat-level archive) is off by default; Settings → Debug flips it. The
-    /// data stays: extra chats remain on the box and the relay.
-    @Published var multiChatEnabled: Bool = (UserDefaults.standard.object(forKey: "multiChatEnabled") as? Bool) ?? true {
-        didSet { UserDefaults.standard.set(multiChatEnabled, forKey: "multiChatEnabled") }
+    /// The chat each agent opens into, chosen once per agent on this device and
+    /// then fixed: the chat the user last used here before D78 (migrated from the
+    /// old per-agent "last opened" store), else the relay's `primary_chat_id`
+    /// (see `primaryChat`). Falls back to the primary if that chat is gone.
+    /// Other plain chats stay on the box and relay as history (memory tree,
+    /// search); the iPhone never lists, badges or notifies them.
+    private var singleChatIds: [Id: Id] {
+        get { (UserDefaults.standard.dictionary(forKey: "singleChatByProject") as? [String: String]) ?? [:] }
+        set { UserDefaults.standard.set(newValue, forKey: "singleChatByProject") }
     }
 
-    // MARK: Chat archive (§9c: per user, synced through the relay; nothing deleted)
-
-    /// Archived chats hide from the chats sheet's main list and never badge or
-    /// notify here. History stays in the agent's context/memory tree and
-    /// searchable history; nothing goes to agentd. The relay keeps the flag per
-    /// user per chat (`archived_at`): the sheet writes it with
-    /// `PUT /chats/{id}/settings {archived}`, every listing seeds it and the
-    /// `chat_archived` push updates it live. The UserDefaults copy is only an
-    /// offline cache plus the writes that have not reached the relay yet.
-    @Published private(set) var archivedChatIds: Set<Id> = Set(UserDefaults.standard.stringArray(forKey: "archivedChats") ?? [])
-
-    /// Archive writes the relay has not confirmed (offline, or a relay without §9c yet).
-    private var pendingArchiveWrites: [Id: Bool] {
-        get { (UserDefaults.standard.dictionary(forKey: "archivePendingWrites") as? [String: Bool]) ?? [:] }
-        set { UserDefaults.standard.set(newValue, forKey: "archivePendingWrites") }
-    }
-    private var archiveFlushing = false
-
-    /// The pinned "Main" chat never counts as archived, whatever the relay says (Mac rule).
-    func isChatArchived(_ chatId: Id) -> Bool {
-        archivedChatIds.contains(chatId) && chat(chatId)?.isPinned != true
+    private func setSingleChat(_ chatId: Id, of projectId: Id) {
+        var m = singleChatIds
+        m[projectId] = chatId
+        singleChatIds = m
     }
 
-    func archiveChat(_ chatId: Id) {
-        guard chat(chatId)?.isPinned != true else { return }
-        setArchived(chatId, true)
-    }
-
-    func unarchiveChat(_ chatId: Id) { setArchived(chatId, false) }
-
-    private func setArchived(_ chatId: Id, _ archived: Bool) {
-        if archived { archivedChatIds.insert(chatId) } else { archivedChatIds.remove(chatId) }
-        setChatArchivedAt(chatId, archived ? Int64(Date().timeIntervalSince1970 * 1000) : nil)
-        saveArchiveCache()
-        if archived {
-            PushManager.shared.clearDelivered(chatId: chatId)
-            applyBadge()
+    func singleChat(of projectId: Id) -> Chat? {
+        let plain = chats(of: projectId).filter { !$0.isGroup && !$0.isSystem }
+        if let id = singleChatIds[projectId], let c = plain.first(where: { $0.id == id }) { return c }
+        // Migration from multi-chat: the chat last used on this device wins once.
+        let legacy = (UserDefaults.standard.dictionary(forKey: "lastOpenedChat") as? [String: String]) ?? [:]
+        if let id = legacy[projectId], let c = plain.first(where: { $0.id == id }) {
+            setSingleChat(c.id, of: projectId)
+            return c
         }
-        var pending = pendingArchiveWrites
-        pending[chatId] = archived
-        pendingArchiveWrites = pending
-        Task { await flushArchiveWrites() }
+        guard let c = primaryChat(of: projectId) else { return nil }
+        if !c.isGroup, !c.isSystem { setSingleChat(c.id, of: projectId) }
+        return c
     }
 
-    private func saveArchiveCache() {
-        UserDefaults.standard.set(Array(archivedChatIds), forKey: "archivedChats")
-    }
-
-    private func setChatArchivedAt(_ chatId: Id, _ at: Int64?) {
-        for (pid, list) in chats {
-            guard let i = list.firstIndex(where: { $0.id == chatId }) else { continue }
-            var updated = list
-            updated[i].archivedAt = at
-            chats[pid] = updated
-        }
-    }
-
-    /// Send pending archive writes to the relay; a write that fails stays
-    /// pending (the local state already shows it) and is retried on the next
-    /// registry refresh. 404/405 means the relay has no §9c yet: keep local.
-    func flushArchiveWrites() async {
-        guard !archiveFlushing, credentials != nil, !isFixture else { return }
-        let pending = pendingArchiveWrites
-        guard !pending.isEmpty else { return }
-        archiveFlushing = true
-        defer { archiveFlushing = false }
-        for (chatId, archived) in pending {
-            // The user may have flipped it again meanwhile: send the current value.
-            let want = pendingArchiveWrites[chatId] ?? archived
-            do {
-                let at = try await api.setChatArchived(chatId: chatId, archived: want)
-                if want, let at { setChatArchivedAt(chatId, at) }
-                var p = pendingArchiveWrites
-                if p[chatId] == want { p[chatId] = nil }
-                pendingArchiveWrites = p
-            } catch {
-                pushLog.notice("archive write \(chatId, privacy: .public)=\(want) failed: \(error.localizedDescription, privacy: .public)")
-            }
-        }
-    }
-
-    /// First launch after the §9c update: the chats this device had archived
-    /// locally go UP to the relay (union), after which the relay is the source
-    /// of truth and the local list is only a cache.
-    private func migrateLocalArchiveToRelay() {
-        let key = "archiveMigratedToRelay"
-        guard !UserDefaults.standard.bool(forKey: key) else { return }
-        var pending = pendingArchiveWrites
-        for id in archivedChatIds where pending[id] == nil { pending[id] = true }
-        pendingArchiveWrites = pending
-        UserDefaults.standard.set(true, forKey: key)
-    }
-
-    /// A relay listing with `archived_at` seeds the set: relay state, plus the
-    /// writes still on their way up (so a flip made offline does not snap back).
-    private func adoptRelayArchiveState(_ lists: [Id: [Chat]]) {
-        let all = lists.values.flatMap { $0 }
-        guard all.contains(where: { $0.archiveSynced }) else { return }
-        migrateLocalArchiveToRelay()
-        var next = archivedChatIds
-        let pending = pendingArchiveWrites
-        for c in all where c.archiveSynced && pending[c.id] == nil {
-            if c.archivedAt != nil { next.insert(c.id) } else { next.remove(c.id) }
-        }
-        if next != archivedChatIds {
-            archivedChatIds = next
-            saveArchiveCache()
-            applyBadge()
-        }
-    }
-
-    /// `chat_archived {chat_id, project_id, archived_at}` from another device.
-    private func applyArchivePush(_ p: PushItem) {
-        guard let chatId = p.payload["chat_id"] else { return }
-        let at = (p.raw["archived_at"] as? NSNumber)?.int64Value
-        if pendingArchiveWrites[chatId] != nil { return }
-        if at != nil { archivedChatIds.insert(chatId) } else { archivedChatIds.remove(chatId) }
-        setChatArchivedAt(chatId, at)
-        saveArchiveCache()
-        if at != nil { PushManager.shared.clearDelivered(chatId: chatId) }
-        applyBadge()
-    }
-
-    /// The chat the user last opened per agent on this device (tapping the agent returns there).
-    private var lastOpenedChat: [Id: Id] {
-        get { (UserDefaults.standard.dictionary(forKey: "lastOpenedChat") as? [String: String]) ?? [:] }
-        set { UserDefaults.standard.set(newValue, forKey: "lastOpenedChat") }
-    }
-
-    func rememberOpened(_ chat: Chat) {
-        guard chat.projectId != peopleSlot else { return }
-        var m = lastOpenedChat
-        m[chat.projectId] = chat.id
-        lastOpenedChat = m
-    }
-
-    /// Tapping an agent: the last chat used here, if it still exists and is
-    /// not archived; a never-opened agent lands on `primary_chat_id`.
-    func landingChat(of projectId: Id) -> Chat? {
-        if let id = lastOpenedChat[projectId], let c = chat(id), !isChatArchived(c.id) { return c }
-        return primaryChat(of: projectId)
+    /// A plain chat of an agent that is not its one chat: history only.
+    func isHiddenChat(_ chatId: Id) -> Bool {
+        guard let c = chat(chatId), !c.isGroup, !c.isSystem else { return false }
+        return singleChat(of: c.projectId)?.id != c.id
     }
 
     /// The one chat an agent shows. Rule: the relay's `primary_chat` when it
@@ -2270,16 +2153,6 @@ final class AppModel: ObservableObject {
         return list.first { $0.isPinned } ?? list.min { $0.id < $1.id }
     }
 
-    /// Agent-hosted group chats (F6) across my agents — always visible, flag or not.
-    var agentGroupChats: [Chat] {
-        chats.values.flatMap { $0 }.filter(\.isGroup)
-    }
-
-    /// Pinned ("main") chat of a project — with multi-chat on; the primary chat otherwise.
-    func mainChat(of projectId: Id) -> Chat? {
-        if !multiChatEnabled { return primaryChat(of: projectId) }
-        return chats(of: projectId).first { $0.isPinned } ?? chats(of: projectId).first
-    }
 
     func project(_ id: Id) -> Project? { projects.first { $0.id == id } }
 
@@ -2709,7 +2582,7 @@ final class AppModel: ObservableObject {
         }
         if let u = unacked[localId] { unacked[real.id] = u }
         caughtUp.insert(real.id)
-        if lastOpenedChat[real.projectId] == localId { rememberOpened(real) }
+        if singleChatIds[real.projectId] == localId { setSingleChat(real.id, of: real.projectId) }
 
         // Room (and doc) before the navigation swap so a remounted ChatView can send.
         ensureRoom(projectId: real.projectId, key: real.id, roomChat: real.id)
@@ -2744,28 +2617,6 @@ final class AppModel: ObservableObject {
         }
         if visibleChatId == localId { visibleChatId = nil }
         notice = Notice(text: reason)
-    }
-
-    func closeChat(_ chat: Chat) {
-        guard !chat.isPinned else { return }
-        chats[chat.projectId] = (chats[chat.projectId] ?? []).filter { $0.id != chat.id }
-        rooms[chat.id]?.stop()
-        rooms[chat.id] = nil
-        docs[chat.id] = nil
-        messages[chat.id] = nil
-        forgetDoc(chat.id)
-        Task {
-            do {
-                try await api.closeChat(projectId: chat.projectId, chatId: chat.id)
-            } catch {
-                if (error as? RelayError)?.status == 409 {
-                    notice = Notice(text: "The pinned chat cannot be closed")
-                } else if (error as? RelayError)?.status != 404 {
-                    notice = Notice(text: "Close chat: \(error.localizedDescription)")
-                }
-                await refreshRegistry()
-            }
-        }
     }
 
     /// Clear a project chat's unread dot and always PUT /read so chat_events

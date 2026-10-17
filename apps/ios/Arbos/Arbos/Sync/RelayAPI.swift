@@ -212,20 +212,8 @@ final class RelayAPI {
             unread: false,
             lastMessageAt: (v["created_at"] as? NSNumber)?.int64Value ?? 0,
             kind: v["kind"] as? String ?? "chat",
-            participants: ((v["participants"] as? [Any]) ?? []).compactMap { ($0 as? String) ?? ($0 as? [String: Any])?["project_id"] as? String ?? ($0 as? [String: Any])?["id"] as? String },
-            archivedAt: (v["archived_at"] as? NSNumber)?.int64Value,
-            archiveSynced: v.keys.contains("archived_at")
+            participants: ((v["participants"] as? [Any]) ?? []).compactMap { ($0 as? String) ?? ($0 as? [String: Any])?["project_id"] as? String ?? ($0 as? [String: Any])?["id"] as? String }
         )
-    }
-
-    /// §9c: `PUT /chats/{id}/settings {archived}` — this user's archive flag for an
-    /// agent chat, synced to their other devices. Returns the chat's `archived_at`
-    /// when the relay echoes it (nil = not archived or not echoed).
-    func setChatArchived(chatId: Id, archived: Bool) async throws -> Int64? {
-        let v = try await json("PUT", "/chats/\(chatId)/settings", body: ["archived": archived])
-        let m = v as? [String: Any]
-        let chat = (m?["chat"] as? [String: Any]) ?? m
-        return (chat?["archived_at"] as? NSNumber)?.int64Value
     }
 
     func createChat(projectId: Id) async throws -> Chat {
@@ -236,9 +224,6 @@ final class RelayAPI {
         return chat
     }
 
-    func closeChat(projectId: Id, chatId: Id) async throws {
-        _ = try await request("DELETE", "/projects/\(projectId)/chats/\(chatId)")
-    }
 
     func createProject(
         name: String,

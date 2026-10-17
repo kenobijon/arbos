@@ -14,13 +14,11 @@ struct AgentEditSheet: View {
     @State private var name = ""
     @State private var editingName = false
     @State private var showModel = false
-    @State private var showChats = false
     @State private var showVoice = false
     @State private var showShare = false
     @FocusState private var nameFocused: Bool
 
     private var project: Project? { model.project(projectId) }
-    private var chatCount: Int { model.chats[projectId]?.count ?? 0 }
 
     static let colorHexes = ["#1084FE", "#10B981", "#FF7A00", "#FF3B5C", "#FF2D9B", "#8B5CF6", "#8E5A3C", "#8E8E93", "#FFB000", "#14B8A6"]
 
@@ -73,13 +71,6 @@ struct AgentEditSheet: View {
                             }
                             .buttonStyle(.plain)
                             divider
-                            if model.multiChatEnabled {
-                                Button { showChats = true } label: {
-                                    row(icon: "bubble.left.and.bubble.right", title: "Chats", value: chatCount == 1 ? "1 chat" : "\(chatCount) chats")
-                                }
-                                .buttonStyle(.plain)
-                                divider
-                            }
                             Button { showShare = true } label: {
                                 row(icon: "person.2", title: project.shared ? "Members" : "Share", value: project.shared ? "Owned by @\(project.ownerHandle ?? "?")" : "Invite by @handle")
                             }
@@ -129,9 +120,6 @@ struct AgentEditSheet: View {
             }
             .sheet(isPresented: $showVoice) {
                 if let project { VoicePickerView(project: project).environmentObject(model).environment(\.theme, theme) }
-            }
-            .sheet(isPresented: $showChats) {
-                ChatListView(projectId: projectId).environmentObject(model).environment(\.theme, theme)
             }
             .sheet(isPresented: $showShare) {
                 if let project { ProjectMembersSheet(project: project).environmentObject(model).environment(\.theme, theme) }
@@ -456,7 +444,7 @@ struct AgentProfileView: View {
 
     private func search(_ p: Project) {
         dismiss()
-        if let chat = model.mainChat(of: p.id) {
+        if let chat = model.singleChat(of: p.id) {
             model.pendingSearchChat = chat.id
             model.open(chat: chat)
         }
