@@ -176,22 +176,22 @@ struct SettingsView: View {
                 showProfileEdit = true
             } label: {
                 VStack(spacing: 6) {
-                    Text(model.user?.name ?? model.user?.login ?? "Arbos")
-                        .font(.system(size: 28, weight: .bold))
-                        .foregroundStyle(theme.text)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
+                    // Same affordance as the agent profile and the Mac header: a pencil after the name.
+                    HStack(spacing: 6) {
+                        Text(model.user?.name ?? model.user?.login ?? "Arbos")
+                            .font(.system(size: 28, weight: .bold))
+                            .foregroundStyle(theme.text)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                        if model.user != nil, !model.isFixture {
+                            Image(systemName: "pencil").font(.system(size: 14, weight: .semibold)).foregroundStyle(theme.muted)
+                        }
+                    }
                     Text(model.user.map { "@\($0.login)" } ?? (model.relayUrl.isEmpty ? "Not signed in" : model.relayUrl))
                         .font(.system(size: Theme.body))
                         .foregroundStyle(theme.muted)
                         .lineLimit(1)
                         .truncationMode(.middle)
-                    if model.user != nil, !model.isFixture {
-                        Text("Edit name")
-                            .font(.system(size: Theme.tiny, weight: .medium))
-                            .foregroundStyle(theme.accent)
-                            .padding(.top, 2)
-                    }
                 }
             }
             .buttonStyle(.plain)
