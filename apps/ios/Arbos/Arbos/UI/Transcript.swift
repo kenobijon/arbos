@@ -895,10 +895,12 @@ struct FileCard: View {
         Button {
             Task { await open() }
         } label: {
-            HStack(spacing: 10) {
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
+            // Grok's file card (web-08, measured): 61 pt tall, 20×27 icon at 15 pt,
+            // text 16 pt after the icon, 17 pt title over a 15 pt muted subtitle.
+            HStack(spacing: 14) {
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
                     .fill(Color(hex: "#FFB000")!)
-                    .frame(width: 22, height: 26)
+                    .frame(width: 21, height: 27)
                     .overlay(Image(systemName: "doc.text").font(.system(size: 12, weight: .bold)).foregroundStyle(.black))
                 VStack(alignment: .leading, spacing: 2) {
                     Text(name).font(.system(size: Theme.body)).foregroundStyle(fromUser ? theme.userText : theme.text).lineLimit(1)
@@ -910,8 +912,9 @@ struct FileCard: View {
                         .controlSize(.small)
                 }
             }
-            .padding(.horizontal, Theme.bubbleHPad)
-            .padding(.vertical, Theme.bubbleVPad)
+            .padding(.leading, 15)
+            .padding(.trailing, Theme.bubbleHPad + 4)
+            .padding(.vertical, 13)
             .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(fromUser ? theme.bubbleUser : theme.bubbleAssistant))
             .contentShape(Rectangle())
         }

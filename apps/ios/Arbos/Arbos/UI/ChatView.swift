@@ -658,12 +658,25 @@ struct ChatView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     Color.clear.frame(height: (isPeople ? 104 : 64) + headerExtra).onAppear { scroller = proxy }
                     if let banner = machineBannerText {
-                        HStack(spacing: 6) {
-                            if model.machine.state == .waking { ProgressView().controlSize(.mini).tint(theme.muted) }
-                            Text(banner)
+                        // Grok (Mac refs 69/70): a quiet notice, not a red strip — the
+                        // title in the text colour, the reason muted.
+                        VStack(spacing: 3) {
+                            HStack(spacing: 6) {
+                                if model.machine.state == .waking { ProgressView().controlSize(.mini).tint(theme.muted) }
+                                if model.machine.state == .error {
+                                    Image(systemName: "desktopcomputer").font(.system(size: 12))
+                                }
+                                Text(model.machine.state == .error ? "Can't reach your machine" : banner)
+                            }
+                            .font(.system(size: Theme.small, weight: model.machine.state == .error ? .semibold : .regular))
+                            .foregroundStyle(model.machine.state == .error ? theme.text : theme.muted)
+                            if model.machine.state == .error {
+                                Text(banner)
+                                    .font(.system(size: Theme.tiny))
+                                    .foregroundStyle(theme.muted)
+                                    .multilineTextAlignment(.center)
+                            }
                         }
-                        .font(.system(size: Theme.small))
-                        .foregroundStyle(model.machine.state == .error ? theme.danger : theme.muted)
                         .frame(maxWidth: .infinity)
                         .padding(.bottom, 16)
                     }
@@ -779,7 +792,7 @@ struct ChatView: View {
     private var machineBannerText: String? {
         switch model.machine.state {
         case .waking: return "Waking your machine…"
-        case .error: return model.machineDetail.map { "Machine: \($0)" } ?? (model.machine.alwaysOn ? "Your machine needs attention" : "Could not wake your machine")
+        case .error: return model.machineDetail ?? (model.machine.alwaysOn ? "Your agents are safe — their machine just can't be reached right now." : "Could not wake your machine")
         case .awake, .hibernatedLight, .hibernatedDeep, .stoppedByUser: return model.link == .reconnecting ? "Reconnecting…" : nil
         }
     }
