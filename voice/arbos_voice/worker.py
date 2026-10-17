@@ -411,11 +411,16 @@ class VoiceCall:
                 "\n\n# Eyes on this call\nThe owner turned camera vision off for you: you get no camera stills and look() "
                 "returns nothing. If someone asks you to look at something, say vision is off for this agent."
             )
+        call = self.info.get("call") or {}
+        agents = self.info.get("agents") or call.get("agents") or []
         return system_prompt(
             name=self.agent_name,
             group=self.state.mode == "group",
             extra=extra,
             people=self.info.get("humans") or [],
+            platform=call.get("platform"),
+            agents=agents if isinstance(agents, list) else [],
+            self_id=self.project_id,
         )
 
     def turn_detection_for(self, mode: str):

@@ -353,3 +353,28 @@ pub fn sheet_button(id: impl Into<ElementId>, label: &str, theme: &Theme) -> Sta
         .hover(|s| s.bg(theme.surface_2))
         .child(label.to_string())
 }
+
+/// A macOS-style switch (read-only picture; the row around it is the control).
+pub fn switch(on: bool, theme: &Theme) -> Div {
+    div()
+        .flex_shrink_0()
+        .w(px(38.0))
+        .h(px(22.0))
+        .rounded_full()
+        .bg(if on {
+            theme.online
+        } else {
+            theme.border_strong
+        })
+        .flex()
+        .items_center()
+        .px(px(2.0))
+        .when(on, |el| el.justify_end())
+        .child(
+            div()
+                .size(px(18.0))
+                .rounded_full()
+                .bg(gpui::white())
+                .shadow_sm(),
+        )
+}

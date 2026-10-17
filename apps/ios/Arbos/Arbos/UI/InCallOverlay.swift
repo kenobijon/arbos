@@ -199,6 +199,8 @@ struct InCallOverlay: View {
             }
         }
         .frame(width: pipSize.width, height: pipSize.height)
+        // §11: the agent is sampling our camera (shown on the tile whatever it displays).
+        .overlay(alignment: .top) { AgentSeesBadge(compact: true).padding(.top, 6) }
         .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(hairline, lineWidth: 1))
         .shadow(color: .black.opacity(theme.isDark ? 0.5 : 0.15), radius: 16, y: 8)
         .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))

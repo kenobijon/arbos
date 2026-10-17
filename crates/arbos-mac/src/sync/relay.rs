@@ -1192,6 +1192,7 @@ fn people_space_from(shared: &Shared, v: &Value) -> Option<(Project, Chat)> {
             .unwrap_or(false),
         primary_chat: None,
         voice: None,
+        vision_enabled: true,
         avatar_color_index: None,
         avatar_color_override: None,
     };
@@ -1683,6 +1684,10 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
                 .and_then(Value::as_str)
                 .filter(|v| !v.is_empty())
                 .map(str::to_string),
+            vision_enabled: [&p, &item]
+                .iter()
+                .find_map(|v| v.get("vision_enabled").and_then(Value::as_bool))
+                .unwrap_or(true),
             // D79: the relay's effective index when it sends one, else the
             // owner's pick, else derived from the id (the same rule everywhere).
             avatar_color_index: [&p, &item]
@@ -4012,6 +4017,36 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     }
                 }
                 let _ = shared.events.send(SyncEvent::VoiceSample { url, path });
+            });
+        }
+        ClientCommand::SetVisionEnabled {
+            project_id,
+            enabled,
+        } => {
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
+                    p.vision_enabled = enabled;
+                }
+                let snapshot = projects.clone();
+                drop(projects);
+                let _ = shared.events.send(SyncEvent::Projects(snapshot));
+            }
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let body = json!({ "vision_enabled": enabled });
+                match shared
+                    .patch_json(&format!("/projects/{project_id}"), body)
+                    .await
+                {
+                    Ok(_) => {}
+                    Err(err) => {
+                        if !err.to_string().contains("HTTP 404") {
+                            shared
+                                .notice(format!("Camera vision not saved: {}", people_error(&err)));
+                        }
+                    }
+                }
             });
         }
         ClientCommand::SetVoice { project_id, voice } => {

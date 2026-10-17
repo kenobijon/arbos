@@ -301,7 +301,7 @@ export default function arbosPiExt(pi: ExtensionAPI) {
           if (args.reply && args.reply.trim()) {
             return { content: [{ type: "text", text: "Reply delivered to the user." }], details: { action }, terminate: true };
           }
-          return { content: [{ type: "text", text: "Route accepted: reply. Write the reply now." }], details: { action } };
+          return { content: [{ type: "text", text: "Route accepted: reply. Write only the answer the user should see — no thinking aloud." }], details: { action } };
         case "act":
           return {
             content: [

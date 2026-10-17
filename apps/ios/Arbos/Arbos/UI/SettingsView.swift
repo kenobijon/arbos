@@ -14,7 +14,9 @@
 // Page #FCFCFC / #141414, cards = the assistant-bubble grey, our circular back
 // button, 17 pt labels, muted monochrome icon tiles, hairlines inset past the tile.
 
+import PhotosUI
 import SwiftUI
+import UIKit
 import UserNotifications
 
 struct SettingsView: View {
@@ -26,6 +28,8 @@ struct SettingsView: View {
     @State private var confirmUnpair = false
     /// Connector errors — the root `notice` alert sits under this sheet and looks like a silent fail.
     @State private var connectorError: String?
+    @State private var avatarItem: PhotosPickerItem?
+    @State private var avatarBusy = false
 
     var body: some View {
         NavigationStack {
@@ -112,6 +116,7 @@ struct SettingsView: View {
                 let isConnector = text.hasPrefix("Connect ")
                     || text.hasPrefix("Connectors:")
                     || text.hasPrefix("Disconnect:")
+                    || text.hasPrefix("Could not update profile picture:")
                 guard isConnector else { return }
                 connectorError = text
                 model.notice = nil
@@ -124,6 +129,10 @@ struct SettingsView: View {
             } message: {
                 Text(connectorError ?? "")
             }
+            .onChange(of: avatarItem) { _, item in
+                guard let item else { return }
+                Task { await applyAvatarPick(item) }
+            }
         }
         .tint(theme.text)
         .preferredColorScheme(theme.isDark ? .dark : .light)
@@ -133,13 +142,19 @@ struct SettingsView: View {
     // MARK: Profile header
 
     /// Large avatar (D79: GitHub picture, else the coloured initials circle), bold
-    /// name, grey handle — Apple's account header.
+    /// name, grey handle — Apple's account header. Tap the picture to change it.
     private var profileHeader: some View {
         VStack(spacing: 6) {
-            PersonAvatar(url: model.user?.avatarUrl, handle: model.user?.login ?? "?", size: 104,
-                         name: model.user?.name, id: model.user?.id,
-                         colorIndex: model.user?.avatarColorIndexEffective)
-                .padding(.bottom, 8)
+            PhotosPicker(selection: $avatarItem, matching: .images) {
+                PersonAvatar(url: model.user?.avatarUrl, handle: model.user?.login ?? "?", size: 104,
+                             name: model.user?.name, id: model.user?.id,
+                             colorIndex: model.user?.avatarColorIndexEffective)
+                    .opacity(avatarBusy ? 0.55 : 1)
+            }
+            .buttonStyle(.plain)
+            .disabled(model.user == nil || avatarBusy || model.isFixture)
+            .accessibilityLabel("Change profile picture")
+            .padding(.bottom, 8)
             Text(model.user?.name ?? model.user?.login ?? "Arbos")
                 .font(.system(size: 28, weight: .bold))
                 .foregroundStyle(theme.text)
@@ -154,6 +169,34 @@ struct SettingsView: View {
         .frame(maxWidth: .infinity)
         .padding(.top, 14)
         .padding(.bottom, 22)
+    }
+
+    private func applyAvatarPick(_ item: PhotosPickerItem) async {
+        avatarBusy = true
+        defer {
+            avatarBusy = false
+            avatarItem = nil
+        }
+        guard let data = try? await item.loadTransferable(type: Data.self),
+              let img = UIImage(data: data) else { return }
+        let square = Self.squareAvatar(img, side: 512)
+        guard let jpeg = square.jpegData(compressionQuality: 0.85) else { return }
+        _ = await model.setUserAvatar(jpeg: jpeg)
+    }
+
+    /// Centre-crop to a square and resize (same idea as group edit).
+    private static func squareAvatar(_ image: UIImage, side: CGFloat) -> UIImage {
+        let s = min(image.size.width, image.size.height)
+        let rect = CGRect(x: (image.size.width - s) / 2, y: (image.size.height - s) / 2, width: s, height: s)
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: side, height: side))
+        return renderer.image { _ in
+            guard let cg = image.cgImage?.cropping(to: rect) else {
+                image.draw(in: CGRect(origin: .zero, size: CGSize(width: side, height: side)))
+                return
+            }
+            UIImage(cgImage: cg, scale: image.scale, orientation: image.imageOrientation)
+                .draw(in: CGRect(origin: .zero, size: CGSize(width: side, height: side)))
+        }
     }
 
     // MARK: Row summaries

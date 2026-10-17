@@ -188,11 +188,11 @@ struct CallScreen: View {
                         }
                     }
                     .frame(width: 270, height: 352)
-                if calls.cameraOn, let local = calls.localVideoTrack {
-                    SwiftUIVideoView(local, layoutMode: .fill, mirrorMode: .mirror)
+                if calls.cameraOn {
+                    selfPreview(cornerRadius: 14)
                         .frame(width: 84, height: 112)
-                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                         .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(theme.bg, lineWidth: 2))
+                        .overlay(alignment: .bottom) { AgentSeesBadge(compact: true).padding(6) }
                         .padding(10)
                 }
             }
@@ -220,10 +220,10 @@ struct CallScreen: View {
                 ForEach(waitingExpected) { person in
                     personTile(person, videoTrack: nil, cameraOn: false, micOn: true, speaking: false)
                 }
-                if calls.cameraOn, let local = calls.localVideoTrack {
-                    SwiftUIVideoView(local, layoutMode: .fill, mirrorMode: .mirror)
-                        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                if calls.cameraOn {
+                    selfPreview(cornerRadius: 20)
                         .aspectRatio(3 / 4, contentMode: .fit)
+                        .overlay(alignment: .bottomLeading) { AgentSeesBadge(compact: false).padding(8) }
                 }
             }
             .padding(.horizontal, 20)
@@ -261,6 +261,19 @@ struct CallScreen: View {
             .padding(8)
         }
         .aspectRatio(3 / 4, contentMode: .fit)
+    }
+
+    /// Our camera: the live track, or a quiet placeholder until it is published.
+    @ViewBuilder
+    private func selfPreview(cornerRadius: CGFloat) -> some View {
+        if let local = calls.localVideoTrack {
+            SwiftUIVideoView(local, layoutMode: .fill, mirrorMode: .mirror)
+                .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        } else {
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .fill(theme.card)
+                .overlay(Image(systemName: "video.fill").font(.system(size: 18, weight: .semibold)).foregroundStyle(theme.muted))
+        }
     }
 
     // MARK: Controls
@@ -314,6 +327,31 @@ struct CallScreen: View {
     static func clock(_ t: TimeInterval) -> String {
         let s = Int(t)
         return s >= 3600 ? String(format: "%d:%02d:%02d", s / 3600, (s / 60) % 60, s % 60) : String(format: "%02d:%02d", s / 60, s % 60)
+    }
+}
+
+/// "<Agent> can see" on OUR self-preview while the voice worker reports that the
+/// agent is sampling our camera (§11). Nothing when it is not.
+struct AgentSeesBadge: View {
+    @ObservedObject private var calls = CallManager.shared
+    var compact: Bool
+
+    var body: some View {
+        if calls.agentSeeing, calls.cameraOn {
+            HStack(spacing: 4) {
+                Image(systemName: "eye.fill").font(.system(size: compact ? 9 : 10, weight: .bold))
+                Text("\(calls.seeingAgentName ?? "Agent") can see")
+                    .font(.system(size: compact ? 9 : 11, weight: .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, compact ? 6 : 8).padding(.vertical, compact ? 3 : 4)
+            .background(Capsule().fill(.black.opacity(0.55)))
+            .overlay(Capsule().strokeBorder(.white.opacity(0.25), lineWidth: 0.5))
+            .transition(.opacity)
+            .accessibilityLabel("\(calls.seeingAgentName ?? "The agent") can see your camera")
+        }
     }
 }
 

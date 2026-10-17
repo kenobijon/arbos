@@ -54,6 +54,26 @@ struct AgentEditSheet: View {
                             }
                             .buttonStyle(.plain)
                             divider
+                            HStack(spacing: 14) {
+                                Image(systemName: "eye")
+                                    .font(.system(size: 16, weight: .medium))
+                                    .foregroundStyle(theme.text)
+                                    .frame(width: 28)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Camera vision").font(.system(size: Theme.body)).foregroundStyle(theme.text)
+                                    Text("On video calls \(project.name) can see your camera while it is on.")
+                                        .font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                                }
+                                Spacer()
+                                Toggle("", isOn: Binding(get: { project.visionOn }, set: { model.setVision(projectId, enabled: $0) }))
+                                    .labelsHidden()
+                                    .tint(theme.online)
+                                    .disabled(project.shared)
+                                    .accessibilityLabel("Camera vision")
+                            }
+                            .padding(.horizontal, 14)
+                            .frame(minHeight: 58)
+                            divider
                             Button { showShare = true } label: {
                                 row(icon: "person.2", title: project.shared ? "Members" : "Share", value: project.shared ? "Owned by @\(project.ownerHandle ?? "?")" : "Invite by @handle")
                             }

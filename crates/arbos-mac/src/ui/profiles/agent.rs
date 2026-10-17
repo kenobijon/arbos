@@ -317,6 +317,49 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
                     cx.notify();
                 })),
         );
+        // Camera vision (voice API §11): a switch row, default on.
+        let vision_on = project.vision_enabled;
+        let p_vision = pid.clone();
+        info = info.child(
+            div()
+                .id("agent-vision-row")
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .px(px(16.0))
+                .py(px(10.0))
+                .border_b_1()
+                .border_color(theme.border)
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.surface_2))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .child(
+                            div()
+                                .text_size(px(TEXT_TINY))
+                                .text_color(theme.text_muted)
+                                .child("camera vision"),
+                        )
+                        .child(div().text_size(px(TEXT_BODY)).text_color(theme.text).child(
+                            if vision_on {
+                                "On — the agent can look through your camera on calls"
+                            } else {
+                                "Off"
+                            },
+                        )),
+                )
+                .child(glass::switch(vision_on, &theme))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let p = p_vision.clone();
+                    this.state
+                        .update(cx, |s, cx| s.set_vision_enabled(p, !vision_on, cx));
+                })),
+        );
     }
     let description = project.description.clone().filter(|d| !d.trim().is_empty());
     if editing {

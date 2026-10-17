@@ -90,6 +90,9 @@ pub struct Project {
     /// Call voice (`GET /voices` id); `None` = the current default voice.
     #[serde(default)]
     pub voice: Option<String>,
+    /// Voice API §11: the agent may look through my camera on calls (default on).
+    #[serde(default = "default_true")]
+    pub vision_enabled: bool,
     /// D79: the avatar gradient in effect (0–6): the owner's pick, else the
     /// id-derived one (`avatar_color_index_effective` from the relay).
     #[serde(default)]
@@ -679,6 +682,10 @@ pub enum TurnKind {
 /// fixtures as a bare string; accept both.
 /// `null`, a missing key and `""` all read as an empty string (JSON from the
 /// relay carries `"avatar_url": null` for people without a picture).
+fn default_true() -> bool {
+    true
+}
+
 pub fn null_to_empty<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
     Ok(Option::<String>::deserialize(d)?.unwrap_or_default())
 }

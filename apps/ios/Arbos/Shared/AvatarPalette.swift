@@ -32,6 +32,10 @@ enum AvatarPalette {
     ]
     static let count = 7
     static let names = ["Red", "Orange", "Violet", "Green", "Cyan", "Blue", "Pink"]
+    /// Initials font size as a share of the diameter. Measured on Telegram's chat
+    /// list (60 pt circle, 18.7 pt cap height ≈ 26.7 pt SF Semibold): 0.445 for one
+    /// and two letters alike; `minimumScaleFactor` catches wide pairs.
+    static let initialsScale: CGFloat = 0.445
 
     /// The deterministic colour for a stable id (project id for agents, user id for people).
     static func index(for id: String) -> Int {
@@ -84,7 +88,7 @@ extension AvatarPalette {
             if let grad = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0, 1]) {
                 cg.drawLinearGradient(grad, start: CGPoint(x: side / 2, y: 0), end: CGPoint(x: side / 2, y: side), options: [])
             }
-            let font = UIFont.systemFont(ofSize: side * (text.count > 1 ? 0.38 : 0.42), weight: .semibold)
+            let font = UIFont.systemFont(ofSize: side * AvatarPalette.initialsScale, weight: .semibold)
             let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor.white]
             let bounds = (text as NSString).size(withAttributes: attrs)
             (text as NSString).draw(at: CGPoint(x: (side - bounds.width) / 2, y: (side - bounds.height) / 2 + side * 0.01), withAttributes: attrs)
