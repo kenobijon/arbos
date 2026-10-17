@@ -158,6 +158,37 @@ final class ChatDoc {
         _ = try map.insertContainer(key: "hiddenParts", child: LoroList())
     }
 
+    /// D82: the agent's first line in a brand-new project's chat, written by the device
+    /// that created the project. Role `assistant`, sender `agent:<project>`, and
+    /// `greeting: true` so memory and the transcript never read it as the user's words.
+    /// Does not commit.
+    func insertAssistantGreeting(id: Id, text: String, deviceId: String, projectId: Id, agentName: String) throws {
+        let list = messages
+        let map = try list.insertContainer(pos: list.len(), child: LoroMap())
+        try map.insert(key: "id", v: id)
+        try map.insert(key: "chatId", v: key)
+        try map.insert(key: "role", v: "assistant")
+        try map.insert(key: "sender", v: "agent:\(projectId)")
+        try map.insert(key: "senderName", v: agentName)
+        try map.insert(key: "greeting", v: true)
+        try map.insert(key: "status", v: "done")
+        try map.insert(key: "deviceId", v: deviceId)
+        try map.insert(key: "createdAt", v: nowMs())
+        try map.insert(key: "completedAt", v: nowMs())
+        try map.insert(key: "waitingUser", v: false)
+        try map.insert(key: "pending", v: false)
+        for k in ["turn", "decision", "subagentId", "subagentName", "inReplyTo", "usage", "returnContract", "model", "effort"] {
+            try map.insert(key: k, v: LoroValue.null)
+        }
+        let parts = try map.insertContainer(key: "parts", child: LoroList())
+        let part = try parts.insertContainer(pos: parts.len(), child: LoroMap())
+        try part.insert(key: "id", v: newId())
+        try part.insert(key: "kind", v: "text")
+        let textC = try part.insertContainer(key: "text", child: LoroText())
+        try textC.pushStr(s: text)
+        _ = try map.insertContainer(key: "hiddenParts", child: LoroList())
+    }
+
     /// Append a `commands` row (`send`, `stop`, `answer`, `retry`, `retitle`). Does not commit.
     func pushCommand(_ kind: String, payload: [String: Any], device: String) throws {
         let list = commands

@@ -100,6 +100,14 @@ struct Machine: Equatable {
     var machineTodayUsd: Double = 0
     /// False until the relay has answered `/machine` once.
     var reported = false
+    /// The relay's own `state` word before the always-on collapse (D82 first-login
+    /// stages need the real waking → awake transition).
+    var rawState: BoxState = .hibernatedLight
+    /// `spec.cpu` / `spec.mem_gib` and `image.current` as reported, for the
+    /// first-login detail lines ("Starting a 4-core machine with 8 GB of memory").
+    var cpu: Int? = nil
+    var memGib: Int? = nil
+    var image: String? = nil
 
     static let unknown = Machine(state: .hibernatedLight, since: nil, spec: "")
 
@@ -395,6 +403,9 @@ struct Message: Identifiable, Equatable {
     /// Voice-call transcript line (`voice: true` / `source: "voice"` in the doc).
     /// Kept in the chat doc for agent context; the transcript UI does not render it.
     var voice: Bool = false
+    /// D82: the agent's canned first line, written by the device that created the
+    /// project (`greeting: true`); written once per chat, never treated as user text.
+    var greeting: Bool = false
 
     var isStreaming: Bool { status == .streaming }
 
@@ -491,7 +502,8 @@ enum DocJSON {
             mentions: (m["mentions"] as? [Any])?.compactMap { $0 as? String } ?? [],
             replyTo: str(m["replyTo"]),
             activity: str(m["activity"]).flatMap { $0.isEmpty ? nil : $0 },
-            voice: bool(m["voice"]) || str(m["source"]) == "voice"
+            voice: bool(m["voice"]) || str(m["source"]) == "voice",
+            greeting: bool(m["greeting"])
         )
     }
 

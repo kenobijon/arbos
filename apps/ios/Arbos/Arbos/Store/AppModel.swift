@@ -145,6 +145,13 @@ final class AppModel: ObservableObject {
     @Published private(set) var models: [String] = []
     @Published var machine: Machine = .unknown
     @Published private(set) var machineBusy = false
+    /// D82: the first-login screen while the relay creates the computer and first
+    /// agent; nil for every ordinary launch. Driven by `FirstLogin.swift`.
+    @Published var firstLogin: FirstLogin?
+    /// Where the first assistant bubble (the greeting) landed, in global
+    /// coordinates — the morph target of the first-login terminal.
+    @Published var greetingBubbleFrame: CGRect?
+    var firstLoginTask: Task<Void, Never>?
     /// `machine.always_on` as last reported by `GET /me` (nil = field absent).
     private var meAlwaysOn: Bool?
     /// Navigation: home → chat. Shared so menus anywhere can open a chat.
@@ -602,7 +609,11 @@ final class AppModel: ObservableObject {
         }
         let wasPaired = credentials != nil
         credentials = DeviceCredentials(relayUrl: toks.relayUrl, deviceId: toks.deviceId, deviceToken: toks.accessToken)
-        if !wasPaired { startAfterPairing() }
+        if !wasPaired {
+            // A sign-in through the browser (not a token refresh): a possible first login.
+            if who != nil { beginFirstLogin() }
+            startAfterPairing()
+        }
     }
 
     /// Single-flight refresh; false when the relay rejected the refresh token
@@ -737,6 +748,7 @@ final class AppModel: ObservableObject {
                     notice = Notice(text: "Token kept in memory only: \(error.localizedDescription)")
                 }
                 credentials = creds
+                beginFirstLogin()
                 startAfterPairing()
             } catch {
                 pairingError = (error as? RelayError)?.isUnauthorized == true
@@ -776,6 +788,7 @@ final class AppModel: ObservableObject {
         link = .connecting
         connectors = ConnectorsView()
         connectorsBusy = false
+        endFirstLogin()
     }
 
     private func startAfterPairing() {
@@ -785,6 +798,7 @@ final class AppModel: ObservableObject {
         if let store, projects.isEmpty, peopleChats.isEmpty {
             loadStoreKV(store)
         }
+        if projects.isEmpty { resumeFirstLoginIfPending() }
         hookPush()
         Task {
             if let ids = try? await api.models(), !ids.isEmpty {
@@ -855,6 +869,7 @@ final class AppModel: ObservableObject {
                     ensureRoom(projectId: c.projectId, key: c.id, roomChat: c.id)
                 }
             }
+            firstLoginRegistryUpdated()
         } catch {
             if (error as? RelayError)?.isUnauthorized == true {
                 // Token revoked or relay re-initialised: pair again.
@@ -1064,6 +1079,7 @@ final class AppModel: ObservableObject {
             } else {
                 self.emitSnapshot(key)
                 self.caughtUp.insert(key)
+                self.firstLoginChatSynced(key)
             }
         }
         room.onAcked = { [weak self] in

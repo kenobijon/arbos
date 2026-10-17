@@ -43,6 +43,8 @@
 		A1C0DE5A11B2C3D4E5F60712 /* QuestionCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C0DE5A11B2C3D4E5F60711 /* QuestionCard.swift */; };
 		A1C0DE5A11B2C3D4E5F60912 /* InCallOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C0DE5A11B2C3D4E5F60911 /* InCallOverlay.swift */; };
 		A1C0DE5A11B2C3D4E5F60922 /* VoicePickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C0DE5A11B2C3D4E5F60921 /* VoicePickerView.swift */; };
+		A1D8200000000000000000A2 /* FirstLoginView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D8200000000000000000A1 /* FirstLoginView.swift */; };
+		A1D8200000000000000000B2 /* FirstLogin.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D8200000000000000000B1 /* FirstLogin.swift */; };
 		A1D45695F908DDA32FE43CB7 /* AvatarImage.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B6A97F3E4CCA36512BE56F /* AvatarImage.swift */; };
 		A1D79A0000000000000000B1 /* AvatarPalette.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D79A0000000000000000A1 /* AvatarPalette.swift */; };
 		A1C634E69BCD2C37B7F27346 /* MessageNotification.swift in Sources */ = {isa = PBXBuildFile; fileRef = A189C676F775E104AF2116C8 /* MessageNotification.swift */; };
@@ -118,6 +120,8 @@
 		A1C0DE5A11B2C3D4E5F60711 /* QuestionCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuestionCard.swift; sourceTree = "<group>"; };
 		A1C0DE5A11B2C3D4E5F60911 /* InCallOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InCallOverlay.swift; sourceTree = "<group>"; };
 		A1C0DE5A11B2C3D4E5F60921 /* VoicePickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoicePickerView.swift; sourceTree = "<group>"; };
+		A1D8200000000000000000A1 /* FirstLoginView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FirstLoginView.swift; sourceTree = "<group>"; };
+		A1D8200000000000000000B1 /* FirstLogin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FirstLogin.swift; sourceTree = "<group>"; };
 		A15C30AC29682FF68428C798 /* Arbos.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Arbos.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A1C864BED8979E7D7306EE37 /* ArbosNotificationService.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = ArbosNotificationService.entitlements; sourceTree = "<group>"; };
 		A1A0DA8EE4AE3E28B6613467 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -229,6 +233,7 @@
 				A1EA51EFDDA9FCC9D359DDAD,
 				A16FB2CB37599A2DEEA1A19E,
 				A15D0D4E1ADC058D632D0769,
+				A1D8200000000000000000B1,
 			);
 			path = Store;
 			sourceTree = "<group>";
@@ -266,6 +271,7 @@
 				A1C0DE5A11B2C3D4E5F60711,
 				A1C0DE5A11B2C3D4E5F60911,
 				A1C0DE5A11B2C3D4E5F60921,
+				A1D8200000000000000000A1,
 			);
 			path = UI;
 			sourceTree = "<group>";
@@ -423,6 +429,8 @@
 				A1C0DE5A11B2C3D4E5F60712 /* QuestionCard.swift in Sources */,
 				A1C0DE5A11B2C3D4E5F60912 /* InCallOverlay.swift in Sources */,
 				A1C0DE5A11B2C3D4E5F60922 /* VoicePickerView.swift in Sources */,
+				A1D8200000000000000000A2 /* FirstLoginView.swift in Sources */,
+				A1D8200000000000000000B2 /* FirstLogin.swift in Sources */,
 				A1D45695F908DDA32FE43CB7 /* AvatarImage.swift in Sources */,
 				A1D79A0000000000000000B1 /* AvatarPalette.swift in Sources */,
 				A1C634E69BCD2C37B7F27346 /* MessageNotification.swift in Sources */,
