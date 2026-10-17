@@ -895,7 +895,7 @@ struct PeopleRow: View {
                         Circle().fill(theme.card).frame(width: Theme.rowAvatar, height: Theme.rowAvatar)
                         Image(systemName: "person.2.fill")
                             .font(.system(size: 17, weight: .medium))
-                            .foregroundStyle(theme.muted)
+                            .foregroundStyle(theme.accent)
                     }
                 } else {
                     PersonAvatar(url: other?.avatarUrl, handle: other?.handle ?? "?", size: Theme.rowAvatar, name: other?.name, id: other?.id, colorIndex: other?.avatarColorIndex)
