@@ -700,6 +700,17 @@ struct ChatView: View {
                             .padding(.top, gap(before: i))
                             .id(row.id)
                             .contextMenu {
+                                if canReact(to: row) {
+                                    ControlGroup {
+                                        ForEach(MessageReaction.palette, id: \.self) { emoji in
+                                            Button {
+                                                model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: emoji)
+                                            } label: {
+                                                Text(emoji)
+                                            }
+                                        }
+                                    }
+                                }
                                 if isPeople, let m = messages.first(where: { $0.id == row.messageId }) {
                                     Button {
                                         replyTo = m
@@ -800,6 +811,16 @@ struct ChatView: View {
 
     private func m_text(_ row: Row) -> String {
         messages.first { $0.id == row.messageId }?.plainText ?? ""
+    }
+
+    /// Emoji reactions apply to real chat bubbles, not date / join / system lines.
+    private func canReact(to row: Row) -> Bool {
+        switch row.kind {
+        case .system, .question, .error:
+            return false
+        case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
+            return messages.contains { $0.id == row.messageId }
+        }
     }
 
     /// Spacing: 8 pt between bubbles of one sender, 24 pt around sender changes

@@ -2319,6 +2319,29 @@ final class AppModel: ObservableObject {
 
     func messages(of chatId: Id) -> [Message] { messages[chatId] ?? [] }
 
+    /// Add or remove an emoji reaction on a message. Multiple different emojis
+    /// can be active on the same message; tapping the same emoji again clears it.
+    func toggleReaction(chatId: Id, messageId: Id, emoji: String) {
+        guard let me = myUserId, !emoji.isEmpty else { return }
+        #if DEBUG
+        if isFixture {
+            guard var list = messages[chatId], let i = list.firstIndex(where: { $0.id == messageId }) else { return }
+            list[i].reactions = MessageReaction.toggling(list[i].reactions, emoji: emoji, sender: me)
+            messages[chatId] = list
+            Haptics.pick()
+            return
+        }
+        #endif
+        guard let doc = docs[chatId] else { return }
+        do {
+            try doc.toggleReaction(messageId: messageId, emoji: emoji, sender: me)
+            doc.commit()
+            Haptics.pick()
+        } catch {
+            notice = Notice(text: "Could not update the reaction: \(error.localizedDescription)")
+        }
+    }
+
     /// Paint any room doc that already has rows but no published transcript yet
     /// (checkpoint landed, catch-up still in flight). Home search reads
     /// `messages`, so this must run when the search field becomes active.
