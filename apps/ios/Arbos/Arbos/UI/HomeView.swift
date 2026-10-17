@@ -18,8 +18,16 @@ struct HomeView: View {
     @State private var offlineHint = false
     /// Own-agent Share sheet from the home long-press menu.
     @State private var shareProject: Project? = nil
-    /// Own-agent delete confirmation from the home long-press menu.
+    /// Own-agent delete confirmation from the home long-press / swipe menu.
     @State private var deleteProject: Project? = nil
+    /// People chat delete confirmation from the home long-press / swipe menu.
+    @State private var deletePeople: PeopleChat? = nil
+    /// "Hidden chats N ›" footer → the list of archived agents.
+    @State private var showHidden = false
+
+    private var hiddenProjects: [Project] {
+        model.projects.filter { model.isArchived($0.id) }.sorted { lastActivity($0) > lastActivity($1) }
+    }
     @FocusState private var searchFocused: Bool
 
     private var projects: [Project] {
@@ -68,7 +76,7 @@ struct HomeView: View {
                         if searchQuery.isEmpty {
                             ForEach(model.approvals) { device in
                                 ApprovalCard(device: device)
-                                    .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
+                                    .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
                                     .listRowSeparator(.hidden)
                                     .listRowBackground(theme.bg)
                             }
@@ -77,17 +85,18 @@ struct HomeView: View {
                             switch row {
                             case .project(let project):
                                 let pinned = model.isHomePinned(projectId: project.id)
+                                // borderless (not .plain): .plain steals the list swipe /
+                                // long-press on recent iOS, so archive and the menu fail.
                                 Button { openSearchHit(project) } label: {
-                                    AgentRow(project: project, preview: preview(project), time: timeLabel(project),
+                                    AgentRow(project: project, preview: preview(project), previewIcon: previewIcon(project), time: timeLabel(project),
                                              streaming: model.isStreaming(project: project.id),
                                              unread: model.chats(of: project.id).contains { model.chatHasUnread($0) },
                                              pinned: pinned)
                                 }
-                                .buttonStyle(.plain)
+                                .buttonStyle(.borderless)
                                 .contextMenu {
-                                    // Grok Bot home actions for an agent: Pin, Duplicate
-                                    // (fork as a new top-level agent), Archive, Share,
-                                    // Profile, Delete. Groups/people keep a smaller menu.
+                                    // Long-press (Telegram / Grok): Pin, Fork, Archive,
+                                    // Share, Profile, Delete. People rows keep a smaller menu.
                                     Button {
                                         withAnimation {
                                             if pinned { model.unpinHome(projectId: project.id) }
@@ -98,7 +107,7 @@ struct HomeView: View {
                                     }
                                     if !project.shared {
                                         Button { model.duplicateProject(project) } label: {
-                                            Label("Duplicate", systemImage: "plus.square.on.square")
+                                            Label("Fork", systemImage: "arrow.triangle.branch")
                                         }
                                     }
                                     Button {
@@ -120,10 +129,10 @@ struct HomeView: View {
                                         }
                                     }
                                 }
-                                .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
+                                .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
                                 .listRowSeparator(.hidden)
                                 .listRowBackground(theme.bg)
-                                .swipeActions(edge: .leading) {
+                                .swipeActions(edge: .leading, allowsFullSwipe: true) {
                                     Button {
                                         withAnimation {
                                             if pinned { model.unpinHome(projectId: project.id) }
@@ -134,13 +143,15 @@ struct HomeView: View {
                                     }
                                     .tint(Color(hex: "#1084FE")!)
                                 }
+                                // Trailing = swipe left. Full-swipe archives (Telegram-easy).
+                                // Archive alone so a destructive Delete cannot steal the full swipe.
                                 .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                                     Button {
                                         withAnimation { model.archive(project.id) }
                                     } label: {
                                         Label("Archive", systemImage: "archivebox")
                                     }
-                                    .tint(theme.muted)
+                                    .tint(Color(hex: "#636366")!)
                                 }
                             case .people(let chat):
                                 let pinned = model.isHomePinned(peopleChatId: chat.id)
@@ -150,7 +161,7 @@ struct HomeView: View {
                                               count: model.unreadCount(for: chat), me: model.user?.id,
                                               pinned: pinned)
                                 }
-                                .buttonStyle(.plain)
+                                .buttonStyle(.borderless)
                                 .contextMenu {
                                     Button {
                                         withAnimation {
@@ -165,11 +176,14 @@ struct HomeView: View {
                                     } else {
                                         Button { model.showProfile(.group(chatId: chat.id, projectId: nil)) } label: { Label("Group info", systemImage: "person.2") }
                                     }
+                                    Button(role: .destructive) { deletePeople = chat } label: {
+                                        Label("Delete", systemImage: "trash")
+                                    }
                                 }
-                                .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
+                                .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
                                 .listRowSeparator(.hidden)
                                 .listRowBackground(theme.bg)
-                                .swipeActions(edge: .leading) {
+                                .swipeActions(edge: .leading, allowsFullSwipe: true) {
                                     Button {
                                         withAnimation {
                                             if pinned { model.unpinHome(peopleChatId: chat.id) }
@@ -180,7 +194,20 @@ struct HomeView: View {
                                     }
                                     .tint(Color(hex: "#1084FE")!)
                                 }
+                                // People chats have no archive lane; require a tap on Delete
+                                // (no full-swipe) so a casual left swipe cannot wipe a DM.
+                                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                    Button(role: .destructive) { deletePeople = chat } label: {
+                                        Label("Delete", systemImage: "trash")
+                                    }
+                                }
                             }
+                        }
+                        if searchQuery.isEmpty, !hiddenProjects.isEmpty {
+                            hiddenFooter
+                                .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
+                                .listRowSeparator(.hidden)
+                                .listRowBackground(theme.bg)
                         }
                         // Launch timing: the populated list is on screen.
                         Color.clear.frame(height: 1)
@@ -219,8 +246,15 @@ struct HomeView: View {
             .navigationDestination(for: AppModel.Route.self) { route in
                 switch route {
                 case .chat(let chatId, let projectId):
+                    // `.id(chatId)` forces a fresh ChatView when switching threads of the
+                    // same agent from the Chats sheet; without it NavigationStack reuses
+                    // the destination and the tap looks like it does nothing.
                     ChatView(chatId: chatId, projectId: projectId)
+                        .id(chatId)
                 }
+            }
+            .navigationDestination(isPresented: $showHidden) {
+                HiddenChatsView().environmentObject(model).environment(\.theme, theme)
             }
             .sheet(isPresented: $showSettings) {
                 SettingsView().environmentObject(model).environment(\.theme, theme)
@@ -247,6 +281,22 @@ struct HomeView: View {
             } message: {
                 Text("Removes this agent and its chats from your list. Hide it with Archive if you may need it later.")
             }
+            .confirmationDialog(
+                "Delete \(deletePeopleTitle)?",
+                isPresented: Binding(
+                    get: { deletePeople != nil },
+                    set: { if !$0 { deletePeople = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("Delete", role: .destructive) {
+                    if let c = deletePeople { model.deletePeopleChat(c.id) }
+                    deletePeople = nil
+                }
+                Button("Cancel", role: .cancel) { deletePeople = nil }
+            } message: {
+                Text("Removes this chat from your list.")
+            }
         }
         .task {
             if DebugHooks.demo, model.isFixture {
@@ -262,6 +312,9 @@ struct HomeView: View {
         .onAppear {
             if DebugHooks.show == "newchat", DebugHooks.openProject == nil {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showNewChat = true }
+            }
+            if DebugHooks.show == "hidden", DebugHooks.openProject == nil {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showHidden = true }
             }
             #if DEBUG
             if DebugHooks.show == "notify", DebugHooks.openProject == nil {
@@ -292,6 +345,37 @@ struct HomeView: View {
     }
 
     // MARK: Top bar
+
+    /// Title used in the people-chat delete confirm (DM name or group title).
+    private var deletePeopleTitle: String {
+        guard let c = deletePeople else { return "this chat" }
+        if c.isGroup { return c.title.isEmpty ? "this group" : c.title }
+        return c.counterpart(me: model.user?.id)?.displayName ?? c.title
+    }
+
+    /// Grok's "Hidden chats  N  ›" line under the list (measured: 15 pt muted,
+    /// the count a shade dimmer, a small chevron, 27 pt above the bottom).
+    private var hiddenFooter: some View {
+        Button { showHidden = true } label: {
+            HStack(spacing: 8) {
+                Text("Hidden chats")
+                    .font(.system(size: Theme.small))
+                    .foregroundStyle(theme.muted)
+                Text("\(hiddenProjects.count)")
+                    .font(.system(size: Theme.small))
+                    .foregroundStyle(theme.placeholder)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(theme.placeholder)
+                Spacer(minLength: 0)
+            }
+            .padding(.top, 14)
+            .padding(.bottom, 20)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Hidden chats, \(hiddenProjects.count)")
+    }
 
     private var topBar: some View {
         HStack(spacing: 10) {
@@ -372,7 +456,8 @@ struct HomeView: View {
                 .buttonStyle(.plain)
             }
         }
-        .padding(.horizontal, 16)
+        // Grok home header: 20 pt side margins, 42 pt circles.
+        .padding(.horizontal, 20)
         .padding(.top, 6)
         .zIndex(1)
     }
@@ -520,15 +605,24 @@ struct HomeView: View {
         return (who.isEmpty ? "" : who + ": ") + HomeView.plain(line)
     }
 
-    /// Newest message with prose across the project's chats.
+    /// Newest message with prose (or an open question) across the project's chats.
     private func latest(_ p: Project) -> Message? {
         var best: Message? = nil
         for chat in model.chats(of: p.id) {
-            if let m = model.messages(of: chat.id).last(where: { !$0.plainText.isEmpty }) {
+            if let m = model.messages(of: chat.id).last(where: { !$0.plainText.isEmpty || $0.openQuestion != nil }) {
                 if best == nil || m.createdAt > best!.createdAt { best = m }
             }
         }
         return best
+    }
+
+    /// Grok puts a small glyph before some previews: a checklist when the bot is
+    /// waiting on a question, a paper plane when it messaged another bot.
+    private func previewIcon(_ p: Project) -> String? {
+        guard let m = latest(p) else { return nil }
+        if m.openQuestion != nil { return "checklist" }
+        if m.role != .user, m.turn == .new, m.subagentName != nil { return "paperplane" }
+        return nil
     }
 
     private func lastActivity(_ p: Project) -> Int64 {
@@ -540,7 +634,11 @@ struct HomeView: View {
         guard let m = latest(p) else {
             return model.isStreaming(project: p.id) ? "\(p.name) is working" : "No messages yet"
         }
+        if let q = m.openQuestion { return HomeView.plain(q.question) }
         let line = m.plainText.split(separator: "\n").first.map(String.init) ?? ""
+        if m.role != .user, m.turn == .new, let name = m.subagentName {
+            return line.isEmpty ? "Messaged \(name)" : "Messaged \(name): \(HomeView.plain(line))"
+        }
         return (m.role == .user ? "You: " : "") + HomeView.plain(line)
     }
 
@@ -605,19 +703,119 @@ struct ApprovalCard: View {
     }
 }
 
+/// Archived ("hidden") agents, Grok's "Hidden chats" page: the same rows as home,
+/// tap opens the agent, swipe or long-press unhides it.
+struct HiddenChatsView: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    @Environment(\.dismiss) private var dismiss
+
+    private var hidden: [Project] {
+        model.projects.filter { model.isArchived($0.id) }.sorted { $0.name < $1.name }
+    }
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            theme.bg.ignoresSafeArea()
+            List {
+                Color.clear.frame(height: 66)
+                    .listRowInsets(EdgeInsets())
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                    .accessibilityHidden(true)
+                if hidden.isEmpty {
+                    Text("No hidden chats")
+                        .font(.system(size: Theme.small))
+                        .foregroundStyle(theme.muted)
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 80)
+                        .listRowInsets(EdgeInsets())
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
+                }
+                ForEach(hidden) { project in
+                    Button { model.open(project: project) } label: {
+                        AgentRow(project: project, preview: HiddenChatsView.preview(project, in: model), time: "",
+                                 streaming: model.isStreaming(project: project.id), unread: false)
+                    }
+                    .buttonStyle(.borderless)
+                    .contextMenu {
+                        Button { withAnimation { model.unarchive(project.id) } } label: {
+                            Label("Unhide", systemImage: "eye")
+                        }
+                    }
+                    .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(theme.bg)
+                    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                        Button { withAnimation { model.unarchive(project.id) } } label: {
+                            Label("Unhide", systemImage: "eye")
+                        }
+                        .tint(theme.unread)
+                    }
+                }
+            }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .background(theme.bg)
+            // Grok page header: back circle left, title centred in a pill.
+            HStack {
+                Button { dismiss() } label: {
+                    GlassCircle {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(theme.text)
+                    }
+                }
+                .buttonStyle(.plain)
+                Spacer()
+                GlassPill {
+                    Text("Hidden chats")
+                        .font(.system(size: Theme.body, weight: .semibold))
+                        .foregroundStyle(theme.text)
+                        .padding(.horizontal, 16)
+                        .frame(height: Theme.control)
+                }
+                Spacer()
+                Color.clear.frame(width: Theme.control, height: Theme.control)
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 6)
+        }
+        .toolbar(.hidden, for: .navigationBar)
+    }
+
+    /// Last line of prose in the agent's chats, as on home.
+    static func preview(_ p: Project, in model: AppModel) -> String {
+        var best: Message? = nil
+        for chat in model.chats(of: p.id) {
+            if let m = model.messages(of: chat.id).last(where: { !$0.plainText.isEmpty }),
+               best == nil || m.createdAt > best!.createdAt { best = m }
+        }
+        guard let m = best else { return "No messages yet" }
+        let line = m.plainText.split(separator: "\n").first.map(String.init) ?? ""
+        return (m.role == .user ? "You: " : "") + HomeView.plain(line)
+    }
+}
+
 struct AgentRow: View {
     @Environment(\.theme) private var theme
     let project: Project
     let preview: String
+    /// SF Symbol drawn before the preview (Grok: checklist / paper plane).
+    var previewIcon: String? = nil
     let time: String
     let streaming: Bool
     let unread: Bool
     var pinned: Bool = false
 
     var body: some View {
-        HStack(spacing: 14) {
-            AgentAvatar(project: project, theme: theme, size: 46, working: streaming)
-            VStack(alignment: .leading, spacing: 3) {
+        // Grok home row (measured): 48 pt avatar box, text 15 pt after it, name 17
+        // semibold over a 15 pt grey preview, time right, 10 pt unread dot at the far
+        // right of the preview line, 80 pt row pitch.
+        HStack(spacing: 15) {
+            AgentAvatar(project: project, theme: theme, size: Theme.rowAvatar, working: streaming)
+            VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(project.name)
                         .font(.system(size: Theme.body, weight: .semibold))
@@ -635,19 +833,26 @@ struct AgentRow: View {
                         .foregroundStyle(theme.muted)
                 }
                 HStack(spacing: 6) {
+                    if let previewIcon {
+                        Image(systemName: previewIcon)
+                            .font(.system(size: 13, weight: .regular))
+                            .foregroundStyle(theme.muted)
+                            .accessibilityHidden(true)
+                    }
                     Text(preview)
                         .font(.system(size: Theme.small))
                         .foregroundStyle(theme.muted)
                         .lineLimit(1)
+                    Spacer(minLength: 0)
                     if streaming {
                         PulseDot(color: theme.warn)
                     } else if unread {
-                        Circle().fill(Color(hex: "#1084FE")!).frame(width: 8, height: 8)
+                        Circle().fill(theme.unread).frame(width: Theme.unreadDot, height: Theme.unreadDot)
                     }
                 }
             }
         }
-        .padding(.vertical, 12)
+        .padding(.vertical, Theme.rowVPad)
         .contentShape(Rectangle())
     }
 }
@@ -683,17 +888,17 @@ struct PeopleRow: View {
     }
 
     var body: some View {
-        HStack(spacing: 14) {
+        HStack(spacing: 15) {
             ZStack(alignment: .bottomTrailing) {
                 if chat.isGroup {
                     ZStack {
-                        Circle().fill(theme.card).frame(width: 46, height: 46)
+                        Circle().fill(theme.card).frame(width: Theme.rowAvatar, height: Theme.rowAvatar)
                         Image(systemName: "person.2.fill")
                             .font(.system(size: 17, weight: .medium))
                             .foregroundStyle(theme.muted)
                     }
                 } else {
-                    PersonAvatar(url: other?.avatarUrl, handle: other?.handle ?? "?", size: 46)
+                    PersonAvatar(url: other?.avatarUrl, handle: other?.handle ?? "?", size: Theme.rowAvatar)
                 }
                 if let a = chat.agents.first?.project {
                     AgentAvatar(project: a, theme: theme, size: 18, still: true)
@@ -701,7 +906,7 @@ struct PeopleRow: View {
                         .offset(x: 3, y: 3)
                 }
             }
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(title)
                         .font(.system(size: Theme.body, weight: .semibold))
@@ -729,12 +934,12 @@ struct PeopleRow: View {
                     if count > 0 {
                         UnreadBadge(count: count)
                     } else if unread {
-                        Circle().fill(Color(hex: "#1084FE")!).frame(width: 8, height: 8)
+                        Circle().fill(theme.unread).frame(width: Theme.unreadDot, height: Theme.unreadDot)
                     }
                 }
             }
         }
-        .padding(.vertical, 12)
+        .padding(.vertical, Theme.rowVPad)
         .contentShape(Rectangle())
     }
 }
@@ -755,6 +960,7 @@ struct PulseDot: View {
 
 /// Unread count pill (blue, white digits), capped at 99+.
 struct UnreadBadge: View {
+    @Environment(\.theme) private var theme
     let count: Int
 
     var body: some View {
@@ -763,7 +969,7 @@ struct UnreadBadge: View {
             .foregroundStyle(.white)
             .padding(.horizontal, count > 9 ? 6 : 0)
             .frame(minWidth: 20, minHeight: 20)
-            .background(Capsule().fill(Color(hex: "#1084FE")!))
+            .background(Capsule().fill(theme.unread))
             .accessibilityLabel("\(count) unread")
     }
 }

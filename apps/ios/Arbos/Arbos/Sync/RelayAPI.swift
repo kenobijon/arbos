@@ -330,17 +330,77 @@ final class RelayAPI {
         }
     }
 
-    /// Model ids the relay proxy can serve, filtered like the Mac client.
+    /// Model ids the relay proxy can serve, filtered like the Mac client,
+    /// then trimmed to the newest major of each family and sorted newest-first.
     func models() async throws -> [String] {
         let v = try await json("GET", "/proxy/v1/models")
         let data = (v as? [String: Any])?["data"] as? [Any] ?? []
         let allowed = ["anthropic/", "openai/", "google/", "x-ai/"]
         var ids = data.compactMap { ($0 as? [String: Any])?["id"] as? String }
             .filter { id in !id.contains(":") && allowed.contains { id.hasPrefix($0) } }
-        ids.sort()
         var seen = Set<String>()
         ids = ids.filter { seen.insert($0).inserted }
+        ids = Self.currentModels(ids)
+        ids.sort(by: Self.newerModel)
         return ids
+    }
+
+    /// Drop older majors in the same provider/stem family
+    /// (`google/gemini-2.5-*` goes away when any `google/gemini-3*` is listed).
+    private static func currentModels(_ ids: [String]) -> [String] {
+        var maxMajor: [String: Int] = [:]
+        for id in ids {
+            let key = modelFamily(id)
+            if let major = modelVersion(id).first {
+                maxMajor[key] = max(maxMajor[key] ?? major, major)
+            }
+        }
+        return ids.filter { id in
+            guard let major = modelVersion(id).first, let keep = maxMajor[modelFamily(id)] else {
+                return true
+            }
+            return major == keep
+        }
+    }
+
+    /// `google/gemini-3.1-flash` → `google/gemini`.
+    private static func modelFamily(_ id: String) -> String {
+        let parts = id.split(separator: "/", maxSplits: 1).map(String.init)
+        let provider = parts.first ?? ""
+        let leaf = parts.count > 1 ? parts[1] : id
+        let stem = leaf.prefix(while: \.isLetter)
+        return "\(provider)/\(stem)"
+    }
+
+    /// Number groups in the leaf id (`gemini-3.1-flash` → `[3, 1]`). Trailing
+    /// date stamps (`…-20241022`) are dropped so they do not look like versions.
+    private static func modelVersion(_ id: String) -> [Int] {
+        let leaf = id.split(separator: "/").last.map(String.init) ?? id
+        var nums: [Int] = []
+        var current = ""
+        for ch in leaf {
+            if ch.isNumber {
+                current.append(ch)
+            } else if !current.isEmpty {
+                if let n = Int(current) { nums.append(n) }
+                current = ""
+            }
+        }
+        if !current.isEmpty, let n = Int(current) { nums.append(n) }
+        if let last = nums.last, last >= 10_000_000 { nums.removeLast() }
+        return nums
+    }
+
+    /// Newer first: higher version within a family, else reverse id order.
+    private static func newerModel(_ a: String, _ b: String) -> Bool {
+        let fa = modelFamily(a), fb = modelFamily(b)
+        if fa == fb {
+            let va = modelVersion(a), vb = modelVersion(b)
+            let n = min(va.count, vb.count)
+            for i in 0..<n where va[i] != vb[i] { return va[i] > vb[i] }
+            if va.count != vb.count { return va.count > vb.count }
+        }
+        return a > b
     }
 
     /// Upload an attachment to the relay blob mirror; returns the key.
@@ -680,7 +740,10 @@ final class RelayAPI {
                 provider: provider,
                 label: m["label"] as? String ?? provider,
                 connect: m["connect"] as? String ?? "oauth",
-                oauthConfigured: (m["oauth_configured"] as? NSNumber)?.boolValue ?? false
+                // Bool and NSNumber both show up from JSONSerialization.
+                oauthConfigured: (m["oauth_configured"] as? Bool)
+                    ?? (m["oauth_configured"] as? NSNumber)?.boolValue
+                    ?? false
             )
         }
         let items: [Connector] = ((list["items"] as? [Any]) ?? []).compactMap { raw in

@@ -2,12 +2,15 @@ import SwiftUI
 
 struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
-    @ObservedObject private var push = PushManager.shared
-    @ObservedObject private var calls = CallManager.shared
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
+    #if DEBUG
     @State private var relayUrl = ""
+    #endif
     @State private var confirmUnpair = false
+    /// Connector errors — the root `notice` alert sits under this sheet and looks like a silent fail.
+    @State private var connectorError: String?
 
     var body: some View {
         NavigationStack {
@@ -15,7 +18,7 @@ struct SettingsView: View {
                 Section {
                     HStack(spacing: 14) {
                         if let url = model.user?.avatarUrl.flatMap(URL.init(string:)) {
-                            AsyncImage(url: url) { img in img.resizable().scaledToFill() } placeholder: { Color(hex: "#2A2A2A")! }
+                            AsyncImage(url: url) { img in img.resizable().scaledToFill() } placeholder: { theme.field }
                                 .frame(width: 56, height: 56)
                                 .clipShape(Circle())
                         } else {
@@ -115,12 +118,6 @@ struct SettingsView: View {
                 .listRowBackground(theme.card)
 
                 Section {
-                    LabeledContent("Notifications") {
-                        Text(notificationsLine).foregroundStyle(theme.muted).multilineTextAlignment(.trailing)
-                    }
-                    LabeledContent("Call ringing") {
-                        Text(calls.voipStatus).foregroundStyle(theme.muted).multilineTextAlignment(.trailing)
-                    }
                     Button {
                         dismiss()
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { FeedbackCenter.shared.open(screen: "settings") }
@@ -180,6 +177,7 @@ struct SettingsView: View {
                     .listRowBackground(theme.card)
                 }
 
+                #if DEBUG
                 Section {
                     TextField("https://relay.example.com", text: $relayUrl)
                         .keyboardType(.URL)
@@ -202,6 +200,7 @@ struct SettingsView: View {
                     Text("Self-hosters point the app at their own relay here. Switching relays signs this device out of the current one; sessions stay in the Keychain.")
                 }
                 .listRowBackground(theme.card)
+                #endif
 
                 if model.tokens == nil {
                     Section {
@@ -235,8 +234,32 @@ struct SettingsView: View {
                 Text(model.tokens != nil ? "This device is signed out of the relay; sign in with GitHub to come back." : "You will need a new pairing code to connect again.")
             }
             .onAppear {
+                #if DEBUG
                 relayUrl = model.relayUrl
+                #endif
                 model.refreshConnectors()
+            }
+            // After Google OAuth in Safari, refresh so "Needs sign-in" flips to Connected.
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .active { model.refreshConnectors() }
+            }
+            // Steal connector notices so they appear above this sheet, not under it.
+            .onChange(of: model.notice) { _, n in
+                guard let text = n?.text else { return }
+                let isConnector = text.hasPrefix("Connect ")
+                    || text.hasPrefix("Connectors:")
+                    || text.hasPrefix("Disconnect:")
+                guard isConnector else { return }
+                connectorError = text
+                model.notice = nil
+            }
+            .alert("Arbos", isPresented: Binding(
+                get: { connectorError != nil },
+                set: { if !$0 { connectorError = nil } }
+            )) {
+                Button("OK", role: .cancel) { connectorError = nil }
+            } message: {
+                Text(connectorError ?? "")
             }
         }
         // Form headers/footers/LabeledContent/segmented pickers use system
@@ -277,12 +300,15 @@ struct SettingsView: View {
                 Button("Disconnect") {
                     model.disconnectConnector(id: id)
                 }
+                .buttonStyle(.borderless)
                 .disabled(model.connectorsBusy)
             } else if p.hasOauth {
                 Button("Connect") {
                     model.connectConnector(provider: p.provider)
                 }
-                .disabled(model.connectorsBusy || model.isFixture || (!p.oauthConfigured && model.connectors.loaded && !model.connectors.mock))
+                .buttonStyle(.borderless)
+                .foregroundStyle(theme.accent)
+                .disabled(model.connectorsBusy || model.isFixture)
             }
         }
     }
@@ -291,14 +317,15 @@ struct SettingsView: View {
         if let cn, cn.status == .connected {
             return cn.label.isEmpty ? ConnectorStatus.connected.label : cn.label
         }
-        if let cn, cn.status == .needsAuth {
-            return ConnectorStatus.needsAuth.label
+        // Prefer the real reason over a stuck "Needs sign-in" from a failed start.
+        if model.connectors.loaded, !p.oauthConfigured, !model.connectors.mock, p.hasOauth {
+            return "OAuth client not configured on the relay"
         }
         if let err = cn?.lastError, !err.isEmpty, cn?.status != .connected {
             return err
         }
-        if model.connectors.loaded, !p.oauthConfigured, !model.connectors.mock, p.hasOauth {
-            return "OAuth client not configured on the relay"
+        if let cn, cn.status == .needsAuth {
+            return ConnectorStatus.needsAuth.label
         }
         if let cn { return cn.status.label }
         return "Not connected"
@@ -311,6 +338,7 @@ struct SettingsView: View {
         return u.docs == 0 ? "Nothing saved yet" : "\(size) · \(u.docs) chat\(u.docs == 1 ? "" : "s")"
     }
 
+    #if DEBUG
     private var linkLabel: String {
         switch model.link {
         case .connecting: return "Connecting…"
@@ -325,20 +353,7 @@ struct SettingsView: View {
         model.setRelayUrl(trimmed)
         dismiss()
     }
-
-    /// System permission × relay capability, in one line.
-    private var notificationsLine: String {
-        switch push.status {
-        case .denied: return "Off in iOS Settings"
-        case .notDetermined: return "Not asked yet"
-        default:
-            switch push.relayPushEnabled {
-            case .some(false): return "On · relay push key pending"
-            case .some(true): return "On"
-            case .none: return push.apnsToken == nil ? "On · registering…" : "On"
-            }
-        }
-    }
+    #endif
 
     static func relative(_ ms: Int64) -> String {
         let date = Date(timeIntervalSince1970: Double(ms) / 1000)

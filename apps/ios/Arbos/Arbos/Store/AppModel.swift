@@ -62,7 +62,11 @@ final class AppModel: ObservableObject {
     @Published var appearanceSetting: String = UserDefaults.standard.string(forKey: "appearance") ?? Appearance.system.rawValue {
         didSet { UserDefaults.standard.set(appearanceSetting, forKey: "appearance") }
     }
-    @Published var surfaceSetting: String = UserDefaults.standard.string(forKey: "surface") ?? Surface.matte.rawValue {
+    /// Glass is the iPhone default (D10 amendment, 2026-10-17: Grok's header
+    /// blurs the transcript under it). The key is only written when the user
+    /// picks a surface in Settings, so an absent key means "never chose" → Glass,
+    /// and an explicit "matte" stays Matte.
+    @Published var surfaceSetting: String = UserDefaults.standard.string(forKey: "surface") ?? Surface.glass.rawValue {
         didSet { UserDefaults.standard.set(surfaceSetting, forKey: "surface") }
     }
 
@@ -102,7 +106,15 @@ final class AppModel: ObservableObject {
     func setAppActive(_ active: Bool) {
         guard appActive != active else { return }
         appActive = active
-        if let id = visibleChatId { rooms[id]?.focused = active }
+        if let id = visibleChatId {
+            rooms[id]?.focused = active
+            // Rows that landed while inactive (e.g. mid-call) lit the unread flag
+            // because isWatching was false — clear now that we are back on screen.
+            if active {
+                if isPeopleChat(id) { markPeopleRead(id) }
+                else { markRead(chatId: id) }
+            }
+        }
         // Leaving the foreground is the last safe moment to write before a kill.
         if !active { flushStore(all: true) }
     }
@@ -190,7 +202,8 @@ final class AppModel: ObservableObject {
         if let chat = landingChat(of: project.id) {
             open(chat: chat)
         } else {
-            Task { if let c = await newChat(projectId: project.id) { open(chat: c) } }
+            // No landing chat yet — open a local thread at once (Mac `new_tab`).
+            _ = startNewChat(projectId: project.id)
         }
     }
 
@@ -283,7 +296,7 @@ final class AppModel: ObservableObject {
     private static let flushDelayNs: UInt64 = 1_500_000_000
 
     var appearance: Appearance { Appearance(rawValue: appearanceSetting) ?? .system }
-    var surface: Surface { Surface(rawValue: surfaceSetting) ?? .matte }
+    var surface: Surface { Surface(rawValue: surfaceSetting) ?? .glass }
     var isPaired: Bool { credentials != nil }
     var relayUrl: String { api.endpoint.httpUrl }
 
@@ -536,8 +549,10 @@ final class AppModel: ObservableObject {
     /// Unread rows of one agent chat for its dot: none while archived.
     func chatHasUnread(_ chat: Chat) -> Bool {
         if isChatArchived(chat.id) { return false }
+        // On screen: never keep a stale local/remote flag (same rule as people chats).
+        if chat.id == visibleChatId { return false }
         if chat.unread { return true }
-        return (unreadCounts[chat.id] ?? 0) > 0 && chat.id != visibleChatId
+        return (unreadCounts[chat.id] ?? 0) > 0
     }
 
     func unreadCount(for chat: PeopleChat) -> Int {
@@ -1312,17 +1327,29 @@ final class AppModel: ObservableObject {
     }
 
     /// Start Google OAuth in Safari; the relay finishes the callback, then we poll.
+    /// Busy clears as soon as Safari opens so Connect is not stuck disabled while the
+    /// user is signing in. Errors go through `notice` — Settings shows them itself
+    /// (the root alert sits under the sheet and looks like a silent fail).
     func connectConnector(provider: String) {
         guard !connectorsBusy, credentials != nil, !isFixture else { return }
         connectorsBusy = true
-        Task {
-            defer { connectorsBusy = false }
+        Task { @MainActor in
             do {
-                if let urlStr = try await api.connectConnector(provider: provider),
-                   let url = URL(string: urlStr) {
-                    await UIApplication.shared.open(url)
+                guard let urlStr = try await api.connectConnector(provider: provider),
+                      let url = URL(string: urlStr) else {
+                    connectorsBusy = false
+                    notice = Notice(text: "Connect \(provider): the relay sent no sign-in URL")
+                    await refreshConnectorsOnce()
+                    return
                 }
-                for wait in [0, 4, 8, 15, 30] as [UInt64] {
+                let opened = await UIApplication.shared.open(url)
+                connectorsBusy = false
+                guard opened else {
+                    notice = Notice(text: "Connect \(provider): could not open the sign-in page")
+                    return
+                }
+                // Match Mac: keep polling after the user returns from Safari.
+                for wait in [0, 4, 8, 15, 30, 60] as [UInt64] {
                     if wait > 0 { try? await Task.sleep(nanoseconds: wait * 1_000_000_000) }
                     do {
                         connectors = try await api.connectors()
@@ -1330,6 +1357,7 @@ final class AppModel: ObservableObject {
                     if connectors.connector(for: provider)?.status == .connected { break }
                 }
             } catch {
+                connectorsBusy = false
                 notice = Notice(text: "Connect \(provider): \(error.localizedDescription)")
                 await refreshConnectorsOnce()
             }
@@ -1628,14 +1656,17 @@ final class AppModel: ObservableObject {
                 mentions.append(address)
             }
         }
-        // In a DM, carry on with the agent who last spoke when nothing addresses an agent
-        // and the message is not aimed at a person. A person chip / @handle / bare name must
-        // not also ping the last agent — otherwise "Message Allan" still wakes bob.
-        // In a group, leave the message unaddressed (unless a chip / @agent set one) so the
-        // box decision model can choose which agent replies from chat context.
+        // In an agent-only DM, carry on with the agent who last spoke when nothing addresses
+        // an agent and the message is not aimed at a person. A DM with a human peer (Allan +
+        // bob) must not inherit that sticky target — otherwise "New test" / "Don't respond bob"
+        // still wakes bob. A person chip / @handle / bare name must not also ping the last
+        // agent — otherwise "Message Allan" still wakes bob. In a group, leave the message
+        // unaddressed (unless a chip / @agent set one) so the box decision model can choose
+        // which agent replies from chat context.
         var reply = replyTo
         let addressedPerson = mentions.contains { $0.hasPrefix("user:") }
-        if chat.kind != "group", !mentions.contains(where: { $0.hasPrefix("agent:") }),
+        let hasHumanPeer = chat.humans.contains { $0.id != me.id }
+        if chat.kind != "group", !hasHumanPeer, !mentions.contains(where: { $0.hasPrefix("agent:") }),
            !addressedPerson, reply == nil,
            let last = messages(of: chatId).last(where: { $0.role == .assistant }) {
             reply = last.id
@@ -2326,6 +2357,20 @@ final class AppModel: ObservableObject {
         chats(of: projectId).contains { isStreaming($0.id) }
     }
 
+    /// Visual cheat: the last row is the user's and no assistant turn has
+    /// started yet — show the working line immediately so a simple first
+    /// question does not sit on a dead transcript while the box wakes.
+    /// Agent project chats only (a human DM has no agent to "work").
+    func isAwaitingReply(_ chatId: Id) -> Bool {
+        if isStreaming(chatId) { return false }
+        if peopleChat(chatId) != nil { return false }
+        let list = messages(of: chatId)
+        guard let last = list.last, last.role == .user else { return false }
+        // Short bridge until the agent opens a streaming row (cold wake).
+        // ChatView ticks this once a second so it can expire cleanly.
+        return nowMs() - last.createdAt < 15_000
+    }
+
     // MARK: Commands (crdt-sync §6.2: the client writes rows and commands)
 
     /// An attachment staged in the composer, uploaded on send.
@@ -2444,14 +2489,22 @@ final class AppModel: ObservableObject {
         messages[chatId] = list
     }
 
-    private func write(chatId: Id, text: String, command: String, attachments: [Attachment], extra: [String: Any] = [:]) {
-        guard let doc = docs[chatId], let chat = chat(chatId) else {
+    private func write(chatId: Id, text: String, command: String, attachments: [Attachment],
+                       extra: [String: Any] = [:], messageId presetId: Id? = nil) {
+        guard let chat = chat(chatId) else {
             #if DEBUG
             if isFixture { fixtureAppend(chatId: chatId, text: text, attachments: attachments) }
             #endif
             return
         }
-        let messageId = newId()
+        // Optimistic new chat: the relay id (and room doc) may not exist yet.
+        // Echo the bubble now and flush once `finalizeNewChat` swaps the id.
+        guard let doc = docs[chatId] else {
+            enqueueOptimisticSend(chatId: chatId, chat: chat, text: text, command: command,
+                                  attachments: attachments, extra: extra)
+            return
+        }
+        let messageId = presetId ?? newId()
         markUnacked(chatId: chatId, messageId: messageId)
         do {
             try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: attachments)
@@ -2469,6 +2522,56 @@ final class AppModel: ObservableObject {
         doc.commit()
         markActivity(chatId: chatId)
         if command == "send" { announce(chatId: chatId, projectId: chat.projectId, messageId: messageId, text: text) }
+        if let p = project(chat.projectId), p.state.isAsleep || p.state == .error {
+            wake(projectId: p.id, reason: "send")
+        }
+    }
+
+    /// A send typed before the optimistic new-chat's relay id landed.
+    private struct OptimisticSend {
+        var messageId: Id
+        var text: String
+        var command: String
+        var attachments: [Attachment]
+        var extra: [String: Any]
+    }
+    private var optimisticSends: [Id: [OptimisticSend]] = [:]
+    /// Local chat ids still waiting on `POST /projects/{id}/chats`.
+    private var optimisticChatIds: Set<Id> = []
+    /// Local → real chat id once the relay create lands (for awaiters).
+    private var optimisticRemap: [Id: Id] = [:]
+
+    /// True when we already published an empty transcript for this chat
+    /// (optimistic new chat) — ChatView shows the empty hint, not a spinner.
+    func hasKnownEmptyTranscript(_ chatId: Id) -> Bool {
+        messages[chatId]?.isEmpty == true
+    }
+
+    private func enqueueOptimisticSend(chatId: Id, chat: Chat, text: String, command: String,
+                                       attachments: [Attachment], extra: [String: Any]) {
+        guard optimisticChatIds.contains(chatId) else {
+            notice = Notice(text: "Could not write the message: chat is not ready yet")
+            return
+        }
+        let messageId = newId()
+        markUnacked(chatId: chatId, messageId: messageId)
+        var m = Message(id: messageId, chatId: chatId, role: .user, sender: "user", status: .done, turn: nil,
+                        decision: nil, subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:], model: nil,
+                        createdAt: nowMs(), completedAt: nowMs(), pending: true,
+                        parts: attachments.map { .attachment(id: newId(), attachment: $0) }
+                            + (text.isEmpty ? [] : [.text(id: "\(messageId)-t", text: text)]),
+                        hiddenCount: 0)
+        // Keep attachment-only rows valid when text is empty.
+        if m.parts.isEmpty { m.parts = [.text(id: "\(messageId)-t", text: text)] }
+        messages[chatId, default: []].append(m)
+        if !chat.isPinned && chat.title == "New chat" {
+            retitleLocally(chatId: chatId, title: AppModel.title(from: text))
+        }
+        optimisticSends[chatId, default: []].append(
+            OptimisticSend(messageId: messageId, text: text, command: command,
+                           attachments: attachments, extra: extra)
+        )
+        markActivity(chatId: chatId)
         if let p = project(chat.projectId), p.state.isAsleep || p.state == .error {
             wake(projectId: p.id, reason: "send")
         }
@@ -2530,19 +2633,117 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Returns the new chat once the relay has created it.
-    func newChat(projectId: Id) async -> Chat? {
-        do {
-            let chat = try await api.createChat(projectId: projectId)
-            var list = chats[projectId] ?? []
-            list.append(chat)
-            chats[projectId] = AppModel.sorted(list)
-            ensureRoom(projectId: projectId, key: chat.id, roomChat: chat.id)
-            return chat
-        } catch {
-            notice = Notice(text: "New chat failed: \(error.localizedDescription)")
-            return nil
+    /// Open a new chat at once (Mac `new_tab`): local id + empty transcript,
+    /// no spinner. The relay create runs in the background and the id is
+    /// swapped when it lands. Pre-wakes a sleeping box so the first question
+    /// does not wait on a cold start.
+    @discardableResult
+    func startNewChat(projectId: Id) -> Chat {
+        let localId = newId()
+        let chat = Chat(id: localId, projectId: projectId, title: "New chat",
+                        isPinned: false, unread: false, lastMessageAt: nowMs())
+        var list = chats[projectId] ?? []
+        // Right after the pinned "Main" chat, same strip order as Mac.
+        let at = min((list.firstIndex(where: { $0.isPinned }).map { $0 + 1 } ?? 0), list.count)
+        list.insert(chat, at: at)
+        chats[projectId] = list
+        messages[localId] = []
+        caughtUp.insert(localId)
+        optimisticChatIds.insert(localId)
+        if let p = project(projectId), p.state.isAsleep || p.state == .error {
+            wake(projectId: projectId, reason: "new-chat")
         }
+        open(chat: chat)
+        Task { await finalizeNewChat(localId: localId, projectId: projectId) }
+        return chat
+    }
+
+    /// Returns the new chat once the relay has created it (legacy awaiters).
+    func newChat(projectId: Id) async -> Chat? {
+        let local = startNewChat(projectId: projectId)
+        let localId = local.id
+        for _ in 0..<100 {
+            if let realId = optimisticRemap[localId], let c = chat(realId) {
+                optimisticRemap.removeValue(forKey: localId)
+                return c
+            }
+            if !optimisticChatIds.contains(localId), optimisticRemap[localId] == nil {
+                return nil // abandoned
+            }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        return optimisticRemap[localId].flatMap(chat) ?? chat(localId)
+    }
+
+    private func finalizeNewChat(localId: Id, projectId: Id) async {
+        do {
+            let real = try await api.createChat(projectId: projectId)
+            adoptOptimisticChat(localId: localId, real: real)
+        } catch {
+            abandonOptimisticChat(localId: localId, projectId: projectId,
+                                  reason: "New chat failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func adoptOptimisticChat(localId: Id, real: Chat) {
+        optimisticChatIds.remove(localId)
+        optimisticRemap[localId] = real.id
+        var list = chats[real.projectId] ?? []
+        if let i = list.firstIndex(where: { $0.id == localId }) {
+            // Keep any title the user already typed into.
+            var adopted = real
+            if list[i].title != "New chat" { adopted.title = list[i].title }
+            list[i] = adopted
+        } else if !list.contains(where: { $0.id == real.id }) {
+            list.append(real)
+        }
+        chats[real.projectId] = AppModel.sorted(list)
+
+        // Copy under the real id first; keep the local key until path swaps so
+        // an in-flight ChatView does not flash an empty transcript mid-adopt.
+        let pending = messages[localId] ?? []
+        messages[real.id] = pending.map { m in
+            var copy = m
+            copy.chatId = real.id
+            return copy
+        }
+        if let u = unacked[localId] { unacked[real.id] = u }
+        caughtUp.insert(real.id)
+        if lastOpenedChat[real.projectId] == localId { rememberOpened(real) }
+
+        // Room (and doc) before the navigation swap so a remounted ChatView can send.
+        ensureRoom(projectId: real.projectId, key: real.id, roomChat: real.id)
+
+        let queued = optimisticSends.removeValue(forKey: localId) ?? []
+        // Keep the echoed bubbles on screen; write them into the real doc with
+        // the same ids so emitSnapshot replaces them in place (no flicker).
+        for item in queued {
+            write(chatId: real.id, text: item.text, command: item.command,
+                  attachments: item.attachments, extra: item.extra, messageId: item.messageId)
+        }
+
+        // Swap the navigation id for the real one, then drop the local mirrors.
+        if case .chat(let id, let pid)? = path.last, id == localId {
+            path[path.count - 1] = .chat(chatId: real.id, projectId: pid)
+        }
+        if visibleChatId == localId { visibleChatId = real.id }
+        messages[localId] = nil
+        unacked[localId] = nil
+        caughtUp.remove(localId)
+    }
+
+    private func abandonOptimisticChat(localId: Id, projectId: Id, reason: String) {
+        optimisticChatIds.remove(localId)
+        optimisticSends[localId] = nil
+        unacked[localId] = nil
+        messages[localId] = nil
+        caughtUp.remove(localId)
+        chats[projectId] = (chats[projectId] ?? []).filter { $0.id != localId }
+        if case .chat(let id, _)? = path.last, id == localId {
+            path.removeLast()
+        }
+        if visibleChatId == localId { visibleChatId = nil }
+        notice = Notice(text: reason)
     }
 
     func closeChat(_ chat: Chat) {
@@ -2567,6 +2768,9 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Clear a project chat's unread dot and always PUT /read so chat_events
+    /// unread clears even when local flags were already clean (notify can record
+    /// events while the chat was on screen, or while focus briefly dropped on a call).
     func markRead(chatId: Id) {
         let hadRemote = (unreadCounts[chatId] ?? 0) > 0
         if unreadCounts[chatId] != nil { unreadCounts[chatId] = 0 }
@@ -2580,15 +2784,13 @@ final class AppModel: ObservableObject {
                 hadLocal = true
             }
         }
-        if hadRemote || hadLocal {
-            applyBadge()
-            // §7c: PUT /chats/{id}/read takes project chat ids too; the relay
-            // clears the user's events for it and badges their other devices.
-            if !isFixture, chat(chatId) != nil {
-                let api = self.api
-                let seq = Int64(messages(of: chatId).count)
-                Task { try? await api.markRead(chatId: chatId, seq: seq) }
-            }
+        if hadRemote || hadLocal { applyBadge() }
+        // §7c: PUT /chats/{id}/read takes project chat ids too; the relay
+        // clears the user's events for it and badges their other devices.
+        if !isFixture, chat(chatId) != nil {
+            let api = self.api
+            let seq = Int64(messages(of: chatId).count)
+            Task { try? await api.markRead(chatId: chatId, seq: seq) }
         }
     }
 

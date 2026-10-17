@@ -42,6 +42,9 @@ CREATE TABLE IF NOT EXISTS voice_user_settings (
 CREATE TABLE IF NOT EXISTS voice_agent_settings (
   project_id TEXT PRIMARY KEY, chattiness TEXT NOT NULL DEFAULT 'balanced', wake_name TEXT
 );
+CREATE TABLE IF NOT EXISTS voice_worker (
+  id INTEGER PRIMARY KEY CHECK (id = 1), info TEXT NOT NULL, at INTEGER NOT NULL
+);
 "#;
 
 /// Columns added after the first voice release (ALTER is idempotent through the error).
@@ -297,6 +300,29 @@ impl Db {
             )?;
             let rows = st.query_map(params![call_id], |r| r.get(0))?;
             rows.collect()
+        })
+    }
+
+    // ---- worker hello (survives relay restarts) ------------------------------------------------------
+
+    pub fn set_voice_worker(&self, info: &Value) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO voice_worker(id, info, at) VALUES (1, ?1, ?2)
+                 ON CONFLICT(id) DO UPDATE SET info = excluded.info, at = excluded.at",
+                params![info.to_string(), now_ms()],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn voice_worker(&self) -> Result<Option<Value>> {
+        self.with(|c| {
+            c.query_row("SELECT info FROM voice_worker WHERE id = 1", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .optional()
+            .map(|s| s.and_then(|s| serde_json::from_str(&s).ok()))
         })
     }
 

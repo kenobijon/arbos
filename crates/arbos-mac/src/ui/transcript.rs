@@ -21,7 +21,9 @@ use crate::ui::groups;
 use crate::ui::markdown::{inline_spans, split_blocks, Block};
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
-use crate::ui::theme::{Theme, BUBBLE_RADIUS, LINE_HEIGHT, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
+use crate::ui::theme::{
+    Theme, BUBBLE_RADIUS, COLUMN_MARGIN, LINE_HEIGHT, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
+};
 use crate::ui::veil::Veil;
 use crate::ui::widgets::QuestionCard;
 use serde_json::Value;
@@ -341,7 +343,7 @@ impl Transcript {
                     .gap(px(6.0))
                     .max_w(relative_width(0.72))
                     .px(px(14.0))
-                    .py(px(10.0))
+                    .py(px(11.0))
                     .rounded(px(BUBBLE_RADIUS))
                     .bg(theme.bubble)
                     .text_color(theme.bubble_text())
@@ -469,9 +471,9 @@ impl Transcript {
                     .max_w(px(ASSISTANT_MAX_WIDTH))
                     .when(fill, |el| el.w_full())
                     .px(px(14.0))
-                    .when(first, |el| el.pt(px(10.0)).rounded_t(r))
+                    .when(first, |el| el.pt(px(11.0)).rounded_t(r))
                     .when(!first, |el| el.pt(px(3.0)))
-                    .when(last, |el| el.pb(px(10.0)).rounded_b(r))
+                    .when(last, |el| el.pb(px(11.0)).rounded_b(r))
                     .when(!last, |el| el.pb(px(3.0)))
                     .bg(theme.bubble_assistant)
                     .child(render_block(&row.id, &block, veil.as_ref(), now, &theme));
@@ -813,7 +815,7 @@ impl Transcript {
             .w_full()
             .flex()
             .justify_center()
-            .px(px(20.0))
+            .px(px(COLUMN_MARGIN))
             .child(div().w_full().max_w(px(COLUMN_MAX_WIDTH)).child(inner))
             .into_any_element()
     }

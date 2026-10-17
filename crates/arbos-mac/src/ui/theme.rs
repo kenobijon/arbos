@@ -12,12 +12,14 @@ use gpui::{hsla, rgb, rgba, App, Global, Hsla, WindowBackgroundAppearance};
 pub const SIDEBAR_WIDTH: f32 = 296.0;
 /// Kept for the settings sub-panels, which open just right of the sidebar.
 pub const RAIL_WIDTH: f32 = SIDEBAR_WIDTH;
-/// The slim conversation header (avatar + name left, icon buttons right).
-pub const HEADER_HEIGHT: f32 = 50.0;
+/// The slim conversation header (avatar + name left, icon buttons right); Grok Mac: 44 pt.
+pub const HEADER_HEIGHT: f32 = 44.0;
 pub const TAB_BAR_HEIGHT: f32 = HEADER_HEIGHT;
 /// Composer: one pill with the "+" circle inside left and mic / send inside right.
 pub const COMPOSER_WIDTH: f32 = 820.0;
-pub const COMPOSER_HEIGHT: f32 = 46.0;
+/// Grok Mac (ref 18, calibrated): 48 pt pill, 22 pt side margins, 14 pt below.
+pub const COMPOSER_HEIGHT: f32 = 48.0;
+pub const COLUMN_MARGIN: f32 = 22.0;
 pub const PLUS_BUTTON: f32 = 32.0;
 pub const SEND_BUTTON: f32 = 32.0;
 /// Icon buttons in the header and sheet corners.
@@ -35,9 +37,9 @@ pub const TEXT_BODY: f32 = 15.0;
 pub const TEXT_SMALL: f32 = 13.0;
 pub const TEXT_TINY: f32 = 11.5;
 pub const LINE_HEIGHT: f32 = 21.0;
-/// Avatar sizes: list row, header, inline sender.
-pub const AVATAR_ROW: f32 = 42.0;
-pub const AVATAR_HEADER: f32 = 26.0;
+/// Avatar sizes: list row (Grok Mac: 33 pt blobs in a 58 pt row), header, inline sender.
+pub const AVATAR_ROW: f32 = 36.0;
+pub const AVATAR_HEADER: f32 = 22.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Surface {
@@ -142,10 +144,12 @@ impl Theme {
         Self {
             surface,
             appearance: Appearance::Light,
-            bg: hex(0xf7f7f7),
-            sidebar: hex(0xefefef),
+            // Grok Mac light (ref 16/30): chat #FCFCFC, sidebar #F6F6F6,
+            // selected row #EFEFEF, assistant bubble #F2F2F2.
+            bg: hex(0xfcfcfc),
+            sidebar: hex(0xf6f6f6),
             surface_1: grey(1.0),
-            surface_2: hex(0xececec),
+            surface_2: hex(0xefefef),
             border: hex_a(0x000000, 0.08),
             border_strong: hex_a(0x000000, 0.16),
             text: hex(0x111111),
@@ -154,9 +158,9 @@ impl Theme {
             accent: hex(0x1084fe),
             accent_soft: hex_a(0x1084fe, 0.14),
             bubble: hex(0x111111),
-            bubble_assistant: hex(0xececec),
+            bubble_assistant: hex(0xf2f2f2),
             field: grey(1.0),
-            field_border: hex(0xe2e2e2),
+            field_border: hex(0xe3e3e3),
             primary: hex(0x111111),
             on_primary: grey(1.0),
             online: hex(0x34c759),

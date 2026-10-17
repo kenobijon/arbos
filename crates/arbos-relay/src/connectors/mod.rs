@@ -290,43 +290,11 @@ pub async fn connect(
         ));
     };
     let redirect = redirect_uri(&state);
+    // Resolve the auth URL (and fail if the OAuth client is missing) *before*
+    // writing a needs_auth placeholder — otherwise a misconfigured relay leaves
+    // Settings stuck on "Needs sign-in" with a Connect button that only errors.
     let (verifier, challenge) = pkce_pair();
     let st = ulid();
-    state
-        .db
-        .put_oauth_state(
-            &OauthState {
-                state: st.clone(),
-                provider: p.as_str().to_owned(),
-                code_verifier: verifier,
-                redirect_uri: redirect.clone(),
-                scopes: oauth.scopes.iter().map(|s| s.to_string()).collect(),
-            },
-            OAUTH_STATE_TTL_MS,
-        )
-        .map_err(internal)?;
-    // A placeholder row so the client shows "connecting…" until the callback lands.
-    if state
-        .db
-        .connector_by_provider(p.as_str())
-        .map_err(internal)?
-        .is_none()
-    {
-        state
-            .db
-            .upsert_connector(&Connector {
-                id: ulid(),
-                provider: p.as_str().to_owned(),
-                label: p.label().to_owned(),
-                scopes: Vec::new(),
-                status: "needs_auth".into(),
-                config: json!({}),
-                created_at: now_ms(),
-                last_used_at: None,
-                last_error: None,
-            })
-            .map_err(internal)?;
-    }
     let auth_url = if mock {
         // Mock: the browser lands straight on our callback, which mints a fake token.
         format!("{redirect}?state={st}&code=mock")
@@ -360,6 +328,41 @@ pub async fn connect(
         }
         url.to_string()
     };
+    state
+        .db
+        .put_oauth_state(
+            &OauthState {
+                state: st.clone(),
+                provider: p.as_str().to_owned(),
+                code_verifier: verifier,
+                redirect_uri: redirect.clone(),
+                scopes: oauth.scopes.iter().map(|s| s.to_string()).collect(),
+            },
+            OAUTH_STATE_TTL_MS,
+        )
+        .map_err(internal)?;
+    // A placeholder row so the client shows "Needs sign-in" until the callback lands.
+    if state
+        .db
+        .connector_by_provider(p.as_str())
+        .map_err(internal)?
+        .is_none()
+    {
+        state
+            .db
+            .upsert_connector(&Connector {
+                id: ulid(),
+                provider: p.as_str().to_owned(),
+                label: p.label().to_owned(),
+                scopes: Vec::new(),
+                status: "needs_auth".into(),
+                config: json!({}),
+                created_at: now_ms(),
+                last_used_at: None,
+                last_error: None,
+            })
+            .map_err(internal)?;
+    }
     Ok(
         Json(json!({ "authUrl": auth_url, "state": st, "redirectUri": redirect, "mock": mock }))
             .into_response(),

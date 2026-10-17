@@ -29,6 +29,8 @@ struct ChatView: View {
     @State private var showFiles = false
     @State private var showAttach = false
     @State private var scroller: ScrollViewProxy?
+    /// Scrolled more than ~120 pt above the end: show Grok's round chevron.
+    @State private var awayFromBottom = false
     @State private var demoRan = false
     @State private var demoQueue: [String] = []
     @StateObject private var recorder = MemoRecorder()
@@ -126,7 +128,8 @@ struct ChatView: View {
     @State private var replyTo: Message?
     @State private var mentionQuery: String?
     /// Chip-picked addressee in a people chat: `agent:…`, `user:…`, or `"everyone"`.
-    /// Nil means infer from the last agent reply (carry the convo) or the human counterpart.
+    /// Nil means no chip: agent-only DMs may still infer the last agent; human-peer DMs stay
+    /// with the person until a chip / `@` / reply picks an agent.
     @State private var talkTo: String?
 
     private var project: Project? { model.project(projectId) }
@@ -136,7 +139,10 @@ struct ChatView: View {
     private var counterpart: ChatMember? { people?.counterpart(me: model.user?.id) }
     private var messages: [Message] { model.messages(of: chatId) }
     private var needsAnswer: Bool { model.chatNeedsAnswer(chatId) }
-    private var streaming: Bool { model.isStreaming(chatId) }
+    /// True while a turn runs, or right after the user sends (before the
+    /// agent opens a streaming row) — visual cheat so a simple first reply
+    /// does not sit on a dead transcript.
+    private var streaming: Bool { model.isStreaming(chatId) || model.isAwaitingReply(chatId) }
     private var name: String {
         if let people { return counterpart.map { "@\($0.handle)" } ?? people.title }
         if let chat, chat.isGroup, !chat.title.isEmpty { return chat.title }
@@ -149,16 +155,18 @@ struct ChatView: View {
         return name
     }
 
-    /// Who the next people-chat message is for — chip pick, reply-to, or (in a DM only) the
-    /// agent who last spoke. Groups leave the addressee unset so the decision model on the box
-    /// can choose which agent replies, or none.
+    /// Who the next people-chat message is for — chip pick, reply-to, or (agent-only DM) the
+    /// agent who last spoke. A DM with a human peer (Allan + bob) leaves the addressee unset so
+    /// plain lines stay with the person; tap the agent chip or `@` to talk to the agent. Groups
+    /// leave the addressee unset so the decision model on the box can choose who replies, or none.
     private var effectiveTalkTo: String? {
         if let talkTo { return talkTo }
         if let r = replyTo, r.role == .assistant, let member = agentMember(for: r) {
             return member.member
         }
-        // DMs keep the last-agent follow-up; groups do not auto-address anyone.
-        if people?.kind != "group",
+        // Agent-only DMs keep the last-agent follow-up; a human peer must not inherit @bob.
+        let hasHumanPeer = people?.humans.contains { $0.id != model.user?.id } == true
+        if people?.kind != "group", !hasHumanPeer,
            let last = messages.last(where: { $0.role == .assistant }),
            let member = agentMember(for: last) {
             return member.member
@@ -249,9 +257,20 @@ struct ChatView: View {
                 }
             }
         }
+        .overlay(alignment: .bottomTrailing) {
+            if awayFromBottom {
+                scrollToBottomButton
+                    .padding(.trailing, composerSideInset)
+                    .padding(.bottom, 10)
+                    .transition(.opacity.combined(with: .scale(scale: 0.8)))
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: awayFromBottom)
         .safeAreaInset(edge: .bottom, spacing: 0) {
             composer
-                .padding(.horizontal, 18)
+                // Grok: 31 pt side inset with the keyboard down, 19 pt with it up.
+                .padding(.horizontal, composerSideInset)
+                .animation(.easeOut(duration: 0.25), value: composerFocused)
                 .padding(.top, 8)
                 .padding(.bottom, composerFocused ? 0 : 2)
                 .background(alignment: .top) {
@@ -367,6 +386,8 @@ struct ChatView: View {
                         startCall(.voice)
                         #endif
                     case "recording": recorder.start()
+                    case "scrollup":
+                        if let first = rows.first { withAnimation { scroller?.scrollTo(first.id, anchor: .top) } }
                     case "pending":
                         pending = [.init(name: "Q3 board deck v5.pdf", mime: "application/pdf", data: Data()),
                                    .init(name: "Photo Oct 15.jpg", mime: "image/jpeg", data: Data())]
@@ -377,8 +398,10 @@ struct ChatView: View {
             }
         }
         .onDisappear {
-            // Catch notifies that landed after the last onChange mark-read while we were still in the chat.
+            // Catch notifies that landed after the last onChange mark-read while we were still in the chat
+            // (including rows that arrived while the app was inactive on a call — isWatching was false).
             if isPeople { model.markPeopleRead(chatId) }
+            else { model.markRead(chatId: chatId) }
             if model.visibleChatId == chatId { model.visibleChatId = nil }
         }
         // Profile "search" sets pendingSearchChat while this chat is already on screen
@@ -590,6 +613,30 @@ struct ChatView: View {
         .padding(.top, 6)
     }
 
+    private var composerSideInset: CGFloat {
+        composerFocused ? Theme.composerInsetKeyboard : Theme.composerInset
+    }
+
+    /// Grok's scroll-to-bottom control: a 36 pt field-coloured circle with a
+    /// chevron, right-aligned with the composer, 18 pt above it.
+    private var scrollToBottomButton: some View {
+        Button {
+            withAnimation(.easeOut(duration: 0.3)) { scroller?.scrollTo("bottom", anchor: .bottom) }
+        } label: {
+            ZStack {
+                Circle().fill(theme.field)
+                Circle().strokeBorder(theme.fieldBorder, lineWidth: 1)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(theme.text)
+            }
+            .frame(width: Theme.voiceButton, height: Theme.voiceButton)
+            .contentShape(Circle().inset(by: -(44 - Theme.voiceButton) / 2))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Scroll to bottom")
+    }
+
     // MARK: Chat navigation swipes
 
     /// Swipe right goes back to Home (#916/#925). There is no swipe between
@@ -620,17 +667,37 @@ struct ChatView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     Color.clear.frame(height: (isPeople ? 104 : 64) + headerExtra).onAppear { scroller = proxy }
                     if let banner = machineBannerText {
-                        HStack(spacing: 6) {
-                            if model.machine.state == .waking { ProgressView().controlSize(.mini).tint(theme.muted) }
-                            Text(banner)
+                        // Grok (Mac refs 69/70): a quiet notice, not a red strip — the
+                        // title in the text colour, the reason muted.
+                        VStack(spacing: 3) {
+                            HStack(spacing: 6) {
+                                if model.machine.state == .waking { ProgressView().controlSize(.mini).tint(theme.muted) }
+                                if model.machine.state == .error {
+                                    Image(systemName: "desktopcomputer").font(.system(size: 12))
+                                }
+                                Text(model.machine.state == .error ? "Can't reach your machine" : banner)
+                            }
+                            .font(.system(size: Theme.small, weight: model.machine.state == .error ? .semibold : .regular))
+                            .foregroundStyle(model.machine.state == .error ? theme.text : theme.muted)
+                            if model.machine.state == .error {
+                                Text(banner)
+                                    .font(.system(size: Theme.tiny))
+                                    .foregroundStyle(theme.muted)
+                                    .multilineTextAlignment(.center)
+                            }
                         }
-                        .font(.system(size: Theme.small))
-                        .foregroundStyle(model.machine.state == .error ? theme.danger : theme.muted)
                         .frame(maxWidth: .infinity)
                         .padding(.bottom, 16)
                     }
                     if !model.caughtUp.contains(chatId) && messages.isEmpty && !model.isFixture {
-                        HStack { Spacer(); ProgressView().tint(theme.muted); Spacer() }.padding(.top, 60)
+                        // Known-empty (optimistic new chat seeds `messages[id] = []`):
+                        // show the empty hint at once — no spinner flash while the
+                        // room catches up on a thread we already know has no rows.
+                        if model.hasKnownEmptyTranscript(chatId) {
+                            if !isPeople { emptyHint }
+                        } else {
+                            HStack { Spacer(); ProgressView().tint(theme.muted); Spacer() }.padding(.top, 60)
+                        }
                     } else if rows.isEmpty, !isPeople {
                         // People chats stay blank (iMessage-style); the agent empty
                         // copy would say "Ask @handle anything…" which is wrong here.
@@ -658,8 +725,16 @@ struct ChatView: View {
                                 Button { UIPasteboard.general.string = m_text(row) } label: { Label("Copy", systemImage: "doc.on.doc") }
                             }
                     }
-                    if streaming {
+                    if model.isStreaming(chatId) {
                         workingLine.padding(.top, 20)
+                    } else if model.isAwaitingReply(chatId) {
+                        // Tick once a second so the awaiting-reply cheat expires
+                        // (isAwaitingReply is time-capped) without a stuck line.
+                        TimelineView(.periodic(from: .now, by: 1)) { _ in
+                            if model.isAwaitingReply(chatId) {
+                                workingLine.padding(.top, 20)
+                            }
+                        }
                     }
                     // Clears the 24 pt fade above the composer, so the last row
                     // (and "<name> is working") is never under the chat bar.
@@ -674,9 +749,17 @@ struct ChatView: View {
                     minHeight: (visibleRows.isEmpty && !streaming) ? 0 : height,
                     alignment: .bottom
                 )
+                // Fill the short-thread frame so taps on empty chrome hit this view.
+                .contentShape(Rectangle())
             }
             .defaultScrollAnchor(.bottom)
             .scrollDismissesKeyboard(.interactively)
+            // Tap empty chat chrome to dismiss the keyboard and free the transcript.
+            .onTapGesture {
+                composerFocused = false
+                searchFocused = false
+            }
+            .modifier(AwayFromBottomReporter(away: $awayFromBottom))
             // Mask stays in the scroll view's bounds — `ignoresSafeArea` on the
             // mask mis-samples the fade when the composer/keyboard inset changes
             // and can blank the whole transcript (white screen mid-type).
@@ -740,7 +823,7 @@ struct ChatView: View {
     private var machineBannerText: String? {
         switch model.machine.state {
         case .waking: return "Waking your machine…"
-        case .error: return model.machineDetail.map { "Machine: \($0)" } ?? (model.machine.alwaysOn ? "Your machine needs attention" : "Could not wake your machine")
+        case .error: return model.machineDetail ?? (model.machine.alwaysOn ? "Your agents are safe — their machine just can't be reached right now." : "Could not wake your machine")
         case .awake, .hibernatedLight, .hibernatedDeep, .stoppedByUser: return model.link == .reconnecting ? "Reconnecting…" : nil
         }
     }
@@ -774,7 +857,14 @@ struct ChatView: View {
                 ForEach(others) { m in
                     let selected = effectiveTalkTo == m.member
                     Button {
-                        talkTo = talkTo == m.member ? nil : m.member
+                        // Tapping the selected chip clears it. Do not promote an inferred /
+                        // reply-only selection into a sticky talkTo — that locked @bob on
+                        // every later line in Allan+bob DMs.
+                        if effectiveTalkTo == m.member {
+                            talkTo = nil
+                        } else {
+                            talkTo = m.member
+                        }
                         replyTo = nil
                     } label: {
                         HStack(spacing: 6) {
@@ -793,6 +883,7 @@ struct ChatView: View {
                         .padding(.leading, 6).padding(.trailing, 10).padding(.vertical, 5)
                         .background(Capsule().fill(selected ? theme.bubbleUser.opacity(theme.isDark ? 0.55 : 0.18) : theme.bubbleAssistant))
                         .overlay(Capsule().strokeBorder(selected ? theme.text.opacity(0.35) : Color.clear, lineWidth: 1))
+                        .contentShape(Capsule().inset(by: -8))
                     }
                     .buttonStyle(.plain)
                     .contextMenu {
@@ -896,6 +987,7 @@ struct ChatView: View {
                             .foregroundStyle(theme.text)
                     }
                     .frame(width: Theme.plusButton, height: Theme.plusButton)
+                    .contentShape(Circle().inset(by: -(44 - Theme.plusButton) / 2))
                 }
                 .buttonStyle(.plain)
                 .sheet(isPresented: $showAttach, onDismiss: demoDismissed) {
@@ -968,12 +1060,21 @@ struct ChatView: View {
                 .buttonStyle(.plain)
                 .padding(.leading, 14)
                 Circle().fill(theme.danger).frame(width: 8, height: 8)
-                HStack(spacing: 2) {
-                    ForEach(Array(recorder.levels.enumerated()), id: \.offset) { _, l in
-                        Capsule().fill(theme.text).frame(width: 3, height: 4 + CGFloat(l) * 20)
+                // Level bars drawn into whatever width is left (newest on the right),
+                // so the recorder row never pushes the composer past the screen edge.
+                Canvas { ctx, size in
+                    let pitch: CGFloat = 5, w: CGFloat = 3
+                    let levels = recorder.levels
+                    let n = min(levels.count, max(0, Int(size.width / pitch)))
+                    for i in 0..<n {
+                        let l = CGFloat(levels[levels.count - n + i])
+                        let h = min(size.height, 4 + l * 20)
+                        let x = size.width - CGFloat(n - i) * pitch
+                        let rect = CGRect(x: x, y: (size.height - h) / 2, width: w, height: h)
+                        ctx.fill(Path(roundedRect: rect, cornerRadius: w / 2), with: .color(theme.text))
                     }
                 }
-                .frame(maxWidth: .infinity)
+                .frame(maxWidth: .infinity, maxHeight: 24)
                 Text(recorder.timeLabel)
                     .font(.system(size: Theme.small, design: .monospaced))
                     .foregroundStyle(theme.text)
@@ -1021,6 +1122,7 @@ struct ChatView: View {
                                     finishMemoHold()
                                 } else {
                                     memoIgnoreRelease = false
+                                    Haptics.recordStart()
                                     recorder.start()
                                 }
                             }
@@ -1066,10 +1168,11 @@ struct ChatView: View {
                     .fill(theme.primary)
                     .frame(width: Theme.voiceButton, height: Theme.voiceButton)
                     .overlay(
-                        Image(systemName: (canSend || recorder.recording) ? "arrow.up" : "phone.fill")
+                        Image(systemName: (canSend || recorder.recording) ? "arrow.up" : idleButtonGlyph)
                             .font(.system(size: 16, weight: .bold))
                             .foregroundStyle(theme.onPrimary)
                     )
+                    .contentShape(Circle().inset(by: -(44 - Theme.voiceButton) / 2))
             }
             .buttonStyle(.plain)
             .accessibilityLabel((canSend || recorder.recording) ? "Send" : "Call")
@@ -1104,6 +1207,7 @@ struct ChatView: View {
     /// Stop the hold-to-talk memo and send its transcript (no-op if too short).
     private func finishMemoHold() {
         guard recorder.recording else { return }
+        Haptics.send()
         if let memo = recorder.stop() {
             sendMemo(.init(name: memo.name, mime: "audio/m4a", data: memo.data))
         }
@@ -1112,6 +1216,9 @@ struct ChatView: View {
     private var canSend: Bool {
         !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pending.isEmpty
     }
+
+    /// Idle round button: phone — starts a voice call (agent or people chat).
+    private var idleButtonGlyph: String { "phone.fill" }
 
     /// Members whose handle/slug starts with the typed `@` prefix; agents first.
     private func mentionList(_ people: PeopleChat, query: String) -> some View {
@@ -1221,14 +1328,20 @@ struct ChatView: View {
         }
     }
 
-    /// After a send in a DM, keep the agent chip selected so the next line stays with them.
-    /// In a group, clear the chip so the next line is unaddressed and the decision model
-    /// picks who replies from chat context (an explicit chip tap still addresses that send).
-    /// Always clear a one-shot "everyone" address.
+    /// After a send in a DM, keep an explicit agent chip selected so the next line stays with
+    /// them. Do not promote a reply-only / @-only address into a sticky chip when a human peer
+    /// is in the chat — otherwise Allan+bob DMs leave Message @bob on unrelated follow-ups.
+    /// In a group, clear the chip so the next line is unaddressed and the decision model picks
+    /// who replies (an explicit chip tap still addresses that send). Always clear "everyone".
     private func pinTalkTo(afterSending address: String?) {
         if address == "everyone" || people?.kind == "group" {
             talkTo = nil
         } else if let address, address.hasPrefix("agent:") {
+            let hasHumanPeer = people?.humans.contains { $0.id != model.user?.id } == true
+            if hasHumanPeer, talkTo != address {
+                // Reply-to or typed @agent addressed this send; leave the next line free.
+                return
+            }
             talkTo = address
         }
     }
@@ -1236,6 +1349,7 @@ struct ChatView: View {
     private func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !pending.isEmpty else { return }
+        Haptics.send()
         if isPeople {
             let address = sendAddress(for: text)
             model.sendPeople(chatId: chatId, text: text, replyTo: replyTo?.id, address: address, attachments: pending)
@@ -1409,6 +1523,25 @@ struct ModelPickerView: View {
     var body: some View {
         NavigationStack {
             List {
+                Section {
+                    HStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundStyle(theme.muted)
+                        TextField("", text: $query, prompt: Text("Filter models").foregroundStyle(theme.placeholder))
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .font(.system(size: Theme.body))
+                            .foregroundStyle(theme.text)
+                        if !query.isEmpty {
+                            Button { query = "" } label: {
+                                Image(systemName: "xmark.circle.fill").foregroundStyle(theme.muted)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .listRowBackground(theme.card)
+                }
                 Section("Reasoning") {
                     Picker("Effort", selection: $effort) {
                         ForEach(Effort.allCases) { e in Text(e.label).tag(e) }
@@ -1447,7 +1580,6 @@ struct ModelPickerView: View {
                     }
                 }
             }
-            .searchable(text: $query, prompt: "Filter models")
             .scrollContentBackground(.hidden)
             .background(theme.bg)
             .navigationTitle("Model")
@@ -1458,5 +1590,23 @@ struct ModelPickerView: View {
             .onAppear { effort = project.effort }
         }
         .presentationDetents([.medium, .large])
+    }
+}
+
+/// Reports when the scroll view sits more than 120 pt above its end (iOS 18+;
+/// earlier systems never show the chevron).
+private struct AwayFromBottomReporter: ViewModifier {
+    @Binding var away: Bool
+
+    func body(content: Content) -> some View {
+        if #available(iOS 18, *) {
+            content.onScrollGeometryChange(for: Bool.self) { g in
+                g.contentOffset.y + g.containerSize.height < g.contentSize.height - 120
+            } action: { _, isAway in
+                away = isAway
+            }
+        } else {
+            content
+        }
     }
 }
