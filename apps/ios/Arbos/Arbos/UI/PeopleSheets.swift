@@ -375,6 +375,7 @@ struct NewAgentView: View {
             Text("A new agent with its own workspace on your machine. You can rename it and pick its model from its profile.")
                 .font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
                 .multilineTextAlignment(.center).padding(.horizontal, 36)
+                .fixedSize(horizontal: false, vertical: true)
             Spacer()
         }
         .background(theme.bg)

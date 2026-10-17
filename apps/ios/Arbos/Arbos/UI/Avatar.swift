@@ -97,6 +97,7 @@ struct AvatarColorPicker: View {
             }
             Text(current == nil ? "Automatic: the colour comes from the agent's id, the same on every device." : "\(AvatarPalette.names[current!]), chosen by you.")
                 .font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
