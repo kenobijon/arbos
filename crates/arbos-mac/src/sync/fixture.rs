@@ -170,6 +170,7 @@ impl SyncSource for FixtureSource {
             emit_channels(&shared);
             emit_local(&shared);
             emit_vault(&shared);
+            emit_open_request(&shared);
             let _ = events.send(SyncEvent::Link(Link::Live));
 
             loop {
@@ -187,6 +188,44 @@ impl SyncSource for FixtureSource {
             Ok(())
         })
     }
+}
+
+/// `ARBOS_FIXTURE_OPEN=<project name or id>[/<chat id>]` opens that chat at
+/// launch (screenshot rigs; the iPhone has `ARBOS_OPEN_PROJECT` / `_CHAT`).
+fn emit_open_request(shared: &Arc<Shared>) {
+    let Ok(spec) = std::env::var("ARBOS_FIXTURE_OPEN") else {
+        return;
+    };
+    let (project, chat) = match spec.split_once('/') {
+        Some((p, c)) => (p.trim(), Some(c.trim())),
+        None => (spec.trim(), None),
+    };
+    let project_id = shared
+        .projects
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|p| p.id == project || p.name.eq_ignore_ascii_case(project))
+        .map(|p| p.id.clone());
+    let Some(project_id) = project_id else {
+        return;
+    };
+    let chat_id = {
+        let chats = shared.chats.lock().unwrap();
+        chat.map(str::to_owned)
+            .or_else(|| {
+                chats
+                    .iter()
+                    .find(|c| c.project_id == project_id && c.is_pinned)
+                    .or_else(|| chats.iter().find(|c| c.project_id == project_id))
+                    .map(|c| c.id.clone())
+            })
+            .unwrap_or_default()
+    };
+    let _ = shared.events.send(SyncEvent::RestoreSelection {
+        project_id,
+        chat_id,
+    });
 }
 
 fn forward_doc_change(shared: &Arc<Shared>, changed: DocChanged) {
