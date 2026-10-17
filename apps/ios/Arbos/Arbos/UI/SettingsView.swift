@@ -641,6 +641,8 @@ struct ConnectorsPage: View {
     /// Provider whose token paste field is open (`nil` = none).
     @State private var tokenFor: String?
     @State private var tokenDraft = ""
+    /// Connected pill tapped: (connector id, label) awaiting the Disconnect confirmation.
+    @State private var disconnecting: (String, String)?
 
     var body: some View {
         SettingsPage(title: "Connected apps") {
@@ -668,49 +670,62 @@ struct ConnectorsPage: View {
         ]
     }
 
+    /// Grok's Plugins row (web-03): icon tile, title over a one-line status, one pill
+    /// on the right — "Connect" (grey) or "✓ Connected" (green tint). Providers that
+    /// take both OAuth and a token get a menu on the pill; token-only ones open the
+    /// paste field directly; a connected pill asks before disconnecting.
     @ViewBuilder
     private func connectorRow(_ p: ConnectorProvider) -> some View {
         let cn = model.connectors.connector(for: p.provider)
         let connected = cn?.status == .connected
         let tokenOpen = tokenFor == p.provider
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .center, spacing: 12) {
+        let busy = model.connectorsBusy || model.isFixture
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center, spacing: 14) {
+                RoundedRectangle(cornerRadius: 7.5, style: .continuous)
+                    .fill(theme.isDark ? Color(hex: "#5C5C60")! : Color(hex: "#6E6E73")!)
+                    .frame(width: SettingsRow.tile, height: SettingsRow.tile)
+                    .overlay(
+                        Image(systemName: connectorSymbol(p.provider))
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(.white)
+                    )
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(p.label).font(.system(size: Theme.body)).foregroundStyle(theme.text)
+                    Text(p.label).font(.system(size: Theme.body)).foregroundStyle(theme.text).lineLimit(2)
                     Text(connectorSubline(p, cn: cn))
                         .font(.system(size: Theme.tiny))
                         .foregroundStyle(theme.muted)
+                        .lineLimit(2)
                 }
                 Spacer(minLength: 8)
                 if connected, let id = cn?.id {
-                    Button("Disconnect") { model.disconnectConnector(id: id) }
-                        .font(.system(size: Theme.small, weight: .semibold))
-                        .buttonStyle(.borderless)
-                        .foregroundStyle(theme.text)
-                        .disabled(model.connectorsBusy)
-                } else {
-                    if p.hasOauth {
-                        Button("Connect") { startOauth(p) }
-                            .font(.system(size: Theme.small, weight: .semibold))
-                            .buttonStyle(.borderless)
-                            .foregroundStyle(theme.accent)
-                            .disabled(model.connectorsBusy || model.isFixture)
+                    Button {
+                        disconnecting = (id, p.label)
+                    } label: {
+                        connectorPill(text: "Connected", check: true, on: true)
                     }
-                    if p.acceptsToken {
-                        Button(tokenOpen ? "Cancel" : "Token…") {
-                            if tokenOpen {
-                                tokenFor = nil
-                                tokenDraft = ""
-                            } else {
-                                tokenFor = p.provider
-                                tokenDraft = ""
-                            }
-                        }
-                        .font(.system(size: Theme.small, weight: .semibold))
-                        .buttonStyle(.borderless)
-                        .foregroundStyle(p.hasOauth ? theme.text : theme.accent)
-                        .disabled(model.connectorsBusy || model.isFixture)
-                    }
+                    .buttonStyle(.plain)
+                    .disabled(model.connectorsBusy)
+                } else if tokenOpen {
+                    Button {
+                        tokenFor = nil
+                        tokenDraft = ""
+                    } label: { connectorPill(text: "Cancel", check: false, on: false) }
+                    .buttonStyle(.plain)
+                } else if p.hasOauth && p.acceptsToken {
+                    Menu {
+                        Button("Sign in with \(shortName(p))") { startOauth(p) }
+                        Button("Paste a token…") { openToken(p) }
+                    } label: { connectorPill(text: "Connect", check: false, on: false) }
+                    .disabled(busy)
+                } else if p.hasOauth {
+                    Button { startOauth(p) } label: { connectorPill(text: "Connect", check: false, on: false) }
+                        .buttonStyle(.plain)
+                        .disabled(busy)
+                } else if p.acceptsToken {
+                    Button { openToken(p) } label: { connectorPill(text: "Connect", check: false, on: false) }
+                        .buttonStyle(.plain)
+                        .disabled(busy)
                 }
             }
             if tokenOpen {
@@ -731,14 +746,66 @@ struct ConnectorsPage: View {
                         .font(.system(size: Theme.small, weight: .semibold))
                         .buttonStyle(.borderless)
                         .foregroundStyle(theme.accent)
-                        .disabled(model.connectorsBusy || model.isFixture
-                                  || tokenDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(busy || tokenDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
+                .padding(.leading, SettingsRow.tile + 14)
             }
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 8)
+        .padding(.vertical, 9)
         .frame(minHeight: 56)
+        .confirmationDialog(
+            "Disconnect \(disconnecting?.1 ?? "")?",
+            isPresented: Binding(get: { disconnecting != nil && disconnecting?.1 == p.label },
+                                 set: { if !$0 { disconnecting = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button("Disconnect", role: .destructive) {
+                if let id = disconnecting?.0 { model.disconnectConnector(id: id) }
+                disconnecting = nil
+            }
+            Button("Keep", role: .cancel) { disconnecting = nil }
+        } message: {
+            Text("Your agents stop using it until you connect it again.")
+        }
+    }
+
+    /// The Grok "Add" / "✓ Added" pill: 30 pt tall, 13 pt semibold.
+    private func connectorPill(text: String, check: Bool, on: Bool) -> some View {
+        HStack(spacing: 5) {
+            if check { Image(systemName: "checkmark").font(.system(size: 11, weight: .bold)) }
+            Text(text).font(.system(size: 13, weight: .semibold))
+        }
+        .foregroundStyle(on ? theme.online : theme.text)
+        .padding(.horizontal, 12)
+        .frame(height: 30)
+        .background(Capsule().fill(on ? theme.online.opacity(0.14) : theme.field))
+        .overlay(Capsule().strokeBorder(on ? theme.online.opacity(0.35) : theme.fieldBorder, lineWidth: 1))
+        .contentShape(Capsule())
+    }
+
+    private func connectorSymbol(_ provider: String) -> String {
+        switch provider {
+        case "google": return "envelope.fill"
+        case "slack": return "number"
+        case "github": return "chevron.left.forwardslash.chevron.right"
+        case "harness_comms": return "antenna.radiowaves.left.and.right"
+        default: return "puzzlepiece.extension.fill"
+        }
+    }
+
+    private func shortName(_ p: ConnectorProvider) -> String {
+        switch p.provider {
+        case "google": return "Google"
+        case "slack": return "Slack"
+        case "github": return "GitHub"
+        default: return p.label
+        }
+    }
+
+    private func openToken(_ p: ConnectorProvider) {
+        tokenFor = p.provider
+        tokenDraft = ""
     }
 
     private func startOauth(_ p: ConnectorProvider) {
@@ -780,12 +847,12 @@ struct ConnectorsPage: View {
         // Prefer the real reason over a stuck "Needs sign-in" from a failed start.
         if model.connectors.loaded, !p.oauthConfigured, !model.connectors.mock, p.hasOauth {
             if p.acceptsToken {
-                return "OAuth not configured — connect with a token"
+                return "Sign-in not set up — paste a token"
             }
             return "OAuth client not configured on the relay"
         }
         if !p.hasOauth, p.acceptsToken {
-            return "API key: use Token…"
+            return "Connects with an API key"
         }
         if let err = cn?.lastError, !err.isEmpty, cn?.status != .connected {
             return err
