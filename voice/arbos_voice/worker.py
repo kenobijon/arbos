@@ -68,7 +68,14 @@ from .config import CONFIG, Config
 from .judge import CHATTINESS_THRESHOLD, Decision, Judge, JudgeContext, forced_decision
 from .listener import GroupListeners, Utterance
 from .meter import CallMeter
-from .prompts import ASK_AGENT_DESCRIPTION, LOOK_DESCRIPTION, system_prompt
+from .prompts import (
+    ASK_AGENT_DESCRIPTION,
+    LEAVE_CALL_DESCRIPTION,
+    LOOK_DESCRIPTION,
+    MUTE_SELF_DESCRIPTION,
+    UNMUTE_SELF_DESCRIPTION,
+    system_prompt,
+)
 from .relay import EventBatcher, Relay, RelayError, ToolPending
 from .vision import Vision, wants_a_look
 
@@ -131,7 +138,13 @@ def speaker_of(participant: rtc.RemoteParticipant | None, identity: str) -> dict
         try:
             meta = json.loads(participant.metadata or "{}")
             if isinstance(meta, dict):
-                out.update({k: v for k, v in meta.items() if k in ("id", "handle", "name", "avatar_url", "kind") and v})
+                out.update(
+                    {
+                        k: v
+                        for k, v in meta.items()
+                        if k in ("id", "handle", "name", "avatar_url", "kind", "platform") and v
+                    }
+                )
         except json.JSONDecodeError:
             pass
         if not out.get("name"):
@@ -215,6 +228,8 @@ class CallState:
     idle_asked: bool = False
     leaving: bool = False
     stop_reason: str | None = None
+    # True while mute_self has detached our audio output (people cannot hear us).
+    muted: bool = False
 
 
 class ArbosVoiceAgent(Agent):
@@ -418,16 +433,51 @@ class VoiceCall:
                 "returns nothing. If someone asks you to look at something, say vision is off for this agent."
             )
         call = self.info.get("call") or {}
+        chat = self.info.get("chat") or {}
         agents = self.info.get("agents") or call.get("agents") or []
+        model = (
+            self.info.get("model")
+            or (self.info.get("project") or {}).get("model")
+            or ctxpack.get("talking_model")
+            or self.cfg.model
+        )
+        people = self.people_on_call()
         return system_prompt(
             name=self.agent_name,
             group=self.state.mode == "group",
             extra=extra,
-            people=self.info.get("humans") or [],
+            people=people,
             platform=call.get("platform"),
             agents=agents if isinstance(agents, list) else [],
             self_id=self.project_id,
+            model=str(model) if model else None,
+            chat_title=(chat.get("title") or chat.get("name") or "").strip() or None,
+            chat_kind=(chat.get("kind") or "").strip() or None,
         )
+
+    def people_on_call(self) -> list[dict]:
+        """Humans for the prompt: call_info rows, with LiveKit platform when the join token carried it."""
+        by_id: dict[str, dict] = {}
+        for raw in self.info.get("humans") or []:
+            if not isinstance(raw, dict):
+                continue
+            entry = dict(raw)
+            pid = str(entry.get("id") or "")
+            if pid:
+                by_id[pid] = entry
+        for p in self.humans():
+            sp = speaker_of(p, p.identity)
+            pid = str(sp.get("id") or "")
+            if not pid:
+                continue
+            entry = by_id.get(pid) or dict(sp)
+            if sp.get("platform"):
+                entry["platform"] = sp["platform"]
+                entry["calling_from"] = sp["platform"]
+            elif entry.get("calling_from") or entry.get("platform"):
+                pass
+            by_id[pid] = entry
+        return list(by_id.values()) or list(self.info.get("humans") or [])
 
     def turn_detection_for(self, mode: str):
         if mode != "duplex":
@@ -881,7 +931,50 @@ class VoiceCall:
         async def look(context: RunContext, what: str, hand_to_agent: bool = False, participant: str = "") -> str:
             return await call.look(what, hand_to_agent=hand_to_agent, participant=participant)
 
-        return [ask_agent, look]
+        @function_tool(name="mute_self", description=MUTE_SELF_DESCRIPTION)
+        async def mute_self(context: RunContext) -> str:
+            return await call.set_muted(True)
+
+        @function_tool(name="unmute_self", description=UNMUTE_SELF_DESCRIPTION)
+        async def unmute_self(context: RunContext) -> str:
+            return await call.set_muted(False)
+
+        @function_tool(name="leave_call", description=LEAVE_CALL_DESCRIPTION)
+        async def leave_call(context: RunContext) -> str:
+            return await call.leave_by_tool()
+
+        return [ask_agent, look, mute_self, unmute_self, leave_call]
+
+    async def set_muted(self, muted: bool) -> str:
+        """Detach or re-attach our audio output so the call cannot / can hear us."""
+        if self.state.muted == muted:
+            return "Already muted." if muted else "Already unmuted."
+        self.state.muted = muted
+        if muted and self.session:
+            try:
+                self.session.interrupt()
+            except Exception as e:
+                log.warning("interrupt on mute failed: %s", e)
+        if self.session:
+            try:
+                self.session.output.set_audio_enabled(not muted)
+            except Exception as e:
+                log.warning("set_audio_enabled(%s) failed: %s", not muted, e)
+                return (
+                    "Could not change mute on the audio path; say so briefly."
+                    if muted
+                    else "Could not unmute on the audio path; say so briefly."
+                )
+        self.event("system", text=f"{self.agent_name} muted" if muted else f"{self.agent_name} unmuted")
+        log.info("agent %s", "muted" if muted else "unmuted")
+        return "Muted. Stay silent until unmute_self." if muted else "Unmuted. You can speak again."
+
+    async def leave_by_tool(self) -> str:
+        """Dismiss ourselves from the call after the model has said goodbye."""
+        if self.state.leaving:
+            return "Already leaving."
+        self.spawn(self.finish("asked"))
+        return "Leaving the call now."
 
     # ---- vision ------------------------------------------------------------------------------------
 

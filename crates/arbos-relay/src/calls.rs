@@ -139,11 +139,18 @@ fn participants_json(state: &AppState, call: &CallRow) -> Vec<Value> {
 
 /// The call object without a token (worker and admin views).
 pub fn call_json_public(state: &AppState, call: &CallRow) -> Value {
-    call_json(state, call, None)
+    call_json(state, call, None, None)
 }
 
 /// The call object; with a fresh token for `for_user` when the call is live.
-fn call_json(state: &AppState, call: &CallRow, for_user: Option<&str>) -> Value {
+/// `platform` (from `X-Arbos-Client`) is written into LiveKit participant metadata so the
+/// voice agent can say where each person is calling from.
+fn call_json(
+    state: &AppState,
+    call: &CallRow,
+    for_user: Option<&str>,
+    platform: Option<&str>,
+) -> Value {
     let mut v = json!({
         "call_id": call.id,
         "chat_id": call.chat_id,
@@ -164,7 +171,19 @@ fn call_json(state: &AppState, call: &CallRow, for_user: Option<&str>) -> Value 
     });
     if let (Some(lk), Some(user), true) = (&state.livekit, for_user, call.active()) {
         let me = Sender::user(state, user);
-        let (token, exp) = lk.join_token(&call.room, &identity_of(user), &me.name, &me.json());
+        let mut meta = me.json();
+        let plat = platform
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .or_else(|| {
+                call.platform
+                    .as_deref()
+                    .filter(|_| user == call.started_by.as_str())
+            });
+        if let Some(p) = plat {
+            meta["platform"] = json!(p);
+        }
+        let (token, exp) = lk.join_token(&call.room, &identity_of(user), &me.name, &meta);
         v["token"] = json!(token);
         v["token_expires_at"] = json!(exp);
     }
@@ -257,7 +276,7 @@ async fn deliver_alert(
 /// every other member's devices.
 async fn announce_started(state: &AppState, call: &CallRow, starter: &Sender) {
     let chat = chat_ref_of(call);
-    let call_v = call_json(state, call, None);
+    let call_v = call_json(state, call, None, None);
     let title = starter.title();
     let what = if call.kind == "video" {
         "video call"
@@ -352,7 +371,7 @@ async fn announce_ended(
                 "event": "ended",
                 "chat_id": call.chat_id,
                 "project_id": project_label,
-                "call": call_json(state, call, None),
+                "call": call_json(state, call, None, None),
             });
             deliver_alert(state, &t, payload, format!("call:{}", call.id)).await;
         }
@@ -410,7 +429,7 @@ async fn announce_missed(state: &AppState, call: &CallRow) {
                 "event": "missed",
                 "chat_id": call.chat_id,
                 "project_id": project_label,
-                "call": call_json(state, call, None),
+                "call": call_json(state, call, None, None),
                 "sender": from.json(),
             });
             deliver_alert(state, &t, payload, format!("call:{}", call.id)).await;
@@ -480,14 +499,17 @@ async fn start_or_join(
             )
         }
     };
+    let (platform, app_version) = client_identity(state, headers, &device);
     if let Ok(Some(existing)) = state.db.active_call_in_chat(&chat.chat_id) {
         let _ = state.db.call_join(&existing.id, &me);
         crate::voice::ensure_agents(state, &existing).await;
-        return Json(json!({ "call": call_json(state, &existing, Some(&me)), "joined": true }))
-            .into_response();
+        return Json(json!({
+            "call": call_json(state, &existing, Some(&me), platform.as_deref()),
+            "joined": true
+        }))
+        .into_response();
     }
     let now = now_ms();
-    let (platform, app_version) = client_identity(state, headers, &device);
     let call = CallRow {
         id: ulid(),
         chat_id: chat.chat_id.clone(),
@@ -500,7 +522,7 @@ async fn start_or_join(
         end_reason: None,
         last_activity_at: now,
         started_device: Some(device),
-        platform,
+        platform: platform.clone(),
         app_version,
     };
     if let Err(e) = state.db.insert_call(&call) {
@@ -521,7 +543,12 @@ async fn start_or_join(
     let dispatched = crate::voice::dispatch_agents(state, &call).await;
     (
         StatusCode::CREATED,
-        Json(json!({ "call": call_json(state, &call, Some(&me)), "joined": false, "reachable": reachable, "agents_dispatched": dispatched })),
+        Json(json!({
+            "call": call_json(state, &call, Some(&me), platform.as_deref()),
+            "joined": false,
+            "reachable": reachable,
+            "agents_dispatched": dispatched
+        })),
     )
         .into_response()
 }
@@ -589,7 +616,7 @@ fn resolve_project_chat(
 fn active_call_response(state: &AppState, chat_id: &str, me: &str) -> Response {
     match state.db.active_call_in_chat(chat_id) {
         Ok(Some(call)) => {
-            Json(json!({ "call": call_json(state, &call, Some(me)) })).into_response()
+            Json(json!({ "call": call_json(state, &call, Some(me), None) })).into_response()
         }
         Ok(None) => api_error(StatusCode::NOT_FOUND, "no_call", "no call in this chat"),
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
@@ -667,12 +694,15 @@ pub async fn get_call(
     State(state): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
+    headers: HeaderMap,
 ) -> Response {
-    let (_, me, call) = match member_call(&state, &principal, &id) {
+    let (device, me, call) = match member_call(&state, &principal, &id) {
         Ok(v) => v,
         Err(r) => return *r,
     };
-    Json(json!({ "call": call_json(&state, &call, Some(&me)) })).into_response()
+    let (platform, _) = client_identity(&state, &headers, &device);
+    Json(json!({ "call": call_json(&state, &call, Some(&me), platform.as_deref()) }))
+        .into_response()
 }
 
 /// `POST /calls/{id}/join` → `{call}` with a fresh token; 410 when the call ended.
@@ -680,11 +710,12 @@ pub async fn join_call(
     State(state): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
+    headers: HeaderMap,
 ) -> Response {
     if state.livekit.is_none() {
         return calls_off();
     }
-    let (_, me, call) = match member_call(&state, &principal, &id) {
+    let (device, me, call) = match member_call(&state, &principal, &id) {
         Ok(v) => v,
         Err(r) => return *r,
     };
@@ -703,7 +734,9 @@ pub async fn join_call(
     }
     let _ = state.db.call_join(&call.id, &me);
     crate::voice::ensure_agents(&state, &call).await;
-    Json(json!({ "call": call_json(&state, &call, Some(&me)) })).into_response()
+    let (platform, _) = client_identity(&state, &headers, &device);
+    Json(json!({ "call": call_json(&state, &call, Some(&me), platform.as_deref()) }))
+        .into_response()
 }
 
 /// `POST /calls/{id}/leave` → `{ended, duration_s}`; the last one out ends the call.
@@ -925,7 +958,7 @@ pub async fn admin_calls(State(state): State<AppState>, principal: Principal) ->
         .active_calls()
         .unwrap_or_default()
         .iter()
-        .map(|c| call_json(&state, c, None))
+        .map(|c| call_json(&state, c, None, None))
         .collect();
     let recent: Vec<Value> = state
         .db
@@ -1100,6 +1133,7 @@ mod tests {
             State(state.clone()),
             carol_dev.clone(),
             Path(call_id.clone()),
+            HeaderMap::new(),
         )
         .await;
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
@@ -1107,6 +1141,7 @@ mod tests {
             State(state.clone()),
             carol_dev.clone(),
             Path(call_id.clone()),
+            HeaderMap::new(),
         )
         .await;
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
@@ -1147,7 +1182,13 @@ mod tests {
             assert_eq!(ended[0].1["writer_device"], *bob_device);
             assert_eq!(ended[0].1["reason"], "last_left");
         }
-        let r = join_call(State(state.clone()), bob_dev.clone(), Path(call_id.clone())).await;
+        let r = join_call(
+            State(state.clone()),
+            bob_dev.clone(),
+            Path(call_id.clone()),
+            HeaderMap::new(),
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::GONE);
         let r = people_chat_call(State(state.clone()), alice_dev, Path(chat)).await;
         assert_eq!(r.status(), StatusCode::NOT_FOUND);
@@ -1368,7 +1409,13 @@ mod tests {
 
         // Bob joins, Alice and Bob hang up; Carol never answered → only Carol gets call_missed.
         let call_id = v["call"]["call_id"].as_str().unwrap().to_owned();
-        join_call(State(state.clone()), bob_dev.clone(), Path(call_id.clone())).await;
+        join_call(
+            State(state.clone()),
+            bob_dev.clone(),
+            Path(call_id.clone()),
+            HeaderMap::new(),
+        )
+        .await;
         leave_call(
             State(state.clone()),
             alice_dev.clone(),
