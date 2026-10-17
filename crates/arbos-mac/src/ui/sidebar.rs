@@ -587,9 +587,9 @@ fn render_row(row: RowView, theme: &Theme, cx: &mut Context<Shell>) -> impl Into
         ))))
         .flex()
         .items_center()
-        .gap(px(11.0))
-        .px(px(10.0))
-        .py(px(8.0))
+        .gap(px(10.0))
+        .px(px(12.0))
+        .py(px(11.0))
         .rounded(px(PANEL_RADIUS - 4.0))
         .bg(if selected {
             theme.surface_2

@@ -17,7 +17,9 @@ pub const HEADER_HEIGHT: f32 = 50.0;
 pub const TAB_BAR_HEIGHT: f32 = HEADER_HEIGHT;
 /// Composer: one pill with the "+" circle inside left and mic / send inside right.
 pub const COMPOSER_WIDTH: f32 = 820.0;
-pub const COMPOSER_HEIGHT: f32 = 46.0;
+/// Grok Mac (ref 18, calibrated): 48 pt pill, 22 pt side margins, 14 pt below.
+pub const COMPOSER_HEIGHT: f32 = 48.0;
+pub const COLUMN_MARGIN: f32 = 22.0;
 pub const PLUS_BUTTON: f32 = 32.0;
 pub const SEND_BUTTON: f32 = 32.0;
 /// Icon buttons in the header and sheet corners.
@@ -35,8 +37,8 @@ pub const TEXT_BODY: f32 = 15.0;
 pub const TEXT_SMALL: f32 = 13.0;
 pub const TEXT_TINY: f32 = 11.5;
 pub const LINE_HEIGHT: f32 = 21.0;
-/// Avatar sizes: list row, header, inline sender.
-pub const AVATAR_ROW: f32 = 42.0;
+/// Avatar sizes: list row (Grok Mac: 33 pt blobs in a 58 pt row), header, inline sender.
+pub const AVATAR_ROW: f32 = 36.0;
 pub const AVATAR_HEADER: f32 = 26.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
