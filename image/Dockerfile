@@ -45,8 +45,9 @@ RUN curl -LsSf https://astral.sh/uv/${UV_VERSION}/install.sh | env UV_INSTALL_DI
  && uv python install 3.11 && chmod -R a+rX /opt/python
 
 # --- The same Python as `python3`, `python` and `pip` on PATH, so an agent's "pip install <sdk or
-# cli>" works out of the box: pip falls back to a --user install when site-packages is read-only,
-# and agentd puts each workspace's ~/.local/bin on PATH (isolation::env).
+# cli>" works out of the box: the PEP 668 marker uv ships is dropped (it would refuse every pip
+# install), pip falls back to a --user install when site-packages is read-only, and agentd puts
+# each workspace's ~/.local/bin on PATH (isolation::env).
 RUN PY="$(uv python find 3.11)" \
  && find /opt/python -name EXTERNALLY-MANAGED -delete \
  && ln -s "$PY" /usr/local/bin/python3 && ln -s "$PY" /usr/local/bin/python \
