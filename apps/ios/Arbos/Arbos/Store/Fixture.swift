@@ -174,18 +174,19 @@ extension AppModel {
         let activity = [act(1, "used", "STRIPE_KEY", ("fx-affine", "Affine"), "api.stripe.com", "agent:affine", 2),
                         act(2, "access_on", "MAILGUN_API_KEY", ("fx-comms", "Comms"), nil, "user:me", 1_440),
                         act(3, "refused", "STRIPE_KEY", ("fx-hyper", "Hyper"), "stripe.evil.example", "agent:hyper", 4_320)]
+        // One pending card: shown on the Secrets root and on Comms's page (same rule on the Mac).
+        let request: [String: Any] = ["id": "fx-req-1", "project_id": "fx-comms", "project_name": "Comms", "name": "GITHUB_LOGIN",
+                                      "purpose": "Sign in to post the release notes", "use": "browser_fill", "host": "github.com",
+                                      "status": "pending", "created_at": now - 180_000]
         secrets = SecretsOverview.parse(["paused": false, "vaults": [vault], "secrets": [stripe, mailgun, github],
-                                         "requests_pending": 1, "activity": activity, "providers": ["onepassword"]])
+                                         "requests_pending": 1, "requests": [request], "activity": activity, "providers": ["onepassword"]])
         var stripeAccess = stripeAgents[1]
         stripeAccess["secret"] = stripe
         var vaultAccess = agent("fx-comms", "Comms", true, "read the Stripe item")
         vaultAccess["vault"] = vault
         vaultAccess["target_kind"] = "vault"
         projectSecrets["fx-comms"] = ProjectSecrets.parse(["paused": false, "owner": true, "items": [stripeAccess, vaultAccess],
-                                                            "requests": [["id": "fx-req-1", "project_id": "fx-comms", "project_name": "Comms", "name": "GITHUB_LOGIN",
-                                                                          "purpose": "Sign in to post the release notes", "use": "browser_fill", "host": "github.com",
-                                                                          "status": "pending", "created_at": now - 180_000]],
-                                                            "activity": activity])
+                                                            "requests": [request], "activity": activity])
     }
 
     /// Two sample message notifications (an agent, a person) for screenshots.
