@@ -1105,7 +1105,7 @@ struct ConnectVaultSheet: View {
     var body: some View {
         SheetFrame(title: "Connect 1Password", action: "Connect", canSave: token.trimmingCharacters(in: .whitespaces).count > 20, busy: busy, save: { Task { await connect() } }) {
             step(1, "In 1Password, create a service account with read access to one vault, e.g. \"Arbos — Research\".") {
-                Link("Open 1password.com", destination: URL(string: "https://my.1password.com/developer-tools/infrastructure-secrets/serviceaccount/")!)
+                SwiftUI.Link("Open 1password.com", destination: URL(string: "https://my.1password.com/developer-tools/infrastructure-secrets/serviceaccount/")!)
                     .font(.system(size: Theme.small, weight: .medium)).foregroundStyle(Color(hex: "#1084FE")!)
             }
             step(2, "Paste its token") {
