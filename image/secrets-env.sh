@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Arbos secrets (D83 decision 2): the real values the owner switched on live in the workspace's
 # secrets.env, written by agentd and rewritten within seconds of any switch, Pause all, delete or
 # disconnect. `bash -c` reads it through BASH_ENV; this loader covers login shells (profile.d)
@@ -15,6 +16,7 @@ __arbos_secrets_env() {
       [ -r "$g" ] && f=$g
     done
   fi
+  # shellcheck source=/dev/null
   [ -n "$f" ] && [ -r "$f" ] && . "$f"
   return 0
 }
