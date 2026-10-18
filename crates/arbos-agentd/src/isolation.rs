@@ -218,14 +218,18 @@ impl Isolation {
     }
 
     /// Environment the workspace's processes get: their own HOME and caches; toolchains stay the
-    /// shared read-only ones under /usr/local, /opt.
+    /// shared read-only ones under /usr/local, /opt. Tools the agent installs itself (`pip
+    /// install`, `uv tool install`, `npm i -g`) land in its own `~/.local`, which leads PATH.
     pub fn env(ra: &RunAs) -> Vec<(String, String)> {
         let home = ra.home.display().to_string();
+        let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".into());
         vec![
             ("HOME".into(), home.clone()),
+            ("PATH".into(), format!("{home}/.local/bin:{path}")),
             ("XDG_CACHE_HOME".into(), format!("{home}/.cache")),
             ("UV_CACHE_DIR".into(), format!("{home}/.cache/uv")),
             ("npm_config_cache".into(), format!("{home}/.cache/npm")),
+            ("npm_config_prefix".into(), format!("{home}/.local")),
             ("PIP_CACHE_DIR".into(), format!("{home}/.cache/pip")),
             ("USER".into(), ra.user.clone()),
             ("LOGNAME".into(), ra.user.clone()),

@@ -44,6 +44,15 @@ ENV UV_PYTHON_INSTALL_DIR=/opt/python
 RUN curl -LsSf https://astral.sh/uv/${UV_VERSION}/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh \
  && uv python install 3.11 && chmod -R a+rX /opt/python
 
+# --- The same Python as `python3`, `python` and `pip` on PATH, so an agent's "pip install <sdk or
+# cli>" works out of the box: pip falls back to a --user install when site-packages is read-only,
+# and agentd puts each workspace's ~/.local/bin on PATH (isolation::env).
+RUN PY="$(uv python find 3.11)" \
+ && ln -s "$PY" /usr/local/bin/python3 && ln -s "$PY" /usr/local/bin/python \
+ && python3 -m ensurepip --upgrade \
+ && ln -s "$(dirname "$PY")/pip3" /usr/local/bin/pip3 && ln -s /usr/local/bin/pip3 /usr/local/bin/pip \
+ && chmod -R a+rX /opt/python
+
 # --- Main agent: pi (needs the Node 24 in the base image) + the Arbos extension
 RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@${PI_VERSION} \
  && npm cache clean --force

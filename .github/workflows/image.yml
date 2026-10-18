@@ -78,6 +78,7 @@ jobs:
             agent-browser --version
             /opt/chrome/chrome --version
             uv --version && doppler --version && gh --version | head -1
+            python3 --version && pip --version
             test -x /opt/prime-venv/bin/python
             test -f /etc/arbos/pi-seed/extensions/arbos-pi-ext/index.ts
             arbos-agentd --version
