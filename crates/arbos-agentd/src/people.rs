@@ -117,8 +117,12 @@ fn message_spoken_name(msg: &MessageView, fallback: &str) -> String {
         .unwrap_or_else(|| fallback.to_owned())
 }
 
-/// True when the message names at least one person and no agent (chip or `@handle`).
-/// Those lines are for humans; the reply gate must not wake an agent to answer them.
+/// True when the message is aimed at people and names no agent (chip or `@handle`).
+///
+/// Person chips ("Call?" with a `user:` mention and no `@` in the prose) and a leading
+/// `@handle` ("@ken …", "Yo @ken") are for humans — the reply gate must not wake an agent.
+/// A mid-line `@person` alone ("Would you rent if @ken asked?") is a reference, not an
+/// address: leave the hard gate open so the group decision model can still pick an agent.
 fn addressed_only_to_people(msg: &MessageView) -> bool {
     let Some(mentions) = msg.rest.get("mentions").and_then(Value::as_array) else {
         return false;
@@ -135,7 +139,16 @@ fn addressed_only_to_people(msg: &MessageView) -> bool {
             saw_person = true;
         }
     }
-    saw_person
+    if !saw_person {
+        return false;
+    }
+    let text = msg.text();
+    // Chip / bare-name address: person mention with no `@` token in the prose.
+    if !text.contains('@') {
+        return true;
+    }
+    // Leading `@handle` (optional yo/hey/hi…) is still a people ping.
+    leading_address_token(&text).is_some_and(|t| t.starts_with('@'))
 }
 
 /// Leading token of the message (optional yo/hey/hi… greeting), lower-cased, punctuation stripped.
@@ -356,8 +369,9 @@ fn text_addresses_agents_collectively(msg: &MessageView) -> bool {
     false
 }
 
-/// Leading person ping in the prose (or people-only mentions) and no agent `@` in the text.
-/// Sticky chip / reply-to agent mentions must not wake an agent for "Allan?".
+/// Leading person ping in the prose (or a people chip / leading `@handle`) and no agent `@`
+/// in the text. Sticky chip / reply-to agent mentions must not wake an agent for "Allan?".
+/// Mid-line `@person` alone is not a people ping — see `addressed_only_to_people`.
 fn people_ping_not_for_agents(msg: &MessageView, info: &PeopleChatInfo) -> bool {
     if text_mentions_agent(msg, info) {
         return false;
@@ -755,8 +769,9 @@ impl Agent {
         {
             return true;
         }
-        // A person chip / @handle with no agent address is for humans — stay quiet even in a
-        // group (the decision model must not wake an agent to decline a call meant for Ken).
+        // A person chip or leading @handle with no agent address is for humans — stay quiet
+        // even in a group (the decision model must not wake an agent to decline a call meant
+        // for Ken). Mid-line @person references alone still reach the decision model.
         if addressed_only_to_people(&msg) {
             return false;
         }
@@ -1187,10 +1202,27 @@ mod tests {
         let mut assistant = msg("@research", json!({}));
         assistant.role = "assistant".into();
         assert!(!addressed(&assistant, P, "research", true, true, true));
-        // Person-only mentions (chip / @handle) — for humans, not agents.
+        // Person-only mentions: chip (no @ in prose) or leading @handle — for humans.
         assert!(addressed_only_to_people(&msg(
             "Call?",
             json!({ "mentions": ["user:gh_ken"] })
+        )));
+        assert!(addressed_only_to_people(&msg(
+            "@ken Call?",
+            json!({ "mentions": ["user:gh_ken"] })
+        )));
+        assert!(addressed_only_to_people(&msg(
+            "Yo @ken",
+            json!({ "mentions": ["user:gh_ken"] })
+        )));
+        // Mid-line @person is a reference, not a people-only address.
+        assert!(!addressed_only_to_people(&msg(
+            "Would you rent a machine if @kenobijon asked ?",
+            json!({ "mentions": ["user:kenobijon"] })
+        )));
+        assert!(!addressed_only_to_people(&msg(
+            "can you see @jo?",
+            json!({ "mentions": ["user:jo"] })
         )));
         assert!(!addressed_only_to_people(&msg(
             "Call?",
@@ -1232,6 +1264,15 @@ mod tests {
             &msg(
                 "can you see @jo?",
                 json!({ "mentions": ["user:jo", "agent:01HPROJ"] })
+            ),
+            &info
+        ));
+        // Mid-line @person with no agent address is also not a people ping — the group
+        // decision model may still wake an agent (e.g. follow-up that names a human).
+        assert!(!people_ping_not_for_agents(
+            &msg(
+                "Would you rent a machine if @kenobijon asked ?",
+                json!({ "mentions": ["user:kenobijon"] })
             ),
             &info
         ));
