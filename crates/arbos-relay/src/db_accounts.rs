@@ -349,6 +349,7 @@ impl Db {
                 params![id],
             )?;
             c.execute("DELETE FROM machine_meter WHERE user_id = ?1", params![id])?;
+            c.execute("DELETE FROM vault_items WHERE user_id = ?1", params![id])?;
             c.execute("DELETE FROM users WHERE id = ?1", params![id])?;
             Ok(true)
         })

@@ -381,9 +381,11 @@ pub struct ChannelPairCode {
 
 /// One credential in the vault (F8). `fields` is ciphertext from `connectors::crypto` over a JSON
 /// object (`{ "url", "username", "password" }` for a login, `{ "value" }` for a secret/api_key).
+/// Owned by one user: every read and write is scoped by `user_id`, and names are unique per user.
 #[derive(Debug, Clone)]
 pub struct VaultItem {
     pub id: String,
+    pub user_id: String,
     pub name: String,
     /// `login | secret | api_key`.
     pub kind: String,
@@ -511,7 +513,71 @@ impl Db {
         crate::db_calls::migrate_calls(&c);
         c.execute_batch(crate::db_voice::VOICE_SCHEMA)?;
         crate::db_voice::migrate_voice(&c);
+        Self::migrate_vault_items_per_user(&c)?;
         Ok(Self(Arc::new(Mutex::new(c))))
+    }
+
+    /// Vault items used to belong to the whole relay (`name TEXT NOT NULL UNIQUE`, no owner), so
+    /// any user's box could list and request every user's items. Give each row a `user_id`,
+    /// make names unique per user instead of relay-wide, and assign the rows that exist to the
+    /// user whose projects requested them (else the legacy `u_default`). Runs once: it looks for
+    /// SQLite's automatic unique index on `name`.
+    fn migrate_vault_items_per_user(c: &Connection) -> Result<()> {
+        let _ = c.execute(
+            "ALTER TABLE vault_items ADD COLUMN user_id TEXT NOT NULL DEFAULT 'u_default'",
+            [],
+        );
+        let has_global_unique: bool = {
+            let mut st = c.prepare("PRAGMA index_list(vault_items)")?;
+            let names: Vec<(String, i64)> = st
+                .query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, i64>(2)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            let mut found = false;
+            for (name, unique) in names {
+                if unique == 0 || !name.starts_with("sqlite_autoindex_vault_items") {
+                    continue;
+                }
+                let mut cols = c.prepare(&format!("PRAGMA index_info({name})"))?;
+                let col_names: Vec<String> = cols
+                    .query_map([], |r| r.get::<_, String>(2))?
+                    .collect::<rusqlite::Result<_>>()?;
+                if col_names == ["name"] {
+                    found = true;
+                }
+            }
+            found
+        };
+        if has_global_unique {
+            tracing::info!("migrating vault_items: one owner per item, names unique per user");
+            c.execute_batch(
+                "BEGIN;
+                 CREATE TABLE vault_items_new (
+                   id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL,
+                   fields TEXT NOT NULL, allowed_hosts TEXT NOT NULL DEFAULT '[]',
+                   created_at INTEGER NOT NULL, last_used_at INTEGER, daytona_secrets TEXT NOT NULL DEFAULT '{}',
+                   user_id TEXT NOT NULL DEFAULT 'u_default'
+                 );
+                 INSERT INTO vault_items_new(id, name, kind, fields, allowed_hosts, created_at, last_used_at, daytona_secrets, user_id)
+                   SELECT id, name, kind, fields, allowed_hosts, created_at, last_used_at, daytona_secrets, user_id FROM vault_items;
+                 DROP TABLE vault_items;
+                 ALTER TABLE vault_items_new RENAME TO vault_items;
+                 -- An item that exactly one user's projects ever requested belongs to that user.
+                 UPDATE vault_items SET user_id = (
+                     SELECT p.user_id FROM vault_requests r JOIN projects p ON p.id = r.project_id
+                     WHERE r.item_id = vault_items.id GROUP BY p.user_id
+                   )
+                   WHERE user_id = 'u_default' AND (
+                     SELECT COUNT(DISTINCT p.user_id) FROM vault_requests r JOIN projects p ON p.id = r.project_id
+                     WHERE r.item_id = vault_items.id
+                   ) = 1;
+                 COMMIT;",
+            )?;
+        }
+        c.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS vault_items_user_name ON vault_items(user_id, name)",
+            [],
+        )?;
+        Ok(())
     }
 
     /// D74: until 2026-10-15 the relay's hash default could land on `mono`, so about one project
@@ -2630,7 +2696,7 @@ impl Db {
     // ---- vault (F8) ---------------------------------------------------------------------------
 
     const VAULT_ITEM_COLS: &'static str =
-        "id, name, kind, fields, allowed_hosts, created_at, last_used_at, daytona_secrets";
+        "id, name, kind, fields, allowed_hosts, created_at, last_used_at, daytona_secrets, user_id";
 
     fn row_to_vault_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<VaultItem> {
         Ok(VaultItem {
@@ -2642,83 +2708,94 @@ impl Db {
             created_at: r.get(5)?,
             last_used_at: r.get(6)?,
             daytona_secrets: serde_json::from_str(&r.get::<_, String>(7)?).unwrap_or_default(),
+            user_id: r.get(8)?,
         })
     }
 
+    /// Insert or update one item. The owner never changes on update: an id that exists under
+    /// another user is left alone (the row count tells the caller nothing happened).
     pub fn upsert_vault_item(&self, it: &VaultItem) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO vault_items(id, name, kind, fields, allowed_hosts, created_at, last_used_at, daytona_secrets)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+                "INSERT INTO vault_items(id, name, kind, fields, allowed_hosts, created_at, last_used_at, daytona_secrets, user_id)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
                  ON CONFLICT(id) DO UPDATE SET name=excluded.name, kind=excluded.kind, fields=excluded.fields,
-                    allowed_hosts=excluded.allowed_hosts, daytona_secrets=excluded.daytona_secrets",
+                    allowed_hosts=excluded.allowed_hosts, daytona_secrets=excluded.daytona_secrets
+                 WHERE vault_items.user_id = excluded.user_id",
                 params![
                     it.id, it.name, it.kind, it.fields_enc,
                     serde_json::to_string(&it.allowed_hosts).unwrap_or_else(|_| "[]".into()),
-                    it.created_at, it.last_used_at, it.daytona_secrets.to_string()
+                    it.created_at, it.last_used_at, it.daytona_secrets.to_string(), it.user_id
                 ],
             )
             .map(|_| ())
         })
     }
 
-    pub fn list_vault_items(&self) -> Result<Vec<VaultItem>> {
+    /// One user's items, by name.
+    pub fn list_vault_items(&self, user_id: &str) -> Result<Vec<VaultItem>> {
         self.with(|c| {
             let mut st = c.prepare(&format!(
-                "SELECT {} FROM vault_items ORDER BY name",
+                "SELECT {} FROM vault_items WHERE user_id = ?1 ORDER BY name",
                 Self::VAULT_ITEM_COLS
             ))?;
-            let rows = st.query_map([], Self::row_to_vault_item)?;
+            let rows = st.query_map(params![user_id], Self::row_to_vault_item)?;
             rows.collect()
         })
     }
 
-    pub fn vault_item(&self, id: &str) -> Result<Option<VaultItem>> {
+    /// One item of one user; another user's id reads as absent.
+    pub fn vault_item(&self, user_id: &str, id: &str) -> Result<Option<VaultItem>> {
         self.with(|c| {
             c.query_row(
                 &format!(
-                    "SELECT {} FROM vault_items WHERE id = ?1",
+                    "SELECT {} FROM vault_items WHERE id = ?1 AND user_id = ?2",
                     Self::VAULT_ITEM_COLS
                 ),
-                params![id],
+                params![id, user_id],
                 Self::row_to_vault_item,
             )
             .optional()
         })
     }
 
-    pub fn vault_item_by_name(&self, name: &str) -> Result<Option<VaultItem>> {
+    pub fn vault_item_by_name(&self, user_id: &str, name: &str) -> Result<Option<VaultItem>> {
         self.with(|c| {
             c.query_row(
                 &format!(
-                    "SELECT {} FROM vault_items WHERE name = ?1",
+                    "SELECT {} FROM vault_items WHERE user_id = ?1 AND name = ?2",
                     Self::VAULT_ITEM_COLS
                 ),
-                params![name],
+                params![user_id, name],
                 Self::row_to_vault_item,
             )
             .optional()
         })
     }
 
-    pub fn touch_vault_item(&self, id: &str) -> Result<()> {
+    pub fn touch_vault_item(&self, user_id: &str, id: &str) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "UPDATE vault_items SET last_used_at = ?2 WHERE id = ?1",
-                params![id, now_ms()],
+                "UPDATE vault_items SET last_used_at = ?3 WHERE id = ?1 AND user_id = ?2",
+                params![id, user_id, now_ms()],
             )
             .map(|_| ())
         })
     }
 
-    pub fn delete_vault_item(&self, id: &str) -> Result<bool> {
+    pub fn delete_vault_item(&self, user_id: &str, id: &str) -> Result<bool> {
         self.with(|c| {
-            c.execute(
-                "UPDATE vault_requests SET status = 'expired' WHERE item_id = ?1 AND status IN ('pending', 'approved')",
-                params![id],
+            let n = c.execute(
+                "DELETE FROM vault_items WHERE id = ?1 AND user_id = ?2",
+                params![id, user_id],
             )?;
-            c.execute("DELETE FROM vault_items WHERE id = ?1", params![id])
-                .map(|n| n > 0)
+            if n > 0 {
+                c.execute(
+                    "UPDATE vault_requests SET status = 'expired' WHERE item_id = ?1 AND status IN ('pending', 'approved')",
+                    params![id],
+                )?;
+            }
+            Ok(n > 0)
         })
     }
 
@@ -2779,26 +2856,39 @@ impl Db {
         })
     }
 
-    pub fn list_vault_requests(&self, limit: i64) -> Result<Vec<VaultRequest>> {
+    /// Requests made by one user's projects: pending first, then the newest decided ones.
+    pub fn list_vault_requests(&self, user_id: &str, limit: i64) -> Result<Vec<VaultRequest>> {
         self.with(|c| {
             Self::expire_vault_requests(c)?;
+            let cols: String = Self::VAULT_REQ_COLS
+                .split(", ")
+                .map(|col| format!("r.{col}"))
+                .collect::<Vec<_>>()
+                .join(", ");
             let mut st = c.prepare(&format!(
-                "SELECT {} FROM vault_requests ORDER BY (status = 'pending') DESC, created_at DESC LIMIT ?1",
-                Self::VAULT_REQ_COLS
+                "SELECT {cols} FROM vault_requests r JOIN projects p ON p.id = r.project_id
+                 WHERE p.user_id = ?1 ORDER BY (r.status = 'pending') DESC, r.created_at DESC LIMIT ?2"
             ))?;
-            let rows = st.query_map(params![limit], Self::row_to_vault_request)?;
+            let rows = st.query_map(params![user_id, limit], Self::row_to_vault_request)?;
             rows.collect()
         })
     }
 
-    /// Decide a pending request. Returns the updated row, or `None` when it is not pending.
-    pub fn decide_vault_request(&self, id: &str, approve: bool) -> Result<Option<VaultRequest>> {
+    /// Decide a pending request of one of `user_id`'s projects. Returns the updated row, or
+    /// `None` when it is not pending or belongs to someone else.
+    pub fn decide_vault_request(
+        &self,
+        user_id: &str,
+        id: &str,
+        approve: bool,
+    ) -> Result<Option<VaultRequest>> {
         self.with(|c| {
             Self::expire_vault_requests(c)?;
             let status = if approve { "approved" } else { "denied" };
             let n = c.execute(
-                "UPDATE vault_requests SET status = ?2, decided_at = ?3 WHERE id = ?1 AND status = 'pending'",
-                params![id, status, now_ms()],
+                "UPDATE vault_requests SET status = ?2, decided_at = ?3 WHERE id = ?1 AND status = 'pending'
+                 AND project_id IN (SELECT id FROM projects WHERE user_id = ?4)",
+                params![id, status, now_ms(), user_id],
             )?;
             if n == 0 {
                 return Ok(None);
@@ -2829,6 +2919,147 @@ impl Db {
             let rows = st.query_map(params![project_id, item_id], Self::row_to_vault_request)?;
             rows.collect()
         })
+    }
+}
+
+#[cfg(test)]
+mod vault_scope_tests {
+    use super::*;
+
+    fn temp_db(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "arbos-vault-{tag}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn item(id: &str, user: &str, name: &str) -> VaultItem {
+        VaultItem {
+            id: id.into(),
+            user_id: user.into(),
+            name: name.into(),
+            kind: "api_key".into(),
+            fields_enc: "enc".into(),
+            allowed_hosts: vec![],
+            created_at: 1,
+            last_used_at: None,
+            daytona_secrets: serde_json::json!({}),
+        }
+    }
+
+    /// Invariant: a user's box (or device) sees, names, touches, updates and deletes only that
+    /// user's items. Two users may both own `STRIPE_KEY`.
+    #[test]
+    fn items_are_scoped_per_user() {
+        let dir = temp_db("scope");
+        let db = Db::open(&dir.join("relay.db")).expect("db");
+        db.upsert_vault_item(&item("a1", "alice", "STRIPE_KEY"))
+            .unwrap();
+        db.upsert_vault_item(&item("a2", "alice", "MAILGUN"))
+            .unwrap();
+        db.upsert_vault_item(&item("b1", "bob", "STRIPE_KEY"))
+            .unwrap();
+
+        let names = |u: &str| -> Vec<String> {
+            db.list_vault_items(u)
+                .unwrap()
+                .into_iter()
+                .map(|i| i.name)
+                .collect()
+        };
+        assert_eq!(names("alice"), vec!["MAILGUN", "STRIPE_KEY"]);
+        assert_eq!(names("bob"), vec!["STRIPE_KEY"]);
+        assert!(names("carol").is_empty());
+
+        assert_eq!(
+            db.vault_item_by_name("bob", "STRIPE_KEY")
+                .unwrap()
+                .unwrap()
+                .id,
+            "b1"
+        );
+        assert!(db.vault_item_by_name("bob", "MAILGUN").unwrap().is_none());
+        assert!(db.vault_item("bob", "a1").unwrap().is_none());
+        assert!(db.vault_item("alice", "a1").unwrap().is_some());
+
+        // Bob cannot take over Alice's row by reusing its id, nor delete or touch it.
+        let mut hijack = item("a1", "bob", "STOLEN");
+        hijack.fields_enc = "bob-enc".into();
+        db.upsert_vault_item(&hijack).unwrap();
+        let a1 = db.vault_item("alice", "a1").unwrap().unwrap();
+        assert_eq!(
+            (a1.name.as_str(), a1.fields_enc.as_str()),
+            ("STRIPE_KEY", "enc")
+        );
+        assert!(!db.delete_vault_item("bob", "a1").unwrap());
+        db.touch_vault_item("bob", "a1").unwrap();
+        assert!(db
+            .vault_item("alice", "a1")
+            .unwrap()
+            .unwrap()
+            .last_used_at
+            .is_none());
+        assert!(db.delete_vault_item("alice", "a1").unwrap());
+        assert_eq!(names("alice"), vec!["MAILGUN"]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A pre-scoping database (global unique `name`, no `user_id`) migrates: the item a user's
+    /// projects requested becomes theirs, the rest stay with the legacy `u_default`, and two
+    /// users can own the same name afterwards.
+    #[test]
+    fn legacy_items_get_an_owner() {
+        let dir = temp_db("legacy");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("relay.db");
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(
+                "CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, user_id TEXT NOT NULL DEFAULT 'u_default',
+                   icon TEXT NOT NULL DEFAULT '', instructions TEXT NOT NULL DEFAULT '', models TEXT NOT NULL DEFAULT '{}',
+                   state TEXT NOT NULL DEFAULT 'waking', created_at INTEGER NOT NULL DEFAULT 0, last_active_at INTEGER NOT NULL DEFAULT 0,
+                   spend_cap_daily REAL NOT NULL DEFAULT 25.0, project_token_hash TEXT, color TEXT NOT NULL DEFAULT '#8b7cf6',
+                   workspace_state TEXT NOT NULL DEFAULT 'stopped', avatar TEXT, deleted_at INTEGER, avatar_color TEXT,
+                   description TEXT NOT NULL DEFAULT '', primary_chat_id TEXT, avatar_color_index INTEGER);
+                 CREATE UNIQUE INDEX projects_user_name ON projects(user_id, name);
+                 INSERT INTO projects(id, name, user_id) VALUES ('p_bob', 'Research', 'bob');
+                 CREATE TABLE vault_items (
+                   id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, kind TEXT NOT NULL,
+                   fields TEXT NOT NULL, allowed_hosts TEXT NOT NULL DEFAULT '[]',
+                   created_at INTEGER NOT NULL, last_used_at INTEGER, daytona_secrets TEXT NOT NULL DEFAULT '{}');
+                 INSERT INTO vault_items(id, name, kind, fields, created_at) VALUES ('i_bob', 'STRIPE_KEY', 'api_key', 'enc', 1);
+                 INSERT INTO vault_items(id, name, kind, fields, created_at) VALUES ('i_old', 'OLD_KEY', 'api_key', 'enc', 1);
+                 CREATE TABLE vault_requests (
+                   id TEXT PRIMARY KEY, project_id TEXT NOT NULL, chat_id TEXT NOT NULL DEFAULT '',
+                   item_id TEXT, item_name TEXT NOT NULL, purpose TEXT NOT NULL DEFAULT '', use_kind TEXT NOT NULL,
+                   status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, decided_at INTEGER, expires_at INTEGER NOT NULL);
+                 INSERT INTO vault_requests(id, project_id, item_id, item_name, use_kind, status, created_at, expires_at)
+                   VALUES ('r1', 'p_bob', 'i_bob', 'STRIPE_KEY', 'header', 'approved', 1, 2);",
+            )
+            .unwrap();
+        }
+        let db = Db::open(&path).expect("migrate");
+        assert_eq!(
+            db.vault_item("bob", "i_bob").unwrap().unwrap().name,
+            "STRIPE_KEY"
+        );
+        assert!(db.vault_item("u_default", "i_bob").unwrap().is_none());
+        assert_eq!(
+            db.vault_item("u_default", "i_old").unwrap().unwrap().name,
+            "OLD_KEY"
+        );
+        // Names are unique per user now, not relay-wide.
+        db.upsert_vault_item(&item("i_alice", "alice", "STRIPE_KEY"))
+            .unwrap();
+        assert_eq!(db.list_vault_items("alice").unwrap().len(), 1);
+        // Reopening is a no-op (the migration ran once).
+        drop(db);
+        let db = Db::open(&path).expect("reopen");
+        assert_eq!(db.list_vault_items("bob").unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
 

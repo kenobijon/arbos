@@ -51,12 +51,24 @@ fn bad(e: impl std::fmt::Display) -> (StatusCode, String) {
     (StatusCode::BAD_REQUEST, e.to_string())
 }
 
-fn device_only(principal: &Principal) -> Result<(), (StatusCode, String)> {
-    if principal.is_box() {
-        Err((StatusCode::FORBIDDEN, "device only".into()))
-    } else {
-        Ok(())
+/// The user a device call acts for. Items belong to users; the admin token has no vault.
+fn device_user(principal: &Principal) -> Result<String, (StatusCode, String)> {
+    match principal {
+        Principal::Device { user_id, .. } => Ok(user_id.clone()),
+        Principal::Box { .. } => Err((StatusCode::FORBIDDEN, "device only".into())),
+        Principal::Admin => Err((
+            StatusCode::FORBIDDEN,
+            "vault items belong to a user; use a device token".into(),
+        )),
     }
+}
+
+/// The user any vault call (device or box) acts for.
+fn vault_user(principal: &Principal) -> Result<String, (StatusCode, String)> {
+    principal
+        .user_id()
+        .map(str::to_owned)
+        .ok_or((StatusCode::FORBIDDEN, "device or box token required".into()))
 }
 
 fn env_name(item: &str) -> String {
@@ -330,12 +342,14 @@ fn fields_object(kind: &str, fields: &Value) -> Result<Value, (StatusCode, Strin
     Ok(Value::Object(out))
 }
 
-/// `GET /vault/items` (device and box): names, kinds, hosts, field names; never values.
-pub async fn list_items(State(state): State<AppState>, _principal: Principal) -> ApiResult {
+/// `GET /vault/items` (device and box): the caller's user's items — names, kinds, hosts, field
+/// names; never values, never another user's items.
+pub async fn list_items(State(state): State<AppState>, principal: Principal) -> ApiResult {
+    let user_id = vault_user(&principal)?;
     let mock = state.cfg.vault_mock;
     let items: Vec<Value> = state
         .db
-        .list_vault_items()
+        .list_vault_items(&user_id)
         .map_err(internal)?
         .iter()
         .map(|it| item_json(it, &field_names(&state, it), mock))
@@ -349,7 +363,7 @@ pub async fn create_item(
     principal: Principal,
     Json(b): Json<ItemBody>,
 ) -> ApiResult {
-    device_only(&principal)?;
+    let user_id = device_user(&principal)?;
     let name = validate_name(b.name.as_deref().unwrap_or(""))?;
     let kind = b.kind.as_deref().unwrap_or("secret").trim().to_owned();
     if !KINDS.contains(&kind.as_str()) {
@@ -359,9 +373,13 @@ pub async fn create_item(
         &kind,
         b.fields.as_ref().ok_or_else(|| bad("fields required"))?,
     )?;
-    let existing = state.db.vault_item_by_name(&name).map_err(internal)?;
+    let existing = state
+        .db
+        .vault_item_by_name(&user_id, &name)
+        .map_err(internal)?;
     let it = VaultItem {
         id: existing.as_ref().map(|e| e.id.clone()).unwrap_or_else(ulid),
+        user_id,
         name,
         kind,
         fields_enc: state
@@ -395,10 +413,10 @@ pub async fn update_item(
     Path(id): Path<String>,
     Json(b): Json<ItemBody>,
 ) -> ApiResult {
-    device_only(&principal)?;
+    let user_id = device_user(&principal)?;
     let mut it = state
         .db
-        .vault_item(&id)
+        .vault_item(&user_id, &id)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "no such item".to_owned()))?;
     if let Some(hosts) = b.allowed_hosts {
@@ -421,8 +439,11 @@ pub async fn delete_item(
     principal: Principal,
     Path(id): Path<String>,
 ) -> ApiResult {
-    device_only(&principal)?;
-    let ok = state.db.delete_vault_item(&id).map_err(internal)?;
+    let user_id = device_user(&principal)?;
+    let ok = state
+        .db
+        .delete_vault_item(&user_id, &id)
+        .map_err(internal)?;
     Ok(if ok {
         StatusCode::NO_CONTENT
     } else {
@@ -431,12 +452,13 @@ pub async fn delete_item(
     .into_response())
 }
 
-/// `GET /vault/requests` (device): pending first, then the newest decided ones.
+/// `GET /vault/requests` (device): the caller's projects' requests, pending first, then the
+/// newest decided ones.
 pub async fn list_requests(State(state): State<AppState>, principal: Principal) -> ApiResult {
-    device_only(&principal)?;
+    let user_id = device_user(&principal)?;
     let items: Vec<Value> = state
         .db
-        .list_vault_requests(100)
+        .list_vault_requests(&user_id, 100)
         .map_err(internal)?
         .iter()
         .map(request_json)
@@ -458,19 +480,19 @@ pub async fn decide_request(
     Path(id): Path<String>,
     Json(b): Json<DecideBody>,
 ) -> ApiResult {
-    device_only(&principal)?;
+    let user_id = device_user(&principal)?;
     let rq = state
         .db
-        .decide_vault_request(&id, b.approve)
+        .decide_vault_request(&user_id, &id, b.approve)
         .map_err(internal)?
         .ok_or((
             StatusCode::CONFLICT,
-            "request is not pending (already decided or expired)".to_owned(),
+            "request is not pending (already decided, expired, or not yours)".to_owned(),
         ))?;
     let mut daytona: Option<String> = None;
     if b.approve && rq.use_kind == "env" {
         if let Some(item_id) = rq.item_id.as_deref() {
-            daytona = mirror_to_daytona(&state, &rq.project_id, item_id).await;
+            daytona = mirror_to_daytona(&state, &user_id, &rq.project_id, item_id).await;
         }
     }
     let _ = state.db.enqueue_push(
@@ -483,14 +505,19 @@ pub async fn decide_request(
 
 /// Best effort: create/refresh one Daytona secret per field and mount them on the project's
 /// sandbox as `ARBOS_SECRET_<NAME>` (single-field items) or `ARBOS_SECRET_<NAME>_<FIELD>`.
-async fn mirror_to_daytona(state: &AppState, project_id: &str, item_id: &str) -> Option<String> {
+async fn mirror_to_daytona(
+    state: &AppState,
+    user_id: &str,
+    project_id: &str,
+    item_id: &str,
+) -> Option<String> {
     let dt = state.daytona.as_ref()?;
     let sb = state.db.box_for_project(project_id).ok().flatten()?;
     if sb.provider != "daytona" {
         return None;
     }
     let sandbox_id = sb.sandbox_id?;
-    let mut it = state.db.vault_item(item_id).ok().flatten()?;
+    let mut it = state.db.vault_item(user_id, item_id).ok().flatten()?;
     let fields = fields_of(state, &it).ok()?;
     let mut ids = it.daytona_secrets.as_object().cloned().unwrap_or_default();
     let mut mounts = Vec::new();
@@ -548,13 +575,14 @@ pub struct RequestBody {
     pub chat_id: String,
 }
 
-/// The project a box call is for. One box serves every project of its user (D70), so the
-/// per-workspace agentd names the project in `X-Arbos-Project`; it must belong to the box's user.
+/// The `(user, project)` a box call is for. One box serves every project of its user (D70), so
+/// the per-workspace agentd names the project in `X-Arbos-Project`; it must belong to the box's
+/// user, and that user's items are the only ones in scope.
 fn box_project(
     state: &AppState,
     principal: &Principal,
     headers: &HeaderMap,
-) -> Result<String, (StatusCode, String)> {
+) -> Result<(String, String), (StatusCode, String)> {
     let Principal::Box { user_id } = principal else {
         return Err((
             StatusCode::FORBIDDEN,
@@ -574,7 +602,7 @@ fn box_project(
     if p.user_id != *user_id {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
-    Ok(p.id)
+    Ok((user_id.clone(), p.id))
 }
 
 /// `POST /vault/request` (box): the agent asks to use an item. Returns `{ id, status }`.
@@ -584,12 +612,15 @@ pub async fn create_request(
     headers: HeaderMap,
     Json(b): Json<RequestBody>,
 ) -> ApiResult {
-    let project_id = box_project(&state, &principal, &headers)?;
+    let (user_id, project_id) = box_project(&state, &principal, &headers)?;
     if !USES.contains(&b.use_kind.as_str()) {
         return Err(bad(format!("use must be one of {}", USES.join(", "))));
     }
     let name = b.name.trim().to_owned();
-    let item = state.db.vault_item_by_name(&name).map_err(internal)?;
+    let item = state
+        .db
+        .vault_item_by_name(&user_id, &name)
+        .map_err(internal)?;
     let Some(item) = item else {
         return Err((
             StatusCode::NOT_FOUND,
@@ -649,7 +680,7 @@ pub async fn request_values(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult {
-    let project_id = box_project(&state, &principal, &headers)?;
+    let (user_id, project_id) = box_project(&state, &principal, &headers)?;
     let rq = state
         .db
         .vault_request(&id)
@@ -676,10 +707,10 @@ pub async fn request_values(
     let item = rq
         .item_id
         .as_deref()
-        .and_then(|i| state.db.vault_item(i).ok().flatten())
+        .and_then(|i| state.db.vault_item(&user_id, i).ok().flatten())
         .ok_or((StatusCode::GONE, "item was deleted".to_owned()))?;
     let fields = fields_of(&state, &item).map_err(internal)?;
-    let _ = state.db.touch_vault_item(&item.id);
+    let _ = state.db.touch_vault_item(&user_id, &item.id);
     Ok(Json(json!({ "name": item.name, "kind": item.kind, "allowed_hosts": item.allowed_hosts, "fields": fields }))
         .into_response())
 }
@@ -699,10 +730,14 @@ pub struct EgressBody {
     pub placeholders: Vec<String>,
 }
 
-/// Items the project may use right now, with plaintext for the substitution step.
-fn resolve_items(state: &AppState, project_id: &str) -> anyhow::Result<Vec<Resolved>> {
+/// The user's items the project may use right now, with plaintext for the substitution step.
+fn resolve_items(
+    state: &AppState,
+    user_id: &str,
+    project_id: &str,
+) -> anyhow::Result<Vec<Resolved>> {
     let mut out = Vec::new();
-    for it in state.db.list_vault_items()? {
+    for it in state.db.list_vault_items(user_id)? {
         let approved = !state
             .db
             .approved_vault_requests(project_id, &it.id)?
@@ -725,7 +760,7 @@ pub async fn egress(
     headers: HeaderMap,
     Json(b): Json<EgressBody>,
 ) -> ApiResult {
-    let project_id = box_project(&state, &principal, &headers)?;
+    let (user_id, project_id) = box_project(&state, &principal, &headers)?;
     let url = reqwest::Url::parse(b.url.trim()).map_err(|e| bad(format!("url: {e}")))?;
     if !matches!(url.scheme(), "http" | "https") {
         return Err(bad("url must be http(s)"));
@@ -748,7 +783,7 @@ pub async fn egress(
             "placeholders are substituted in headers and body only, never in the URL",
         ));
     }
-    let items = resolve_items(&state, &project_id).map_err(internal)?;
+    let items = resolve_items(&state, &user_id, &project_id).map_err(internal)?;
     let mut sub = Substitution::default();
     let mut headers = BTreeMap::new();
     for (k, v) in &b.headers {
@@ -763,9 +798,9 @@ pub async fn egress(
         .as_deref()
         .map(|t| substitute(t, &host, &items, &mut sub));
     let used: HashSet<String> = sub.substituted.iter().cloned().collect();
-    for it in state.db.list_vault_items().map_err(internal)? {
+    for it in state.db.list_vault_items(&user_id).map_err(internal)? {
         if used.iter().any(|u| u.starts_with(&format!("{}/", it.name))) {
-            let _ = state.db.touch_vault_item(&it.id);
+            let _ = state.db.touch_vault_item(&user_id, &it.id);
         }
     }
 
@@ -813,15 +848,17 @@ pub async fn egress(
 // ---- mock ----------------------------------------------------------------------------------------
 
 /// `ARBOS_VAULT_MOCK=1`: two demo items whose hosts are this machine, so `/egress` against the
-/// relay's own echo target shows the substitution end to end.
+/// relay's own echo target shows the substitution end to end. Seeded for the pair-code user
+/// (`u_default`), the only one a one-machine mock has.
 pub fn seed_mock(state: &AppState) -> anyhow::Result<()> {
     if !state.cfg.vault_mock {
         return Ok(());
     }
+    const MOCK_USER: &str = "u_default";
     let echo = format!("{}/vault/mock/echo", state.cfg.public_url);
     let hosts = vec!["127.0.0.1".to_owned(), "localhost".to_owned()];
     for (name, kind) in MOCK_ITEMS {
-        if state.db.vault_item_by_name(name)?.is_some() {
+        if state.db.vault_item_by_name(MOCK_USER, name)?.is_some() {
             continue;
         }
         let fields = match kind {
@@ -832,6 +869,7 @@ pub fn seed_mock(state: &AppState) -> anyhow::Result<()> {
         };
         state.db.upsert_vault_item(&VaultItem {
             id: ulid(),
+            user_id: MOCK_USER.into(),
             name: name.into(),
             kind: kind.into(),
             fields_enc: state.relay_key.encrypt(&fields.to_string())?,
@@ -972,6 +1010,7 @@ mod tests {
             .unwrap();
         let it = VaultItem {
             id: "i1".into(),
+            user_id: "u1".into(),
             name: "acme".into(),
             kind: "api_key".into(),
             fields_enc: enc.clone(),
