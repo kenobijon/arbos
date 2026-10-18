@@ -141,6 +141,9 @@ struct ChatView: View {
     /// with the person until a chip / `@` / reply picks an agent. Several agent chips can be
     /// on at once so that combination all reply (and "hey agents" / every agent chip → everyone).
     @State private var talkTo: Set<String> = []
+    /// iMessage-style drag-left peek: how far (pt) timestamps are revealed. Springs back on release.
+    @State private var timeReveal: CGFloat = 0
+    private let timeRevealMax: CGFloat = 56
 
     private var project: Project? { model.project(projectId) }
     private var chat: Chat? { model.chat(chatId) }
@@ -693,6 +696,33 @@ struct ChatView: View {
         }
     }
 
+    /// Drag left on the transcript to peek per-message clocks (iMessage).
+    /// Vertical scrolls and the right-to-go-back swipe stay alone: this only
+    /// tracks a clear leftward horizontal drag, then springs closed.
+    private var timeRevealGesture: some Gesture {
+        DragGesture(minimumDistance: 12, coordinateSpace: .local)
+            .onChanged { value in
+                let dx = value.translation.width
+                let dy = value.translation.height
+                guard abs(dx) >= abs(dy) * 1.15 else { return }
+                guard dx < 0 else {
+                    if timeReveal != 0 { timeReveal = 0 }
+                    return
+                }
+                let raw = -dx
+                if raw <= timeRevealMax {
+                    timeReveal = raw
+                } else {
+                    timeReveal = timeRevealMax + (raw - timeRevealMax) * 0.25
+                }
+            }
+            .onEnded { _ in
+                withAnimation(.interpolatingSpring(stiffness: 320, damping: 30)) {
+                    timeReveal = 0
+                }
+            }
+    }
+
     // MARK: Transcript
 
     private func transcript(width: CGFloat, height: CGFloat) -> some View {
@@ -741,7 +771,7 @@ struct ChatView: View {
                         emptyHint
                     }
                     ForEach(Array(visibleRows.enumerated()), id: \.element.id) { i, row in
-                        RowView(row: row, chatId: chatId, width: width)
+                        RowView(row: row, chatId: chatId, width: width, reveal: timeReveal)
                             .padding(.top, gap(before: i))
                             .id(row.id)
                             .contextMenu {
@@ -778,13 +808,13 @@ struct ChatView: View {
                             }
                     }
                     if model.isStreaming(chatId) {
-                        workingLine.padding(.top, 20)
+                        workingLine.padding(.top, 20).offset(x: -timeReveal)
                     } else if model.hasOpenSubagent(chatId) {
                         // Open hand-off: child still running after the spawn row
                         // finished. Tick so the 60s grace can expire cleanly.
                         TimelineView(.periodic(from: .now, by: 1)) { _ in
                             if model.hasOpenSubagent(chatId) {
-                                workingLine.padding(.top, 20)
+                                workingLine.padding(.top, 20).offset(x: -timeReveal)
                             }
                         }
                     } else if model.isAwaitingReply(chatId) {
@@ -792,7 +822,7 @@ struct ChatView: View {
                         // (isAwaitingReply is time-capped) without a stuck line.
                         TimelineView(.periodic(from: .now, by: 1)) { _ in
                             if model.isAwaitingReply(chatId) {
-                                workingLine.padding(.top, 20)
+                                workingLine.padding(.top, 20).offset(x: -timeReveal)
                             }
                         }
                     }
@@ -819,6 +849,7 @@ struct ChatView: View {
                 composerFocused = false
                 searchFocused = false
             }
+            .simultaneousGesture(timeRevealGesture)
             .modifier(AwayFromBottomReporter(away: $awayFromBottom))
             // Mask stays in the scroll view's bounds — `ignoresSafeArea` on the
             // mask mis-samples the fade when the composer/keyboard inset changes
