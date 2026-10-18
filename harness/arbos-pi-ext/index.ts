@@ -2,7 +2,7 @@
  * arbos-pi-ext: the one pi extension Arbos loads into the main agent (and the
  * pi fallback subagent). Design D64/D65/D66, arbos-design.md §4.4.1.
  *
- * 1. `tool_call` hook: deny-list veto + audit append BEFORE execution, act-turn call counting.
+ * 1. `tool_call` hook: deny-list veto + audit append BEFORE execution.
  * 2. `ask_user(question, widget?)` tool → agentd raises InputRequested (S8) or a typed question card.
  * 3. `route` custom tool, validated by agentd (one retry, then `reply`).
  * 4. `tool_result` offload (> 4,000 chars → blob + handle), `peek`, working-set section.
@@ -28,16 +28,13 @@ const HOOK_URL = process.env.ARBOS_HOOK_URL ?? "";
 const HOOK_TOKEN = process.env.ARBOS_MCP_TOKEN ?? "";
 const SESSION_ROLE = process.env.ARBOS_SESSION_ROLE ?? "main"; // main | subagent
 const OFFLOAD_CHARS = Number(process.env.ARBOS_OFFLOAD_CHARS ?? 4000);
-const ACT_MAX_CALLS = Number(process.env.ARBOS_ACT_MAX_CALLS ?? 8);
 const HEAD_LINES = 20;
 const TAIL_LINES = 10;
 const ROUTE_PREFIX = "(Arbos: call `route` first.) ";
-// Talking to the user is not "acting": these never count toward the act limit.
-const FREE_TOOLS = new Set(["route", "ask_user", "send_message"]);
 // Mirrors `arbos_core::approval::SHELL_TOOLS`; the classification itself happens in agentd.
 const SHELL_TOOLS = new Set(["bash", "shell", "run_command", "execute_command"]);
 const APPROVAL_POLL_MS = Number(process.env.ARBOS_APPROVAL_POLL_MS ?? 1500);
-const APPROVAL_WAIT_MS = Number(process.env.ARBOS_APPROVAL_WAIT_MS ?? 14 * 60 * 1000); // under the 15 min turn deadline
+const APPROVAL_WAIT_MS = Number(process.env.ARBOS_APPROVAL_WAIT_MS ?? 14 * 60 * 1000); // under the turn deadline
 
 type ApprovalState = "allowed" | "pending" | "approved" | "rejected" | "expired";
 
@@ -92,7 +89,6 @@ interface Handle {
 
 export default function arbosPiExt(pi: ExtensionAPI) {
   // Per-turn state. Reset at every run start.
-  let actCalls = 0;
   let routeAttempts = 0;
   let routed = false;
   let routeCorrections = 0;
@@ -118,7 +114,6 @@ export default function arbosPiExt(pi: ExtensionAPI) {
 
   // ---- 4b. working-set section, refreshed every run and after compaction -----------------
   pi.on("before_agent_start", async (event) => {
-    actCalls = 0;
     routeAttempts = 0;
     routed = false;
     routeCorrections = 0;
@@ -143,7 +138,7 @@ export default function arbosPiExt(pi: ExtensionAPI) {
     }
   });
 
-  // ---- 1. deny-list veto + audit before execution + act counting --------------------------
+  // ---- 1. deny-list veto + audit before execution ----------------------------------------
   pi.on("tool_call", async (event) => {
     const denied = matchDeny(event.toolName, event.input as Record<string, unknown>);
     audit({
@@ -159,17 +154,6 @@ export default function arbosPiExt(pi: ExtensionAPI) {
     if (denied) {
       void hook("/hook/deny", { session_id: sessionId, tool: event.toolName, rule: denied.rule, call_id: event.toolCallId });
       return { block: true, reason: `Blocked by the Arbos deny-list (${denied.rule}): ${denied.why}` };
-    }
-    if (SESSION_ROLE === "main" && !FREE_TOOLS.has(event.toolName) && !event.parentToolCallId) {
-      actCalls += 1;
-      if (actCalls > ACT_MAX_CALLS) {
-        void hook("/hook/act-limit", { session_id: sessionId, calls: actCalls, call_id: event.toolCallId });
-        return {
-          block: true,
-          terminate: true,
-          reason: `Act limit reached (${ACT_MAX_CALLS} tool calls). Stop now and summarize what you did and what is left; Arbos hands the rest to a subagent.`,
-        };
-      }
     }
     // Risky shell commands wait for an approval card (feature `approve`); agentd's
     // `arbos_core::approval` matcher is the single source of truth for what counts as risky.
@@ -308,8 +292,8 @@ export default function arbosPiExt(pi: ExtensionAPI) {
               {
                 type: "text",
                 text: acked
-                  ? `Route accepted: act. Your acknowledgement is already in the chat. Do the work with at most ${ACT_MAX_CALLS} tool calls (send_message only at real milestones), then write only the conversational result — no thinking aloud, no process narration.`
-                  : `Route accepted: act. Follow your plan with at most ${ACT_MAX_CALLS} tool calls, then write only the conversational result — no thinking aloud.`,
+                  ? "Route accepted: act. Your acknowledgement is already in the chat. Do the work (send_message only at real milestones), then write only the conversational result — no thinking aloud, no process narration."
+                  : "Route accepted: act. Follow your plan, then write only the conversational result — no thinking aloud.",
               },
             ],
             details: { action },
