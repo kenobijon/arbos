@@ -28,8 +28,8 @@ use crate::model::{
     ChatKind, ChoiceOption, Connector, ConnectorAction, ConnectorProvider, ConnectorStatus,
     ConnectorsView, Effort, FieldKind, FormField, Id, Link, LocalDevice, LocalView, Message,
     MessageStatus, Part, Project, QuestionState, Role, Routine, RoutineRun, RoutineRunStatus,
-    RoutineTrigger, Skill, StatusKind, ToolCall, ToolStatus, TurnKind, VaultItem, VaultRequest,
-    VaultRequestStatus, VaultView, Widget,
+    RoutineTrigger, Secret, SecretActivity, SecretAgent, SecretRequest, SecretScope, SecretsView,
+    Skill, StatusKind, ToolCall, ToolStatus, TurnKind, Widget,
 };
 
 pub const STREAM_FRAME_MS: u64 = arbos_core::STREAM_COMMIT_MS;
@@ -77,7 +77,7 @@ struct Shared {
     subscriptions: Mutex<Vec<loro::Subscription>>,
     connectors: Mutex<ConnectorsView>,
     channels: Mutex<ChannelsView>,
-    vault: Mutex<VaultView>,
+    secrets: Mutex<SecretsView>,
     routines: Mutex<Vec<Routine>>,
     routine_runs: Mutex<HashMap<Id, Vec<RoutineRun>>>,
     local: Mutex<LocalView>,
@@ -122,7 +122,7 @@ impl SyncSource for FixtureSource {
                 subscriptions: Mutex::new(Vec::new()),
                 connectors: Mutex::new(seed_connectors()),
                 channels: Mutex::new(seed_channels()),
-                vault: Mutex::new(seed_vault()),
+                secrets: Mutex::new(seed_secrets()),
                 routines: Mutex::new(seed_routines()),
                 routine_runs: Mutex::new(seed_routine_runs()),
                 local: Mutex::new(seed_local()),
@@ -188,7 +188,7 @@ impl SyncSource for FixtureSource {
             emit_skills(&shared);
             emit_channels(&shared);
             emit_local(&shared);
-            emit_vault(&shared);
+            emit_secrets(&shared);
             emit_open_request(&shared);
             let _ = events.send(SyncEvent::Link(Link::Live));
 
@@ -951,61 +951,191 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 .retain(|c| c.id != id);
             emit_connectors(shared);
         }
-        ClientCommand::VaultRefresh => emit_vault(shared),
-        ClientCommand::VaultAddItem { item } => {
+        ClientCommand::SecretsRefresh => emit_secrets(shared),
+        ClientCommand::ProjectSecretsRefresh { project_id } => {
+            let view = shared.secrets.lock().unwrap().clone();
+            let items = view
+                .secrets
+                .iter()
+                .filter_map(|s| {
+                    let a = s.agents.iter().find(|a| a.project_id == project_id)?;
+                    Some(crate::model::ProjectSecretAccess {
+                        access_id: a.access_id.clone(),
+                        enabled: a.enabled,
+                        note: a.note.clone(),
+                        hosts: a.hosts.clone(),
+                        last_used_at: a.last_used_at,
+                        disabled_at: a.disabled_at,
+                        secret: Some(Secret {
+                            agents: Vec::new(),
+                            ..s.clone()
+                        }),
+                        vault: None,
+                    })
+                })
+                .collect();
+            let requests = view
+                .requests
+                .iter()
+                .filter(|r| r.project_id == project_id)
+                .cloned()
+                .collect();
+            let activity = view
+                .activity
+                .iter()
+                .filter(|a| a.project_id.as_deref() == Some(project_id.as_str()))
+                .cloned()
+                .collect();
+            let _ = shared.events.send(SyncEvent::ProjectSecrets {
+                project_id,
+                view: crate::model::ProjectSecrets {
+                    paused: view.paused,
+                    owner: true,
+                    items,
+                    requests,
+                    activity,
+                },
+            });
+        }
+        ClientCommand::SecretAdd { item } => {
             {
-                let mut view = shared.vault.lock().unwrap();
-                view.items.retain(|i| i.name != item.name);
-                view.items.push(VaultItem {
+                let mut view = shared.secrets.lock().unwrap();
+                let env = crate::model::secret_env_name(&item.name);
+                view.secrets.retain(|s| s.env != env);
+                let agents = item
+                    .agents
+                    .iter()
+                    .map(|pid| fixture_agent(pid, "", true, &item.note))
+                    .collect();
+                view.secrets.push(Secret {
                     id: new_id(),
                     name: item.name.clone(),
+                    env,
                     kind: item.kind.clone(),
-                    allowed_hosts: item.allowed_hosts.clone(),
-                    fields: item.fields.iter().map(|(k, _)| k.clone()).collect(),
-                    env: format!(
-                        "ARBOS_SECRET_{}",
-                        item.name.to_ascii_uppercase().replace(['-', '.'], "_")
-                    ),
+                    note: item.note.clone(),
+                    hosts: item.hosts.clone(),
+                    ask_every_time: false,
+                    expires_at: None,
+                    version: 1,
                     created_at: now_ms() as i64,
                     last_used_at: None,
-                    mock: true,
+                    username: item
+                        .fields
+                        .iter()
+                        .find(|(k, _)| k == "username")
+                        .map(|(_, v)| v.clone()),
+                    vault_name: "Arbos".into(),
+                    agents,
                 });
-                view.items.sort_by(|a, b| a.name.cmp(&b.name));
+                view.secrets.sort_by(|a, b| a.env.cmp(&b.env));
             }
-            emit_vault(shared);
+            emit_secrets(shared);
             let _ = shared.events.send(SyncEvent::Notice(format!(
-                "Vault: saved {} (fixture; values are not kept).",
+                "Secrets: saved {} (fixture; values are not kept).",
                 item.name
             )));
         }
-        ClientCommand::VaultDeleteItem { id } => {
-            shared.vault.lock().unwrap().items.retain(|i| i.id != id);
-            emit_vault(shared);
-        }
-        ClientCommand::VaultDecide {
-            request_id,
-            approve,
-        } => {
-            let name = {
-                let mut view = shared.vault.lock().unwrap();
-                let r = view.requests.iter_mut().find(|r| r.id == request_id);
-                r.map(|r| {
-                    r.status = if approve {
-                        VaultRequestStatus::Approved
-                    } else {
-                        VaultRequestStatus::Denied
-                    };
-                    r.decided_at = Some(now_ms() as i64);
-                    r.item_name.clone()
-                })
-            };
-            emit_vault(shared);
-            if let Some(name) = name {
-                let _ = shared.events.send(SyncEvent::Notice(format!(
-                    "Vault: {} {name} (fixture).",
-                    if approve { "approved" } else { "denied" }
-                )));
+        ClientCommand::SecretPatch { id, body } => {
+            {
+                let mut view = shared.secrets.lock().unwrap();
+                if let Some(s) = view.secrets.iter_mut().find(|s| s.id == id) {
+                    if let Some(a) = body.get("ask_every_time").and_then(|v| v.as_bool()) {
+                        s.ask_every_time = a;
+                    }
+                    if let Some(n) = body.get("note").and_then(|v| v.as_str()) {
+                        s.note = n.to_string();
+                    }
+                }
             }
+            emit_secrets(shared);
+        }
+        ClientCommand::SecretReplaceValue { id, .. } => {
+            {
+                let mut view = shared.secrets.lock().unwrap();
+                if let Some(s) = view.secrets.iter_mut().find(|s| s.id == id) {
+                    s.version += 1;
+                }
+            }
+            emit_secrets(shared);
+        }
+        ClientCommand::SecretDelete { id } => {
+            shared
+                .secrets
+                .lock()
+                .unwrap()
+                .secrets
+                .retain(|s| s.id != id);
+            emit_secrets(shared);
+        }
+        ClientCommand::SecretAccess {
+            id,
+            project_id,
+            enabled,
+            note,
+        } => {
+            {
+                let mut view = shared.secrets.lock().unwrap();
+                if let Some(s) = view.secrets.iter_mut().find(|s| s.id == id) {
+                    match s.agents.iter_mut().find(|a| a.project_id == project_id) {
+                        Some(a) => {
+                            a.enabled = enabled;
+                            a.disabled_at = (!enabled).then(|| now_ms() as i64);
+                            if let Some(n) = note {
+                                a.note = n;
+                            }
+                        }
+                        None => s.agents.push(fixture_agent(
+                            &project_id,
+                            "",
+                            enabled,
+                            note.as_deref().unwrap_or(""),
+                        )),
+                    }
+                }
+            }
+            emit_secrets(shared);
+        }
+        ClientCommand::SecretRevokeAll { id } => {
+            {
+                let mut view = shared.secrets.lock().unwrap();
+                if let Some(s) = view.secrets.iter_mut().find(|s| s.id == id) {
+                    for a in &mut s.agents {
+                        a.enabled = false;
+                        a.disabled_at = Some(now_ms() as i64);
+                    }
+                }
+            }
+            emit_secrets(shared);
+        }
+        ClientCommand::SecretsPause { paused } => {
+            shared.secrets.lock().unwrap().paused = paused;
+            emit_secrets(shared);
+        }
+        ClientCommand::SecretDecide {
+            request_id,
+            decision,
+        } => {
+            {
+                let mut view = shared.secrets.lock().unwrap();
+                if let Some(r) = view.requests.iter_mut().find(|r| r.id == request_id) {
+                    r.status = match decision.as_str() {
+                        "deny" => "denied",
+                        "once" => "allowed_once",
+                        "chat" => "allowed_chat",
+                        _ => "allowed_always",
+                    }
+                    .into();
+                    r.decided_at = Some(now_ms() as i64);
+                }
+            }
+            emit_secrets(shared);
+        }
+        ClientCommand::VaultConnect { .. }
+        | ClientCommand::VaultAccess { .. }
+        | ClientCommand::VaultDisconnect { .. } => {
+            let _ = shared.events.send(SyncEvent::Notice(
+                "Connected vaults need a relay (fixture).".into(),
+            ));
         }
         ClientCommand::RoutinesRefresh { project_id } => emit_routines(shared, &project_id),
         ClientCommand::RoutineCreate {
@@ -1368,67 +1498,167 @@ fn emit_connectors(shared: &Shared) {
     let _ = shared.events.send(SyncEvent::Connectors(view));
 }
 
-fn emit_vault(shared: &Shared) {
-    let view = shared.vault.lock().unwrap().clone();
-    let _ = shared.events.send(SyncEvent::Vault(view));
+fn emit_secrets(shared: &Shared) {
+    let view = shared.secrets.lock().unwrap().clone();
+    let _ = shared.events.send(SyncEvent::Secrets(view));
 }
 
-/// Settings → Vault demo (F8): a login and two keys, one pending request from the Comms project,
-/// one approved earlier. No value exists anywhere in the fixture.
-fn seed_vault() -> VaultView {
-    let item = |name: &str, kind: &str, hosts: &[&str], fields: &[&str], days_ago: i64| VaultItem {
+fn fixture_agent(project_id: &str, name: &str, enabled: bool, note: &str) -> SecretAgent {
+    let name = if name.is_empty() {
+        match project_id {
+            "comms" => "Comms",
+            "website" => "Website",
+            "research" => "Research",
+            other => other,
+        }
+        .to_string()
+    } else {
+        name.to_string()
+    };
+    SecretAgent {
+        project_id: project_id.into(),
+        name,
+        access_id: new_id(),
+        enabled,
+        note: note.into(),
+        hosts: Vec::new(),
+        scope: SecretScope {
+            kind: "all".into(),
+            chat_id: None,
+        },
+        last_used_at: enabled.then(|| now_ms() as i64 - 120_000),
+        disabled_at: (!enabled).then(|| now_ms() as i64 - 6 * 86_400_000),
+    }
+}
+
+/// Settings → Secrets demo (D83): a Stripe key for Research and Comms, a Mailgun key for Comms,
+/// a GitHub login for Website, one pending request from Comms, recent activity. No value exists
+/// anywhere in the fixture.
+fn seed_secrets() -> SecretsView {
+    let now = now_ms() as i64;
+    let secret = |name: &str,
+                  kind: &str,
+                  note: &str,
+                  hosts: &[&str],
+                  agents: Vec<SecretAgent>,
+                  days_ago: i64| Secret {
         id: new_id(),
         name: name.into(),
+        env: crate::model::secret_env_name(name),
         kind: kind.into(),
-        allowed_hosts: hosts.iter().map(|h| h.to_string()).collect(),
-        fields: fields.iter().map(|f| f.to_string()).collect(),
-        env: format!(
-            "ARBOS_SECRET_{}",
-            name.to_ascii_uppercase().replace(['-', '.'], "_")
-        ),
-        created_at: now_ms() as i64 - days_ago * 86_400_000,
-        last_used_at: (days_ago > 3).then(|| now_ms() as i64 - 3_600_000),
-        mock: true,
+        note: note.into(),
+        hosts: hosts.iter().map(|h| h.to_string()).collect(),
+        ask_every_time: false,
+        expires_at: None,
+        version: 1,
+        created_at: now - days_ago * 86_400_000,
+        last_used_at: (days_ago > 3).then(|| now - 120_000),
+        username: (kind == "login").then(|| "unarbos".to_string()),
+        vault_name: "Arbos".into(),
+        agents,
     };
-    let items = vec![
-        item(
-            "github-unarbos",
-            "login",
-            &["github.com", "*.github.com"],
-            &["url", "username", "password"],
+    let secrets = vec![
+        secret(
+            "STRIPE_KEY",
+            "key",
+            "Stripe live key — refunds and reports. Never for payouts.",
+            &["api.stripe.com"],
+            vec![
+                fixture_agent("research", "Research", true, "pull refund reports"),
+                fixture_agent(
+                    "comms",
+                    "Comms",
+                    true,
+                    "monthly revenue line in the newsletter",
+                ),
+                fixture_agent("website", "Website", false, ""),
+            ],
             12,
         ),
-        item("openai-api", "api_key", &["api.openai.com"], &["value"], 5),
-        item("stripe-test", "secret", &["api.stripe.com"], &["value"], 1),
+        secret(
+            "MAILGUN_API_KEY",
+            "key",
+            "Newsletter sends.",
+            &["api.mailgun.net"],
+            vec![fixture_agent("comms", "Comms", true, "send the newsletter")],
+            5,
+        ),
+        secret(
+            "GitHub login",
+            "login",
+            "The unarbos account, for Actions and reviews.",
+            &["github.com", "*.github.com"],
+            vec![fixture_agent(
+                "website",
+                "Website",
+                true,
+                "review failing Actions runs",
+            )],
+            1,
+        ),
     ];
-    let requests = vec![
-        VaultRequest {
-            id: new_id(),
-            project_id: "comms".into(),
-            chat_id: "comms-pinned".into(),
-            item_name: "openai-api".into(),
-            purpose: "Transcribe the voice memo through the Whisper API".into(),
-            use_kind: "header".into(),
-            status: VaultRequestStatus::Pending,
-            created_at: now_ms() as i64 - 40_000,
-            decided_at: None,
-        },
-        VaultRequest {
-            id: new_id(),
-            project_id: "website".into(),
-            chat_id: "website-pinned".into(),
-            item_name: "github-unarbos".into(),
-            purpose: "Sign in to review the failing Actions run".into(),
-            use_kind: "browser_fill".into(),
-            status: VaultRequestStatus::Approved,
-            created_at: now_ms() as i64 - 7_200_000,
-            decided_at: Some(now_ms() as i64 - 7_100_000),
-        },
+    let requests = vec![SecretRequest {
+        id: new_id(),
+        project_id: "comms".into(),
+        project_name: Some("Comms".into()),
+        chat_id: "comms-pinned".into(),
+        name: "GITHUB_LOGIN".into(),
+        purpose: "Sign in to post the release notes".into(),
+        use_kind: "browser_fill".into(),
+        host: Some("github.com".into()),
+        status: "pending".into(),
+        created_at: now - 180_000,
+        decided_at: None,
+    }];
+    let act = |action: &str,
+               name: &str,
+               project: Option<(&str, &str)>,
+               host: Option<&str>,
+               by: &str,
+               mins_ago: i64| SecretActivity {
+        id: mins_ago,
+        at: now - mins_ago * 60_000,
+        action: action.into(),
+        name: name.into(),
+        project_id: project.map(|(id, _)| id.to_string()),
+        project_name: project.map(|(_, n)| n.to_string()),
+        host: host.map(str::to_string),
+        by: by.into(),
+        detail: serde_json::json!({}),
+    };
+    let activity = vec![
+        act(
+            "used",
+            "STRIPE_KEY",
+            Some(("research", "Research")),
+            Some("api.stripe.com"),
+            "agent:research",
+            2,
+        ),
+        act(
+            "access_on",
+            "MAILGUN_API_KEY",
+            Some(("comms", "Comms")),
+            None,
+            "user:me",
+            1_440,
+        ),
+        act(
+            "refused",
+            "STRIPE_KEY",
+            Some(("website", "Website")),
+            Some("stripe.evil.example"),
+            "agent:website",
+            4_320,
+        ),
     ];
-    VaultView {
-        mock: true,
-        items,
+    SecretsView {
+        paused: false,
+        secrets,
+        vaults: Vec::new(),
+        providers: Vec::new(),
         requests,
+        activity,
         loaded: true,
     }
 }

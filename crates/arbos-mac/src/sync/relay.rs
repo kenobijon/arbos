@@ -36,8 +36,8 @@ use crate::model::{
     CallEnded, CallLeft, CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView,
     Chat, ChatKind, Connector, ConnectorProvider, ConnectorsView, Effort, Id, Link, LocalDevice,
     LocalView, Machine, MachineState, Message, MessageStatus, Part, Person, Project,
-    ProjectDocView, Reachable, ReplyPolicy, Role, Routine, RoutineRun, Sender, Skill, SpaceKind,
-    ThreadInfo, VaultItem, VaultRequest, VaultView, Voice,
+    ProjectDocView, ProjectSecrets, Reachable, ReplyPolicy, Role, Routine, RoutineRun, Secret,
+    SecretActivity, SecretRequest, SecretsView, Sender, Skill, SpaceKind, ThreadInfo, Voice,
 };
 use crate::update;
 
@@ -730,7 +730,7 @@ fn start_after_pairing(shared: &Arc<Shared>) {
         let shared = shared.clone();
         tokio::spawn(async move {
             refresh_connectors(&shared).await;
-            refresh_vault(&shared).await;
+            refresh_secrets(&shared).await;
         });
     }
     {
@@ -749,8 +749,8 @@ fn start_after_pairing(shared: &Arc<Shared>) {
         let mut poll = interval(REGISTRY_POLL);
         loop {
             poll.tick().await;
-            // Pending vault requests show up without a manual refresh.
-            refresh_vault(&shared).await;
+            // Pending secret requests show up without a manual refresh.
+            refresh_secrets(&shared).await;
             if let Err(err) = refresh_registry(&shared).await {
                 let text = format!("{err:#}");
                 if text.contains("HTTP 401") {
@@ -4506,68 +4506,204 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 refresh_connectors(&shared).await;
             });
         }
-        ClientCommand::VaultRefresh => {
+        ClientCommand::SecretsRefresh => {
             let shared = shared.clone();
             tokio::spawn(async move {
-                refresh_vault(&shared).await;
+                refresh_secrets(&shared).await;
             });
         }
-        ClientCommand::VaultAddItem { item } => {
+        ClientCommand::ProjectSecretsRefresh { project_id } => {
             let shared = shared.clone();
             tokio::spawn(async move {
-                let fields: serde_json::Map<String, Value> = item
-                    .fields
-                    .iter()
-                    .map(|(k, v)| (k.clone(), Value::String(v.clone())))
-                    .collect();
-                let body = json!({ "name": item.name, "kind": item.kind, "fields": fields, "allowed_hosts": item.allowed_hosts });
-                match shared.post_json("/vault/items", body).await {
-                    Ok(_) => shared.notice(format!("Vault: saved {}.", item.name)),
-                    Err(err) => shared.notice(format!("Vault: {err:#}")),
+                refresh_project_secrets(&shared, &project_id).await;
+            });
+        }
+        ClientCommand::SecretAdd { item } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let mut body = json!({ "name": item.name, "kind": item.kind, "note": item.note, "hosts": item.hosts,
+                    "agents": item.agents.iter().map(|p| json!({ "project_id": p })).collect::<Vec<_>>() });
+                if item.kind == "login" {
+                    let fields: serde_json::Map<String, Value> = item
+                        .fields
+                        .iter()
+                        .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                        .collect();
+                    body["fields"] = Value::Object(fields);
+                } else if let Some((_, v)) = item.fields.iter().find(|(k, _)| k == "value") {
+                    body["value"] = Value::String(v.clone());
                 }
-                refresh_vault(&shared).await;
+                match shared.post_json("/secrets", body).await {
+                    Ok(v) => {
+                        let env = v["secret"]["env"].as_str().unwrap_or(&item.name);
+                        shared.notice(format!("Secrets: saved {env}."));
+                    }
+                    Err(err) => shared.notice(format!("Secrets: {}", relay_message(&err))),
+                }
+                refresh_secrets(&shared).await;
             });
         }
-        ClientCommand::VaultDeleteItem { id } => {
+        ClientCommand::SecretPatch { id, body } => {
             let shared = shared.clone();
             tokio::spawn(async move {
-                let resp = shared
-                    .http
-                    .delete(format!("{}/vault/items/{}", shared.http_url, id))
-                    .bearer_auth(shared.token())
-                    .send()
-                    .await;
-                match resp {
-                    Ok(r) if r.status().is_success() => {}
-                    Ok(r) => shared.notice(format!("Vault delete: HTTP {}", r.status())),
-                    Err(err) => shared.notice(format!("Vault delete: {err}")),
+                if let Err(err) = shared.patch_json(&format!("/secrets/{id}"), body).await {
+                    shared.notice(format!("Secrets: {}", relay_message(&err)));
                 }
-                refresh_vault(&shared).await;
+                refresh_secrets(&shared).await;
             });
         }
-        ClientCommand::VaultDecide {
+        ClientCommand::SecretReplaceValue { id, body } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                match shared.put_json(&format!("/secrets/{id}/value"), body).await {
+                    Ok(_) => shared.notice(
+                        "Secrets: value replaced. The old one works for 24 hours.".to_string(),
+                    ),
+                    Err(err) => shared.notice(format!("Secrets: {}", relay_message(&err))),
+                }
+                refresh_secrets(&shared).await;
+            });
+        }
+        ClientCommand::SecretDelete { id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared.delete(&format!("/secrets/{id}")).await {
+                    shared.notice(format!("Delete secret: {}", relay_message(&err)));
+                }
+                refresh_secrets(&shared).await;
+            });
+        }
+        ClientCommand::SecretAccess {
+            id,
+            project_id,
+            enabled,
+            note,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let mut body = json!({ "enabled": enabled });
+                if let Some(n) = note {
+                    body["note"] = Value::String(n);
+                }
+                if let Err(err) = shared
+                    .put_json(&format!("/secrets/{id}/access/{project_id}"), body)
+                    .await
+                {
+                    shared.notice(format!("Secrets: {}", relay_message(&err)));
+                }
+                refresh_secrets(&shared).await;
+                refresh_project_secrets(&shared, &project_id).await;
+            });
+        }
+        ClientCommand::SecretRevokeAll { id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared
+                    .post_json(&format!("/secrets/{id}/revoke-all"), json!({}))
+                    .await
+                {
+                    shared.notice(format!("Secrets: {}", relay_message(&err)));
+                }
+                refresh_secrets(&shared).await;
+            });
+        }
+        ClientCommand::SecretsPause { paused } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared
+                    .put_json("/me/secrets/settings", json!({ "paused": paused }))
+                    .await
+                {
+                    shared.notice(format!("Secrets: {}", relay_message(&err)));
+                }
+                refresh_secrets(&shared).await;
+            });
+        }
+        ClientCommand::SecretDecide {
             request_id,
-            approve,
+            decision,
         } => {
             let shared = shared.clone();
             tokio::spawn(async move {
                 match shared
                     .post_json(
-                        &format!("/vault/requests/{request_id}/decide"),
-                        json!({ "approve": approve }),
+                        &format!("/secrets/requests/{request_id}/decide"),
+                        json!({ "decision": decision }),
                     )
                     .await
                 {
                     Ok(v) => {
-                        let name = v["request"]["item_name"].as_str().unwrap_or("item");
-                        shared.notice(format!(
-                            "Vault: {} {name}.",
-                            if approve { "approved" } else { "denied" }
-                        ));
+                        let name = v["request"]["name"].as_str().unwrap_or("the secret");
+                        let agent = v["request"]["project_name"].as_str().unwrap_or("the agent");
+                        shared.notice(match decision.as_str() {
+                            "deny" => format!("{agent} asked for {name}. Denied."),
+                            "once" => format!("{agent} may use {name} once."),
+                            "chat" => format!("{agent} may use {name} in this chat."),
+                            _ => format!("{agent} may use {name}."),
+                        });
                     }
-                    Err(err) => shared.notice(format!("Vault decide: {err:#}")),
+                    Err(err) => shared.notice(format!("Secrets: {}", relay_message(&err))),
                 }
-                refresh_vault(&shared).await;
+                refresh_secrets(&shared).await;
+            });
+        }
+        ClientCommand::VaultConnect {
+            token,
+            agents,
+            note,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let body = json!({ "provider": "onepassword", "token": token,
+                    "agents": agents.iter().map(|p| json!({ "project_id": p, "note": note })).collect::<Vec<_>>() });
+                match shared.post_json("/vaults", body).await {
+                    Ok(v) => shared.notice(format!(
+                        "Connected {}.",
+                        v["vault"]["name"].as_str().unwrap_or("the vault")
+                    )),
+                    Err(err) => {
+                        let text = format!("{err:#}");
+                        shared.notice(if text.contains("bad_token") {
+                            "That token didn't work. Check it was copied whole.".to_string()
+                        } else if text.contains("no_vaults") {
+                            "This token can read no vaults.".to_string()
+                        } else if text.contains("rate_limited") {
+                            "1Password rate limit reached — try again later.".to_string()
+                        } else {
+                            format!("Connect 1Password: {}", relay_message(&err))
+                        });
+                    }
+                }
+                refresh_secrets(&shared).await;
+            });
+        }
+        ClientCommand::VaultAccess {
+            id,
+            project_id,
+            enabled,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared
+                    .put_json(
+                        &format!("/vaults/{id}/access/{project_id}"),
+                        json!({ "enabled": enabled }),
+                    )
+                    .await
+                {
+                    shared.notice(format!("Secrets: {}", relay_message(&err)));
+                }
+                refresh_secrets(&shared).await;
+                refresh_project_secrets(&shared, &project_id).await;
+            });
+        }
+        ClientCommand::VaultDisconnect { id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared.delete(&format!("/vaults/{id}")).await {
+                    shared.notice(format!("Disconnect: {}", relay_message(&err)));
+                }
+                refresh_secrets(&shared).await;
             });
         }
         ClientCommand::WatchBrowser { project_id, on } => {
@@ -4969,40 +5105,87 @@ async fn refresh_connectors(shared: &Arc<Shared>) {
     }));
 }
 
-/// Settings → Vault: `GET /vault/items` + `GET /vault/requests` → one view (F8). Never values.
-async fn refresh_vault(shared: &Arc<Shared>) {
-    let (items, requests) = tokio::join!(
-        shared.get_json("/vault/items"),
-        shared.get_json("/vault/requests")
+/// The relay's `error.message` out of an HTTP error, else the whole chain.
+fn relay_message(err: &anyhow::Error) -> String {
+    let text = format!("{err:#}");
+    if let Some(i) = text.find('{') {
+        if let Ok(v) = serde_json::from_str::<Value>(&text[i..]) {
+            if let Some(m) = v["error"]["message"].as_str() {
+                return m.to_string();
+            }
+        }
+    }
+    text
+}
+
+/// Settings → Secrets: `GET /secrets` + `GET /secrets/requests` → one view (D83). Never values.
+async fn refresh_secrets(shared: &Arc<Shared>) {
+    let (overview, requests) = tokio::join!(
+        shared.get_json("/secrets"),
+        shared.get_json("/secrets/requests")
     );
-    let (items, requests) = match (items, requests) {
-        (Ok(i), Ok(r)) => (i, r),
+    let (overview, requests) = match (overview, requests) {
+        (Ok(o), Ok(r)) => (o, r),
         (Err(err), _) | (_, Err(err)) => {
             if !format!("{err:#}").contains("HTTP 404") {
-                shared.notice(format!("Vault: {err:#}"));
+                shared.notice(format!("Secrets: {}", relay_message(&err)));
             }
             return;
         }
     };
-    let parse = |v: &Value| -> Vec<Value> { v["items"].as_array().cloned().unwrap_or_default() };
-    let items: Vec<VaultItem> = parse(&items)
+    let list =
+        |v: &Value, key: &str| -> Vec<Value> { v[key].as_array().cloned().unwrap_or_default() };
+    let secrets: Vec<Secret> = list(&overview, "secrets")
         .iter()
         .filter_map(|i| serde_json::from_value(i.clone()).ok())
         .collect();
-    let requests: Vec<VaultRequest> = parse(&requests)
+    let vaults = list(&overview, "vaults")
+        .iter()
+        .filter_map(|i| serde_json::from_value(i.clone()).ok())
+        .collect();
+    let activity: Vec<SecretActivity> = list(&overview, "activity")
+        .iter()
+        .filter_map(|i| serde_json::from_value(i.clone()).ok())
+        .collect();
+    let requests: Vec<SecretRequest> = list(&requests, "items")
         .iter()
         .filter_map(|r| serde_json::from_value(r.clone()).ok())
         .collect();
-    let _ = shared.events.send(SyncEvent::Vault(VaultView {
-        mock: requests_mock(&items),
-        items,
+    let providers = list(&overview, "providers")
+        .iter()
+        .filter_map(|p| p.as_str().map(str::to_string))
+        .collect();
+    let _ = shared.events.send(SyncEvent::Secrets(SecretsView {
+        paused: overview["paused"].as_bool().unwrap_or(false),
+        secrets,
+        vaults,
+        providers,
         requests,
+        activity,
         loaded: true,
     }));
 }
 
-fn requests_mock(items: &[VaultItem]) -> bool {
-    items.iter().any(|i| i.mock)
+/// One agent's Secrets page (`GET /projects/{id}/secrets`).
+async fn refresh_project_secrets(shared: &Arc<Shared>, project_id: &str) {
+    match shared
+        .get_json(&format!("/projects/{project_id}/secrets"))
+        .await
+    {
+        Ok(v) => {
+            if let Ok(view) = serde_json::from_value::<ProjectSecrets>(v) {
+                let _ = shared.events.send(SyncEvent::ProjectSecrets {
+                    project_id: project_id.to_string(),
+                    view,
+                });
+            }
+        }
+        Err(err) => {
+            if !format!("{err:#}").contains("HTTP 404") {
+                shared.notice(format!("Secrets: {}", relay_message(&err)));
+            }
+        }
+    }
 }
 
 /// S16: the box's `/browser/stream` (agentd proxies agent-browser's JPEG

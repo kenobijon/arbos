@@ -1453,37 +1453,6 @@ impl LocalDevice {
     }
 }
 
-/// One vault item as the relay lists it (F8). Values are write-only; this never carries one.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct VaultItem {
-    pub id: Id,
-    pub name: String,
-    /// `login | secret | api_key`.
-    pub kind: String,
-    #[serde(default)]
-    pub allowed_hosts: Vec<String>,
-    #[serde(default)]
-    pub fields: Vec<String>,
-    #[serde(default)]
-    pub env: String,
-    #[serde(default)]
-    pub created_at: i64,
-    #[serde(default)]
-    pub last_used_at: Option<i64>,
-    #[serde(default)]
-    pub mock: bool,
-}
-
-impl VaultItem {
-    pub fn kind_label(&self) -> &'static str {
-        match self.kind.as_str() {
-            "login" => "Login",
-            "api_key" => "API key",
-            _ => "Secret",
-        }
-    }
-}
-
 /// Settings → This Mac state.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LocalView {
@@ -1493,73 +1462,372 @@ pub struct LocalView {
     pub loaded: bool,
 }
 
-/// `vault_requests.status` (F8).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum VaultRequestStatus {
-    Pending,
-    Approved,
-    Denied,
-    Expired,
-    #[serde(other)]
-    Other,
+/// One agent's switch on a secret (D83 Access): `secret.agents[]`, project-page `items[]`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SecretAgent {
+    pub project_id: Id,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub access_id: Id,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub note: String,
+    #[serde(default)]
+    pub hosts: Vec<String>,
+    #[serde(default)]
+    pub scope: SecretScope,
+    #[serde(default)]
+    pub last_used_at: Option<i64>,
+    #[serde(default)]
+    pub disabled_at: Option<i64>,
 }
 
-impl VaultRequestStatus {
-    pub fn label(self) -> &'static str {
-        match self {
-            VaultRequestStatus::Pending => "Pending",
-            VaultRequestStatus::Approved => "Approved",
-            VaultRequestStatus::Denied => "Denied",
-            VaultRequestStatus::Expired => "Expired",
-            VaultRequestStatus::Other => "Unknown",
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SecretScope {
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub chat_id: Option<Id>,
+}
+
+/// One secret as the relay lists it (D83). Values are write-only; this never carries one.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Secret {
+    pub id: Id,
+    pub name: String,
+    /// `$STRIPE_KEY` in the box.
+    #[serde(default)]
+    pub env: String,
+    /// `key | login | text`.
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub note: String,
+    #[serde(default)]
+    pub hosts: Vec<String>,
+    #[serde(default)]
+    pub ask_every_time: bool,
+    #[serde(default)]
+    pub expires_at: Option<i64>,
+    #[serde(default)]
+    pub version: i64,
+    #[serde(default)]
+    pub created_at: i64,
+    #[serde(default)]
+    pub last_used_at: Option<i64>,
+    /// Logins: the username is metadata; the password is the secret.
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub vault_name: String,
+    #[serde(default)]
+    pub agents: Vec<SecretAgent>,
+}
+
+impl Secret {
+    pub fn kind_label(&self) -> &'static str {
+        match self.kind.as_str() {
+            "login" => "Login",
+            "text" => "Text",
+            _ => "Key",
+        }
+    }
+
+    pub fn glyph(&self) -> &'static str {
+        if self.kind == "login" {
+            "person"
+        } else {
+            "key"
         }
     }
 }
 
-/// A box asking to use a vault item (`GET /vault/requests` item).
+/// A card the owner has not answered yet (`GET /secrets/requests`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct VaultRequest {
+pub struct SecretRequest {
     pub id: Id,
     pub project_id: Id,
     #[serde(default)]
+    pub project_name: Option<String>,
+    #[serde(default)]
     pub chat_id: Id,
-    pub item_name: String,
+    #[serde(default)]
+    pub name: String,
     #[serde(default)]
     pub purpose: String,
     /// `env | header | browser_fill`.
     #[serde(rename = "use", default)]
     pub use_kind: String,
-    pub status: VaultRequestStatus,
+    #[serde(default)]
+    pub host: Option<String>,
+    /// `pending | allowed_once | allowed_chat | allowed_always | denied | expired`.
+    #[serde(default)]
+    pub status: String,
     #[serde(default)]
     pub created_at: i64,
     #[serde(default)]
     pub decided_at: Option<i64>,
 }
 
-/// Fields of a new vault item as typed in Settings → Vault; sent once, never kept.
-#[derive(Clone, Debug, PartialEq)]
-pub struct VaultNewItem {
-    pub name: String,
-    pub kind: String,
-    pub fields: Vec<(String, String)>,
-    pub allowed_hosts: Vec<String>,
+impl SecretRequest {
+    pub fn is_pending(&self) -> bool {
+        self.status == "pending"
+    }
 }
 
-/// Settings → Vault state.
+/// One audit row: names and hosts only, never a value.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SecretActivity {
+    pub id: i64,
+    pub at: i64,
+    pub action: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub project_id: Option<Id>,
+    #[serde(default)]
+    pub project_name: Option<String>,
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub by: String,
+    #[serde(default)]
+    pub detail: serde_json::Value,
+}
+
+impl SecretActivity {
+    /// "Research used STRIPE_KEY · api.stripe.com".
+    pub fn line(&self) -> String {
+        let agent = self
+            .project_name
+            .clone()
+            .unwrap_or_else(|| "An agent".into());
+        let at = self
+            .host
+            .as_ref()
+            .map(|h| format!(" · {h}"))
+            .unwrap_or_default();
+        let name = &self.name;
+        match self.action.as_str() {
+            "used" => format!("{agent} used {name}{at}"),
+            "refused" => format!("Refused: {agent} · {name}{at}"),
+            "requested" => format!("{agent} asked for {name}{at}"),
+            "decided" => match self.detail["decision"].as_str().unwrap_or("") {
+                "denied" => format!("{agent} asked for {name}. Denied."),
+                "allowed_once" => format!("You let {agent} use {name} once"),
+                "allowed_chat" => format!("You let {agent} use {name} in one chat"),
+                _ => format!("You let {agent} use {name}"),
+            },
+            "access_on" if self.by.starts_with("agent:") => format!("{agent} is using {name}{at}"),
+            "access_on" => format!("You gave {agent} access to {name}"),
+            "access_off" => format!("You turned {name} off for {agent}"),
+            "created" => format!("You added {name}"),
+            "updated" => format!("You edited {name}"),
+            "value_replaced" => format!("You replaced the value of {name}"),
+            "deleted" => format!("You deleted {name}"),
+            "paused" if self.by == "stop_machine" => "Secrets paused with the machine".into(),
+            "paused" => "You paused all secrets".into(),
+            "unpaused" => "You turned secrets back on".into(),
+            "expired" => format!("{name} expired"),
+            "expiring" => format!("{name} expires soon"),
+            "vault_connected" => format!("You connected {name}"),
+            "vault_disconnected" => format!("You disconnected {name}"),
+            other => format!("{} · {name}", other.replace('_', " ")),
+        }
+    }
+}
+
+/// A connected vault (Phase 2: 1Password).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ConnectedVault {
+    pub id: Id,
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub items_count: i64,
+    #[serde(default)]
+    pub token_expires_at: Option<i64>,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub agents: Vec<SecretAgent>,
+}
+
+impl ConnectedVault {
+    pub fn provider_label(&self) -> &str {
+        if self.provider == "onepassword" {
+            "1Password"
+        } else {
+            &self.provider
+        }
+    }
+}
+
+/// A new secret as typed in Settings → Secrets; sent once, never kept.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NewSecret {
+    pub name: String,
+    /// `key | login | text`.
+    pub kind: String,
+    /// `value` for key/text; `url`, `username`, `password` for a login.
+    pub fields: Vec<(String, String)>,
+    pub note: String,
+    pub hosts: Vec<String>,
+    /// Agents that get Access at once.
+    pub agents: Vec<Id>,
+}
+
+/// Settings → Secrets state (`GET /secrets` + `GET /secrets/requests`).
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct VaultView {
-    pub mock: bool,
-    pub items: Vec<VaultItem>,
-    pub requests: Vec<VaultRequest>,
+pub struct SecretsView {
+    pub paused: bool,
+    pub secrets: Vec<Secret>,
+    pub vaults: Vec<ConnectedVault>,
+    /// Vault providers this relay can connect (`["onepassword"]` once Phase 2 is live).
+    pub providers: Vec<String>,
+    pub requests: Vec<SecretRequest>,
+    pub activity: Vec<SecretActivity>,
     pub loaded: bool,
 }
 
-impl VaultView {
-    pub fn pending(&self) -> impl Iterator<Item = &VaultRequest> {
-        self.requests
-            .iter()
-            .filter(|r| r.status == VaultRequestStatus::Pending)
+impl SecretsView {
+    pub fn pending(&self) -> impl Iterator<Item = &SecretRequest> {
+        self.requests.iter().filter(|r| r.is_pending())
+    }
+
+    /// Settings row value: `4 secrets · 1Password`, `No secrets yet`, `Paused`.
+    pub fn row_value(&self) -> String {
+        if self.paused {
+            return "Paused".into();
+        }
+        if self.secrets.is_empty() && self.vaults.is_empty() {
+            return "No secrets yet".into();
+        }
+        let mut s = format!(
+            "{} secret{}",
+            self.secrets.len(),
+            if self.secrets.len() == 1 { "" } else { "s" }
+        );
+        if let Some(v) = self.vaults.first() {
+            s.push_str(&format!(" · {}", v.provider_label()));
+        }
+        s
+    }
+
+    pub fn secret(&self, id: &str) -> Option<&Secret> {
+        self.secrets.iter().find(|s| s.id == id)
+    }
+}
+
+/// `GET /projects/{id}/secrets`: what one agent may use, for its profile page.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProjectSecrets {
+    #[serde(default)]
+    pub paused: bool,
+    #[serde(default)]
+    pub owner: bool,
+    #[serde(default)]
+    pub items: Vec<ProjectSecretAccess>,
+    #[serde(default)]
+    pub requests: Vec<SecretRequest>,
+    #[serde(default)]
+    pub activity: Vec<SecretActivity>,
+}
+
+/// One row of the agent's Secrets page: an Access on a secret or on a whole vault.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProjectSecretAccess {
+    #[serde(default)]
+    pub access_id: Id,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub note: String,
+    #[serde(default)]
+    pub hosts: Vec<String>,
+    #[serde(default)]
+    pub last_used_at: Option<i64>,
+    #[serde(default)]
+    pub disabled_at: Option<i64>,
+    #[serde(default)]
+    pub secret: Option<Secret>,
+    #[serde(default)]
+    pub vault: Option<ConnectedVault>,
+}
+
+impl ProjectSecretAccess {
+    pub fn title(&self) -> String {
+        if let Some(s) = &self.secret {
+            s.env.clone()
+        } else if let Some(v) = &self.vault {
+            format!("{} (vault)", v.name)
+        } else {
+            "Secret".into()
+        }
+    }
+}
+
+/// "used 2 min ago" · "never used" · "turned off Oct 12".
+pub fn secret_usage(last_used_at: Option<i64>, disabled_at: Option<i64>, enabled: bool) -> String {
+    if !enabled {
+        if let Some(d) = disabled_at {
+            return format!("turned off {}", short_date(d));
+        }
+    }
+    match last_used_at {
+        Some(t) => format!("used {}", ago(t)),
+        None => "never used".into(),
+    }
+}
+
+pub fn ago(ms: i64) -> String {
+    let d = (now_ms() as i64 - ms).max(0) / 1000;
+    if d < 60 {
+        "just now".into()
+    } else if d < 3600 {
+        format!("{} min ago", d / 60)
+    } else if d < 86_400 {
+        format!("{} h ago", d / 3600)
+    } else if d < 7 * 86_400 {
+        format!("{} d ago", d / 86_400)
+    } else {
+        short_date(ms)
+    }
+}
+
+/// "Oct 12" (this year) or "Oct 12 2025".
+pub fn short_date(ms: i64) -> String {
+    let dt = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms).unwrap_or_default();
+    let now = chrono::Utc::now();
+    if dt.format("%Y").to_string() == now.format("%Y").to_string() {
+        dt.format("%b %-d").to_string()
+    } else {
+        dt.format("%b %-d %Y").to_string()
+    }
+}
+
+/// `stripe live` → `STRIPE_LIVE` (mirrors the relay's rule).
+pub fn secret_env_name(name: &str) -> String {
+    let mut s = String::new();
+    for ch in name.trim().chars() {
+        s.push(if ch.is_ascii_alphanumeric() {
+            ch.to_ascii_uppercase()
+        } else {
+            '_'
+        });
+    }
+    while s.contains("__") {
+        s = s.replace("__", "_");
+    }
+    let s = s.trim_matches('_').to_owned();
+    if s.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        format!("_{s}")
+    } else {
+        s
     }
 }
 
