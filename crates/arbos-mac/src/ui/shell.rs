@@ -48,6 +48,9 @@ actions!(
     [CloseTab, NewTab, ToggleRail, TogglePanel, Escape, Quit]
 );
 
+/// Left inset for the conversation header while the sidebar is hidden: the window's traffic lights.
+const TRAFFIC_LIGHTS_INSET: f32 = 72.0;
+
 pub struct Shell {
     pub(crate) state: Entity<AppState>,
     transcript: Entity<Transcript>,
@@ -779,7 +782,7 @@ impl Shell {
 
     // ----- conversation pane ---------------------------------------------------
 
-    fn render_center(&self, cx: &mut Context<Self>) -> Div {
+    fn render_center(&self, sidebar_hidden: bool, cx: &mut Context<Self>) -> Div {
         let theme = Theme::of(cx).clone();
         let state = self.state.read(cx);
         let project = state.selected().cloned();
@@ -876,6 +879,9 @@ impl Shell {
             div()
                 .relative()
                 .left(px(shake_offset))
+                // Without the sidebar the traffic lights sit over this header:
+                // clear them (14 pt in, three 12 pt lights, 8 pt gaps).
+                .when(sidebar_hidden, |el| el.pl(px(TRAFFIC_LIGHTS_INSET)))
                 .child(header::render(self, &space, cx)),
         );
         if let Some(chips) = header::chips(self, &space, cx) {
@@ -2632,7 +2638,7 @@ impl Render for Shell {
         if !sidebar_hidden {
             root = root.child(frosted(0.0, PANEL_BLUR, sidebar::render(self, cx)));
         }
-        root = root.child(self.render_center(cx));
+        root = root.child(self.render_center(sidebar_hidden, cx));
         if panel_open {
             root = root.child(self.render_right_panel(cx));
         }
