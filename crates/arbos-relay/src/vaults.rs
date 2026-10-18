@@ -104,6 +104,7 @@ impl OpError {
         {
             OpError::NotFound
         } else if s.contains("token")
+            || s.contains("credentials")
             || s.contains("unauthor")
             || s.contains("401")
             || s.contains("403")
@@ -1473,6 +1474,10 @@ mod tests {
         ));
         assert!(matches!(
             OpError::classify("[ERROR] invalid service account token"),
+            OpError::BadToken
+        ));
+        assert!(matches!(
+            OpError::classify("[ERROR] 2026/10/18 failed to DecodeSACredentials: illegal base64"),
             OpError::BadToken
         ));
         assert!(matches!(
