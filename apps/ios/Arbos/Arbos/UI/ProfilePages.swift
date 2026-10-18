@@ -603,9 +603,12 @@ struct GroupProfileView: View {
     private var memberCount: Int { rows.filter { $0.agent == nil }.count }
 
     /// Owners (and admins, when a chat has that role) can remove other people.
+    /// Check `me.role` and our row in `members` — parse defaults `myRole` to
+    /// `"member"` when `me` is missing, which would otherwise hide remove.
     private var canManageMembers: Bool {
-        let role = people?.myRole
-        return role == "owner" || role == "admin"
+        if people?.myRole == "owner" || people?.myRole == "admin" { return true }
+        let rowRole = people?.humans.first(where: { $0.id == model.user?.id })?.role
+        return rowRole == "owner" || rowRole == "admin"
     }
 
     private func canRemove(_ r: Row) -> Bool {
@@ -732,23 +735,42 @@ struct GroupProfileView: View {
             .buttonStyle(.plain)
             ForEach(rows) { r in
                 ProfileRowDivider(inset: 68)
-                Button {
-                    if let a = r.agent { model.showProfile(.agent(projectId: a.id)) } else { model.showProfile(.user(r.person)) }
-                } label: {
-                    MemberStatusRow(person: r.person,
-                                    status: r.agent != nil ? (model.isStreaming(project: r.agent!.id) ? "working" : "idle", false)
-                                        : (r.person.id == model.user?.id ? ("online", true)
-                                           : lastSeenLine(max(r.person.lastSeenAt ?? 0, model.lastSeen[r.person.id] ?? 0), online: r.person.online)),
-                                    badge: r.role == "owner" ? "owner" : (r.role == "admin" ? "admin" : nil),
-                                    isMe: r.person.id == model.user?.id, agent: r.agent)
-                }
-                .buttonStyle(.plain)
-                .contextMenu {
-                    if canRemove(r) {
-                        Button("Remove from chat", role: .destructive) {
-                            pendingRemoveId = r.person.id
-                            pendingRemoveName = r.person.displayName
+                // borderless (not .plain): .plain steals long-press on recent iOS,
+                // so the remove context menu never appears (same as HomeView rows).
+                HStack(spacing: 0) {
+                    Button {
+                        if let a = r.agent { model.showProfile(.agent(projectId: a.id)) } else { model.showProfile(.user(r.person)) }
+                    } label: {
+                        MemberStatusRow(person: r.person,
+                                        status: r.agent != nil ? (model.isStreaming(project: r.agent!.id) ? "working" : "idle", false)
+                                            : (r.person.id == model.user?.id ? ("online", true)
+                                               : lastSeenLine(max(r.person.lastSeenAt ?? 0, model.lastSeen[r.person.id] ?? 0), online: r.person.online)),
+                                        badge: r.role == "owner" ? "owner" : (r.role == "admin" ? "admin" : nil),
+                                        isMe: r.person.id == model.user?.id, agent: r.agent)
+                    }
+                    .buttonStyle(.borderless)
+                    .contextMenu {
+                        if canRemove(r) {
+                            Button("Remove from chat", role: .destructive) {
+                                pendingRemoveId = r.person.id
+                                pendingRemoveName = r.person.displayName
+                            }
                         }
+                    }
+                    if canRemove(r) {
+                        Menu {
+                            Button("Remove from chat", role: .destructive) {
+                                pendingRemoveId = r.person.id
+                                pendingRemoveName = r.person.displayName
+                            }
+                        } label: {
+                            Image(systemName: "ellipsis")
+                                .font(.system(size: 16, weight: .medium))
+                                .foregroundStyle(theme.muted)
+                                .frame(width: 36, height: 44)
+                                .contentShape(Rectangle())
+                        }
+                        .padding(.trailing, 8)
                     }
                 }
             }
