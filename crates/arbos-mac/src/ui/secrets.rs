@@ -2012,7 +2012,7 @@ impl SecretsPanel {
                             .child(
                                 div()
                                     .text_size(px(TEXT_TINY))
-                                    .text_color(if on { theme.accent } else { theme.text_muted })
+                                    .text_color(theme.text_muted)
                                     .overflow_hidden()
                                     .whitespace_nowrap()
                                     .text_ellipsis()
