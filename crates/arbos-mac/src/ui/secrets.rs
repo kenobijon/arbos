@@ -74,6 +74,8 @@ pub struct SecretsPanel {
     hosts_input: Entity<ComposerInput>,
     token_input: Entity<ComposerInput>,
     error: Option<String>,
+    /// Rig: a secret env name to open as soon as the list arrives.
+    pending_env: Option<String>,
     focus_handle: FocusHandle,
 }
 
@@ -125,6 +127,7 @@ impl SecretsPanel {
             hosts_input,
             token_input,
             error: None,
+            pending_env: None,
             focus_handle: cx.focus_handle(),
         }
     }
@@ -140,8 +143,25 @@ impl SecretsPanel {
         cx.notify();
     }
 
+    /// Rig: open on one secret by env name once the relay (or fixture) has listed it.
+    pub fn show_secret_env(&mut self, env: String, cx: &mut Context<Self>) {
+        self.open = true;
+        self.pending_env = Some(env);
+        self.page = Page::List;
+        self.state.update(cx, |s, cx| s.secrets_refresh(cx));
+        cx.notify();
+    }
+
     /// Agent profile → secrets: open straight on that agent's page.
     pub fn show_agent(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        let project_id = self
+            .state
+            .read(cx)
+            .projects
+            .iter()
+            .find(|p| p.id == project_id || p.name.eq_ignore_ascii_case(&project_id))
+            .map(|p| p.id.clone())
+            .unwrap_or(project_id);
         self.open = true;
         self.page = Page::Agent(project_id.clone());
         self.state.update(cx, |s, cx| {
@@ -1868,6 +1888,27 @@ impl Render for SecretsPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let view = self.state.read(cx).secrets.clone();
+        if let Some(env) = self.pending_env.clone() {
+            if let Some(s) = view.secrets.iter().find(|s| s.env == env) {
+                self.pending_env = None;
+                self.page = Page::Secret(s.id.clone());
+            }
+        }
+        // The rig may name an agent before the project list arrived; swap in its id once known.
+        if let Page::Agent(pid) = self.page.clone() {
+            let resolved = self
+                .state
+                .read(cx)
+                .projects
+                .iter()
+                .find(|p| p.id != pid && p.name.eq_ignore_ascii_case(&pid))
+                .map(|p| p.id.clone());
+            if let Some(id) = resolved {
+                self.page = Page::Agent(id.clone());
+                self.state
+                    .update(cx, |s, cx| s.project_secrets_refresh(id, cx));
+            }
+        }
         let title = self.title(&view, cx);
         let back_label = if self.page == Page::List {
             "‹ Settings"
