@@ -204,8 +204,10 @@ pub fn redact(text: &str) -> String {
             }
         }
     }
-    let patterns: [(&str, &str); 6] = [
+    let patterns: [(&str, &str); 8] = [
         (r"sk-or-v1-[A-Za-z0-9]{20,}", "[REDACTED:openrouter-key]"),
+        (r"\bops_[A-Za-z0-9]{20,}", "[REDACTED:1password-token]"),
+        (r"\bdp\.st\.[A-Za-z0-9_\-]{10,}", "[REDACTED:doppler-token]"),
         (r"sk-ant-[A-Za-z0-9_\-]{20,}", "[REDACTED:anthropic-key]"),
         (r"sk-[A-Za-z0-9]{32,}", "[REDACTED:openai-key]"),
         (r"dtn_[A-Za-z0-9]{20,}", "[REDACTED:daytona-key]"),

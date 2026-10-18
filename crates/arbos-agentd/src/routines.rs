@@ -215,6 +215,13 @@ impl Agent {
                     tracing::warn!(error = %e, "group_message push failed");
                 }
             }
+            // D83: the owner flipped a switch, paused everything, replaced a value or answered
+            // a card; the grants come from the relay again at once.
+            "secret_access_changed"
+            | "secrets_paused"
+            | "secret_value_replaced"
+            | "secret_decided"
+            | "secret_notice" => crate::vault::on_push(self, kind, &payload).await,
             other => {
                 tracing::info!(kind = other, push = %payload, "push delivered");
                 let _ = self.store.t3_append(
