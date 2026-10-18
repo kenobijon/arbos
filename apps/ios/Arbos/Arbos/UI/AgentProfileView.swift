@@ -274,6 +274,7 @@ struct AgentProfileView: View {
     @State private var showVoice = false
     @State private var showDescription = false
     @State private var descriptionDraft = ""
+    @State private var showSecrets = false
     @State private var muted = false
 
     private var project: Project? { model.project(projectId) ?? fallback }
@@ -313,6 +314,9 @@ struct AgentProfileView: View {
                             ProfileRowDivider()
                             ProfileInfoRow(label: "voice", value: voiceLine(project))
                                 .onTapGesture { if isMine { showVoice = true } }
+                            ProfileRowDivider()
+                            ProfileInfoRow(label: "secrets", value: secretsLine(project), trailingIcon: "chevron.right")
+                                .onTapGesture { showSecrets = true }
                             ProfileRowDivider()
                             if project.description.isEmpty {
                                 if isMine {
@@ -356,6 +360,13 @@ struct AgentProfileView: View {
         .sheet(isPresented: $showEdit) {
             AgentEditSheet(projectId: projectId).environmentObject(model).environment(\.theme, theme)
         }
+        .sheet(isPresented: $showSecrets) {
+            NavigationStack { AgentSecretsPage(projectId: projectId) }
+                .environmentObject(model).environment(\.theme, theme)
+                .presentationBackground(theme.bg)
+                .preferredColorScheme(theme.isDark ? .dark : .light)
+        }
+        .task { await model.refreshProjectSecrets(projectId) }
         .alert("Description", isPresented: $showDescription) {
             TextField("One paragraph about this agent", text: $descriptionDraft)
             Button("Save") { model.updateProject(projectId, description: descriptionDraft.trimmingCharacters(in: .whitespacesAndNewlines)) }
@@ -387,6 +398,15 @@ struct AgentProfileView: View {
         if let id = project.voice { return catalog?.voices.first { $0.id == id }?.name ?? id.capitalized }
         if let d = catalog?.defaultId, let v = catalog?.voices.first(where: { $0.id == d }) { return "\(v.name) (default)" }
         return "Default"
+    }
+
+    /// "3 · STRIPE_KEY, Arbos — Res…" from the agent's Access rows; "none" before any.
+    private func secretsLine(_ p: Project) -> String {
+        guard let d = model.projectSecrets[p.id] else { return "—" }
+        let on = d.items.filter(\.enabled)
+        if on.isEmpty { return d.requests.contains(where: \.isPending) ? "waiting for you" : "none" }
+        let names = on.map(\.title).joined(separator: ", ")
+        return "\(on.count) · \(names)"
     }
 
     private func machineLine(_ p: Project) -> String {

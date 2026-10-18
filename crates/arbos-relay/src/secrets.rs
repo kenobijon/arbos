@@ -767,6 +767,7 @@ pub async fn list(State(state): State<AppState>, principal: Principal) -> ApiRes
     Ok(Json(json!({
         "paused": settings.paused, "paused_at": settings.paused_at, "paused_by": settings.paused_by,
         "vaults": crate::vaults::list_json(&state, &user_id),
+        "providers": crate::vaults::providers(&state),
         "secrets": secrets, "requests_pending": pending, "activity": recent,
     }))
     .into_response())

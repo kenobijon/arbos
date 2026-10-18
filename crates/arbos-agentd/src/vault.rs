@@ -398,7 +398,10 @@ async fn settle_card(agent: &Arc<Agent>, approval_id: Option<&str>, status: &str
         },
         _ => ApprovalOutcome::Expired,
     };
-    let _ = agent.decide_approval(id, outcome, "arbos:secrets").await;
+    // The decision rides in `decidedBy` so clients can show which row was picked.
+    let _ = agent
+        .decide_approval(id, outcome, &format!("arbos:secrets:{status}"))
+        .await;
 }
 
 /// Wait for the decision. The relay row is the authority: Settings writes it directly, and a

@@ -34,6 +34,7 @@ struct SettingsView: View {
     /// `ARBOS_SETTINGS_PAGE=appearance` lands on that page (screenshot rig).
     @State private var showAppearancePage = DebugHooks.settingsPage == "appearance"
     @State private var showConnectorsPage = DebugHooks.settingsPage == "connectors"
+    @State private var showSecretsPage = DebugHooks.settingsPage == "secrets"
 
     var body: some View {
         NavigationStack {
@@ -46,6 +47,11 @@ struct SettingsView: View {
                     if model.credentials != nil {
                         NavigationLink { ConnectorsPage(connectorError: $connectorError) } label: {
                             SettingsRow(icon: "link", title: "Connected apps", value: connectorsSummary)
+                        }
+                        // D83: a secret is "an app you connected by key"; it sits right after.
+                        NavigationLink { SecretsPage() } label: {
+                            SettingsRow(icon: "key.fill", title: "Secrets", value: model.secretsRowValue,
+                                        valueTint: model.secrets?.paused == true ? theme.danger : nil)
                         }
                     }
                     if !model.isFixture {
@@ -106,6 +112,7 @@ struct SettingsView: View {
             .onAppear {
                 model.refreshConnectors()
                 Task { await push.refreshStatus() }
+                Task { await model.refreshSecrets() }
             }
             // After Google OAuth in Safari, refresh so "Needs sign-in" flips to Connected.
             .onChange(of: scenePhase) { _, phase in
@@ -139,6 +146,7 @@ struct SettingsView: View {
             }
             .navigationDestination(isPresented: $showAppearancePage) { AppearancePage() }
             .navigationDestination(isPresented: $showConnectorsPage) { ConnectorsPage(connectorError: $connectorError) }
+            .navigationDestination(isPresented: $showSecretsPage) { SecretsPage() }
             .sheet(isPresented: $showProfileEdit) {
                 NavigationStack {
                     ProfileEditView()
@@ -411,6 +419,8 @@ struct SettingsRow: View {
     var chevron: Bool = true
     /// Small status dot drawn on the tile (machine state).
     var dot: Color? = nil
+    /// Colour for the trailing value (red `Paused`).
+    var valueTint: Color? = nil
 
     static let height: CGFloat = 48
     static let tile: CGFloat = 30
@@ -442,7 +452,7 @@ struct SettingsRow: View {
             if let value, !value.isEmpty {
                 Text(value)
                     .font(.system(size: Theme.body))
-                    .foregroundStyle(theme.muted)
+                    .foregroundStyle(valueTint ?? theme.muted)
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .frame(maxWidth: 170, alignment: .trailing)

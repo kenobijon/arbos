@@ -326,6 +326,10 @@ struct Question: Equatable {
     /// Picked option ids (or the typed text) once answered.
     var answer: [String]
     var open: Bool
+    /// Set when this "question" is really an S18 approval card (`questionId` = `approval:<id>`).
+    var approvalId: String? = nil
+    /// D83: the relay request the card decides (`payload.secretRequestId`).
+    var secretRequestId: String? = nil
 
     var hasChoices: Bool { !options.isEmpty }
 }
@@ -606,6 +610,8 @@ enum DocJSON {
             return .status(id: id, code: code, message: str(pm["message"]) ?? "")
         case "question":
             return .question(id: id, question: question(pm))
+        case "approval":
+            return .question(id: id, question: approval(pm))
         case "subagent_result":
             return .subagentResult(id: id)
         default:
@@ -639,6 +645,54 @@ enum DocJSON {
             widgetType: type,
             answer: answer,
             open: (str(pm["state"]) ?? "open") != "answered"
+        )
+    }
+
+    /// An S18 approval part as a question card (D76): the title is the question; the answers
+    /// are the card's four rows for a secret request (`payload.answers`), else Approve / Reject.
+    /// `decidedBy` carries the relay's decision (`arbos:secrets:allowed_always`) so an answered
+    /// card can show which row was picked.
+    static func approval(_ pm: [String: Any]) -> Question {
+        let approvalId = str(pm["approvalId"]) ?? id(pm)
+        let payload = pm["payload"] as? [String: Any]
+        var options: [ChoiceOption] = []
+        for o in (payload?["answers"] as? [Any]) ?? [] {
+            guard let om = o as? [String: Any], let oid = str(om["id"]) else { continue }
+            options.append(ChoiceOption(id: oid, label: str(om["label"]) ?? oid))
+        }
+        if options.isEmpty {
+            options = [ChoiceOption(id: "approve", label: "Approve"), ChoiceOption(id: "reject", label: "Reject")]
+        }
+        let state = str(pm["state"]) ?? "pending"
+        let decidedBy = str(pm["decidedBy"]) ?? ""
+        var picked: [String] = []
+        switch state {
+        case "approved":
+            if decidedBy.hasSuffix(":allowed_once") { picked = ["once"] }
+            else if decidedBy.hasSuffix(":allowed_chat") { picked = ["chat"] }
+            else if decidedBy.hasSuffix(":allowed_always") { picked = ["always"] }
+            else if options.contains(where: { $0.id == "approve" }) { picked = ["approve"] }
+            else if options.count == 4 { picked = ["always"] }
+        case "rejected":
+            picked = options.contains(where: { $0.id == "deny" }) ? ["deny"] : ["reject"]
+        default:
+            break
+        }
+        var title = (str(pm["title"]) ?? "Approve this?").trimmingCharacters(in: .whitespaces)
+        if !title.hasSuffix("?") {
+            while title.hasSuffix(".") { title.removeLast() }
+            title += "?"
+        }
+        return Question(
+            questionId: "approval:\(approvalId)",
+            question: title,
+            options: options,
+            multi: false,
+            widgetType: "approval",
+            answer: picked,
+            open: state == "pending",
+            approvalId: approvalId,
+            secretRequestId: str(payload?["secretRequestId"])
         )
     }
 

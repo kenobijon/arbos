@@ -54,6 +54,11 @@ pub(crate) async fn box_request(
     ))
 }
 
+/// Providers this relay can connect (`GET /secrets` → `providers[]`).
+pub(crate) fn providers(_state: &AppState) -> Vec<&'static str> {
+    Vec::new()
+}
+
 pub(crate) fn admin_status(_state: &AppState) -> Value {
     json!({ "onepassword": { "available": false } })
 }
