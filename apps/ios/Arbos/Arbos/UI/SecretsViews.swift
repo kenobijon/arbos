@@ -83,7 +83,8 @@ struct SecretToggleRow: View {
     }
 }
 
-/// Chip row of agents to pick (`( Research ✓ ) ( Comms )`).
+/// Chips of agents to pick (`( Research ✓ ) ( Comms )`); they wrap like the
+/// Mac's row, so no agent hides past the edge on a narrow phone or at a large text size.
 struct AgentChips: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -91,33 +92,31 @@ struct AgentChips: View {
     var projects: [Project] { model.projects.filter { !$0.shared } }
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(projects) { p in
-                    let on = picked.contains(p.id)
-                    Button {
-                        Haptics.pick()
-                        if on { picked.remove(p.id) } else { picked.insert(p.id) }
-                    } label: {
-                        HStack(spacing: 6) {
-                            AgentAvatar(project: p, theme: theme, size: 20, still: true)
-                            Text(p.name).font(theme.font(Theme.small, weight: .medium)).lineLimit(1)
-                            if on { Image(systemName: "checkmark").font(.system(size: 11, weight: .bold)) }
-                        }
-                        .foregroundStyle(on ? theme.onPrimary : theme.text)
-                        .padding(.horizontal, 12)
-                        .frame(height: 34)
-                        .background(Capsule().fill(on ? theme.primary : theme.field))
-                        .overlay(Capsule().strokeBorder(on ? Color.clear : theme.fieldBorder, lineWidth: 1))
+        WrapLayout(spacing: 8) {
+            ForEach(projects) { p in
+                let on = picked.contains(p.id)
+                Button {
+                    Haptics.pick()
+                    if on { picked.remove(p.id) } else { picked.insert(p.id) }
+                } label: {
+                    HStack(spacing: 6) {
+                        AgentAvatar(project: p, theme: theme, size: 20, still: true)
+                        Text(p.name).font(theme.font(Theme.small, weight: .medium)).lineLimit(1)
+                        if on { Image(systemName: "checkmark").font(.system(size: 11, weight: .bold)) }
                     }
-                    .buttonStyle(.plain)
+                    .foregroundStyle(on ? theme.onPrimary : theme.text)
+                    .padding(.horizontal, 12)
+                    .frame(height: 34)
+                    .background(Capsule().fill(on ? theme.primary : theme.field))
+                    .overlay(Capsule().strokeBorder(on ? Color.clear : theme.fieldBorder, lineWidth: 1))
                 }
-                if projects.isEmpty {
-                    Text("No agents yet").font(theme.font(Theme.small)).foregroundStyle(theme.muted)
-                }
+                .buttonStyle(.plain)
             }
-            .padding(.horizontal, 1)
+            if projects.isEmpty {
+                Text("No agents yet").font(theme.font(Theme.small)).foregroundStyle(theme.muted)
+            }
         }
+        .padding(.horizontal, 1)
     }
 }
 
