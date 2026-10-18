@@ -710,7 +710,11 @@ struct ChatView: View {
                     guard dx < 0, abs(dx) > abs(dy) * 1.15 else { return }
                     timeRevealLocked = true
                 }
-                let reveal = min(RowView.timeRevealWidth, max(0, -dx))
+                // iMessage feel: 1:1 up to the reveal width, then rubber-band
+                // (a fifth of the excess, at most 24 pt) instead of a hard stop.
+                let raw = max(0, -dx)
+                let w = RowView.timeRevealWidth
+                let reveal = raw <= w ? raw : w + min(24, (raw - w) * 0.2)
                 var t = Transaction()
                 t.disablesAnimations = true
                 withTransaction(t) { timeReveal = reveal }

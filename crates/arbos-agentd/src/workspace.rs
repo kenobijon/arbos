@@ -595,6 +595,8 @@ pub fn seed_state(cfg: &Config) -> Result<()> {
     // models.json: the relay proxy as provider `arbos-relay` through the loopback stub (D2).
     // The built-in `openrouter` provider pointed at the loopback stub keeps pi's OpenRouter behaviour
     // (cache_control breakpoints for Anthropic models, usage accounting) while the key stays on the relay.
+    // `ARBOS_CONTEXT_WINDOW_TOKENS_OVERRIDE`: when set, forces every model stub's contextWindow (unset = 1_000_000).
+    let context_window = context_window_tokens();
     let models = json!({
         "providers": {
             "openrouter": { "baseUrl": format!("{}/v1", cfg.proxy_base()), "apiKey": cfg.box_token },
@@ -603,8 +605,8 @@ pub fn seed_state(cfg: &Config) -> Result<()> {
                 "api": "openai-completions",
                 "apiKey": cfg.box_token,
                 "models": [
-                    { "id": cfg.talking_model, "name": format!("{} (relay)", cfg.talking_model), "reasoning": false, "input": ["text", "image"], "contextWindow": 1000000, "maxTokens": 32000, "cost": { "input": 0.1, "output": 0.5, "cacheRead": 0.01, "cacheWrite": 0.125 } },
-                    { "id": cfg.subagent_model, "name": format!("{} (relay)", cfg.subagent_model), "reasoning": true, "input": ["text", "image"], "contextWindow": 1000000, "maxTokens": 64000, "cost": { "input": 2, "output": 10, "cacheRead": 0.2, "cacheWrite": 2.5 } }
+                    { "id": cfg.talking_model, "name": format!("{} (relay)", cfg.talking_model), "reasoning": false, "input": ["text", "image"], "contextWindow": context_window, "maxTokens": 32000, "cost": { "input": 0.1, "output": 0.5, "cacheRead": 0.01, "cacheWrite": 0.125 } },
+                    { "id": cfg.subagent_model, "name": format!("{} (relay)", cfg.subagent_model), "reasoning": true, "input": ["text", "image"], "contextWindow": context_window, "maxTokens": 64000, "cost": { "input": 2, "output": 10, "cacheRead": 0.2, "cacheWrite": 2.5 } }
                 ]
             }
         }
@@ -661,6 +663,15 @@ pub fn seed_state(cfg: &Config) -> Result<()> {
             .status();
     }
     Ok(())
+}
+
+/// Provider context-window size for model stubs. `ARBOS_CONTEXT_WINDOW_TOKENS_OVERRIDE` (unset = 1_000_000).
+fn context_window_tokens() -> u64 {
+    std::env::var("ARBOS_CONTEXT_WINDOW_TOKENS_OVERRIDE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(1_000_000)
 }
 
 fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {

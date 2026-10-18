@@ -21,9 +21,8 @@ pub const STREAM_COMMIT_MS: u64 = 120;
 /// Inline cap for tool output carried in the doc; the rest goes by `outputRef` (crdt-sync §6.2).
 pub const TOOL_OUTPUT_SUMMARY_MAX: usize = 160;
 
-/// Main-agent `act` limits (D66).
-pub const ACT_MAX_TOOL_CALLS: u32 = 8;
-pub const ACT_MAX_WALL_SECS: u64 = 60;
+/// Default main-turn wall-clock deadline in seconds. Override at startup with `ARBOS_TURN_DEADLINE_SECS`.
+pub const TURN_DEADLINE_SECS: u64 = 900;
 
 /// Offload threshold for the main agent's tool results (design §4.4.1).
 pub const OFFLOAD_CHARS: usize = 4_000;

@@ -64,7 +64,7 @@ fn tools() -> Value {
           "inputSchema": { "type": "object", "properties": { "text": { "type": "string" }, "to": { "type": "string", "description": "Project name or id; default: every other participant" } }, "required": ["text"] } },
         { "name": "ask_user", "description": "Ask the user one question and wait; the answer arrives as the next message. Pass `widget` for a typed answer (choice, multi_select, text, date, form).",
           "inputSchema": { "type": "object", "properties": { "question": { "type": "string" }, "widget": widget_schema() }, "required": ["question"] } },
-        { "name": "spawn_subagent", "description": "Hand a task to a new subagent (Prime by default). Use mid-act when the task is bigger than 8 tool calls.",
+        { "name": "spawn_subagent", "description": "Hand a task to a new subagent (Prime by default). Prefer for long or research-heavy work.",
           "inputSchema": { "type": "object", "properties": { "name": { "type": "string" }, "purpose": { "type": "string" }, "brief": { "type": "string" }, "isolate": { "type": "boolean" } }, "required": ["name","purpose","brief"] } },
         { "name": "wake_subagent", "description": "Continue an existing subagent with a new brief.", "inputSchema": { "type": "object", "properties": { "id": { "type": "string" }, "brief": { "type": "string" } }, "required": ["id","brief"] } },
         { "name": "skills_list", "description": "List the skills library (reusable how-tos shared across Projects): slug, name, description, when to use. Optional q filters by keyword.",

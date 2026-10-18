@@ -4,7 +4,7 @@
 //! * `voice_context` — the context pack for a call: the voice system prompt (instructions,
 //!   project memory, working set), the chat's recent lines, the people on the call;
 //! * `voice_tool` — a spoken request to do work or look something up. It runs as a normal turn
-//!   of the pi main session in the chat the call belongs to (same tools, same D64/D66 limits):
+//!   of the pi main session in the chat the call belongs to (same tools, same turn rules):
 //!   the request lands as a user row marked `voice: true`, the usual ack / tool cards / result
 //!   rows follow, and the result text goes back to be spoken. `attachments` (`[{name, mime,
 //!   ref}]`, camera frames from the worker's `look` tool, already in the chat's blob slot) become

@@ -50,6 +50,8 @@ pub enum RowKind {
         /// Another person in a people chat (D72): left bubble with their
         /// avatar and handle instead of my right bubble.
         from: Option<Person>,
+        /// "9:41 PM", revealed at the bubble's outer edge on hover.
+        time: Option<String>,
     },
     Markdown {
         block: Block,
@@ -60,6 +62,8 @@ pub enum RowKind {
         first: bool,
         last: bool,
         fill: bool,
+        /// "9:41 PM", revealed next to the react glyph on hover.
+        time: Option<String>,
     },
     /// Centered muted time line ("Today 9:39 PM").
     Stamp {
@@ -414,6 +418,7 @@ impl Transcript {
                 pending,
                 sender_label,
                 from,
+                time,
             } => {
                 let mut bubble = self
                     .react_target(
@@ -503,12 +508,21 @@ impl Transcript {
                                 })
                         })
                         .child(
-                            bubble
-                                .bg(theme.bubble_assistant)
-                                .text_color(theme.text)
-                                .border_l_2()
-                                .border_color(Theme::with_alpha(color, 0.7))
-                                .when(pending, |el| el.opacity(0.6)),
+                            div()
+                                .group("bubble-row")
+                                .w_full()
+                                .flex()
+                                .items_center()
+                                .justify_start()
+                                .child(
+                                    bubble
+                                        .bg(theme.bubble_assistant)
+                                        .text_color(theme.text)
+                                        .border_l_2()
+                                        .border_color(Theme::with_alpha(color, 0.7))
+                                        .when(pending, |el| el.opacity(0.6)),
+                                )
+                                .children(hover_time(time, &theme).map(|t| t.ml(px(8.0)))),
                         )
                         .into_any_element();
                 }
@@ -528,7 +542,17 @@ impl Transcript {
                                 .child(label),
                         )
                     })
-                    .child(bubble.when(pending, |el| el.opacity(0.6)))
+                    .child(
+                        // My bubble sits right, so its outer edge (and time) is on the left.
+                        div()
+                            .group("bubble-row")
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .children(hover_time(time, &theme).map(|t| t.mr(px(8.0))))
+                            .child(bubble.when(pending, |el| el.opacity(0.6))),
+                    )
                     .into_any_element()
             }
             RowKind::Markdown {
@@ -537,6 +561,7 @@ impl Transcript {
                 first,
                 last,
                 fill,
+                time,
             } => {
                 let veil = if live {
                     self.veils.get(&row.id).cloned()
@@ -594,6 +619,10 @@ impl Transcript {
                             }
                         }))
                 });
+                // Messages for Mac: the bubble's time shows beside the glyph on hover.
+                let hover_time = (last && !live)
+                    .then(|| hover_time(time, &theme).map(|t| t.ml(px(8.0))))
+                    .flatten();
                 div()
                     .group("bubble-row")
                     .w_full()
@@ -604,6 +633,7 @@ impl Transcript {
                     .when(last, |el| el.pb(px(6.0)))
                     .child(bubble)
                     .children(hover_react)
+                    .children(hover_time)
                     .into_any_element()
             }
             RowKind::Stamp { label } => div()
@@ -1119,6 +1149,31 @@ fn sender_caption(message: &Message) -> Option<String> {
     Some(sender.replace(':', " · "))
 }
 
+/// The bubble's own clock ("9:41 PM"), the iPhone's drag-to-reveal time.
+fn clock_label(ms: u64) -> Option<String> {
+    use chrono::{Local, TimeZone};
+    if ms == 0 {
+        return None;
+    }
+    Local
+        .timestamp_millis_opt(ms as i64)
+        .single()
+        .map(|t| t.format("%-I:%M %p").to_string())
+}
+
+/// The 11 pt muted time beside a bubble; invisible until its row is hovered.
+fn hover_time(time: Option<String>, theme: &Theme) -> Option<Div> {
+    time.map(|label| {
+        div()
+            .flex_shrink_0()
+            .text_size(px(11.0))
+            .text_color(theme.text_muted)
+            .opacity(0.0)
+            .group_hover("bubble-row", |s| s.opacity(1.0))
+            .child(label)
+    })
+}
+
 /// A text block that is really machine output (a JSON object/array) is not
 /// prose; it belongs in the Details drawer, never in the transcript.
 fn is_json_block(block: &Block) -> bool {
@@ -1225,6 +1280,7 @@ pub fn build_rows(
                         pending: message.pending,
                         sender_label,
                         from,
+                        time: clock_label(message.created_at),
                     },
                 });
                 if message.status == MessageStatus::Queued {
@@ -1398,6 +1454,7 @@ pub fn build_rows(
                                         first,
                                         last,
                                         fill,
+                                        time: clock_label(message.created_at),
                                     },
                                 });
                                 block_ix += 1;
