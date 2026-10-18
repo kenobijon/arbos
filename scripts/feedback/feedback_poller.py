@@ -58,7 +58,7 @@ origin.txt (where it came from, shown as the issue's Source). `inject` writes on
 
 CLI:  feedback_poller.py [run] | status | testers | set-cursor <ISO-8601>
       | inject <image|-> "<comment>" [ios|mac] [--handle <login>] [--origin "<text>"] [--email <tester email, grouping only>]
-      | requeue <id>… | prioritize <id>… | confirm <id> [note] | handoff <id> [label] | deployed <id> [note]
+      | requeue <id>… [--allow "<who confirmed>"] | prioritize <id>… | confirm <id> [note] | handoff <id> [label] | deployed <id> [note]
       | track <id> <issue> "<comment>" [--handle <login>] [--owner <label>]   (a hand-filed, handed-off item)
 """
 
@@ -1143,7 +1143,11 @@ class Loop:
         self.gh.ensure_label("shipped", "1D76DB", "Fix is in a TestFlight / edge build")
         self.gh.ensure_label("needs-human", "D93F0B", "The automatic fix did not land")
         self.gh.ensure_label("flagged", "B60205", "Feedback screened as obviously malicious; no automatic fix")
-        verdict, why = self.screen_intent(info, st.get("tier", "tester"))
+        if st.get("screen_override"):
+            # Operator override after a human read the request (owner/coordinator confirmed it).
+            verdict, why = "ok", f"operator override: {st['screen_override']}"
+        else:
+            verdict, why = self.screen_intent(info, st.get("tier", "tester"))
         in_app = f"{info.get('device') or 'app'} app (Send feedback)"
         source_label = {"testflight": "TestFlight", "mac": in_app, "app": in_app,
                         "inbox": info.get("origin") or "synthetic (poller inbox)"}.get(info["source"], info["source"])
@@ -1948,7 +1952,14 @@ def main(argv: list[str]) -> int:
     if cmd == "requeue":
         store = Store(cfg)
         loop = Loop(cfg)
-        for fid in argv[2:]:
+        # `requeue <id> --allow "<who confirmed>"`: skip the intent screen for this one item (a human read it).
+        allow = None
+        ids = list(argv[2:])
+        if "--allow" in ids:
+            i = ids.index("--allow")
+            allow = ids[i + 1] if i + 1 < len(ids) else "operator"
+            del ids[i:i + 2]
+        for fid in ids:
             st = store.state(fid)
             if not st:
                 print(f"{fid}: unknown")
@@ -1957,6 +1968,8 @@ def main(argv: list[str]) -> int:
             # The issue stays (a second attempt continues the same thread); everything the first
             # attempt tracked about agent, commit and builds goes, or a stale value would count as shipped.
             keep = {k: st[k] for k in ("id", "created", "issue", "issue_url", "screenshot_urls", "boost") if k in st}
+            if allow:
+                keep["screen_override"] = allow
             tier = loop.tier(info)
             st = {**keep, "status": "queued", "retries": 0, "tier": tier, "tester": loop.tester_label(info, tier),
                   "tester_key": loop.tester_key(info), "target": loop.pick_target(info)}
