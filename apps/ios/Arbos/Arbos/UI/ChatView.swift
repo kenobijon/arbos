@@ -140,10 +140,12 @@ struct ChatView: View {
     private var counterpart: ChatMember? { people?.counterpart(me: model.user?.id) }
     private var messages: [Message] { model.messages(of: chatId) }
     private var needsAnswer: Bool { model.chatNeedsAnswer(chatId) }
-    /// True while a turn runs, or right after the user sends (before the
-    /// agent opens a streaming row) — visual cheat so a simple first reply
-    /// does not sit on a dead transcript.
-    private var streaming: Bool { model.isStreaming(chatId) || model.isAwaitingReply(chatId) }
+    /// True while a turn runs, a subagent hand-off is still open, or right
+    /// after the user sends (before the agent opens a streaming row) — visual
+    /// cheat so a simple first reply does not sit on a dead transcript.
+    private var streaming: Bool {
+        model.isStreaming(chatId) || model.hasOpenSubagent(chatId) || model.isAwaitingReply(chatId)
+    }
     private var name: String {
         if let people { return counterpart.map { "@\($0.handle)" } ?? people.title }
         if let chat, chat.isGroup, !chat.title.isEmpty { return chat.title }
@@ -748,6 +750,14 @@ struct ChatView: View {
                     }
                     if model.isStreaming(chatId) {
                         workingLine.padding(.top, 20)
+                    } else if model.hasOpenSubagent(chatId) {
+                        // Open hand-off: child still running after the spawn row
+                        // finished. Tick so the 60s grace can expire cleanly.
+                        TimelineView(.periodic(from: .now, by: 1)) { _ in
+                            if model.hasOpenSubagent(chatId) {
+                                workingLine.padding(.top, 20)
+                            }
+                        }
                     } else if model.isAwaitingReply(chatId) {
                         // Tick once a second so the awaiting-reply cheat expires
                         // (isAwaitingReply is time-capped) without a stuck line.
