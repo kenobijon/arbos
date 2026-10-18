@@ -41,6 +41,17 @@ fn bad(e: impl std::fmt::Display) -> (StatusCode, String) {
     (StatusCode::BAD_REQUEST, e.to_string())
 }
 
+/// Reject a one-shot whose fire time is not strictly in the future. Used by create/patch
+/// only — the scheduler must still be able to parse a stored once trigger after it is due.
+fn require_once_in_future(trigger: &Trigger) -> Result<(), String> {
+    match trigger {
+        Trigger::Once { at_ms } if *at_ms <= now_ms() => {
+            Err("once at must be in the future".into())
+        }
+        _ => Ok(()),
+    }
+}
+
 /// A validated trigger. The JSON form in the table is what clients send.
 #[derive(Debug, Clone)]
 pub enum Trigger {
@@ -79,6 +90,9 @@ impl Trigger {
                 Ok(Trigger::Cron { expr, tz })
             }
             Some("once") => {
+                // Past `at` values are allowed here: the scheduler re-parses the stored
+                // trigger after `next_run_at` is due. Create/patch reject past times via
+                // `require_once_in_future` so clients cannot schedule into the past.
                 let now = now_ms();
                 let at_ms = if let Some(at) = v
                     .get("at")
@@ -94,9 +108,6 @@ impl Trigger {
                 } else {
                     return Err("once trigger needs at or in_seconds".into());
                 };
-                if at_ms <= now {
-                    return Err("once at must be in the future".into());
-                }
                 Ok(Trigger::Once { at_ms })
             }
             Some("webhook") => {
@@ -411,6 +422,7 @@ pub async fn create(
         return Err(bad("prompt required"));
     }
     let trigger = Trigger::parse(&b.trigger).map_err(bad)?;
+    require_once_in_future(&trigger).map_err(bad)?;
     let chats = state.db.list_chats(&project_id).map_err(internal)?;
     let chat_id = match b.chat_id.filter(|c| !c.is_empty()) {
         Some(c) => {
@@ -468,6 +480,11 @@ pub async fn patch(
     let rt = load_routine(&state, &project_id, &rid)?;
     let trigger_json = b.trigger.clone().unwrap_or_else(|| rt.trigger.clone());
     let trigger = Trigger::parse(&trigger_json).map_err(bad)?;
+    // Only a newly supplied trigger is checked for "in the future"; re-enabling or
+    // renaming must not fail because a still-stored once `at` has already passed.
+    if b.trigger.is_some() {
+        require_once_in_future(&trigger).map_err(bad)?;
+    }
     let enabled = b.enabled.unwrap_or(rt.enabled);
     if let Some(c) = &b.chat_id {
         if !state.db.chat_exists(&project_id, c).map_err(internal)? {
@@ -674,16 +691,20 @@ mod tests {
         let hook = Trigger::parse(&json!({ "kind": "webhook" })).unwrap();
         assert_eq!(next_run_ms(&hook, now), None);
 
-        // One-shot: due at `at`, then gone (build the trigger directly so the test clock can be past).
+        // One-shot: due at `at`, then gone. Parse must accept a past `at` so the scheduler
+        // can re-read the stored trigger after next_run_at is due (create/patch still reject).
         let once_at = at("2026-10-15T10:00:20Z");
-        let once = Trigger::Once { at_ms: once_at };
+        let once = Trigger::parse(&json!({ "kind": "once", "at": once_at })).unwrap();
         assert_eq!(next_run_ms(&once, now), Some(once_at));
         let (fired, next) = schedule_step(&once, Some(once_at), at("2026-10-15T10:00:25Z"));
         assert!(fired);
         assert_eq!(next, None);
-        assert!(Trigger::parse(&json!({ "kind": "once", "at": now_ms() - 1 })).is_err());
+        let past = Trigger::parse(&json!({ "kind": "once", "at": now_ms() - 1 })).unwrap();
+        assert!(matches!(past, Trigger::Once { .. }));
+        assert!(require_once_in_future(&past).is_err());
         let in_secs = Trigger::parse(&json!({ "kind": "once", "in_seconds": 30 })).unwrap();
         assert!(matches!(in_secs, Trigger::Once { at_ms } if at_ms > now_ms()));
+        assert!(require_once_in_future(&in_secs).is_ok());
 
         // Scheduler steps inside one minute: fires once at the due tick, then stays quiet until
         // the next minute boundary even when ticks keep coming.
