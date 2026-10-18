@@ -137,6 +137,55 @@ extension AppModel {
             Person(id: "fx-u5", handle: "tobias", avatarUrl: nil, name: "Tobias Lund", status: "member"),
         ]
         link = .live
+        seedFixtureSecrets(now: now)
+    }
+
+    /// Settings → Secrets demo (D83), the Mac fixture's twin: a Stripe key for Affine and
+    /// Comms, a Mailgun key for Comms, a GitHub login for Hyper, one 1Password vault, recent
+    /// activity. No value exists anywhere in the fixture.
+    private func seedFixtureSecrets(now: Int64) {
+        func agent(_ id: String, _ name: String, _ enabled: Bool, _ note: String) -> [String: Any] {
+            var a: [String: Any] = ["project_id": id, "name": name, "access_id": "fx-acc-\(id)-\(note.count)", "enabled": enabled, "note": note, "hosts": []]
+            if enabled { a["last_used_at"] = now - 120_000 } else { a["disabled_at"] = now - 6 * 86_400_000 }
+            return a
+        }
+        func secret(_ id: String, _ name: String, _ env: String, _ kind: String, _ note: String, _ hosts: [String], _ agents: [[String: Any]], _ daysAgo: Int64) -> [String: Any] {
+            var m: [String: Any] = ["id": id, "name": name, "env": env, "kind": kind, "note": note, "hosts": hosts, "ask_every_time": false,
+                                    "version": 1, "created_at": now - daysAgo * 86_400_000, "vault_name": "Arbos", "agents": agents]
+            if daysAgo > 3 { m["last_used_at"] = now - 120_000 }
+            if kind == "login" { m["username"] = "unarbos" }
+            return m
+        }
+        func act(_ id: Int, _ action: String, _ name: String, _ project: (String, String)?, _ host: String?, _ by: String, _ minsAgo: Int64) -> [String: Any] {
+            var m: [String: Any] = ["id": id, "at": now - minsAgo * 60_000, "action": action, "name": name, "by": by, "detail": [:]]
+            if let p = project { m["project_id"] = p.0; m["project_name"] = p.1 }
+            if let host { m["host"] = host }
+            return m
+        }
+        let stripeAgents = [agent("fx-affine", "Affine", true, "pull refund reports"),
+                            agent("fx-comms", "Comms", true, "monthly revenue line in the newsletter"),
+                            agent("fx-hyper", "Hyper", false, "")]
+        let stripe = secret("fx-sec-stripe", "STRIPE_KEY", "STRIPE_KEY", "key", "Stripe live key — refunds and reports. Never for payouts.", ["api.stripe.com"], stripeAgents, 12)
+        let mailgun = secret("fx-sec-mailgun", "MAILGUN_API_KEY", "MAILGUN_API_KEY", "key", "Newsletter sends.", ["api.mailgun.net"], [agent("fx-comms", "Comms", true, "send the newsletter")], 5)
+        let github = secret("fx-sec-github", "GitHub login", "GITHUB_LOGIN", "login", "The unarbos account, for Actions and reviews.", ["github.com", "*.github.com"], [agent("fx-hyper", "Hyper", true, "review failing Actions runs")], 1)
+        let vault: [String: Any] = ["id": "fx-vault-1p", "provider": "onepassword", "name": "Arbos — Research", "items_count": 12, "status": "ok",
+                                    "limits": ["reads_per_hour": 1000, "reads_used_hour": 3],
+                                    "agents": [agent("fx-affine", "Affine", true, "read the Stripe and Postgres items")]]
+        let activity = [act(1, "used", "STRIPE_KEY", ("fx-affine", "Affine"), "api.stripe.com", "agent:affine", 2),
+                        act(2, "access_on", "MAILGUN_API_KEY", ("fx-comms", "Comms"), nil, "user:me", 1_440),
+                        act(3, "refused", "STRIPE_KEY", ("fx-hyper", "Hyper"), "stripe.evil.example", "agent:hyper", 4_320)]
+        secrets = SecretsOverview.parse(["paused": false, "vaults": [vault], "secrets": [stripe, mailgun, github],
+                                         "requests_pending": 1, "activity": activity, "providers": ["onepassword"]])
+        var stripeAccess = stripeAgents[1]
+        stripeAccess["secret"] = stripe
+        var vaultAccess = agent("fx-comms", "Comms", true, "read the Stripe item")
+        vaultAccess["vault"] = vault
+        vaultAccess["target_kind"] = "vault"
+        projectSecrets["fx-comms"] = ProjectSecrets.parse(["paused": false, "owner": true, "items": [stripeAccess, vaultAccess],
+                                                            "requests": [["id": "fx-req-1", "project_id": "fx-comms", "project_name": "Comms", "name": "GITHUB_LOGIN",
+                                                                          "purpose": "Sign in to post the release notes", "use": "browser_fill", "host": "github.com",
+                                                                          "status": "pending", "created_at": now - 180_000]],
+                                                            "activity": activity])
     }
 
     /// Two sample message notifications (an agent, a person) for screenshots.
