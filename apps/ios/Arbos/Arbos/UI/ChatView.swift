@@ -69,6 +69,14 @@ struct ChatView: View {
         return project?.name ?? people?.title ?? name
     }
 
+    /// Attach-sheet "Voice chat" subtitle target: the group in a group chat, else the peer/agent.
+    private var attachVoiceName: String {
+        if let people, people.isGroup {
+            return people.title.isEmpty ? "the group" : people.title
+        }
+        return name
+    }
+
     /// Header tap: DM → the other person; group / shared project → the group page; own agent → its page.
     private func openHeaderProfile() {
         if let people {
@@ -1062,7 +1070,7 @@ struct ChatView: View {
                 }
                 .buttonStyle(.plain)
                 .sheet(isPresented: $showAttach, onDismiss: demoDismissed) {
-                    AttachSheet(name: name) {
+                    AttachSheet(name: attachVoiceName) {
                         showAttach = false
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showPhotos = true }
                     } onFile: {
