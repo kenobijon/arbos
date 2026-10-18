@@ -1509,6 +1509,10 @@ pub struct Secret {
     pub hosts: Vec<String>,
     #[serde(default)]
     pub ask_every_time: bool,
+    /// "Real value in the agent's environment": agents with Access get the value itself as
+    /// `$STRIPE_KEY`, no card per use (D83 decision 2 as decided).
+    #[serde(default)]
+    pub inject_env: bool,
     #[serde(default)]
     pub expires_at: Option<i64>,
     #[serde(default)]
@@ -1536,10 +1540,22 @@ impl Secret {
     }
 
     pub fn glyph(&self) -> &'static str {
-        if self.kind == "login" {
+        if self.inject_env {
+            "terminal"
+        } else if self.kind == "login" {
             "person"
         } else {
             "key"
+        }
+    }
+
+    /// The variables the real value takes: `$STRIPE_KEY`, or `$GITHUB_LOGIN_USERNAME and
+    /// $GITHUB_LOGIN_PASSWORD` for a login.
+    pub fn real_var_list(&self) -> String {
+        if self.kind == "login" {
+            format!("${0}_USERNAME and ${0}_PASSWORD", self.env)
+        } else {
+            format!("${}", self.env)
         }
     }
 }
@@ -1634,6 +1650,10 @@ impl SecretActivity {
             "expiring" => format!("{name} expires soon"),
             "vault_connected" => format!("You connected {name}"),
             "vault_disconnected" => format!("You disconnected {name}"),
+            "vault_refreshed" => format!("{name} refreshed"),
+            "env_on" => format!("You put the real value of {name} in the environment"),
+            "env_off" => format!("You took the real value of {name} out of the environment"),
+            "injected" => format!("{name} went into {agent}'s environment"),
             other => format!("{} · {name}", other.replace('_', " ")),
         }
     }
@@ -1658,9 +1678,12 @@ pub struct ConnectedVault {
     /// `{ reads_per_hour, reads_used_hour, reads_per_day, reads_used_day, cache_ttl_secs }`.
     #[serde(default)]
     pub limits: serde_json::Value,
-    /// Cached `[{ ref, title, category, fields[], urls[] }]`, names only.
+    /// Cached `[{ ref, title, category, fields[], urls[], env, inject_env }]`, names only.
     #[serde(default)]
     pub items: Vec<serde_json::Value>,
+    /// Items the owner put into the agents' environment as real values.
+    #[serde(default)]
+    pub env_items: i64,
 }
 
 impl ConnectedVault {
@@ -1685,6 +1708,8 @@ pub struct NewSecret {
     pub hosts: Vec<String>,
     /// Agents that get Access at once.
     pub agents: Vec<Id>,
+    /// Real value in the agent's environment from the start.
+    pub inject_env: bool,
 }
 
 /// Settings → Secrets state (`GET /secrets` + `GET /secrets/requests`).

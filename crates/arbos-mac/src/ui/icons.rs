@@ -90,6 +90,8 @@ const ICONS: &[(&str, &str)] = &[
     icon!("key", "<circle cx=\"8\" cy=\"15\" r=\"4\"/><path d=\"M11 12l9-9M16 6l2 2M13 9l2 2\"/>"),
     icon!("pause", "<rect x=\"6\" y=\"5\" width=\"4\" height=\"14\" rx=\"1\" fill=\"#000\"/><rect x=\"14\" y=\"5\" width=\"4\" height=\"14\" rx=\"1\" fill=\"#000\"/>"),
     icon!("lock", "<rect x=\"5\" y=\"11\" width=\"14\" height=\"10\" rx=\"2\"/><path d=\"M8 11V8a4 4 0 0 1 8 0v3\"/>"),
+    // A secret whose real value is in the agent's environment (D83 decision 2).
+    icon!("terminal", "<rect x=\"3\" y=\"5\" width=\"18\" height=\"14\" rx=\"2\"/><path d=\"M7 9l3 3-3 3M12 15h5\"/>"),
     // Profile pages (Telegram-style action rows).
     icon!("video", "<rect x=\"3\" y=\"7\" width=\"12\" height=\"10\" rx=\"2\"/><path d=\"M15 11l6-3v8l-6-3z\"/>"),
     icon!(
