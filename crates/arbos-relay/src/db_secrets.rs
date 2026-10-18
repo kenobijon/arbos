@@ -692,17 +692,6 @@ impl Db {
         })
     }
 
-    pub fn pending_secret_requests_count(&self, user_id: &str) -> Result<i64> {
-        self.with(|c| {
-            expire_requests(c)?;
-            c.query_row(
-                "SELECT COUNT(*) FROM secret_requests WHERE user_id = ?1 AND status = 'pending'",
-                params![user_id],
-                |r| r.get(0),
-            )
-        })
-    }
-
     /// An undecided request for the same (project, target, use) resumes instead of a second card.
     pub fn pending_secret_request_for(
         &self,
@@ -1255,7 +1244,13 @@ mod tests {
         stale.expires_at = now - 1;
         db.insert_secret_request(&stale).unwrap();
         assert_eq!(db.secret_request("r2").unwrap().unwrap().status, "expired");
-        assert_eq!(db.pending_secret_requests_count("alice").unwrap(), 0);
+        let pending = db
+            .list_secret_requests("alice", None, 50)
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.status == "pending")
+            .count();
+        assert_eq!(pending, 0);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

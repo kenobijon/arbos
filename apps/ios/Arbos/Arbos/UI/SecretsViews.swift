@@ -264,7 +264,6 @@ struct SecretsPage: View {
     @State private var showAdd = false
     @State private var showConnect = false
     @State private var confirmPause = false
-    @State private var requests: [SecretRequestItem] = []
     /// Rig: `ARBOS_SETTINGS_PAGE=secret:<ENV>` pushes that secret's page once the list arrives.
     @State private var rigSecretId: String?
     @State private var showRigSecret = false
@@ -273,7 +272,8 @@ struct SecretsPage: View {
 
     private var overview: SecretsOverview? { model.secrets }
     private var paused: Bool { overview?.paused ?? false }
-    private var pending: [SecretRequestItem] { requests.filter(\.isPending) }
+    /// Same rule on both platforms: anything waiting shows here and on the agent's page.
+    private var pending: [SecretRequestItem] { overview?.requests.filter(\.isPending) ?? [] }
 
     var body: some View {
         SettingsPage(title: "Secrets") {
@@ -289,7 +289,7 @@ struct SecretsPage: View {
                 SettingsGroup(header: "Waiting for you") {
                     ForEach(pending) { r in
                         SecretRequestRow(request: r) { decision in
-                            requests.removeAll { $0.id == r.id }
+                            model.secrets?.requests.removeAll { $0.id == r.id }
                             model.decideSecretRequest(r.id, decision: decision, projectId: r.projectId)
                         }
                     }
@@ -334,7 +334,6 @@ struct SecretsPage: View {
         }
         .task {
             await model.refreshSecrets()
-            requests = (try? await model.relay.secretRequests()) ?? []
             if let env = DebugHooks.settingsPage?.stripping(prefix: "secret:"),
                let s = model.secrets?.secrets.first(where: { $0.env == env }) {
                 rigSecretId = s.id

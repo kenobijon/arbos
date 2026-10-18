@@ -225,6 +225,8 @@ struct SecretsOverview: Equatable {
     var activity: [SecretActivity]
     /// Vault providers this relay can connect (`["onepassword"]` once Phase 2 is deployed).
     var providers: [String] = []
+    /// Cards the owner has not answered yet, for the Secrets root ("Waiting for you").
+    var requests: [SecretRequestItem] = []
     var loaded = true
 
     static func parse(_ v: Any?) -> SecretsOverview? {
@@ -236,7 +238,8 @@ struct SecretsOverview: Equatable {
             secrets: (m["secrets"] as? [Any])?.compactMap(SecretItem.parse) ?? [],
             requestsPending: Int(DocJSON.int(m["requests_pending"]) ?? 0),
             activity: (m["activity"] as? [Any])?.compactMap(SecretActivity.parse) ?? [],
-            providers: (m["providers"] as? [Any])?.compactMap { $0 as? String } ?? []
+            providers: (m["providers"] as? [Any])?.compactMap { $0 as? String } ?? [],
+            requests: (m["requests"] as? [Any])?.compactMap(SecretRequestItem.parse) ?? []
         )
     }
 

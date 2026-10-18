@@ -82,11 +82,6 @@ extension RelayAPI {
         return ((v?["items"] as? [Any])?.compactMap(SecretActivity.parse) ?? [], DocJSON.int(v?["next_before"]))
     }
 
-    func secretRequests() async throws -> [SecretRequestItem] {
-        let v = try await json("GET", "/secrets/requests") as? [String: Any]
-        return (v?["items"] as? [Any])?.compactMap(SecretRequestItem.parse) ?? []
-    }
-
     /// `POST /secrets/requests/{id}/decide {decision}` — `once | chat | always | deny`.
     func decideSecretRequest(_ id: String, decision: String) async throws {
         _ = try await request("POST", "/secrets/requests/\(id)/decide", body: ["decision": decision])
