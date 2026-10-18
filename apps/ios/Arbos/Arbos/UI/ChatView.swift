@@ -52,6 +52,10 @@ struct ChatView: View {
     @State private var searchText = ""
     @FocusState private var searchFocused: Bool
     @ObservedObject private var calls = CallManager.shared
+    /// iMessage-style: drag the transcript left to peek message times (0…`RowView.timeRevealWidth`).
+    @State private var timeReveal: CGFloat = 0
+    /// Once the pan is more horizontal-left than vertical, lock so scroll does not steal it.
+    @State private var timeRevealLocked = false
 
     /// Rows after the in-chat search filter (profile "search").
     private var visibleRows: [Row] {
@@ -141,9 +145,6 @@ struct ChatView: View {
     /// with the person until a chip / `@` / reply picks an agent. Several agent chips can be
     /// on at once so that combination all reply (and "hey agents" / every agent chip → everyone).
     @State private var talkTo: Set<String> = []
-    /// iMessage-style drag-left peek: how far (pt) timestamps are revealed. Springs back on release.
-    @State private var timeReveal: CGFloat = 0
-    private let timeRevealMax: CGFloat = 56
 
     private var project: Project? { model.project(projectId) }
     private var chat: Chat? { model.chat(chatId) }
@@ -696,28 +697,27 @@ struct ChatView: View {
         }
     }
 
-    /// Drag left on the transcript to peek per-message clocks (iMessage).
-    /// Vertical scrolls and the right-to-go-back swipe stay alone: this only
-    /// tracks a clear leftward horizontal drag, then springs closed.
+    /// Drag left on the transcript to peek each bubble's send time (iMessage).
+    /// Locks only after the pan is clearly horizontal-left so vertical scroll stays free.
     private var timeRevealGesture: some Gesture {
         DragGesture(minimumDistance: 12, coordinateSpace: .local)
             .onChanged { value in
                 let dx = value.translation.width
                 let dy = value.translation.height
-                guard abs(dx) >= abs(dy) * 1.15 else { return }
-                guard dx < 0 else {
-                    if timeReveal != 0 { timeReveal = 0 }
-                    return
+                if !timeRevealLocked {
+                    guard abs(dx) + abs(dy) >= 12 else { return }
+                    // Vertical scroll or swipe-right-to-back: do not steal the gesture.
+                    guard dx < 0, abs(dx) > abs(dy) * 1.15 else { return }
+                    timeRevealLocked = true
                 }
-                let raw = -dx
-                if raw <= timeRevealMax {
-                    timeReveal = raw
-                } else {
-                    timeReveal = timeRevealMax + (raw - timeRevealMax) * 0.25
-                }
+                let reveal = min(RowView.timeRevealWidth, max(0, -dx))
+                var t = Transaction()
+                t.disablesAnimations = true
+                withTransaction(t) { timeReveal = reveal }
             }
             .onEnded { _ in
-                withAnimation(.interpolatingSpring(stiffness: 320, damping: 30)) {
+                timeRevealLocked = false
+                withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
                     timeReveal = 0
                 }
             }
@@ -771,7 +771,7 @@ struct ChatView: View {
                         emptyHint
                     }
                     ForEach(Array(visibleRows.enumerated()), id: \.element.id) { i, row in
-                        RowView(row: row, chatId: chatId, width: width, reveal: timeReveal)
+                        RowView(row: row, chatId: chatId, width: width, timeReveal: timeReveal)
                             .padding(.top, gap(before: i))
                             .id(row.id)
                             .contextMenu {
@@ -808,13 +808,13 @@ struct ChatView: View {
                             }
                     }
                     if model.isStreaming(chatId) {
-                        workingLine.padding(.top, 20).offset(x: -timeReveal)
+                        workingLine.padding(.top, 20)
                     } else if model.hasOpenSubagent(chatId) {
                         // Open hand-off: child still running after the spawn row
                         // finished. Tick so the 60s grace can expire cleanly.
                         TimelineView(.periodic(from: .now, by: 1)) { _ in
                             if model.hasOpenSubagent(chatId) {
-                                workingLine.padding(.top, 20).offset(x: -timeReveal)
+                                workingLine.padding(.top, 20)
                             }
                         }
                     } else if model.isAwaitingReply(chatId) {
@@ -822,7 +822,7 @@ struct ChatView: View {
                         // (isAwaitingReply is time-capped) without a stuck line.
                         TimelineView(.periodic(from: .now, by: 1)) { _ in
                             if model.isAwaitingReply(chatId) {
-                                workingLine.padding(.top, 20).offset(x: -timeReveal)
+                                workingLine.padding(.top, 20)
                             }
                         }
                     }
@@ -844,12 +844,13 @@ struct ChatView: View {
             }
             .defaultScrollAnchor(.bottom)
             .scrollDismissesKeyboard(.interactively)
+            // Drag left → reveal message times (iMessage). simultaneous so vertical scroll still works.
+            .simultaneousGesture(timeRevealGesture)
             // Tap empty chat chrome to dismiss the keyboard and free the transcript.
             .onTapGesture {
                 composerFocused = false
                 searchFocused = false
             }
-            .simultaneousGesture(timeRevealGesture)
             .modifier(AwayFromBottomReporter(away: $awayFromBottom))
             // Mask stays in the scroll view's bounds — `ignoresSafeArea` on the
             // mask mis-samples the fade when the composer/keyboard inset changes

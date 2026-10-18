@@ -43,8 +43,6 @@ struct Row: Identifiable, Equatable {
     var kind: RowKind
     /// Emoji reactions shown under this bubble (stamped on the last prose/media row of a message).
     var reactions: [MessageReaction] = []
-    /// Message time (ms); used for iMessage-style drag-left timestamps. 0 = none.
-    var createdAt: Int64 = 0
 }
 
 enum Transcript {
@@ -201,9 +199,6 @@ enum Transcript {
                }) {
                 chunk[ix].reactions = message.reactions
             }
-            if message.createdAt > 0 {
-                for i in chunk.indices { chunk[i].createdAt = message.createdAt }
-            }
             // Joins that happened before this message land first (Grok: "@bob joined").
             if message.createdAt > 0 { flushJoins(before: message.createdAt) }
             // Date separators when the gap is over an hour (Grok: "Today 8:00 AM").
@@ -229,8 +224,7 @@ enum Transcript {
             guard let first = runRow else { return }
             if run.count > 1, case .system(_, _, let project) = first.kind {
                 out.append(Row(id: first.id, messageId: first.messageId, role: .system,
-                               kind: .system(icon: nil, text: handoffText(run), avatarProject: project),
-                               createdAt: first.createdAt))
+                               kind: .system(icon: nil, text: handoffText(run), avatarProject: project)))
             } else {
                 out.append(first)
             }
@@ -327,12 +321,6 @@ enum Transcript {
             return date.formatted(.dateTime.weekday(.wide)) + " \(time)"
         }
         return date.formatted(date: .abbreviated, time: .shortened)
-    }
-
-    /// Clock-only label for drag-left timestamps (iMessage: "3:45 PM").
-    static func clockLabel(_ ms: Int64) -> String {
-        Date(timeIntervalSince1970: Double(ms) / 1000)
-            .formatted(date: .omitted, time: .shortened)
     }
 }
 
@@ -469,10 +457,11 @@ struct RowView: View {
     let row: Row
     let chatId: Id
     let width: CGFloat
-    /// Shared drag-left reveal (0 = hidden; gutter width = fully shown).
-    var reveal: CGFloat = 0
+    /// How far the transcript has been dragged left to reveal iMessage-style times (0…`timeRevealWidth`).
+    var timeReveal: CGFloat = 0
 
-    private static let timestampGutter: CGFloat = 56
+    /// Trailing column width for swipe-revealed times (fits "12:59 PM").
+    static let timeRevealWidth: CGFloat = 56
 
     private var maxBubble: CGFloat { max(200, width - Theme.bubbleInset) }
 
@@ -480,40 +469,45 @@ struct RowView: View {
         model.firstLogin != nil && model.messages(of: chatId).first(where: { $0.greeting })?.id == row.messageId
     }
 
-    /// Per-message clock on the trailing edge; system / cards stay plain.
-    private var showsTimestamp: Bool {
-        guard row.createdAt > 0 else { return false }
+    /// Bubbles get a swipe time; centred system / card / error rows do not.
+    private var showsSwipeTime: Bool {
         switch row.kind {
-        case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
-            return true
         case .system, .question, .error:
             return false
+        case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
+            return true
         }
     }
 
-    var body: some View {
-        // iMessage: content slides left; a trailing clock slides in from off-screen.
-        ZStack(alignment: .trailing) {
-            VStack(spacing: 4) {
-                bubble
-                if !row.reactions.isEmpty {
-                    reactionChips
-                }
-            }
-            .offset(x: -reveal)
+    private var swipeTimeLabel: String? {
+        guard showsSwipeTime else { return nil }
+        guard let ms = model.messages(of: chatId).first(where: { $0.id == row.messageId })?.createdAt,
+              ms > 0 else { return nil }
+        return Date(timeIntervalSince1970: Double(ms) / 1000)
+            .formatted(date: .omitted, time: .shortened)
+    }
 
-            if showsTimestamp {
-                Text(Transcript.clockLabel(row.createdAt))
-                    .font(.system(size: 11))
-                    .foregroundStyle(theme.muted)
-                    .monospacedDigit()
-                    .frame(width: Self.timestampGutter, alignment: .trailing)
-                    // Cap at the gutter so rubber-band overscroll keeps the clock pinned.
-                    .offset(x: max(0, Self.timestampGutter - reveal))
-                    .accessibilityHidden(reveal < 8)
+    var body: some View {
+        VStack(spacing: 4) {
+            bubble
+            if !row.reactions.isEmpty {
+                reactionChips
             }
         }
-        .clipped()
+        // iMessage: drag left → whole row slides; time sits on the trailing edge.
+        .offset(x: -timeReveal)
+        .overlay(alignment: .trailing) {
+            if let time = swipeTimeLabel, timeReveal > 0.5 {
+                Text(time)
+                    .font(.system(size: 11))
+                    .foregroundStyle(theme.muted)
+                    .frame(width: Self.timeRevealWidth, alignment: .trailing)
+                    .offset(x: Self.timeRevealWidth - timeReveal)
+                    .opacity(Double(min(1, timeReveal / (Self.timeRevealWidth * 0.55))))
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(timeReveal < 12)
+            }
+        }
     }
 
     @ViewBuilder
