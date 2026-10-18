@@ -51,8 +51,10 @@ struct Grant {
     project_id: String,
     /// The request that granted it (one-time grants and browser fills need it for `values`).
     request_id: Option<String>,
-    /// Env name = the secret's name (`STRIPE_KEY`), D83 decision 1.
+    /// Env name = the secret's name (`STRIPE_KEY`), D83 decision 1; an `op://` ref for a
+    /// connected-vault item (no env for those: they travel through egress only).
     name: String,
+    has_env: bool,
     kind: String,
     /// field → `arbos-secret://NAME/field`.
     placeholders: BTreeMap<String, String>,
@@ -80,21 +82,36 @@ fn state() -> &'static Mutex<State> {
     S.get_or_init(|| Mutex::new(State::default()))
 }
 
+/// `op://vault/item/field` → `op://vault/item`; anything else unchanged.
+fn item_base(name: &str) -> String {
+    if !name.starts_with("op://") {
+        return name.to_owned();
+    }
+    let parts: Vec<&str> = name.splitn(5, '/').collect();
+    if parts.len() >= 5 {
+        format!("op://{}/{}", parts[2], parts[3])
+    } else {
+        name.to_owned()
+    }
+}
+
 fn grant_for(project_id: &str, name: &str) -> Option<Grant> {
+    let want = item_base(name);
     state()
         .lock()
         .expect("secrets state")
         .grants
         .iter()
         .rev()
-        .find(|g| g.project_id == project_id && g.name == name)
+        .find(|g| g.project_id == project_id && item_base(&g.name) == want)
         .cloned()
 }
 
 fn remember_grant(g: Grant) {
     let mut st = state().lock().expect("secrets state");
+    let base = item_base(&g.name);
     st.grants
-        .retain(|x| !(x.project_id == g.project_id && x.name == g.name));
+        .retain(|x| !(x.project_id == g.project_id && item_base(&x.name) == base));
     st.grants.push(g);
 }
 
@@ -130,7 +147,13 @@ pub fn grant_envs(project_id: &str) -> Vec<(String, String)> {
 
 impl Grant {
     fn from_item(project_id: &str, item: &Value) -> Option<Self> {
-        let name = item["env"].as_str()?.to_owned();
+        // Arbos secrets are known by their env name; connected-vault items by their `op://` ref.
+        let has_env = item["env"].as_str().is_some_and(|e| !e.is_empty());
+        let name = item["env"]
+            .as_str()
+            .filter(|e| !e.is_empty())
+            .or(item["ref"].as_str())?
+            .to_owned();
         let placeholders: BTreeMap<String, String> = item["placeholders"]
             .as_object()
             .map(|m| {
@@ -158,6 +181,7 @@ impl Grant {
             project_id: project_id.to_owned(),
             request_id: None,
             name,
+            has_env,
             kind: item["kind"].as_str().unwrap_or("key").to_owned(),
             placeholders,
             hosts,
@@ -168,6 +192,9 @@ impl Grant {
     }
 
     fn env_pairs(&self) -> Vec<(String, String)> {
+        if !self.has_env {
+            return Vec::new();
+        }
         if self.placeholders.len() == 1 {
             return self
                 .placeholders
@@ -365,7 +392,7 @@ pub async fn secrets_list(agent: &Agent) -> Value {
         .iter()
         .map(|it| {
             let access = it["enabled"].as_bool().unwrap_or(false);
-            json!({ "name": it["env"], "kind": it["kind"], "fields": it["fields"], "placeholders": it["placeholders"],
+            json!({ "name": if it["env"].is_null() { it["title"].clone() } else { it["env"].clone() }, "kind": it["kind"], "fields": it["fields"], "placeholders": it["placeholders"],
                 "hosts": it["hosts"], "note": it["note"], "vault": it["vault_name"], "ref": it["ref"],
                 "access": if paused { "paused" } else if access { "on" } else { "off" },
                 "ask_every_time": it["ask_every_time"] })
@@ -480,12 +507,15 @@ async fn obtain_grant(
     if is_paused(&project) {
         return Err(err_result("Secrets are paused by the owner. Stop and tell the user; do not ask again until they turn Pause all secrets off."));
     }
-    let name = name
-        .strip_prefix("arbos-secret://")
-        .and_then(|r| r.split('/').next())
-        .unwrap_or(name)
-        .trim_start_matches('$')
-        .to_owned();
+    let name = if name.starts_with("op://") {
+        name.to_owned()
+    } else {
+        name.strip_prefix("arbos-secret://")
+            .and_then(|r| r.split('/').next())
+            .unwrap_or(name)
+            .trim_start_matches('$')
+            .to_owned()
+    };
     let cooled = state()
         .lock()
         .expect("secrets state")
@@ -538,7 +568,12 @@ async fn obtain_grant(
         let items = refresh_grants(agent).await.unwrap_or_default();
         items
             .iter()
-            .find(|it| it["env"].as_str() == Some(name.as_str()))
+            .find(|it| {
+                it["env"].as_str() == Some(name.as_str())
+                    || it["ref"]
+                        .as_str()
+                        .is_some_and(|r| item_base(r) == item_base(&name))
+            })
             .and_then(|it| it["kind"].as_str())
             .unwrap_or("key")
             .to_owned()
@@ -658,7 +693,12 @@ async fn obtain_grant(
         .or_else(|| {
             items
                 .iter()
-                .find(|it| it["env"].as_str() == Some(name.as_str()))
+                .find(|it| {
+                    it["env"].as_str() == Some(name.as_str())
+                        || it["ref"]
+                            .as_str()
+                            .is_some_and(|r| item_base(r) == item_base(&name))
+                })
                 .and_then(|it| Grant::from_item(&project, it))
         })
         .ok_or_else(|| err_result(format!("{name}: the secret is gone")))?;

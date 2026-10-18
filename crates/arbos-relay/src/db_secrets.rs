@@ -58,6 +58,27 @@ CREATE TABLE IF NOT EXISTS secret_audit (
 );
 CREATE INDEX IF NOT EXISTS secret_audit_user_at ON secret_audit(user_id, at);
 CREATE INDEX IF NOT EXISTS secret_audit_target ON secret_audit(target_id, at);
+-- Connected vaults (D83 §3, Phase 2): a provider token (ciphertext under the user DEK, AAD =
+-- vault id), what it can see, and the cached item list (names only).
+CREATE TABLE IF NOT EXISTS vaults (
+  id TEXT PRIMARY KEY, user_id TEXT NOT NULL, provider TEXT NOT NULL, name TEXT NOT NULL,
+  token_enc TEXT, external_vaults TEXT NOT NULL DEFAULT '[]', items TEXT NOT NULL DEFAULT '[]',
+  items_count INTEGER NOT NULL DEFAULT 0, items_refreshed_at INTEGER, token_expires_at INTEGER,
+  status TEXT NOT NULL DEFAULT 'ok', last_error TEXT, last_refreshed_at INTEGER,
+  created_at INTEGER NOT NULL, disconnected_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS vaults_user ON vaults(user_id);
+-- Per-item host pinning for a vault Access: the first use of an item at a host pins it.
+CREATE TABLE IF NOT EXISTS vault_access_hosts (
+  access_id TEXT NOT NULL, item_ref TEXT NOT NULL, host TEXT NOT NULL, pinned_at INTEGER NOT NULL,
+  PRIMARY KEY (access_id, item_ref, host)
+);
+-- Provider reads per vault, per UTC hour and per UTC day, so the Vault page can show
+-- "Reads this hour 12 / 1,000" and the resolver stays under the plan's limits.
+CREATE TABLE IF NOT EXISTS vault_reads (
+  vault_id TEXT NOT NULL, window TEXT NOT NULL, reads INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (vault_id, window)
+);
 "#;
 
 /// A pending request nobody answers expires after this long (D76: 10 min silence = denied).
@@ -867,6 +888,204 @@ impl Db {
             rows.collect()
         })
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Vault {
+    pub id: String,
+    pub user_id: String,
+    /// `onepassword` (more providers later, same shape).
+    pub provider: String,
+    pub name: String,
+    pub token_enc: Option<String>,
+    /// `[{ id, name }]` of the provider-side vaults the token can read.
+    pub external_vaults: Value,
+    /// Cached `[{ ref, id, title, category, fields: [name], urls: [] }]`; names only.
+    pub items: Value,
+    pub items_count: i64,
+    pub items_refreshed_at: Option<i64>,
+    pub token_expires_at: Option<i64>,
+    /// `ok | token_invalid | rate_limited | expired`.
+    pub status: String,
+    pub last_error: Option<String>,
+    pub last_refreshed_at: Option<i64>,
+    pub created_at: i64,
+    pub disconnected_at: Option<i64>,
+}
+
+const VAULT_COLS: &str = "id, user_id, provider, name, token_enc, external_vaults, items, items_count, items_refreshed_at, token_expires_at, status, last_error, last_refreshed_at, created_at, disconnected_at";
+
+fn row_to_vault(r: &rusqlite::Row<'_>) -> rusqlite::Result<Vault> {
+    Ok(Vault {
+        id: r.get(0)?,
+        user_id: r.get(1)?,
+        provider: r.get(2)?,
+        name: r.get(3)?,
+        token_enc: r.get(4)?,
+        external_vaults: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or_default(),
+        items: serde_json::from_str(&r.get::<_, String>(6)?).unwrap_or_default(),
+        items_count: r.get(7)?,
+        items_refreshed_at: r.get(8)?,
+        token_expires_at: r.get(9)?,
+        status: r.get(10)?,
+        last_error: r.get(11)?,
+        last_refreshed_at: r.get(12)?,
+        created_at: r.get(13)?,
+        disconnected_at: r.get(14)?,
+    })
+}
+
+impl Db {
+    // ---- connected vaults -----------------------------------------------------------------------
+
+    pub fn upsert_vault(&self, v: &Vault) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO vaults(id, user_id, provider, name, token_enc, external_vaults, items, items_count, items_refreshed_at,
+                   token_expires_at, status, last_error, last_refreshed_at, created_at, disconnected_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
+                 ON CONFLICT(id) DO UPDATE SET name = excluded.name, token_enc = excluded.token_enc,
+                   external_vaults = excluded.external_vaults, items = excluded.items, items_count = excluded.items_count,
+                   items_refreshed_at = excluded.items_refreshed_at, token_expires_at = excluded.token_expires_at,
+                   status = excluded.status, last_error = excluded.last_error, last_refreshed_at = excluded.last_refreshed_at,
+                   disconnected_at = excluded.disconnected_at
+                 WHERE vaults.user_id = excluded.user_id",
+                params![
+                    v.id, v.user_id, v.provider, v.name, v.token_enc, v.external_vaults.to_string(), v.items.to_string(),
+                    v.items_count, v.items_refreshed_at, v.token_expires_at, v.status, v.last_error, v.last_refreshed_at,
+                    v.created_at, v.disconnected_at
+                ],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn list_vaults(&self, user_id: &str) -> Result<Vec<Vault>> {
+        self.with(|c| {
+            let mut st = c.prepare(&format!(
+                "SELECT {VAULT_COLS} FROM vaults WHERE user_id = ?1 AND disconnected_at IS NULL ORDER BY created_at"
+            ))?;
+            let rows = st.query_map(params![user_id], row_to_vault)?;
+            rows.collect()
+        })
+    }
+
+    pub fn vault(&self, user_id: &str, id: &str) -> Result<Option<Vault>> {
+        self.with(|c| {
+            c.query_row(
+                &format!("SELECT {VAULT_COLS} FROM vaults WHERE id = ?1 AND user_id = ?2 AND disconnected_at IS NULL"),
+                params![id, user_id],
+                row_to_vault,
+            )
+            .optional()
+        })
+    }
+
+    /// Disconnect: token ciphertext and cached items go; the row stays for the audit trail.
+    pub fn disconnect_vault(&self, user_id: &str, id: &str) -> Result<bool> {
+        self.with(|c| {
+            let n = c.execute(
+                "UPDATE vaults SET token_enc = NULL, items = '[]', items_count = 0, disconnected_at = ?3
+                 WHERE id = ?1 AND user_id = ?2 AND disconnected_at IS NULL",
+                params![id, user_id, now_ms()],
+            )?;
+            if n > 0 {
+                c.execute(
+                    "DELETE FROM vault_access_hosts WHERE access_id IN (SELECT id FROM secret_access WHERE target_kind = 'vault' AND target_id = ?1)",
+                    params![id],
+                )?;
+                c.execute(
+                    "DELETE FROM secret_access WHERE target_kind = 'vault' AND target_id = ?1",
+                    params![id],
+                )?;
+                c.execute(
+                    "UPDATE secret_requests SET status = 'expired', decided_at = ?2 WHERE target_kind = 'vault' AND target_id = ?1 AND status IN ('pending', 'allowed_once')",
+                    params![id, now_ms()],
+                )?;
+            }
+            Ok(n > 0)
+        })
+    }
+
+    pub fn vault_item_hosts(&self, access_id: &str, item_ref: &str) -> Result<Vec<String>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT host FROM vault_access_hosts WHERE access_id = ?1 AND item_ref = ?2 ORDER BY pinned_at",
+            )?;
+            let rows = st.query_map(params![access_id, item_ref], |r| r.get(0))?;
+            rows.collect()
+        })
+    }
+
+    /// Every pinned `(item_ref, host)` of one access.
+    pub fn vault_access_hosts(&self, access_id: &str) -> Result<Vec<(String, String)>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT item_ref, host FROM vault_access_hosts WHERE access_id = ?1 ORDER BY pinned_at",
+            )?;
+            let rows = st.query_map(params![access_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect()
+        })
+    }
+
+    pub fn pin_vault_item_host(&self, access_id: &str, item_ref: &str, host: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO vault_access_hosts(access_id, item_ref, host, pinned_at) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(access_id, item_ref, host) DO NOTHING",
+                params![access_id, item_ref, host, now_ms()],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// Count one provider read in the current hour and day windows; returns `(hour, day)` totals.
+    pub fn count_vault_read(&self, vault_id: &str) -> Result<(i64, i64)> {
+        let (hour, day) = read_windows();
+        self.with(|c| {
+            for w in [&hour, &day] {
+                c.execute(
+                    "INSERT INTO vault_reads(vault_id, window, reads) VALUES (?1, ?2, 1)
+                     ON CONFLICT(vault_id, window) DO UPDATE SET reads = reads + 1",
+                    params![vault_id, w],
+                )?;
+            }
+            c.execute(
+                "DELETE FROM vault_reads WHERE vault_id = ?1 AND window NOT IN (?2, ?3)",
+                params![vault_id, hour, day],
+            )?;
+            let get = |w: &str| -> rusqlite::Result<i64> {
+                c.query_row(
+                    "SELECT reads FROM vault_reads WHERE vault_id = ?1 AND window = ?2",
+                    params![vault_id, w],
+                    |r| r.get(0),
+                )
+            };
+            Ok((get(&hour)?, get(&day)?))
+        })
+    }
+
+    pub fn vault_reads(&self, vault_id: &str) -> Result<(i64, i64)> {
+        let (hour, day) = read_windows();
+        self.with(|c| {
+            let get = |w: &str| -> rusqlite::Result<i64> {
+                c.query_row(
+                    "SELECT reads FROM vault_reads WHERE vault_id = ?1 AND window = ?2",
+                    params![vault_id, w],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map(|v| v.unwrap_or(0))
+            };
+            Ok((get(&hour)?, get(&day)?))
+        })
+    }
+}
+
+/// `("h<unix hours>", "d<unix days>")` for the current UTC hour and day.
+fn read_windows() -> (String, String) {
+    let now_s = now_ms() / 1000;
+    (format!("h{}", now_s / 3600), format!("d{}", now_s / 86_400))
 }
 
 #[cfg(test)]

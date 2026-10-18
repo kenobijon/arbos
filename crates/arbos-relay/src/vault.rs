@@ -257,17 +257,35 @@ pub async fn egress(
         .collect();
     let chat_id = b.chat_id.as_deref().filter(|c| !c.is_empty());
     let plan = secrets::plan_egress(&state, &user_id, &project_id, &host, chat_id, &texts)?;
+    // Connected vaults: `op://…` references resolve on the relay too (Phase 2).
+    let op_plan =
+        crate::vaults::plan_egress(&state, &user_id, &project_id, &host, chat_id, &texts).await;
     let mut sub = Substitution {
         refused: plan.refused.clone(),
         ..Default::default()
     };
+    sub.refused.extend(op_plan.refused.iter().cloned());
+    let swap_refs = |text: &str, sub: &mut Substitution| -> String {
+        let mut out = text.to_owned();
+        for (r, value) in &op_plan.values {
+            if out.contains(r.as_str()) {
+                out = out.replace(r.as_str(), value);
+                if !sub.substituted.contains(r) {
+                    sub.substituted.push(r.clone());
+                }
+            }
+        }
+        out
+    };
     let mut headers = BTreeMap::new();
     for (k, v) in &b.headers {
-        headers.insert(k.clone(), substitute(v, &host, &plan.items, &mut sub));
+        let v = substitute(v, &host, &plan.items, &mut sub);
+        headers.insert(k.clone(), swap_refs(&v, &mut sub));
     }
-    let body_out = body_text
-        .as_deref()
-        .map(|t| substitute(t, &host, &plan.items, &mut sub));
+    let body_out = body_text.as_deref().map(|t| {
+        let t = substitute(t, &host, &plan.items, &mut sub);
+        swap_refs(&t, &mut sub)
+    });
     for (s, allowed) in &plan.used {
         if sub
             .substituted
@@ -277,8 +295,18 @@ pub async fn egress(
             secrets::after_use(&state, s, &project_id, &host, "header", chat_id, allowed);
         }
     }
+    for (r, allowed) in &op_plan.used {
+        if sub.substituted.contains(r) {
+            crate::vaults::after_op_use(&state, r, &project_id, &host, "header", chat_id, allowed);
+        }
+    }
     let mut redact = plan.redact;
     for v in &sub.secrets {
+        if !redact.contains(v) {
+            redact.push(v.clone());
+        }
+    }
+    for (_, v) in &op_plan.values {
         if !redact.contains(v) {
             redact.push(v.clone());
         }
