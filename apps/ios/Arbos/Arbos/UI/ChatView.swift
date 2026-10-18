@@ -776,8 +776,19 @@ struct ChatView: View {
                             .id(row.id)
                             .contextMenu {
                                 if canReact(to: row) {
+                                    // ControlGroup .menu style only lays out 3 side-by-side;
+                                    // 6 in one group wraps into a broken vertical stack.
                                     ControlGroup {
-                                        ForEach(MessageReaction.palette, id: \.self) { emoji in
+                                        ForEach(Array(MessageReaction.palette.prefix(3)), id: \.self) { emoji in
+                                            Button {
+                                                model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: emoji)
+                                            } label: {
+                                                Text(emoji)
+                                            }
+                                        }
+                                    }
+                                    ControlGroup {
+                                        ForEach(Array(MessageReaction.palette.suffix(3)), id: \.self) { emoji in
                                             Button {
                                                 model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: emoji)
                                             } label: {
