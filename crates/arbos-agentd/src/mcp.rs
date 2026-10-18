@@ -159,6 +159,7 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
             | "local_read"
             | "local_list"
             | "vault_request"
+            | "secrets_request"
             | "browser_fill"
     ) {
         if let Err(refusal) = a.gate_tool(name, args, &chat_for_scratch).await {
@@ -661,8 +662,10 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
         }
         "deliver_file" => crate::media::deliver_file(a, args).await,
         "generate_image" => crate::media::generate_image(a, args).await,
-        "vault_list" => crate::vault::vault_list(a).await,
-        "vault_request" => crate::vault::vault_request(a, args, &chat_for_scratch).await,
+        "vault_list" | "secrets_list" => crate::vault::secrets_list(a).await,
+        "vault_request" | "secrets_request" => {
+            crate::vault::secrets_request(a, args, &chat_for_scratch).await
+        }
         "egress" => crate::vault::egress(a, args, &chat_for_scratch).await,
         "browser_fill" => crate::vault::browser_fill(a, args, &chat_for_scratch).await,
         "routines_list" | "routines_create" | "routines_update" | "routines_delete" => {

@@ -1,9 +1,14 @@
-//! Vault tools (F8): `vault_list`, `vault_request`, `egress`, `browser_fill`. The box never holds
-//! a credential: the model works with placeholders (`arbos-secret://<item>/<field>`, also exposed
-//! to child processes as `ARBOS_SECRET_<NAME>`), the relay swaps them in on `POST /egress` for the
-//! item's allowed hosts only, and logins are typed into agent-browser by agentd itself, with the
-//! values held for a few seconds and registered for write-time redaction (D19). Every use is
-//! audited (names, hosts, URLs; never values).
+//! Secrets tools (D83): `secrets_list`, `secrets_request`, `egress`, `browser_fill` (the F8 names
+//! `vault_list` / `vault_request` stay as aliases for one release). The box never holds a
+//! secret: the model works with placeholders (`arbos-secret://<NAME>/<field>`, also exposed to
+//! child processes as `$<NAME>`), the relay swaps them in on `POST /egress` for the agent's
+//! allowed hosts only, and logins are typed into agent-browser by agentd itself, with the values
+//! held for a few seconds and registered for write-time redaction (D19). Every use is audited
+//! (names, hosts, URLs; never values).
+//!
+//! Standing Access comes from the relay (`GET /box/secrets`) and is refreshed on the pushes
+//! `secret_access_changed`, `secrets_paused`, `secret_value_replaced`, `secret_decided`, so a
+//! switch flipped in Settings reaches this process within one push poll (5 s).
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -13,7 +18,7 @@ use serde_json::{json, Value};
 use tokio::sync::oneshot;
 
 use arbos_core::approval::{ApprovalOutcome, ApprovalRequest, Risk};
-use arbos_core::ids::now_ms;
+use arbos_core::ids::{now_ms, ulid};
 
 use crate::agent::Agent;
 use crate::approval::WaitMode;
@@ -23,6 +28,8 @@ const POLL: Duration = Duration::from_secs(2);
 const DEFAULT_WAIT_S: u64 = 180;
 /// Plaintext fields for a browser fill live at most this long in agentd.
 const FILL_BUDGET: Duration = Duration::from_secs(30);
+/// After a refusal the agent is told to stop; it may ask again after this long (D76 cool-down).
+const DENIED_COOLDOWN: Duration = Duration::from_secs(10 * 60);
 const USERNAME_SELECTORS: [&str; 7] = [
     "input[autocomplete=username]",
     "input[type=email]",
@@ -37,68 +44,83 @@ const PASSWORD_SELECTORS: [&str; 2] = [
     "input[type=password]",
 ];
 
-/// One approved request this agentd knows about. Scoped by project: a D70 user box runs one
-/// agentd for several workspaces, and an approval is per project on the relay too.
+/// One secret this project may use right now (an enabled Access on the relay), or one the
+/// owner allowed once. Scoped by project: a D70 user box runs one agentd for several workspaces.
 #[derive(Debug, Clone)]
 struct Grant {
     project_id: String,
-    request_id: String,
+    /// The request that granted it (one-time grants and browser fills need it for `values`).
+    request_id: Option<String>,
+    /// Env name = the secret's name (`STRIPE_KEY`), D83 decision 1.
     name: String,
     kind: String,
-    use_kind: String,
-    env: String,
-    /// field → `arbos-secret://name/field`.
+    /// field → `arbos-secret://NAME/field`.
     placeholders: BTreeMap<String, String>,
     hosts: Vec<String>,
+    note: String,
+    /// `all` or `chat:<id>`.
+    scope: String,
+    /// The relay's connected-vault name (`Arbos` for the built-in one).
+    vault_name: String,
 }
 
-fn grants() -> &'static Mutex<Vec<Grant>> {
-    static G: OnceLock<Mutex<Vec<Grant>>> = OnceLock::new();
-    G.get_or_init(|| Mutex::new(Vec::new()))
+#[derive(Default)]
+struct State {
+    grants: Vec<Grant>,
+    /// Projects whose owner paused every secret.
+    paused: Vec<String>,
+    /// (project, name) → when a denial was last heard; the agent does not re-ask inside the cool-down.
+    denied_at: BTreeMap<(String, String), Instant>,
+    /// Requests a tool call is waiting on: request id → waker fired by `secret_decided`.
+    waiting: BTreeMap<String, oneshot::Sender<String>>,
 }
 
-fn grant_for(project_id: &str, name: &str, use_kind: &str) -> Option<Grant> {
-    grants()
+fn state() -> &'static Mutex<State> {
+    static S: OnceLock<Mutex<State>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(State::default()))
+}
+
+fn grant_for(project_id: &str, name: &str) -> Option<Grant> {
+    state()
         .lock()
-        .expect("grants")
+        .expect("secrets state")
+        .grants
         .iter()
         .rev()
-        .find(|g| g.project_id == project_id && g.name == name && g.use_kind == use_kind)
+        .find(|g| g.project_id == project_id && g.name == name)
         .cloned()
 }
 
 fn remember_grant(g: Grant) {
-    let mut v = grants().lock().expect("grants");
-    v.retain(|x| !(x.project_id == g.project_id && x.name == g.name && x.use_kind == g.use_kind));
-    v.push(g);
+    let mut st = state().lock().expect("secrets state");
+    st.grants
+        .retain(|x| !(x.project_id == g.project_id && x.name == g.name));
+    st.grants.push(g);
 }
 
-/// A request the user has not decided yet, keyed by (project, item, use). A repeated `vault_request`
-/// for the same item resumes waiting instead of posting a second card.
-#[derive(Debug, Clone)]
-struct PendingRequest {
-    request_id: String,
-    approval_id: Option<String>,
+fn is_paused(project_id: &str) -> bool {
+    state()
+        .lock()
+        .expect("secrets state")
+        .paused
+        .iter()
+        .any(|p| p == project_id)
 }
 
-type PendingMap = BTreeMap<(String, String, String), PendingRequest>;
-
-fn pending() -> &'static Mutex<PendingMap> {
-    static P: OnceLock<Mutex<PendingMap>> = OnceLock::new();
-    P.get_or_init(|| Mutex::new(BTreeMap::new()))
-}
-
-/// `ARBOS_SECRET_<NAME>` (one field) or `ARBOS_SECRET_<NAME>_<FIELD>` → placeholder, for every
-/// approved `env` grant. Child processes get these; a Daytona box may already carry the same
-/// names as Daytona Secrets, which win.
+/// `$NAME` (one field) or `$NAME_FIELD` → placeholder, for every grant of the project. Child
+/// processes get these; a Daytona box may already carry the same names as Daytona Secrets,
+/// which win. Nothing while the owner paused secrets.
 pub fn grant_envs(project_id: &str) -> Vec<(String, String)> {
+    if is_paused(project_id) {
+        return Vec::new();
+    }
     let mut out = Vec::new();
-    for g in grants().lock().expect("grants").iter() {
-        if g.use_kind != "env" || g.project_id != project_id {
+    for g in state().lock().expect("secrets state").grants.iter() {
+        if g.project_id != project_id {
             continue;
         }
         for (k, v) in g.env_pairs() {
-            if std::env::var_os(&k).is_none() {
+            if std::env::var_os(&k).is_none() && !out.iter().any(|(x, _)| *x == k) {
                 out.push((k, v));
             }
         }
@@ -107,33 +129,72 @@ pub fn grant_envs(project_id: &str) -> Vec<(String, String)> {
 }
 
 impl Grant {
+    fn from_item(project_id: &str, item: &Value) -> Option<Self> {
+        let name = item["env"].as_str()?.to_owned();
+        let placeholders: BTreeMap<String, String> = item["placeholders"]
+            .as_object()
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_owned())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let hosts = item["hosts"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|h| h.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let scope = match item["scope"]["kind"].as_str() {
+            Some("chat") => format!(
+                "chat:{}",
+                item["scope"]["chat_id"].as_str().unwrap_or_default()
+            ),
+            _ => "all".to_owned(),
+        };
+        Some(Grant {
+            project_id: project_id.to_owned(),
+            request_id: None,
+            name,
+            kind: item["kind"].as_str().unwrap_or("key").to_owned(),
+            placeholders,
+            hosts,
+            note: item["note"].as_str().unwrap_or("").to_owned(),
+            scope,
+            vault_name: item["vault_name"].as_str().unwrap_or("Arbos").to_owned(),
+        })
+    }
+
     fn env_pairs(&self) -> Vec<(String, String)> {
         if self.placeholders.len() == 1 {
             return self
                 .placeholders
                 .values()
-                .map(|p| (self.env.clone(), p.clone()))
+                .map(|p| (self.name.clone(), p.clone()))
                 .collect();
         }
         self.placeholders
             .iter()
             .map(|(f, p)| {
                 (
-                    format!("{}_{}", self.env, f.to_ascii_uppercase()),
+                    format!("{}_{}", self.name, f.to_ascii_uppercase()),
                     p.clone(),
                 )
             })
             .collect()
     }
 
-    fn describe(&self) -> Value {
+    fn describe(&self, status: &str) -> Value {
         let env: BTreeMap<String, String> = self.env_pairs().into_iter().collect();
         json!({
-            "status": "approved", "requestId": self.request_id, "item": self.name, "kind": self.kind, "use": self.use_kind,
-            "placeholders": self.placeholders, "env": env, "allowed_hosts": self.hosts,
-            "how": match self.use_kind.as_str() {
-                "browser_fill" => "Call browser_fill(name, url) to have Arbos type the login into the page; you never see the values.".to_owned(),
-                _ => "Put the placeholder (or $ENV name) in a header or body and call the egress tool; the relay swaps in the real value only for the allowed hosts and redacts it from the reply. Never try to read the value.".to_owned(),
+            "status": status, "requestId": self.request_id, "name": self.name, "kind": self.kind,
+            "placeholders": self.placeholders, "env": env, "hosts": self.hosts, "note": self.note, "scope": self.scope,
+            "vault": self.vault_name,
+            "how": match self.kind.as_str() {
+                "login" => "Call browser_fill(name, url) to have Arbos type the login into the page; you never see the values.".to_owned(),
+                _ => format!("Put the placeholder (or ${}) in a header or body and call the egress tool; the relay swaps in the real value only for the allowed hosts and redacts it from the reply. Never try to read, print, encode or copy the value.", self.name),
             },
         })
     }
@@ -153,15 +214,23 @@ fn wait_budget() -> Duration {
 }
 
 pub fn tool_specs() -> Vec<Value> {
+    let list = json!({ "name": "secrets_list", "description": "Secrets the user keeps in Arbos (and in connected vaults such as 1Password): names, kinds (key | login | text), field names, allowed hosts, and whether this agent has access. Values are never shown. A secret you have access to is already in your environment as $NAME holding a placeholder; otherwise call secrets_request.",
+        "inputSchema": { "type": "object", "properties": {} } });
+    let request = json!({ "name": "secrets_request", "description": "Ask the owner to let you use a secret. name = the secret's name (or an op:// reference), purpose = one sentence shown on the card, use = 'header' or 'env' for keys (you get a placeholder usable only through egress or as $NAME in a shell), 'browser_fill' for logins (then call browser_fill), host = the host you will use it at. Returns at once when the owner already gave you access; otherwise posts a card and waits for the answer (Allow once / Allow for this chat / Always allow / Deny).",
+        "inputSchema": { "type": "object", "properties": { "name": { "type": "string" }, "purpose": { "type": "string", "description": "one sentence shown to the user" }, "use": { "type": "string", "enum": ["header", "env", "browser_fill"] }, "host": { "type": "string", "description": "the host you will send it to, e.g. api.stripe.com" } }, "required": ["name", "purpose"] } });
+    let mut alias_list = list.clone();
+    alias_list["name"] = json!("vault_list");
+    let mut alias_request = request.clone();
+    alias_request["name"] = json!("vault_request");
     vec![
-        json!({ "name": "vault_list", "description": "Credentials the user keeps in the Arbos vault: names, kinds (login | secret | api_key), field names and allowed hosts. Values are never shown; use vault_request to get a placeholder you can send through egress, or browser_fill for logins.",
-                "inputSchema": { "type": "object", "properties": {} } }),
-        json!({ "name": "vault_request", "description": "Ask the user to let you use a vault item. use = 'header' or 'env' for API keys/secrets (you get a placeholder and an ARBOS_SECRET_<NAME> env name for subagent shells, usable only through the egress tool), 'browser_fill' for logins (then call browser_fill). Posts an approval card and waits for the user's decision (the card, or Settings → Vault); returns pending when they have not answered yet (call again later to resume waiting).",
-                "inputSchema": { "type": "object", "properties": { "name": { "type": "string" }, "purpose": { "type": "string", "description": "one sentence shown to the user" }, "use": { "type": "string", "enum": ["header", "env", "browser_fill"] } }, "required": ["name", "purpose"] } }),
-        json!({ "name": "egress", "description": "HTTP request performed by the relay with vault placeholders (arbos-secret://item/field or $ARBOS_SECRET_NAME) substituted in headers/body for the item's allowed hosts only. Returns status, headers and body with secret values redacted. Use this instead of curl whenever a request needs a vault credential.",
+        list,
+        request,
+        json!({ "name": "egress", "description": "HTTP request performed by the relay with secret placeholders (arbos-secret://NAME/field, $NAME, or op:// references) substituted in headers/body for the secret's allowed hosts only. Returns status, headers and body with secret values redacted. Use this instead of curl whenever a request needs a secret.",
                 "inputSchema": { "type": "object", "properties": { "url": { "type": "string" }, "method": { "type": "string" }, "headers": { "type": "object", "additionalProperties": { "type": "string" } }, "body": { "type": ["string", "object", "null"] } }, "required": ["url"] } }),
-        json!({ "name": "browser_fill", "description": "Arbos opens url in the box browser and types the vault login's username and password into the sign-in form (approval needed; the values are never shown to you). Afterwards use the browser as usual (click Sign in, read the page).",
+        json!({ "name": "browser_fill", "description": "Arbos opens url in the box browser and types the login's username and password into the sign-in form (access needed; the values are never shown to you). Afterwards use the browser as usual (click Sign in, read the page).",
                 "inputSchema": { "type": "object", "properties": { "name": { "type": "string" }, "url": { "type": "string" } }, "required": ["name", "url"] } }),
+        alias_list,
+        alias_request,
     ]
 }
 
@@ -177,12 +246,21 @@ async fn relay_get(agent: &Agent, path: &str) -> Result<Value, String> {
     let status = r.status();
     let text = r.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(format!("relay {path}: HTTP {status} {text}"));
+        return Err(relay_error(status, &text, path));
     }
     serde_json::from_str(&text).map_err(|e| e.to_string())
 }
 
-async fn relay_post(agent: &Agent, path: &str, body: &Value) -> Result<Value, String> {
+/// `(status, body)` → one line for the model: the relay's `error.message` when it has one.
+fn relay_error(status: reqwest::StatusCode, text: &str, path: &str) -> String {
+    let v: Value = serde_json::from_str(text).unwrap_or(Value::Null);
+    match v["error"]["message"].as_str() {
+        Some(m) => m.to_owned(),
+        None => format!("relay {path}: HTTP {status} {text}"),
+    }
+}
+
+async fn relay_post(agent: &Agent, path: &str, body: &Value) -> Result<(u16, Value), String> {
     let r = agent
         .http_client()
         .post(format!("{}{}", agent.cfg.relay_url, path))
@@ -195,50 +273,141 @@ async fn relay_post(agent: &Agent, path: &str, body: &Value) -> Result<Value, St
     let status = r.status();
     let text = r.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(format!("relay {path}: HTTP {status} {text}"));
+        return Err(relay_error(status, &text, path));
     }
-    serde_json::from_str(&text).map_err(|e| e.to_string())
+    Ok((
+        status.as_u16(),
+        serde_json::from_str(&text).map_err(|e| e.to_string())?,
+    ))
 }
 
-async fn items(agent: &Agent) -> Result<Vec<Value>, String> {
-    let v = relay_get(agent, "/vault/items").await?;
-    Ok(v["items"].as_array().cloned().unwrap_or_default())
+/// Pull `GET /box/secrets` and rebuild this project's standing grants. Called at workspace start
+/// and on every secrets push.
+pub async fn refresh_grants(agent: &Agent) -> Result<Vec<Value>, String> {
+    let v = relay_get(agent, "/box/secrets").await?;
+    let items = v["items"].as_array().cloned().unwrap_or_default();
+    let paused = v["paused"].as_bool().unwrap_or(false);
+    let project = agent.cfg.project_id.clone();
+    let mut st = state().lock().expect("secrets state");
+    st.grants
+        .retain(|g| g.project_id != project || g.request_id.is_some());
+    for it in &items {
+        if it["enabled"].as_bool().unwrap_or(false) {
+            if let Some(g) = Grant::from_item(&project, it) {
+                st.grants
+                    .retain(|x| !(x.project_id == project && x.name == g.name));
+                st.grants.push(g);
+            }
+        }
+    }
+    st.paused.retain(|p| *p != project);
+    if paused {
+        st.paused.push(project);
+    }
+    Ok(items)
 }
 
-pub async fn vault_list(agent: &Agent) -> Value {
-    let list = match items(agent).await {
+/// A secrets push from the relay (`secret_access_changed`, `secrets_paused`,
+/// `secret_value_replaced`, `secret_decided`, `secret_notice`).
+pub async fn on_push(agent: &Arc<Agent>, kind: &str, payload: &Value) {
+    match kind {
+        "secret_decided" => {
+            let id = payload["request_id"].as_str().unwrap_or("").to_owned();
+            let status = payload["status"].as_str().unwrap_or("").to_owned();
+            let waker = state().lock().expect("secrets state").waiting.remove(&id);
+            if let Some(tx) = waker {
+                let _ = tx.send(status);
+            }
+            let _ = refresh_grants(agent).await;
+        }
+        "secret_notice" => {
+            let text = payload["text"].as_str().unwrap_or("").to_owned();
+            if text.is_empty() {
+                return;
+            }
+            let chat_hint = payload["chat_id"].as_str().unwrap_or("").to_owned();
+            let chat_id = agent.approval_chat(&chat_hint).await.unwrap_or(chat_hint);
+            if let Some(host) = agent.sync.host(&chat_id).await {
+                let h = host.lock().await;
+                h.doc.append_system_note(
+                    &ulid(),
+                    &format!("agent:{}", agent.cfg.project_id),
+                    &text,
+                    &agent.cfg.device_id,
+                );
+            }
+            agent.append_audit(
+                "secret_notice",
+                json!({ "text": text, "host": payload["host"], "name": payload["env"] }),
+            );
+        }
+        _ => {
+            // `secret_access_changed`, `secrets_paused`, `secret_value_replaced`: the relay is
+            // the authority; take its current view (≤ 5 s after the switch, PUSH_POLL).
+            if let Err(e) = refresh_grants(agent).await {
+                tracing::warn!(error = %e, kind, "secrets: refresh after push failed");
+            }
+            agent.append_audit(
+                "secrets_changed",
+                json!({ "kind": kind, "env": payload["env"], "enabled": payload["enabled"], "paused": payload["paused"] }),
+            );
+        }
+    }
+}
+
+pub async fn secrets_list(agent: &Agent) -> Value {
+    let list = match refresh_grants(agent).await {
         Ok(l) => l,
         Err(e) => return err_result(e),
     };
-    let granted: Vec<Value> = grants()
-        .lock()
-        .expect("grants")
-        .iter()
-        .filter(|g| g.project_id == agent.cfg.project_id)
-        .map(|g| json!({ "item": g.name, "use": g.use_kind, "env": g.env }))
-        .collect();
+    let paused = is_paused(&agent.cfg.project_id);
     let items: Vec<Value> = list
         .iter()
         .map(|it| {
-            json!({ "name": it["name"], "kind": it["kind"], "fields": it["fields"], "allowed_hosts": it["allowed_hosts"], "env": it["env"], "mock": it["mock"] })
+            let access = it["enabled"].as_bool().unwrap_or(false);
+            json!({ "name": it["env"], "kind": it["kind"], "fields": it["fields"], "placeholders": it["placeholders"],
+                "hosts": it["hosts"], "note": it["note"], "vault": it["vault_name"], "ref": it["ref"],
+                "access": if paused { "paused" } else if access { "on" } else { "off" },
+                "ask_every_time": it["ask_every_time"] })
         })
         .collect();
     text_result(
-        json!({ "items": items, "granted": granted, "note": "Values are never readable. vault_request(name, purpose, use) asks the user; approved items work through egress (placeholders) or browser_fill (logins)." })
+        json!({ "paused": paused, "items": items,
+            "note": if paused { "Secrets are paused by the owner: every use fails until they turn Pause all secrets off. Stop and say so." }
+                    else { "Values are never readable. A secret with access on is already $NAME in your shell (a placeholder) and usable through egress; for one with access off call secrets_request(name, purpose, use, host)." } })
             .to_string(),
     )
 }
 
 async fn relay_status(agent: &Agent, request_id: &str) -> Result<String, String> {
-    let v = relay_get(agent, &format!("/vault/requests/{request_id}")).await?;
-    Ok(v["status"].as_str().unwrap_or("pending").to_owned())
+    let v = relay_get(agent, &format!("/box/secrets/requests/{request_id}")).await?;
+    Ok(v["request"]["status"]
+        .as_str()
+        .unwrap_or("pending")
+        .to_owned())
 }
 
-/// Wait for the decision. The relay row (`vault_requests`, decided with a device token) is the
-/// authority: Settings → Vault writes it directly, and a client that approves the chat card
-/// forwards the decision there (`vaultRequestId` in the card payload). Whichever way the user
-/// answers, the other surface is settled too: a relay decision flips the card, a rejected card
-/// ends the wait at once. `Ok(None)` when the budget runs out with the request still pending.
+/// Flip the chat card to match the relay's decision. Already decided from the card itself is
+/// fine: first decision wins.
+async fn settle_card(agent: &Arc<Agent>, approval_id: Option<&str>, status: &str) {
+    let Some(id) = approval_id else { return };
+    let outcome = match status {
+        "allowed_once" | "allowed_chat" | "allowed_always" => ApprovalOutcome::Approved,
+        "denied" => ApprovalOutcome::Rejected {
+            reason: Some("denied by the owner".into()),
+        },
+        _ => ApprovalOutcome::Expired,
+    };
+    // The decision rides in `decidedBy` so clients can show which row was picked.
+    let _ = agent
+        .decide_approval(id, outcome, &format!("arbos:secrets:{status}"))
+        .await;
+}
+
+/// Wait for the decision. The relay row is the authority: Settings writes it directly, and a
+/// client that answers the chat card forwards the decision there (`secretRequestId` in the card
+/// payload). The relay's `secret_decided` push ends the wait at once; polling covers the rest.
+/// `Ok(None)` when the budget runs out with the request still pending.
 async fn wait_decision(
     agent: &Arc<Agent>,
     request_id: &str,
@@ -247,54 +416,59 @@ async fn wait_decision(
     budget: Duration,
 ) -> Result<Option<String>, String> {
     let start = Instant::now();
-    loop {
+    let (tx, mut pushed) = oneshot::channel::<String>();
+    state()
+        .lock()
+        .expect("secrets state")
+        .waiting
+        .insert(request_id.to_owned(), tx);
+    let result = loop {
         let status = relay_status(agent, request_id).await?;
         if status != "pending" {
-            if let Some(id) = approval_id {
-                let outcome = match status.as_str() {
-                    "approved" => ApprovalOutcome::Approved,
-                    "denied" => ApprovalOutcome::Rejected {
-                        reason: Some("denied in Settings → Vault".into()),
-                    },
-                    _ => ApprovalOutcome::Expired,
-                };
-                // Already decided from the card itself is fine: first decision wins.
-                let _ = agent.decide_approval(id, outcome, "arbos:vault").await;
-            }
-            return Ok(Some(status));
+            settle_card(agent, approval_id, &status).await;
+            break Ok(Some(status));
         }
         if start.elapsed() >= budget {
-            return Ok(None);
+            break Ok(None);
         }
-        match card.as_mut() {
-            Some(rx) => {
-                tokio::select! {
-                    res = rx => {
-                        card = None;
-                        match res {
-                            Ok(ApprovalOutcome::Approved) => {
-                                // The client forwards the approval to the relay; keep polling.
-                            }
-                            Ok(ApprovalOutcome::Rejected { .. }) => return Ok(Some("denied".into())),
-                            Ok(ApprovalOutcome::Expired) | Err(_) => return Ok(Some("expired".into())),
-                        }
+        tokio::select! {
+            res = &mut pushed => {
+                if let Ok(status) = res {
+                    if status != "pending" {
+                        settle_card(agent, approval_id, &status).await;
+                        break Ok(Some(status));
                     }
-                    _ = tokio::time::sleep(POLL) => {}
                 }
             }
-            None => tokio::time::sleep(POLL).await,
+            res = async { match card.as_mut() { Some(rx) => rx.await, None => std::future::pending().await } } => {
+                card = None;
+                match res {
+                    // The client forwards the approval to the relay; keep polling.
+                    Ok(ApprovalOutcome::Approved) => {}
+                    Ok(ApprovalOutcome::Rejected { .. }) => break Ok(Some("denied".into())),
+                    Ok(ApprovalOutcome::Expired) | Err(_) => break Ok(Some("expired".into())),
+                }
+            }
+            _ = tokio::time::sleep(POLL) => {}
         }
-    }
+    };
+    state()
+        .lock()
+        .expect("secrets state")
+        .waiting
+        .remove(request_id);
+    result
 }
 
-/// Create the relay request, post the approval card, wait for the user. Shared by
-/// `vault_request` and `browser_fill`.
+/// Find the standing grant or ask the relay; post the card when the relay says a decision is
+/// needed; wait for it. Shared by `secrets_request` and `browser_fill`.
 async fn obtain_grant(
     agent: &Arc<Agent>,
     chat_hint: &str,
     name: &str,
     purpose: &str,
     use_kind: &str,
+    host: Option<&str>,
 ) -> Result<Grant, Value> {
     // Access cards belong on the pinned main chat (same rule as `approval_chat`).
     let chat_id = agent
@@ -302,111 +476,127 @@ async fn obtain_grant(
         .await
         .unwrap_or_else(|| chat_hint.to_owned());
     let chat_id = chat_id.as_str();
-    if let Some(g) = grant_for(&agent.cfg.project_id, name, use_kind) {
-        return Ok(g);
+    let project = agent.cfg.project_id.clone();
+    if is_paused(&project) {
+        return Err(err_result("Secrets are paused by the owner. Stop and tell the user; do not ask again until they turn Pause all secrets off."));
     }
-    let list = items(agent).await.map_err(err_result)?;
-    let Some(item) = list.iter().find(|it| it["name"].as_str() == Some(name)) else {
-        let names: Vec<&str> = list.iter().filter_map(|it| it["name"].as_str()).collect();
+    let name = name
+        .strip_prefix("arbos-secret://")
+        .and_then(|r| r.split('/').next())
+        .unwrap_or(name)
+        .trim_start_matches('$')
+        .to_owned();
+    let cooled = state()
+        .lock()
+        .expect("secrets state")
+        .denied_at
+        .get(&(project.clone(), name.clone()))
+        .is_some_and(|t| t.elapsed() < DENIED_COOLDOWN);
+    if cooled {
         return Err(err_result(format!(
-            "no vault item named {name}; available: {}",
-            if names.is_empty() {
-                "(none; the user adds items in Settings → Vault)".to_owned()
-            } else {
-                names.join(", ")
-            }
+            "{name}: the owner denied this in the last 10 minutes. Do not ask again now; tell the user what you needed it for."
         )));
+    }
+    let host_ok = |g: &Grant| {
+        host.is_none()
+            || g.hosts.is_empty()
+            || host.is_some_and(|h| {
+                g.hosts.iter().any(|a| {
+                    let a = a.to_ascii_lowercase();
+                    h.eq_ignore_ascii_case(&a)
+                        || a.strip_prefix("*.")
+                            .is_some_and(|suf| h.to_ascii_lowercase().ends_with(suf))
+                })
+            })
     };
-    let kind = item["kind"].as_str().unwrap_or("secret").to_owned();
-    if use_kind == "browser_fill" && kind != "login" {
-        return Err(err_result(format!(
-            "{name} is a {kind}; browser_fill needs a login item"
-        )));
-    }
-    let hosts: Vec<String> = item["allowed_hosts"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|h| h.as_str().map(str::to_owned))
-                .collect()
-        })
-        .unwrap_or_default();
-    let placeholders: BTreeMap<String, String> = item["placeholders"]
-        .as_object()
-        .map(|m| {
-            m.iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_owned())))
-                .collect()
-        })
-        .unwrap_or_default();
-    let key = (
-        agent.cfg.project_id.clone(),
-        name.to_owned(),
-        use_kind.to_owned(),
-    );
-    // Resume an undecided request from an earlier call (its card is still in the chat).
-    let mut resumed = pending().lock().expect("pending").get(&key).cloned();
-    if let Some(p) = &resumed {
-        match relay_status(agent, &p.request_id).await {
-            Ok(s) if s == "pending" => {}
-            _ => {
-                pending().lock().expect("pending").remove(&key);
-                resumed = None;
-            }
+    if let Some(g) = grant_for(&project, &name) {
+        if g.request_id.is_none() && host_ok(&g) && use_kind != "browser_fill" {
+            return Ok(g);
         }
     }
-    let (request_id, approval_id, card) = match resumed {
-        Some(p) => (p.request_id, p.approval_id, None),
-        None => {
-            let created = relay_post(
-                agent,
-                "/vault/request",
-                &json!({ "name": name, "purpose": purpose, "use": use_kind, "chatId": chat_id }),
-            )
+    let (status_code, created) = relay_post(
+        agent,
+        "/box/secrets/request",
+        &json!({ "name": name, "purpose": purpose, "use": use_kind, "host": host, "chat_id": chat_id }),
+    )
+    .await
+    .map_err(err_result)?;
+    let request = &created["request"];
+    let request_id = request["id"].as_str().unwrap_or("").to_owned();
+    if status_code == 200 {
+        // Standing Access covers it: no card.
+        let _ = refresh_grants(agent).await;
+        let mut g = grant_for(&project, &name)
+            .or_else(|| Grant::from_item(&project, &created["item"]))
+            .ok_or_else(|| err_result(format!("{name}: no such secret")))?;
+        g.request_id = Some(request_id);
+        remember_grant(g.clone());
+        return Ok(g);
+    }
+    let resumed = created["resumed"].as_bool().unwrap_or(false);
+    let kind = {
+        let items = refresh_grants(agent).await.unwrap_or_default();
+        items
+            .iter()
+            .find(|it| it["env"].as_str() == Some(name.as_str()))
+            .and_then(|it| it["kind"].as_str())
+            .unwrap_or("key")
+            .to_owned()
+    };
+    if use_kind == "browser_fill" && kind != "login" {
+        return Err(err_result(format!(
+            "{name} is a {kind}; browser_fill needs a Login"
+        )));
+    }
+    agent.append_audit(
+        "secret_requested",
+        json!({ "requestId": request_id, "name": name, "kind": kind, "use": use_kind, "host": host, "purpose": purpose, "chatId": chat_id, "resumed": resumed }),
+    );
+    let _ = agent.store.t3_append(
+        chat_id,
+        None,
+        Some(chat_id),
+        "secret_request",
+        Some("assistant"),
+        &format!("secrets_request {name} ({use_kind}): {purpose}"),
+        None,
+    );
+    let (approval_id, card) = if resumed {
+        (None, None)
+    } else {
+        // One card per request, four answers (D76 A–D). `secretRequestId` lets the client
+        // forward the answer to the relay row, which stays the authority (`mcp.rs` skips its
+        // generic gate for the secrets tools so this is the only card).
+        let (tx, rx) = oneshot::channel();
+        let agent_name = agent.cfg.project_name.clone();
+        let title = match (kind.as_str(), host) {
+            ("login", Some(h)) => format!("Let {agent_name} sign in to {h} with {name}?"),
+            ("login", None) => format!("Let {agent_name} sign in with {name}?"),
+            (_, Some(h)) => format!("Let {agent_name} use {name} at {h}?"),
+            (_, None) => format!("Let {agent_name} use {name}?"),
+        };
+        let req = ApprovalRequest {
+            title,
+            summary: purpose.to_owned(),
+            risk: Risk::Credential,
+            payload: json!({ "kind": "secret_request", "secretRequestId": request_id, "name": name, "secretKind": kind,
+                "use": use_kind, "host": host, "purpose": purpose, "agent": agent_name,
+                "answers": [
+                    { "id": "once", "label": "Allow once" },
+                    { "id": "chat", "label": "Allow for this chat" },
+                    { "id": "always", "label": format!("Always allow {agent_name}") },
+                    { "id": "deny", "label": "Deny" },
+                ] }),
+        };
+        match agent
+            .begin_approval(chat_id, req, WaitMode::Inline, Some(tx))
             .await
-            .map_err(err_result)?;
-            let request_id = created["id"].as_str().unwrap_or("").to_owned();
-            agent.append_audit(
-                "vault_requested",
-                json!({ "requestId": request_id, "item": name, "kind": kind, "use": use_kind, "purpose": purpose, "chatId": chat_id }),
-            );
-            let _ = agent.store.t3_append(
-                chat_id,
-                None,
-                Some(chat_id),
-                "vault_request",
-                Some("assistant"),
-                &format!("vault_request {name} ({use_kind}): {purpose}"),
-                None,
-            );
-            // One approval card (S18 shape) per request. `vaultRequestId` lets the client forward
-            // the card's decision to the relay row, which stays the authority (`mcp.rs` skips its
-            // generic gate for the vault tools so this is the only card).
-            let (tx, rx) = oneshot::channel();
-            let req = ApprovalRequest {
-                title: format!("Use vault item {name}"),
-                summary: format!("{purpose} — {use_kind}, hosts: {}", hosts.join(", ")),
-                risk: Risk::Credential,
-                payload: json!({ "kind": "vault_request", "vaultRequestId": request_id, "item": name, "itemKind": kind, "use": use_kind, "allowed_hosts": hosts }),
-            };
-            let approval_id = match agent
-                .begin_approval(chat_id, req, WaitMode::Inline, Some(tx))
-                .await
-            {
-                Ok(id) => Some(id),
-                Err(e) => {
-                    tracing::warn!(error = %e, item = name, "vault: approval card could not be posted; Settings → Vault still decides");
-                    None
-                }
-            };
-            pending().lock().expect("pending").insert(
-                key.clone(),
-                PendingRequest {
-                    request_id: request_id.clone(),
-                    approval_id: approval_id.clone(),
-                },
-            );
-            (request_id, approval_id, Some(rx))
+        {
+            Ok(id) => (Some(id), Some(rx)),
+            Err(e) => {
+                tracing::warn!(error = %e, name = %name, "secrets: approval card could not be posted; Settings → Secrets still decides");
+                (None, None)
+            }
         }
     };
 
@@ -421,15 +611,14 @@ async fn obtain_grant(
     .map_err(err_result)?;
     let Some(status) = decided else {
         return Err(text_result(
-            json!({ "status": "pending", "requestId": request_id, "item": name, "use": use_kind,
-                "note": "The user has not decided yet (the card in this chat, or Arbos → Settings → Vault). Tell them you are waiting for approval and end the turn; calling vault_request again with the same name resumes waiting and returns at once once it is approved." })
+            json!({ "status": "pending", "requestId": request_id, "name": name, "use": use_kind,
+                "note": "The owner has not decided yet (the card in this chat, or Arbos → Settings → Secrets). Tell them you are waiting for access and end the turn; calling secrets_request again with the same name resumes waiting and returns at once once it is allowed." })
                 .to_string(),
         ));
     };
-    pending().lock().expect("pending").remove(&key);
     agent.append_audit(
-        "vault_decided",
-        json!({ "requestId": request_id, "item": name, "use": use_kind, "status": status, "decidedBy": "user" }),
+        "secret_decided",
+        json!({ "requestId": request_id, "name": name, "use": use_kind, "status": status, "decidedBy": "owner" }),
     );
     let msg_id = agent
         .turn
@@ -442,51 +631,82 @@ async fn obtain_grant(
         if let Some(host) = agent.sync.host(chat_id).await {
             host.lock().await.doc.add_hidden_part(
                 &msg_id,
-                "vault_request",
-                &format!("vault {name} ({use_kind}): {status}"),
-                &json!({ "requestId": request_id, "item": name, "use": use_kind, "status": status, "decidedAt": now_ms() }),
+                "secret_request",
+                &format!("secret {name} ({use_kind}): {status}"),
+                &json!({ "requestId": request_id, "name": name, "use": use_kind, "status": status, "decidedAt": now_ms() }),
             );
         }
     }
-    if status != "approved" {
+    if !matches!(
+        status.as_str(),
+        "allowed_once" | "allowed_chat" | "allowed_always"
+    ) {
+        if status == "denied" {
+            state()
+                .lock()
+                .expect("secrets state")
+                .denied_at
+                .insert((project.clone(), name.clone()), Instant::now());
+        }
         return Err(err_result(format!(
-            "vault request for {name} was {status} by the user"
+            "{name}: the owner {} this request. Stop, and tell the user what you needed it for; do not ask again for 10 minutes.",
+            if status == "denied" { "denied" } else { "did not answer" }
         )));
     }
-    let g = Grant {
-        project_id: agent.cfg.project_id.clone(),
-        request_id,
-        name: name.to_owned(),
-        kind,
-        use_kind: use_kind.to_owned(),
-        env: item["env"].as_str().unwrap_or("ARBOS_SECRET").to_owned(),
-        placeholders,
-        hosts,
-    };
+    let items = refresh_grants(agent).await.unwrap_or_default();
+    let mut g = grant_for(&project, &name)
+        .or_else(|| {
+            items
+                .iter()
+                .find(|it| it["env"].as_str() == Some(name.as_str()))
+                .and_then(|it| Grant::from_item(&project, it))
+        })
+        .ok_or_else(|| err_result(format!("{name}: the secret is gone")))?;
+    g.request_id = Some(request_id);
+    if let Some(h) = host {
+        if !g.hosts.iter().any(|x| x == h) {
+            g.hosts.push(h.to_owned());
+        }
+    }
     remember_grant(g.clone());
     Ok(g)
 }
 
-pub async fn vault_request(agent: &Arc<Agent>, args: &Value, chat_id: &str) -> Value {
-    let name = args["name"].as_str().unwrap_or("").trim().to_owned();
+pub async fn secrets_request(agent: &Arc<Agent>, args: &Value, chat_id: &str) -> Value {
+    let name = args["name"]
+        .as_str()
+        .or(args["ref"].as_str())
+        .unwrap_or("")
+        .trim()
+        .to_owned();
     let purpose = args["purpose"].as_str().unwrap_or("").trim().to_owned();
     let use_kind = args["use"].as_str().unwrap_or("header").trim().to_owned();
+    let host = args["host"]
+        .as_str()
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+        .map(|h| {
+            reqwest::Url::parse(h)
+                .ok()
+                .and_then(|u| u.host_str().map(str::to_owned))
+                .unwrap_or_else(|| h.to_ascii_lowercase())
+        });
     if name.is_empty() {
-        return err_result("name is required (see vault_list)");
+        return err_result("name is required (see secrets_list)");
     }
     if !matches!(use_kind.as_str(), "env" | "header" | "browser_fill") {
         return err_result("use must be header, env or browser_fill");
     }
-    match obtain_grant(agent, chat_id, &name, &purpose, &use_kind).await {
-        Ok(g) => text_result(g.describe().to_string()),
+    match obtain_grant(agent, chat_id, &name, &purpose, &use_kind, host.as_deref()).await {
+        Ok(g) => text_result(g.describe("allowed").to_string()),
         Err(v) => v,
     }
 }
 
-/// `$ARBOS_SECRET_X` / `${ARBOS_SECRET_X}` → the granted placeholder, so shell-style references work.
+/// `$NAME` / `${NAME}` → the granted placeholder, so shell-style references work.
 fn expand_env_refs(project_id: &str, text: &str) -> String {
     let mut out = text.to_owned();
-    for g in grants().lock().expect("grants").iter() {
+    for g in state().lock().expect("secrets state").grants.iter() {
         if g.project_id != project_id {
             continue;
         }
@@ -510,6 +730,9 @@ pub async fn egress(agent: &Arc<Agent>, args: &Value, chat_id: &str) -> Value {
         .trim()
         .to_ascii_uppercase();
     let project = agent.cfg.project_id.as_str();
+    if is_paused(project) {
+        return err_result("Secrets are paused by the owner. Stop and tell the user.");
+    }
     let headers: BTreeMap<String, String> = args["headers"]
         .as_object()
         .map(|m| {
@@ -537,7 +760,7 @@ pub async fn egress(agent: &Arc<Agent>, args: &Value, chat_id: &str) -> Value {
     {
         for ph in text
             .split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ',' | ';'))
-            .filter(|t| t.starts_with("arbos-secret://"))
+            .filter(|t| t.starts_with("arbos-secret://") || t.starts_with("op://"))
         {
             if !placeholders.contains(&ph.to_owned()) {
                 placeholders.push(ph.to_owned());
@@ -565,7 +788,7 @@ pub async fn egress(agent: &Arc<Agent>, args: &Value, chat_id: &str) -> Value {
         .post(format!("{}/egress", agent.cfg.relay_url))
         .bearer_auth(&agent.cfg.box_token)
         .header("x-arbos-project", &agent.cfg.project_id)
-        .json(&json!({ "url": url, "method": method, "headers": headers, "body": body, "placeholders": placeholders }))
+        .json(&json!({ "url": url, "method": method, "headers": headers, "body": body, "placeholders": placeholders, "chat_id": chat_id }))
         .send()
         .await;
     let (status, text) = match r {
@@ -577,7 +800,16 @@ pub async fn egress(agent: &Arc<Agent>, args: &Value, chat_id: &str) -> Value {
     };
     let text = crate::store::redact(&text);
     if !status.is_success() && status.as_u16() != 502 {
-        return err_result(format!("egress: {text}"));
+        if status.as_u16() == 403 && text.contains("\"paused\"") {
+            let _ = refresh_grants(agent).await;
+            return err_result("Secrets are paused by the owner. Stop and tell the user; do not retry until they turn Pause all secrets off.");
+        }
+        return err_result(format!("egress: {}", relay_error(status, &text, "/egress")));
+    }
+    // A refusal the relay reported inside a 200 (the request went out with the placeholder
+    // verbatim) is worth a fresh look at the grants: the switch may have flipped.
+    if text.contains("access was turned off") || text.contains("no access for this agent") {
+        let _ = refresh_grants(agent).await;
     }
     text_result(text)
 }
@@ -616,50 +848,44 @@ pub async fn browser_fill(agent: &Arc<Agent>, args: &Value, chat_id: &str) -> Va
     if name.is_empty() || url.is_empty() {
         return err_result("name and url are required");
     }
+    let host = reqwest::Url::parse(&url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_owned))
+        .unwrap_or_default();
     let grant = match obtain_grant(
         agent,
         chat_id,
         &name,
         &format!("sign in at {url}"),
         "browser_fill",
+        Some(&host),
     )
     .await
     {
         Ok(g) => g,
         Err(v) => return v,
     };
-    let host = reqwest::Url::parse(&url)
-        .ok()
-        .and_then(|u| u.host_str().map(str::to_owned))
-        .unwrap_or_default();
-    if !grant.hosts.is_empty()
-        && !grant.hosts.iter().any(|h| {
-            let h = h.to_ascii_lowercase();
-            host.eq_ignore_ascii_case(&h)
-                || h.strip_prefix("*.")
-                    .is_some_and(|suf| host.to_ascii_lowercase().ends_with(suf))
-        })
-    {
+    let Some(request_id) = grant.request_id.clone() else {
         return err_result(format!(
-            "{host} is not an allowed host for {name} (allowed: {})",
-            grant.hosts.join(", ")
+            "{name}: no fill window; call secrets_request first"
         ));
-    }
+    };
     // The values arrive now and are gone when this function returns.
     let values = match relay_post(
         agent,
-        &format!("/vault/requests/{}/values", grant.request_id),
+        &format!("/box/secrets/requests/{request_id}/values"),
         &json!({}),
     )
     .await
     {
-        Ok(v) => v,
+        Ok((_, v)) => v,
         Err(e) => {
             // The approval window may have closed; drop the grant so the next call asks again.
-            grants()
+            state()
                 .lock()
-                .expect("grants")
-                .retain(|g| g.request_id != grant.request_id);
+                .expect("secrets state")
+                .grants
+                .retain(|g| g.request_id.as_deref() != Some(request_id.as_str()));
             return err_result(format!("could not fetch login fields: {e}"));
         }
     };
@@ -743,7 +969,7 @@ pub async fn browser_fill(agent: &Arc<Agent>, args: &Value, chat_id: &str) -> Va
     drop(fields);
     agent.append_audit(
         "browser_fill",
-        json!({ "item": name, "url": url, "filled": filled, "simulated": simulated, "ms": started.elapsed().as_millis() as i64, "chatId": chat_id }),
+        json!({ "name": name, "url": url, "filled": filled, "simulated": simulated, "ms": started.elapsed().as_millis() as i64, "chatId": chat_id }),
     );
     let _ = agent.store.t3_append(
         chat_id,
@@ -755,8 +981,53 @@ pub async fn browser_fill(agent: &Arc<Agent>, args: &Value, chat_id: &str) -> Va
         None,
     );
     text_result(
-        json!({ "ok": !filled.is_empty(), "item": name, "url": url, "filled": filled, "simulated": simulated, "notes": notes,
+        json!({ "ok": !filled.is_empty(), "name": name, "url": url, "filled": filled, "simulated": simulated, "notes": notes,
             "note": "Arbos typed the values; they are not available to you. Continue in the browser (submit the form, read the result)." })
             .to_string(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Env name = the secret's own name (decision 1): one-field secrets are `$NAME`, logins
+    /// `$NAME_USERNAME` / `$NAME_PASSWORD`; nothing while paused.
+    #[test]
+    fn env_pairs_follow_decision_1() {
+        let item = json!({ "env": "STRIPE_KEY", "kind": "key", "enabled": true, "hosts": ["api.stripe.com"],
+            "placeholders": { "value": "arbos-secret://STRIPE_KEY/value" }, "note": "refunds", "vault_name": "Arbos" });
+        let g = Grant::from_item("p1", &item).unwrap();
+        assert_eq!(
+            g.env_pairs(),
+            vec![(
+                "STRIPE_KEY".to_owned(),
+                "arbos-secret://STRIPE_KEY/value".to_owned()
+            )]
+        );
+        let login = json!({ "env": "GITHUB_LOGIN", "kind": "login", "enabled": true, "hosts": [],
+            "placeholders": { "username": "arbos-secret://GITHUB_LOGIN/username", "password": "arbos-secret://GITHUB_LOGIN/password" },
+            "scope": { "kind": "chat", "chat_id": "c7" } });
+        let g2 = Grant::from_item("p1", &login).unwrap();
+        let mut names: Vec<String> = g2.env_pairs().into_iter().map(|(k, _)| k).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["GITHUB_LOGIN_PASSWORD", "GITHUB_LOGIN_USERNAME"]
+        );
+        assert_eq!(g2.scope, "chat:c7");
+
+        remember_grant(g.clone());
+        assert_eq!(grant_envs("p1").len(), 1);
+        assert!(grant_envs("p2").is_empty());
+        state().lock().unwrap().paused.push("p1".into());
+        assert!(grant_envs("p1").is_empty());
+        state().lock().unwrap().paused.clear();
+        assert_eq!(
+            expand_env_refs("p1", "Bearer $STRIPE_KEY and ${STRIPE_KEY}"),
+            "Bearer arbos-secret://STRIPE_KEY/value and arbos-secret://STRIPE_KEY/value"
+        );
+        let described = g.describe("allowed").to_string();
+        assert!(described.contains("$STRIPE_KEY") && !described.contains("sk-"));
+    }
 }

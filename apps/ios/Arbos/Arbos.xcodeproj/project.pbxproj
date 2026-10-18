@@ -55,6 +55,10 @@
 		A1D79A0000000000000000B2 /* AvatarPalette.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D79A0000000000000000A1 /* AvatarPalette.swift */; };
 		A10279EE2B8CCA654EC85FF3 /* MessageNotification.swift in Sources */ = {isa = PBXBuildFile; fileRef = A189C676F775E104AF2116C8 /* MessageNotification.swift */; };
 		A1C074DB74357475F6D8CFFE /* ArbosNotificationService.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = A1F36F98FFEAB133710BB7DD /* ArbosNotificationService.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		A1F3867FABDB2908FFF6F2F0 /* Secrets.swift in Sources */ = {isa = PBXBuildFile; fileRef = A159B0F38B1AA8C313A060FD /* Secrets.swift */; };
+		A115819FE05076AF542EABF0 /* SecretsAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1112911C0D615A9C335C0EF /* SecretsAPI.swift */; };
+		A1BB7C8BDA3465CD63AA1284 /* SecretsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C69DB7C444253D783D4156 /* SecretsStore.swift */; };
+		A1C98CB150ED95D675AD1811 /* SecretsViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A19678BD13DA9148706081DF /* SecretsViews.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -130,6 +134,10 @@
 		A1B6A97F3E4CCA36512BE56F /* AvatarImage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AvatarImage.swift; sourceTree = "<group>"; };
 		A1D79A0000000000000000A1 /* AvatarPalette.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AvatarPalette.swift; sourceTree = "<group>"; };
 		A189C676F775E104AF2116C8 /* MessageNotification.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageNotification.swift; sourceTree = "<group>"; };
+		A159B0F38B1AA8C313A060FD /* Secrets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Secrets.swift; sourceTree = "<group>"; };
+		A1112911C0D615A9C335C0EF /* SecretsAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecretsAPI.swift; sourceTree = "<group>"; };
+		A1C69DB7C444253D783D4156 /* SecretsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecretsStore.swift; sourceTree = "<group>"; };
+		A19678BD13DA9148706081DF /* SecretsViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecretsViews.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -211,6 +219,7 @@
 				A17AB0DF610F874C5BE921E3,
 				A123D7A2CAFBECAE6ECFCF29,
 				A19AC72230E7AD9814A783A6,
+				A159B0F38B1AA8C313A060FD,
 			);
 			path = Model;
 			sourceTree = "<group>";
@@ -231,6 +240,7 @@
 				A1D0C5B0E1F2A3B4C5D6E704,
 				A1E06B8AB50C3A04CA1B1326,
 				A1EA51EFDDA9FCC9D359DDAD,
+				A1C69DB7C444253D783D4156,
 				A16FB2CB37599A2DEEA1A19E,
 				A15D0D4E1ADC058D632D0769,
 				A1D8200000000000000000B1,
@@ -246,6 +256,7 @@
 				A10ABB7244D9DD1CFA2C11DE,
 				A1A8BC5FCD045299B0D7D13D,
 				A1E592B43CC1234959AF2E63,
+				A1112911C0D615A9C335C0EF,
 				A143D937501D0DB6490E379A,
 			);
 			path = Sync;
@@ -265,6 +276,7 @@
 				A17A2B0ACDD5E316BB8EA070,
 				A19B0E359DCB5FC76FD8B6CB,
 				A11C70AFBE2CFC9BD0EB0AC1,
+				A19678BD13DA9148706081DF,
 				A1947AC5E87D2B2E121B97A0,
 				A1DA96384927E136586BC012,
 				A1ECED47C60FFA9826884A25,
@@ -399,11 +411,13 @@
 				A134D74DFA78D38A472BF229 /* Call.swift in Sources */,
 				A1547843CA4E6FD14D625E8D /* Model.swift in Sources */,
 				A117280222D51C2ECDBA9FC8 /* People.swift in Sources */,
+				A1F3867FABDB2908FFF6F2F0 /* Secrets.swift in Sources */,
 				A17DC1D0E22C9438EC90011C /* AppModel.swift in Sources */,
 				A1D0C5B0E1F2A3B4C5D6E703 /* LaunchClock.swift in Sources */,
 				A1D0C5B0E1F2A3B4C5D6E701 /* DeviceStore.swift in Sources */,
 				A16CDC927A9BCBA23734AFF8 /* CallManager.swift in Sources */,
 				A17F7FD4D50498CC4760775E /* Feedback.swift in Sources */,
+				A1BB7C8BDA3465CD63AA1284 /* SecretsStore.swift in Sources */,
 				A1E51B078F3180B74D6F5A88 /* Fixture.swift in Sources */,
 				A10B17B543EDC6C9BAAEDF33 /* PushManager.swift in Sources */,
 				A1C76C55AC33FA79D6C27FAA /* Auth.swift in Sources */,
@@ -411,6 +425,7 @@
 				A1B312F5959D92D8D1C90C0D /* Frame.swift in Sources */,
 				A14BB8E6904C5D3D5CFFCA56 /* Keychain.swift in Sources */,
 				A156C11ABF2E8C649148533D /* RelayAPI.swift in Sources */,
+				A115819FE05076AF542EABF0 /* SecretsAPI.swift in Sources */,
 				A16EA7B171BC56646BAFF4F9 /* Room.swift in Sources */,
 				A1B0F9F54DB2257BA4BA7B63 /* AgentProfileView.swift in Sources */,
 				A143D97A2803EDDA4BEA6B67 /* Avatar.swift in Sources */,
@@ -423,6 +438,7 @@
 				A136CC7A1B16DAA6EE6A41AA /* ProfilePages.swift in Sources */,
 				A1EB042AE1EE736D57004E58 /* Recorder.swift in Sources */,
 				A1FF55551C48D291C2FD5310 /* SettingsView.swift in Sources */,
+				A1C98CB150ED95D675AD1811 /* SecretsViews.swift in Sources */,
 				A16B7487AC090D4969019FDF /* SignInView.swift in Sources */,
 				A19E8F90C26169886405B87C /* Theme.swift in Sources */,
 				A1AF934D450F6DEFF67E0212 /* Transcript.swift in Sources */,

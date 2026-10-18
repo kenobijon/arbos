@@ -309,8 +309,15 @@ final class AppModel: ObservableObject {
     /// Settings → Connectors (Google Gmail/Calendar, …). Empty until first refresh.
     @Published private(set) var connectors = ConnectorsView()
     @Published private(set) var connectorsBusy = false
+    /// Settings → Secrets (D83). `nil` until the first `GET /secrets`.
+    @Published var secrets: SecretsOverview?
+    /// Agent profile → Secrets, per project.
+    @Published var projectSecrets: [Id: ProjectSecrets] = [:]
+    @Published var secretsBusy = false
 
     private var api: RelayAPI
+    /// The relay client, for feature extensions in other files.
+    var relay: RelayAPI { api }
     private var docs: [Id: ChatDoc] = [:]
     private var rooms: [Id: Room] = [:]
     /// Client-minted message ids whose push the relay has not `ACK`ed (S3),
@@ -2298,6 +2305,20 @@ final class AppModel: ObservableObject {
                 await refreshRegistry()
             case "project_member_removed":
                 await refreshRegistry()
+            case "secret_request":
+                // D83: an agent wants a secret; the card is in its chat, Settings badges too.
+                if let name = p.payload["name"] {
+                    let agent = p.payload["project_name"] ?? "An agent"
+                    let host = p.payload["host"].map { " at \($0)" } ?? ""
+                    PushManager.post(id: p.id, title: agent, body: "\(agent) wants to use \(name)\(host)", chatId: "")
+                }
+                await refreshSecrets()
+            case "secrets_paused", "secret_expiring":
+                if p.kind == "secret_expiring", let name = p.payload["name"] {
+                    let expired = p.payload["expired"] == "true" || p.payload["expired"] == "1"
+                    PushManager.post(id: p.id, title: "Secrets", body: expired ? "\(name) expired. Agents lost it." : "\(name) expires in 3 days.", chatId: "")
+                }
+                await refreshSecrets()
             default:
                 break
             }
@@ -2605,9 +2626,43 @@ final class AppModel: ObservableObject {
     /// value travels in the `answer` command for agentd to render for the model.
     func answerQuestion(chatId: Id, questionId: String, value: Any, label: String) {
         let ids: [String] = (value as? [String]) ?? [(value as? String) ?? ""]
+        if let approvalId = questionId.stripping(prefix: "approval:") {
+            decideApproval(chatId: chatId, approvalId: approvalId, choice: ids.first ?? "deny")
+            return
+        }
         markQuestionAnswered(chatId: chatId, questionId: questionId, answer: ids)
         write(chatId: chatId, text: "Answer: \(label)", command: "answer", attachments: [],
               extra: ["questionId": questionId, "value": value])
+    }
+
+    /// An approval card (S18) answered on the phone: for a secret request the relay row is the
+    /// authority (`POST /secrets/requests/{id}/decide`), then the doc command `approve` /
+    /// `reject` flips the card for agentd, exactly as the Mac does with `vaultRequestId`.
+    func decideApproval(chatId: Id, approvalId: String, choice: String) {
+        let questionId = "approval:\(approvalId)"
+        var secretRequestId: String?
+        for m in messages[chatId] ?? [] {
+            for p in m.parts {
+                if case .question(_, let q) = p, q.questionId == questionId { secretRequestId = q.secretRequestId }
+            }
+        }
+        markQuestionAnswered(chatId: chatId, questionId: questionId, answer: [choice])
+        let approve = choice != "deny" && choice != "reject"
+        if let rid = secretRequestId {
+            Task { @MainActor in
+                do {
+                    try await api.decideSecretRequest(rid, decision: choice)
+                    await refreshSecrets()
+                } catch {
+                    notice = Notice(text: "Secrets: \(error.localizedDescription)")
+                }
+            }
+        }
+        guard let doc = docs[chatId] else { return }
+        var payload: [String: Any] = ["approvalId": approvalId]
+        if !approve { payload["reason"] = "denied on iPhone" }
+        try? doc.pushCommand(approve ? "approve" : "reject", payload: payload, device: deviceId)
+        doc.commit()
     }
 
     private func markQuestionAnswered(chatId: Id, questionId: String, answer: [String]) {

@@ -259,9 +259,8 @@ fn code_label(code: &str) -> Option<String> {
         "routines_create" | "routines_update" | "routines_delete" | "routines_list" => {
             "Setting the schedule"
         }
-        "vault_list" | "vault_request" | "egress" | "browser_fill" => {
-            "Using your stored credentials"
-        }
+        "vault_list" | "vault_request" | "secrets_list" | "secrets_request" | "egress"
+        | "browser_fill" => "Using your secrets",
         "connector_call" | "connectors_list" => "Checking your connected accounts",
         _ => return None,
     };

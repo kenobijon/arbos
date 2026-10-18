@@ -350,6 +350,22 @@ impl Db {
             )?;
             c.execute("DELETE FROM machine_meter WHERE user_id = ?1", params![id])?;
             c.execute("DELETE FROM vault_items WHERE user_id = ?1", params![id])?;
+            c.execute(
+                "DELETE FROM secret_versions WHERE secret_id IN (SELECT id FROM secrets WHERE user_id = ?1)",
+                params![id],
+            )?;
+            for table in [
+                "secrets",
+                "secret_access",
+                "secret_requests",
+                "user_keys",
+                "user_secrets_settings",
+            ] {
+                c.execute(
+                    &format!("DELETE FROM {table} WHERE user_id = ?1"),
+                    params![id],
+                )?;
+            }
             c.execute("DELETE FROM users WHERE id = ?1", params![id])?;
             Ok(true)
         })

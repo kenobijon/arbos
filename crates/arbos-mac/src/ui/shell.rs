@@ -31,6 +31,7 @@ use crate::ui::onboarding;
 use crate::ui::people;
 use crate::ui::profiles;
 use crate::ui::routines::{RoutinesEvent, RoutinesPanel};
+use crate::ui::secrets::{SecretsEvent, SecretsPanel};
 use crate::ui::sidebar;
 use crate::ui::skills::SkillsPanel;
 use crate::ui::theme::{
@@ -39,7 +40,6 @@ use crate::ui::theme::{
     TAB_BAR_HEIGHT, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
 };
 use crate::ui::transcript::{Transcript, TranscriptEvent, COLUMN_MAX_WIDTH};
-use crate::ui::vault::{VaultEvent, VaultPanel};
 use crate::ui::voice::Voice;
 use crate::ui::voicepicker;
 
@@ -75,7 +75,7 @@ pub struct Shell {
     channels: Entity<ChannelsPanel>,
     /// F6: the "add a project to this chat" picker (from the "…" menu).
     group_picker_open: bool,
-    vault: Entity<VaultPanel>,
+    pub(crate) secrets: Entity<SecretsPanel>,
     shake_started_at: Option<u64>,
     /// True while the sign-in screen is up; its clearing focuses the composer.
     signing_in: bool,
@@ -279,10 +279,10 @@ impl Shell {
             }
         })
         .detach();
-        let vault = cx.new(|cx| VaultPanel::new(state.clone(), cx));
-        cx.observe(&vault, |_, _, cx| cx.notify()).detach();
-        cx.subscribe(&vault, |this, _, event: &VaultEvent, cx| match event {
-            VaultEvent::Back => {
+        let secrets = cx.new(|cx| SecretsPanel::new(state.clone(), cx));
+        cx.observe(&secrets, |_, _, cx| cx.notify()).detach();
+        cx.subscribe(&secrets, |this, _, event: &SecretsEvent, cx| match event {
+            SecretsEvent::Back => {
                 this.settings_open = true;
                 cx.notify();
             }
@@ -342,7 +342,7 @@ impl Shell {
             routines,
             routines_open: false,
             channels,
-            vault,
+            secrets,
             shake_started_at: None,
             signing_in: false,
             menu_open: false,
@@ -1489,6 +1489,11 @@ impl Shell {
         let account_image = account.as_ref().and_then(|a| state.avatar(&a.avatar_url));
         let notify_on = state.notifier.enabled;
         let skill_count = state.skills.len();
+        let secrets_value = if state.secrets.loaded {
+            state.secrets.row_value()
+        } else {
+            String::new()
+        };
         let store_usage = state.store_usage;
         let update = state.update.clone();
         let update_failed = matches!(update.phase, crate::update::UpdatePhase::Failed { .. });
@@ -2091,13 +2096,18 @@ impl Shell {
                 ),
             )
             .child(
-                glass::nav_row_icon("settings-vault", "doc", "Vault", None, &theme).on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.settings_open = false;
-                        this.vault.update(cx, |p, cx| p.show(cx));
-                        cx.notify();
-                    }),
-                ),
+                glass::nav_row_icon(
+                    "settings-secrets",
+                    "key",
+                    "Secrets",
+                    Some(secrets_value),
+                    &theme,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.settings_open = false;
+                    this.secrets.update(cx, |p, cx| p.show(cx));
+                    cx.notify();
+                })),
             )
             .child(
                 glass::nav_row_icon(
@@ -2557,7 +2567,7 @@ impl Render for Shell {
                         || (this.state.read(cx).new_chat_open && people.is_focused(window))
                         || this.connectors.read(cx).input_focused(window, cx)
                         || this.skills.read(cx).has_focus(window, cx)
-                        || this.vault.read(cx).input_focused(window, cx)
+                        || this.secrets.read(cx).input_focused(window, cx)
                     {
                         return;
                     }
@@ -2687,8 +2697,8 @@ impl Render for Shell {
         if self.local.read(cx).is_open() {
             root = root.child(self.local.clone());
         }
-        if self.vault.read(cx).is_open() {
-            root = root.child(self.vault.clone());
+        if self.secrets.read(cx).is_open() {
+            root = root.child(self.secrets.clone());
         }
         if self.routines_open {
             root = root.child(self.routines.clone());

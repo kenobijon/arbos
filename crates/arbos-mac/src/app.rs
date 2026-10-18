@@ -19,9 +19,9 @@ use crate::model::{
 };
 use crate::model::{
     new_id, now_ms, AttachmentKind, BoxState, ChannelsView, Chat, ChatKind, ConnectorsView, Effort,
-    Id, Link, LocalView, Machine, Message, MessageStatus, Part, Project, ProjectDocView,
-    QuestionState, Role, Routine, RoutineRun, RoutineTrigger, Skill, StatusKind, VaultNewItem,
-    VaultRequestStatus, VaultView,
+    Id, Link, LocalView, Machine, Message, MessageStatus, NewSecret, Part, Project, ProjectDocView,
+    ProjectSecrets, QuestionState, Role, Routine, RoutineRun, RoutineTrigger, SecretsView, Skill,
+    StatusKind,
 };
 use crate::sync::{ClientCommand, SyncEvent, SyncSource};
 use crate::ui::notify::{self, Gate, Notifier, NotifyEvent, NotifyKind};
@@ -298,8 +298,10 @@ pub struct AppState {
     pub machine: Machine,
     /// Settings → Connectors (F1).
     pub connectors: ConnectorsView,
-    /// Settings → Vault (F8).
-    pub vault: VaultView,
+    /// Settings → Secrets (D83).
+    pub secrets: SecretsView,
+    /// Agent profile → Secrets, per project.
+    pub project_secrets: std::collections::HashMap<Id, ProjectSecrets>,
     /// Settings → Routines, per project (F3).
     pub routines: HashMap<Id, Vec<Routine>>,
     /// Run history per routine, newest first.
@@ -552,7 +554,8 @@ impl AppState {
             show_details: false,
             machine: Machine::default(),
             connectors: ConnectorsView::default(),
-            vault: VaultView::default(),
+            secrets: SecretsView::default(),
+            project_secrets: std::collections::HashMap::new(),
             routines: HashMap::new(),
             routine_runs: HashMap::new(),
             notifier: Notifier::new(),
@@ -1273,8 +1276,11 @@ impl AppState {
                 ));
                 cx.notify();
             }
-            SyncEvent::Vault(view) => {
-                self.vault = view;
+            SyncEvent::ProjectSecrets { project_id, view } => {
+                self.project_secrets.insert(project_id, view);
+            }
+            SyncEvent::Secrets(view) => {
+                self.secrets = view;
                 cx.notify();
             }
             SyncEvent::Routines {
@@ -2174,6 +2180,33 @@ impl AppState {
         cx.notify();
     }
 
+    /// D76/D83: one of the four answers on a secret-request card. The relay row is the
+    /// authority; the doc command then flips the card for agentd.
+    pub fn answer_approval(
+        &mut self,
+        chat_id: Id,
+        approval_id: String,
+        choice: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(request_id) = self.secret_request_of(&chat_id, &approval_id) {
+            self.secret_decide(request_id, choice.to_string(), cx);
+        }
+        if choice == "deny" {
+            self.command(ClientCommand::Reject {
+                chat_id,
+                approval_id,
+                reason: Some("denied".into()),
+            });
+        } else {
+            self.command(ClientCommand::Approve {
+                chat_id,
+                approval_id,
+            });
+        }
+        cx.notify();
+    }
+
     /// S18: approve an approval card; the box dispatches and flips the card's state.
     pub fn approve(&mut self, chat_id: Id, approval_id: String, cx: &mut Context<Self>) {
         self.forward_vault_decision(&chat_id, &approval_id, true, cx);
@@ -2211,8 +2244,18 @@ impl AppState {
         approve: bool,
         cx: &mut Context<Self>,
     ) {
-        let request_id = self
-            .messages
+        if let Some(request_id) = self.secret_request_of(chat_id, approval_id) {
+            self.secret_decide(
+                request_id,
+                if approve { "always" } else { "deny" }.into(),
+                cx,
+            );
+        }
+    }
+
+    /// The relay request id a secret card carries (`secretRequestId`, or F8's `vaultRequestId`).
+    fn secret_request_of(&self, chat_id: &Id, approval_id: &str) -> Option<String> {
+        self.messages
             .get(chat_id)
             .into_iter()
             .flatten()
@@ -2223,14 +2266,12 @@ impl AppState {
                     payload,
                     ..
                 } if id == approval_id => payload
-                    .get("vaultRequestId")
+                    .get("secretRequestId")
+                    .or_else(|| payload.get("vaultRequestId"))
                     .and_then(|v| v.as_str())
                     .map(str::to_owned),
                 _ => None,
-            });
-        if let Some(request_id) = request_id {
-            self.vault_decide(request_id, approve, cx);
-        }
+            })
     }
 
     pub fn set_model(&mut self, model: String, cx: &mut Context<Self>) {
@@ -3420,38 +3461,171 @@ impl AppState {
         cx.notify();
     }
 
-    // ----- vault (F8) ------------------------------------------------------
+    // ----- secrets (D83) ---------------------------------------------------
 
-    pub fn vault_refresh(&mut self, cx: &mut Context<Self>) {
-        self.command(ClientCommand::VaultRefresh);
+    pub fn secrets_refresh(&mut self, cx: &mut Context<Self>) {
+        self.command(ClientCommand::SecretsRefresh);
         cx.notify();
     }
 
-    pub fn vault_add_item(&mut self, item: VaultNewItem, cx: &mut Context<Self>) {
+    pub fn project_secrets_refresh(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        self.command(ClientCommand::ProjectSecretsRefresh { project_id });
+        cx.notify();
+    }
+
+    pub fn secret_add(&mut self, item: NewSecret, cx: &mut Context<Self>) {
         self.push_notice(format!("Saving {} on the relay…", item.name));
-        self.command(ClientCommand::VaultAddItem { item });
+        self.command(ClientCommand::SecretAdd { item });
         cx.notify();
     }
 
-    pub fn vault_delete_item(&mut self, id: Id, cx: &mut Context<Self>) {
-        self.vault.items.retain(|i| i.id != id);
-        self.command(ClientCommand::VaultDeleteItem { id });
+    pub fn secret_patch(&mut self, id: Id, body: serde_json::Value, cx: &mut Context<Self>) {
+        if let Some(s) = self.secrets.secrets.iter_mut().find(|s| s.id == id) {
+            if let Some(a) = body.get("ask_every_time").and_then(|v| v.as_bool()) {
+                s.ask_every_time = a;
+            }
+            if let Some(n) = body.get("note").and_then(|v| v.as_str()) {
+                s.note = n.to_string();
+            }
+        }
+        self.command(ClientCommand::SecretPatch { id, body });
         cx.notify();
     }
 
-    pub fn vault_decide(&mut self, request_id: Id, approve: bool, cx: &mut Context<Self>) {
-        if let Some(r) = self.vault.requests.iter_mut().find(|r| r.id == request_id) {
-            r.status = if approve {
-                VaultRequestStatus::Approved
-            } else {
-                VaultRequestStatus::Denied
-            };
+    pub fn secret_replace_value(
+        &mut self,
+        id: Id,
+        body: serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
+        self.command(ClientCommand::SecretReplaceValue { id, body });
+        cx.notify();
+    }
+
+    pub fn secret_delete(&mut self, id: Id, cx: &mut Context<Self>) {
+        self.secrets.secrets.retain(|s| s.id != id);
+        self.command(ClientCommand::SecretDelete { id });
+        cx.notify();
+    }
+
+    /// One switch: secret × agent. Optimistic; the relay's view follows.
+    pub fn secret_access(
+        &mut self,
+        id: Id,
+        project_id: Id,
+        enabled: bool,
+        note: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(s) = self.secrets.secrets.iter_mut().find(|s| s.id == id) {
+            if let Some(a) = s.agents.iter_mut().find(|a| a.project_id == project_id) {
+                a.enabled = enabled;
+            }
+        }
+        if let Some(ps) = self.project_secrets.get_mut(&project_id) {
+            if let Some(i) = ps
+                .items
+                .iter_mut()
+                .find(|i| i.secret.as_ref().is_some_and(|s| s.id == id))
+            {
+                i.enabled = enabled;
+            }
+        }
+        self.command(ClientCommand::SecretAccess {
+            id,
+            project_id,
+            enabled,
+            note,
+        });
+        cx.notify();
+    }
+
+    pub fn secret_revoke_all(&mut self, id: Id, cx: &mut Context<Self>) {
+        if let Some(s) = self.secrets.secrets.iter_mut().find(|s| s.id == id) {
+            for a in &mut s.agents {
+                a.enabled = false;
+            }
+        }
+        self.command(ClientCommand::SecretRevokeAll { id });
+        cx.notify();
+    }
+
+    /// The kill switch. Optimistic: the switch flips now; the relay confirms.
+    pub fn secrets_pause(&mut self, paused: bool, cx: &mut Context<Self>) {
+        self.secrets.paused = paused;
+        self.command(ClientCommand::SecretsPause { paused });
+        cx.notify();
+    }
+
+    /// `once | chat | always | deny` on a pending request.
+    pub fn secret_decide(&mut self, request_id: Id, decision: String, cx: &mut Context<Self>) {
+        if let Some(r) = self
+            .secrets
+            .requests
+            .iter_mut()
+            .find(|r| r.id == request_id)
+        {
+            r.status = match decision.as_str() {
+                "deny" => "denied",
+                "once" => "allowed_once",
+                "chat" => "allowed_chat",
+                _ => "allowed_always",
+            }
+            .into();
             r.decided_at = Some(now_ms() as i64);
         }
-        self.command(ClientCommand::VaultDecide {
+        for ps in self.project_secrets.values_mut() {
+            ps.requests.retain(|r| r.id != request_id);
+        }
+        self.command(ClientCommand::SecretDecide {
             request_id,
-            approve,
+            decision,
         });
+        cx.notify();
+    }
+
+    pub fn vault_connect(
+        &mut self,
+        token: String,
+        agents: Vec<Id>,
+        note: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.push_notice("Checking the token with 1Password…".to_string());
+        self.command(ClientCommand::VaultConnect {
+            token,
+            agents,
+            note,
+        });
+        cx.notify();
+    }
+
+    pub fn vault_access(&mut self, id: Id, project_id: Id, enabled: bool, cx: &mut Context<Self>) {
+        if let Some(v) = self.secrets.vaults.iter_mut().find(|v| v.id == id) {
+            if let Some(a) = v.agents.iter_mut().find(|a| a.project_id == project_id) {
+                a.enabled = enabled;
+            }
+        }
+        if let Some(ps) = self.project_secrets.get_mut(&project_id) {
+            if let Some(i) = ps
+                .items
+                .iter_mut()
+                .find(|i| i.vault.as_ref().is_some_and(|v| v.id == id))
+            {
+                i.enabled = enabled;
+            }
+        }
+        self.command(ClientCommand::VaultAccess {
+            id,
+            project_id,
+            enabled,
+        });
+        cx.notify();
+    }
+
+    pub fn vault_disconnect(&mut self, id: Id, cx: &mut Context<Self>) {
+        self.secrets.vaults.retain(|v| v.id != id);
+        self.command(ClientCommand::VaultDisconnect { id });
         cx.notify();
     }
 

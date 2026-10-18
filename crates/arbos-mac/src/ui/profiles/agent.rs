@@ -53,6 +53,7 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
         Some(p) => (p.clone(), !p.is_guest()),
         None => (project_from_member(state, project_id)?, false),
     };
+    let secrets_data = state.project_secrets.get(&project.id).cloned();
     let avatar_state = state.avatar_state(&project.id);
     let streaming = state.project_is_streaming(&project.id);
     let voice_text = crate::ui::voicepicker::current_label(&project, &state.voices);
@@ -276,6 +277,70 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
         .child(info_row("owner", owner_text, &theme))
         .child(info_row("machine", machine_text, &theme))
         .child(info_row("model", model_text, &theme));
+    // D83: what this agent may use; opens the agent's Secrets page.
+    let secrets_text = match secrets_data.as_ref() {
+        Some(d) => {
+            let on: Vec<String> = d
+                .items
+                .iter()
+                .filter(|i| i.enabled)
+                .map(|i| i.title())
+                .collect();
+            if on.is_empty() {
+                if d.requests.iter().any(|r| r.is_pending()) {
+                    "waiting for you".to_string()
+                } else {
+                    "none".to_string()
+                }
+            } else {
+                format!("{} · {}", on.len(), on.join(", "))
+            }
+        }
+        None => "—".to_string(),
+    };
+    let p_secrets = pid.clone();
+    info = info.child(
+        div()
+            .id("agent-secrets-row")
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .px(px(16.0))
+            .py(px(10.0))
+            .border_b_1()
+            .border_color(theme.border)
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.surface_2))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .text_size(px(TEXT_TINY))
+                            .text_color(theme.text_muted)
+                            .child("secrets"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(TEXT_BODY))
+                            .text_color(theme.text)
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(secrets_text),
+                    ),
+            )
+            .child(icon("chevron-right", 14.0, theme.text_faint))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let pid = p_secrets.clone();
+                this.secrets.update(cx, |p, cx| p.show_agent(pid, cx));
+                cx.notify();
+            })),
+    );
     if mine {
         // Call voice: opens the picker sheet.
         info = info.child(

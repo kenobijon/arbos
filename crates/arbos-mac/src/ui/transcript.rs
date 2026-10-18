@@ -793,7 +793,9 @@ impl Transcript {
                 let approval_id = view.approval_id.clone();
                 let (state_a, chat_a, id_a) =
                     (self.state.clone(), chat_id.clone(), approval_id.clone());
-                let (state_r, chat_r, id_r) = (self.state.clone(), chat_id, approval_id);
+                let (state_r, chat_r, id_r) =
+                    (self.state.clone(), chat_id.clone(), approval_id.clone());
+                let (state_s, chat_s, id_s) = (self.state.clone(), chat_id, approval_id);
                 approval_card(
                     &row.id,
                     &view,
@@ -804,6 +806,11 @@ impl Transcript {
                     move |cx| {
                         state_r
                             .update(cx, |s, cx| s.reject(chat_r.clone(), id_r.clone(), None, cx));
+                    },
+                    move |choice, cx| {
+                        state_s.update(cx, |s, cx| {
+                            s.answer_approval(chat_s.clone(), id_s.clone(), choice, cx)
+                        });
                     },
                 )
                 .into_any_element()

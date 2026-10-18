@@ -25,7 +25,8 @@ use crate::model::{
 };
 use crate::model::{
     BoxState, ChannelsView, Chat, ConnectorsView, Effort, Id, Link, LocalView, Machine, Message,
-    Project, ProjectDocView, Routine, RoutineRun, RoutineTrigger, Skill, VaultNewItem, VaultView,
+    NewSecret, Project, ProjectDocView, ProjectSecrets, Routine, RoutineRun, RoutineTrigger,
+    SecretsView, Skill,
 };
 
 /// Something the source learned; the UI applies it to its mirror.
@@ -209,8 +210,13 @@ pub enum SyncEvent {
         provider: String,
         auth_url: String,
     },
-    /// Settings → Vault: items (never values) and requests (F8).
-    Vault(VaultView),
+    /// Settings → Secrets: secrets, accesses, requests, activity (never values; D83).
+    Secrets(SecretsView),
+    /// One agent's secrets page (`GET /projects/{id}/secrets`).
+    ProjectSecrets {
+        project_id: Id,
+        view: ProjectSecrets,
+    },
     /// Routines of one project (Settings → Routines).
     Routines {
         project_id: Id,
@@ -492,19 +498,62 @@ pub enum ClientCommand {
     ConnectorDisconnect {
         id: Id,
     },
-    /// Settings → Vault opened or asked for a refresh.
-    VaultRefresh,
-    /// Add (or replace by name) a vault item; the values go to the relay once.
-    VaultAddItem {
-        item: VaultNewItem,
+    /// Settings → Secrets opened or asked for a refresh.
+    SecretsRefresh,
+    /// An agent's Secrets page opened.
+    ProjectSecretsRefresh {
+        project_id: Id,
     },
-    VaultDeleteItem {
+    /// Add a secret; the value goes to the relay once.
+    SecretAdd {
+        item: NewSecret,
+    },
+    /// `PATCH /secrets/{id}` (name, note, hosts, ask_every_time, expires_at).
+    SecretPatch {
+        id: Id,
+        body: serde_json::Value,
+    },
+    /// `PUT /secrets/{id}/value`: a new version; the old one works for 24 h.
+    SecretReplaceValue {
+        id: Id,
+        body: serde_json::Value,
+    },
+    SecretDelete {
         id: Id,
     },
-    /// Approve or deny a pending vault request.
-    VaultDecide {
+    /// One Access switch (`PUT /secrets/{id}/access/{project_id}`).
+    SecretAccess {
+        id: Id,
+        project_id: Id,
+        enabled: bool,
+        note: Option<String>,
+    },
+    /// Every Access of a secret off.
+    SecretRevokeAll {
+        id: Id,
+    },
+    /// The kill switch (`PUT /me/secrets/settings`).
+    SecretsPause {
+        paused: bool,
+    },
+    /// Answer a request: `once | chat | always | deny`.
+    SecretDecide {
         request_id: Id,
-        approve: bool,
+        decision: String,
+    },
+    /// Connect a 1Password vault (Phase 2); the token goes to the relay once.
+    VaultConnect {
+        token: String,
+        agents: Vec<Id>,
+        note: String,
+    },
+    VaultAccess {
+        id: Id,
+        project_id: Id,
+        enabled: bool,
+    },
+    VaultDisconnect {
+        id: Id,
     },
     /// Settings → Routines opened or needs a refresh.
     RoutinesRefresh {

@@ -90,18 +90,61 @@ impl ApprovalView {
     }
 }
 
-/// The card: question title, plain preview, A Approve / B Reject rows; × = Reject.
+impl ApprovalView {
+    /// The answers a secret-request card offers (D76 A–D), from `payload.answers`.
+    fn answers(&self) -> Vec<(String, String)> {
+        self.payload
+            .get("answers")
+            .and_then(|a| a.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|o| {
+                        Some((
+                            o.get("id")?.as_str()?.to_string(),
+                            o.get("label")?.as_str()?.to_string(),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Which answer an answered secret card picked, from `decidedBy` (`…:allowed_always`).
+    fn picked_answer(&self) -> Option<&'static str> {
+        match self.state {
+            ApprovalState::Rejected => Some("deny"),
+            ApprovalState::Approved => {
+                let by = self.decided_by.as_deref().unwrap_or("");
+                Some(if by.ends_with(":allowed_once") {
+                    "once"
+                } else if by.ends_with(":allowed_chat") {
+                    "chat"
+                } else {
+                    "always"
+                })
+            }
+            ApprovalState::Pending | ApprovalState::Expired => None,
+        }
+    }
+}
+
+/// The card: question title, plain preview, A Approve / B Reject rows; × = Reject. A secret
+/// request (payload `answers`) shows its four rows instead and reports the choice through
+/// `on_answer`.
 pub fn approval_card(
     row_id: &str,
     view: &ApprovalView,
     theme: &Theme,
     on_approve: impl Fn(&mut App) + 'static,
     on_reject: impl Fn(&mut App) + 'static,
+    on_answer: impl Fn(&str, &mut App) + 'static,
 ) -> Stateful<Div> {
     let look = CardLook::of(theme);
     let palette = look.palette;
     let pending = view.state == ApprovalState::Pending;
     let on_reject = std::rc::Rc::new(on_reject);
+    let on_answer = std::rc::Rc::new(on_answer);
+    let answers = view.answers();
 
     let close: Option<CloseHandler> = pending.then(|| {
         let on_reject = on_reject.clone();
@@ -127,34 +170,64 @@ pub fn approval_card(
         });
     }
 
-    let (approve_state, reject_state) = match view.state {
-        ApprovalState::Pending => (RowState::Open, RowState::Open),
-        ApprovalState::Approved => (RowState::Chosen, RowState::Faded),
-        ApprovalState::Rejected => (RowState::Faded, RowState::Chosen),
-        ApprovalState::Expired => (RowState::Faded, RowState::Faded),
-    };
-    let approve_row = option_row(
-        format!("{row_id}-approve"),
-        Some("A".into()),
-        "Approve",
-        approve_state,
-        false,
-        &look,
-    )
-    .when(pending, |el| el.on_click(move |_, _, cx| on_approve(cx)));
-    let reject_row = option_row(
-        format!("{row_id}-reject"),
-        Some("B".into()),
-        "Reject",
-        reject_state,
-        true,
-        &look,
-    )
-    .when(pending, |el| {
-        let on_reject = on_reject.clone();
-        el.on_click(move |_, _, cx| on_reject(cx))
-    });
-    let mut list = option_list(&palette).child(approve_row).child(reject_row);
+    let mut list = option_list(&palette);
+    if answers.is_empty() {
+        let (approve_state, reject_state) = match view.state {
+            ApprovalState::Pending => (RowState::Open, RowState::Open),
+            ApprovalState::Approved => (RowState::Chosen, RowState::Faded),
+            ApprovalState::Rejected => (RowState::Faded, RowState::Chosen),
+            ApprovalState::Expired => (RowState::Faded, RowState::Faded),
+        };
+        let approve_row = option_row(
+            format!("{row_id}-approve"),
+            Some("A".into()),
+            "Approve",
+            approve_state,
+            false,
+            &look,
+        )
+        .when(pending, |el| el.on_click(move |_, _, cx| on_approve(cx)));
+        let reject_row = option_row(
+            format!("{row_id}-reject"),
+            Some("B".into()),
+            "Reject",
+            reject_state,
+            true,
+            &look,
+        )
+        .when(pending, |el| {
+            let on_reject = on_reject.clone();
+            el.on_click(move |_, _, cx| on_reject(cx))
+        });
+        list = list.child(approve_row).child(reject_row);
+    } else {
+        let picked = view.picked_answer();
+        for (ix, (id, label)) in answers.iter().enumerate() {
+            let state = if pending {
+                RowState::Open
+            } else if picked == Some(id.as_str()) {
+                RowState::Chosen
+            } else {
+                RowState::Faded
+            };
+            let letter = char::from(b'A' + (ix as u8).min(25)).to_string();
+            let choice = id.clone();
+            let on_answer = on_answer.clone();
+            list = list.child(
+                option_row(
+                    format!("{row_id}-{id}"),
+                    Some(letter),
+                    label,
+                    state,
+                    ix > 0,
+                    &look,
+                )
+                .when(pending, |el| {
+                    el.on_click(move |_, _, cx| on_answer(&choice, cx))
+                }),
+            );
+        }
+    }
 
     if !pending {
         let mut note = view.state.label().to_string();
