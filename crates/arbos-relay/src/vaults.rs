@@ -149,7 +149,13 @@ async fn op(state: &AppState, token: &str, args: &[&str]) -> Result<String, OpEr
         .filter(|s| !s.is_empty())
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| state.cfg.data_dir.join("op"));
+    // `op` refuses a config dir anyone else can read.
     let _ = std::fs::create_dir_all(&cfg_dir);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&cfg_dir, std::fs::Permissions::from_mode(0o700));
+    }
     let mut cmd = tokio::process::Command::new(op_bin());
     cmd.args(args)
         .env_clear()
@@ -172,7 +178,14 @@ async fn op(state: &AppState, token: &str, args: &[&str]) -> Result<String, OpEr
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
-        Err(OpError::classify(&String::from_utf8_lossy(&out.stderr)))
+        // Drop `op`'s "Using configuration at non-standard location" notice before classifying.
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let meaningful: String = stderr
+            .lines()
+            .filter(|l| !l.starts_with("Using configuration at"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        Err(OpError::classify(&meaningful))
     }
 }
 
