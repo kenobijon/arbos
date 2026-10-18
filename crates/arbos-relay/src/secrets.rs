@@ -404,7 +404,7 @@ pub(crate) fn request_json(state: &AppState, r: &SecretRequest) -> Value {
     })
 }
 
-fn activity(state: &AppState, user_id: &str, q: AuditQuery) -> Vec<Value> {
+pub(crate) fn activity(state: &AppState, user_id: &str, q: AuditQuery) -> Vec<Value> {
     state
         .db
         .list_audit(user_id, &q)

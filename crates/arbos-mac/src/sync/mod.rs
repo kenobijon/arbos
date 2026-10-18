@@ -555,6 +555,11 @@ pub enum ClientCommand {
     VaultDisconnect {
         id: Id,
     },
+    /// `PUT /vaults/{id}/token`: a new service-account token (validated by the relay first).
+    VaultReplaceToken {
+        id: Id,
+        token: String,
+    },
     /// Settings → Routines opened or needs a refresh.
     RoutinesRefresh {
         project_id: Id,

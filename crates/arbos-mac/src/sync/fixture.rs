@@ -1132,6 +1132,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         }
         ClientCommand::VaultConnect { .. }
         | ClientCommand::VaultAccess { .. }
+        | ClientCommand::VaultReplaceToken { .. }
         | ClientCommand::VaultDisconnect { .. } => {
             let _ = shared.events.send(SyncEvent::Notice(
                 "Connected vaults need a relay (fixture).".into(),

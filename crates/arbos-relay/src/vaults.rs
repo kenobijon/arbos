@@ -104,6 +104,7 @@ impl OpError {
         {
             OpError::NotFound
         } else if s.contains("token")
+            || s.contains("credentials")
             || s.contains("unauthor")
             || s.contains("401")
             || s.contains("403")
@@ -149,7 +150,13 @@ async fn op(state: &AppState, token: &str, args: &[&str]) -> Result<String, OpEr
         .filter(|s| !s.is_empty())
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| state.cfg.data_dir.join("op"));
+    // `op` refuses a config dir anyone else can read.
     let _ = std::fs::create_dir_all(&cfg_dir);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&cfg_dir, std::fs::Permissions::from_mode(0o700));
+    }
     let mut cmd = tokio::process::Command::new(op_bin());
     cmd.args(args)
         .env_clear()
@@ -172,7 +179,14 @@ async fn op(state: &AppState, token: &str, args: &[&str]) -> Result<String, OpEr
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
-        Err(OpError::classify(&String::from_utf8_lossy(&out.stderr)))
+        // Drop `op`'s "Using configuration at non-standard location" notice before classifying.
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let meaningful: String = stderr
+            .lines()
+            .filter(|l| !l.starts_with("Using configuration at"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        Err(OpError::classify(&meaningful))
     }
 }
 
@@ -406,6 +420,8 @@ fn vault_json(state: &AppState, v: &Vault) -> Value {
                     "cache_ttl_secs": cache_ttl().as_secs() },
         "status": v.status, "last_error": v.last_error, "last_refreshed_at": v.last_refreshed_at,
         "created_at": v.created_at, "agents": agents,
+        // Cached names only (title, category, fields, urls): small, and the Mac shows them inline.
+        "items": v.items,
     })
 }
 
@@ -750,25 +766,16 @@ pub async fn get(
             v = v2;
         }
     }
-    let activity: Vec<Value> = state
-        .db
-        .list_audit(
-            &user_id,
-            &AuditQuery {
-                target_id: Some(v.id.clone()),
-                since: Some(now_ms() - ACTIVITY_WINDOW_MS),
-                limit: 50,
-                ..Default::default()
-            },
-        )
-        .unwrap_or_default()
-        .iter()
-        .map(|a| {
-            let mut j = serde_json::to_value(a).unwrap_or(Value::Null);
-            j["name"] = json!(a.target_name);
-            j
-        })
-        .collect();
+    let activity = secrets::activity(
+        &state,
+        &user_id,
+        AuditQuery {
+            target_id: Some(v.id.clone()),
+            since: Some(now_ms() - ACTIVITY_WINDOW_MS),
+            limit: 50,
+            ..Default::default()
+        },
+    );
     Ok(
         Json(json!({ "vault": vault_json(&state, &v), "items": v.items, "activity": activity }))
             .into_response(),
@@ -1460,6 +1467,10 @@ mod tests {
         ));
         assert!(matches!(
             OpError::classify("[ERROR] invalid service account token"),
+            OpError::BadToken
+        ));
+        assert!(matches!(
+            OpError::classify("[ERROR] 2026/10/18 failed to DecodeSACredentials: illegal base64"),
             OpError::BadToken
         ));
         assert!(matches!(

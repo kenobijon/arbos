@@ -292,6 +292,8 @@ impl Shell {
                 let pid = v["secrets-agent:".len()..].to_string();
                 secrets.update(cx, |p, cx| p.show_agent(pid, cx));
             }
+            Some("secrets-connect") => secrets.update(cx, |p, cx| p.show_connect(cx)),
+            Some("secrets-vault") => secrets.update(cx, |p, cx| p.show_first_vault(cx)),
             _ => {}
         }
         cx.observe(&secrets, |_, _, cx| cx.notify()).detach();

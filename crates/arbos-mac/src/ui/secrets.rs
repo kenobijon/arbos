@@ -76,6 +76,8 @@ pub struct SecretsPanel {
     error: Option<String>,
     /// Rig: a secret env name to open as soon as the list arrives.
     pending_env: Option<String>,
+    /// Rig: open the first vault as soon as the list arrives.
+    pending_vault: bool,
     focus_handle: FocusHandle,
 }
 
@@ -128,6 +130,7 @@ impl SecretsPanel {
             token_input,
             error: None,
             pending_env: None,
+            pending_vault: false,
             focus_handle: cx.focus_handle(),
         }
     }
@@ -147,6 +150,23 @@ impl SecretsPanel {
     pub fn show_secret_env(&mut self, env: String, cx: &mut Context<Self>) {
         self.open = true;
         self.pending_env = Some(env);
+        self.page = Page::List;
+        self.state.update(cx, |s, cx| s.secrets_refresh(cx));
+        cx.notify();
+    }
+
+    /// Rig: the Connect 1Password form.
+    pub fn show_connect(&mut self, cx: &mut Context<Self>) {
+        self.open = true;
+        self.page = Page::Connect;
+        self.state.update(cx, |s, cx| s.secrets_refresh(cx));
+        cx.notify();
+    }
+
+    /// Rig: the first connected vault's page once the list arrives.
+    pub fn show_first_vault(&mut self, cx: &mut Context<Self>) {
+        self.open = true;
+        self.pending_vault = true;
         self.page = Page::List;
         self.state.update(cx, |s, cx| s.secrets_refresh(cx));
         cx.notify();
@@ -1586,6 +1606,8 @@ impl SecretsPanel {
         let step = |n: &str, text: &str, theme: &Theme| {
             div()
                 .flex()
+                .items_start()
+                .min_w_0()
                 .gap(px(10.0))
                 .child(
                     div()
@@ -1604,7 +1626,9 @@ impl SecretsPanel {
                 .child(
                     div()
                         .flex_1()
+                        .min_w_0()
                         .text_size(px(TEXT_BODY))
+                        .line_height(px(TEXT_BODY + 6.0))
                         .text_color(theme.text)
                         .child(text.to_string()),
                 )
@@ -1686,6 +1710,16 @@ impl SecretsPanel {
                     .unwrap_or_else(|| "Never".to_string()),
                 theme,
             ));
+        if let (Some(used), Some(cap)) = (
+            v.limits["reads_used_hour"].as_i64(),
+            v.limits["reads_per_hour"].as_i64(),
+        ) {
+            g = g.child(Self::value_row(
+                "Reads this hour",
+                format!("{used} / {cap}"),
+                theme,
+            ));
+        }
         if v.status != "ok" && !v.status.is_empty() {
             g = g.child(Self::value_row("Status", v.status.replace('_', " "), theme));
         }
@@ -1807,6 +1841,141 @@ impl SecretsPanel {
             Some("An agent with access may use any item in this vault by reference; the first use at a new host asks you.".into()),
             theme,
         ));
+        // Items (names only, from the relay's cache).
+        let mut g = Self::group(theme);
+        if v.items.is_empty() {
+            g = g.child(Self::footnote("No items listed yet.", theme).pb(px(8.0)));
+        }
+        for it in v.items.iter().take(50) {
+            let fields: Vec<&str> = it["fields"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|f| f.as_str()).collect())
+                .unwrap_or_default();
+            g = g.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .px(px(16.0))
+                    .py(px(8.0))
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .text_size(px(TEXT_BODY))
+                            .text_color(theme.text)
+                            .child(it["title"].as_str().unwrap_or("Item").to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(TEXT_TINY))
+                            .text_color(theme.text_muted)
+                            .child(fields.join(" · ")),
+                    ),
+            );
+        }
+        body = body.child(Self::section(
+            "Items",
+            g,
+            Some(format!(
+                "Agents reference an item as op://{}/<item>/<field>.",
+                v.name
+            )),
+            theme,
+        ));
+
+        // Activity for this vault (from the overview).
+        let acts: Vec<SecretActivity> = self
+            .state
+            .read(cx)
+            .secrets
+            .activity
+            .iter()
+            .filter(|a| a.name == v.name)
+            .take(5)
+            .cloned()
+            .collect();
+        let mut g = Self::group(theme);
+        if acts.is_empty() {
+            g = g.child(Self::footnote("No activity in the last 30 days.", theme).pb(px(8.0)));
+        }
+        for row in Self::activity_rows(&acts, theme) {
+            g = g.child(row);
+        }
+        body = body.child(Self::section("Activity", g, None, theme));
+
+        // Replace token…
+        let vid_t = v.id.clone();
+        if self.replacing {
+            let mut form = div()
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .px(px(16.0))
+                .py(px(10.0));
+            form = form.child(Self::field(
+                "Token",
+                self.token_input.clone(),
+                Some("Stored encrypted. Arbos never shows it again."),
+                theme,
+            ));
+            if let Some(e) = &self.error {
+                form = form.child(
+                    div()
+                        .text_size(px(TEXT_TINY))
+                        .text_color(theme.danger)
+                        .child(e.clone()),
+                );
+            }
+            form = form.child(
+                div()
+                    .flex()
+                    .gap(px(8.0))
+                    .child(
+                        glass::primary_button("vault-token-save", "Replace token", theme)
+                            .h(px(30.0))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let token = this.token_input.read(cx).text().trim().to_string();
+                                if token.len() < 20 {
+                                    this.error =
+                                        Some("Paste the whole service-account token.".into());
+                                    cx.notify();
+                                    return;
+                                }
+                                let id = vid_t.clone();
+                                this.state
+                                    .update(cx, |st, cx| st.vault_replace_token(id, token, cx));
+                                this.replacing = false;
+                                this.error = None;
+                                this.token_input.update(cx, |i, cx| i.clear(cx));
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        glass::quiet_button("vault-token-cancel", "Cancel", theme)
+                            .h(px(30.0))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.replacing = false;
+                                this.error = None;
+                                cx.notify();
+                            })),
+                    ),
+            );
+            body = body.child(Self::group(theme).child(form));
+        } else {
+            body = body.child(Self::group(theme).child(
+                Self::action_row("vault-token", "Replace token…", false, theme).on_click(
+                    cx.listener(|this, _, window, cx| {
+                        this.replacing = true;
+                        this.error = None;
+                        let h = this.token_input.read(cx).focus_handle(cx);
+                        window.focus(&h, cx);
+                        cx.notify();
+                    }),
+                ),
+            ));
+        }
+
         let armed = self.confirm.as_deref() == Some("disconnect");
         let agents: Vec<&str> = v
             .agents
@@ -1892,6 +2061,12 @@ impl Render for SecretsPanel {
             if let Some(s) = view.secrets.iter().find(|s| s.env == env) {
                 self.pending_env = None;
                 self.page = Page::Secret(s.id.clone());
+            }
+        }
+        if self.pending_vault {
+            if let Some(v) = view.vaults.first() {
+                self.pending_vault = false;
+                self.page = Page::Vault(v.id.clone());
             }
         }
         // The rig may name an agent before the project list arrived; swap in its id once known.
