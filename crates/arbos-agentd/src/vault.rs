@@ -9,8 +9,17 @@
 //! Standing Access comes from the relay (`GET /box/secrets`) and is refreshed on the pushes
 //! `secret_access_changed`, `secrets_paused`, `secret_value_replaced`, `secret_decided`, so a
 //! switch flipped in Settings reaches this process within one push poll (5 s).
+//!
+//! Real values (D83 decision 2 as decided 2026-10-18): a secret whose owner switched "Real value
+//! in the agent's environment" on arrives from `GET /box/secrets/env` and is written to the
+//! workspace's `secrets.env`, which every shell sources (`BASH_ENV` for `bash -c`, the image's
+//! profile.d / bash.bashrc loader for login and interactive shells). The file is rewritten on
+//! the same pushes, so a switch, Pause all, a delete or a disconnect takes the variable out of
+//! the next command within the same 5 s; processes already running keep what they had. The
+//! harness processes themselves never get a real value at spawn — only the file carries them.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -22,6 +31,7 @@ use arbos_core::ids::{now_ms, ulid};
 
 use crate::agent::Agent;
 use crate::approval::WaitMode;
+use crate::config::Config;
 use crate::mcp::{err_result, text_result};
 
 const POLL: Duration = Duration::from_secs(2);
@@ -64,6 +74,18 @@ struct Grant {
     scope: String,
     /// The relay's connected-vault name (`Arbos` for the built-in one).
     vault_name: String,
+    /// The owner put the real value in the environment (no card per use).
+    inject_env: bool,
+    /// Variable names the real value arrives under (`$NAME`, `$NAME_USERNAME`…).
+    real_vars: Vec<String>,
+}
+
+/// The real values of one secret or vault item, as `GET /box/secrets/env` handed them over.
+#[derive(Debug, Clone)]
+struct RealValues {
+    /// The grant's name: the secret's env name, or the item's `op://vault/item`.
+    name: String,
+    vars: BTreeMap<String, String>,
 }
 
 #[derive(Default)]
@@ -71,6 +93,11 @@ struct State {
     grants: Vec<Grant>,
     /// Projects whose owner paused every secret.
     paused: Vec<String>,
+    /// project → real values in its box right now (switch on, Access on, not paused).
+    real: BTreeMap<String, Vec<RealValues>>,
+    /// project → every variable name a secret of this user could occupy, so a shell can drop
+    /// the ones that are no longer allowed.
+    known_vars: BTreeMap<String, BTreeSet<String>>,
     /// (project, name) → when a denial was last heard; the agent does not re-ask inside the cool-down.
     denied_at: BTreeMap<(String, String), Instant>,
     /// Requests a tool call is waiting on: request id → waker fired by `secret_decided`.
@@ -177,6 +204,15 @@ impl Grant {
             ),
             _ => "all".to_owned(),
         };
+        let inject_env = item["inject_env"].as_bool().unwrap_or(false);
+        let real_vars: Vec<String> = match item["real_vars"].as_array() {
+            Some(a) => a
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect(),
+            None if has_env => real_var_names(&name, &placeholders),
+            None => Vec::new(),
+        };
         Some(Grant {
             project_id: project_id.to_owned(),
             request_id: None,
@@ -188,6 +224,8 @@ impl Grant {
             note: item["note"].as_str().unwrap_or("").to_owned(),
             scope,
             vault_name: item["vault_name"].as_str().unwrap_or("Arbos").to_owned(),
+            inject_env,
+            real_vars,
         })
     }
 
@@ -218,12 +256,136 @@ impl Grant {
         json!({
             "status": status, "requestId": self.request_id, "name": self.name, "kind": self.kind,
             "placeholders": self.placeholders, "env": env, "hosts": self.hosts, "note": self.note, "scope": self.scope,
-            "vault": self.vault_name,
-            "how": match self.kind.as_str() {
+            "vault": self.vault_name, "real_value": self.inject_env,
+            "how": if self.inject_env {
+                format!("The owner put the real value in your environment: ${} works in any shell command or program. Keep it out of chat and logs.", self.real_vars.first().cloned().unwrap_or_else(|| self.name.clone()))
+            } else { match self.kind.as_str() {
                 "login" => "Call browser_fill(name, url) to have Arbos type the login into the page; you never see the values.".to_owned(),
                 _ => format!("Put the placeholder (or ${}) in a header or body and call the egress tool; the relay swaps in the real value only for the allowed hosts and redacts it from the reply. Never try to read, print, encode or copy the value.", self.name),
-            },
+            } },
         })
+    }
+}
+
+/// The variable names a secret's real value would take: the same names its placeholders use.
+fn real_var_names(name: &str, placeholders: &BTreeMap<String, String>) -> Vec<String> {
+    if placeholders.len() <= 1 {
+        return vec![name.to_owned()];
+    }
+    placeholders
+        .keys()
+        .filter(|f| *f != "url")
+        .map(|f| format!("{name}_{}", f.to_ascii_uppercase()))
+        .collect()
+}
+
+// ---- real values in the environment -------------------------------------------------------------
+
+/// The file a workspace's shells source: `<state>/secrets.env`.
+pub fn env_file(cfg: &Config) -> PathBuf {
+    cfg.state_dir.join("secrets.env")
+}
+
+/// What every harness child gets so its shells find the file: `BASH_ENV` for `bash -c`,
+/// `ARBOS_SECRETS_ENV` for the image's login/interactive loader. Plus the placeholder env.
+pub fn shell_envs(cfg: &Config) -> Vec<(String, String)> {
+    let path = env_file(cfg);
+    if !path.is_file() {
+        if let Err(e) = write_env_file(cfg) {
+            tracing::warn!(error = %e, "secrets.env: first write failed");
+        }
+    }
+    let mut envs = grant_envs(&cfg.project_id);
+    let p = path.display().to_string();
+    envs.push(("ARBOS_SECRETS_ENV".into(), p.clone()));
+    envs.push(("BASH_ENV".into(), p));
+    envs
+}
+
+fn sh_quote(v: &str) -> String {
+    format!("'{}'", v.replace('\'', "'\\''"))
+}
+
+/// Render the file for one project from the current state: real values for grants with the
+/// switch on, placeholders for the other grants (a Daytona Secret of the same name wins, as at
+/// spawn), `unset` for every other name a secret could occupy — all of them while paused.
+fn render_env_file(st: &State, project: &str, project_name: &str) -> String {
+    let paused = st.paused.iter().any(|p| p == project);
+    let mut exports: BTreeMap<String, String> = BTreeMap::new();
+    let mut unset: BTreeSet<String> = st.known_vars.get(project).cloned().unwrap_or_default();
+    if !paused {
+        let real = st.real.get(project).cloned().unwrap_or_default();
+        for g in st.grants.iter().filter(|g| g.project_id == project) {
+            let base = item_base(&g.name);
+            let values = real
+                .iter()
+                .find(|r| item_base(&r.name) == base)
+                .filter(|_| g.inject_env);
+            match values {
+                Some(r) => {
+                    for (k, v) in &r.vars {
+                        exports.insert(k.clone(), v.clone());
+                    }
+                }
+                None => {
+                    for (k, v) in g.env_pairs() {
+                        if std::env::var_os(&k).is_none() {
+                            exports.insert(k, v);
+                        } else {
+                            unset.remove(&k);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for k in exports.keys() {
+        unset.remove(k);
+    }
+    let mut out = String::new();
+    out.push_str(&format!(
+        "# Arbos secrets for {project_name} — written by agentd, read by every shell. Do not edit.\n"
+    ));
+    out.push_str("# Real values are here only for secrets whose owner switched \"Real value in the agent's\n# environment\" on; the rest hold placeholders for the egress tool.\n");
+    if paused {
+        out.push_str("# Secrets are paused by the owner.\n");
+    }
+    if !unset.is_empty() {
+        out.push_str("unset ");
+        out.push_str(&unset.iter().cloned().collect::<Vec<_>>().join(" "));
+        out.push('\n');
+    }
+    for (k, v) in &exports {
+        out.push_str(&format!("export {k}={}\n", sh_quote(v)));
+    }
+    out
+}
+
+/// Write the file atomically; readable by the workspace user, writable by nobody else.
+pub fn write_env_file(cfg: &Config) -> std::io::Result<()> {
+    let text = render_env_file(
+        &state().lock().expect("secrets state"),
+        &cfg.project_id,
+        &cfg.project_name,
+    );
+    let path = env_file(cfg);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("env.tmp");
+    std::fs::write(&tmp, text)?;
+    secure_env_file(&tmp, cfg)?;
+    std::fs::rename(&tmp, &path)
+}
+
+fn secure_env_file(path: &Path, cfg: &Config) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    match &cfg.run_as {
+        Some(ra) => {
+            std::os::unix::fs::chown(path, Some(0), Some(ra.gid))?;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640))
+        }
+        None => std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)),
     }
 }
 
@@ -315,23 +477,78 @@ pub async fn refresh_grants(agent: &Agent) -> Result<Vec<Value>, String> {
     let items = v["items"].as_array().cloned().unwrap_or_default();
     let paused = v["paused"].as_bool().unwrap_or(false);
     let project = agent.cfg.project_id.clone();
-    let mut st = state().lock().expect("secrets state");
-    st.grants
-        .retain(|g| g.project_id != project || g.request_id.is_some());
-    for it in &items {
-        if it["enabled"].as_bool().unwrap_or(false) {
+    {
+        let mut st = state().lock().expect("secrets state");
+        st.grants
+            .retain(|g| g.project_id != project || g.request_id.is_some());
+        let mut known = BTreeSet::new();
+        for it in &items {
             if let Some(g) = Grant::from_item(&project, it) {
-                st.grants
-                    .retain(|x| !(x.project_id == project && x.name == g.name));
-                st.grants.push(g);
+                known.extend(g.env_pairs().into_iter().map(|(k, _)| k));
+                known.extend(g.real_vars.iter().cloned());
+                if it["enabled"].as_bool().unwrap_or(false) {
+                    st.grants
+                        .retain(|x| !(x.project_id == project && x.name == g.name));
+                    st.grants.push(g);
+                }
             }
         }
+        st.known_vars.insert(project.clone(), known);
+        st.paused.retain(|p| *p != project);
+        if paused {
+            st.paused.push(project);
+        }
     }
-    st.paused.retain(|p| *p != project);
-    if paused {
-        st.paused.push(project);
+    if let Err(e) = write_env_file(&agent.cfg) {
+        tracing::warn!(error = %e, "secrets.env: write failed");
     }
     Ok(items)
+}
+
+/// Pull `GET /box/secrets/env` — the real values this box may hold — register them for
+/// redaction and rewrite the file. Called with `refresh_grants` at start and on every push.
+pub async fn refresh_env(agent: &Agent) -> Result<(), String> {
+    let v = relay_get(agent, "/box/secrets/env").await?;
+    let project = agent.cfg.project_id.clone();
+    let mut real = Vec::new();
+    for it in v["items"].as_array().cloned().unwrap_or_default() {
+        let name = it["ref"]
+            .as_str()
+            .filter(|r| r.starts_with("op://"))
+            .or(it["env"].as_str())
+            .unwrap_or("")
+            .to_owned();
+        let vars: BTreeMap<String, String> = it["vars"]
+            .as_object()
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_owned())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if name.is_empty() || vars.is_empty() {
+            continue;
+        }
+        for val in vars.values() {
+            crate::store::redact_live_value(val);
+        }
+        real.push(RealValues { name, vars });
+    }
+    let names: Vec<String> = real.iter().map(|r| r.name.clone()).collect();
+    state()
+        .lock()
+        .expect("secrets state")
+        .real
+        .insert(project, real);
+    write_env_file(&agent.cfg).map_err(|e| e.to_string())?;
+    tracing::info!(names = ?names, "secrets.env: real values written");
+    Ok(())
+}
+
+/// Grants and real values in one go: what every push and the workspace start need.
+pub async fn refresh_all(agent: &Agent) -> Result<(), String> {
+    refresh_grants(agent).await?;
+    refresh_env(agent).await
 }
 
 /// A secrets push from the relay (`secret_access_changed`, `secrets_paused`,
@@ -345,7 +562,7 @@ pub async fn on_push(agent: &Arc<Agent>, kind: &str, payload: &Value) {
             if let Some(tx) = waker {
                 let _ = tx.send(status);
             }
-            let _ = refresh_grants(agent).await;
+            let _ = refresh_all(agent).await;
         }
         "secret_notice" => {
             let text = payload["text"].as_str().unwrap_or("").to_owned();
@@ -371,7 +588,7 @@ pub async fn on_push(agent: &Arc<Agent>, kind: &str, payload: &Value) {
         _ => {
             // `secret_access_changed`, `secrets_paused`, `secret_value_replaced`: the relay is
             // the authority; take its current view (≤ 5 s after the switch, PUSH_POLL).
-            if let Err(e) = refresh_grants(agent).await {
+            if let Err(e) = refresh_all(agent).await {
                 tracing::warn!(error = %e, kind, "secrets: refresh after push failed");
             }
             agent.append_audit(
@@ -395,13 +612,14 @@ pub async fn secrets_list(agent: &Agent) -> Value {
             json!({ "name": if it["env"].is_null() { it["title"].clone() } else { it["env"].clone() }, "kind": it["kind"], "fields": it["fields"], "placeholders": it["placeholders"],
                 "hosts": it["hosts"], "note": it["note"], "vault": it["vault_name"], "ref": it["ref"],
                 "access": if paused { "paused" } else if access { "on" } else { "off" },
-                "ask_every_time": it["ask_every_time"] })
+                "ask_every_time": it["ask_every_time"],
+                "real_value": it["inject_env"], "real_env": if it["env"].is_null() { it["real_env"].clone() } else { it["env"].clone() } })
         })
         .collect();
     text_result(
         json!({ "paused": paused, "items": items,
             "note": if paused { "Secrets are paused by the owner: every use fails until they turn Pause all secrets off. Stop and say so." }
-                    else { "Values are never readable. A secret with access on is already $NAME in your shell (a placeholder) and usable through egress; for one with access off call secrets_request(name, purpose, use, host)." } })
+                    else { "A secret with access on is already $NAME in your shell: the real value when real_value is true (use it directly in commands and programs; keep it out of chat and logs), otherwise a placeholder usable through egress. For one with access off call secrets_request(name, purpose, use, host)." } })
             .to_string(),
     )
 }
@@ -1069,5 +1287,66 @@ mod tests {
         );
         let described = g.describe("allowed").to_string();
         assert!(described.contains("$STRIPE_KEY") && !described.contains("sk-"));
+    }
+
+    /// The file every shell sources: the real value for a switched-on grant, the placeholder for
+    /// the others, `unset` for names without Access — and for all of them while paused.
+    #[test]
+    fn env_file_carries_real_values_only_while_allowed() {
+        let mut st = State::default();
+        let stripe = Grant::from_item(
+            "p1",
+            &json!({ "env": "STRIPE_KEY", "kind": "key", "enabled": true, "inject_env": true,
+            "placeholders": { "value": "arbos-secret://STRIPE_KEY/value" } }),
+        )
+        .unwrap();
+        let mailgun = Grant::from_item(
+            "p1",
+            &json!({ "env": "MAILGUN_API_KEY", "kind": "key", "enabled": true,
+            "placeholders": { "value": "arbos-secret://MAILGUN_API_KEY/value" } }),
+        )
+        .unwrap();
+        st.grants = vec![stripe, mailgun];
+        st.known_vars.insert(
+            "p1".into(),
+            [
+                "STRIPE_KEY",
+                "MAILGUN_API_KEY",
+                "GITHUB_LOGIN_USERNAME",
+                "GITHUB_LOGIN_PASSWORD",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect(),
+        );
+        st.real.insert(
+            "p1".into(),
+            vec![RealValues {
+                name: "STRIPE_KEY".into(),
+                vars: [("STRIPE_KEY".to_owned(), "sk_live_it's".to_owned())].into(),
+            }],
+        );
+        let text = render_env_file(&st, "p1", "Research");
+        assert!(
+            text.contains("export STRIPE_KEY='sk_live_it'\\''s'\n"),
+            "{text}"
+        );
+        assert!(text.contains("export MAILGUN_API_KEY='arbos-secret://MAILGUN_API_KEY/value'"));
+        assert!(text.contains("unset GITHUB_LOGIN_PASSWORD GITHUB_LOGIN_USERNAME\n"));
+        assert!(!text.contains("unset STRIPE_KEY"));
+
+        // Switch off (the relay stops sending the value, the grant says so): placeholder again.
+        st.grants[0].inject_env = false;
+        st.real.insert("p1".into(), Vec::new());
+        let text = render_env_file(&st, "p1", "Research");
+        assert!(text.contains("export STRIPE_KEY='arbos-secret://STRIPE_KEY/value'"));
+        assert!(!text.contains("sk_live"));
+
+        st.paused.push("p1".into());
+        let text = render_env_file(&st, "p1", "Research");
+        assert!(text.contains(
+            "unset GITHUB_LOGIN_PASSWORD GITHUB_LOGIN_USERNAME MAILGUN_API_KEY STRIPE_KEY\n"
+        ));
+        assert!(!text.contains("export"));
     }
 }

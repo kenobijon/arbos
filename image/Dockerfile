@@ -94,6 +94,12 @@ COPY image/arbos-shell          /usr/local/lib/arbos/arbos-shell
 COPY image/hooks/               /usr/local/lib/arbos/hooks/
 COPY image/prime-skills/        /etc/arbos/prime-seed/skills/
 RUN chmod 755 /usr/local/lib/arbos/arbos-shell /usr/local/lib/arbos/hooks/claude/*.sh
+# --- D83 real values: every login shell (profile.d) and interactive shell (bash.bashrc) sources
+# the workspace's secrets.env; `bash -c` gets it through BASH_ENV from agentd.
+COPY image/secrets-env.sh       /usr/local/lib/arbos/secrets-env.sh
+RUN chmod 644 /usr/local/lib/arbos/secrets-env.sh \
+ && ln -s /usr/local/lib/arbos/secrets-env.sh /etc/profile.d/arbos-secrets.sh \
+ && printf '\n. /usr/local/lib/arbos/secrets-env.sh\n' >> /etc/bash.bashrc
 # --- Our binary (built earlier in the same CI job: cargo build --release -p arbos-agentd → dist/)
 COPY dist/arbos-agentd /usr/local/bin/arbos-agentd
 COPY image/AGENTS.md   /etc/arbos/AGENTS.md

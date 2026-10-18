@@ -345,7 +345,7 @@ impl PrimeAdapter {
                     .unwrap_or_else(|_| "/usr/local/lib/arbos/arbos-shell".into()),
             ),
         ]);
-        envs.extend(crate::vault::grant_envs(&self.cfg.project_id));
+        envs.extend(crate::vault::shell_envs(&self.cfg));
         envs
     }
 
@@ -588,7 +588,7 @@ impl PiAdapter {
             ("ARBOS_BOX_TOKEN".into(), cfg.box_token.clone()),
         ]);
         // Approved vault grants (F8): placeholders only, usable through the egress tool.
-        envs.extend(crate::vault::grant_envs(&cfg.project_id));
+        envs.extend(crate::vault::shell_envs(cfg));
         envs
     }
 
@@ -897,7 +897,7 @@ impl ClaudeCodeAdapter {
             .env("DISABLE_TELEMETRY", "1")
             .env("DISABLE_ERROR_REPORTING", "1")
             .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
-            .envs(crate::vault::grant_envs(&self.cfg.project_id))
+            .envs(crate::vault::shell_envs(&self.cfg))
             .envs(self.cfg.browser_env())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
