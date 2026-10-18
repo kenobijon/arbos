@@ -1796,9 +1796,11 @@ class Loop:
                     contained.append(cmp.get("status") in ("ahead", "identical"))
                 if shas and contained and all(contained):
                     real = agentd.get("real_min_sha") is not None
+                    awake_boxes = [b for b in agentd.get("boxes") or [] if b.get("state", "awake") == "awake" and not (real and b.get("test"))]
+                    images = sorted({b.get("image", "?") for b in awake_boxes}) or ["?"]
                     where = ("the voice pod" if kind == "voice" else "the relay" if kind == "relay"
                              else f"all {(agentd.get('real_awake') if real else agentd.get('awake')) or len(shas)} awake "
-                                  f"{'real-user ' if real else ''}boxes (image {(agentd.get('boxes') or [{}])[0].get('image', '?')})")
+                                  f"{'real-user ' if real else ''}boxes (image {'/'.join(images)})")
                     done_notes.append(f"{where} runs {shas[0][:8]}" + ("" if len(shas) == 1 else f" (+{len(shas) - 1} sha)"))
                 else:
                     still.append(kind)
