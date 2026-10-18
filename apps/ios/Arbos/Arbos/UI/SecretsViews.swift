@@ -345,6 +345,7 @@ struct SecretsPage: View {
                 showRigVault = true
             }
             if DebugHooks.settingsPage == "connect" { showConnect = true }
+            if DebugHooks.settingsPage == "new-secret" { showAdd = true }
         }
         .navigationDestination(isPresented: $showRigSecret) {
             if let id = rigSecretId { SecretPage(secretId: id) }
