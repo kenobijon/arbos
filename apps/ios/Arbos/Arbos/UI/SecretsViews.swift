@@ -1328,6 +1328,11 @@ struct VaultPage: View {
     }
 
     private func load() async {
+        if model.isFixture {
+            items = model.fixtureVaultItems
+            activity = model.secrets?.activity ?? []
+            return
+        }
         busy = true
         defer { busy = false }
         if let (v, list, acts) = try? await model.relay.vault(vaultId) {

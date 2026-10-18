@@ -313,6 +313,8 @@ final class AppModel: ObservableObject {
     @Published var secrets: SecretsOverview?
     /// Agent profile → Secrets, per project.
     @Published var projectSecrets: [Id: ProjectSecrets] = [:]
+    /// Fixture only: the Vault page's item list (the relay answers this live).
+    var fixtureVaultItems: [[String: Any]] = []
     @Published var secretsBusy = false
 
     private var api: RelayAPI
