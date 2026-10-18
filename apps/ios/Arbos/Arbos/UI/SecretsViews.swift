@@ -182,19 +182,18 @@ struct SecretTextField: View {
 }
 
 /// Four small answers under a pending request row: Allow once · Allow for this chat · Always allow · Deny.
+/// They wrap onto a second line on narrow phones so Deny is never off-screen.
 struct RequestAnswers: View {
     @Environment(\.theme) private var theme
     let agent: String
     let decide: (String) -> Void
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                answer("Allow once", "once")
-                answer("Allow for this chat", "chat")
-                answer("Always allow \(agent)", "always")
-                answer("Deny", "deny", destructive: true)
-            }
+        WrapLayout(spacing: 8) {
+            answer("Allow once", "once")
+            answer("Allow for this chat", "chat")
+            answer("Always allow \(agent)", "always")
+            answer("Deny", "deny", destructive: true)
         }
     }
 
@@ -208,6 +207,41 @@ struct RequestAnswers: View {
                 .background(Capsule().fill(theme.field))
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// Leading-aligned rows of chips: fills a line, then starts the next.
+struct WrapLayout: Layout {
+    var spacing: CGFloat = 8
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? .infinity
+        return place(in: width, subviews: subviews).size
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let result = place(in: bounds.width, subviews: subviews)
+        for (subview, origin) in zip(subviews, result.origins) {
+            subview.place(at: CGPoint(x: bounds.minX + origin.x, y: bounds.minY + origin.y), proposal: .unspecified)
+        }
+    }
+
+    private func place(in width: CGFloat, subviews: Subviews) -> (size: CGSize, origins: [CGPoint]) {
+        var origins: [CGPoint] = []
+        var x: CGFloat = 0, y: CGFloat = 0, lineHeight: CGFloat = 0, maxX: CGFloat = 0
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if x > 0, x + size.width > width {
+                x = 0
+                y += lineHeight + spacing
+                lineHeight = 0
+            }
+            origins.append(CGPoint(x: x, y: y))
+            x += size.width + spacing
+            lineHeight = max(lineHeight, size.height)
+            maxX = max(maxX, x - spacing)
+        }
+        return (CGSize(width: maxX, height: y + lineHeight), origins)
     }
 }
 
