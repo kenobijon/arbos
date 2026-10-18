@@ -1894,6 +1894,21 @@ impl Render for SecretsPanel {
                 self.page = Page::Secret(s.id.clone());
             }
         }
+        // The rig may name an agent before the project list arrived; swap in its id once known.
+        if let Page::Agent(pid) = self.page.clone() {
+            let resolved = self
+                .state
+                .read(cx)
+                .projects
+                .iter()
+                .find(|p| p.id != pid && p.name.eq_ignore_ascii_case(&pid))
+                .map(|p| p.id.clone());
+            if let Some(id) = resolved {
+                self.page = Page::Agent(id.clone());
+                self.state
+                    .update(cx, |s, cx| s.project_secrets_refresh(id, cx));
+            }
+        }
         let title = self.title(&view, cx);
         let back_label = if self.page == Page::List {
             "‹ Settings"
