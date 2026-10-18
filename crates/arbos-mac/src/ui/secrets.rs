@@ -76,6 +76,8 @@ pub struct SecretsPanel {
     error: Option<String>,
     /// Rig: a secret env name to open as soon as the list arrives.
     pending_env: Option<String>,
+    /// Rig: open the first vault as soon as the list arrives.
+    pending_vault: bool,
     focus_handle: FocusHandle,
 }
 
@@ -128,6 +130,7 @@ impl SecretsPanel {
             token_input,
             error: None,
             pending_env: None,
+            pending_vault: false,
             focus_handle: cx.focus_handle(),
         }
     }
@@ -147,6 +150,23 @@ impl SecretsPanel {
     pub fn show_secret_env(&mut self, env: String, cx: &mut Context<Self>) {
         self.open = true;
         self.pending_env = Some(env);
+        self.page = Page::List;
+        self.state.update(cx, |s, cx| s.secrets_refresh(cx));
+        cx.notify();
+    }
+
+    /// Rig: the Connect 1Password form.
+    pub fn show_connect(&mut self, cx: &mut Context<Self>) {
+        self.open = true;
+        self.page = Page::Connect;
+        self.state.update(cx, |s, cx| s.secrets_refresh(cx));
+        cx.notify();
+    }
+
+    /// Rig: the first connected vault's page once the list arrives.
+    pub fn show_first_vault(&mut self, cx: &mut Context<Self>) {
+        self.open = true;
+        self.pending_vault = true;
         self.page = Page::List;
         self.state.update(cx, |s, cx| s.secrets_refresh(cx));
         cx.notify();
@@ -1892,6 +1912,12 @@ impl Render for SecretsPanel {
             if let Some(s) = view.secrets.iter().find(|s| s.env == env) {
                 self.pending_env = None;
                 self.page = Page::Secret(s.id.clone());
+            }
+        }
+        if self.pending_vault {
+            if let Some(v) = view.vaults.first() {
+                self.pending_vault = false;
+                self.page = Page::Vault(v.id.clone());
             }
         }
         // The rig may name an agent before the project list arrived; swap in its id once known.

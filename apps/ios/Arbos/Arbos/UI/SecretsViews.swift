@@ -268,6 +268,8 @@ struct SecretsPage: View {
     /// Rig: `ARBOS_SETTINGS_PAGE=secret:<ENV>` pushes that secret's page once the list arrives.
     @State private var rigSecretId: String?
     @State private var showRigSecret = false
+    @State private var rigVaultId: String?
+    @State private var showRigVault = false
 
     private var overview: SecretsOverview? { model.secrets }
     private var paused: Bool { overview?.paused ?? false }
@@ -338,9 +340,18 @@ struct SecretsPage: View {
                 rigSecretId = s.id
                 showRigSecret = true
             }
+            // Rig: `ARBOS_SETTINGS_PAGE=vault` opens the first connected vault; `connect` the Connect sheet.
+            if DebugHooks.settingsPage == "vault", let v = model.secrets?.vaults.first {
+                rigVaultId = v.id
+                showRigVault = true
+            }
+            if DebugHooks.settingsPage == "connect" { showConnect = true }
         }
         .navigationDestination(isPresented: $showRigSecret) {
             if let id = rigSecretId { SecretPage(secretId: id) }
+        }
+        .navigationDestination(isPresented: $showRigVault) {
+            if let id = rigVaultId { VaultPage(vaultId: id) }
         }
         .confirmationDialog("Pause all secrets?", isPresented: $confirmPause, titleVisibility: .visible) {
             Button("Pause all secrets", role: .destructive) { model.setSecretsPaused(true) }
