@@ -5,6 +5,11 @@
 # sees the current state.
 __arbos_secrets_env() {
   local f="${ARBOS_SECRETS_ENV:-}"
+  # A workspace user's HOME is <state>/home, so its file is one level up; root (and a box without
+  # per-workspace users) can list /work and takes every workspace's file.
+  if [ -z "$f" ] && [ -r "${HOME:-/nonexistent}/../secrets.env" ]; then
+    f="$HOME/../secrets.env"
+  fi
   if [ -z "$f" ]; then
     for g in /work/*/.arbos/secrets.env; do
       [ -r "$g" ] && f=$g
