@@ -457,6 +457,11 @@ struct RowView: View {
     let row: Row
     let chatId: Id
     let width: CGFloat
+    /// How far the transcript has been dragged left to reveal iMessage-style times (0…`timeRevealWidth`).
+    var timeReveal: CGFloat = 0
+
+    /// Trailing column width for swipe-revealed times (fits "12:59 PM").
+    static let timeRevealWidth: CGFloat = 56
 
     private var maxBubble: CGFloat { max(200, width - Theme.bubbleInset) }
 
@@ -464,11 +469,43 @@ struct RowView: View {
         model.firstLogin != nil && model.messages(of: chatId).first(where: { $0.greeting })?.id == row.messageId
     }
 
+    /// Bubbles get a swipe time; centred system / card / error rows do not.
+    private var showsSwipeTime: Bool {
+        switch row.kind {
+        case .system, .question, .error:
+            return false
+        case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
+            return true
+        }
+    }
+
+    private var swipeTimeLabel: String? {
+        guard showsSwipeTime else { return nil }
+        guard let ms = model.messages(of: chatId).first(where: { $0.id == row.messageId })?.createdAt,
+              ms > 0 else { return nil }
+        return Date(timeIntervalSince1970: Double(ms) / 1000)
+            .formatted(date: .omitted, time: .shortened)
+    }
+
     var body: some View {
         VStack(spacing: 4) {
             bubble
             if !row.reactions.isEmpty {
                 reactionChips
+            }
+        }
+        // iMessage: drag left → whole row slides; time sits on the trailing edge.
+        .offset(x: -timeReveal)
+        .overlay(alignment: .trailing) {
+            if let time = swipeTimeLabel, timeReveal > 0.5 {
+                Text(time)
+                    .font(.system(size: 11))
+                    .foregroundStyle(theme.muted)
+                    .frame(width: Self.timeRevealWidth, alignment: .trailing)
+                    .offset(x: Self.timeRevealWidth - timeReveal)
+                    .opacity(Double(min(1, timeReveal / (Self.timeRevealWidth * 0.55))))
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(timeReveal < 12)
             }
         }
     }

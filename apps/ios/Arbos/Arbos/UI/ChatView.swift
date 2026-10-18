@@ -52,6 +52,10 @@ struct ChatView: View {
     @State private var searchText = ""
     @FocusState private var searchFocused: Bool
     @ObservedObject private var calls = CallManager.shared
+    /// iMessage-style: drag the transcript left to peek message times (0…`RowView.timeRevealWidth`).
+    @State private var timeReveal: CGFloat = 0
+    /// Once the pan is more horizontal-left than vertical, lock so scroll does not steal it.
+    @State private var timeRevealLocked = false
 
     /// Rows after the in-chat search filter (profile "search").
     private var visibleRows: [Row] {
@@ -693,6 +697,32 @@ struct ChatView: View {
         }
     }
 
+    /// Drag left on the transcript to peek each bubble's send time (iMessage).
+    /// Locks only after the pan is clearly horizontal-left so vertical scroll stays free.
+    private var timeRevealGesture: some Gesture {
+        DragGesture(minimumDistance: 12, coordinateSpace: .local)
+            .onChanged { value in
+                let dx = value.translation.width
+                let dy = value.translation.height
+                if !timeRevealLocked {
+                    guard abs(dx) + abs(dy) >= 12 else { return }
+                    // Vertical scroll or swipe-right-to-back: do not steal the gesture.
+                    guard dx < 0, abs(dx) > abs(dy) * 1.15 else { return }
+                    timeRevealLocked = true
+                }
+                let reveal = min(RowView.timeRevealWidth, max(0, -dx))
+                var t = Transaction()
+                t.disablesAnimations = true
+                withTransaction(t) { timeReveal = reveal }
+            }
+            .onEnded { _ in
+                timeRevealLocked = false
+                withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+                    timeReveal = 0
+                }
+            }
+    }
+
     // MARK: Transcript
 
     private func transcript(width: CGFloat, height: CGFloat) -> some View {
@@ -741,7 +771,7 @@ struct ChatView: View {
                         emptyHint
                     }
                     ForEach(Array(visibleRows.enumerated()), id: \.element.id) { i, row in
-                        RowView(row: row, chatId: chatId, width: width)
+                        RowView(row: row, chatId: chatId, width: width, timeReveal: timeReveal)
                             .padding(.top, gap(before: i))
                             .id(row.id)
                             .contextMenu {
@@ -814,6 +844,8 @@ struct ChatView: View {
             }
             .defaultScrollAnchor(.bottom)
             .scrollDismissesKeyboard(.interactively)
+            // Drag left → reveal message times (iMessage). simultaneous so vertical scroll still works.
+            .simultaneousGesture(timeRevealGesture)
             // Tap empty chat chrome to dismiss the keyboard and free the transcript.
             .onTapGesture {
                 composerFocused = false
