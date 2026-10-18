@@ -1745,7 +1745,16 @@ class Loop:
         agentd = doc.get("agentd") or {}
         # Fleet: when every awake box runs the same agentd, fleet_min_sha speaks for all; otherwise
         # the fix must be in every awake box's sha (a box left behind still runs the old code).
-        if agentd.get("all_same") and agentd.get("fleet_min_sha"):
+        # Real users only (relay ≥ e0aba25 reports real_min_sha / real_all_same and tags test boxes):
+        # a test box woken on an old image must not hold a fix back. Older relays: fleet-wide fields.
+        if agentd.get("real_min_sha"):
+            if agentd.get("real_all_same"):
+                agentd_shas = [agentd["real_min_sha"]]
+            else:
+                agentd_shas = sorted({b["sha"] for b in agentd.get("boxes") or []
+                                      if b.get("sha") and b.get("state", "awake") == "awake" and not b.get("test")}
+                                     or {agentd["real_min_sha"]})
+        elif agentd.get("all_same") and agentd.get("fleet_min_sha"):
             agentd_shas = [agentd["fleet_min_sha"]]
         else:
             agentd_shas = sorted({b["sha"] for b in agentd.get("boxes") or [] if b.get("sha") and b.get("state", "awake") == "awake"}
@@ -1770,8 +1779,10 @@ class Loop:
                         break
                     contained.append(cmp.get("status") in ("ahead", "identical"))
                 if shas and contained and all(contained):
+                    real = agentd.get("real_min_sha") is not None
                     where = ("the voice pod" if kind == "voice" else "the relay" if kind == "relay"
-                             else f"all {agentd.get('awake') or len(shas)} awake boxes (image {(agentd.get('boxes') or [{}])[0].get('image', '?')})")
+                             else f"all {(agentd.get('real_awake') if real else agentd.get('awake')) or len(shas)} awake "
+                                  f"{'real-user ' if real else ''}boxes (image {(agentd.get('boxes') or [{}])[0].get('image', '?')})")
                     done_notes.append(f"{where} runs {shas[0][:8]}" + ("" if len(shas) == 1 else f" (+{len(shas) - 1} sha)"))
                 else:
                     still.append(kind)
