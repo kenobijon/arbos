@@ -449,8 +449,8 @@ struct SecretPage: View {
                     .padding(.horizontal, 16).frame(minHeight: SettingsRow.height)
                 }
                 SettingsGroup(footer: s.injectEnv
-                              ? "\(SecretsText.realVarList(s)) is a normal variable in the box of every agent with access: shell commands and programs read it directly, nothing asks you. Turning access or Pause all off removes it within seconds. Arbos still redacts the value from chat and logs as best it can."
-                              : "Off: agents get a placeholder and the relay fills the value in only through egress, for the allowed hosts. Turn this on for tools that must read $\(s.env) themselves, such as CLIs and SDKs.") {
+                              ? "On: \(SecretsText.realVarList(s)) is a normal variable in the box of every agent with access. Any program the agent runs can use the key directly — including to spend money or change things on your accounts — without asking you. No card, no host check. Turning access or Pause all off removes it within seconds. Arbos still redacts the value from chat and logs as best it can."
+                              : "Off: agents get a placeholder and the relay fills the value in only through egress, for the allowed hosts. Turn this on only for keys you would hand to a CLI or SDK that must read $\(s.env) itself — once on, programs can act with it, including spending, without asking you.") {
                     SecretToggleRow(icon: "terminal.fill", title: "Real value in the environment",
                                     subtitle: s.injectEnv ? "On · agents with access see the value" : "Agents with access get \(SecretsText.realVarList(s)) itself",
                                     isOn: Binding(get: { s.injectEnv }, set: { model.patchSecret(s.id, ["inject_env": $0]) }),
@@ -740,8 +740,8 @@ struct NewSecretSheet: View {
                     SecretTextField(placeholder: "sk_live_…", text: $value, secure: true)
                 }
             }
-            SecretField(label: "Note") {
-                SecretTextField(placeholder: "What is it for? Agents read this.", text: $note, capitalization: .sentences)
+            SecretField(label: "Note", hint: SecretsText.noteHint) {
+                SecretTextField(placeholder: SecretsText.notePlaceholder, text: $note, multiline: true, capitalization: .sentences)
             }
             SecretField(label: "Agents") {
                 AgentChips(picked: $picked)
@@ -750,8 +750,8 @@ struct NewSecretSheet: View {
                 SecretTextField(placeholder: "api.stripe.com", text: $hosts, keyboard: .URL)
             }
             SecretField(label: "In the agent's environment", hint: injectEnv
-                        ? "Agents with access get $\(env.isEmpty ? "NAME" : env) itself: CLIs, SDKs and scripts read it directly. Nothing asks you per use."
-                        : "Off: agents get a placeholder; the relay fills the value in only through egress.") {
+                        ? "On: agents with access get $\(env.isEmpty ? "NAME" : env) itself. Any program they run can use it directly — including to spend money — without asking you. Only for keys you would hand to a CLI."
+                        : "Off: agents get a placeholder; the relay fills the value in only through egress, for the allowed hosts. Turn on only for keys a CLI or SDK must read itself.") {
                 Toggle(isOn: $injectEnv) {
                     Text("Real value in the agent's environment").font(.system(size: Theme.body)).foregroundStyle(theme.text)
                 }
@@ -812,8 +812,8 @@ struct EditSecretSheet: View {
             SecretField(label: "Name", hint: "Agents see it as $\(SecretsText.envName(name)).") {
                 SecretTextField(placeholder: "STRIPE_KEY", text: $name, mono: true, capitalization: .characters)
             }
-            SecretField(label: "Note") {
-                SecretTextField(placeholder: "What is it for? Agents read this.", text: $note, capitalization: .sentences)
+            SecretField(label: "Note", hint: SecretsText.noteHint) {
+                SecretTextField(placeholder: SecretsText.notePlaceholder, text: $note, multiline: true, capitalization: .sentences)
             }
             SecretField(label: "Where it may be used (optional)", hint: "Leave empty to decide the first time an agent uses it.") {
                 SecretTextField(placeholder: "api.stripe.com", text: $hosts, keyboard: .URL)
@@ -1078,7 +1078,7 @@ struct GiveAccessSheet: View {
             Text("\(secret.env) will be usable by the agents you pick, without them ever seeing it.")
                 .font(.system(size: Theme.small)).foregroundStyle(theme.muted)
             SecretField(label: "Agents") { AgentChips(picked: $picked) }
-            SecretField(label: "Note") { SecretTextField(placeholder: "What is it for? Agents read this.", text: $note, capitalization: .sentences) }
+            SecretField(label: "Note for the agent", hint: SecretsText.accessNoteHint) { SecretTextField(placeholder: "reports only · may spend up to $5 a day", text: $note, capitalization: .sentences) }
         }
         .onAppear {
             picked = Set(secret.agents.filter(\.enabled).map(\.projectId))
@@ -1114,7 +1114,7 @@ struct AccessEditSheet: View {
 
     var body: some View {
         SheetFrame(title: access.name, action: "Save", canSave: true, busy: busy, save: { Task { await save() } }) {
-            SecretField(label: "Note") { SecretTextField(placeholder: "What is it for? Agents read this.", text: $note, capitalization: .sentences) }
+            SecretField(label: "Note for the agent", hint: SecretsText.accessNoteHint) { SecretTextField(placeholder: "reports only · may spend up to $5 a day", text: $note, capitalization: .sentences) }
             SecretField(label: "Where it may be used (optional)", hint: secret.hosts.isEmpty ? "Leave empty to decide the first time \(access.name) uses it." : "Also allowed: \(secret.hosts.joined(separator: ", ")) (from the secret).") {
                 SecretTextField(placeholder: "api.stripe.com", text: $hosts, keyboard: .URL)
             }
@@ -1335,7 +1335,7 @@ struct PickSecretsSheet: View {
                 }
             }
             .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(theme.bubbleAssistant))
-            SecretField(label: "Note") { SecretTextField(placeholder: "What is it for? Agents read this.", text: $note, capitalization: .sentences) }
+            SecretField(label: "Note for the agent", hint: SecretsText.accessNoteHint) { SecretTextField(placeholder: "reports only · may spend up to $5 a day", text: $note, capitalization: .sentences) }
         }
         .task { if model.secrets == nil { await model.refreshSecrets() } }
     }
@@ -1375,7 +1375,7 @@ struct ConnectVaultSheet: View {
                 Text("Stored encrypted. Arbos never shows it again.").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
             }
             SecretField(label: "Agents that may use this vault") { AgentChips(picked: $picked) }
-            SecretField(label: "Note") { SecretTextField(placeholder: "Research may use everything in this vault", text: $note, capitalization: .sentences) }
+            SecretField(label: "Note", hint: SecretsText.vaultNoteHint) { SecretTextField(placeholder: "read-only · confirm before charging", text: $note, capitalization: .sentences) }
             if let error { Text(error).font(.system(size: Theme.small)).foregroundStyle(theme.danger) }
         }
     }
@@ -1585,7 +1585,7 @@ struct GiveVaultAccessSheet: View {
     var body: some View {
         SheetFrame(title: "Give access", action: "Save", canSave: !picked.isEmpty, busy: busy, save: { Task { await save() } }) {
             SecretField(label: "Agents") { AgentChips(picked: $picked) }
-            SecretField(label: "Note") { SecretTextField(placeholder: "Research may use everything in this vault", text: $note, capitalization: .sentences) }
+            SecretField(label: "Note", hint: SecretsText.vaultNoteHint) { SecretTextField(placeholder: "read-only · confirm before charging", text: $note, capitalization: .sentences) }
         }
         .onAppear { picked = Set(model.secrets?.vaults.first { $0.id == vaultId }?.agents.filter(\.enabled).map(\.projectId) ?? []) }
     }
