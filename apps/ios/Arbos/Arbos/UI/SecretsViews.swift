@@ -265,6 +265,9 @@ struct SecretsPage: View {
     @State private var showConnect = false
     @State private var confirmPause = false
     @State private var requests: [SecretRequestItem] = []
+    /// Rig: `ARBOS_SETTINGS_PAGE=secret:<ENV>` pushes that secret's page once the list arrives.
+    @State private var rigSecretId: String?
+    @State private var showRigSecret = false
 
     private var overview: SecretsOverview? { model.secrets }
     private var paused: Bool { overview?.paused ?? false }
@@ -330,6 +333,14 @@ struct SecretsPage: View {
         .task {
             await model.refreshSecrets()
             requests = (try? await model.relay.secretRequests()) ?? []
+            if let env = DebugHooks.settingsPage?.stripping(prefix: "secret:"),
+               let s = model.secrets?.secrets.first(where: { $0.env == env }) {
+                rigSecretId = s.id
+                showRigSecret = true
+            }
+        }
+        .navigationDestination(isPresented: $showRigSecret) {
+            if let id = rigSecretId { SecretPage(secretId: id) }
         }
         .confirmationDialog("Pause all secrets?", isPresented: $confirmPause, titleVisibility: .visible) {
             Button("Pause all secrets", role: .destructive) { model.setSecretsPaused(true) }
