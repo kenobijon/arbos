@@ -973,7 +973,25 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         vault: None,
                     })
                 })
-                .collect();
+                .collect::<Vec<_>>();
+            let mut items = items;
+            for v in &view.vaults {
+                if let Some(a) = v.agents.iter().find(|a| a.project_id == project_id) {
+                    items.push(crate::model::ProjectSecretAccess {
+                        access_id: a.access_id.clone(),
+                        enabled: a.enabled,
+                        note: a.note.clone(),
+                        hosts: a.hosts.clone(),
+                        last_used_at: a.last_used_at,
+                        disabled_at: a.disabled_at,
+                        secret: None,
+                        vault: Some(crate::model::ConnectedVault {
+                            agents: Vec::new(),
+                            ..v.clone()
+                        }),
+                    });
+                }
+            }
             let requests = view
                 .requests
                 .iter()
@@ -1507,9 +1525,9 @@ fn emit_secrets(shared: &Shared) {
 fn fixture_agent(project_id: &str, name: &str, enabled: bool, note: &str) -> SecretAgent {
     let name = if name.is_empty() {
         match project_id {
-            "comms" => "Comms",
-            "website" => "Website",
-            "research" => "Research",
+            PROJECT_COMMS => "Comms",
+            PROJECT_ARBOS => "Arbos",
+            PROJECT_AFFINE => "Affine",
             other => other,
         }
         .to_string()
@@ -1565,14 +1583,14 @@ fn seed_secrets() -> SecretsView {
             "Stripe live key — refunds and reports. Never for payouts.",
             &["api.stripe.com"],
             vec![
-                fixture_agent("research", "Research", true, "pull refund reports"),
+                fixture_agent(PROJECT_AFFINE, "Affine", true, "pull refund reports"),
                 fixture_agent(
-                    "comms",
+                    PROJECT_COMMS,
                     "Comms",
                     true,
                     "monthly revenue line in the newsletter",
                 ),
-                fixture_agent("website", "Website", false, ""),
+                fixture_agent(PROJECT_ARBOS, "Arbos", false, ""),
             ],
             12,
         ),
@@ -1581,7 +1599,12 @@ fn seed_secrets() -> SecretsView {
             "key",
             "Newsletter sends.",
             &["api.mailgun.net"],
-            vec![fixture_agent("comms", "Comms", true, "send the newsletter")],
+            vec![fixture_agent(
+                PROJECT_COMMS,
+                "Comms",
+                true,
+                "send the newsletter",
+            )],
             5,
         ),
         secret(
@@ -1590,8 +1613,8 @@ fn seed_secrets() -> SecretsView {
             "The unarbos account, for Actions and reviews.",
             &["github.com", "*.github.com"],
             vec![fixture_agent(
-                "website",
-                "Website",
+                PROJECT_ARBOS,
+                "Arbos",
                 true,
                 "review failing Actions runs",
             )],
@@ -1600,9 +1623,9 @@ fn seed_secrets() -> SecretsView {
     ];
     let requests = vec![SecretRequest {
         id: new_id(),
-        project_id: "comms".into(),
+        project_id: PROJECT_COMMS.into(),
         project_name: Some("Comms".into()),
-        chat_id: "comms-pinned".into(),
+        chat_id: CHAT_COMMS_MAIN.into(),
         name: "GITHUB_LOGIN".into(),
         purpose: "Sign in to post the release notes".into(),
         use_kind: "browser_fill".into(),
@@ -1631,7 +1654,7 @@ fn seed_secrets() -> SecretsView {
         act(
             "used",
             "STRIPE_KEY",
-            Some(("research", "Research")),
+            Some((PROJECT_AFFINE, "Affine")),
             Some("api.stripe.com"),
             "agent:research",
             2,
@@ -1639,7 +1662,7 @@ fn seed_secrets() -> SecretsView {
         act(
             "access_on",
             "MAILGUN_API_KEY",
-            Some(("comms", "Comms")),
+            Some((PROJECT_COMMS, "Comms")),
             None,
             "user:me",
             1_440,
@@ -1647,17 +1670,40 @@ fn seed_secrets() -> SecretsView {
         act(
             "refused",
             "STRIPE_KEY",
-            Some(("website", "Website")),
+            Some((PROJECT_ARBOS, "Arbos")),
             Some("stripe.evil.example"),
             "agent:website",
             4_320,
         ),
     ];
+    // One connected 1Password vault (Phase 2), names only — the iPhone fixture's twin.
+    let vaults = vec![crate::model::ConnectedVault {
+        id: "fx-vault-1p".into(),
+        provider: "onepassword".into(),
+        name: "Arbos — Research".into(),
+        items_count: 12,
+        token_expires_at: None,
+        status: "ok".into(),
+        agents: vec![
+            fixture_agent(
+                PROJECT_AFFINE,
+                "Affine",
+                true,
+                "read the Stripe and Postgres items",
+            ),
+            fixture_agent(PROJECT_COMMS, "Comms", true, "read the Stripe item"),
+        ],
+        limits: serde_json::json!({ "reads_per_hour": 1000, "reads_used_hour": 3 }),
+        items: vec![
+            serde_json::json!({ "ref": "op://Arbos - Research/Stripe", "title": "Stripe", "category": "API_CREDENTIAL", "fields": ["credential", "username"], "urls": ["https://dashboard.stripe.com"] }),
+            serde_json::json!({ "ref": "op://Arbos - Research/Postgres", "title": "Postgres", "category": "DATABASE", "fields": ["password", "hostname", "port", "database"], "urls": [] }),
+        ],
+    }];
     SecretsView {
         paused: false,
         secrets,
-        vaults: Vec::new(),
-        providers: Vec::new(),
+        vaults,
+        providers: vec!["onepassword".into()],
         requests,
         activity,
         loaded: true,
