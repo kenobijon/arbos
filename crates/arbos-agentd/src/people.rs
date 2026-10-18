@@ -281,6 +281,51 @@ fn text_names_this_agent(msg: &MessageView, info: &PeopleChatInfo, project_id: &
     false
 }
 
+/// Agent project ids named by `mentions` (`agent:<id>`), in order, deduped.
+fn mentioned_agent_ids(msg: &MessageView) -> Vec<String> {
+    let Some(mentions) = msg.rest.get("mentions").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for m in mentions {
+        let Some(id) = m.as_str().and_then(|s| s.strip_prefix("agent:")) else {
+            continue;
+        };
+        if !out.iter().any(|x| x == id) {
+            out.push(id.to_owned());
+        }
+    }
+    out
+}
+
+/// Every agent project id in this people chat.
+fn chat_agent_ids(info: &PeopleChatInfo) -> Vec<String> {
+    let mut out = Vec::new();
+    for m in &info.members {
+        let Some(id) = m["member"].as_str().and_then(|s| s.strip_prefix("agent:")) else {
+            continue;
+        };
+        if !out.iter().any(|x| x == id) {
+            out.push(id.to_owned());
+        }
+    }
+    out
+}
+
+/// Agents this message is shared with (more than one must reply): collective phrases
+/// ("hey agents") or two-plus `agent:` mentions. Empty when only one agent is addressed
+/// (or none — the decision model path stays single-claim).
+pub fn people_shared_agent_ids(msg: &MessageView, info: &PeopleChatInfo) -> Vec<String> {
+    if text_addresses_agents_collectively(msg) {
+        return chat_agent_ids(info);
+    }
+    let mentioned = mentioned_agent_ids(msg);
+    if mentioned.len() > 1 {
+        return mentioned;
+    }
+    Vec::new()
+}
+
 /// "hey agents" / "can the agents…" / "all agents" — address every agent, no `@` required.
 fn text_addresses_agents_collectively(msg: &MessageView) -> bool {
     let trimmed = msg.text().trim().to_lowercase();
@@ -596,6 +641,66 @@ impl Agent {
             json!({ "chat_id": chat_id, "memory_invalidated": invalidated }),
         );
         tracing::info!(chat = %chat_id, invalidated, "left a people chat");
+    }
+
+    /// True when this agent already wrote an assistant reply for `user_msg_id` in this room.
+    pub async fn people_already_replied(&self, host: &SharedHost, user_msg_id: &str) -> bool {
+        if user_msg_id.is_empty() {
+            return false;
+        }
+        let me = format!("agent:{}", self.cfg.project_id);
+        let h = host.lock().await;
+        h.doc.messages().iter().any(|m| {
+            m.role == "assistant"
+                && m.status != "cancelled"
+                && m.rest.get("inReplyTo").and_then(Value::as_str) == Some(user_msg_id)
+                && (m.rest.get("sender").and_then(Value::as_str) == Some(me.as_str())
+                    || m.rest.get("deviceId").and_then(Value::as_str)
+                        == Some(self.cfg.device_id.as_str()))
+        })
+    }
+
+    /// Shared people `send` still waiting on another addressed agent: leave the command `taken`
+    /// so their box can claim it. False when this is not a multi-agent address, or every named
+    /// agent has already replied (or there is no message).
+    pub async fn people_shared_send_open(
+        &self,
+        chat_id: &str,
+        host: &SharedHost,
+        user_msg_id: &str,
+    ) -> bool {
+        if user_msg_id.is_empty() || !self.people.is_people_chat(chat_id) {
+            return false;
+        }
+        let Some(info) = self.people.info(chat_id) else {
+            return false;
+        };
+        let h = host.lock().await;
+        let Some(msg) = h.doc.message(user_msg_id) else {
+            return false;
+        };
+        let shared = people_shared_agent_ids(&msg, &info);
+        if shared.len() <= 1 {
+            return false;
+        }
+        let replied: std::collections::HashSet<String> = h
+            .doc
+            .messages()
+            .iter()
+            .filter(|m| {
+                m.role == "assistant"
+                    && m.status != "cancelled"
+                    && m.rest.get("inReplyTo").and_then(Value::as_str) == Some(user_msg_id)
+            })
+            .filter_map(|m| {
+                m.rest
+                    .get("sender")
+                    .and_then(Value::as_str)
+                    .and_then(|s| s.strip_prefix("agent:"))
+                    .map(str::to_owned)
+            })
+            .collect();
+        shared.iter().any(|id| !replied.contains(id))
     }
 
     /// Should this `send` command drive a turn here? People chats route by mention; a message
@@ -1172,6 +1277,35 @@ mod tests {
             "Allan?",
             json!({})
         )));
+
+        // Shared address: collective phrase → every agent; two @mentions → those two.
+        let group = PeopleChatInfo {
+            members: vec![
+                json!({ "member": "agent:01HPROJ", "handle": "bob" }),
+                json!({ "member": "agent:OTHER", "handle": "arbos" }),
+                json!({ "member": "user:gh_2", "handle": "sam" }),
+            ],
+            slug: "bob".into(),
+            kind: "group".into(),
+            ..Default::default()
+        };
+        let shared = people_shared_agent_ids(&msg("Hey agents? Say hi", json!({})), &group);
+        assert_eq!(shared.len(), 2);
+        assert!(shared.contains(&"01HPROJ".to_string()));
+        assert!(shared.contains(&"OTHER".to_string()));
+        let two = people_shared_agent_ids(
+            &msg(
+                "hi",
+                json!({ "mentions": ["agent:01HPROJ", "agent:OTHER"] }),
+            ),
+            &group,
+        );
+        assert_eq!(two.len(), 2);
+        assert!(people_shared_agent_ids(
+            &msg("hi", json!({ "mentions": ["agent:01HPROJ"] })),
+            &group
+        )
+        .is_empty());
     }
 
     #[test]
