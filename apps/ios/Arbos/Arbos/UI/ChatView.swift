@@ -270,7 +270,7 @@ struct ChatView: View {
                         HStack(spacing: 8) {
                             Image(systemName: "magnifyingglass").font(.system(size: 15, weight: .medium)).foregroundStyle(theme.muted)
                             TextField("", text: $searchText, prompt: Text("Search in chat").foregroundStyle(theme.placeholder))
-                                .font(.system(size: Theme.body)).foregroundStyle(theme.text)
+                                .font(theme.font(Theme.body)).foregroundStyle(theme.text)
                                 .focused($searchFocused)
                                 .autocorrectionDisabled()
                             Button { showSearch = false; searchText = "" } label: {
@@ -533,7 +533,7 @@ struct ChatView: View {
             Button { dismiss() } label: {
                 GlassCircle {
                     Image(systemName: "chevron.left")
-                        .font(.system(size: 17, weight: .semibold))
+                        .font(theme.font(17, weight: .semibold))
                         .foregroundStyle(theme.text)
                 }
             }
@@ -548,22 +548,22 @@ struct ChatView: View {
                                               imageUrl: groupImageURL(people))
                                 VStack(alignment: .leading, spacing: 0) {
                                     Text(people.title)
-                                        .font(.system(size: Theme.body, weight: .semibold))
+                                        .font(theme.font(Theme.body, weight: .semibold))
                                         .foregroundStyle(theme.text)
                                         .lineLimit(1)
-                                    Text(groupSubtitle(people)).font(.system(size: 10)).foregroundStyle(theme.muted)
+                                    Text(groupSubtitle(people)).font(theme.font(10)).foregroundStyle(theme.muted)
                                 }
                             } else {
                                 PersonAvatar(url: counterpart?.avatarUrl, handle: counterpart?.handle ?? "?", size: Theme.avatar, name: counterpart?.name, id: counterpart?.id, colorIndex: counterpart?.avatarColorIndex)
                                 VStack(alignment: .leading, spacing: 0) {
                                     Text(counterpart?.displayName ?? people.title)
-                                        .font(.system(size: Theme.body, weight: .semibold))
+                                        .font(theme.font(Theme.body, weight: .semibold))
                                         .foregroundStyle(theme.text)
                                         .lineLimit(1)
                                     if people.pending {
-                                        Text("Invited · opens when they sign in").font(.system(size: 10)).foregroundStyle(theme.muted)
+                                        Text("Invited · opens when they sign in").font(theme.font(10)).foregroundStyle(theme.muted)
                                     } else if !people.agents.isEmpty {
-                                        Text("\(people.agents.count) agent\(people.agents.count == 1 ? "" : "s")").font(.system(size: 10)).foregroundStyle(theme.muted)
+                                        Text("\(people.agents.count) agent\(people.agents.count == 1 ? "" : "s")").font(theme.font(10)).foregroundStyle(theme.muted)
                                     }
                                 }
                             }
@@ -578,7 +578,7 @@ struct ChatView: View {
                                 AgentAvatar(project: project, theme: theme, size: Theme.avatar, dot: machineDotColor(model.machine.state, theme: theme), working: streaming)
                             }
                             Text(name)
-                                .font(.system(size: Theme.body, weight: .semibold))
+                                .font(theme.font(Theme.body, weight: .semibold))
                                 .foregroundStyle(theme.text)
                                 .lineLimit(1)
                         }
@@ -598,7 +598,7 @@ struct ChatView: View {
                 Button { showMembers = true } label: {
                     GlassCircle {
                         Image(systemName: "person.badge.plus")
-                            .font(.system(size: 15, weight: .semibold))
+                            .font(theme.font(15, weight: .semibold))
                             .foregroundStyle(theme.text)
                     }
                 }
@@ -644,7 +644,7 @@ struct ChatView: View {
             } label: {
                 GlassCircle {
                     Image(systemName: "ellipsis")
-                        .font(.system(size: 17, weight: .semibold))
+                        .font(theme.font(17, weight: .semibold))
                         .foregroundStyle(theme.text)
                 }
             }
@@ -668,7 +668,7 @@ struct ChatView: View {
                 Circle().fill(theme.field)
                 Circle().strokeBorder(theme.fieldBorder, lineWidth: 1)
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 15, weight: .medium))
+                    .font(theme.font(15, weight: .medium))
                     .foregroundStyle(theme.text)
             }
             .frame(width: Theme.voiceButton, height: Theme.voiceButton)
@@ -748,11 +748,11 @@ struct ChatView: View {
                                 }
                                 Text(model.machine.state == .error ? "Can't reach your machine" : banner)
                             }
-                            .font(.system(size: Theme.small, weight: model.machine.state == .error ? .semibold : .regular))
+                            .font(theme.font(Theme.small, weight: model.machine.state == .error ? .semibold : .regular))
                             .foregroundStyle(model.machine.state == .error ? theme.text : theme.muted)
                             if model.machine.state == .error {
                                 Text(banner)
-                                    .font(.system(size: Theme.tiny))
+                                    .font(theme.font(Theme.tiny))
                                     .foregroundStyle(theme.muted)
                                     .multilineTextAlignment(.center)
                             }
@@ -951,10 +951,10 @@ struct ChatView: View {
                 AgentAvatar(project: project, theme: theme, size: 64)
             }
             Text(name)
-                .font(.system(size: 20, weight: .semibold))
+                .font(theme.font(20, weight: .semibold))
                 .foregroundStyle(theme.text)
             Text("Ask \(name) anything. It plans, delegates, or answers.")
-                .font(.system(size: Theme.small))
+                .font(theme.font(Theme.small))
                 .foregroundStyle(theme.muted)
                 .multilineTextAlignment(.center)
         }
@@ -1001,10 +1001,10 @@ struct ChatView: View {
                                 PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 18, name: m.name, id: m.id, colorIndex: m.avatarColorIndex)
                             }
                             Text(m.isAgent ? "@\(mentionSlug(m.project?.name ?? m.handle))" : "@\(m.handle)")
-                                .font(.system(size: Theme.tiny, weight: .medium))
+                                .font(theme.font(Theme.tiny, weight: .medium))
                                 .foregroundStyle(theme.text)
                             if m.isAgent, let o = m.ownerHandle {
-                                Text("· @\(o)").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                                Text("· @\(o)").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                             }
                         }
                         .padding(.leading, 6).padding(.trailing, 10).padding(.vertical, 5)
@@ -1023,7 +1023,7 @@ struct ChatView: View {
                 Button { showMembers = true } label: {
                     HStack(spacing: 4) {
                         Image(systemName: "plus").font(.system(size: 11, weight: .bold))
-                        Text("Agent").font(.system(size: Theme.tiny, weight: .medium))
+                        Text("Agent").font(theme.font(Theme.tiny, weight: .medium))
                     }
                     .foregroundStyle(theme.text)
                     .padding(.horizontal, 10).padding(.vertical, 6)
@@ -1071,8 +1071,8 @@ struct ChatView: View {
             if let r = replyTo {
                 HStack(spacing: 8) {
                     Image(systemName: "arrowshape.turn.up.left").font(.system(size: 12)).foregroundStyle(theme.muted)
-                    Text("Replying to @\(r.senderHandle ?? (r.role == .assistant ? "agent" : "you"))").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
-                    Text(r.plainText).font(.system(size: Theme.tiny)).foregroundStyle(theme.text).lineLimit(1)
+                    Text("Replying to @\(r.senderHandle ?? (r.role == .assistant ? "agent" : "you"))").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+                    Text(r.plainText).font(theme.font(Theme.tiny)).foregroundStyle(theme.text).lineLimit(1)
                     Spacer()
                     Button { replyTo = nil } label: { Image(systemName: "xmark").font(.system(size: 11, weight: .bold)).foregroundStyle(theme.muted) }
                         .buttonStyle(.plain)
@@ -1087,8 +1087,8 @@ struct ChatView: View {
                         ForEach(pending) { a in
                             HStack(spacing: 6) {
                                 Image(systemName: a.mime.hasPrefix("image/") ? "photo" : (a.mime.hasPrefix("audio/") ? "waveform" : "doc"))
-                                    .font(.system(size: 12))
-                                Text(a.name).font(.system(size: Theme.tiny)).lineLimit(1)
+                                    .font(theme.font(12))
+                                Text(a.name).font(theme.font(Theme.tiny)).lineLimit(1)
                                 Button { pending.removeAll { $0.id == a.id } } label: {
                                     Image(systemName: "xmark").font(.system(size: 10, weight: .bold))
                                 }
@@ -1109,7 +1109,7 @@ struct ChatView: View {
                         Circle().fill(theme.field)
                         Circle().strokeBorder(theme.fieldBorder.opacity(0.6), lineWidth: 1)
                         Image(systemName: "plus")
-                            .font(.system(size: 21, weight: .regular))
+                            .font(theme.font(21, weight: .regular))
                             .foregroundStyle(theme.text)
                     }
                     .frame(width: Theme.plusButton, height: Theme.plusButton)
@@ -1202,14 +1202,14 @@ struct ChatView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: 24)
                 Text(recorder.timeLabel)
-                    .font(.system(size: Theme.small, design: .monospaced))
+                    .font(theme.font(Theme.small, design: .monospaced))
                     .foregroundStyle(theme.text)
             } else {
                 TextField("", text: $draft, prompt: Text(composerPrompt).foregroundStyle(theme.placeholder), axis: .vertical)
                     .lineLimit(1...8)
                     // Size to the typed text (one line when empty), not the offered height.
                     .fixedSize(horizontal: false, vertical: true)
-                    .font(.system(size: Theme.body))
+                    .font(theme.font(Theme.body))
                     .foregroundStyle(theme.text)
                     .tint(Color(hex: "#1084FE")!)
                     .focused($composerFocused)
@@ -1230,7 +1230,7 @@ struct ChatView: View {
                 // steal the touch. The mic stays mounted while recording so release
                 // can finish without a second tap.
                 Image(systemName: "mic")
-                    .font(.system(size: 17))
+                    .font(theme.font(17))
                     .foregroundStyle(recorder.recording ? theme.danger : theme.icon)
                     .frame(width: 44, height: Theme.fieldHeight)
                     .contentShape(Rectangle())
@@ -1295,7 +1295,7 @@ struct ChatView: View {
                     .frame(width: Theme.voiceButton, height: Theme.voiceButton)
                     .overlay(
                         Image(systemName: (canSend || recorder.recording) ? "arrow.up" : idleButtonGlyph)
-                            .font(.system(size: 16, weight: .bold))
+                            .font(theme.font(16, weight: .bold))
                             .foregroundStyle(theme.onPrimary)
                     )
                     .contentShape(Circle().inset(by: -(44 - Theme.voiceButton) / 2))
@@ -1360,7 +1360,7 @@ struct ChatView: View {
                                 HStack(spacing: 6) {
                                     if m.isAgent, let p = m.project { AgentAvatar(project: p, theme: theme, size: 20, still: true) } else { PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 20, name: m.name, id: m.id, colorIndex: m.avatarColorIndex) }
                                     Text("@\(m.isAgent ? mentionSlug(m.project?.name ?? m.handle) : m.handle)")
-                                        .font(.system(size: Theme.small, weight: .medium)).foregroundStyle(theme.text)
+                                        .font(theme.font(Theme.small, weight: .medium)).foregroundStyle(theme.text)
                                 }
                                 .padding(.leading, 6).padding(.trailing, 12).padding(.vertical, 7)
                                 .background(Capsule().fill(theme.bubbleAssistant))
@@ -1535,6 +1535,7 @@ struct ChatView: View {
 
 /// Soft fade + streaming shimmer on "<name> is working" (Mac `working_line`).
 private struct WorkingStatusText: View {
+    @Environment(\.theme) private var theme
     let text: String
     let color: Color
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -1573,7 +1574,7 @@ private struct WorkingStatusText: View {
 
     private func label<S: ShapeStyle>(_ style: S) -> some View {
         Text(text)
-            .font(.system(size: Theme.small))
+            .font(theme.font(Theme.small))
             .foregroundStyle(style)
     }
 }
@@ -1650,8 +1651,8 @@ struct AttachSheet: View {
                     Image(systemName: icon).font(.system(size: 18)).foregroundStyle(theme.text)
                 }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(title).font(.system(size: Theme.body)).foregroundStyle(theme.text)
-                    Text(subtitle).font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                    Text(title).font(theme.font(Theme.body)).foregroundStyle(theme.text)
+                    Text(subtitle).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                 }
                 Spacer()
             }
@@ -1687,12 +1688,12 @@ struct ModelPickerView: View {
                 Section {
                     HStack(spacing: 8) {
                         Image(systemName: "magnifyingglass")
-                            .font(.system(size: 15, weight: .medium))
+                            .font(theme.font(15, weight: .medium))
                             .foregroundStyle(theme.muted)
                         TextField("", text: $query, prompt: Text("Filter models").foregroundStyle(theme.placeholder))
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
-                            .font(.system(size: Theme.body))
+                            .font(theme.font(Theme.body))
                             .foregroundStyle(theme.text)
                         if !query.isEmpty {
                             Button { query = "" } label: {
@@ -1724,7 +1725,7 @@ struct ModelPickerView: View {
                             HStack {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(Project.shortModel(id)).foregroundStyle(theme.text)
-                                    Text(id).font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                                    Text(id).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                                 }
                                 Spacer()
                                 if id == current.model {
@@ -1741,7 +1742,7 @@ struct ModelPickerView: View {
                 }
                 if !current.modelNote.isEmpty {
                     Section {
-                        Text(current.modelNote).font(.system(size: Theme.tiny)).foregroundStyle(theme.warn)
+                        Text(current.modelNote).font(theme.font(Theme.tiny)).foregroundStyle(theme.warn)
                     }
                 }
             }

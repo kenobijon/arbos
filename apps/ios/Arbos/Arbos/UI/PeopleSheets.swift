@@ -143,7 +143,7 @@ struct NewChatSheet: View {
             TextField("", text: $query, prompt: Text("Search people or agents").foregroundStyle(theme.placeholder))
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
-                .font(.system(size: Theme.body))
+                .font(theme.font(Theme.body))
                 .foregroundStyle(theme.text)
                 .focused($focused)
                 .submitLabel(.go)
@@ -169,7 +169,7 @@ struct NewChatSheet: View {
 
     private func sectionHeader(_ text: String) -> some View {
         Text(text.uppercased())
-            .font(.system(size: 12, weight: .medium))
+            .font(theme.font(12, weight: .medium))
             .kerning(0.4)
             .foregroundStyle(theme.muted)
             .padding(.horizontal, 32)
@@ -191,8 +191,8 @@ struct NewChatSheet: View {
                 Image(systemName: icon).font(.system(size: 17, weight: .semibold)).foregroundStyle(theme.text)
             }
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.system(size: Theme.body, weight: .medium)).foregroundStyle(theme.text)
-                Text(subtitle).font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                Text(title).font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text)
+                Text(subtitle).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
             }
             Spacer()
             Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.muted.opacity(0.7))
@@ -210,18 +210,18 @@ struct NewChatSheet: View {
                 Text(model.credentials == nil
                      ? "Sign in to see who else is on Arbos."
                      : "No one else is on Arbos yet. Search a GitHub username to invite them; the chat opens for both of you when they sign in.")
-                    .font(.system(size: Theme.small)).foregroundStyle(theme.muted)
+                    .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: .infinity)
                     .padding(.horizontal, 36).padding(.top, 20)
             } else {
                 VStack(spacing: 10) {
                     Text("No one on Arbos or GitHub matches @\(trimmed).")
-                        .font(.system(size: Theme.small)).foregroundStyle(theme.muted)
+                        .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
                     if trimmed.count >= 2 {
                         Button { openHandle(trimmed) } label: {
                             Text("Invite @\(trimmed)")
-                                .font(.system(size: Theme.small, weight: .semibold)).foregroundStyle(theme.onPrimary)
+                                .font(theme.font(Theme.small, weight: .semibold)).foregroundStyle(theme.onPrimary)
                                 .padding(.horizontal, 18).frame(height: 38)
                                 .background(Capsule().fill(theme.primary))
                         }
@@ -278,8 +278,8 @@ struct AgentPickRow: View {
         HStack(spacing: 14) {
             AgentAvatar(project: project, theme: theme, size: 44, still: true)
             VStack(alignment: .leading, spacing: 2) {
-                Text(project.name).font(.system(size: Theme.body, weight: .medium)).foregroundStyle(theme.text).lineLimit(1)
-                Text("@\(mentionSlug(project.name))").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted).lineLimit(1)
+                Text(project.name).font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text).lineLimit(1)
+                Text("@\(mentionSlug(project.name))").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).lineLimit(1)
             }
             Spacer()
             if let trailing { trailing }
@@ -300,15 +300,15 @@ struct PersonRow: View {
         HStack(spacing: 14) {
             PersonAvatar(url: person.avatarUrl, handle: person.handle, size: 44, name: person.name, id: person.id, colorIndex: person.avatarColorIndex)
             VStack(alignment: .leading, spacing: 2) {
-                Text(person.displayName).font(.system(size: Theme.body, weight: .medium)).foregroundStyle(theme.text).lineLimit(1)
-                Text("@\(person.handle)").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted).lineLimit(1)
+                Text(person.displayName).font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text).lineLimit(1)
+                Text("@\(person.handle)").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).lineLimit(1)
             }
             Spacer()
             if let trailing {
                 trailing
             } else {
                 Text(PersonRow.statusLabel(person.status))
-                    .font(.system(size: 11, weight: .medium))
+                    .font(theme.font(11, weight: .medium))
                     .foregroundStyle(person.status == "member" ? theme.online : theme.muted)
                     .padding(.horizontal, 9).padding(.vertical, 4)
                     .background(Capsule().fill(theme.field))
@@ -351,9 +351,9 @@ struct NewAgentView: View {
                 .padding(.top, 28)
                 .animation(.snappy, value: "\(clean)|\(pickedColorIndex ?? -1)")
             Text(clean.isEmpty ? "Name your agent" : "@\(mentionSlug(clean))")
-                .font(.system(size: Theme.small)).foregroundStyle(theme.muted)
+                .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
             TextField("", text: $name, prompt: Text("Agent name").foregroundStyle(theme.placeholder))
-                .font(.system(size: Theme.body)).foregroundStyle(theme.text)
+                .font(theme.font(Theme.body)).foregroundStyle(theme.text)
                 .multilineTextAlignment(.center)
                 .autocorrectionDisabled()
                 .focused($focused)
@@ -367,7 +367,7 @@ struct NewAgentView: View {
                 .padding(.horizontal, 24)
             Button(action: create) {
                 Text("Create agent")
-                    .font(.system(size: Theme.body, weight: .semibold)).foregroundStyle(theme.onPrimary)
+                    .font(theme.font(Theme.body, weight: .semibold)).foregroundStyle(theme.onPrimary)
                     .frame(maxWidth: .infinity).frame(height: 50)
                     .background(Capsule().fill(theme.primary))
             }
@@ -376,7 +376,7 @@ struct NewAgentView: View {
             .opacity(clean.isEmpty ? 0.45 : 1)
             .padding(.horizontal, 24)
             Text("A new agent with its own workspace on your machine. You can rename it and pick its model from its profile.")
-                .font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                 .multilineTextAlignment(.center).padding(.horizontal, 36)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer()
@@ -436,7 +436,7 @@ struct NewGroupView: View {
                         ForEach(pickedAgents) { p in
                             HStack(spacing: 6) {
                                 AgentAvatar(project: p, theme: theme, size: 22, still: true)
-                                Text("@\(mentionSlug(p.name))").font(.system(size: Theme.tiny, weight: .medium)).foregroundStyle(theme.text)
+                                Text("@\(mentionSlug(p.name))").font(theme.font(Theme.tiny, weight: .medium)).foregroundStyle(theme.text)
                                 Button { toggleAgent(p) } label: { Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).foregroundStyle(theme.muted) }
                                     .buttonStyle(.plain)
                             }
@@ -446,7 +446,7 @@ struct NewGroupView: View {
                         ForEach(picked) { p in
                             HStack(spacing: 6) {
                                 PersonAvatar(url: p.avatarUrl, handle: p.handle, size: 22, name: p.name, id: p.id, colorIndex: p.avatarColorIndex)
-                                Text("@\(p.handle)").font(.system(size: Theme.tiny, weight: .medium)).foregroundStyle(theme.text)
+                                Text("@\(p.handle)").font(theme.font(Theme.tiny, weight: .medium)).foregroundStyle(theme.text)
                                 Button { toggle(p) } label: { Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).foregroundStyle(theme.muted) }
                                     .buttonStyle(.plain)
                             }
@@ -462,7 +462,7 @@ struct NewGroupView: View {
                 Image(systemName: "magnifyingglass").font(.system(size: 15, weight: .medium)).foregroundStyle(theme.muted)
                 TextField("", text: $query, prompt: Text("Add people or agents").foregroundStyle(theme.placeholder))
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
-                    .font(.system(size: Theme.body)).foregroundStyle(theme.text)
+                    .font(theme.font(Theme.body)).foregroundStyle(theme.text)
             }
             .padding(.horizontal, 12).frame(height: 38)
             .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
@@ -472,7 +472,7 @@ struct NewGroupView: View {
 
             if let errorText {
                 Text(errorText)
-                    .font(.system(size: Theme.small))
+                    .font(theme.font(Theme.small))
                     .foregroundStyle(theme.danger)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 20)
@@ -483,7 +483,7 @@ struct NewGroupView: View {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     if !agentCandidates.isEmpty {
                         Text("YOUR AGENTS")
-                            .font(.system(size: 12, weight: .medium))
+                            .font(theme.font(12, weight: .medium))
                             .kerning(0.4)
                             .foregroundStyle(theme.muted)
                             .padding(.horizontal, 16)
@@ -493,7 +493,7 @@ struct NewGroupView: View {
                                 Button { toggleAgent(p) } label: {
                                     AgentPickRow(project: p, trailing: AnyView(
                                         Image(systemName: pickedAgents.contains(where: { $0.id == p.id }) ? "checkmark.circle.fill" : "circle")
-                                            .font(.system(size: 22))
+                                            .font(theme.font(22))
                                             .foregroundStyle(pickedAgents.contains(where: { $0.id == p.id }) ? theme.text : theme.muted.opacity(0.5))
                                     ))
                                 }
@@ -509,7 +509,7 @@ struct NewGroupView: View {
                     if !candidates.isEmpty || agentCandidates.isEmpty {
                         if !agentCandidates.isEmpty {
                             Text("PEOPLE")
-                                .font(.system(size: 12, weight: .medium))
+                                .font(theme.font(12, weight: .medium))
                                 .kerning(0.4)
                                 .foregroundStyle(theme.muted)
                                 .padding(.horizontal, 16)
@@ -520,7 +520,7 @@ struct NewGroupView: View {
                                 Button { toggle(p) } label: {
                                     PersonRow(person: p, trailing: AnyView(
                                         Image(systemName: picked.contains(p) ? "checkmark.circle.fill" : "circle")
-                                            .font(.system(size: 22))
+                                            .font(theme.font(22))
                                             .foregroundStyle(picked.contains(p) ? theme.text : theme.muted.opacity(0.5))
                                     ))
                                 }
@@ -529,7 +529,7 @@ struct NewGroupView: View {
                             }
                             if candidates.isEmpty {
                                 Text(trimmed.isEmpty ? "No one else on Arbos yet. Search a GitHub username." : "No one matches @\(trimmed).")
-                                    .font(.system(size: Theme.small)).foregroundStyle(theme.muted)
+                                    .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
                                     .multilineTextAlignment(.center).padding(.horizontal, 36).padding(.vertical, 24)
                             }
                         }
@@ -549,7 +549,7 @@ struct NewGroupView: View {
             ToolbarItem(placement: .topBarTrailing) {
                 Button { create() } label: {
                     Text(creating ? "Creating…" : "Create")
-                        .font(.system(size: Theme.small, weight: .semibold))
+                        .font(theme.font(Theme.small, weight: .semibold))
                         .foregroundStyle(theme.onPrimary)
                         .padding(.horizontal, 12)
                         .frame(height: 32)
@@ -628,10 +628,10 @@ struct MembersSheet: View {
                                 Button { model.showProfile(.user(ProfilePerson(m))) } label: { PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 40, name: m.name, id: m.id, colorIndex: m.avatarColorIndex) }.buttonStyle(.plain)
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(m.displayName).foregroundStyle(theme.text)
-                                    Text("@\(m.handle)\(m.status == "invited" ? " · invited" : "")").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                                    Text("@\(m.handle)\(m.status == "invited" ? " · invited" : "")").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                                 }
                                 Spacer()
-                                if m.id == model.user?.id { Text("You").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted) }
+                                if m.id == model.user?.id { Text("You").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted) }
                             }
                             .swipeActions {
                                 if m.id != model.user?.id {
@@ -665,7 +665,7 @@ struct MembersSheet: View {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(a.displayName).foregroundStyle(theme.text)
                                     Text("@\(mentionSlug(a.project?.name ?? a.handle)) · owned by @\(a.ownerHandle ?? "?")\(a.replyPolicy == "every_message" ? " · replies to everything" : "")")
-                                        .font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                                        .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                                 }
                                 Spacer()
                                 if a.ownerId == model.user?.id {
@@ -781,13 +781,13 @@ struct PersonPicker: View {
                     Text(trimmed.isEmpty
                          ? "No one else on Arbos yet. Search a GitHub username."
                          : "No one matches @\(trimmed).")
-                        .font(.system(size: Theme.small)).foregroundStyle(theme.muted)
+                        .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
                     if trimmed.count >= 2, !searching {
                         Button {
                             onPick(Person(id: "github:\(trimmed.lowercased())", handle: trimmed, avatarUrl: nil, name: nil, status: "github"))
                         } label: {
                             Text("Invite @\(trimmed)")
-                                .font(.system(size: Theme.small, weight: .semibold))
+                                .font(theme.font(Theme.small, weight: .semibold))
                                 .foregroundStyle(theme.text)
                         }
                     }
@@ -833,7 +833,7 @@ struct AgentPicker: View {
                         AgentAvatar(project: p, theme: theme, size: 40)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(p.name).foregroundStyle(theme.text)
-                            Text("@\(mentionSlug(p.name))").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                            Text("@\(mentionSlug(p.name))").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                         }
                     }
                 }
@@ -897,7 +897,7 @@ struct ProjectMembersSheet: View {
                                 ProgressView().controlSize(.small).tint(theme.muted)
                             }
                             Button(busy ? "…" : "Invite") { invite() }
-                                .font(.system(size: Theme.small, weight: .semibold))
+                                .font(theme.font(Theme.small, weight: .semibold))
                                 .disabled(busy || trimmed.isEmpty)
                         }
                         if !trimmed.isEmpty {
@@ -907,11 +907,11 @@ struct ProjectMembersSheet: View {
                                         PersonAvatar(url: p.avatarUrl, handle: p.handle, size: 40, name: p.name, id: p.id, colorIndex: p.avatarColorIndex)
                                         VStack(alignment: .leading, spacing: 2) {
                                             Text(p.displayName).foregroundStyle(theme.text)
-                                            Text("@\(p.handle)").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                                            Text("@\(p.handle)").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                                         }
                                         Spacer()
                                         Text(PersonRow.statusLabel(p.status))
-                                            .font(.system(size: 11, weight: .medium))
+                                            .font(theme.font(11, weight: .medium))
                                             .foregroundStyle(p.status == "member" ? theme.online : theme.muted)
                                     }
                                 }
@@ -920,7 +920,7 @@ struct ProjectMembersSheet: View {
                             }
                             if suggestions.isEmpty && !searching && trimmed.count >= 2 {
                                 Text("No one matches @\(trimmed).")
-                                    .font(.system(size: Theme.small)).foregroundStyle(theme.muted)
+                                    .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
                             }
                         }
                     } footer: {
@@ -934,7 +934,7 @@ struct ProjectMembersSheet: View {
                             Button { model.showProfile(.user(ProfilePerson(m))) } label: { PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 40, name: m.name, id: m.id, colorIndex: m.avatarColorIndex) }.buttonStyle(.plain)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(m.name?.isEmpty == false ? m.name! : m.handle).foregroundStyle(theme.text)
-                                Text("@\(m.handle) · \(m.role)\(m.status == "invited" ? " · invited" : "")").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                                Text("@\(m.handle) · \(m.role)\(m.status == "invited" ? " · invited" : "")").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                             }
                         }
                         .swipeActions {

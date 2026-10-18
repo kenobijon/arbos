@@ -79,12 +79,12 @@ struct ProfileHeader<Avatar: View>: View {
         VStack(spacing: 10) {
             avatar().frame(width: 112, height: 112)
             Text(name)
-                .font(.system(size: 28, weight: .semibold))
+                .font(theme.font(28, weight: .semibold))
                 .foregroundStyle(theme.text)
                 .lineLimit(1)
                 .padding(.horizontal, 24)
             Text(status)
-                .font(.system(size: Theme.small))
+                .font(theme.font(Theme.small))
                 .foregroundStyle(statusOnline ? Color(hex: "#1084FE")! : theme.muted)
         }
         .padding(.top, -24)
@@ -117,13 +117,13 @@ struct ProfileActionRow: View {
                         ZStack(alignment: .topTrailing) {
                             Image(systemName: a.icon).font(.system(size: 20, weight: .medium))
                             if a.soon {
-                                Text("soon").font(.system(size: 8, weight: .bold)).foregroundStyle(theme.bg)
+                                Text("soon").font(theme.font(8, weight: .bold)).foregroundStyle(theme.bg)
                                     .padding(.horizontal, 4).padding(.vertical, 1)
                                     .background(Capsule().fill(theme.muted))
                                     .offset(x: 14, y: -8)
                             }
                         }
-                        Text(a.label).font(.system(size: 12))
+                        Text(a.label).font(theme.font(12))
                     }
                     .foregroundStyle(a.destructive ? theme.danger : (a.enabled ? accent : theme.muted))
                     .frame(maxWidth: .infinity).frame(height: 64)
@@ -166,8 +166,8 @@ struct ProfileInfoRow: View {
     var body: some View {
         HStack {
             VStack(alignment: .leading, spacing: 3) {
-                Text(label).font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
-                Text(value).font(.system(size: Theme.body)).foregroundStyle(tint ?? theme.text).textSelection(.enabled)
+                Text(label).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+                Text(value).font(theme.font(Theme.body)).foregroundStyle(tint ?? theme.text).textSelection(.enabled)
             }
             Spacer()
             if let trailingIcon { Image(systemName: trailingIcon).font(.system(size: 18)).foregroundStyle(Color(hex: "#1084FE")!) }
@@ -186,7 +186,7 @@ struct ProfileLinkRow: View {
     var body: some View {
         Button(action: action) {
             HStack {
-                Text(title).font(.system(size: Theme.body)).foregroundStyle(destructive ? theme.danger : Color(hex: "#1084FE")!)
+                Text(title).font(theme.font(Theme.body)).foregroundStyle(destructive ? theme.danger : Color(hex: "#1084FE")!)
                 Spacer()
             }
             .padding(.horizontal, 16).frame(height: 48)
@@ -207,7 +207,7 @@ struct ProfileTabs: View {
             ForEach(tabs, id: \.self) { t in
                 Button { withAnimation(.snappy(duration: 0.2)) { selected = t } } label: {
                     Text(t)
-                        .font(.system(size: Theme.small, weight: .medium))
+                        .font(theme.font(Theme.small, weight: .medium))
                         .foregroundStyle(theme.text)
                         .padding(.horizontal, 16).frame(height: 36)
                         .background(Capsule().fill(selected == t ? theme.field : .clear))
@@ -293,7 +293,7 @@ struct ChatItemsList: View {
 
     var body: some View {
         if filtered.isEmpty {
-            Text(empty).font(.system(size: Theme.small)).foregroundStyle(theme.muted)
+            Text(empty).font(theme.font(Theme.small)).foregroundStyle(theme.muted)
                 .frame(maxWidth: .infinity).padding(.top, 36).padding(.horizontal, 32).multilineTextAlignment(.center)
         } else if kind == .media {
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 2), count: 3), spacing: 2) {
@@ -337,12 +337,12 @@ struct ChatItemsList: View {
         HStack(spacing: 12) {
             GlassCircle(size: 40) {
                 Image(systemName: item.kind == .voice ? "waveform" : item.kind == .link ? "link" : "doc.fill")
-                    .font(.system(size: 16, weight: .medium)).foregroundStyle(theme.text)
+                    .font(theme.font(16, weight: .medium)).foregroundStyle(theme.text)
             }
             VStack(alignment: .leading, spacing: 3) {
-                Text(item.title).font(.system(size: Theme.body)).foregroundStyle(theme.text).lineLimit(1)
+                Text(item.title).font(theme.font(Theme.body)).foregroundStyle(theme.text).lineLimit(1)
                 Text(item.kind == .link ? item.subtitle : "\(item.fromHandle.map { "@\($0) · " } ?? "")\(Date(timeIntervalSince1970: Double(item.at) / 1000).formatted(date: .abbreviated, time: .omitted))")
-                    .font(.system(size: Theme.tiny)).foregroundStyle(item.kind == .link ? Color(hex: "#1084FE")! : theme.muted).lineLimit(1)
+                    .font(theme.font(Theme.tiny)).foregroundStyle(item.kind == .link ? Color(hex: "#1084FE")! : theme.muted).lineLimit(1)
             }
             Spacer()
         }
@@ -369,14 +369,14 @@ struct MemberStatusRow: View {
             }
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    Text(agent?.name ?? person.displayName).font(.system(size: Theme.body)).foregroundStyle(theme.text).lineLimit(1)
-                    if isMe { Text("you").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted) }
+                    Text(agent?.name ?? person.displayName).font(theme.font(Theme.body)).foregroundStyle(theme.text).lineLimit(1)
+                    if isMe { Text("you").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted) }
                 }
-                Text(status.text).font(.system(size: Theme.tiny)).foregroundStyle(status.online ? Color(hex: "#1084FE")! : theme.muted)
+                Text(status.text).font(theme.font(Theme.tiny)).foregroundStyle(status.online ? Color(hex: "#1084FE")! : theme.muted)
             }
             Spacer()
             if let badge {
-                Text(badge).font(.system(size: 12, weight: .medium))
+                Text(badge).font(theme.font(12, weight: .medium))
                     .foregroundStyle(badge == "owner" ? Color(hex: "#8B5CF6")! : theme.online)
                     .padding(.horizontal, 8).padding(.vertical, 3)
                     .background(Capsule().fill((badge == "owner" ? Color(hex: "#8B5CF6")! : theme.online).opacity(0.15)))
@@ -492,7 +492,7 @@ struct UserProfileView: View {
         let groups = sharedGroups
         return Group {
             if groups.isEmpty && sharedProjects.isEmpty {
-                Text("No groups in common yet.").font(.system(size: Theme.small)).foregroundStyle(theme.muted).padding(.top, 36)
+                Text("No groups in common yet.").font(theme.font(Theme.small)).foregroundStyle(theme.muted).padding(.top, 36)
             } else {
                 ProfileCard {
                     ForEach(groups) { g in
@@ -500,8 +500,8 @@ struct UserProfileView: View {
                             HStack(spacing: 12) {
                                 GlassCircle(size: 40) { Image(systemName: "person.2.fill").font(.system(size: 15)).foregroundStyle(theme.text) }
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text(g.title).font(.system(size: Theme.body)).foregroundStyle(theme.text)
-                                    Text("\(g.humans.count) members").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                                    Text(g.title).font(theme.font(Theme.body)).foregroundStyle(theme.text)
+                                    Text("\(g.humans.count) members").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                                 }
                                 Spacer()
                             }
@@ -515,8 +515,8 @@ struct UserProfileView: View {
                             HStack(spacing: 12) {
                                 AgentAvatar(project: p, theme: theme, size: 40, still: true)
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text(p.name).font(.system(size: Theme.body)).foregroundStyle(theme.text)
-                                    Text("shared project · @\(p.ownerHandle ?? model.user?.login ?? "")").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                                    Text(p.name).font(theme.font(Theme.body)).foregroundStyle(theme.text)
+                                    Text("shared project · @\(p.ownerHandle ?? model.user?.login ?? "")").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                                 }
                                 Spacer()
                             }
@@ -671,12 +671,12 @@ struct GroupProfileView: View {
             ProfileTopBar {
                 if people != nil {
                     Button("Edit") { showEdit = true }
-                        .font(.system(size: Theme.body, weight: .medium)).foregroundStyle(theme.text)
+                        .font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text)
                         .padding(.horizontal, 14).frame(height: Theme.control)
                         .background(Capsule().fill(theme.field))
                 } else if project != nil, project?.shared != true {
                     Button("Edit") { model.showProfile(.agent(projectId: projectId!)) }
-                        .font(.system(size: Theme.body, weight: .medium)).foregroundStyle(theme.text)
+                        .font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text)
                         .padding(.horizontal, 14).frame(height: Theme.control)
                         .background(Capsule().fill(theme.field))
                 }
@@ -727,7 +727,7 @@ struct GroupProfileView: View {
             Button { showAdd = true } label: {
                 HStack(spacing: 12) {
                     GlassCircle(size: 40) { Image(systemName: "person.badge.plus").font(.system(size: 16, weight: .medium)).foregroundStyle(Color(hex: "#1084FE")!) }
-                    Text("Add Members").font(.system(size: Theme.body)).foregroundStyle(Color(hex: "#1084FE")!)
+                    Text("Add Members").font(theme.font(Theme.body)).foregroundStyle(Color(hex: "#1084FE")!)
                     Spacer()
                 }
                 .padding(.horizontal, 14).padding(.vertical, 9).contentShape(Rectangle())
@@ -765,7 +765,7 @@ struct GroupProfileView: View {
                             }
                         } label: {
                             Image(systemName: "ellipsis")
-                                .font(.system(size: 16, weight: .medium))
+                                .font(theme.font(16, weight: .medium))
                                 .foregroundStyle(theme.muted)
                                 .frame(width: 36, height: 44)
                                 .contentShape(Rectangle())
@@ -826,7 +826,7 @@ struct GroupEditSheet: View {
                             }
                             GlassCircle(size: 36) {
                                 Image(systemName: "camera.fill")
-                                    .font(.system(size: 14, weight: .semibold))
+                                    .font(theme.font(14, weight: .semibold))
                                     .foregroundStyle(theme.text)
                             }
                             .offset(x: 4, y: 4)
@@ -836,9 +836,9 @@ struct GroupEditSheet: View {
                     .accessibilityLabel("Choose group image")
 
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Group name").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                        Text("Group name").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                         TextField("", text: $name, prompt: Text("Name this group").foregroundStyle(theme.placeholder))
-                            .font(.system(size: Theme.body))
+                            .font(theme.font(Theme.body))
                             .foregroundStyle(theme.text)
                             .autocorrectionDisabled()
                             .focused($nameFocused)
@@ -849,7 +849,7 @@ struct GroupEditSheet: View {
                     .padding(.horizontal, 16)
 
                     Text("A name and picture help everyone recognise this chat. Leave the name blank to use member handles.")
-                        .font(.system(size: Theme.tiny))
+                        .font(theme.font(Theme.tiny))
                         .foregroundStyle(theme.muted)
                         .multilineTextAlignment(.center)
                         .padding(.horizontal, 28)
@@ -870,7 +870,7 @@ struct GroupEditSheet: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { Task { await save() } } label: {
                         Text(saving ? "Saving…" : "Save")
-                            .font(.system(size: Theme.small, weight: .semibold))
+                            .font(theme.font(Theme.small, weight: .semibold))
                             .foregroundStyle(theme.onPrimary)
                             .padding(.horizontal, 12).frame(height: 32)
                             .background(Capsule().fill(theme.primary))

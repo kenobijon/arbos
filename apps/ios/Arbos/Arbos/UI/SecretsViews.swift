@@ -24,9 +24,9 @@ struct SecretRowLabel<Trailing: View>: View {
                 .overlay(Image(systemName: icon).font(.system(size: 15, weight: .semibold)).foregroundStyle(.white))
                 .opacity(dim ? 0.55 : 1)
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.system(size: Theme.body)).foregroundStyle(dim ? theme.muted : theme.text).lineLimit(2)
+                Text(title).font(theme.font(Theme.body)).foregroundStyle(dim ? theme.muted : theme.text).lineLimit(2)
                 if let subtitle, !subtitle.isEmpty {
-                    Text(subtitle).font(.system(size: Theme.tiny)).foregroundStyle(theme.muted).lineLimit(2)
+                    Text(subtitle).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).lineLimit(2)
                 }
             }
             Spacer(minLength: 8)
@@ -51,7 +51,7 @@ struct SecretAddRow: View {
                     .fill(theme.field)
                     .frame(width: SettingsRow.tile, height: SettingsRow.tile)
                     .overlay(Image(systemName: "plus").font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.text))
-                Text(title).font(.system(size: Theme.body)).foregroundStyle(theme.text)
+                Text(title).font(theme.font(Theme.body)).foregroundStyle(theme.text)
                 Spacer()
             }
             .padding(.horizontal, 16)
@@ -101,7 +101,7 @@ struct AgentChips: View {
                     } label: {
                         HStack(spacing: 6) {
                             AgentAvatar(project: p, theme: theme, size: 20, still: true)
-                            Text(p.name).font(.system(size: Theme.small, weight: .medium)).lineLimit(1)
+                            Text(p.name).font(theme.font(Theme.small, weight: .medium)).lineLimit(1)
                             if on { Image(systemName: "checkmark").font(.system(size: 11, weight: .bold)) }
                         }
                         .foregroundStyle(on ? theme.onPrimary : theme.text)
@@ -113,7 +113,7 @@ struct AgentChips: View {
                     .buttonStyle(.plain)
                 }
                 if projects.isEmpty {
-                    Text("No agents yet").font(.system(size: Theme.small)).foregroundStyle(theme.muted)
+                    Text("No agents yet").font(theme.font(Theme.small)).foregroundStyle(theme.muted)
                 }
             }
             .padding(.horizontal, 1)
@@ -129,10 +129,10 @@ struct SecretField<Content: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(label).font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+            Text(label).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
             content()
             if let hint {
-                Text(hint).font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                Text(hint).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
             }
         }
     }
@@ -172,7 +172,7 @@ struct SecretTextField: View {
                     .frame(height: Theme.fieldHeight)
             }
         }
-        .font(.system(size: Theme.body, design: mono ? .monospaced : .default))
+        .font(theme.font(Theme.body, design: mono ? .monospaced : .default))
         .foregroundStyle(theme.text)
         .textInputAutocapitalization(capitalization)
         .autocorrectionDisabled()
@@ -200,7 +200,7 @@ struct RequestAnswers: View {
     private func answer(_ label: String, _ id: String, destructive: Bool = false) -> some View {
         Button { Haptics.pick(); decide(id) } label: {
             Text(label)
-                .font(.system(size: Theme.tiny, weight: .medium))
+                .font(theme.font(Theme.tiny, weight: .medium))
                 .foregroundStyle(destructive ? theme.danger : theme.text)
                 .padding(.horizontal, 10)
                 .frame(height: 28)
@@ -256,9 +256,9 @@ struct SecretRequestRow: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(request.host.map { "\(request.name) at \($0)" } ?? request.name)
-                        .font(.system(size: Theme.body)).foregroundStyle(theme.text)
+                        .font(theme.font(Theme.body)).foregroundStyle(theme.text)
                     Text([request.projectName, request.purpose.isEmpty ? nil : request.purpose, SecretsText.ago(request.createdAt)].compactMap { $0 }.joined(separator: " · "))
-                        .font(.system(size: Theme.tiny)).foregroundStyle(theme.muted).lineLimit(2)
+                        .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).lineLimit(2)
                 }
                 Spacer()
             }
@@ -278,10 +278,10 @@ struct ActivityRows: View {
         ForEach(items) { a in
             VStack(alignment: .leading, spacing: 2) {
                 Text(a.line)
-                    .font(.system(size: Theme.small))
+                    .font(theme.font(Theme.small))
                     .foregroundStyle(a.action == "refused" ? theme.danger : theme.text)
                     .lineLimit(2)
-                Text(SecretsText.ago(a.at)).font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                Text(SecretsText.ago(a.at)).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 16)
@@ -448,8 +448,8 @@ struct SecretPage: View {
                 if !s.note.isEmpty {
                     SettingsGroup {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("Note").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
-                            Text(s.note).font(.system(size: Theme.body)).foregroundStyle(theme.text)
+                            Text("Note").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+                            Text(s.note).font(theme.font(Theme.body)).foregroundStyle(theme.text)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 16).padding(.vertical, 12)
@@ -465,17 +465,17 @@ struct SecretPage: View {
                     }
                     SettingsValueRow("Used at", value: s.hosts.isEmpty ? "Decided at first use" : s.hosts.joined(separator: ", "))
                     HStack {
-                        Text("Value").font(.system(size: Theme.body)).foregroundStyle(theme.text)
+                        Text("Value").font(theme.font(Theme.body)).foregroundStyle(theme.text)
                         Spacer()
-                        Text("••••••").font(.system(size: Theme.body)).foregroundStyle(theme.muted)
+                        Text("••••••").font(theme.font(Theme.body)).foregroundStyle(theme.muted)
                         Button("Replace…") { showReplace = true }
-                            .font(.system(size: Theme.body)).foregroundStyle(Color(hex: "#1084FE")!)
+                            .font(theme.font(Theme.body)).foregroundStyle(Color(hex: "#1084FE")!)
                             .disabled(model.isFixture)
                     }
                     .padding(.horizontal, 16).frame(minHeight: SettingsRow.height)
                     SettingsValueRow("Expires", value: s.expiresAt.map { SecretsText.shortDate($0) } ?? "Never")
                     HStack {
-                        Text("Ask every time").font(.system(size: Theme.body)).foregroundStyle(theme.text)
+                        Text("Ask every time").font(theme.font(Theme.body)).foregroundStyle(theme.text)
                         Spacer()
                         Toggle("", isOn: Binding(get: { s.askEveryTime }, set: { model.patchSecret(s.id, ["ask_every_time": $0]) }))
                             .labelsHidden().tint(theme.online).disabled(model.isFixture)
@@ -499,7 +499,7 @@ struct SecretPage: View {
                     }
                     if s.agents.isEmpty {
                         Text("No agent has access yet.")
-                            .font(.system(size: Theme.small)).foregroundStyle(theme.muted)
+                            .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.horizontal, 16).padding(.vertical, 12)
                     }
@@ -514,7 +514,7 @@ struct SecretPage: View {
                     }
                     if s.directors.isEmpty {
                         Text("Only you right now.")
-                            .font(.system(size: Theme.small)).foregroundStyle(theme.muted)
+                            .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.horizontal, 16).padding(.vertical, 12)
                     }
@@ -523,7 +523,7 @@ struct SecretPage: View {
                 SettingsGroup(header: "Activity") {
                     if activity.isEmpty {
                         Text("No activity in the last 30 days.")
-                            .font(.system(size: Theme.small)).foregroundStyle(theme.muted)
+                            .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.horizontal, 16).padding(.vertical, 12)
                     } else {
@@ -551,7 +551,7 @@ struct SecretPage: View {
         .overlay(alignment: .topTrailing) {
             if secret != nil {
                 Button("Edit") { showEdit = true }
-                    .font(.system(size: Theme.body, weight: .medium)).foregroundStyle(theme.text)
+                    .font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text)
                     .padding(.horizontal, 14).frame(height: Theme.control)
                     .background(Capsule().fill(theme.field))
                     .padding(.trailing, 20).padding(.top, 6)
@@ -627,9 +627,9 @@ struct SecretPage: View {
         HStack(spacing: 14) {
             PersonAvatar(url: d.avatarUrl, handle: d.handle.isEmpty ? d.userId : d.handle, size: SettingsRow.tile, name: d.name, id: d.userId)
             VStack(alignment: .leading, spacing: 2) {
-                Text(d.displayName).font(.system(size: Theme.body)).foregroundStyle(theme.text)
+                Text(d.displayName).font(theme.font(Theme.body)).foregroundStyle(theme.text)
                 Text(d.note.isEmpty ? (d.handle.isEmpty ? "May direct agents to use this" : "@\(d.handle)") : d.note)
-                    .font(.system(size: Theme.tiny)).foregroundStyle(theme.muted).lineLimit(2)
+                    .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).lineLimit(2)
             }
             Spacer(minLength: 8)
             Image(systemName: "chevron.right").font(.system(size: 14, weight: .semibold)).foregroundStyle(theme.placeholder)
@@ -647,8 +647,8 @@ struct SecretPage: View {
                 InitialsAvatar(name: a.name, handle: a.name, id: a.projectId, override: nil, size: SettingsRow.tile)
             }
             VStack(alignment: .leading, spacing: 2) {
-                Text(a.name).font(.system(size: Theme.body)).foregroundStyle(theme.text)
-                Text(accessSubtitle(a)).font(.system(size: Theme.tiny)).foregroundStyle(theme.muted).lineLimit(2)
+                Text(a.name).font(theme.font(Theme.body)).foregroundStyle(theme.text)
+                Text(accessSubtitle(a)).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).lineLimit(2)
             }
             Spacer(minLength: 8)
             Toggle("", isOn: Binding(get: { a.enabled }, set: { model.setSecretAccess(secretId: s.id, projectId: a.projectId, enabled: $0) }))
@@ -708,7 +708,7 @@ private struct SheetFrame<Content: View>: View {
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Button(busy ? "Saving…" : action) { save() }
-                    .font(.system(size: Theme.body, weight: .semibold))
+                    .font(theme.font(Theme.body, weight: .semibold))
                     .foregroundStyle(theme.text)
                     .disabled(!canSave || busy)
                     .opacity(canSave && !busy ? 1 : 0.45)
@@ -787,12 +787,12 @@ struct NewSecretSheet: View {
                         ? "On: agents with access get $\(env.isEmpty ? "NAME" : env) itself. Any program they run can use it directly — including to spend money — without asking you. Only for keys you would hand to a CLI."
                         : "Off: agents get a placeholder; the relay fills the value in only through egress, for the allowed hosts. Turn on only for keys a CLI or SDK must read itself.") {
                 Toggle(isOn: $injectEnv) {
-                    Text("Real value in the agent's environment").font(.system(size: Theme.body)).foregroundStyle(theme.text)
+                    Text("Real value in the agent's environment").font(theme.font(Theme.body)).foregroundStyle(theme.text)
                 }
                 .tint(theme.online)
             }
             if let error {
-                Text(error).font(.system(size: Theme.small)).foregroundStyle(theme.danger)
+                Text(error).font(theme.font(Theme.small)).foregroundStyle(theme.danger)
             }
         }
     }
@@ -862,12 +862,12 @@ struct EditSecretSheet: View {
                         DatePicker("", selection: Binding(get: { e }, set: { expires = $0 }), in: Date()..., displayedComponents: .date)
                             .labelsHidden()
                     } else {
-                        Text("Never").font(.system(size: Theme.body)).foregroundStyle(theme.muted)
+                        Text("Never").font(theme.font(Theme.body)).foregroundStyle(theme.muted)
                     }
                     Spacer()
                 }
             }
-            if let error { Text(error).font(.system(size: Theme.small)).foregroundStyle(theme.danger) }
+            if let error { Text(error).font(theme.font(Theme.small)).foregroundStyle(theme.danger) }
         }
         .onAppear {
             name = secret.name
@@ -911,7 +911,7 @@ struct ReplaceValueSheet: View {
     var body: some View {
         SheetFrame(title: "Replace value", action: "Replace", canSave: canSave, busy: busy, save: { Task { await save() } }) {
             Text("The old value keeps working for 24 hours while agents pick up the new one.")
-                .font(.system(size: Theme.small)).foregroundStyle(theme.muted)
+                .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
             if secret.kind == "login" {
                 SecretField(label: "Sign-in URL") { SecretTextField(placeholder: "https://…", text: $url, keyboard: .URL) }
                 SecretField(label: "Username") { SecretTextField(placeholder: secret.username ?? "name@example.com", text: $username, keyboard: .emailAddress) }
@@ -923,7 +923,7 @@ struct ReplaceValueSheet: View {
                     SecretTextField(placeholder: secret.kind == "text" ? "Paste the new text" : "sk_live_…", text: $value, secure: secret.kind != "text", multiline: secret.kind == "text", mono: true)
                 }
             }
-            if let error { Text(error).font(.system(size: Theme.small)).foregroundStyle(theme.danger) }
+            if let error { Text(error).font(theme.font(Theme.small)).foregroundStyle(theme.danger) }
         }
         .onAppear { username = secret.username ?? "" }
     }
@@ -974,10 +974,10 @@ struct AddDirectorSheet: View {
     var body: some View {
         SheetFrame(title: "Who can direct", action: "Add", canSave: picked != nil, busy: busy, save: { Task { await save() } }) {
             Text("\(secret.env) stays yours. The person you add may ask your agents to use it; anyone else may not.")
-                .font(.system(size: Theme.small)).foregroundStyle(theme.muted)
+                .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
             SecretField(label: "Person") {
                 TextField("", text: $query, prompt: Text("Search by name or @handle").foregroundStyle(theme.placeholder))
-                    .font(.system(size: Theme.body))
+                    .font(theme.font(Theme.body))
                     .foregroundStyle(theme.text)
                     .padding(.horizontal, 14)
                     .frame(height: Theme.fieldHeight)
@@ -988,9 +988,9 @@ struct AddDirectorSheet: View {
                 if let picked {
                     HStack(spacing: 10) {
                         PersonAvatar(url: picked.avatarUrl, handle: picked.handle, size: 28, name: picked.name, id: picked.id, colorIndex: picked.avatarColorIndex)
-                        Text(picked.displayName).font(.system(size: Theme.body)).foregroundStyle(theme.text)
+                        Text(picked.displayName).font(theme.font(Theme.body)).foregroundStyle(theme.text)
                         Spacer()
-                        Button("Change") { self.picked = nil }.font(.system(size: Theme.small)).foregroundStyle(Color(hex: "#1084FE")!)
+                        Button("Change") { self.picked = nil }.font(theme.font(Theme.small)).foregroundStyle(Color(hex: "#1084FE")!)
                     }
                     .padding(.top, 8)
                 } else if !candidates.isEmpty {
@@ -1013,7 +1013,7 @@ struct AddDirectorSheet: View {
                 SecretTextField(placeholder: "only 1k usd of credit usage per day", text: $note, capitalization: .sentences)
             }
             if let error {
-                Text(error).font(.system(size: Theme.tiny)).foregroundStyle(theme.danger)
+                Text(error).font(theme.font(Theme.tiny)).foregroundStyle(theme.danger)
             }
         }
         .task { await model.loadDirectory(force: false) }
@@ -1057,9 +1057,9 @@ struct DirectorEditSheet: View {
             HStack(spacing: 12) {
                 PersonAvatar(url: director.avatarUrl, handle: director.handle.isEmpty ? director.userId : director.handle, size: 44, name: director.name, id: director.userId)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(director.displayName).font(.system(size: Theme.body)).foregroundStyle(theme.text)
+                    Text(director.displayName).font(theme.font(Theme.body)).foregroundStyle(theme.text)
                     if !director.handle.isEmpty {
-                        Text("@\(director.handle)").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                        Text("@\(director.handle)").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                     }
                 }
                 Spacer()
@@ -1072,7 +1072,7 @@ struct DirectorEditSheet: View {
                 dismiss()
             } label: {
                 Text("Remove")
-                    .font(.system(size: Theme.body, weight: .semibold))
+                    .font(theme.font(Theme.body, weight: .semibold))
                     .foregroundStyle(theme.danger)
                     .frame(maxWidth: .infinity).frame(height: 48)
                     .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
@@ -1110,7 +1110,7 @@ struct GiveAccessSheet: View {
     var body: some View {
         SheetFrame(title: "Give access", action: "Save", canSave: !picked.isEmpty, busy: busy, save: { Task { await save() } }) {
             Text("\(secret.env) will be usable by the agents you pick, without them ever seeing it.")
-                .font(.system(size: Theme.small)).foregroundStyle(theme.muted)
+                .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
             SecretField(label: "Agents") { AgentChips(picked: $picked) }
             SecretField(label: "Note for the agent", hint: SecretsText.accessNoteHint) { SecretTextField(placeholder: "reports only · may spend up to $5 a day", text: $note, capitalization: .sentences) }
         }
@@ -1160,7 +1160,7 @@ struct AccessEditSheet: View {
                 .pickerStyle(.segmented)
                 .disabled(access.scopeChatId == nil)
                 if access.scopeChatId == nil && !everywhere {
-                    Text("Chat-only access is made from the card in a chat (Allow for this chat).").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                    Text("Chat-only access is made from the card in a chat (Allow for this chat).").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                 }
             }
             Button(role: .destructive) {
@@ -1168,7 +1168,7 @@ struct AccessEditSheet: View {
                 dismiss()
             } label: {
                 Text(access.enabled ? "Turn off" : "Turn on")
-                    .font(.system(size: Theme.body, weight: .semibold))
+                    .font(theme.font(Theme.body, weight: .semibold))
                     .foregroundStyle(access.enabled ? theme.danger : theme.text)
                     .frame(maxWidth: .infinity).frame(height: 48)
                     .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
@@ -1249,7 +1249,7 @@ struct AgentSecretsPage: View {
             SettingsGroup(footer: agentFooter) {
                 if let d = data, d.paused {
                     Text("Secrets are paused. Agents can't use any secret until you turn this off.")
-                        .font(.system(size: Theme.small)).foregroundStyle(theme.danger)
+                        .font(theme.font(Theme.small)).foregroundStyle(theme.danger)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 16).padding(.vertical, 12)
                 }
@@ -1291,7 +1291,7 @@ struct AgentSecretsPage: View {
                     }
                 } else {
                     Text("No activity in the last 30 days.")
-                        .font(.system(size: Theme.small)).foregroundStyle(theme.muted)
+                        .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 16).padding(.vertical, 12)
                 }
@@ -1349,7 +1349,7 @@ struct PickSecretsSheet: View {
     var body: some View {
         SheetFrame(title: "Give access", action: "Save", canSave: !picked.isEmpty, busy: busy, save: { Task { await save() } }) {
             if secrets.isEmpty {
-                Text("Add an API key or password in Settings → Secrets first.").font(.system(size: Theme.small)).foregroundStyle(theme.muted)
+                Text("Add an API key or password in Settings → Secrets first.").font(theme.font(Theme.small)).foregroundStyle(theme.muted)
             }
             VStack(spacing: 0) {
                 ForEach(secrets) { s in
@@ -1361,7 +1361,7 @@ struct PickSecretsSheet: View {
                     } label: {
                         SecretRowLabel(icon: s.icon, title: s.env, subtitle: s.note.isEmpty ? nil : s.note, dim: already.contains(s.id)) {
                             Image(systemName: on ? "checkmark.circle.fill" : "circle")
-                                .font(.system(size: 20)).foregroundStyle(on ? theme.online : theme.placeholder)
+                                .font(theme.font(20)).foregroundStyle(on ? theme.online : theme.placeholder)
                         }
                     }
                     .buttonStyle(.plain)
@@ -1402,24 +1402,24 @@ struct ConnectVaultSheet: View {
         SheetFrame(title: "Connect 1Password", action: "Connect", canSave: token.trimmingCharacters(in: .whitespaces).count > 20, busy: busy, save: { Task { await connect() } }) {
             step(1, "In 1Password, create a service account with read access to one vault, e.g. \"Arbos — Research\".") {
                 SwiftUI.Link("Open 1password.com", destination: URL(string: "https://my.1password.com/developer-tools/infrastructure-secrets/serviceaccount/")!)
-                    .font(.system(size: Theme.small, weight: .medium)).foregroundStyle(Color(hex: "#1084FE")!)
+                    .font(theme.font(Theme.small, weight: .medium)).foregroundStyle(Color(hex: "#1084FE")!)
             }
             step(2, "Paste its token") {
                 SecretTextField(placeholder: "ops_••••••••••••••••••••", text: $token, secure: true, mono: true)
-                Text("Stored encrypted. Arbos never shows it again.").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                Text("Stored encrypted. Arbos never shows it again.").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
             }
             SecretField(label: "Agents that may use this vault") { AgentChips(picked: $picked) }
             SecretField(label: "Note", hint: SecretsText.vaultNoteHint) { SecretTextField(placeholder: "read-only · confirm before charging", text: $note, capitalization: .sentences) }
-            if let error { Text(error).font(.system(size: Theme.small)).foregroundStyle(theme.danger) }
+            if let error { Text(error).font(theme.font(Theme.small)).foregroundStyle(theme.danger) }
         }
     }
 
     private func step<C: View>(_ n: Int, _ text: String, @ViewBuilder _ content: () -> C) -> some View {
         HStack(alignment: .top, spacing: 12) {
-            Text("\(n)").font(.system(size: 14, weight: .semibold)).foregroundStyle(theme.onPrimary)
+            Text("\(n)").font(theme.font(14, weight: .semibold)).foregroundStyle(theme.onPrimary)
                 .frame(width: 24, height: 24).background(Circle().fill(theme.primary))
             VStack(alignment: .leading, spacing: 8) {
-                Text(text).font(.system(size: Theme.body)).foregroundStyle(theme.text)
+                Text(text).font(theme.font(Theme.body)).foregroundStyle(theme.text)
                 content()
             }
         }
@@ -1488,9 +1488,9 @@ struct VaultPage: View {
                                 InitialsAvatar(name: a.name, handle: a.name, id: a.projectId, override: nil, size: SettingsRow.tile)
                             }
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(a.name).font(.system(size: Theme.body)).foregroundStyle(theme.text)
+                                Text(a.name).font(theme.font(Theme.body)).foregroundStyle(theme.text)
                                 Text(a.note.isEmpty ? SecretsText.usage(lastUsedAt: a.lastUsedAt, disabledAt: a.disabledAt, enabled: a.enabled) : a.note)
-                                    .font(.system(size: Theme.tiny)).foregroundStyle(theme.muted).lineLimit(2)
+                                    .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).lineLimit(2)
                             }
                             Spacer(minLength: 8)
                             Toggle("", isOn: Binding(get: { a.enabled }, set: { model.setVaultAccess(vaultId: v.id, projectId: a.projectId, enabled: $0) }))
@@ -1505,16 +1505,16 @@ struct VaultPage: View {
                 }
                 SettingsGroup(header: "Items") {
                     TextField("", text: $search, prompt: Text("Search items").foregroundStyle(theme.placeholder))
-                        .font(.system(size: Theme.body)).foregroundStyle(theme.text)
+                        .font(theme.font(Theme.body)).foregroundStyle(theme.text)
                         .padding(.horizontal, 16).frame(minHeight: SettingsRow.height)
                     ForEach(Array(filtered.prefix(50).enumerated()), id: \.offset) { _, it in
                         let on = (it["inject_env"] as? Bool) ?? false
                         let env = (it["env"] as? String) ?? ""
                         HStack(spacing: 12) {
                             VStack(alignment: .leading, spacing: 2) {
-                                Text((it["title"] as? String) ?? "Item").font(.system(size: Theme.body)).foregroundStyle(theme.text)
+                                Text((it["title"] as? String) ?? "Item").font(theme.font(Theme.body)).foregroundStyle(theme.text)
                                 Text(on ? "Real value as $\(env) in the agents' environment" : ((it["fields"] as? [String]) ?? []).joined(separator: " · "))
-                                    .font(.system(size: Theme.tiny)).foregroundStyle(theme.muted).lineLimit(2)
+                                    .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).lineLimit(2)
                             }
                             Spacer(minLength: 8)
                             Toggle("", isOn: Binding(get: { on }, set: { setItemEnv(it, on: $0) }))
@@ -1524,13 +1524,13 @@ struct VaultPage: View {
                         .padding(.horizontal, 16).padding(.vertical, 9)
                     }
                     if items.isEmpty {
-                        Text(busy ? "Loading…" : "No items listed yet.").font(.system(size: Theme.small)).foregroundStyle(theme.muted)
+                        Text(busy ? "Loading…" : "No items listed yet.").font(theme.font(Theme.small)).foregroundStyle(theme.muted)
                             .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16).padding(.vertical, 12)
                     }
                 }
                 SettingsGroup(header: "Activity") {
                     if activity.isEmpty {
-                        Text("No activity in the last 30 days.").font(.system(size: Theme.small)).foregroundStyle(theme.muted)
+                        Text("No activity in the last 30 days.").font(theme.font(Theme.small)).foregroundStyle(theme.muted)
                             .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16).padding(.vertical, 12)
                     } else {
                         ActivityRows(items: Array(activity.prefix(5)))

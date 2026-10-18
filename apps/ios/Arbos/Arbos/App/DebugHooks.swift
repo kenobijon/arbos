@@ -37,6 +37,8 @@ enum DebugHooks {
     static var onboardingProfile: Bool { value("ARBOS_ONBOARDING_PROFILE") == "1" }
     /// With `ARBOS_SHOW=settings`: the Settings page to land on (`appearance`).
     static var settingsPage: String? { value("ARBOS_SETTINGS_PAGE") }
+    /// Text Size factor for screenshot sweeps (one of TextScale.steps, e.g. 0.85 / 1.3).
+    static var textScale: Double? { value("ARBOS_TEXT_SCALE").flatMap(Double.init) }
     /// Scripted tour for the screen recording (fixture only).
     static var demo: Bool { value("ARBOS_DEMO") == "1" }
     /// Scripted tour against the live relay: sends ARBOS_AUTO_SEND, waits for the reply, tours the sheets.

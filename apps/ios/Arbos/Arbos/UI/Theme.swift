@@ -22,9 +22,38 @@ enum Haptics {
     static func pick() { selection.selectionChanged() }
 }
 
+/// Telegram-style text size steps (Q6). Index 3 = the design size.
+enum TextScale {
+    static let steps: [CGFloat] = [0.85, 0.9, 0.95, 1.0, 1.1, 1.2, 1.3]
+    static let defaultIndex = 3
+    static let key = "textScale"
+
+    static func index(for scale: CGFloat) -> Int {
+        var best = defaultIndex
+        var bestD = CGFloat.greatestFiniteMagnitude
+        for (i, s) in steps.enumerated() where abs(s - scale) < bestD { best = i; bestD = abs(s - scale) }
+        return best
+    }
+
+    static func label(_ scale: CGFloat) -> String {
+        switch index(for: scale) {
+        case 0: return "Smallest"
+        case 1: return "Smaller"
+        case 2: return "Small"
+        case 3: return "Default"
+        case 4: return "Large"
+        case 5: return "Larger"
+        default: return "Largest"
+        }
+    }
+}
+
 struct Theme {
     let isDark: Bool
     var surface: Surface
+    /// Q6 text size: one factor over every point size that goes through `font(_:)`
+    /// (Settings → Appearance → Text Size; `TextScale.steps`, default 1).
+    var textScale: CGFloat = 1
 
     let bg: Color
     /// Assistant bubble.
@@ -129,7 +158,7 @@ struct Theme {
         userCodeChip: Color.white.opacity(0.14)
     )
 
-    static func resolve(appearance: Appearance, surface: Surface, systemDark: Bool) -> Theme {
+    static func resolve(appearance: Appearance, surface: Surface, systemDark: Bool, textScale: CGFloat = 1) -> Theme {
         let dark: Bool
         switch appearance {
         case .system: dark = systemDark
@@ -138,8 +167,19 @@ struct Theme {
         }
         var t = dark ? Theme.dark : Theme.light
         t.surface = surface
+        t.textScale = textScale
         return t
     }
+
+    /// The app's text font: a fixed design size scaled by the user's Text Size.
+    /// Every label and chat bubble goes through here (not Dynamic Type: Grok's
+    /// design sizes are the baseline, the slider moves them together).
+    func font(_ size: CGFloat, weight: Font.Weight = .regular, design: Font.Design = .default) -> Font {
+        .system(size: pt(size), weight: weight, design: design)
+    }
+
+    /// A point size scaled like the text, for frames that must grow with it.
+    func pt(_ size: CGFloat) -> CGFloat { (size * textScale * 2).rounded() / 2 }
 
     /// Text colour on a user bubble (white on dark grey, white on black).
     var userText: Color { .white }

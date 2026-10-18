@@ -13,15 +13,15 @@ struct NotificationsPrimerView: View {
             Spacer(minLength: 8)
             GlassCircle(size: 72) {
                 Image(systemName: "bell.badge.fill")
-                    .font(.system(size: 30, weight: .semibold))
+                    .font(theme.font(30, weight: .semibold))
                     .foregroundStyle(theme.text)
             }
             Text("Know when an agent is done")
-                .font(.system(size: 22, weight: .semibold))
+                .font(theme.font(22, weight: .semibold))
                 .foregroundStyle(theme.text)
                 .multilineTextAlignment(.center)
             Text("Arbos sends a message when an agent replies or a person writes to you — nothing else.")
-                .font(.system(size: Theme.small))
+                .font(theme.font(Theme.small))
                 .foregroundStyle(theme.muted)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 36)
@@ -35,7 +35,7 @@ struct NotificationsPrimerView: View {
                 }
             } label: {
                 Text(asking ? "…" : "Turn on notifications")
-                    .font(.system(size: Theme.body, weight: .semibold))
+                    .font(theme.font(Theme.body, weight: .semibold))
                     .foregroundStyle(theme.onPrimary)
                     .frame(maxWidth: .infinity).frame(height: 50)
                     .background(Capsule().fill(theme.primary))
@@ -46,7 +46,7 @@ struct NotificationsPrimerView: View {
                 PushManager.shared.primerShown = true
                 dismiss()
             } label: {
-                Text("Not now").font(.system(size: Theme.small, weight: .medium)).foregroundStyle(theme.muted)
+                Text("Not now").font(theme.font(Theme.small, weight: .medium)).foregroundStyle(theme.muted)
             }
             .buttonStyle(.plain)
             .padding(.bottom, 18)

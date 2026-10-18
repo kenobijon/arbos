@@ -72,7 +72,7 @@ struct InCallOverlay: View {
             ZStack {
                 Circle().fill(tint ?? (filled ? theme.text : inner))
                 Image(systemName: icon)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(theme.font(13, weight: .semibold))
                     .foregroundStyle(tint != nil ? .white : (filled ? theme.bg : theme.text))
             }
             .frame(width: 32, height: 32)
@@ -109,13 +109,13 @@ struct InCallOverlay: View {
                     }
                     VStack(alignment: .leading, spacing: 1) {
                         Text(callName)
-                            .font(.system(size: Theme.small, weight: .semibold))
+                            .font(theme.font(Theme.small, weight: .semibold))
                             .foregroundStyle(theme.text)
                             .lineLimit(1)
                         HStack(spacing: 5) {
                             if someoneSpeaking { PulseDot(color: theme.online) }
                             Text(statusLine)
-                                .font(.system(size: Theme.tiny))
+                                .font(theme.font(Theme.tiny))
                                 .foregroundStyle(someoneSpeaking ? theme.online : theme.muted)
                                 .lineLimit(1)
                                 .monospacedDigit()
@@ -180,10 +180,10 @@ struct InCallOverlay: View {
             // Bottom strip: name/timer and the two controls.
             TimelineView(.periodic(from: .now, by: 1)) { _ in
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(callName).font(.system(size: 11, weight: .semibold)).foregroundStyle(theme.text).lineLimit(1)
+                    Text(callName).font(theme.font(11, weight: .semibold)).foregroundStyle(theme.text).lineLimit(1)
                     HStack(spacing: 4) {
                         if someoneSpeaking { PulseDot(color: theme.online) }
-                        Text(statusLine).font(.system(size: 10)).foregroundStyle(someoneSpeaking ? theme.online : theme.muted).lineLimit(1).monospacedDigit()
+                        Text(statusLine).font(theme.font(10)).foregroundStyle(someoneSpeaking ? theme.online : theme.muted).lineLimit(1).monospacedDigit()
                     }
                     HStack(spacing: 8) {
                         muteButton

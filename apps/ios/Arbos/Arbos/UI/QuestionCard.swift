@@ -48,7 +48,7 @@ struct QuestionCard: View {
                 }
                 if open && !options.isEmpty {
                     Text("Or answer in the chat below")
-                        .font(.system(size: Theme.small))
+                        .font(theme.font(Theme.small))
                         .foregroundStyle(palette.badgeInk)
                         .padding(.top, 4)
                         .padding(.leading, 1)
@@ -64,7 +64,7 @@ struct QuestionCard: View {
     private var header: some View {
         HStack(alignment: .top, spacing: 10) {
             Text(title)
-                .font(.system(size: 17.5, weight: .semibold))
+                .font(theme.font(17.5, weight: .semibold))
                 .foregroundStyle(theme.text)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.leading, 1)
@@ -119,12 +119,12 @@ struct QuestionCard: View {
         } label: {
             HStack(spacing: 11) {
                 Text(Self.letter(ix))
-                    .font(.system(size: 14))
+                    .font(theme.font(14))
                     .foregroundStyle(chosen ? palette.inner : palette.badgeInk)
                     .frame(width: Self.badge, height: Self.badge)
                     .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(chosen ? theme.text : palette.badge))
                 Text(option.label)
-                    .font(.system(size: Theme.body))
+                    .font(theme.font(Theme.body))
                     .foregroundStyle(faded ? theme.placeholder : theme.text)
                     .multilineTextAlignment(.leading)
                     .fixedSize(horizontal: false, vertical: true)
@@ -148,7 +148,7 @@ struct QuestionCard: View {
         } label: {
             HStack {
                 Text("Send")
-                    .font(.system(size: Theme.body, weight: .semibold))
+                    .font(theme.font(Theme.body, weight: .semibold))
                     .foregroundStyle(selected.isEmpty ? theme.placeholder : theme.text)
                 Spacer(minLength: 0)
             }

@@ -499,7 +499,7 @@ struct RowView: View {
         .overlay(alignment: .trailing) {
             if let time = swipeTimeLabel, timeReveal > 0.5 {
                 Text(time)
-                    .font(.system(size: 11))
+                    .font(theme.font(11))
                     .foregroundStyle(theme.muted)
                     .frame(width: Self.timeRevealWidth, alignment: .trailing)
                     .offset(x: Self.timeRevealWidth - timeReveal)
@@ -517,7 +517,7 @@ struct RowView: View {
             HStack {
                 Spacer(minLength: 0)
                 Text(Markdown.inline(text, color: theme.userText, link: theme.accent, codeChip: theme.userCodeChip))
-                    .font(.system(size: Theme.body))
+                    .font(theme.font(Theme.body))
                     .lineSpacing(Theme.bodyLineSpacing)
                     .tint(theme.accent)
                     .textSelection(.enabled)
@@ -536,11 +536,11 @@ struct RowView: View {
                 .accessibilityLabel("@\(handle), profile")
                 VStack(alignment: .leading, spacing: 3) {
                     Text("@\(handle)")
-                        .font(.system(size: Theme.tiny, weight: .medium))
+                        .font(theme.font(Theme.tiny, weight: .medium))
                         .foregroundStyle(theme.muted)
                         .padding(.leading, 4)
                     Text(Markdown.inline(text, color: theme.text, link: theme.accent, codeChip: theme.codeChip))
-                        .font(.system(size: Theme.body))
+                        .font(theme.font(Theme.body))
                         .lineSpacing(Theme.bodyLineSpacing)
                         .tint(theme.accent)
                         .textSelection(.enabled)
@@ -556,7 +556,7 @@ struct RowView: View {
                 peopleAvatar(handle: handle, avatar: avatar)
                 VStack(alignment: .leading, spacing: 3) {
                     Text("@\(handle)")
-                        .font(.system(size: Theme.tiny, weight: .medium))
+                        .font(theme.font(Theme.tiny, weight: .medium))
                         .foregroundStyle(theme.muted)
                         .padding(.leading, 4)
                     VStack(alignment: .leading, spacing: 8) {
@@ -579,7 +579,7 @@ struct RowView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     if let caption {
                         Text(caption)
-                            .font(.system(size: Theme.tiny, weight: .medium))
+                            .font(theme.font(Theme.tiny, weight: .medium))
                             .foregroundStyle(theme.muted)
                     }
                     ForEach(Array(blocks.enumerated()), id: \.offset) { i, block in
@@ -610,7 +610,7 @@ struct RowView: View {
                 }
                 systemText(text, avatarProject: avatarProject)
             }
-            .font(.system(size: Theme.small))
+            .font(theme.font(Theme.small))
             .foregroundStyle(theme.muted)
             .frame(maxWidth: .infinity)
             .multilineTextAlignment(.center)
@@ -644,11 +644,11 @@ struct RowView: View {
         case .error(let code, let message):
             HStack(spacing: 10) {
                 Image(systemName: "exclamationmark.circle").foregroundStyle(theme.danger)
-                Text(message).font(.system(size: Theme.small)).foregroundStyle(theme.text)
+                Text(message).font(theme.font(Theme.small)).foregroundStyle(theme.text)
                 Spacer(minLength: 0)
-                Text(code).font(.system(size: 11)).foregroundStyle(theme.muted)
+                Text(code).font(theme.font(11)).foregroundStyle(theme.muted)
                 Button("Retry") { model.retry(chatId: chatId, messageId: row.messageId) }
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(theme.font(13, weight: .semibold))
                     .foregroundStyle(theme.text)
             }
             .padding(.horizontal, Theme.bubbleHPad).padding(.vertical, 10)
@@ -667,10 +667,10 @@ struct RowView: View {
                     model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: reaction.emoji)
                 } label: {
                     HStack(spacing: 3) {
-                        Text(reaction.emoji).font(.system(size: 14))
+                        Text(reaction.emoji).font(theme.font(14))
                         if reaction.senders.count > 1 {
                             Text("\(reaction.senders.count)")
-                                .font(.system(size: 12, weight: .medium))
+                                .font(theme.font(12, weight: .medium))
                                 .foregroundStyle(theme.muted)
                         }
                     }
@@ -721,11 +721,11 @@ struct RowView: View {
         HStack(alignment: .top, spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("@\(handle)")
-                    .font(.system(size: Theme.tiny, weight: .semibold))
+                    .font(theme.font(Theme.tiny, weight: .semibold))
                     .foregroundStyle(theme.muted)
                 if let preview, !preview.isEmpty {
                     Text(preview)
-                        .font(.system(size: Theme.tiny))
+                        .font(theme.font(Theme.tiny))
                         .foregroundStyle(theme.muted)
                         .lineLimit(2)
                 }
@@ -809,14 +809,14 @@ struct BlockView: View {
                     .lineSpacing(Theme.bodyLineSpacing)
             } else {
                 Text(Markdown.inline(text, color: theme.text, link: theme.accent, codeChip: theme.codeChip))
-                    .font(.system(size: Theme.body))
+                    .font(theme.font(Theme.body))
                     .lineSpacing(Theme.bodyLineSpacing)
                     .tint(theme.accent)
                     .textSelection(.enabled)
             }
         case .heading(_, let text):
             Text(Markdown.inline(text, color: theme.text, link: theme.accent, codeChip: theme.codeChip))
-                .font(.system(size: Theme.body, weight: .semibold))
+                .font(theme.font(Theme.body, weight: .semibold))
                 .tint(theme.accent)
         case .bullets(let items), .numbered(let items):
             let numbered: Bool = { if case .numbered = block { return true } else { return false } }()
@@ -824,14 +824,14 @@ struct BlockView: View {
                 ForEach(Array(items.enumerated()), id: \.offset) { i, item in
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         Text(numbered ? "\(i + 1)." : "•")
-                            .font(.system(size: Theme.body))
+                            .font(theme.font(Theme.body))
                             .foregroundStyle(theme.text)
                             .frame(minWidth: 16, alignment: .trailing)
                         if live && i == items.count - 1 {
                             StreamingText(text: item, font: .system(size: Theme.body), color: theme.text)
                         } else {
                             Text(Markdown.inline(item, color: theme.text, link: theme.accent, codeChip: theme.codeChip))
-                                .font(.system(size: Theme.body))
+                                .font(theme.font(Theme.body))
                                 .tint(theme.accent)
                         }
                     }
@@ -842,7 +842,7 @@ struct BlockView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     ForEach(Array(lines.enumerated()), id: \.offset) { i, line in
                         Text(line.split(separator: "|").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.joined(separator: "    "))
-                            .font(.system(size: 14, weight: i == 0 ? .semibold : .regular, design: .monospaced))
+                            .font(theme.font(14, weight: i == 0 ? .semibold : .regular, design: .monospaced))
                             .foregroundStyle(theme.text)
                     }
                 }
@@ -852,7 +852,7 @@ struct BlockView: View {
         case .code(_, let code):
             ScrollView(.horizontal, showsIndicators: false) {
                 Text(code)
-                    .font(.system(size: 14, design: .monospaced))
+                    .font(theme.font(14, design: .monospaced))
                     .foregroundStyle(theme.text)
                     .textSelection(.enabled)
                     .padding(10)
@@ -908,7 +908,7 @@ struct AvatarCluster: View {
         } else if shown.isEmpty {
             GlassCircle(size: size) {
                 Image(systemName: "person.2.fill")
-                    .font(.system(size: size * 0.4))
+                    .font(theme.font(size * 0.4))
                     .foregroundStyle(theme.text)
             }
         } else {
@@ -921,7 +921,7 @@ struct AvatarCluster: View {
                     ZStack {
                         Circle().fill(theme.field)
                         Image(systemName: "plus")
-                            .font(.system(size: size * 0.35, weight: .bold))
+                            .font(theme.font(size * 0.35, weight: .bold))
                             .foregroundStyle(theme.text)
                     }
                     .frame(width: size * 0.85, height: size * 0.85)
@@ -960,7 +960,7 @@ struct ImageBubble: View {
                         .scaledToFill()
                 } else if failed || blobRef == nil {
                     Image(systemName: "photo")
-                        .font(.system(size: 28))
+                        .font(theme.font(28))
                         .foregroundStyle(fromUser ? theme.userText.opacity(0.7) : theme.muted)
                 } else {
                     ProgressView().tint(fromUser ? theme.userText.opacity(0.7) : theme.muted)
@@ -1006,6 +1006,7 @@ struct ImageBubble: View {
 /// Full-screen image: pinch to zoom, drag to pan when zoomed, double-tap to toggle.
 /// At 1×: swipe down or swipe right from the left edge to dismiss.
 private struct ZoomableImageViewer: View {
+    @Environment(\.theme) private var theme
     let image: UIImage
     let onClose: () -> Void
 
@@ -1040,7 +1041,7 @@ private struct ZoomableImageViewer: View {
                 .accessibilityHint("Pinch to zoom, double tap to zoom in or out, swipe down or from the left edge to close")
             Button(action: onClose) {
                 Image(systemName: "xmark")
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(theme.font(15, weight: .semibold))
                     .foregroundStyle(.white)
                     .frame(width: 36, height: 36)
                     .background(Circle().fill(Color.white.opacity(0.18)))
@@ -1168,8 +1169,8 @@ struct FileCard: View {
                     .frame(width: 21, height: 27)
                     .overlay(Image(systemName: "doc.text").font(.system(size: 12, weight: .bold)).foregroundStyle(.black))
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(name).font(.system(size: Theme.body)).foregroundStyle(fromUser ? theme.userText : theme.text).lineLimit(1)
-                    Text(subtitle).font(.system(size: Theme.small)).foregroundStyle(fromUser ? theme.userText.opacity(0.7) : theme.muted).lineLimit(1)
+                    Text(name).font(theme.font(Theme.body)).foregroundStyle(fromUser ? theme.userText : theme.text).lineLimit(1)
+                    Text(subtitle).font(theme.font(Theme.small)).foregroundStyle(fromUser ? theme.userText.opacity(0.7) : theme.muted).lineLimit(1)
                 }
                 if loading {
                     ProgressView()
@@ -1263,7 +1264,7 @@ struct VoiceMemoBubble: View {
                     }
                 }
                 Text(player.durationLabel)
-                    .font(.system(size: Theme.tiny, design: .monospaced))
+                    .font(theme.font(Theme.tiny, design: .monospaced))
                     .foregroundStyle(fromUser ? theme.userText.opacity(0.8) : theme.muted)
             }
             .padding(.horizontal, Theme.bubbleHPad)

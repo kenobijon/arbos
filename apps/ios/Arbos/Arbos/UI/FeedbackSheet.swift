@@ -32,7 +32,7 @@ struct FeedbackSheet: View {
                         if let project {
                             HStack(spacing: 8) {
                                 AgentAvatar(project: project, theme: theme, size: 22, still: true)
-                                Text("About \(project.name)").font(.system(size: Theme.tiny, weight: .medium)).foregroundStyle(theme.muted)
+                                Text("About \(project.name)").font(theme.font(Theme.tiny, weight: .medium)).foregroundStyle(theme.muted)
                             }
                             .padding(.horizontal, 12).frame(height: 30)
                             .background(Capsule().fill(theme.field))
@@ -40,18 +40,18 @@ struct FeedbackSheet: View {
                         screenshotCard
                         noteField
                         Text("Your screenshot and note go to the Arbos team, with the app version and device. An agent on our side reads every one and fixes what it can.")
-                            .font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                            .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                             .multilineTextAlignment(.center)
                             .padding(.horizontal, 28)
                         if let error {
-                            Text(error).font(.system(size: Theme.tiny)).foregroundStyle(theme.danger).multilineTextAlignment(.center).padding(.horizontal, 24)
+                            Text(error).font(theme.font(Theme.tiny)).foregroundStyle(theme.danger).multilineTextAlignment(.center).padding(.horizontal, 24)
                         }
                         Button(action: send) {
                             HStack(spacing: 8) {
                                 if sending { ProgressView().tint(theme.onPrimary).controlSize(.small) }
                                 Text(sending ? "Sending…" : "Send feedback")
                             }
-                            .font(.system(size: Theme.body, weight: .semibold)).foregroundStyle(theme.onPrimary)
+                            .font(theme.font(Theme.body, weight: .semibold)).foregroundStyle(theme.onPrimary)
                             .frame(maxWidth: .infinity).frame(height: 50)
                             .background(Capsule().fill(theme.primary))
                         }
@@ -60,7 +60,7 @@ struct FeedbackSheet: View {
                         .opacity(canSend ? 1 : 0.45)
                         .padding(.horizontal, 16)
                         Text("\(FeedbackCenter.appVersion) · \(FeedbackCenter.deviceLine)")
-                            .font(.system(size: 11)).foregroundStyle(theme.placeholder)
+                            .font(theme.font(11)).foregroundStyle(theme.placeholder)
                     }
                     Color.clear.frame(height: 20)
                 }
@@ -149,8 +149,8 @@ struct FeedbackSheet: View {
                 PhotosPicker(selection: $photoItem, matching: .images) {
                     VStack(spacing: 8) {
                         Image(systemName: "photo.badge.plus").font(.system(size: 26, weight: .medium)).foregroundStyle(theme.muted)
-                        Text("Add a screenshot").font(.system(size: Theme.small, weight: .medium)).foregroundStyle(theme.text)
-                        Text("Optional — pick one from Photos").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                        Text("Add a screenshot").font(theme.font(Theme.small, weight: .medium)).foregroundStyle(theme.text)
+                        Text("Optional — pick one from Photos").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                     }
                     .frame(maxWidth: .infinity).frame(height: 140)
                     .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(theme.card))
@@ -166,11 +166,11 @@ struct FeedbackSheet: View {
         ZStack(alignment: .topLeading) {
             if note.isEmpty {
                 Text("What happened? What did you expect?")
-                    .font(.system(size: Theme.body)).foregroundStyle(theme.placeholder)
+                    .font(theme.font(Theme.body)).foregroundStyle(theme.placeholder)
                     .padding(.horizontal, 18).padding(.vertical, 14)
             }
             TextEditor(text: $note)
-                .font(.system(size: Theme.body))
+                .font(theme.font(Theme.body))
                 .foregroundStyle(theme.text)
                 .scrollContentBackground(.hidden)
                 .focused($noteFocused)
@@ -188,12 +188,12 @@ struct FeedbackSheet: View {
                 Image(systemName: "checkmark").font(.system(size: 30, weight: .semibold)).foregroundStyle(theme.online)
             }
             .padding(.top, 40)
-            Text("Thanks — sent.").font(.system(size: 22, weight: .semibold)).foregroundStyle(theme.text)
+            Text("Thanks — sent.").font(theme.font(22, weight: .semibold)).foregroundStyle(theme.text)
             Text("It is in the fix loop. Reference \(id.suffix(8)).")
-                .font(.system(size: Theme.small)).foregroundStyle(theme.muted)
+                .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
                 .multilineTextAlignment(.center).padding(.horizontal, 32)
             Button { dismiss() } label: {
-                Text("Done").font(.system(size: Theme.body, weight: .semibold)).foregroundStyle(theme.onPrimary)
+                Text("Done").font(theme.font(Theme.body, weight: .semibold)).foregroundStyle(theme.onPrimary)
                     .frame(maxWidth: .infinity).frame(height: 50)
                     .background(Capsule().fill(theme.primary))
             }

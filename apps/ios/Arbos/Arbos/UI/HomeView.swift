@@ -71,7 +71,7 @@ struct HomeView: View {
                             .listRowBackground(Color.clear)
                     } else if homeRows.isEmpty, !searchQuery.isEmpty {
                         Text("No conversations match \"\(query.trimmingCharacters(in: .whitespaces))\"")
-                            .font(.system(size: Theme.small))
+                            .font(theme.font(Theme.small))
                             .foregroundStyle(theme.muted)
                             .frame(maxWidth: .infinity)
                             .padding(.top, 80)
@@ -375,13 +375,13 @@ struct HomeView: View {
         Button { showHidden = true } label: {
             HStack(spacing: 8) {
                 Text("Hidden chats")
-                    .font(.system(size: Theme.small))
+                    .font(theme.font(Theme.small))
                     .foregroundStyle(theme.muted)
                 Text("\(hiddenCount)")
-                    .font(.system(size: Theme.small))
+                    .font(theme.font(Theme.small))
                     .foregroundStyle(theme.placeholder)
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(theme.font(11, weight: .semibold))
                     .foregroundStyle(theme.placeholder)
                 Spacer(minLength: 0)
             }
@@ -412,7 +412,7 @@ struct HomeView: View {
                 HStack(spacing: 8) {
                     Image(systemName: "magnifyingglass").foregroundStyle(theme.icon)
                     TextField("", text: $query, prompt: Text("Search").foregroundStyle(theme.placeholder))
-                        .font(.system(size: Theme.body))
+                        .font(theme.font(Theme.body))
                         .foregroundStyle(theme.text)
                         .focused($searchFocused)
                         .submitLabel(.search)
@@ -440,7 +440,7 @@ struct HomeView: View {
                         // Between the account circle and the buttons, where nothing else lives.
                         if offlineHint {
                             Text("Offline · showing saved chats")
-                                .font(.system(size: Theme.small))
+                                .font(theme.font(Theme.small))
                                 .foregroundStyle(theme.muted)
                                 .lineLimit(1)
                                 .minimumScaleFactor(0.8)
@@ -456,7 +456,7 @@ struct HomeView: View {
                 } label: {
                     GlassCircle {
                         Image(systemName: "magnifyingglass")
-                            .font(.system(size: 17, weight: .medium))
+                            .font(theme.font(17, weight: .medium))
                             .foregroundStyle(theme.text)
                     }
                 }
@@ -465,7 +465,7 @@ struct HomeView: View {
                 Button { showNewChat = true } label: {
                     GlassCircle {
                         Image(systemName: "plus")
-                            .font(.system(size: 19, weight: .regular))
+                            .font(theme.font(19, weight: .regular))
                             .foregroundStyle(theme.text)
                     }
                 }
@@ -484,34 +484,34 @@ struct HomeView: View {
         VStack(spacing: 10) {
             if let err = model.registryError {
                 Text("Could not reach the relay")
-                    .font(.system(size: Theme.body, weight: .semibold))
+                    .font(theme.font(Theme.body, weight: .semibold))
                     .foregroundStyle(theme.text)
                 Text(err)
-                    .font(.system(size: Theme.small))
+                    .font(theme.font(Theme.small))
                     .foregroundStyle(theme.muted)
                     .multilineTextAlignment(.center)
                 Button("Try again") { Task { await model.refreshRegistry() } }
-                    .font(.system(size: Theme.small, weight: .semibold))
+                    .font(theme.font(Theme.small, weight: .semibold))
                     .foregroundStyle(theme.text)
             } else if model.link == .connecting && !model.isFixture {
                 ProgressView().tint(theme.muted)
                 Text(slowConnect ? "Still connecting…" : "Loading your agents…")
-                    .font(.system(size: Theme.small))
+                    .font(theme.font(Theme.small))
                     .foregroundStyle(theme.muted)
                 if slowConnect {
                     Button("Retry") {
                         slowConnect = false
                         Task { await model.refreshRegistry() }
                     }
-                    .font(.system(size: Theme.small, weight: .semibold))
+                    .font(theme.font(Theme.small, weight: .semibold))
                     .foregroundStyle(theme.text)
                 }
             } else {
                 Text("No agents yet")
-                    .font(.system(size: Theme.body, weight: .semibold))
+                    .font(theme.font(Theme.body, weight: .semibold))
                     .foregroundStyle(theme.text)
                 Text("Tap + to create one. The relay sets up its workspace on your machine.")
-                    .font(.system(size: Theme.small))
+                    .font(theme.font(Theme.small))
                     .foregroundStyle(theme.muted)
                     .multilineTextAlignment(.center)
             }
@@ -695,20 +695,20 @@ struct ApprovalCard: View {
                     Image(systemName: "iphone.and.arrow.right.inward").font(.system(size: 15)).foregroundStyle(theme.text)
                 }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Approve new device").font(.system(size: Theme.body, weight: .semibold)).foregroundStyle(theme.text)
-                    Text("\(device.name) · code \(device.userCode)").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                    Text("Approve new device").font(theme.font(Theme.body, weight: .semibold)).foregroundStyle(theme.text)
+                    Text("\(device.name) · code \(device.userCode)").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                 }
                 Spacer()
             }
             HStack(spacing: 10) {
                 Button { model.deny(device) } label: {
-                    Text("Deny").font(.system(size: Theme.small, weight: .semibold)).foregroundStyle(theme.text)
+                    Text("Deny").font(theme.font(Theme.small, weight: .semibold)).foregroundStyle(theme.text)
                         .frame(maxWidth: .infinity).frame(height: 38)
                         .background(Capsule().fill(theme.field)).overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1))
                 }
                 .buttonStyle(.plain)
                 Button { model.approve(device) } label: {
-                    Text("Approve").font(.system(size: Theme.small, weight: .semibold)).foregroundStyle(theme.onPrimary)
+                    Text("Approve").font(theme.font(Theme.small, weight: .semibold)).foregroundStyle(theme.onPrimary)
                         .frame(maxWidth: .infinity).frame(height: 38)
                         .background(Capsule().fill(theme.primary))
                 }
@@ -762,7 +762,7 @@ struct HiddenChatsView: View {
                     .accessibilityHidden(true)
                 if hidden.isEmpty {
                     Text("No hidden chats")
-                        .font(.system(size: Theme.small))
+                        .font(theme.font(Theme.small))
                         .foregroundStyle(theme.muted)
                         .frame(maxWidth: .infinity)
                         .padding(.top, 80)
@@ -841,7 +841,7 @@ struct HiddenChatsView: View {
                 Button { dismiss() } label: {
                     GlassCircle {
                         Image(systemName: "chevron.left")
-                            .font(.system(size: 17, weight: .semibold))
+                            .font(theme.font(17, weight: .semibold))
                             .foregroundStyle(theme.text)
                     }
                 }
@@ -849,7 +849,7 @@ struct HiddenChatsView: View {
                 Spacer()
                 GlassPill {
                     Text("Hidden chats")
-                        .font(.system(size: Theme.body, weight: .semibold))
+                        .font(theme.font(Theme.body, weight: .semibold))
                         .foregroundStyle(theme.text)
                         .padding(.horizontal, 16)
                         .frame(height: Theme.control)
@@ -949,29 +949,31 @@ struct AgentRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(project.name)
-                        .font(.system(size: Theme.body, weight: .semibold))
+                        .font(theme.font(Theme.body, weight: .semibold))
                         .foregroundStyle(theme.text)
                         .lineLimit(1)
                     Spacer()
                     if pinned {
                         Image(systemName: "pin.fill")
-                            .font(.system(size: 11, weight: .semibold))
+                            .font(theme.font(11, weight: .semibold))
                             .foregroundStyle(theme.muted)
                             .accessibilityLabel("Pinned")
                     }
                     Text(time)
-                        .font(.system(size: Theme.small))
+                        .font(theme.font(Theme.small))
                         .foregroundStyle(theme.muted)
+                        .lineLimit(1)
+                        .fixedSize()
                 }
                 HStack(spacing: 6) {
                     if let previewIcon {
                         Image(systemName: previewIcon)
-                            .font(.system(size: 13, weight: .regular))
+                            .font(theme.font(13, weight: .regular))
                             .foregroundStyle(theme.muted)
                             .accessibilityHidden(true)
                     }
                     Text(preview)
-                        .font(.system(size: Theme.small))
+                        .font(theme.font(Theme.small))
                         .foregroundStyle(theme.muted)
                         .lineLimit(1)
                     Spacer(minLength: 0)
@@ -1023,7 +1025,7 @@ struct PeopleRow: View {
                     ZStack {
                         Circle().fill(theme.card).frame(width: Theme.rowAvatar, height: Theme.rowAvatar)
                         Image(systemName: "person.2.fill")
-                            .font(.system(size: 17, weight: .medium))
+                            .font(theme.font(17, weight: .medium))
                             .foregroundStyle(theme.accent)
                     }
                 } else {
@@ -1038,25 +1040,27 @@ struct PeopleRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(title)
-                        .font(.system(size: Theme.body, weight: .semibold))
+                        .font(theme.font(Theme.body, weight: .semibold))
                         .foregroundStyle(theme.text)
                         .lineLimit(1)
                     Text(label)
-                        .font(.system(size: Theme.tiny))
+                        .font(theme.font(Theme.tiny))
                         .foregroundStyle(theme.muted)
                         .lineLimit(1)
                     Spacer()
                     if pinned {
                         Image(systemName: "pin.fill")
-                            .font(.system(size: 11, weight: .semibold))
+                            .font(theme.font(11, weight: .semibold))
                             .foregroundStyle(theme.muted)
                             .accessibilityLabel("Pinned")
                     }
-                    Text(time).font(.system(size: Theme.small)).foregroundStyle(theme.muted)
+                    Text(time).font(theme.font(Theme.small)).foregroundStyle(theme.muted)
+                        .lineLimit(1)
+                        .fixedSize()
                 }
                 HStack(spacing: 6) {
                     Text(preview)
-                        .font(.system(size: Theme.small))
+                        .font(theme.font(Theme.small))
                         .foregroundStyle(theme.muted)
                         .lineLimit(1)
                     Spacer(minLength: 0)
@@ -1094,7 +1098,7 @@ struct UnreadBadge: View {
 
     var body: some View {
         Text(count > 99 ? "99+" : "\(count)")
-            .font(.system(size: 12, weight: .semibold))
+            .font(theme.font(12, weight: .semibold))
             .foregroundStyle(.white)
             .padding(.horizontal, count > 9 ? 6 : 0)
             .frame(minWidth: 20, minHeight: 20)

@@ -33,6 +33,7 @@ struct SettingsView: View {
     @State private var showProfileEdit = false
     /// `ARBOS_SETTINGS_PAGE=appearance` lands on that page (screenshot rig).
     @State private var showAppearancePage = DebugHooks.settingsPage == "appearance"
+    @State private var showTextSizePage = DebugHooks.settingsPage == "textsize"
     @State private var showConnectorsPage = DebugHooks.settingsPage == "connectors"
     @State private var showSecretsPage = ["secrets", "vault", "connect", "new-secret"].contains(DebugHooks.settingsPage ?? "") || DebugHooks.settingsPage?.hasPrefix("secret:") == true
 
@@ -72,6 +73,9 @@ struct SettingsView: View {
                     NavigationLink { AppearancePage() } label: {
                         SettingsRow(icon: "circle.lefthalf.filled", title: "Appearance", value: appearanceSummary)
                     }
+                    NavigationLink { TextSizePage() } label: {
+                        SettingsRow(icon: "textformat.size", title: "Text Size", value: TextScale.label(model.textScale))
+                    }
                 }
                 SettingsGroup {
                     Button {
@@ -93,7 +97,7 @@ struct SettingsView: View {
                 SettingsGroup {
                     Button(role: .destructive) { confirmUnpair = true } label: {
                         Text(model.tokens != nil ? "Sign out" : "Sign out this device")
-                            .font(.system(size: Theme.body))
+                            .font(theme.font(Theme.body))
                             .foregroundStyle(theme.danger)
                             .frame(maxWidth: .infinity, minHeight: SettingsRow.height)
                             .contentShape(Rectangle())
@@ -145,6 +149,7 @@ struct SettingsView: View {
                 Task { await applyAvatarPick(item) }
             }
             .navigationDestination(isPresented: $showAppearancePage) { AppearancePage() }
+            .navigationDestination(isPresented: $showTextSizePage) { TextSizePage() }
             .navigationDestination(isPresented: $showConnectorsPage) { ConnectorsPage(connectorError: $connectorError) }
             .navigationDestination(isPresented: $showSecretsPage) { SecretsPage() }
             .sheet(isPresented: $showProfileEdit) {
@@ -189,7 +194,7 @@ struct SettingsView: View {
                     // Same affordance as the agent profile and the Mac header: a pencil after the name.
                     HStack(spacing: 6) {
                         Text(model.user?.name ?? model.user?.login ?? "Arbos")
-                            .font(.system(size: 28, weight: .bold))
+                            .font(theme.font(28, weight: .bold))
                             .foregroundStyle(theme.text)
                             .lineLimit(1)
                             .minimumScaleFactor(0.8)
@@ -198,7 +203,7 @@ struct SettingsView: View {
                         }
                     }
                     Text(model.user.map { "@\($0.login)" } ?? (model.relayUrl.isEmpty ? "Not signed in" : model.relayUrl))
-                        .font(.system(size: Theme.body))
+                        .font(theme.font(Theme.body))
                         .foregroundStyle(theme.muted)
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -324,7 +329,7 @@ struct SettingsPage<Content: View>: View {
                 Button { (onBack ?? { dismiss() })() } label: {
                     GlassCircle {
                         Image(systemName: "chevron.left")
-                            .font(.system(size: 17, weight: .semibold))
+                            .font(theme.font(17, weight: .semibold))
                             .foregroundStyle(theme.text)
                     }
                 }
@@ -336,7 +341,7 @@ struct SettingsPage<Content: View>: View {
             .padding(.top, 16)
             .overlay {
                 Text(title)
-                    .font(.system(size: Theme.body, weight: .semibold))
+                    .font(theme.font(Theme.body, weight: .semibold))
                     .foregroundStyle(theme.text)
                     .padding(.top, 16)
             }
@@ -390,7 +395,7 @@ struct SettingsGroup<Rows: View>: View {
         VStack(alignment: .leading, spacing: 8) {
             if let header {
                 Text(header.uppercased())
-                    .font(.system(size: Theme.tiny, weight: .medium))
+                    .font(theme.font(Theme.tiny, weight: .medium))
                     .foregroundStyle(theme.muted)
                     .padding(.leading, 16)
             }
@@ -398,7 +403,7 @@ struct SettingsGroup<Rows: View>: View {
                 .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(theme.bubbleAssistant))
             if let footer {
                 Text(footer)
-                    .font(.system(size: Theme.tiny))
+                    .font(theme.font(Theme.tiny))
                     .foregroundStyle(theme.muted)
                     .padding(.horizontal, 16)
             }
@@ -452,7 +457,7 @@ struct SettingsRow: View {
                     .frame(width: Self.tile, height: Self.tile)
                     .overlay(
                         Image(systemName: icon)
-                            .font(.system(size: 15, weight: .semibold))
+                            .font(theme.font(15, weight: .semibold))
                             .foregroundStyle(.white)
                     )
                 if let dot {
@@ -462,7 +467,7 @@ struct SettingsRow: View {
                 }
             }
             Text(title)
-                .font(.system(size: Theme.body))
+                .font(theme.font(Theme.body))
                 .foregroundStyle(theme.text)
                 .lineLimit(1)
                 .layoutPriority(1)
@@ -471,14 +476,14 @@ struct SettingsRow: View {
                 // The value takes what the title leaves and clips at its end
                 // (Apple's Settings), not in the middle ("3 secret…assword").
                 Text(value)
-                    .font(.system(size: Theme.body))
+                    .font(theme.font(Theme.body))
                     .foregroundStyle(valueTint ?? theme.muted)
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
             if chevron {
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(theme.font(14, weight: .semibold))
                     .foregroundStyle(theme.placeholder)
             }
         }
@@ -506,10 +511,10 @@ struct SettingsValueRow<Trailing: View>: View {
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
-            Text(title).font(.system(size: Theme.body)).foregroundStyle(theme.text)
+            Text(title).font(theme.font(Theme.body)).foregroundStyle(theme.text)
             Spacer(minLength: 8)
             trailing()
-                .font(.system(size: Theme.body))
+                .font(theme.font(Theme.body))
                 .foregroundStyle(theme.muted)
                 .multilineTextAlignment(.trailing)
         }
@@ -528,7 +533,7 @@ struct SettingsChoiceRow: View {
     var body: some View {
         Button(action: action) {
             HStack {
-                Text(title).font(.system(size: Theme.body)).foregroundStyle(theme.text)
+                Text(title).font(theme.font(Theme.body)).foregroundStyle(theme.text)
                 Spacer()
                 if selected {
                     Image(systemName: "checkmark").font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.text)
@@ -553,7 +558,7 @@ struct SettingsActionRow: View {
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(.system(size: Theme.body))
+                .font(theme.font(Theme.body))
                 .foregroundStyle(destructive ? theme.danger : theme.text)
                 .frame(maxWidth: .infinity, minHeight: SettingsRow.height, alignment: .leading)
                 .padding(.horizontal, 16)
@@ -629,7 +634,7 @@ struct MachinePage: View {
                         SettingsValueRow("Machine time today") {
                             VStack(alignment: .trailing, spacing: 2) {
                                 Text(String(format: "$%.2f", model.machine.machineTodayUsd))
-                                Text("Not taken from credits").font(.system(size: Theme.tiny))
+                                Text("Not taken from credits").font(theme.font(Theme.tiny))
                             }
                         }
                     } else {
@@ -638,7 +643,7 @@ struct MachinePage: View {
                     SettingsValueRow("Workspaces", value: "\(model.machine.workspaces.values.filter { $0 == .active }.count) running · \(model.machine.workspaces.count) total")
                     if let id = model.machine.sandboxId, !id.isEmpty {
                         SettingsValueRow("Sandbox") {
-                            Text(id).font(.system(size: 12, design: .monospaced)).lineLimit(1).truncationMode(.middle)
+                            Text(id).font(theme.font(12, design: .monospaced)).lineLimit(1).truncationMode(.middle)
                         }
                     }
                 }
@@ -718,13 +723,13 @@ struct ConnectorsPage: View {
                     .frame(width: SettingsRow.tile, height: SettingsRow.tile)
                     .overlay(
                         Image(systemName: connectorSymbol(p.provider))
-                            .font(.system(size: 15, weight: .semibold))
+                            .font(theme.font(15, weight: .semibold))
                             .foregroundStyle(.white)
                     )
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(p.label).font(.system(size: Theme.body)).foregroundStyle(theme.text).lineLimit(2)
+                    Text(p.label).font(theme.font(Theme.body)).foregroundStyle(theme.text).lineLimit(2)
                     Text(connectorSubline(p, cn: cn))
-                        .font(.system(size: Theme.tiny))
+                        .font(theme.font(Theme.tiny))
                         .foregroundStyle(theme.muted)
                         .lineLimit(2)
                 }
@@ -764,7 +769,7 @@ struct ConnectorsPage: View {
                     SecureField("Paste a token, then Save", text: $tokenDraft)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                        .font(.system(size: Theme.small))
+                        .font(theme.font(Theme.small))
                         .foregroundStyle(theme.text)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 8)
@@ -774,7 +779,7 @@ struct ConnectorsPage: View {
                                 .strokeBorder(theme.fieldBorder, lineWidth: 1)
                         )
                     Button("Save") { saveToken(p) }
-                        .font(.system(size: Theme.small, weight: .semibold))
+                        .font(theme.font(Theme.small, weight: .semibold))
                         .buttonStyle(.borderless)
                         .foregroundStyle(theme.accent)
                         .disabled(busy || tokenDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -805,7 +810,7 @@ struct ConnectorsPage: View {
     private func connectorPill(text: String, check: Bool, on: Bool) -> some View {
         HStack(spacing: 5) {
             if check { Image(systemName: "checkmark").font(.system(size: 11, weight: .bold)) }
-            Text(text).font(.system(size: 13, weight: .semibold))
+            Text(text).font(theme.font(13, weight: .semibold))
         }
         .foregroundStyle(on ? theme.online : theme.text)
         .padding(.horizontal, 12)
@@ -952,6 +957,68 @@ struct AppearancePage: View {
     }
 }
 
+/// Q6: Telegram-style text size — a live two-bubble preview above a seven-step
+/// slider. The slider writes the setting at once, so the whole app follows.
+struct TextSizePage: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+
+    private var index: Int { TextScale.index(for: model.textScale) }
+
+    var body: some View {
+        SettingsPage(title: "Text Size") {
+            SettingsGroup(header: "Preview") {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text("Hi! The launch note is ready — want me to post it, or tighten it first?")
+                            .font(theme.font(Theme.body))
+                            .lineSpacing(Theme.bodyLineSpacing)
+                            .foregroundStyle(theme.text)
+                            .padding(.horizontal, Theme.bubbleHPad).padding(.vertical, Theme.bubbleVPad)
+                            .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
+                            .frame(maxWidth: 280, alignment: .leading)
+                        Spacer(minLength: 24)
+                    }
+                    HStack {
+                        Spacer(minLength: 24)
+                        Text("Tighten the first line, then post.")
+                            .font(theme.font(Theme.body))
+                            .lineSpacing(Theme.bodyLineSpacing)
+                            .foregroundStyle(theme.userText)
+                            .padding(.horizontal, Theme.bubbleHPad).padding(.vertical, Theme.bubbleVPad)
+                            .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleUser))
+                            .frame(maxWidth: 280, alignment: .trailing)
+                    }
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .animation(.easeOut(duration: 0.15), value: index)
+            }
+            SettingsGroup(footer: "Changes the size of messages and labels everywhere in Arbos. \(TextScale.label(model.textScale))\(index == TextScale.defaultIndex ? "" : " · \(Int((model.textScale * 100).rounded()))%").") {
+                HStack(spacing: 12) {
+                    Text("A").font(.system(size: 13, weight: .medium)).foregroundStyle(theme.muted)
+                    Slider(
+                        value: Binding(get: { Double(index) },
+                                       set: { v in
+                                           let i = Int(v.rounded())
+                                           let next = Double(TextScale.steps[max(0, min(TextScale.steps.count - 1, i))])
+                                           if next != model.textScaleSetting { model.textScaleSetting = next; Haptics.pick() }
+                                       }),
+                        in: 0...Double(TextScale.steps.count - 1),
+                        step: 1
+                    )
+                    .tint(theme.accent)
+                    .accessibilityLabel("Text size")
+                    .accessibilityValue(TextScale.label(model.textScale))
+                    Text("A").font(.system(size: 24, weight: .medium)).foregroundStyle(theme.text)
+                }
+                .padding(.horizontal, 16)
+                .frame(minHeight: 56)
+            }
+        }
+    }
+}
+
 struct AboutPage: View {
     @Environment(\.theme) private var theme
 
@@ -994,12 +1061,12 @@ struct ProfileEditView: View {
                 VStack(alignment: .leading, spacing: 18) {
                     if onboarding {
                         Text("Your profile")
-                            .font(.system(size: 22, weight: .semibold))
+                            .font(theme.font(22, weight: .semibold))
                             .foregroundStyle(theme.text)
                             .frame(maxWidth: .infinity)
                             .padding(.top, 12)
                         Text("Pick a name and handle people will see. You can change them later in Settings.")
-                            .font(.system(size: Theme.small))
+                            .font(theme.font(Theme.small))
                             .foregroundStyle(theme.muted)
                             .multilineTextAlignment(.center)
                             .frame(maxWidth: .infinity)
@@ -1010,12 +1077,12 @@ struct ProfileEditView: View {
 
                     if let error {
                         Text(error)
-                            .font(.system(size: Theme.small))
+                            .font(theme.font(Theme.small))
                             .foregroundStyle(theme.danger)
                     }
 
                     Text("Handle: letters, numbers, and hyphens · up to 39 characters.")
-                        .font(.system(size: Theme.tiny))
+                        .font(theme.font(Theme.tiny))
                         .foregroundStyle(theme.muted)
                 }
                 .padding(.horizontal, 24)
@@ -1038,7 +1105,7 @@ struct ProfileEditView: View {
                 Task { await save() }
             } label: {
                 Text(busy ? "Saving…" : (onboarding ? "Continue" : "Save"))
-                    .font(.system(size: Theme.body, weight: .semibold))
+                    .font(theme.font(Theme.body, weight: .semibold))
                     .foregroundStyle(theme.onPrimary)
                     .frame(maxWidth: .infinity)
                     .frame(height: 50)
@@ -1076,9 +1143,9 @@ struct ProfileEditView: View {
 
     private var nameField: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Name").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+            Text("Name").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
             TextField("", text: $name, prompt: Text("Display name").foregroundStyle(theme.placeholder))
-                .font(.system(size: Theme.body))
+                .font(theme.font(Theme.body))
                 .foregroundStyle(theme.text)
                 .textContentType(.name)
                 .textInputAutocapitalization(.words)
@@ -1094,11 +1161,11 @@ struct ProfileEditView: View {
 
     private var handleField: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Handle").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+            Text("Handle").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
             HStack(spacing: 2) {
-                Text("@").font(.system(size: Theme.body)).foregroundStyle(theme.muted)
+                Text("@").font(theme.font(Theme.body)).foregroundStyle(theme.muted)
                 TextField("", text: $handle, prompt: Text("handle").foregroundStyle(theme.placeholder))
-                    .font(.system(size: Theme.body))
+                    .font(theme.font(Theme.body))
                     .foregroundStyle(theme.text)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
@@ -1162,7 +1229,7 @@ struct RelayPage: View {
                         .keyboardType(.URL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                        .font(.system(size: Theme.body))
+                        .font(theme.font(Theme.body))
                         .foregroundStyle(theme.text)
                         .onSubmit(applyRelay)
                 }
@@ -1174,7 +1241,7 @@ struct RelayPage: View {
             }
             SettingsGroup {
                 SettingsValueRow("Device") {
-                    Text(model.deviceId).font(.system(size: 12, design: .monospaced)).lineLimit(1).truncationMode(.middle)
+                    Text(model.deviceId).font(theme.font(12, design: .monospaced)).lineLimit(1).truncationMode(.middle)
                 }
                 SettingsValueRow("Link", value: linkLabel)
             }
