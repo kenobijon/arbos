@@ -1092,8 +1092,12 @@ class Loop:
         else:
             shot_line = ("none — a text-only report (TestFlight without a screenshot, or words relayed from a chat); "
                          "the comment is all the evidence, so find the screen it describes in the code")
+        comment = info["comment"].strip() or "(no comment)"
+        if info.get("operator_note"):
+            # A decision the owner / coordinator made after reading the item (scope, constraints, proof wanted).
+            comment += "\n\n  **Owner decision, relayed by the operator (this is the scope to build):** " + info["operator_note"].strip()
         repl = {
-            "FEEDBACK_ID": fid, "COMMENT": info["comment"].strip() or "(no comment)", "SOURCE": src,
+            "FEEDBACK_ID": fid, "COMMENT": comment, "SOURCE": src,
             "DEVICE": info.get("device") or "?", "OS_VERSION": info.get("os") or "?", "TESTER": st.get("tester", "tester"),
             "APP_BUILD": info.get("build") or "?", "SCREENSHOT_DIMS": shot_line,
             "TARGET_NAME": t["name"], "TARGET_PATH": t["path"], "CHECKS": t["checks"], "ISSUE_URL": issue_url,
