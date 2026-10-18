@@ -61,3 +61,14 @@ pub fn ease_out_cubic(t: f32) -> f32 {
     let u = 1.0 - t;
     1.0 - u * u * u
 }
+
+/// macOS Accessibility → Display → Reduce motion, read once at launch; GPUI's
+/// `with_animation` and the fades that check `cx.reduce_motion()` follow it.
+pub fn system_reduce_motion() -> bool {
+    std::process::Command::new("defaults")
+        .args(["read", "com.apple.universalaccess", "reduceMotion"])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "1")
+        .unwrap_or(false)
+}

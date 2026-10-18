@@ -107,7 +107,7 @@ impl Onboarding {
             awake_since: None,
             synced_chats: HashSet::new(),
             workspaces_running: HashSet::new(),
-            reduce_motion: reduce_motion_enabled(),
+            reduce_motion: crate::ui::motion::system_reduce_motion(),
             demo: false,
         }
     }
@@ -156,16 +156,6 @@ impl Default for Onboarding {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// macOS Accessibility → Display → Reduce motion, read once per onboarding.
-fn reduce_motion_enabled() -> bool {
-    std::process::Command::new("defaults")
-        .args(["read", "com.apple.universalaccess", "reduceMotion"])
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "1")
-        .unwrap_or(false)
 }
 
 impl AppState {

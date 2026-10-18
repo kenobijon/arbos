@@ -18,7 +18,7 @@ use gpui::{
 use crate::app::AppState;
 use crate::ui::composer;
 use crate::ui::feedback;
-use crate::ui::motion::PulseClock;
+use crate::ui::motion::{self, PulseClock};
 use crate::ui::shell::{self, Shell};
 use crate::ui::theme::{reapply_window_background, AppearancePref, Surface, Theme};
 use crate::ui::widgets;
@@ -45,6 +45,7 @@ fn main() {
                 .and_then(|v| AppearancePref::parse(&v))
                 .unwrap_or_else(AppearancePref::load);
             cx.set_global(Theme::for_pref(pref, surface, cx));
+            cx.set_reduce_motion(motion::system_reduce_motion());
             PulseClock::init(cx);
             bind_keys(cx);
             set_menus(cx);
