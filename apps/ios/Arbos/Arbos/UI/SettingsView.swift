@@ -1023,6 +1023,16 @@ struct ProfileEditView: View {
                 .padding(.bottom, 24)
             }
             .scrollDismissesKeyboard(.interactively)
+            // On short screens with the keyboard up the hint scrolls under the
+            // button; fade that edge instead of slicing a line of text.
+            .mask(
+                VStack(spacing: 0) {
+                    Color.black
+                    LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom)
+                        .frame(height: 20)
+                }
+            )
+            .padding(.bottom, 6)
 
             Button {
                 Task { await save() }
