@@ -984,24 +984,40 @@ pub async fn admin_calls(State(state): State<AppState>, principal: Principal) ->
     // What agentd commit each awake box runs (reported in its hello), and the fleet minimum:
     // the SHA of the awake box that reported longest ago (oldest build still running). A fix is
     // shipped everywhere when every awake box's `sha` descends from it; `all_same` is the quick check.
+    // `real_*` counts only non-test users: test boxes are woken by workers on whatever image
+    // they last had and would otherwise drag the fleet minimum down.
     let mut fleet: Vec<Value> = Vec::new();
     let mut awake_shas: Vec<(i64, String)> = Vec::new();
+    let mut real_shas: Vec<(i64, String)> = Vec::new();
     for a in state.db.all_box_agentd().unwrap_or_default() {
         let (bs, _) = state.box_state(&a.user_id).await;
+        let is_test = state
+            .db
+            .user(&a.user_id)
+            .ok()
+            .flatten()
+            .is_some_and(|u| u.test);
         if matches!(bs, arbos_core::wire::BoxState::Awake) {
             if let Some(sha) = &a.sha {
                 awake_shas.push((a.reported_at, sha.clone()));
+                if !is_test {
+                    real_shas.push((a.reported_at, sha.clone()));
+                }
             }
         }
-        fleet.push(json!({ "user_id": a.user_id, "state": bs, "sha": a.sha, "version": a.version, "image": a.image, "reported_at": a.reported_at }));
+        fleet.push(json!({ "user_id": a.user_id, "test": is_test, "state": bs, "sha": a.sha, "version": a.version, "image": a.image, "reported_at": a.reported_at }));
     }
     awake_shas.sort();
+    real_shas.sort();
     let agentd = json!({
         "boxes": fleet,
         "awake": awake_shas.len(),
         "fleet_min_sha": awake_shas.first().map(|x| x.1.clone()),
         "all_same": awake_shas.windows(2).all(|w| w[0].1 == w[1].1),
         "shas": awake_shas.iter().map(|x| x.1.clone()).collect::<std::collections::BTreeSet<_>>(),
+        "real_awake": real_shas.len(),
+        "real_min_sha": real_shas.first().map(|x| x.1.clone()),
+        "real_all_same": real_shas.windows(2).all(|w| w[0].1 == w[1].1),
     });
     Json(json!({
         "agentd": agentd,
