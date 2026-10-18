@@ -2508,7 +2508,9 @@ final class AppModel: ObservableObject {
         for part in m.parts.reversed() {
             if case .status(_, let code, let text) = part, code == .working || code == .step {
                 let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !t.isEmpty, t.lowercased() != "working", t.lowercased() != "thinking" { return t }
+                // "Working…", "Working.", "thinking" → fall through to "<name> is working".
+                let bare = t.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ".…"))
+                if !bare.isEmpty, bare != "working", bare != "thinking" { return t }
             }
         }
         return nil
@@ -2522,7 +2524,25 @@ final class AppModel: ObservableObject {
     }
 
     func isStreaming(project projectId: Id) -> Bool {
-        chats(of: projectId).contains { isStreaming($0.id) }
+        chats(of: projectId).contains { isStreaming($0.id) || hasOpenSubagent($0.id) }
+    }
+
+    /// A subagent hand-off is still open: the brief went out (`handoffMessages` 1)
+    /// and the result has not come back (2). The spawn/wake row may already be
+    /// `done` while the child still runs, so `isStreaming` alone misses it —
+    /// show the faded working line until the hand-off closes.
+    func hasOpenSubagent(_ chatId: Id) -> Bool {
+        messages(of: chatId).contains { m in
+            guard m.role == .assistant else { return false }
+            guard m.subagentId != nil || m.subagentName != nil else { return false }
+            guard m.turn == .new || m.turn == .spawn || m.turn == .wake else { return false }
+            guard (m.handoffMessages ?? 1) < 2 else { return false }
+            // Streaming hand-off rows (the normal case while the child runs).
+            if m.isStreaming { return true }
+            // Brief race after `finish_message` before `handoffMessages` flips to 2.
+            let t = m.completedAt ?? m.createdAt
+            return nowMs() - t < 60_000
+        }
     }
 
     /// Visual cheat: the last row is the user's and no assistant turn has
@@ -2530,7 +2550,7 @@ final class AppModel: ObservableObject {
     /// question does not sit on a dead transcript while the box wakes.
     /// Agent project chats only (a human DM has no agent to "work").
     func isAwaitingReply(_ chatId: Id) -> Bool {
-        if isStreaming(chatId) { return false }
+        if isStreaming(chatId) || hasOpenSubagent(chatId) { return false }
         if peopleChat(chatId) != nil { return false }
         let list = messages(of: chatId)
         guard let last = list.last, last.role == .user else { return false }
