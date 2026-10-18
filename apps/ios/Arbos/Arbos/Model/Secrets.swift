@@ -47,6 +47,9 @@ struct SecretItem: Identifiable, Equatable {
     var note: String
     var hosts: [String]
     var askEveryTime: Bool
+    /// "Real value in the agent's environment": agents with access get the value itself as
+    /// `$STRIPE_KEY`, no card per use (D83 decision 2 as decided).
+    var injectEnv: Bool
     var expiresAt: Int64?
     var version: Int
     var createdAt: Int64
@@ -76,6 +79,7 @@ struct SecretItem: Identifiable, Equatable {
             note: DocJSON.str(m["note"]) ?? "",
             hosts: (m["hosts"] as? [Any])?.compactMap { $0 as? String } ?? [],
             askEveryTime: DocJSON.bool(m["ask_every_time"]),
+            injectEnv: DocJSON.bool(m["inject_env"]),
             expiresAt: DocJSON.int(m["expires_at"]),
             version: Int(DocJSON.int(m["version"]) ?? 1),
             createdAt: DocJSON.int(m["created_at"]) ?? 0,
@@ -148,6 +152,9 @@ struct SecretActivity: Identifiable, Equatable {
         case "vault_connected": return "You connected \(name)"
         case "vault_disconnected": return "You disconnected \(name)"
         case "vault_refreshed": return "\(name) refreshed"
+        case "env_on": return "You put the real value of \(name) in the environment"
+        case "env_off": return "You took the real value of \(name) out of the environment"
+        case "injected": return "\(name) went into \(agent)'s environment"
         default: return "\(action.replacingOccurrences(of: "_", with: " ")) · \(name)"
         }
     }
@@ -195,6 +202,8 @@ struct ConnectedVault: Identifiable, Equatable {
     var readsUsedHour: Int?
     var readsPerHour: Int?
     var agents: [SecretAgentAccess]
+    /// Items the owner put into the agents' environment as real values.
+    var envItems: Int = 0
 
     var providerLabel: String { provider == "onepassword" ? "1Password" : provider.capitalized }
 
@@ -210,7 +219,8 @@ struct ConnectedVault: Identifiable, Equatable {
             status: DocJSON.str(m["status"]) ?? "ok",
             readsUsedHour: DocJSON.int(limits?["reads_used_hour"]).map(Int.init),
             readsPerHour: DocJSON.int(limits?["reads_per_hour"]).map(Int.init),
-            agents: (m["agents"] as? [Any])?.compactMap(SecretAgentAccess.parse) ?? []
+            agents: (m["agents"] as? [Any])?.compactMap(SecretAgentAccess.parse) ?? [],
+            envItems: Int(DocJSON.int(m["env_items"]) ?? 0)
         )
     }
 }
@@ -312,6 +322,12 @@ struct ProjectSecrets: Equatable {
 }
 
 enum SecretsText {
+    /// The variables a secret's real value takes: "$STRIPE_KEY", or
+    /// "$GITHUB_LOGIN_USERNAME and $GITHUB_LOGIN_PASSWORD" for a login.
+    static func realVarList(_ s: SecretItem) -> String {
+        s.kind == "login" ? "$\(s.env)_USERNAME and $\(s.env)_PASSWORD" : "$\(s.env)"
+    }
+
     /// "used 2 min ago" · "never used" · "turned off Oct 12".
     static func usage(lastUsedAt: Int64?, disabledAt: Int64? = nil, enabled: Bool = true) -> String {
         if !enabled, let d = disabledAt { return "turned off \(shortDate(d))" }

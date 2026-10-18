@@ -444,6 +444,14 @@ struct SecretPage: View {
                     }
                     .padding(.horizontal, 16).frame(minHeight: SettingsRow.height)
                 }
+                SettingsGroup(footer: s.injectEnv
+                              ? "\(SecretsText.realVarList(s)) is a normal variable in the box of every agent with access: shell commands and programs read it directly, nothing asks you. Turning access or Pause all off removes it within seconds. Arbos still redacts the value from chat and logs as best it can."
+                              : "Off: agents get a placeholder and the relay fills the value in only through egress, for the allowed hosts. Turn this on for tools that must read $\(s.env) themselves, such as CLIs and SDKs.") {
+                    SecretToggleRow(icon: "terminal.fill", title: "Real value in the agent's environment",
+                                    subtitle: s.injectEnv ? "On · agents with access see the value" : nil,
+                                    isOn: Binding(get: { s.injectEnv }, set: { model.patchSecret(s.id, ["inject_env": $0]) }),
+                                    disabled: model.isFixture)
+                }
                 SettingsGroup(header: "Agents") {
                     ForEach(s.agents) { a in
                         Button { editingAccess = a } label: {
@@ -628,6 +636,7 @@ struct NewSecretSheet: View {
     @State private var note = ""
     @State private var hosts = ""
     @State private var picked: Set<Id> = []
+    @State private var injectEnv = false
     @State private var busy = false
     @State private var error: String?
 
@@ -680,6 +689,14 @@ struct NewSecretSheet: View {
             SecretField(label: "Where it may be used (optional)", hint: "Leave empty to decide the first time an agent uses it.") {
                 SecretTextField(placeholder: "api.stripe.com", text: $hosts, keyboard: .URL)
             }
+            SecretField(label: "In the agent's environment", hint: injectEnv
+                        ? "Agents with access get $\(env.isEmpty ? "NAME" : env) itself: CLIs, SDKs and scripts read it directly. Nothing asks you per use."
+                        : "Off: agents get a placeholder; the relay fills the value in only through egress.") {
+                Toggle(isOn: $injectEnv) {
+                    Text("Real value in the agent's environment").font(.system(size: Theme.body)).foregroundStyle(theme.text)
+                }
+                .tint(theme.online)
+            }
             if let error {
                 Text(error).font(.system(size: Theme.small)).foregroundStyle(theme.danger)
             }
@@ -697,6 +714,7 @@ struct NewSecretSheet: View {
             "note": note.trimmingCharacters(in: .whitespacesAndNewlines),
             "hosts": hosts.split(whereSeparator: { $0 == "," || $0 == " " || $0 == "\n" }).map(String.init),
             "agents": picked.map { ["project_id": $0] },
+            "inject_env": injectEnv,
         ]
         switch kind {
         case "login":
@@ -990,7 +1008,7 @@ struct AgentSecretsPage: View {
                         .padding(.horizontal, 16).padding(.vertical, 12)
                 }
                 ForEach(data?.items ?? []) { item in
-                    SecretRowLabel(icon: item.icon, title: item.title, subtitle: itemSubtitle(item), dim: data?.paused ?? false) {
+                    SecretRowLabel(icon: item.secret?.injectEnv == true ? "terminal.fill" : item.icon, title: item.title, subtitle: itemSubtitle(item), dim: data?.paused ?? false) {
                         Toggle("", isOn: Binding(get: { item.enabled }, set: { on in
                             if let s = item.secret {
                                 model.setSecretAccess(secretId: s.id, projectId: projectId, enabled: on)
@@ -1047,9 +1065,12 @@ struct AgentSecretsPage: View {
 
     private func itemSubtitle(_ item: ProjectSecretAccess) -> String {
         if let v = item.vault {
-            return "everything in this vault · \(v.itemsCount) item\(v.itemsCount == 1 ? "" : "s")"
+            var s = "everything in this vault · \(v.itemsCount) item\(v.itemsCount == 1 ? "" : "s")"
+            if v.envItems > 0 { s += " · \(v.envItems) as real value\(v.envItems == 1 ? "" : "s")" }
+            return s
         }
         var parts: [String] = []
+        if let s = item.secret, s.injectEnv { parts.append("Real value in its environment") }
         if !item.note.isEmpty { parts.append(item.note) }
         parts.append(SecretsText.usage(lastUsedAt: item.lastUsedAt, disabledAt: item.disabledAt, enabled: item.enabled))
         return parts.joined(separator: " · ")
@@ -1233,11 +1254,19 @@ struct VaultPage: View {
                         .font(.system(size: Theme.body)).foregroundStyle(theme.text)
                         .padding(.horizontal, 16).frame(minHeight: SettingsRow.height)
                     ForEach(Array(filtered.prefix(50).enumerated()), id: \.offset) { _, it in
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text((it["title"] as? String) ?? "Item").font(.system(size: Theme.body)).foregroundStyle(theme.text)
-                            Text(((it["fields"] as? [String]) ?? []).joined(separator: " · ")).font(.system(size: Theme.tiny)).foregroundStyle(theme.muted).lineLimit(1)
+                        let on = (it["inject_env"] as? Bool) ?? false
+                        let env = (it["env"] as? String) ?? ""
+                        HStack(spacing: 12) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text((it["title"] as? String) ?? "Item").font(.system(size: Theme.body)).foregroundStyle(theme.text)
+                                Text(on ? "Real value as $\(env) in the agents' environment" : ((it["fields"] as? [String]) ?? []).joined(separator: " · "))
+                                    .font(.system(size: Theme.tiny)).foregroundStyle(on ? theme.accent : theme.muted).lineLimit(1)
+                            }
+                            Spacer(minLength: 8)
+                            Toggle("", isOn: Binding(get: { on }, set: { setItemEnv(it, on: $0) }))
+                                .labelsHidden().tint(theme.online).disabled(model.isFixture || busy)
+                                .accessibilityLabel("Real value of \((it["title"] as? String) ?? "item") in the environment")
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 16).padding(.vertical, 9)
                     }
                     if items.isEmpty {
@@ -1298,6 +1327,23 @@ struct VaultPage: View {
             items = list
             activity = acts
             if let i = model.secrets?.vaults.firstIndex(where: { $0.id == v.id }) { model.secrets?.vaults[i] = v }
+        }
+    }
+
+    /// One item's real value into (or out of) the environment of every agent with access.
+    private func setItemEnv(_ it: [String: Any], on: Bool) {
+        guard let ref = it["ref"] as? String else { return }
+        Task {
+            busy = true
+            defer { busy = false }
+            do {
+                items = try await model.relay.setVaultItemEnv(vaultId, ref: ref, on: on)
+                await model.refreshSecrets()
+            } catch let e as RelayError {
+                model.notice = Notice(text: "Real value: \(e.message)")
+            } catch {
+                model.notice = Notice(text: "Real value: \(error.localizedDescription)")
+            }
         }
     }
 }

@@ -165,11 +165,12 @@ extension AppModel {
         let stripeAgents = [agent("fx-affine", "Affine", true, "pull refund reports"),
                             agent("fx-comms", "Comms", true, "monthly revenue line in the newsletter"),
                             agent("fx-hyper", "Hyper", false, "")]
-        let stripe = secret("fx-sec-stripe", "STRIPE_KEY", "STRIPE_KEY", "key", "Stripe live key — refunds and reports. Never for payouts.", ["api.stripe.com"], stripeAgents, 12)
+        var stripe = secret("fx-sec-stripe", "STRIPE_KEY", "STRIPE_KEY", "key", "Stripe live key — refunds and reports. Never for payouts.", ["api.stripe.com"], stripeAgents, 12)
+        stripe["inject_env"] = true
         let mailgun = secret("fx-sec-mailgun", "MAILGUN_API_KEY", "MAILGUN_API_KEY", "key", "Newsletter sends.", ["api.mailgun.net"], [agent("fx-comms", "Comms", true, "send the newsletter")], 5)
         let github = secret("fx-sec-github", "GitHub login", "GITHUB_LOGIN", "login", "The unarbos account, for Actions and reviews.", ["github.com", "*.github.com"], [agent("fx-hyper", "Hyper", true, "review failing Actions runs")], 1)
         let vault: [String: Any] = ["id": "fx-vault-1p", "provider": "onepassword", "name": "Arbos — Research", "items_count": 12, "status": "ok",
-                                    "limits": ["reads_per_hour": 1000, "reads_used_hour": 3],
+                                    "env_items": 1, "limits": ["reads_per_hour": 1000, "reads_used_hour": 3],
                                     "agents": [agent("fx-affine", "Affine", true, "read the Stripe and Postgres items")]]
         let activity = [act(1, "used", "STRIPE_KEY", ("fx-affine", "Affine"), "api.stripe.com", "agent:affine", 2),
                         act(2, "access_on", "MAILGUN_API_KEY", ("fx-comms", "Comms"), nil, "user:me", 1_440),
