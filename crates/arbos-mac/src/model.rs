@@ -1770,7 +1770,7 @@ impl ProjectSecretAccess {
         if let Some(s) = &self.secret {
             s.env.clone()
         } else if let Some(v) = &self.vault {
-            format!("{} (vault)", v.name)
+            v.name.clone()
         } else {
             "Secret".into()
         }

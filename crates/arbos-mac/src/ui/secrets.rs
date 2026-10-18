@@ -1407,7 +1407,7 @@ impl SecretsPanel {
             let (glyph, title, sub) = if let Some(v) = &item.vault {
                 (
                     "lock",
-                    format!("{} (vault)", v.name),
+                    v.name.clone(),
                     format!(
                         "everything in this vault · {} item{}",
                         v.items_count,
