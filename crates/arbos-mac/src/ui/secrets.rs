@@ -13,7 +13,7 @@ use gpui::{
 use crate::app::AppState;
 use crate::model::{
     ago, secret_env_name, secret_usage, ConnectedVault, Id, NewSecret, ProjectSecrets, Secret,
-    SecretActivity, SecretAgent, SecretRequest, SecretsView,
+    SecretActivity, SecretRequest, SecretsView,
 };
 use crate::ui::avatars;
 use crate::ui::composer::ComposerInput;
@@ -826,7 +826,18 @@ impl SecretsPanel {
 
     fn render_secret(&self, s: &Secret, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let mut body = div().flex().flex_col().gap(px(18.0));
-        let paused = self.state.read(cx).secrets.paused;
+        let (paused, projects, acts) = {
+            let st = self.state.read(cx);
+            let acts: Vec<SecretActivity> = st
+                .secrets
+                .activity
+                .iter()
+                .filter(|a| a.name == s.env)
+                .take(5)
+                .cloned()
+                .collect();
+            (st.secrets.paused, st.projects.clone(), acts)
+        };
         if paused {
             body = body.child(Self::footnote(
                 "Secrets are paused. Agents can't use any secret until you turn this off.",
@@ -1002,7 +1013,6 @@ impl SecretsPanel {
 
         // Agents.
         let mut g = Self::group(theme);
-        let state = self.state.read(cx);
         for a in &s.agents {
             let mut sub: Vec<String> = Vec::new();
             if !a.note.is_empty() {
@@ -1012,7 +1022,7 @@ impl SecretsPanel {
                 sub.push("this chat only".into());
             }
             sub.push(secret_usage(a.last_used_at, a.disabled_at, a.enabled));
-            let avatar = match state.project(&a.project_id) {
+            let avatar = match projects.iter().find(|p| p.id == a.project_id) {
                 Some(p) => avatars::project(p, 30.0, theme),
                 None => avatars::element(&a.project_id, &a.name, None, 30.0, theme),
             };
@@ -1131,14 +1141,6 @@ impl SecretsPanel {
         body = body.child(Self::section("Agents", g, None, theme));
 
         // Activity for this secret (from the overview; the relay keeps 30 days).
-        let acts: Vec<SecretActivity> = state
-            .secrets
-            .activity
-            .iter()
-            .filter(|a| a.name == s.env)
-            .take(5)
-            .cloned()
-            .collect();
         let mut g = Self::group(theme);
         if acts.is_empty() {
             g = g.child(Self::footnote("No activity in the last 30 days.", theme).pb(px(8.0)));
@@ -1669,9 +1671,9 @@ impl SecretsPanel {
         }
         body = body.child(g);
         let mut g = Self::group(theme);
-        let state = self.state.read(cx);
+        let projects = self.state.read(cx).projects.clone();
         for a in &v.agents {
-            let avatar = match state.project(&a.project_id) {
+            let avatar = match projects.iter().find(|p| p.id == a.project_id) {
                 Some(p) => avatars::project(p, 30.0, theme),
                 None => avatars::element(&a.project_id, &a.name, None, 30.0, theme),
             };

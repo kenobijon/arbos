@@ -53,6 +53,7 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
         Some(p) => (p.clone(), !p.is_guest()),
         None => (project_from_member(state, project_id)?, false),
     };
+    let secrets_data = state.project_secrets.get(&project.id).cloned();
     let avatar_state = state.avatar_state(&project.id);
     let streaming = state.project_is_streaming(&project.id);
     let voice_text = crate::ui::voicepicker::current_label(&project, &state.voices);
@@ -277,7 +278,7 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
         .child(info_row("machine", machine_text, &theme))
         .child(info_row("model", model_text, &theme));
     // D83: what this agent may use; opens the agent's Secrets page.
-    let secrets_text = match state.project_secrets.get(&project.id) {
+    let secrets_text = match secrets_data.as_ref() {
         Some(d) => {
             let on: Vec<String> = d
                 .items
