@@ -94,14 +94,29 @@ impl DocHost {
 
     /// New pending commands not yet handed to the agent loop. On the first catch-up after a
     /// (re)start, commands this box had marked `taken` but never finished are recovered too.
+    ///
+    /// People chats can address several agents at once ("hey agents", multi-@, chip multi-select).
+    /// The first box marks the command `taken`; others must still see it while the user message
+    /// is recent, so each addressed agent can reply. `handle_command` skips agents that do not
+    /// want the message or that already wrote a reply.
     fn new_pending(&mut self) -> Vec<CommandView> {
         let recovering = !self.recovered;
         self.recovered = true;
+        let now = now_ms();
+        // How long a `taken` people `send` stays claimable by other agents (shared address).
+        const SHARED_SEND_OPEN_MS: i64 = 15 * 60 * 1000;
         let mut out = Vec::new();
         for c in self.doc.commands() {
-            let eligible = c.status == "pending" || (recovering && c.status == "taken");
+            let mut eligible = c.status == "pending" || (recovering && c.status == "taken");
+            if !eligible
+                && c.kind == "send"
+                && c.status == "taken"
+                && now.saturating_sub(c.issued_at) < SHARED_SEND_OPEN_MS
+            {
+                eligible = true;
+            }
             if eligible && self.seen_commands.insert(c.id.clone()) {
-                if c.status == "taken" {
+                if recovering && c.status == "taken" {
                     self.mark_interrupted(&c);
                 }
                 out.push(c);

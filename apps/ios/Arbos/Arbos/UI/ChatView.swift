@@ -128,10 +128,11 @@ struct ChatView: View {
     }
     @State private var replyTo: Message?
     @State private var mentionQuery: String?
-    /// Chip-picked addressee in a people chat: `agent:…`, `user:…`, or `"everyone"`.
-    /// Nil means no chip: agent-only DMs may still infer the last agent; human-peer DMs stay
-    /// with the person until a chip / `@` / reply picks an agent.
-    @State private var talkTo: String?
+    /// Chip-picked addressees in a people chat: `agent:…` and/or `user:…` member ids.
+    /// Empty means no chip: agent-only DMs may still infer the last agent; human-peer DMs stay
+    /// with the person until a chip / `@` / reply picks an agent. Several agent chips can be
+    /// on at once so that combination all reply (and "hey agents" / every agent chip → everyone).
+    @State private var talkTo: Set<String> = []
 
     private var project: Project? { model.project(projectId) }
     private var chat: Chat? { model.chat(chatId) }
@@ -156,12 +157,27 @@ struct ChatView: View {
         return name
     }
 
+    /// Agent member ids currently selected on the conversation chips.
+    private var talkToAgents: [String] {
+        talkTo.filter { $0.hasPrefix("agent:") }.sorted()
+    }
+
+    /// True when every agent in the chat is selected (or the draft says "hey agents").
+    private var talkingToEveryone: Bool {
+        if AppModel.addressesEveryone(draft) { return true }
+        guard let agents = people?.agents, agents.count > 1 else { return false }
+        return talkToAgents.count == agents.count
+    }
+
     /// Who the next people-chat message is for — chip pick, reply-to, or (agent-only DM) the
     /// agent who last spoke. A DM with a human peer (Allan + bob) leaves the addressee unset so
     /// plain lines stay with the person; tap the agent chip or `@` to talk to the agent. Groups
     /// leave the addressee unset so the decision model on the box can choose who replies, or none.
+    /// When several agent chips are on, this is nil (see `talkToAgents` / `sendAddress`).
     private var effectiveTalkTo: String? {
-        if let talkTo { return talkTo }
+        if talkingToEveryone { return "everyone" }
+        if talkToAgents.count > 1 { return nil }
+        if let one = talkTo.first { return one }
         if let r = replyTo, r.role == .assistant, let member = agentMember(for: r) {
             return member.member
         }
@@ -179,7 +195,8 @@ struct ChatView: View {
     private var composerPrompt: String {
         if transcribing { return "Transcribing…" }
         if !isPeople { return needsAnswer ? "Answer \(name)" : "Ask \(name)" }
-        if AppModel.addressesEveryone(draft) || talkTo == "everyone" { return "Message everyone" }
+        if talkingToEveryone { return "Message everyone" }
+        if talkToAgents.count > 1 { return "Message \(talkToAgents.count) agents" }
         // Bare person or agent name in the draft ("Allan?", "Bob?") overrides a sticky chip.
         if let people {
             let namedPeople = AppModel.namedPeople(in: draft, members: people.members)
@@ -732,13 +749,17 @@ struct ChatView: View {
                                 if isPeople, let m = messages.first(where: { $0.id == row.messageId }) {
                                     Button {
                                         replyTo = m
-                                        talkTo = agentMember(for: m)?.member
+                                        if let member = agentMember(for: m)?.member {
+                                            talkTo = [member]
+                                        }
                                         composerFocused = true
                                     } label: { Label("Reply", systemImage: "arrowshape.turn.up.left") }
                                     if m.role == .assistant, let h = m.senderHandle {
                                         Button {
                                             draft = "@\(h) " + draft
-                                            talkTo = agentMember(for: m)?.member
+                                            if let member = agentMember(for: m)?.member {
+                                                talkTo = [member]
+                                            }
                                             composerFocused = true
                                         } label: { Label("Mention @\(h)", systemImage: "at") }
                                     }
@@ -879,19 +900,28 @@ struct ChatView: View {
 
     /// Avatars + handles of everyone in a people chat; agents show their owner.
     /// Tap a chip to insert `@handle` into the composer and address the next send.
+    /// Agent chips toggle so several can be selected together (that combination all replies).
     private func memberChips(_ people: PeopleChat) -> some View {
         // Skip me — you don't address yourself; keeps a 1:1 DM to one chip + Agent.
         let others = people.members.filter { $0.id != model.user?.id }
         return ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 ForEach(others) { m in
-                    let selected = effectiveTalkTo == m.member
+                    let selected = talkTo.contains(m.member)
+                        || (talkTo.isEmpty && effectiveTalkTo == m.member)
                     Button {
-                        // Tapping the selected chip clears it. Do not promote an inferred /
-                        // reply-only selection into a sticky talkTo — that locked @bob on
-                        // every later line in Allan+bob DMs.
-                        if effectiveTalkTo == m.member {
-                            talkTo = nil
+                        // Agent chips toggle so combinations can all respond. Person chips stay
+                        // single-select. Tapping the only selected chip clears it — do not promote
+                        // an inferred / reply-only selection into a sticky talkTo.
+                        if talkTo.contains(m.member) {
+                            talkTo.remove(m.member)
+                        } else if talkTo.isEmpty, effectiveTalkTo == m.member {
+                            talkTo = []
+                        } else if m.isAgent {
+                            talkTo = Set(talkTo.filter { $0.hasPrefix("agent:") })
+                            talkTo.insert(m.member)
+                            ensureMention(m)
+                            composerFocused = true
                         } else {
                             // Same path as the @-picker: put `@handle` in the draft and set talkTo.
                             completeMention(m)
@@ -1281,12 +1311,24 @@ struct ChatView: View {
     }
 
     private func completeMention(_ m: ChatMember) {
-        let slug = m.isAgent ? mentionSlug(m.project?.name ?? m.handle) : m.handle
-        var parts = draft.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
-        if let last = parts.last, last.hasPrefix("@") { parts[parts.count - 1] = "@\(slug)" } else { parts.append("@\(slug)") }
-        draft = parts.joined(separator: " ") + " "
-        talkTo = m.member
+        ensureMention(m)
+        talkTo = [m.member]
         mentionQuery = nil
+    }
+
+    /// Put `@slug` in the draft if it is not already there (multi-select agent chips).
+    private func ensureMention(_ m: ChatMember) {
+        let slug = m.isAgent ? mentionSlug(m.project?.name ?? m.handle) : m.handle
+        let token = "@\(slug)"
+        let lower = draft.lowercased()
+        if lower.split(whereSeparator: { $0.isWhitespace }).contains(where: {
+            $0.trimmingCharacters(in: CharacterSet(charactersIn: ".,!?:;")).lowercased() == token.lowercased()
+        }) {
+            return
+        }
+        var parts = draft.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
+        if let last = parts.last, last.hasPrefix("@") { parts[parts.count - 1] = token } else { parts.append(token) }
+        draft = parts.joined(separator: " ") + " "
     }
 
     /// Fixed-locale stamp for photo attachment names (relay blob keys must be ASCII).
@@ -1319,8 +1361,11 @@ struct ChatView: View {
     /// Chip / inferred agent, or `"everyone"` when the draft says so — matches `composerPrompt`.
     /// A bare person name in the text drops a sticky agent so bob does not answer "Allan?".
     /// A bare agent name ("Bob?") addresses that agent like `@bob`.
+    /// Several selected agent chips (or "hey agents") address everyone / that combination via
+    /// mentions on the send — see `chipMentions(for:)`.
     private func sendAddress(for text: String) -> String? {
-        if AppModel.addressesEveryone(text) || talkTo == "everyone" { return "everyone" }
+        if talkingToEveryone || AppModel.addressesEveryone(text) { return "everyone" }
+        if talkToAgents.count > 1 { return nil }
         let members = people?.members ?? []
         if AppModel.mentions(in: text, members: members).contains(where: { $0.hasPrefix("agent:") }) {
             return effectiveTalkTo
@@ -1334,6 +1379,13 @@ struct ChatView: View {
         return effectiveTalkTo
     }
 
+    /// Extra agent member ids from the conversation chips when more than one is selected.
+    private func chipMentions(for text: String) -> [String] {
+        if talkingToEveryone || AppModel.addressesEveryone(text) { return [] }
+        guard talkToAgents.count > 1 else { return [] }
+        return talkToAgents
+    }
+
     /// Finish dictation and send: transcript (plus any typed draft) goes out as text.
     /// The audio is only used for STT — it is not attached to the chat.
     private func sendMemo(_ memo: AppModel.PendingAttachment) {
@@ -1341,11 +1393,12 @@ struct ChatView: View {
         let extras = pending
         let reply = replyTo?.id
         let address = sendAddress(for: typed)
+        let chips = chipMentions(for: typed)
         pending.removeAll()
         draft = ""
         replyTo = nil
         mentionQuery = nil
-        pinTalkTo(afterSending: address)
+        pinTalkTo(afterSending: address, chipMentions: chips)
         sentOnce = true
         transcribing = true
         Task {
@@ -1355,7 +1408,8 @@ struct ChatView: View {
             let text = [typed, transcript ?? ""].filter { !$0.isEmpty }.joined(separator: "\n\n")
             guard !text.isEmpty || !extras.isEmpty else { return }
             if isPeople {
-                model.sendPeople(chatId: chatId, text: text, replyTo: reply, address: address, attachments: extras)
+                model.sendPeople(chatId: chatId, text: text, replyTo: reply, address: address,
+                                 chipMentions: chips, attachments: extras)
             } else if needsAnswer && extras.isEmpty {
                 model.answer(chatId: chatId, text: text)
             } else {
@@ -1368,17 +1422,18 @@ struct ChatView: View {
     /// them. Do not promote a reply-only / @-only address into a sticky chip when a human peer
     /// is in the chat — otherwise Allan+bob DMs leave Message @bob on unrelated follow-ups.
     /// In a group, clear the chip so the next line is unaddressed and the decision model picks
-    /// who replies (an explicit chip tap still addresses that send). Always clear "everyone".
-    private func pinTalkTo(afterSending address: String?) {
-        if address == "everyone" || people?.kind == "group" {
-            talkTo = nil
+    /// who replies (an explicit chip tap still addresses that send). Always clear everyone /
+    /// multi-agent combinations.
+    private func pinTalkTo(afterSending address: String?, chipMentions: [String]) {
+        if address == "everyone" || people?.kind == "group" || chipMentions.count > 1 {
+            talkTo = []
         } else if let address, address.hasPrefix("agent:") {
             let hasHumanPeer = people?.humans.contains { $0.id != model.user?.id } == true
-            if hasHumanPeer, talkTo != address {
+            if hasHumanPeer, talkTo != [address] {
                 // Reply-to or typed @agent addressed this send; leave the next line free.
                 return
             }
-            talkTo = address
+            talkTo = [address]
         }
     }
 
@@ -1388,12 +1443,14 @@ struct ChatView: View {
         Haptics.send()
         if isPeople {
             let address = sendAddress(for: text)
-            model.sendPeople(chatId: chatId, text: text, replyTo: replyTo?.id, address: address, attachments: pending)
+            let chips = chipMentions(for: text)
+            model.sendPeople(chatId: chatId, text: text, replyTo: replyTo?.id, address: address,
+                             chipMentions: chips, attachments: pending)
             pending.removeAll()
             draft = ""
             replyTo = nil
             mentionQuery = nil
-            pinTalkTo(afterSending: address)
+            pinTalkTo(afterSending: address, chipMentions: chips)
             sentOnce = true
             return
         }

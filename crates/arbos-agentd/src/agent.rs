@@ -899,16 +899,25 @@ impl Agent {
         };
         // People chats route by mention (or, in a group, the decision model): a message not
         // for this agent is left pending for whoever it is for; humans' own sends are theirs.
-        if cmd.kind == "send" && self.people.is_people_chat(chat_id) {
+        // Shared addresses ("hey agents", several @agents) stay `taken` until each addressed
+        // agent has replied — see `people_shared_send_open` / sync `new_pending`.
+        let people_msg_id = if cmd.kind == "send" && self.people.is_people_chat(chat_id) {
             let msg_id = cmd
                 .payload
                 .get("messageId")
                 .and_then(Value::as_str)
-                .unwrap_or("");
-            if !self.people_wants(chat_id, &host, msg_id).await {
+                .unwrap_or("")
+                .to_owned();
+            if !self.people_wants(chat_id, &host, &msg_id).await {
                 return Ok(());
             }
-        }
+            if self.people_already_replied(&host, &msg_id).await {
+                return Ok(());
+            }
+            Some(msg_id)
+        } else {
+            None
+        };
         {
             host.lock()
                 .await
@@ -955,9 +964,17 @@ impl Agent {
             }
             other => Err(anyhow!("unknown command kind {other}")),
         };
+        let leave_taken = match (&res, people_msg_id.as_deref()) {
+            (Ok(()), Some(msg_id)) => self.people_shared_send_open(chat_id, &host, msg_id).await,
+            _ => false,
+        };
         let mut h = host.lock().await;
         match &res {
-            Ok(()) => h.doc.set_command_status(&cmd.id, CommandStatus::Done, None),
+            Ok(()) => {
+                if !leave_taken {
+                    h.doc.set_command_status(&cmd.id, CommandStatus::Done, None);
+                }
+            }
             Err(e) => {
                 tracing::warn!(chat_id, cmd = %cmd.kind, error = %e, "command failed");
                 h.doc.set_command_status(

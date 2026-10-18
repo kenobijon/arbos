@@ -1759,7 +1759,10 @@ final class AppModel: ObservableObject {
     /// `address` is an optional chip target (`agent:…` / `user:…` / `"everyone"`) when the
     /// text itself has no `@` mention — so a follow-up can keep talking to one agent, or
     /// "hey everyone" can reach every agent, without typing `@`.
-    func sendPeople(chatId: String, text: String, replyTo: String?, address: String? = nil, attachments: [PendingAttachment] = []) {
+    /// `chipMentions` are extra agent member ids from a multi-select on the conversation
+    /// selector (any combination of agents that should all reply).
+    func sendPeople(chatId: String, text: String, replyTo: String?, address: String? = nil,
+                    chipMentions: [String] = [], attachments: [PendingAttachment] = []) {
         guard let doc = docs[chatId], let chat = peopleChat(chatId), let me = user else { return }
         var mentions = AppModel.mentions(in: text, members: chat.members)
         // Leading bare person names ("Allan", "Allan?", "Yo Allan …") count as addressing
@@ -1775,18 +1778,26 @@ final class AppModel: ObservableObject {
         for agent in leadingAgents where !mentions.contains(agent) {
             mentions.append(agent)
         }
+        // Conversation-selector combinations: every selected agent is mentioned so each box
+        // wakes (agentd allows several replies on a shared people `send`).
+        for agent in chipMentions where agent.hasPrefix("agent:") && !mentions.contains(agent) {
+            mentions.append(agent)
+        }
         // Agent @mentions, bare agent names, and "everyone"/"agents" phrases count as an
         // address. A leading person name must not keep a sticky agent chip — otherwise
         // "Message @bob" + "Allan?" wakes bob. A person @handle mid-line must not block the
-        // chip (bob still answers about @jo).
+        // chip (bob still answers about @jo). "everyone" always expands to every agent even
+        // when a leftover `@agent` chip already named one.
         let addressedAgent = mentions.contains { $0.hasPrefix("agent:") }
-        if !addressedAgent, let address {
+        if let address {
             if address == "everyone" {
                 mentions.append(contentsOf: chat.agents.map(\.member).filter { !mentions.contains($0) })
-            } else if address.hasPrefix("agent:"), !leadingPeople.isEmpty {
-                // Text opens by naming a person; leave the sticky agent out of mentions.
-            } else if chat.members.contains(where: { $0.member == address }), !mentions.contains(address) {
-                mentions.append(address)
+            } else if !addressedAgent {
+                if address.hasPrefix("agent:"), !leadingPeople.isEmpty {
+                    // Text opens by naming a person; leave the sticky agent out of mentions.
+                } else if chat.members.contains(where: { $0.member == address }), !mentions.contains(address) {
+                    mentions.append(address)
+                }
             }
         }
         // In an agent-only DM, carry on with the agent who last spoke when nothing addresses
@@ -1881,7 +1892,9 @@ final class AppModel: ObservableObject {
                 if !out.contains(m.member) { out.append(m.member) }
             }
         }
-        if out.isEmpty && AppModel.addressesEveryone(text) {
+        // "hey agents" / @everyone always names every agent — even when a chip already put
+        // one `@agent` in the draft (otherwise only that one would wake).
+        if AppModel.addressesEveryone(text) {
             appendAgents()
         }
         return out
