@@ -198,6 +198,9 @@ pub struct EgressBody {
     /// The chat the tool call runs in (chat-scoped Access).
     #[serde(default, alias = "chatId")]
     pub chat_id: Option<String>,
+    /// Human directing this turn (`user_id`). Absent = owner / unknown.
+    #[serde(default, alias = "askedBy")]
+    pub asked_by: Option<String>,
 }
 
 /// `POST /egress` (box): perform an HTTP request on the box's behalf with placeholders swapped for
@@ -256,7 +259,20 @@ pub async fn egress(
         .chain(body_text.as_deref())
         .collect();
     let chat_id = b.chat_id.as_deref().filter(|c| !c.is_empty());
-    let plan = secrets::plan_egress(&state, &user_id, &project_id, &host, chat_id, &texts)?;
+    let asked_by = b
+        .asked_by
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty());
+    let plan = secrets::plan_egress(
+        &state,
+        &user_id,
+        &project_id,
+        &host,
+        chat_id,
+        asked_by,
+        &texts,
+    )?;
     // Connected vaults: `op://…` references resolve on the relay too (Phase 2).
     let op_plan =
         crate::vaults::plan_egress(&state, &user_id, &project_id, &host, chat_id, &texts).await;
@@ -608,6 +624,7 @@ pub async fn create_request(
         use_kind: Some(b.use_kind),
         host: None,
         chat_id: b.chat_id,
+        asked_by: None,
     };
     let resp = secrets::box_request(State(state), principal, headers, Json(body)).await?;
     let v = response_json(resp).await?;

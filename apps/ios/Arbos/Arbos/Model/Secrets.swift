@@ -5,6 +5,36 @@
 
 import Foundation
 
+/// A person the owner authorized to direct agents to use this secret (`secret.directors[]`).
+struct SecretDirector: Identifiable, Equatable {
+    var id: String { userId }
+    var userId: String
+    var handle: String
+    var name: String?
+    var avatarUrl: String?
+    /// Constraints the agent must honour when this person directs use
+    /// (e.g. "only 1k usd of credit usage per day").
+    var note: String
+    var createdAt: Int64
+
+    var displayName: String {
+        if let name, !name.isEmpty { return name }
+        return handle.isEmpty ? userId : "@\(handle)"
+    }
+
+    static func parse(_ v: Any?) -> SecretDirector? {
+        guard let m = v as? [String: Any], let userId = DocJSON.str(m["user_id"]) else { return nil }
+        return SecretDirector(
+            userId: userId,
+            handle: (DocJSON.str(m["handle"]) ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "@")),
+            name: DocJSON.str(m["name"]),
+            avatarUrl: DocJSON.str(m["avatar_url"]),
+            note: DocJSON.str(m["note"]) ?? "",
+            createdAt: DocJSON.int(m["created_at"]) ?? 0
+        )
+    }
+}
+
 /// One agent's switch on a secret (`secret.agents[]`, `GET /projects/{id}/secrets items[]`).
 struct SecretAgentAccess: Identifiable, Equatable {
     var id: String
@@ -58,6 +88,8 @@ struct SecretItem: Identifiable, Equatable {
     var username: String?
     var vaultName: String
     var agents: [SecretAgentAccess]
+    /// People (besides the owner) who may direct an agent to use this secret.
+    var directors: [SecretDirector]
 
     var kindLabel: String {
         switch kind {
@@ -86,7 +118,8 @@ struct SecretItem: Identifiable, Equatable {
             lastUsedAt: DocJSON.int(m["last_used_at"]),
             username: DocJSON.str(m["username"]),
             vaultName: DocJSON.str(m["vault_name"]) ?? "Arbos",
-            agents: (m["agents"] as? [Any])?.compactMap(SecretAgentAccess.parse) ?? []
+            agents: (m["agents"] as? [Any])?.compactMap(SecretAgentAccess.parse) ?? [],
+            directors: (m["directors"] as? [Any])?.compactMap(SecretDirector.parse) ?? []
         )
     }
 }
@@ -156,6 +189,8 @@ struct SecretActivity: Identifiable, Equatable {
         case "env_on": return "You put the real value of \(name) in the environment"
         case "env_off": return "You took the real value of \(name) out of the environment"
         case "injected": return "\(name) went into \(agent)'s environment"
+        case "director_on": return "You let someone direct agents to use \(name)"
+        case "director_off": return "You removed a director from \(name)"
         default: return "\(action.replacingOccurrences(of: "_", with: " ")) · \(name)"
         }
     }

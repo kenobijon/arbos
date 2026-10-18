@@ -80,6 +80,10 @@ struct Grant {
     inject_env: bool,
     /// Variable names the real value arrives under (`$NAME`, `$NAME_USERNAME`…).
     real_vars: Vec<String>,
+    /// User ids the owner named who may direct use of this secret (owner always may).
+    director_ids: Vec<String>,
+    /// Constraints the agent must honour (secret note + per-director notes).
+    use_notes: Vec<String>,
 }
 
 /// The real values of one secret or vault item, as `GET /box/secrets/env` handed them over.
@@ -215,6 +219,30 @@ impl Grant {
             None if has_env => real_var_names(&name, &placeholders),
             None => Vec::new(),
         };
+        let director_ids: Vec<String> = item["directors"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|d| d["user_id"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let use_notes: Vec<String> = item["use_notes"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .filter(|s| !s.trim().is_empty())
+                    .collect()
+            })
+            .unwrap_or_else(|| {
+                let n = item["note"].as_str().unwrap_or("").trim();
+                if n.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![n.to_owned()]
+                }
+            });
         Some(Grant {
             project_id: project_id.to_owned(),
             request_id: None,
@@ -228,6 +256,8 @@ impl Grant {
             vault_name: item["vault_name"].as_str().unwrap_or("Arbos").to_owned(),
             inject_env,
             real_vars,
+            director_ids,
+            use_notes,
         })
     }
 
@@ -259,14 +289,33 @@ impl Grant {
             "status": status, "requestId": self.request_id, "name": self.name, "kind": self.kind,
             "placeholders": self.placeholders, "env": env, "hosts": self.hosts, "note": self.note, "scope": self.scope,
             "vault": self.vault_name, "real_value": self.inject_env,
+            "use_notes": self.use_notes,
+            "who_may_direct": "Only the owner, or people the owner added under Who can direct for this secret. Anyone else directing you cannot use it.",
             "how": if self.inject_env {
-                format!("The owner put the real value in your environment: ${} works in any shell command or program. Keep it out of chat and logs.", self.real_vars.first().cloned().unwrap_or_else(|| self.name.clone()))
+                format!("The owner put the real value in your environment: ${} works in any shell command or program. Keep it out of chat and logs. Only use it when the person directing you is the owner or is listed as allowed to direct this secret; honour every use_notes constraint.", self.real_vars.first().cloned().unwrap_or_else(|| self.name.clone()))
             } else { match self.kind.as_str() {
                 "login" => "Call browser_fill(name, url) to have Arbos type the login into the page; you never see the values.".to_owned(),
-                _ => format!("Put the placeholder (or ${}) in a header or body and call the egress tool; the relay swaps in the real value only for the allowed hosts and redacts it from the reply. Never try to read, print, encode or copy the value.", self.name),
+                _ => format!("Put the placeholder (or ${}) in a header or body and call the egress tool; the relay swaps in the real value only for the allowed hosts and redacts it from the reply. Never try to read, print, encode or copy the value. Only use it when the person directing you is allowed; honour every use_notes constraint.", self.name),
             } },
         })
     }
+}
+
+/// User id of the human directing the current turn, when known.
+fn asked_by_user_id(agent: &Agent) -> Option<String> {
+    agent.people.current_asker().map(|a| a.user_id)
+}
+
+/// May the current asker direct use of this grant? Owner / no asker → yes; else directors list.
+fn asker_may_direct(agent: &Agent, g: &Grant) -> bool {
+    let Some(asker) = agent.people.current_asker() else {
+        return true;
+    };
+    let owner = agent.people.project_owner();
+    if asker.role == "owner" || (!owner.is_empty() && asker.user_id == owner) {
+        return true;
+    }
+    g.director_ids.iter().any(|id| id == &asker.user_id)
 }
 
 /// The variable names a secret's real value would take: the same names its placeholders use.
@@ -756,7 +805,9 @@ pub async fn secrets_list(agent: &Agent) -> Value {
         .map(|it| {
             let access = it["enabled"].as_bool().unwrap_or(false);
             json!({ "name": if it["env"].is_null() { it["title"].clone() } else { it["env"].clone() }, "kind": it["kind"], "fields": it["fields"], "placeholders": it["placeholders"],
-                "hosts": it["hosts"], "note": it["note"], "vault": it["vault_name"], "ref": it["ref"],
+                "hosts": it["hosts"], "note": it["note"], "use_notes": it["use_notes"], "directors": it["directors"],
+                "who_may_direct": it["who_may_direct"],
+                "vault": it["vault_name"], "ref": it["ref"],
                 "access": if paused { "paused" } else if access { "on" } else { "off" },
                 "ask_every_time": it["ask_every_time"],
                 "real_value": it["inject_env"], "real_env": if it["env"].is_null() { it["real_env"].clone() } else { it["env"].clone() } })
@@ -765,7 +816,7 @@ pub async fn secrets_list(agent: &Agent) -> Value {
     text_result(
         json!({ "paused": paused, "items": items,
             "note": if paused { "Secrets are paused by the owner: every use fails until they turn Pause all secrets off. Stop and say so." }
-                    else { "A secret with access on is already $NAME in your shell: the real value when real_value is true (use it directly in commands and programs; keep it out of chat and logs), otherwise a placeholder usable through egress. For one with access off call secrets_request(name, purpose, use, host)." } })
+                    else { "A secret with access on is already $NAME in your shell: the real value when real_value is true (use it directly in commands and programs; keep it out of chat and logs), otherwise a placeholder usable through egress. For one with access off call secrets_request(name, purpose, use, host). Only the owner — or people listed in directors for that secret — may direct you to use it; honour every use_notes constraint when you do." } })
             .to_string(),
     )
 }
@@ -905,16 +956,21 @@ async fn obtain_grant(
     };
     if let Some(g) = grant_for(&project, &name) {
         if g.request_id.is_none() && host_ok(&g) && use_kind != "browser_fill" {
-            return Ok(g);
+            if asker_may_direct(agent, &g) {
+                return Ok(g);
+            }
+            return Err(err_result(format!(
+                "{name}: the person directing you is not allowed to use this secret. Only the owner, or people the owner added under Who can direct, may. Tell them, and do not retry with this secret."
+            )));
         }
     }
-    let (status_code, created) = relay_post(
-        agent,
-        "/box/secrets/request",
-        &json!({ "name": name, "purpose": purpose, "use": use_kind, "host": host, "chat_id": chat_id }),
-    )
-    .await
-    .map_err(err_result)?;
+    let mut req = json!({ "name": name, "purpose": purpose, "use": use_kind, "host": host, "chat_id": chat_id });
+    if let Some(uid) = asked_by_user_id(agent) {
+        req["asked_by"] = json!(uid);
+    }
+    let (status_code, created) = relay_post(agent, "/box/secrets/request", &req)
+        .await
+        .map_err(err_result)?;
     let request = &created["request"];
     let request_id = request["id"].as_str().unwrap_or("").to_owned();
     if status_code == 200 {
@@ -1187,12 +1243,16 @@ pub async fn egress(agent: &Arc<Agent>, args: &Value, chat_id: &str) -> Value {
         ),
         None,
     );
+    let mut egress_body = json!({ "url": url, "method": method, "headers": headers, "body": body, "placeholders": placeholders, "chat_id": chat_id });
+    if let Some(uid) = asked_by_user_id(agent) {
+        egress_body["asked_by"] = json!(uid);
+    }
     let r = agent
         .http_client()
         .post(format!("{}/egress", agent.cfg.relay_url))
         .bearer_auth(&agent.cfg.box_token)
         .header("x-arbos-project", &agent.cfg.project_id)
-        .json(&json!({ "url": url, "method": method, "headers": headers, "body": body, "placeholders": placeholders, "chat_id": chat_id }))
+        .json(&egress_body)
         .send()
         .await;
     let (status, text) = match r {
