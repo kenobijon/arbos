@@ -1257,6 +1257,16 @@ class Loop:
             tagged = any(f"[feedback {fid}]" in c["commit"]["message"] for c in cmp.get("commits", []))
             if cmp.get("status") in ("ahead", "diverged") and tagged:
                 files = [f["filename"] for f in cmp.get("files", [])]
+                if not files:
+                    # Seen once the branch head is a merge of main: the compare lists no files. Take them
+                    # from the tagged commits themselves so the ship checks know what to wait for.
+                    seen: list[str] = []
+                    for c in cmp.get("commits", []):
+                        if f"[feedback {fid}]" in c["commit"]["message"]:
+                            for f in self.gh.commit(c["sha"]).get("files", []):
+                                if f["filename"] not in seen:
+                                    seen.append(f["filename"])
+                    files = seen
                 st.update(status="gating", branch=branch, branch_head=head, files=files,
                           expects_ios=any(f.startswith("apps/ios/") or f == ".github/workflows/ios.yml" for f in files),
                           expects_ci=any(not f.startswith("apps/ios/") for f in files),
@@ -1422,6 +1432,12 @@ class Loop:
 
     def check_ship(self, fid: str, st: dict) -> None:
         sha = st["commit"]
+        if not st.get("expects_ios") and not st.get("expects_ci"):
+            # Nothing to wait for would mean a silent 90-min timeout; derive the expectations from the commit.
+            files = st.get("files") or [f["filename"] for f in self.gh.commit(sha).get("files", [])]
+            st.update(files=files, expects_ios=any(f.startswith("apps/ios/") for f in files),
+                      expects_ci=any(not f.startswith("apps/ios/") for f in files))
+            self.store.save_state(fid, st)
         if not st.get("commit_date"):
             # Superseding-run searches start at the commit's own time, not at a (possibly reset) pushed_at.
             with contextlib.suppress(HttpError, KeyError):
