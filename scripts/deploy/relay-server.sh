@@ -113,6 +113,20 @@ if ! /usr/local/bin/arbosctl --version 2>/dev/null | grep -q "$RELAY_VERSION"; t
 fi
 fi  # FROM_SOURCE
 
+# ---- 1b. 1Password CLI, pinned: the relay resolves `op://` references of connected vaults with it
+# (D83 Phase 2). Installed or replaced only when the version differs; the token is never on disk.
+say "1Password CLI"
+OP_VERSION="${OP_VERSION:-2.30.3}"
+if [[ "$(op --version 2>/dev/null || true)" != "$OP_VERSION" ]]; then
+  case "$(uname -m)" in aarch64|arm64) OP_ARCH=arm64;; *) OP_ARCH=amd64;; esac
+  OP_TMP=$(mktemp -d)
+  curl -fsSL "https://cache.agilebits.com/dist/1P/op2/pkg/v${OP_VERSION}/op_linux_${OP_ARCH}_v${OP_VERSION}.zip" -o "$OP_TMP/op.zip"
+  unzip -oq "$OP_TMP/op.zip" -d "$OP_TMP"
+  install -m 0755 "$OP_TMP/op" /usr/local/bin/op
+  rm -rf "$OP_TMP"
+fi
+echo "op $(op --version) at $(command -v op)"
+
 # ---- 2. system user + data dir ---------------------------------------------------------------------
 say "user + data dir"
 id arbos >/dev/null 2>&1 || useradd --system --home "$DATA_DIR" --shell /usr/sbin/nologin arbos

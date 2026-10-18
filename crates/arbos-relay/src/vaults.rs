@@ -1,64 +1,1474 @@
-//! Connected vaults (D83 §3): secrets that live elsewhere and are used by reference. Phase 1
-//! ships the hook points only; Phase 2 adds the 1Password provider (`op://` resolved on the
-//! relay with the pinned `op` CLI, vault-level Access, per-item host pinning).
+//! Connected vaults (D83 §3, Phase 2): secrets that live elsewhere and are used by reference.
+//! v1 provider: **1Password** through the pinned `op` CLI on the relay host. The service-account
+//! token is stored as ciphertext under the user's DEK (AAD = vault id), is handed to `op` through
+//! the environment of one child process at a time, and never reaches a box. `op://` references
+//! resolve on the relay only, inside `/egress`, with a short in-memory cache so a vault stays
+//! under the plan's limits (the Arbos account is Individual: 1,000 reads/h per token, 1,000
+//! requests/day for the account — decision 10). Vault-level Access with per-item host pinning.
+//!
+//! Env: `ARBOS_OP_BIN` (default `op`), `ARBOS_OP_CACHE_TTL_SECS` (resolved values; default 300),
+//! `ARBOS_OP_ITEMS_TTL_SECS` (cached item list; default 3600), `ARBOS_OP_CONFIG_DIR` (default
+//! `<data>/op`), `ARBOS_OP_READS_PER_HOUR` / `ARBOS_OP_READS_PER_DAY` (plan limits; defaults
+//! 1000 / 1000). `ARBOS_OP_DISABLED=1` turns the provider off (`providers: []`).
 
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
+use axum::Json;
+use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::db_secrets::{Access, SecretRequest};
-use crate::secrets::{err, ApiErr};
+use arbos_core::ids::{now_ms, ulid};
+
+use crate::auth::Principal;
+use crate::db_secrets::{Access, AuditEntry, AuditQuery, SecretRequest, Vault, REQUEST_PENDING_MS};
+use crate::secrets::{
+    self, audit, clean_hosts, device_user, err, internal, request_json, user_dek, ApiErr,
+    ApiResult, Refusal, ACTIVITY_WINDOW_MS,
+};
 use crate::state::AppState;
+use crate::vault::host_allowed;
 
-/// `GET /secrets` → `vaults[]`.
-pub(crate) fn list_json(_state: &AppState, _user_id: &str) -> Vec<Value> {
-    Vec::new()
+pub const OP_SCHEME: &str = "op://";
+const OP_TIMEOUT: Duration = Duration::from_secs(25);
+/// Refuse before the plan refuses us: leave this much of each window unused.
+const LIMIT_HEADROOM: f64 = 0.95;
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(default)
 }
 
-/// One vault-level access as an item of the agent profile page.
-pub(crate) fn access_item_json(_state: &AppState, _owner: &str, _a: &Access) -> Option<Value> {
-    None
+fn op_bin() -> String {
+    std::env::var("ARBOS_OP_BIN")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "op".into())
 }
 
-/// Items of connected vaults this project may use (names only).
-pub(crate) fn box_items(_state: &AppState, _user_id: &str, _project_id: &str) -> Vec<Value> {
-    Vec::new()
+fn provider_enabled() -> bool {
+    !std::env::var("ARBOS_OP_DISABLED").is_ok_and(|v| v == "1")
 }
 
-/// A card decision on an `op://` request.
-pub(crate) async fn decide_vault_request(
-    _state: &AppState,
-    _user_id: &str,
-    _rq: &SecretRequest,
-    _status: &str,
-) -> Result<Option<Access>, ApiErr> {
-    Ok(None)
+fn cache_ttl() -> Duration {
+    Duration::from_secs(env_u64("ARBOS_OP_CACHE_TTL_SECS", 300))
 }
 
-/// `POST /box/secrets/request` with an `op://` reference.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn box_request(
-    _state: &AppState,
-    _user_id: &str,
-    _project_id: &str,
-    reference: &str,
-    _purpose: &str,
-    _use_kind: &str,
-    _host: Option<String>,
-    _chat_id: &str,
-) -> Result<Response, ApiErr> {
-    Err(err(
-        StatusCode::NOT_IMPLEMENTED,
-        "provider_unavailable",
-        format!("{reference}: connected vaults are not available on this relay yet"),
-    ))
+fn items_ttl_ms() -> i64 {
+    env_u64("ARBOS_OP_ITEMS_TTL_SECS", 3600) as i64 * 1000
+}
+
+fn reads_per_hour() -> i64 {
+    env_u64("ARBOS_OP_READS_PER_HOUR", 1000) as i64
+}
+
+fn reads_per_day() -> i64 {
+    env_u64("ARBOS_OP_READS_PER_DAY", 1000) as i64
 }
 
 /// Providers this relay can connect (`GET /secrets` → `providers[]`).
 pub(crate) fn providers(_state: &AppState) -> Vec<&'static str> {
-    Vec::new()
+    if provider_enabled() {
+        vec!["onepassword"]
+    } else {
+        Vec::new()
+    }
 }
 
-pub(crate) fn admin_status(_state: &AppState) -> Value {
-    json!({ "onepassword": { "available": false } })
+// ---- the `op` CLI -----------------------------------------------------------------------------
+
+#[derive(Debug)]
+enum OpError {
+    BadToken,
+    RateLimited,
+    NotFound,
+    Other(String),
+}
+
+impl OpError {
+    fn classify(stderr: &str) -> Self {
+        let s = stderr.to_ascii_lowercase();
+        if s.contains("rate limit") || s.contains("rate-limit") || s.contains("429") {
+            OpError::RateLimited
+        } else if s.contains("isn't an item")
+            || s.contains("not found")
+            || s.contains("no item")
+            || s.contains("doesn't exist")
+            || s.contains("more than one item")
+        {
+            OpError::NotFound
+        } else if s.contains("token")
+            || s.contains("unauthor")
+            || s.contains("401")
+            || s.contains("403")
+            || s.contains("session")
+            || s.contains("invalid")
+        {
+            OpError::BadToken
+        } else {
+            OpError::Other(stderr.trim().chars().take(300).collect())
+        }
+    }
+
+    fn api(&self) -> ApiErr {
+        match self {
+            OpError::BadToken => err(
+                StatusCode::BAD_REQUEST,
+                "bad_token",
+                "That token didn't work. Check it was copied whole.",
+            ),
+            OpError::RateLimited => err(
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limited",
+                "1Password rate limit reached — try again later.",
+            ),
+            OpError::NotFound => err(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "no such item in the vault",
+            ),
+            OpError::Other(m) => err(
+                StatusCode::BAD_GATEWAY,
+                "provider_error",
+                format!("1Password: {m}"),
+            ),
+        }
+    }
+}
+
+/// Run one `op` command with the token in its environment only. stdout as text; stderr classified.
+async fn op(state: &AppState, token: &str, args: &[&str]) -> Result<String, OpError> {
+    let cfg_dir = std::env::var("ARBOS_OP_CONFIG_DIR")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| state.cfg.data_dir.join("op"));
+    let _ = std::fs::create_dir_all(&cfg_dir);
+    let mut cmd = tokio::process::Command::new(op_bin());
+    cmd.args(args)
+        .env_clear()
+        .env(
+            "PATH",
+            std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".into()),
+        )
+        .env("HOME", &cfg_dir)
+        .env("OP_CONFIG_DIR", &cfg_dir)
+        .env("OP_SERVICE_ACCOUNT_TOKEN", token)
+        .env("OP_FORMAT", "json")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let out = tokio::time::timeout(OP_TIMEOUT, cmd.output())
+        .await
+        .map_err(|_| OpError::Other("op timed out".into()))?
+        .map_err(|e| OpError::Other(format!("could not run op: {e}")))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        Err(OpError::classify(&String::from_utf8_lossy(&out.stderr)))
+    }
+}
+
+/// Fields the agent can reference per 1Password category, without a per-item read.
+fn fields_for_category(category: &str) -> Vec<&'static str> {
+    match category.to_ascii_uppercase().as_str() {
+        "LOGIN" => vec!["username", "password"],
+        "API_CREDENTIAL" => vec!["credential", "username"],
+        "PASSWORD" => vec!["password"],
+        "SECURE_NOTE" => vec!["notesPlain"],
+        "DATABASE" => vec!["username", "password", "hostname", "port", "database"],
+        "SSH_KEY" => vec!["private_key", "public_key"],
+        "CREDIT_CARD" => vec!["number", "cvv"],
+        _ => vec!["password", "credential", "notesPlain"],
+    }
+}
+
+/// `op vault list` → `[{id, name}]`.
+async fn list_external_vaults(state: &AppState, token: &str) -> Result<Vec<Value>, OpError> {
+    let out = op(state, token, &["vault", "list", "--format", "json"]).await?;
+    let v: Value = serde_json::from_str(&out).map_err(|e| OpError::Other(e.to_string()))?;
+    Ok(v.as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|x| json!({ "id": x["id"], "name": x["name"] }))
+        .collect())
+}
+
+/// `op item list --vault <id>` for every external vault → cached items, names only.
+async fn list_items(
+    state: &AppState,
+    token: &str,
+    external: &[Value],
+) -> Result<Vec<Value>, OpError> {
+    let mut items = Vec::new();
+    for ev in external {
+        let Some(vid) = ev["id"].as_str() else {
+            continue;
+        };
+        let vname = ev["name"].as_str().unwrap_or(vid);
+        let out = op(
+            state,
+            token,
+            &["item", "list", "--vault", vid, "--format", "json"],
+        )
+        .await?;
+        let v: Value = serde_json::from_str(&out).map_err(|e| OpError::Other(e.to_string()))?;
+        for it in v.as_array().cloned().unwrap_or_default() {
+            let title = it["title"].as_str().unwrap_or("").to_owned();
+            let category = it["category"].as_str().unwrap_or("").to_owned();
+            let urls: Vec<String> = it["urls"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|u| u["href"].as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let fields = fields_for_category(&category);
+            let primary = fields.first().copied().unwrap_or("password");
+            items.push(json!({
+                "id": it["id"], "title": title, "category": category, "vault": { "id": vid, "name": vname },
+                "ref": format!("{OP_SCHEME}{vname}/{title}/{primary}"),
+                "fields": fields, "urls": urls,
+            }));
+        }
+    }
+    Ok(items)
+}
+
+type ValueCache = Mutex<HashMap<(String, String), (Instant, String)>>;
+
+/// Resolved values, keyed by `(vault_id, reference)`, for `ARBOS_OP_CACHE_TTL_SECS`.
+fn cache() -> &'static ValueCache {
+    static C: OnceLock<ValueCache> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cache_flush(vault_id: &str) {
+    cache()
+        .lock()
+        .expect("op cache")
+        .retain(|(v, _), _| v != vault_id);
+}
+
+/// One plan-aware provider read, counted per vault.
+async fn read_counted(
+    state: &AppState,
+    v: &Vault,
+    token: &str,
+    args: &[&str],
+) -> Result<String, ApiErr> {
+    let (hour, day) = state.db.vault_reads(&v.id).map_err(internal)?;
+    if hour as f64 >= reads_per_hour() as f64 * LIMIT_HEADROOM
+        || day as f64 >= reads_per_day() as f64 * LIMIT_HEADROOM
+    {
+        let secs = if hour as f64 >= reads_per_hour() as f64 * LIMIT_HEADROOM {
+            3600 - (now_ms() / 1000) % 3600
+        } else {
+            86_400 - (now_ms() / 1000) % 86_400
+        };
+        return Err(ApiErr(
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limited".into(),
+            format!(
+                "1Password rate limit reached — try again in {} min.",
+                (secs / 60).max(1)
+            ),
+        ));
+    }
+    let _ = state.db.count_vault_read(&v.id);
+    op(state, token, args).await.map_err(|e| {
+        if matches!(e, OpError::BadToken | OpError::RateLimited) {
+            let mut v2 = v.clone();
+            v2.status = if matches!(e, OpError::BadToken) {
+                "token_invalid"
+            } else {
+                "rate_limited"
+            }
+            .into();
+            v2.last_error = Some(e.api().2.clone());
+            let _ = state.db.upsert_vault(&v2);
+        }
+        e.api()
+    })
+}
+
+/// Decrypt the vault's token for one provider call.
+fn vault_token(state: &AppState, v: &Vault) -> Result<String, ApiErr> {
+    let enc = v.token_enc.as_deref().ok_or_else(|| {
+        err(
+            StatusCode::CONFLICT,
+            "token_invalid",
+            "this vault has no token; replace it",
+        )
+    })?;
+    let dek = user_dek(state, &v.user_id).map_err(internal)?;
+    dek.decrypt(v.id.as_bytes(), enc).map_err(internal)
+}
+
+/// Resolve one `op://…` reference for a vault (cache first). The value stays in this process.
+async fn resolve(state: &AppState, v: &Vault, reference: &str) -> Result<String, ApiErr> {
+    let key = (v.id.clone(), reference.to_owned());
+    if let Some((at, val)) = cache().lock().expect("op cache").get(&key) {
+        if at.elapsed() < cache_ttl() {
+            return Ok(val.clone());
+        }
+    }
+    let token = vault_token(state, v)?;
+    let out = read_counted(state, v, &token, &["read", "--no-newline", reference]).await?;
+    cache()
+        .lock()
+        .expect("op cache")
+        .insert(key, (Instant::now(), out.clone()));
+    Ok(out)
+}
+
+/// The vault an `op://<vault>/<item>/<field>` reference belongs to, by external name or id.
+fn vault_for_ref<'a>(vaults: &'a [Vault], reference: &str) -> Option<&'a Vault> {
+    let rest = reference.strip_prefix(OP_SCHEME)?;
+    let vault_seg = rest.split('/').next()?.trim();
+    vaults.iter().find(|v| {
+        v.external_vaults.as_array().is_some_and(|a| {
+            a.iter().any(|e| {
+                e["name"]
+                    .as_str()
+                    .is_some_and(|n| n.eq_ignore_ascii_case(vault_seg))
+                    || e["id"].as_str() == Some(vault_seg)
+            })
+        })
+    })
+}
+
+/// `op://…` references in `s`, in order (stops at whitespace, quotes and JSON punctuation).
+pub fn find_refs(s: &str) -> Vec<String> {
+    // Vault and item names may hold spaces (1Password allows them); the field ends at
+    // whitespace, a quote or JSON punctuation.
+    let is_term =
+        |c: char| c == '\n' || matches!(c, '"' | '\'' | '<' | '>' | ',' | ';' | '}' | ']' | '\\');
+    let mut out = Vec::new();
+    let mut rest = s;
+    while let Some(i) = rest.find(OP_SCHEME) {
+        let after = &rest[i + OP_SCHEME.len()..];
+        let mut segs: Vec<&str> = Vec::new();
+        let mut cursor = after;
+        let mut consumed = 0;
+        for n in 0..3 {
+            let end = if n < 2 {
+                cursor.find(|c: char| c == '/' || is_term(c))
+            } else {
+                cursor.find(|c: char| c.is_whitespace() || c == '/' || is_term(c))
+            }
+            .unwrap_or(cursor.len());
+            let seg = cursor[..end].trim();
+            if seg.is_empty() || (n < 2 && !cursor[end..].starts_with('/')) {
+                break;
+            }
+            segs.push(seg);
+            let step = (end + usize::from(n < 2)).min(cursor.len());
+            consumed += step;
+            cursor = &cursor[step..];
+        }
+        if segs.len() == 3 {
+            let token = format!("{OP_SCHEME}{}/{}/{}", segs[0], segs[1], segs[2]);
+            if !out.contains(&token) {
+                out.push(token);
+            }
+        }
+        rest = &after[consumed.max(1).min(after.len())..];
+    }
+    out
+}
+
+// ---- JSON --------------------------------------------------------------------------------------
+
+fn vault_json(state: &AppState, v: &Vault) -> Value {
+    let (hour, day) = state.db.vault_reads(&v.id).unwrap_or((0, 0));
+    let agents: Vec<Value> = state
+        .db
+        .accesses_of_target("vault", &v.id)
+        .unwrap_or_default()
+        .iter()
+        .map(|a| access_json(state, a))
+        .collect();
+    json!({
+        "id": v.id, "provider": v.provider, "name": v.name,
+        "external_vaults": v.external_vaults, "items_count": v.items_count,
+        "items_refreshed_at": v.items_refreshed_at, "token_expires_at": v.token_expires_at,
+        "limits": { "reads_per_hour": reads_per_hour(), "reads_used_hour": hour, "reads_per_day": reads_per_day(), "reads_used_day": day,
+                    "cache_ttl_secs": cache_ttl().as_secs() },
+        "status": v.status, "last_error": v.last_error, "last_refreshed_at": v.last_refreshed_at,
+        "created_at": v.created_at, "agents": agents,
+    })
+}
+
+fn access_json(state: &AppState, a: &Access) -> Value {
+    let name = state
+        .db
+        .project(&a.project_id)
+        .ok()
+        .flatten()
+        .map(|p| p.name)
+        .unwrap_or_else(|| a.project_id.clone());
+    let pinned: Vec<Value> = state
+        .db
+        .vault_access_hosts(&a.id)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(r, h)| json!({ "ref": r, "host": h }))
+        .collect();
+    json!({
+        "project_id": a.project_id, "name": name, "access_id": a.id, "enabled": a.enabled,
+        "note": a.note, "hosts": a.hosts, "item_hosts": pinned,
+        "scope": { "kind": a.scope_kind, "chat_id": a.scope_chat_id },
+        "created_from": a.created_from, "created_at": a.created_at,
+        "last_used_at": a.last_used_at, "disabled_at": a.disabled_at,
+    })
+}
+
+/// `GET /secrets` → `vaults[]`.
+pub(crate) fn list_json(state: &AppState, user_id: &str) -> Vec<Value> {
+    state
+        .db
+        .list_vaults(user_id)
+        .unwrap_or_default()
+        .iter()
+        .map(|v| vault_json(state, v))
+        .collect()
+}
+
+/// One vault-level access as an item of the agent profile page.
+pub(crate) fn access_item_json(state: &AppState, owner: &str, a: &Access) -> Option<Value> {
+    let v = state.db.vault(owner, &a.target_id).ok().flatten()?;
+    let mut j = access_json(state, a);
+    j["target_kind"] = json!("vault");
+    j["vault"] = json!({ "id": v.id, "provider": v.provider, "name": v.name, "items_count": v.items_count, "status": v.status });
+    Some(j)
+}
+
+/// Items of connected vaults this project may use (names only), one per cached item.
+pub(crate) fn box_items(state: &AppState, user_id: &str, project_id: &str) -> Vec<Value> {
+    let mut out = Vec::new();
+    for v in state.db.list_vaults(user_id).unwrap_or_default() {
+        let access = state.db.access(project_id, "vault", &v.id).ok().flatten();
+        let enabled = access.as_ref().is_some_and(|a| a.enabled);
+        for it in v.items.as_array().cloned().unwrap_or_default() {
+            let r = it["ref"].as_str().unwrap_or("").to_owned();
+            let hosts: Vec<String> = access
+                .as_ref()
+                .map(|a| state.db.vault_item_hosts(&a.id, &r).unwrap_or_default())
+                .unwrap_or_default();
+            let fields: Vec<String> = it["fields"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|f| f.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let base = r
+                .rsplit_once('/')
+                .map(|(b, _)| b.to_owned())
+                .unwrap_or(r.clone());
+            let placeholders: serde_json::Map<String, Value> = fields
+                .iter()
+                .map(|f| (f.clone(), Value::String(format!("{base}/{f}"))))
+                .collect();
+            out.push(json!({
+                "id": format!("{}:{}", v.id, it["id"].as_str().unwrap_or("")), "name": it["title"], "env": Value::Null,
+                "kind": it["category"].as_str().map(|c| c.to_ascii_lowercase()).unwrap_or_default(),
+                "note": "", "hosts": hosts, "ref": r, "fields": fields, "placeholders": placeholders,
+                "vault_name": v.name, "vault_id": v.id, "access_id": access.as_ref().map(|a| a.id.clone()),
+                "enabled": enabled && v.status == "ok", "ask_every_time": false, "expires_at": v.token_expires_at,
+                "scope": access.as_ref().map(|a| json!({ "kind": a.scope_kind, "chat_id": a.scope_chat_id })),
+                "urls": it["urls"],
+            }));
+        }
+    }
+    out
+}
+
+pub(crate) fn admin_status(state: &AppState) -> Value {
+    let paths = std::env::var("PATH").unwrap_or_default();
+    let found = std::env::split_paths(&paths).any(|d| d.join(op_bin()).is_file())
+        || std::path::Path::new(&op_bin()).is_file();
+    json!({ "onepassword": { "available": provider_enabled() && found, "op_bin": op_bin(),
+        "cache_ttl_secs": cache_ttl().as_secs(), "items_ttl_secs": items_ttl_ms() / 1000,
+        "reads_per_hour": reads_per_hour(), "reads_per_day": reads_per_day(),
+        "vaults": state.db.with(|c| c.query_row("SELECT COUNT(*) FROM vaults WHERE disconnected_at IS NULL", [], |r| r.get::<_, i64>(0))).unwrap_or(0) } })
+}
+
+fn entry(action: &str, v: &Vault, by: &str) -> AuditEntry {
+    AuditEntry {
+        action: action.into(),
+        target_kind: "vault".into(),
+        target_id: v.id.clone(),
+        target_name: v.name.clone(),
+        by: by.into(),
+        detail: json!({}),
+        ..Default::default()
+    }
+}
+
+fn push_box(state: &AppState, project_id: &str, kind: &str, payload: Value) {
+    let _ = state.db.enqueue_push(project_id, kind, &payload);
+}
+
+fn after_access_change(state: &AppState, v: &Vault, a: &Access) {
+    push_box(
+        state,
+        &a.project_id,
+        "secret_access_changed",
+        json!({ "access_id": a.id, "ref": format!("{OP_SCHEME}{}/", v.name), "env": Value::Null, "name": v.name,
+            "kind": "vault", "enabled": a.enabled, "hosts": a.hosts }),
+    );
+}
+
+// ---- device: connect, read, token, refresh, access, disconnect -----------------------------
+
+#[derive(Deserialize)]
+pub struct ConnectBody {
+    #[serde(default = "default_provider")]
+    pub provider: String,
+    pub token: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub agents: Vec<secrets::AgentPick>,
+}
+
+fn default_provider() -> String {
+    "onepassword".into()
+}
+
+/// Validate a token with the provider and read what it can see. Returns `(external vaults, items)`.
+async fn probe(state: &AppState, token: &str) -> Result<(Vec<Value>, Vec<Value>), ApiErr> {
+    let external = list_external_vaults(state, token)
+        .await
+        .map_err(|e| e.api())?;
+    if external.is_empty() {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "no_vaults",
+            "This token can read no vaults.",
+        ));
+    }
+    let items = list_items(state, token, &external)
+        .await
+        .map_err(|e| e.api())?;
+    Ok((external, items))
+}
+
+/// `POST /vaults` → 201 `{ vault }`. The token is checked with `op vault list` + one
+/// `op item list` per vault, then stored encrypted; the box never sees it.
+pub async fn connect(
+    State(state): State<AppState>,
+    principal: Principal,
+    Json(b): Json<ConnectBody>,
+) -> ApiResult {
+    let user_id = device_user(&principal)?;
+    if !provider_enabled() || b.provider != "onepassword" {
+        return Err(err(
+            StatusCode::NOT_IMPLEMENTED,
+            "provider_unavailable",
+            format!(
+                "{}: connected vaults of this kind are not available on this relay",
+                b.provider
+            ),
+        ));
+    }
+    let token = b.token.trim().to_owned();
+    if token.len() < 20 || token.contains(char::is_whitespace) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "bad_token",
+            "That token didn't work. Check it was copied whole.",
+        ));
+    }
+    let (external, items) = probe(&state, &token).await?;
+    let default_name = external
+        .iter()
+        .filter_map(|e| e["name"].as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let name = b
+        .name
+        .map(|n| n.trim().chars().take(80).collect::<String>())
+        .filter(|n| !n.is_empty())
+        .unwrap_or(default_name);
+    let dek = user_dek(&state, &user_id).map_err(internal)?;
+    let id = ulid();
+    let now = now_ms();
+    let v = Vault {
+        id: id.clone(),
+        user_id: user_id.clone(),
+        provider: "onepassword".into(),
+        name,
+        token_enc: Some(dek.encrypt(id.as_bytes(), &token).map_err(internal)?),
+        external_vaults: Value::Array(external),
+        items_count: items.len() as i64,
+        items: Value::Array(items),
+        items_refreshed_at: Some(now),
+        token_expires_at: None,
+        status: "ok".into(),
+        last_error: None,
+        last_refreshed_at: Some(now),
+        created_at: now,
+        disconnected_at: None,
+    };
+    state.db.upsert_vault(&v).map_err(internal)?;
+    // The probe made 1 + n reads; count them so the Vault page is honest.
+    for _ in 0..=v.external_vaults.as_array().map(Vec::len).unwrap_or(0) {
+        let _ = state.db.count_vault_read(&v.id);
+    }
+    audit(
+        &state,
+        &user_id,
+        AuditEntry {
+            detail: json!({ "provider": v.provider, "vaults": v.external_vaults.as_array().map(Vec::len).unwrap_or(0), "items": v.items_count }),
+            ..entry("vault_connected", &v, &format!("user:{user_id}"))
+        },
+    );
+    for pick in &b.agents {
+        if let Some(a) = grant_access(
+            &state,
+            &user_id,
+            &v,
+            &pick.project_id,
+            pick.note.as_deref(),
+            true,
+            "settings",
+        )? {
+            after_access_change(&state, &v, &a);
+        }
+    }
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "vault": vault_json(&state, &v) })),
+    )
+        .into_response())
+}
+
+fn grant_access(
+    state: &AppState,
+    user_id: &str,
+    v: &Vault,
+    project_id: &str,
+    note: Option<&str>,
+    enabled: bool,
+    created_from: &str,
+) -> Result<Option<Access>, ApiErr> {
+    let Some(p) = state.db.project(project_id).map_err(internal)? else {
+        return Err(err(StatusCode::NOT_FOUND, "not_found", "no such agent"));
+    };
+    if p.user_id != user_id {
+        return Err(err(StatusCode::FORBIDDEN, "not_owner", "not your agent"));
+    }
+    let existing = state.db.access(&p.id, "vault", &v.id).map_err(internal)?;
+    let was_on = existing.as_ref().is_some_and(|a| a.enabled);
+    let now = now_ms();
+    let a = Access {
+        id: existing.as_ref().map(|a| a.id.clone()).unwrap_or_else(ulid),
+        user_id: user_id.to_owned(),
+        project_id: p.id.clone(),
+        target_kind: "vault".into(),
+        target_id: v.id.clone(),
+        note: note
+            .map(|n| n.chars().take(500).collect())
+            .or_else(|| existing.as_ref().map(|a| a.note.clone()))
+            .unwrap_or_default(),
+        hosts: existing
+            .as_ref()
+            .map(|a| a.hosts.clone())
+            .unwrap_or_default(),
+        scope_kind: existing
+            .as_ref()
+            .map(|a| a.scope_kind.clone())
+            .unwrap_or_else(|| "all".into()),
+        scope_chat_id: existing.as_ref().and_then(|a| a.scope_chat_id.clone()),
+        enabled,
+        created_from: existing
+            .as_ref()
+            .map(|a| a.created_from.clone())
+            .unwrap_or_else(|| created_from.to_owned()),
+        created_at: existing.as_ref().map(|a| a.created_at).unwrap_or(now),
+        disabled_at: if enabled {
+            None
+        } else {
+            existing.as_ref().and_then(|a| a.disabled_at).or(Some(now))
+        },
+        last_used_at: existing.as_ref().and_then(|a| a.last_used_at),
+    };
+    state.db.upsert_access(&a).map_err(internal)?;
+    if was_on != enabled || existing.is_none() {
+        audit(
+            state,
+            user_id,
+            AuditEntry {
+                project_id: Some(p.id.clone()),
+                access_id: Some(a.id.clone()),
+                detail: json!({ "note": a.note, "created_from": created_from }),
+                ..entry(
+                    if enabled { "access_on" } else { "access_off" },
+                    v,
+                    &format!("user:{user_id}"),
+                )
+            },
+        );
+    }
+    Ok(Some(a))
+}
+
+fn load_vault(state: &AppState, user_id: &str, id: &str) -> Result<Vault, ApiErr> {
+    state
+        .db
+        .vault(user_id, id)
+        .map_err(internal)?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "not_found", "no such vault"))
+}
+
+/// `GET /vaults/{id}` → `{ vault, items, activity }` (items from the cache; refreshed when stale).
+pub async fn get(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+) -> ApiResult {
+    let user_id = device_user(&principal)?;
+    let mut v = load_vault(&state, &user_id, &id)?;
+    if v.items_refreshed_at
+        .is_none_or(|t| now_ms() - t > items_ttl_ms())
+        && v.status == "ok"
+    {
+        if let Ok(v2) = refresh_items(&state, &v).await {
+            v = v2;
+        }
+    }
+    let activity: Vec<Value> = state
+        .db
+        .list_audit(
+            &user_id,
+            &AuditQuery {
+                target_id: Some(v.id.clone()),
+                since: Some(now_ms() - ACTIVITY_WINDOW_MS),
+                limit: 50,
+                ..Default::default()
+            },
+        )
+        .unwrap_or_default()
+        .iter()
+        .map(|a| {
+            let mut j = serde_json::to_value(a).unwrap_or(Value::Null);
+            j["name"] = json!(a.target_name);
+            j
+        })
+        .collect();
+    Ok(
+        Json(json!({ "vault": vault_json(&state, &v), "items": v.items, "activity": activity }))
+            .into_response(),
+    )
+}
+
+/// Re-read the item list (1 + n provider reads) and clear the value cache.
+async fn refresh_items(state: &AppState, v: &Vault) -> Result<Vault, ApiErr> {
+    let token = vault_token(state, v)?;
+    let external =
+        match read_counted(state, v, &token, &["vault", "list", "--format", "json"]).await {
+            Ok(out) => serde_json::from_str::<Value>(&out)
+                .ok()
+                .and_then(|x| x.as_array().cloned())
+                .unwrap_or_default()
+                .iter()
+                .map(|x| json!({ "id": x["id"], "name": x["name"] }))
+                .collect::<Vec<_>>(),
+            Err(e) => return Err(e),
+        };
+    let mut items = Vec::new();
+    for ev in &external {
+        let _ = state.db.count_vault_read(&v.id);
+        items.extend(
+            list_items(state, &token, std::slice::from_ref(ev))
+                .await
+                .map_err(|e| e.api())?,
+        );
+    }
+    let mut v2 = v.clone();
+    v2.external_vaults = Value::Array(external);
+    v2.items_count = items.len() as i64;
+    v2.items = Value::Array(items);
+    v2.items_refreshed_at = Some(now_ms());
+    v2.last_refreshed_at = Some(now_ms());
+    v2.status = "ok".into();
+    v2.last_error = None;
+    state.db.upsert_vault(&v2).map_err(internal)?;
+    cache_flush(&v.id);
+    audit(
+        state,
+        &v.user_id,
+        AuditEntry {
+            detail: json!({ "items": v2.items_count }),
+            ..entry("vault_refreshed", &v2, "system")
+        },
+    );
+    Ok(v2)
+}
+
+/// `POST /vaults/{id}/refresh` → `{ vault }`.
+pub async fn refresh(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+) -> ApiResult {
+    let user_id = device_user(&principal)?;
+    let v = load_vault(&state, &user_id, &id)?;
+    let v2 = refresh_items(&state, &v).await?;
+    Ok(Json(json!({ "vault": vault_json(&state, &v2) })).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct TokenBody {
+    pub token: String,
+}
+
+/// `PUT /vaults/{id}/token` `{ token }` → `{ vault }` (validated first; cache flushed).
+pub async fn replace_token(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    Json(b): Json<TokenBody>,
+) -> ApiResult {
+    let user_id = device_user(&principal)?;
+    let v = load_vault(&state, &user_id, &id)?;
+    let token = b.token.trim().to_owned();
+    let (external, items) = probe(&state, &token).await?;
+    let dek = user_dek(&state, &user_id).map_err(internal)?;
+    let mut v2 = v.clone();
+    v2.token_enc = Some(dek.encrypt(v.id.as_bytes(), &token).map_err(internal)?);
+    v2.external_vaults = Value::Array(external);
+    v2.items_count = items.len() as i64;
+    v2.items = Value::Array(items);
+    v2.items_refreshed_at = Some(now_ms());
+    v2.last_refreshed_at = Some(now_ms());
+    v2.status = "ok".into();
+    v2.last_error = None;
+    state.db.upsert_vault(&v2).map_err(internal)?;
+    cache_flush(&v.id);
+    audit(
+        &state,
+        &user_id,
+        AuditEntry {
+            detail: json!({ "token_replaced": true }),
+            ..entry("vault_refreshed", &v2, &format!("user:{user_id}"))
+        },
+    );
+    Ok(Json(json!({ "vault": vault_json(&state, &v2) })).into_response())
+}
+
+#[derive(Deserialize, Default)]
+pub struct AccessBody {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// `PUT /vaults/{id}/access/{project_id}` `{ enabled, note? }` → `{ access }`.
+pub async fn put_access(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((id, project_id)): Path<(String, String)>,
+    body: Option<Json<AccessBody>>,
+) -> ApiResult {
+    let user_id = device_user(&principal)?;
+    let b = body.map(|b| b.0).unwrap_or_default();
+    let v = load_vault(&state, &user_id, &id)?;
+    let a = grant_access(
+        &state,
+        &user_id,
+        &v,
+        &project_id,
+        b.note.as_deref(),
+        b.enabled,
+        "settings",
+    )?
+    .ok_or_else(|| err(StatusCode::NOT_FOUND, "not_found", "no such agent"))?;
+    after_access_change(&state, &v, &a);
+    Ok(Json(json!({ "access": access_json(&state, &a) })).into_response())
+}
+
+/// `DELETE /vaults/{id}` → 204. Token ciphertext and cached items go, every access is removed,
+/// the cache is flushed; the audit stays.
+pub async fn disconnect(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+) -> ApiResult {
+    let user_id = device_user(&principal)?;
+    let v = load_vault(&state, &user_id, &id)?;
+    let accesses = state
+        .db
+        .accesses_of_target("vault", &v.id)
+        .unwrap_or_default();
+    state.db.disconnect_vault(&user_id, &id).map_err(internal)?;
+    cache_flush(&v.id);
+    audit(
+        &state,
+        &user_id,
+        AuditEntry {
+            detail: json!({ "agents": accesses.len() }),
+            ..entry("vault_disconnected", &v, &format!("user:{user_id}"))
+        },
+    );
+    for mut a in accesses {
+        a.enabled = false;
+        after_access_change(&state, &v, &a);
+    }
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+// ---- the rule for `op://` references ------------------------------------------------------------
+
+/// What one `op://` use was allowed by.
+pub(crate) struct OpAllowed {
+    pub vault: Vault,
+    pub access: Option<Access>,
+    pub once: Option<SecretRequest>,
+    pub pin_host: bool,
+}
+
+/// Access on, scope matches, the item's pinned hosts include `host` (or none yet → pin), vault
+/// token healthy. `host` empty skips the host check (a request without a host).
+#[allow(clippy::result_large_err)]
+pub(crate) fn decide_op_use(
+    state: &AppState,
+    user_id: &str,
+    reference: &str,
+    project_id: &str,
+    host: &str,
+    use_kind: &str,
+    chat_id: Option<&str>,
+) -> Result<OpAllowed, (Refusal, Option<Vault>)> {
+    let vaults = state.db.list_vaults(user_id).unwrap_or_default();
+    let Some(v) = vault_for_ref(&vaults, reference).cloned() else {
+        return Err((Refusal::NoSuch, None));
+    };
+    if v.status != "ok" || v.token_enc.is_none() {
+        return Err((Refusal::Expired, Some(v)));
+    }
+    let item_ref = item_base(reference);
+    let access = state.db.access(project_id, "vault", &v.id).ok().flatten();
+    if let Some(once) = state
+        .db
+        .allowed_once_for(project_id, &v.id, Some(host), use_kind)
+        .ok()
+        .flatten()
+        .filter(|r| item_base(&r.target_ref) == item_ref)
+    {
+        return Ok(OpAllowed {
+            vault: v,
+            access,
+            once: Some(once),
+            pin_host: false,
+        });
+    }
+    let Some(a) = access else {
+        return Err((Refusal::NoAccess, Some(v)));
+    };
+    if !a.enabled {
+        return Err((Refusal::TurnedOff, Some(v)));
+    }
+    if a.scope_kind == "chat" && a.scope_chat_id.as_deref() != chat_id {
+        return Err((Refusal::WrongChat, Some(v)));
+    }
+    let mut hosts = state
+        .db
+        .vault_item_hosts(&a.id, &item_ref)
+        .unwrap_or_default();
+    hosts.extend(a.hosts.iter().cloned());
+    if hosts.is_empty() {
+        return Ok(OpAllowed {
+            vault: v,
+            access: Some(a),
+            once: None,
+            pin_host: !host.is_empty(),
+        });
+    }
+    if !host.is_empty() && !host_allowed(host, &hosts) {
+        return Err((Refusal::HostNotAllowed(hosts), Some(v)));
+    }
+    Ok(OpAllowed {
+        vault: v,
+        access: Some(a),
+        once: None,
+        pin_host: false,
+    })
+}
+
+/// `op://vault/item/field` → `op://vault/item` (the pin is per item, not per field).
+fn item_base(reference: &str) -> String {
+    let parts: Vec<&str> = reference.splitn(5, '/').collect();
+    if parts.len() >= 5 {
+        format!("{}/{}/{}", parts[0], parts[2], parts[3]).replacen("op:/", "op://", 1)
+    } else {
+        reference.to_owned()
+    }
+}
+
+fn short_ref(reference: &str) -> String {
+    reference
+        .strip_prefix(OP_SCHEME)
+        .map(|r| {
+            let mut it = r.split('/');
+            let vault = it.next().unwrap_or("");
+            let item = it.next().unwrap_or("");
+            format!("{item} from {vault}")
+        })
+        .unwrap_or_else(|| reference.to_owned())
+}
+
+/// After an allowed use: spend a one-time grant, pin the first host, audit.
+pub(crate) fn after_op_use(
+    state: &AppState,
+    reference: &str,
+    project_id: &str,
+    host: &str,
+    use_kind: &str,
+    chat_id: Option<&str>,
+    allowed: &OpAllowed,
+) {
+    if let Some(once) = &allowed.once {
+        let _ = state.db.consume_allowed_once(&once.id);
+    }
+    let v = &allowed.vault;
+    if allowed.pin_host {
+        if let Some(a) = &allowed.access {
+            let _ = state
+                .db
+                .pin_vault_item_host(&a.id, &item_base(reference), host);
+            let agent = state
+                .db
+                .project(project_id)
+                .ok()
+                .flatten()
+                .map(|p| p.name)
+                .unwrap_or_else(|| "The agent".into());
+            push_box(
+                state,
+                project_id,
+                "secret_notice",
+                json!({ "ref": reference, "env": Value::Null, "host": host, "chat_id": chat_id,
+                    "text": format!("{agent} used {} at {host}.", short_ref(reference)) }),
+            );
+            audit(
+                state,
+                &v.user_id,
+                AuditEntry {
+                    project_id: Some(project_id.to_owned()),
+                    chat_id: chat_id.map(str::to_owned),
+                    access_id: Some(a.id.clone()),
+                    host: Some(host.to_owned()),
+                    detail: json!({ "pinned": true, "ref": item_base(reference) }),
+                    ..entry("access_on", v, &format!("agent:{project_id}"))
+                },
+            );
+        }
+    }
+    if let Some(a) = &allowed.access {
+        let _ = state.db.with(|c| {
+            c.execute(
+                "UPDATE secret_access SET last_used_at = ?2 WHERE id = ?1",
+                rusqlite::params![a.id, now_ms()],
+            )
+        });
+    }
+    audit(
+        state,
+        &v.user_id,
+        AuditEntry {
+            project_id: Some(project_id.to_owned()),
+            chat_id: chat_id.map(str::to_owned),
+            request_id: allowed.once.as_ref().map(|r| r.id.clone()),
+            access_id: allowed.access.as_ref().map(|a| a.id.clone()),
+            use_kind: Some(use_kind.to_owned()),
+            host: Some(host.to_owned()),
+            detail: json!({ "ref": item_base(reference) }),
+            ..entry("used", v, &format!("agent:{project_id}"))
+        },
+    );
+}
+
+fn audit_op_refusal(
+    state: &AppState,
+    user_id: &str,
+    reference: &str,
+    v: Option<&Vault>,
+    project_id: &str,
+    host: &str,
+    why: &Refusal,
+) {
+    audit(
+        state,
+        user_id,
+        AuditEntry {
+            action: "refused".into(),
+            target_kind: "vault".into(),
+            target_id: v.map(|v| v.id.clone()).unwrap_or_default(),
+            target_name: v
+                .map(|v| v.name.clone())
+                .unwrap_or_else(|| short_ref(reference)),
+            project_id: Some(project_id.to_owned()),
+            use_kind: Some("header".into()),
+            host: Some(host.to_owned()),
+            by: format!("agent:{project_id}"),
+            detail: json!({ "reason": why.kind(), "ref": item_base(reference) }),
+            ..Default::default()
+        },
+    )
+}
+
+/// `/egress` step for `op://` references: `(reference → value)` to substitute, refusals, values
+/// to redact, and the uses to settle after the request goes out.
+pub(crate) struct OpPlan {
+    pub values: Vec<(String, String)>,
+    pub refused: Vec<(String, String)>,
+    pub used: Vec<(String, OpAllowed)>,
+}
+
+pub(crate) async fn plan_egress(
+    state: &AppState,
+    user_id: &str,
+    project_id: &str,
+    host: &str,
+    chat_id: Option<&str>,
+    texts: &[&str],
+) -> OpPlan {
+    let mut plan = OpPlan {
+        values: Vec::new(),
+        refused: Vec::new(),
+        used: Vec::new(),
+    };
+    let mut seen = std::collections::HashSet::new();
+    for t in texts {
+        for r in find_refs(t) {
+            if !seen.insert(r.clone()) {
+                continue;
+            }
+            match decide_op_use(state, user_id, &r, project_id, host, "header", chat_id) {
+                Ok(allowed) => match resolve(state, &allowed.vault, &r).await {
+                    Ok(value) => {
+                        plan.values.push((r.clone(), value));
+                        plan.used.push((r, allowed));
+                    }
+                    Err(e) => plan.refused.push((r, e.2)),
+                },
+                Err((why, v)) => {
+                    let name = v
+                        .as_ref()
+                        .map(|v| v.name.clone())
+                        .unwrap_or_else(|| short_ref(&r));
+                    let msg = match &why {
+                        Refusal::NoSuch => format!("{r}: no connected vault holds this reference."),
+                        Refusal::NoAccess => {
+                            format!("{r}: this agent has no access to vault {name}.")
+                        }
+                        Refusal::Expired => format!("{r}: vault {name} needs a new token."),
+                        other => other.message(&short_ref(&r), host),
+                    };
+                    audit_op_refusal(state, user_id, &r, v.as_ref(), project_id, host, &why);
+                    plan.refused.push((r, msg));
+                }
+            }
+        }
+    }
+    plan
+}
+
+/// `POST /box/secrets/request` with an `op://` reference: standing access → 200; else a card.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn box_request(
+    state: &AppState,
+    user_id: &str,
+    project_id: &str,
+    reference: &str,
+    purpose: &str,
+    use_kind: &str,
+    host: Option<String>,
+    chat_id: &str,
+) -> Result<Response, ApiErr> {
+    let vaults = state.db.list_vaults(user_id).map_err(internal)?;
+    let Some(v) = vault_for_ref(&vaults, reference).cloned() else {
+        return Err(err(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            format!("{reference}: no connected vault holds this reference"),
+        ));
+    };
+    let host_s = host.clone().unwrap_or_default();
+    let chat = if chat_id.is_empty() {
+        None
+    } else {
+        Some(chat_id)
+    };
+    if let Ok(allowed) = decide_op_use(
+        state, user_id, reference, project_id, &host_s, use_kind, chat,
+    ) {
+        if allowed.once.is_none() {
+            if let Some(a) = allowed.access.clone() {
+                let now = now_ms();
+                let rq = SecretRequest {
+                    id: ulid(),
+                    user_id: user_id.to_owned(),
+                    project_id: project_id.to_owned(),
+                    chat_id: chat_id.to_owned(),
+                    target_kind: "vault".into(),
+                    target_id: Some(v.id.clone()),
+                    target_ref: reference.to_owned(),
+                    purpose: purpose.chars().take(400).collect(),
+                    use_kind: use_kind.to_owned(),
+                    host: host.clone(),
+                    status: "allowed_always".into(),
+                    decided_by: Some(format!("rule:{}", a.id)),
+                    created_at: now,
+                    decided_at: Some(now),
+                    expires_at: i64::MAX,
+                };
+                state.db.insert_secret_request(&rq).map_err(internal)?;
+                if allowed.pin_host {
+                    after_op_use(
+                        state, reference, project_id, &host_s, use_kind, chat, &allowed,
+                    );
+                }
+                return Ok(Json(json!({ "request": request_json(state, &rq), "status": "allowed_always", "access_id": a.id })).into_response());
+            }
+        }
+    }
+    if let Some(rq) = state
+        .db
+        .pending_secret_request_for(project_id, reference, use_kind)
+        .map_err(internal)?
+    {
+        return Ok((StatusCode::CREATED, Json(json!({ "request": request_json(state, &rq), "status": "pending", "resumed": true }))).into_response());
+    }
+    let now = now_ms();
+    let rq = SecretRequest {
+        id: ulid(),
+        user_id: user_id.to_owned(),
+        project_id: project_id.to_owned(),
+        chat_id: chat_id.to_owned(),
+        target_kind: "vault".into(),
+        target_id: Some(v.id.clone()),
+        target_ref: reference.to_owned(),
+        purpose: purpose.chars().take(400).collect(),
+        use_kind: use_kind.to_owned(),
+        host: host.clone(),
+        status: "pending".into(),
+        decided_by: None,
+        created_at: now,
+        decided_at: None,
+        expires_at: now + REQUEST_PENDING_MS,
+    };
+    state.db.insert_secret_request(&rq).map_err(internal)?;
+    audit(
+        state,
+        user_id,
+        AuditEntry {
+            project_id: Some(project_id.to_owned()),
+            chat_id: chat.map(str::to_owned),
+            request_id: Some(rq.id.clone()),
+            use_kind: Some(use_kind.to_owned()),
+            host: host.clone(),
+            detail: json!({ "purpose": rq.purpose, "ref": item_base(reference) }),
+            ..entry("requested", &v, &format!("agent:{project_id}"))
+        },
+    );
+    let agent = state
+        .db
+        .project(project_id)
+        .ok()
+        .flatten()
+        .map(|p| p.name)
+        .unwrap_or_default();
+    let _ = state.db.push_user(
+        user_id,
+        "secret_request",
+        &json!({ "request_id": rq.id, "project_id": project_id, "project_name": agent, "name": short_ref(reference), "host": host, "use": use_kind, "vault_id": v.id }),
+        None,
+    );
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "request": request_json(state, &rq), "status": "pending" })),
+    )
+        .into_response())
+}
+
+/// A card decision on an `op://` request: `chat`/`always` turn the vault Access on (creating it
+/// with the purpose as note) and pin the request's host for that item.
+pub(crate) async fn decide_vault_request(
+    state: &AppState,
+    user_id: &str,
+    rq: &SecretRequest,
+    status: &str,
+) -> Result<Option<Access>, ApiErr> {
+    let Some(vid) = rq.target_id.as_deref() else {
+        return Ok(None);
+    };
+    let v = load_vault(state, user_id, vid)?;
+    audit(
+        state,
+        user_id,
+        AuditEntry {
+            project_id: Some(rq.project_id.clone()),
+            chat_id: Some(rq.chat_id.clone()),
+            request_id: Some(rq.id.clone()),
+            use_kind: Some(rq.use_kind.clone()),
+            host: rq.host.clone(),
+            detail: json!({ "decision": status, "ref": item_base(&rq.target_ref) }),
+            ..entry("decided", &v, &format!("card:{}", rq.id))
+        },
+    );
+    if !matches!(status, "allowed_chat" | "allowed_always") {
+        return Ok(None);
+    }
+    let mut a = grant_access(
+        state,
+        user_id,
+        &v,
+        &rq.project_id,
+        Some(&rq.purpose),
+        true,
+        &format!("card:{}", rq.id),
+    )?
+    .ok_or_else(|| err(StatusCode::NOT_FOUND, "not_found", "no such agent"))?;
+    if status == "allowed_chat" {
+        a.scope_kind = "chat".into();
+        a.scope_chat_id = Some(rq.chat_id.clone());
+    } else {
+        a.scope_kind = "all".into();
+        a.scope_chat_id = None;
+    }
+    state.db.upsert_access(&a).map_err(internal)?;
+    if let Some(h) = rq.host.as_deref() {
+        let _ = state
+            .db
+            .pin_vault_item_host(&a.id, &item_base(&rq.target_ref), h);
+    }
+    after_access_change(state, &v, &a);
+    Ok(Some(a))
+}
+
+/// Hosts a device may pin or widen for one agent × item: `PUT /vaults/{id}/access/{project_id}/hosts`
+/// `{ ref, hosts }`.
+#[derive(Deserialize)]
+pub struct ItemHostsBody {
+    #[serde(rename = "ref")]
+    pub reference: String,
+    pub hosts: Vec<String>,
+}
+
+pub async fn put_item_hosts(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((id, project_id)): Path<(String, String)>,
+    Json(b): Json<ItemHostsBody>,
+) -> ApiResult {
+    let user_id = device_user(&principal)?;
+    let v = load_vault(&state, &user_id, &id)?;
+    let a = state
+        .db
+        .access(&project_id, "vault", &v.id)
+        .map_err(internal)?
+        .ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "no access for this agent",
+            )
+        })?;
+    let hosts = clean_hosts(&b.hosts)?;
+    let base = item_base(&b.reference);
+    state
+        .db
+        .with(|c| {
+            c.execute(
+                "DELETE FROM vault_access_hosts WHERE access_id = ?1 AND item_ref = ?2",
+                rusqlite::params![a.id, base],
+            )
+        })
+        .map_err(internal)?;
+    for h in &hosts {
+        state
+            .db
+            .pin_vault_item_host(&a.id, &base, h)
+            .map_err(internal)?;
+    }
+    audit(
+        &state,
+        &user_id,
+        AuditEntry {
+            project_id: Some(project_id.clone()),
+            access_id: Some(a.id.clone()),
+            detail: json!({ "ref": base, "hosts": hosts }),
+            ..entry("updated", &v, &format!("user:{user_id}"))
+        },
+    );
+    Ok(Json(json!({ "access": access_json(&state, &a) })).into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refs_are_found_and_pinned_per_item() {
+        let text = r#"{"Authorization":"Bearer op://Arbos — Research/Stripe/credential","x":"op://Arbos — Research/Postgres/url"} op://short"#;
+        let refs = find_refs(text);
+        assert_eq!(
+            refs,
+            vec![
+                "op://Arbos — Research/Stripe/credential".to_owned(),
+                "op://Arbos — Research/Postgres/url".to_owned()
+            ]
+        );
+        assert_eq!(
+            item_base("op://Arbos — Research/Stripe/credential"),
+            "op://Arbos — Research/Stripe"
+        );
+        assert_eq!(item_base("op://v/i"), "op://v/i");
+        assert_eq!(
+            short_ref("op://Arbos — Research/Stripe/credential"),
+            "Stripe from Arbos — Research"
+        );
+        assert_eq!(fields_for_category("LOGIN"), vec!["username", "password"]);
+        assert_eq!(fields_for_category("api_credential")[0], "credential");
+    }
+
+    #[test]
+    fn op_errors_are_classified() {
+        assert!(matches!(
+            OpError::classify("[ERROR] 429 rate limit exceeded"),
+            OpError::RateLimited
+        ));
+        assert!(matches!(
+            OpError::classify("[ERROR] invalid service account token"),
+            OpError::BadToken
+        ));
+        assert!(matches!(
+            OpError::classify("[ERROR] \"Stripe\" isn't an item in the \"X\" vault"),
+            OpError::NotFound
+        ));
+        assert_eq!(
+            OpError::classify("[ERROR] 429 rate limit exceeded").api().1,
+            "rate_limited"
+        );
+    }
 }

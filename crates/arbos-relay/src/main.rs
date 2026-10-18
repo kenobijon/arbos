@@ -666,6 +666,15 @@ async fn main() -> anyhow::Result<()> {
             "/box/secrets/requests/{id}/values",
             post(secrets::box_request_values),
         )
+        .route("/vaults", post(vaults::connect))
+        .route("/vaults/{id}", get(vaults::get).delete(vaults::disconnect))
+        .route("/vaults/{id}/token", put(vaults::replace_token))
+        .route("/vaults/{id}/refresh", post(vaults::refresh))
+        .route("/vaults/{id}/access/{project_id}", put(vaults::put_access))
+        .route(
+            "/vaults/{id}/access/{project_id}/hosts",
+            put(vaults::put_item_hosts),
+        )
         .route("/admin/secrets", get(secrets::admin_status))
         .route("/admin/secrets/pause", post(secrets::admin_pause))
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024))
