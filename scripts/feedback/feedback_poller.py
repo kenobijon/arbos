@@ -59,6 +59,7 @@ origin.txt (where it came from, shown as the issue's Source). `inject` writes on
 CLI:  feedback_poller.py [run] | status | testers | set-cursor <ISO-8601>
       | inject <image|-> "<comment>" [ios|mac] [--handle <login>] [--origin "<text>"] [--email <tester email, grouping only>]
       | requeue <id>… | prioritize <id>… | confirm <id> [note] | handoff <id> [label] | deployed <id> [note]
+      | track <id> <issue> "<comment>" [--handle <login>] [--owner <label>]   (a hand-filed, handed-off item)
 """
 
 from __future__ import annotations
@@ -1682,7 +1683,37 @@ class Loop:
             self.watch_deploys()
         except Exception as e:  # noqa: BLE001
             log(f"deploy watch failed: {e}")
+        try:
+            self.watch_handoffs()
+        except Exception as e:  # noqa: BLE001
+            log(f"handoff watch failed: {e}")
         return 0
+
+    # ---- handed-off items: a dedicated worker fixes them; the loop still tracks the landing -------
+
+    def watch_handoffs(self) -> None:
+        """A handed-off item whose owner tags the commit `[feedback <id>]` is picked up when that commit
+        reaches main: the item becomes shipped-or-landed like a loop fix (iOS/Mac parts through the
+        builds, voice/agentd/relay parts through watch_deploys), so the audit follows it to the fleet."""
+        for fid in self.store.items():
+            st = self.store.state(fid)
+            if st.get("status") != "handed_off" or st.get("commit") or not st.get("track_commit"):
+                continue
+            commit = self.find_commit(fid, st.get("created") or iso())
+            if not commit:
+                continue
+            files = [f["filename"] for f in self.gh.commit(commit["sha"]).get("files", [])]
+            st.update(status="pushed", commit=commit["sha"], commit_url=commit["html_url"],
+                      commit_message=commit["commit"]["message"].splitlines()[0], pushed_at=iso(), files=files,
+                      commit_date=commit["commit"]["committer"]["date"],
+                      expects_ios=any(f.startswith("apps/ios/") for f in files),
+                      expects_ci=any(not f.startswith("apps/ios/") for f in files))
+            self.store.save_state(fid, st)
+            self.store.event(fid, "handoff_landed", commit=commit["sha"], files=files)
+            if st.get("issue"):
+                self.gh.comment(st["issue"], f"The owner's fix landed on `main`: {commit['html_url']} — `{st['commit_message']}`\n\n"
+                                f"Files: {', '.join(f'`{f}`' for f in files) or '—'}\n\nThe loop now tracks it to the builds / fleet.")
+                self.gh.set_labels(st["issue"], [], ["in-progress"])
 
     # ---- landed-not-shipped: code that is on main but runs somewhere no build carries ------------
 
@@ -1962,6 +1993,37 @@ def main(argv: list[str]) -> int:
             return 2
         loop.mark_deployed(fid, st, note)
         print(f"{fid}: deployed ({note})")
+        return 0
+    if cmd == "track":
+        # A handed-off item that never went through the loop (filed by hand): create it so the audit and
+        # watch_handoffs follow the owner's `[feedback <id>]` commit to the builds and the fleet.
+        if len(argv) < 5:
+            print("track <id> <issue-number> \"<comment>\" [--handle <login>] [--owner <label>]")
+            return 2
+        store = Store(cfg)
+        fid, number, comment = argv[2], int(argv[3]), argv[4]
+        rest = argv[5:]
+        handle = rest[rest.index("--handle") + 1] if "--handle" in rest else ""
+        owner = rest[rest.index("--owner") + 1] if "--owner" in rest else "handed-off"
+        d = store.item_dir(fid)
+        if d.exists():
+            print(f"{fid}: exists")
+            return 2
+        d.mkdir(parents=True)
+        info = {"id": fid, "source": "inbox", "created": iso(), "comment": comment, "email": "", "handle": handle or None,
+                "origin": "filed by hand (handed off)", "device": "relayed report", "os": None, "device_platform": None,
+                "device_family": None, "app_platform": None, "bundle": None, "build": None, "build_id": None,
+                "locale": None, "screen_points": None, "screenshots": [], "forced_target": None, "raw": {}}
+        (d / "submission.json").write_text(json.dumps(info, indent=2, ensure_ascii=False) + "\n")
+        loop = Loop(cfg)
+        tier = "priority" if handle.lower() in ("unconst", "jake") or not handle else loop.tier(info)
+        st = {"id": fid, "created": info["created"], "status": "handed_off", "handed_off_to": owner, "track_commit": True,
+              "tier": tier, "tester": "Jacob (owner)" if tier == "priority" and not handle else loop.tester_label(info, tier),
+              "tester_key": loop.tester_key(info) if handle else "jake@bittensor.com", "target": "ios",
+              "issue": number, "issue_url": f"https://github.com/{cfg.github_repo}/issues/{number}"}
+        store.save_state(fid, st)
+        store.event(fid, "tracked", issue=number, owner=owner)
+        print(f"{fid}: tracking #{number} (handed off to {owner}); lands when a main commit carries [feedback {fid}]")
         return 0
     if cmd == "handoff":
         # A dedicated worker owns this item: cancel the agent run, stop tracking, label the issue.
