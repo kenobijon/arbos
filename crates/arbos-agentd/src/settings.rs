@@ -413,6 +413,9 @@ impl Agent {
     /// Switch the live pi session's model / thinking level and remember the new slots.
     pub async fn apply_models(self: &Arc<Self>, m: &Models) -> Result<()> {
         let prev = self.settings.models.read().await.clone();
+        // Remember first so a respawn / system-prompt rewrite reads the new slots.
+        *self.settings.models.write().await = m.clone();
+        let mut switched = prev.talking.id == m.talking.id;
         if let Ok(pi) = self.pi_child().await {
             if prev.talking.id != m.talking.id {
                 let r = pi
@@ -422,21 +425,45 @@ impl Agent {
                         model_id: m.talking.id.clone(),
                     })
                     .await?;
-                if !r.success {
-                    tracing::warn!(model = %m.talking.id, error = ?r.error, "set_model refused");
+                if r.success {
+                    switched = true;
+                } else {
+                    // pi's in-session catalog may not list the new id yet; respawn
+                    // with live_models() so the next turn actually uses it.
+                    tracing::warn!(model = %m.talking.id, error = ?r.error, "set_model refused; respawning pi");
+                    if let Err(e) = self.respawn_pi_current().await {
+                        tracing::warn!(error = %e, "pi respawn after set_model refused");
+                    } else {
+                        switched = true;
+                    }
                 }
             }
             if prev.talking.effort != m.talking.effort {
-                let _ = pi
-                    .call(RpcCommand::SetThinkingLevel {
-                        id: pi.next_id("tl"),
-                        level: effort_to_thinking(&m.talking.effort).into(),
-                    })
-                    .await;
+                if let Ok(pi) = self.pi_child().await {
+                    let _ = pi
+                        .call(RpcCommand::SetThinkingLevel {
+                            id: pi.next_id("tl"),
+                            level: effort_to_thinking(&m.talking.effort).into(),
+                        })
+                        .await;
+                }
             }
+        } else if prev.talking.id != m.talking.id {
+            // No live pi yet; the next start_pi/respawn picks up live_models().
+            switched = true;
         }
-        *self.settings.models.write().await = m.clone();
-        tracing::info!(talking = %m.talking.id, effort = %m.talking.effort, subagent = %m.subagent.id, "models applied");
+        // The router prompt names the talking model under "This project"; rewrite
+        // so a picker change is what the agent reports on the next turn.
+        if let Err(e) = self.write_system_prompt() {
+            tracing::warn!(error = %e, "rewrite system prompt after model change");
+        }
+        tracing::info!(
+            talking = %m.talking.id,
+            effort = %m.talking.effort,
+            subagent = %m.subagent.id,
+            switched,
+            "models applied"
+        );
         Ok(())
     }
 

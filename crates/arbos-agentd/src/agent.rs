@@ -809,6 +809,14 @@ impl Agent {
         Ok(())
     }
 
+    /// Respawn the main pi child on the chat it was last on (empty → a fresh
+    /// session file). Used when an in-session `set_model` is refused so the
+    /// next turn boots with `live_models()`.
+    pub(crate) async fn respawn_pi_current(self: &Arc<Self>) -> Result<()> {
+        let chat = self.current_chat.lock().await.clone().unwrap_or_default();
+        self.respawn_pi(&chat).await
+    }
+
     async fn respawn_pi(self: &Arc<Self>, chat_id: &str) -> Result<()> {
         if let Some(old) = self.pi.lock().await.take() {
             old.shutdown().await;
