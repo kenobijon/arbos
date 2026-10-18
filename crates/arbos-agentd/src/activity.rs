@@ -262,6 +262,8 @@ fn code_label(code: &str) -> Option<String> {
         "vault_list" | "vault_request" | "secrets_list" | "secrets_request" | "egress"
         | "browser_fill" => "Using your secrets",
         "connector_call" | "connectors_list" => "Checking your connected accounts",
+        "web_search" => "Searching the web",
+        "web_fetch" => "Reading the docs",
         _ => return None,
     };
     Some(l.into())

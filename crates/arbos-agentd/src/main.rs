@@ -27,6 +27,7 @@ mod sync;
 mod tree;
 mod vault;
 mod voice;
+mod web;
 mod workspace;
 
 use std::time::{Duration, Instant};

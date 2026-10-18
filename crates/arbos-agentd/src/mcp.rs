@@ -4,7 +4,7 @@
 //! spawn_subagent, wake_subagent, connectors_list, connector_call, local_devices,
 //! local_run, local_read, local_list, deliver_file, generate_image, group_send, vault_list,
 //! vault_request, egress, browser_fill, routines_list, routines_create, routines_update,
-//! routines_delete.
+//! routines_delete, web_search, web_fetch.
 //!
 //! Sessions authenticate with a role-bound bearer token (main vs subagent, `Config::
 //! mcp_token_for_role`); tools that speak to other Projects are refused to subagents (D69).
@@ -81,6 +81,7 @@ fn tools() -> Value {
         a.extend(crate::media::tool_specs());
         a.extend(crate::vault::tool_specs());
         a.extend(crate::routines::tool_specs());
+        a.extend(crate::web::tool_specs());
     }
     list
 }
@@ -667,6 +668,8 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
             crate::vault::secrets_request(a, args, &chat_for_scratch).await
         }
         "egress" => crate::vault::egress(a, args, &chat_for_scratch).await,
+        "web_search" => crate::web::web_search(a, args, &chat_for_scratch).await,
+        "web_fetch" => crate::web::web_fetch(a, args, &chat_for_scratch).await,
         "browser_fill" => crate::vault::browser_fill(a, args, &chat_for_scratch).await,
         "routines_list" | "routines_create" | "routines_update" | "routines_delete" => {
             crate::routines::call_tool(a, name, args, &chat_for_scratch).await

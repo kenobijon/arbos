@@ -1,0 +1,609 @@
+//! Web research for every harness (design D14/D21 as built): `web_search` and `web_fetch` on the
+//! project MCP server, so the main agent (through codemode), Prime, Claude Code and the pi
+//! fallback all have the same two tools.
+//!
+//! Search goes to a keyless search endpoint that speaks MCP over HTTP (`ARBOS_WEB_SEARCH_MCP_URL`,
+//! default Exa's public server, free tier, no key in the box) with an HTML search page as the
+//! fallback. Fetch is a plain GET with HTML reduced to readable text, falling back to the same
+//! endpoint's page reader when a site blocks bots or renders only with JavaScript. Credentials
+//! never travel through these tools: anything that needs a secret goes through `egress`.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use serde_json::{json, Value};
+
+use crate::agent::Agent;
+use crate::mcp::{err_result, text_result};
+
+const DEFAULT_SEARCH_MCP_URL: &str = "https://mcp.exa.ai/mcp";
+const SEARCH_TOOL: &str = "web_search_exa";
+const FETCH_TOOL: &str = "web_fetch_exa";
+const HTML_SEARCH_URL: &str = "https://html.duckduckgo.com/html/";
+const USER_AGENT: &str =
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36 ArbosAgent/1.0";
+const SEARCH_TIMEOUT: Duration = Duration::from_secs(25);
+const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_RESULTS: u64 = 8;
+const MAX_RESULTS: u64 = 10;
+const DEFAULT_FETCH_CHARS: usize = 20_000;
+const MAX_FETCH_CHARS: usize = 60_000;
+/// Bytes read from one page before giving up on it.
+const MAX_BODY_BYTES: usize = 3_000_000;
+/// An HTML page that reduces to less text than this is probably a bot wall or a JS-only shell.
+const THIN_PAGE_CHARS: usize = 300;
+
+pub fn tool_specs() -> Vec<Value> {
+    vec![
+        json!({ "name": "web_search", "description": "Search the web (no key needed). Use it to find a service's API reference, OpenAPI/Swagger spec, SDK or CLI, GitHub repository, pricing page, or the meaning of an error, before guessing or asking the user. Returns titles, URLs and the relevant text of the top pages; follow up with web_fetch on the best URL.",
+                "inputSchema": { "type": "object", "properties": {
+                    "query": { "type": "string", "description": "Describe the page you want, e.g. \"<service> REST API reference authentication endpoints\"" },
+                    "objective": { "type": "string", "description": "Optional: what you need from the results (which pages should rank first, what facts to pull)" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 10, "description": "Results to return (default 8)" } },
+                  "required": ["query"] } }),
+        json!({ "name": "web_fetch", "description": "Read a public URL as text: documentation pages, OpenAPI/Swagger JSON or YAML, README files, llms.txt, raw source on GitHub, release notes. HTML is reduced to readable text with links kept; JSON, YAML and plain text come back verbatim. No credentials: a request that needs a key goes through egress instead.",
+                "inputSchema": { "type": "object", "properties": {
+                    "url": { "type": "string" },
+                    "max_chars": { "type": "integer", "minimum": 1000, "maximum": 60000, "description": "Cut the text here (default 20000); big pages become a peek handle anyway" } },
+                  "required": ["url"] } }),
+    ]
+}
+
+fn search_mcp_url() -> String {
+    std::env::var("ARBOS_WEB_SEARCH_MCP_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_SEARCH_MCP_URL.to_owned())
+}
+
+/// The text content of one MCP `tools/call` answer, from a JSON body or an SSE stream.
+/// `Err(text)` when the server flagged the result as an error.
+fn mcp_text(body: &str) -> Option<Result<String, String>> {
+    let candidates: Vec<&str> = if body.trim_start().starts_with('{') {
+        vec![body.trim()]
+    } else {
+        body.lines()
+            .filter_map(|l| l.strip_prefix("data:"))
+            .map(str::trim)
+            .collect()
+    };
+    for c in candidates {
+        let Ok(v) = serde_json::from_str::<Value>(c) else {
+            continue;
+        };
+        if let Some(e) = v.get("error") {
+            return Some(Err(e
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown error")
+                .to_owned()));
+        }
+        let Some(content) = v.pointer("/result/content").and_then(Value::as_array) else {
+            continue;
+        };
+        let text = content
+            .iter()
+            .filter_map(|c| c.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if v.pointer("/result/isError")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Some(Err(text));
+        }
+        return Some(Ok(text));
+    }
+    None
+}
+
+async fn mcp_call(
+    agent: &Arc<Agent>,
+    tool: &str,
+    arguments: Value,
+    timeout: Duration,
+) -> Result<String, String> {
+    let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": tool, "arguments": arguments } });
+    let resp = agent
+        .http_client()
+        .post(search_mcp_url())
+        .timeout(timeout)
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .header("user-agent", USER_AGENT)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("search endpoint unreachable: {e}"))?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!(
+            "search endpoint answered {status}: {}",
+            clip_chars(&text, 200)
+        ));
+    }
+    match mcp_text(&text) {
+        Some(r) => r,
+        None => Err("search endpoint returned nothing readable".into()),
+    }
+}
+
+pub async fn web_search(agent: &Arc<Agent>, args: &Value, chat_id: &str) -> Value {
+    let query = args["query"].as_str().unwrap_or("").trim().to_owned();
+    if query.is_empty() {
+        return err_result("query is required");
+    }
+    let objective = args["objective"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("Find the pages that best answer: {query}"));
+    let limit = args["limit"]
+        .as_u64()
+        .unwrap_or(DEFAULT_RESULTS)
+        .clamp(1, MAX_RESULTS);
+    record(agent, chat_id, "web_search", &query);
+    let primary = mcp_call(
+        agent,
+        SEARCH_TOOL,
+        json!({ "query": query, "objective": objective, "numResults": limit }),
+        SEARCH_TIMEOUT,
+    )
+    .await;
+    let out = match primary {
+        Ok(text) if !text.trim().is_empty() => Ok(text),
+        Ok(_) => Err("no results".to_owned()),
+        Err(e) => Err(e),
+    };
+    match out {
+        Ok(text) => text_result(crate::store::redact(&text)),
+        Err(primary_err) => {
+            tracing::warn!(error = %primary_err, "web_search: primary endpoint failed; HTML fallback");
+            match html_search(agent, &query, limit as usize).await {
+                Ok(text) => text_result(crate::store::redact(&text)),
+                Err(e) => err_result(format!(
+                    "web search failed ({primary_err}; fallback: {e}). Try web_fetch on a URL you know, such as the service's docs or GitHub page."
+                )),
+            }
+        }
+    }
+}
+
+/// Fallback search: a plain HTML results page, parsed with regexes.
+async fn html_search(agent: &Arc<Agent>, query: &str, limit: usize) -> Result<String, String> {
+    let resp = agent
+        .http_client()
+        .get(HTML_SEARCH_URL)
+        .query(&[("q", query)])
+        .timeout(SEARCH_TIMEOUT)
+        .header("user-agent", USER_AGENT)
+        .header("accept", "text/html")
+        .send()
+        .await
+        .map_err(|e| format!("search page unreachable: {e}"))?;
+    let status = resp.status();
+    let html = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!("search page answered {status}"));
+    }
+    let link_re =
+        regex_lite::Regex::new(r#"<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>"#)
+            .map_err(|e| e.to_string())?;
+    let snippet_re = regex_lite::Regex::new(r#"<a[^>]*class="result__snippet"[^>]*>(.*?)</a>"#)
+        .map_err(|e| e.to_string())?;
+    let snippets: Vec<String> = snippet_re
+        .captures_iter(&html)
+        .map(|c| html_to_text(&c[1], None))
+        .collect();
+    let mut out = Vec::new();
+    for (i, cap) in link_re.captures_iter(&html).enumerate() {
+        if out.len() >= limit {
+            break;
+        }
+        let href = decode_entities(&cap[1]);
+        let url = redirect_target(&href).unwrap_or(href);
+        let title = html_to_text(&cap[2], None);
+        let snippet = snippets.get(i).cloned().unwrap_or_default();
+        out.push(format!(
+            "{}. {title}\n   {url}\n   {snippet}",
+            out.len() + 1
+        ));
+    }
+    if out.is_empty() {
+        return Err("no results parsed from the search page".into());
+    }
+    Ok(out.join("\n\n"))
+}
+
+/// `//host/l/?uddg=<url>&…` style redirect links → the real URL.
+fn redirect_target(href: &str) -> Option<String> {
+    let (_, q) = href.split_once("uddg=")?;
+    let enc = q.split('&').next()?;
+    Some(percent_decode(enc))
+}
+
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(b) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(b);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(if bytes[i] == b'+' { b' ' } else { bytes[i] });
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+pub async fn web_fetch(agent: &Arc<Agent>, args: &Value, chat_id: &str) -> Value {
+    let url = args["url"].as_str().unwrap_or("").trim().to_owned();
+    if url.is_empty() {
+        return err_result("url is required");
+    }
+    if let Err(why) = check_url(&url) {
+        return err_result(why);
+    }
+    let max_chars = args["max_chars"]
+        .as_u64()
+        .map(|n| n as usize)
+        .unwrap_or(DEFAULT_FETCH_CHARS)
+        .clamp(1_000, MAX_FETCH_CHARS);
+    record(agent, chat_id, "web_fetch", &url);
+    let direct = direct_fetch(agent, &url, max_chars).await;
+    let fallback_reason = match &direct {
+        Ok(page) if page.thin => {
+            Some("the page has almost no readable text (bot wall or JavaScript-only)".to_owned())
+        }
+        Ok(_) => None,
+        Err(e) => Some(e.clone()),
+    };
+    if let Some(reason) = fallback_reason {
+        tracing::info!(url, reason, "web_fetch: trying the reader endpoint");
+        if let Ok(text) = mcp_call(
+            agent,
+            FETCH_TOOL,
+            json!({ "urls": [url], "maxCharacters": max_chars }),
+            FETCH_TIMEOUT,
+        )
+        .await
+        {
+            if text.trim().len() > THIN_PAGE_CHARS {
+                return text_result(crate::store::redact(&format!(
+                    "URL: {url}\nSource: reader endpoint ({reason})\n\n{text}"
+                )));
+            }
+        }
+    }
+    match direct {
+        Ok(page) => text_result(crate::store::redact(&format!(
+            "URL: {url}\nStatus: {}\nContent-Type: {}\n\n{}",
+            page.status, page.content_type, page.text
+        ))),
+        Err(e) => err_result(format!("web_fetch failed: {e}")),
+    }
+}
+
+struct Page {
+    status: u16,
+    content_type: String,
+    text: String,
+    thin: bool,
+}
+
+async fn direct_fetch(agent: &Arc<Agent>, url: &str, max_chars: usize) -> Result<Page, String> {
+    let resp = agent
+        .http_client()
+        .get(url)
+        .timeout(FETCH_TIMEOUT)
+        .header("user-agent", USER_AGENT)
+        .header(
+            "accept",
+            "text/html,application/json,application/yaml,text/plain,text/markdown,*/*;q=0.8",
+        )
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+    let status = resp.status().as_u16();
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
+    let final_url = resp.url().to_string();
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("body read failed: {e}"))?;
+    let body = String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_BODY_BYTES)]).into_owned();
+    if matches!(status, 401 | 403 | 429 | 503) && body.len() < 20_000 {
+        return Err(format!("status {status}"));
+    }
+    let is_html = content_type.contains("html")
+        || (content_type.is_empty() && body.trim_start().starts_with('<'));
+    let text = if is_html {
+        html_to_text(&body, Some(&final_url))
+    } else {
+        body
+    };
+    let thin = is_html && text.trim().len() < THIN_PAGE_CHARS;
+    Ok(Page {
+        status,
+        content_type: if content_type.is_empty() {
+            "unknown".into()
+        } else {
+            content_type
+        },
+        text: clip_chars(&text, max_chars),
+        thin,
+    })
+}
+
+/// Only public http(s) URLs with no secret placeholder in them.
+fn check_url(url: &str) -> Result<(), String> {
+    let lower = url.to_ascii_lowercase();
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        return Err("only http(s) URLs can be fetched".into());
+    }
+    if lower.contains("arbos-secret://") || lower.contains("op://") || url.contains('$') {
+        return Err(
+            "this URL carries a secret placeholder; a request that needs a secret goes through egress (placeholder in a header or the body, never in the URL)"
+                .into(),
+        );
+    }
+    let host = lower
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .rsplit('@')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_owned();
+    let private = host.is_empty()
+        || host == "localhost"
+        || host.ends_with(".local")
+        || host.ends_with(".internal")
+        || host.starts_with("127.")
+        || host.starts_with("10.")
+        || host.starts_with("192.168.")
+        || host.starts_with("169.254.")
+        || host == "0.0.0.0"
+        || host == "::1"
+        || host
+            .strip_prefix("172.")
+            .and_then(|r| r.split('.').next())
+            .and_then(|o| o.parse::<u8>().ok())
+            .is_some_and(|o| (16..=31).contains(&o));
+    if private {
+        return Err("web_fetch reads public sites only".into());
+    }
+    Ok(())
+}
+
+fn record(agent: &Arc<Agent>, chat_id: &str, tool: &str, subject: &str) {
+    let _ = agent.store.t3_append(
+        chat_id,
+        None,
+        Some(chat_id),
+        tool,
+        Some("assistant"),
+        &format!("{tool} {}", clip_chars(subject, 400)),
+        None,
+    );
+}
+
+fn clip_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_owned();
+    }
+    let cut: String = s.chars().take(max).collect();
+    format!("{cut}\n…[cut at {max} chars; raise max_chars or fetch a more specific URL]")
+}
+
+/// HTML → readable text: scripts, styles and comments dropped; block tags become line breaks;
+/// list items get a dash; links keep their target as `text (url)`; entities decoded; blank
+/// lines collapsed. No external parser: the pages that matter here (docs, READMEs, specs) are
+/// simple, and anything else can go to the reader endpoint.
+pub fn html_to_text(html: &str, base_url: Option<&str>) -> String {
+    let mut s = html.to_owned();
+    for tag in ["script", "style", "noscript", "svg", "template"] {
+        let re = regex_lite::Regex::new(&format!(r"(?is)<{tag}\b[^>]*>.*?</{tag}>")).unwrap();
+        s = re.replace_all(&s, " ").into_owned();
+    }
+    let comments = regex_lite::Regex::new(r"(?s)<!--.*?-->").unwrap();
+    s = comments.replace_all(&s, " ").into_owned();
+    let anchors =
+        regex_lite::Regex::new(r#"(?is)<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>(.*?)</a>"#)
+            .unwrap();
+    s = anchors
+        .replace_all(&s, |c: &regex_lite::Captures| {
+            let href = decode_entities(&c[1]);
+            let label = strip_tags(&c[2]);
+            let label = label.trim();
+            match absolute_url(&href, base_url) {
+                Some(u) if !label.is_empty() && !u.starts_with("javascript:") && label != u => {
+                    format!("{label} ({u})")
+                }
+                _ => label.to_owned(),
+            }
+        })
+        .into_owned();
+    let li = regex_lite::Regex::new(r"(?i)<li\b[^>]*>").unwrap();
+    s = li.replace_all(&s, "\n- ").into_owned();
+    let headings = regex_lite::Regex::new(r"(?i)<h([1-6])\b[^>]*>").unwrap();
+    s = headings
+        .replace_all(&s, |c: &regex_lite::Captures| {
+            let n: usize = c[1].parse().unwrap_or(1);
+            format!("\n\n{} ", "#".repeat(n))
+        })
+        .into_owned();
+    let breaks = regex_lite::Regex::new(
+        r"(?i)<(br|/p|/div|/li|/h[1-6]|/tr|/table|/section|/article|/header|/footer|/pre|/blockquote|/ul|/ol|/dd|/dt|hr)\b[^>]*>",
+    )
+    .unwrap();
+    s = breaks.replace_all(&s, "\n").into_owned();
+    let cells = regex_lite::Regex::new(r"(?i)</t[dh]>").unwrap();
+    s = cells.replace_all(&s, " | ").into_owned();
+    let text = strip_tags(&s);
+    let text = decode_entities(&text);
+    let mut out = String::with_capacity(text.len());
+    let mut blank_run = 0;
+    for line in text.lines() {
+        let line: String = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        if line.is_empty() {
+            blank_run += 1;
+            if blank_run <= 1 {
+                out.push('\n');
+            }
+        } else {
+            blank_run = 0;
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
+    out.trim().to_owned()
+}
+
+fn strip_tags(s: &str) -> String {
+    let re = regex_lite::Regex::new(r"(?s)<[^>]*>").unwrap();
+    re.replace_all(s, " ").into_owned()
+}
+
+fn absolute_url(href: &str, base: Option<&str>) -> Option<String> {
+    let href = href.trim();
+    if href.is_empty() || href.starts_with('#') {
+        return None;
+    }
+    if href.starts_with("http://") || href.starts_with("https://") {
+        return Some(href.to_owned());
+    }
+    let base = base?;
+    if let Some(rest) = href.strip_prefix("//") {
+        let scheme = base.split("://").next().unwrap_or("https");
+        return Some(format!("{scheme}://{rest}"));
+    }
+    let (scheme, rest) = base.split_once("://")?;
+    let host = rest.split(['/', '?', '#']).next()?;
+    if let Some(path) = href.strip_prefix('/') {
+        return Some(format!("{scheme}://{host}/{path}"));
+    }
+    if href.contains(':') {
+        return None;
+    }
+    let dir = rest
+        .split(['?', '#'])
+        .next()
+        .and_then(|p| p.rsplit_once('/'))
+        .map(|(d, _)| d)
+        .unwrap_or(host);
+    Some(format!("{scheme}://{dir}/{href}"))
+}
+
+fn decode_entities(s: &str) -> String {
+    let mut out = s
+        .replace("&nbsp;", " ")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&#x27;", "'")
+        .replace("&apos;", "'")
+        .replace("&hellip;", "…")
+        .replace("&mdash;", "—")
+        .replace("&ndash;", "–");
+    let numeric = regex_lite::Regex::new(r"&#(x?)([0-9a-fA-F]+);").unwrap();
+    out = numeric
+        .replace_all(&out, |c: &regex_lite::Captures| {
+            let n = if c[1].is_empty() {
+                c[2].parse::<u32>().ok()
+            } else {
+                u32::from_str_radix(&c[2], 16).ok()
+            };
+            n.and_then(char::from_u32)
+                .map(|ch| ch.to_string())
+                .unwrap_or_default()
+        })
+        .into_owned();
+    out.replace("&amp;", "&")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn html_becomes_readable_text_with_links() {
+        let html = r#"<html><head><style>p{}</style><script>x()</script></head>
+        <body><h1>API reference</h1><p>Base URL: <code>https://api.example.com/v1</code></p>
+        <ul><li><a href="/docs/auth">Authentication</a></li><li>List nodes &amp; prices</li></ul>
+        <!-- hidden --><table><tr><td>GET</td><td>/nodes</td></tr></table></body></html>"#;
+        let text = html_to_text(html, Some("https://docs.example.com/intro"));
+        assert!(text.starts_with("# API reference"));
+        assert!(text.contains("Base URL: https://api.example.com/v1"));
+        assert!(text.contains("- Authentication (https://docs.example.com/docs/auth)"));
+        assert!(text.contains("- List nodes & prices"));
+        assert!(text.contains("GET | /nodes"));
+        assert!(!text.contains("x()"));
+        assert!(!text.contains("hidden"));
+    }
+
+    #[test]
+    fn mcp_text_reads_json_and_sse() {
+        let json_body =
+            r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"hello"}]}}"#;
+        assert_eq!(mcp_text(json_body), Some(Ok("hello".into())));
+        let sse = "event: message\ndata: {\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"a\"},{\"type\":\"text\",\"text\":\"b\"}],\"isError\":true}}\n\n";
+        assert_eq!(mcp_text(sse), Some(Err("a\nb".into())));
+        assert_eq!(mcp_text("nothing"), None);
+    }
+
+    #[test]
+    fn url_checks() {
+        assert!(check_url("https://docs.example.com/openapi.json").is_ok());
+        assert!(check_url("ftp://x").is_err());
+        assert!(check_url("http://127.0.0.1:7789/mcp").is_err());
+        assert!(check_url("http://169.254.169.254/latest").is_err());
+        assert!(check_url("http://172.20.0.1/").is_err());
+        assert!(check_url("https://api.example.com/v1?key=$MY_KEY").is_err());
+        assert!(check_url("https://api.example.com/arbos-secret://K/value").is_err());
+    }
+
+    #[test]
+    fn redirect_links_are_unwrapped() {
+        assert_eq!(
+            redirect_target(
+                "//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fa%3Fb%3D1&rut=abc"
+            ),
+            Some("https://example.com/a?b=1".into())
+        );
+        assert_eq!(
+            absolute_url("guide", Some("https://h.io/docs/api/intro")),
+            Some("https://h.io/docs/api/guide".into())
+        );
+        assert_eq!(
+            absolute_url("//cdn.h.io/x", Some("https://h.io/")),
+            Some("https://cdn.h.io/x".into())
+        );
+        assert_eq!(absolute_url("mailto:a@b", Some("https://h.io/")), None);
+    }
+
+    #[test]
+    fn entities_decode() {
+        assert_eq!(
+            decode_entities("a &amp; b &lt;c&gt; &#65;&#x42; &quot;q&quot;"),
+            "a & b <c> AB \"q\""
+        );
+    }
+}
