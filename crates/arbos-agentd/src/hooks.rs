@@ -1,5 +1,5 @@
 //! Loopback hook API for `arbos-pi-ext` (sandbox-image.md §3.3): route validation,
-//! ask_user, act limit, handles, working set, scratchpad.
+//! ask_user, handles, working set, scratchpad.
 
 use std::sync::Arc;
 
@@ -120,14 +120,6 @@ async fn approval_abandon(
     }
     let id = b.get("approvalId").and_then(Value::as_str).unwrap_or("");
     Json(a.abandon_approval(id).await).into_response()
-}
-
-async fn act_limit(State(a): State<S>, headers: HeaderMap, Json(_b): Json<Value>) -> Response {
-    if !authed(&a, &headers) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    a.hook_act_limit().await;
-    ok()
 }
 
 async fn deny(State(a): State<S>, headers: HeaderMap, Json(b): Json<Value>) -> Response {
@@ -314,7 +306,6 @@ pub fn router(agent: Arc<Agent>) -> Router {
         .route("/hook/route", post(route))
         .route("/hook/ask_user", post(ask_user))
         .route("/hook/send_message", post(send_message))
-        .route("/hook/act-limit", post(act_limit))
         .route("/hook/approval", post(approval))
         .route("/hook/approval-status", post(approval_status))
         .route("/hook/approval-abandon", post(approval_abandon))

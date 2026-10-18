@@ -1,6 +1,8 @@
 //! The project agent driver: one `pi --mode rpc` child per Project (D65), one pi
-//! session per chat, the `route` tool validated here, act limits (D66), streams
-//! folded into the chat doc, subagents through the `HarnessAdapter` registry.
+//! session per chat, the `route` tool validated here, streams folded into the
+//! chat doc, subagents through the `HarnessAdapter` registry. Hard limits that
+//! remain (turn deadline, context window, spend, tool timeouts) are announced
+//! in the chat — never a silent stop.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,7 +19,7 @@ use arbos_core::ids::ulid;
 use arbos_core::route::{pick_harness, validate, Harness, ValidRoute};
 use arbos_core::rpc::{AssistantEvent, Command as RpcCommand, Event};
 use arbos_core::widget::Widget;
-use arbos_core::{ACT_MAX_WALL_SECS, TOOL_OUTPUT_SUMMARY_MAX};
+use arbos_core::{TOOL_OUTPUT_SUMMARY_MAX, TURN_DEADLINE_SECS};
 
 use crate::config::Config;
 use crate::harness::{
@@ -1348,8 +1350,8 @@ impl Agent {
             }
             tracing::info!(chat_id, "ack_fallback: model wrote no sentence after route");
         }
-        // An act turn that ran out of time says so instead of leaving an empty bubble; the
-        // subagent that continues it reports back in a later message.
+        // An act turn that hit a hard limit and escalated says so instead of leaving an empty
+        // bubble; the subagent that continues it reports back in a later message.
         if matches!(turn.route, Some(ValidRoute::Act { .. }))
             && turn.escalate
             && !turn.stopped
@@ -1360,7 +1362,7 @@ impl Agent {
                 h.doc.append_text(
                     &assistant_msg_id,
                     &p,
-                    "This is taking longer than I thought; I'm continuing in the background and will post the result here.",
+                    "I hit a turn limit; I'm handing the rest to a subagent and will post the result here.",
                 );
             }
             tracing::info!(chat_id, "escalation note: act turn ended with no text");
@@ -2103,11 +2105,10 @@ impl Agent {
             return Err(anyhow!("prompt rejected: {}", r.error.unwrap_or_default()));
         }
         let started = Instant::now();
-        let mut act_steered = false;
-        let mut act_aborted = false;
-        let deadline = Duration::from_secs(15 * 60);
+        let mut deadline_announced = false;
+        let deadline = Duration::from_secs(turn_deadline_secs());
         // Time the turn spends blocked on an approval card is the user's, not the agent's: it
-        // counts toward neither the act limit nor the turn deadline.
+        // does not count toward the turn deadline.
         let mut approval_paused = Duration::ZERO;
         let mut approval_pause_started: Option<Instant> = None;
         loop {
@@ -2127,20 +2128,22 @@ impl Agent {
                         continue;
                     }
                     let elapsed = started.elapsed().saturating_sub(approval_paused);
-                    // Act wall-clock limit (D66): steer at 60 s, abort 20 s later.
-                    let is_act = matches!(self.turn.lock().await.as_ref().and_then(|t| t.route.as_ref()), Some(ValidRoute::Act { .. }));
-                    if is_act && elapsed > Duration::from_secs(ACT_MAX_WALL_SECS) && !act_steered {
-                        act_steered = true;
-                        let _ = pi.call(RpcCommand::Steer { id: pi.next_id("st"), message: "Time limit reached. Stop now and summarize what you did and what is left.".into() }).await;
-                        if let Some(t) = self.turn.lock().await.as_mut() { t.escalate = true; }
-                    }
-                    if is_act && elapsed > Duration::from_secs(ACT_MAX_WALL_SECS + 20) && !act_aborted {
-                        act_aborted = true;
-                        let _ = pi.call(RpcCommand::Abort { id: pi.next_id("ab") }).await;
-                    }
-                    if elapsed > deadline {
-                        let _ = pi.call(RpcCommand::Abort { id: pi.next_id("ab") }).await;
-                        return Err(anyhow!("turn exceeded 15 minutes"));
+                    // Turn deadline: announce in chat, hand remaining work to a subagent, never silent.
+                    if elapsed > deadline && !deadline_announced {
+                        deadline_announced = true;
+                        if let Some(t) = self.turn.lock().await.as_mut() {
+                            t.escalate = true;
+                        }
+                        self.post_limit_notice(
+                            host,
+                            "I hit the turn time limit; I'm handing the rest to a subagent.",
+                        )
+                        .await;
+                        let _ = pi
+                            .call(RpcCommand::Abort {
+                                id: pi.next_id("ab"),
+                            })
+                            .await;
                     }
                     continue;
                 }
@@ -2241,15 +2244,22 @@ impl Agent {
                     | AssistantEvent::Done { .. }
                     | AssistantEvent::Unknown => {}
                     AssistantEvent::Error { error, .. } => {
-                        let mut h = host.lock().await;
-                        h.doc.add_error_part(
-                            &t.assistant_msg_id,
-                            "model_error",
-                            &error
-                                .as_ref()
-                                .map(|e| e.to_string())
-                                .unwrap_or_else(|| "provider error".into()),
-                        );
+                        let err_text = error
+                            .as_ref()
+                            .map(|e| e.to_string())
+                            .unwrap_or_else(|| "provider error".into());
+                        {
+                            let mut h = host.lock().await;
+                            h.doc
+                                .add_error_part(&t.assistant_msg_id, "model_error", &err_text);
+                        }
+                        if let Some((notice, escalate)) = classify_hard_limit(&err_text) {
+                            if escalate {
+                                t.escalate = true;
+                            }
+                            // Visible chat line: never stop silently on a hard limit.
+                            self.write_text(host, t, notice).await;
+                        }
                     }
                 }
             }
@@ -2350,18 +2360,28 @@ impl Agent {
                     None
                 };
                 let input = t.tool_inputs.remove(tool_call_id).unwrap_or(json!({}));
-                let mut h = host.lock().await;
-                h.doc.add_tool_part(
-                    &t.assistant_msg_id,
-                    tool_call_id,
-                    tool_name,
-                    &input,
-                    &summary,
-                    output_ref.as_deref(),
-                    Some(output.len() as i64),
-                    *is_error,
-                );
+                {
+                    let mut h = host.lock().await;
+                    h.doc.add_tool_part(
+                        &t.assistant_msg_id,
+                        tool_call_id,
+                        tool_name,
+                        &input,
+                        &summary,
+                        output_ref.as_deref(),
+                        Some(output.len() as i64),
+                        *is_error,
+                    );
+                }
                 t.text_part_dirty = true;
+                if *is_error {
+                    if let Some((notice, escalate)) = classify_hard_limit(&output) {
+                        if escalate {
+                            t.escalate = true;
+                        }
+                        self.write_text(host, t, notice).await;
+                    }
+                }
             }
             Event::AgentSettled { .. } => return Ok(true),
             Event::CompactionEnd { .. } => {
@@ -2810,10 +2830,26 @@ impl Agent {
         Ok(id)
     }
 
-    pub async fn hook_act_limit(&self) {
-        if let Some(t) = self.turn.lock().await.as_mut() {
-            t.escalate = true;
+    /// Post a one- or two-sentence hard-limit notice into the live chat row (never silent).
+    async fn post_limit_notice(&self, host: &SharedHost, text: &str) {
+        let mut tl = self.turn.lock().await;
+        let Some(t) = tl.as_mut() else {
+            return;
+        };
+        self.maybe_split_ack(host, t, true).await;
+        let interim = std::mem::take(&mut t.act_buffer);
+        if !interim.trim().is_empty() {
+            let _ = self.store.t3_append(
+                &t.chat_id,
+                None,
+                Some(&t.chat_id),
+                "interim",
+                Some("assistant"),
+                interim.trim(),
+                Some(&json!({ "before": "limit_notice" })),
+            );
         }
+        self.write_text(host, t, text).await;
     }
 
     /// Working-set section (design §6.6 item 2b): running subagents + compaction summary +
@@ -3682,6 +3718,59 @@ pub fn route_name(r: &ValidRoute) -> &'static str {
         ValidRoute::Wake { .. } => "wake",
         ValidRoute::New { .. } => "new",
     }
+}
+
+/// Main-turn wall-clock deadline in seconds. `ARBOS_TURN_DEADLINE_SECS` (default 900).
+fn turn_deadline_secs() -> u64 {
+    std::env::var("ARBOS_TURN_DEADLINE_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(TURN_DEADLINE_SECS)
+}
+
+/// Map a provider / tool error to a short chat announcement and whether to escalate to a subagent.
+/// Returns `None` when the error is not a known hard limit (ordinary tool failures stay quiet).
+fn classify_hard_limit(err: &str) -> Option<(&'static str, bool)> {
+    let lower = err.to_ascii_lowercase();
+    if lower.contains("spend_cap")
+        || lower.contains("credits_exhausted")
+        || lower.contains("credits are used up")
+        || lower.contains("daily spend cap")
+        || lower.contains("insufficient credits")
+        || (lower.contains("spend") && lower.contains("cap"))
+    {
+        return Some((
+            "I hit the spend limit for today, so I have to stop here.",
+            false,
+        ));
+    }
+    if lower.contains("context_length")
+        || lower.contains("context length")
+        || lower.contains("context window")
+        || lower.contains("maximum context")
+        || lower.contains("prompt is too long")
+        || lower.contains("too many tokens")
+        || lower.contains("token limit")
+        || (lower.contains("max_tokens")
+            && (lower.contains("exceed") || lower.contains("limit") || lower.contains("over")))
+    {
+        return Some((
+            "I hit the model's context limit; I'm summarizing and continuing in a fresh context.",
+            true,
+        ));
+    }
+    if lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("deadline exceeded")
+        || lower.contains("time-out")
+    {
+        return Some((
+            "A tool or model call timed out; I'll try another approach.",
+            false,
+        ));
+    }
+    None
 }
 
 #[cfg(test)]
