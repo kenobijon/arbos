@@ -710,6 +710,86 @@ impl Store {
         })
     }
 
+    /// Replace every occurrence of `values` in T3 text (and its FTS index). Returns how many
+    /// rows changed. Used by Scrub from context.
+    pub fn t3_scrub(&self, values: &[String]) -> Result<usize> {
+        let needles: Vec<&str> = values
+            .iter()
+            .map(String::as_str)
+            .filter(|v| v.len() >= 6)
+            .collect();
+        if needles.is_empty() {
+            return Ok(0);
+        }
+        self.with(|c| {
+            let mut st = c.prepare("SELECT id, text FROM t3")?;
+            let rows: Vec<(String, String)> = st
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut n = 0;
+            for (id, text) in rows {
+                let mut next = text.clone();
+                for v in &needles {
+                    if next.contains(v) {
+                        next = next.replace(v, "[REDACTED:vault]");
+                    }
+                }
+                if next == text {
+                    continue;
+                }
+                c.execute(
+                    "UPDATE t3 SET text = ?2, size = ?3 WHERE id = ?1",
+                    params![id, next, next.len() as i64],
+                )?;
+                c.execute("DELETE FROM t3_fts WHERE id = ?1", params![id])?;
+                c.execute(
+                    "INSERT INTO t3_fts(text, id, thread_id, kind) SELECT text, id, thread_id, kind FROM t3 WHERE id = ?1",
+                    params![id],
+                )?;
+                n += 1;
+            }
+            Ok(n)
+        })
+    }
+
+    /// Replace every occurrence of `values` in durable memory text (and its FTS index).
+    pub fn memory_scrub(&self, values: &[String]) -> Result<usize> {
+        let needles: Vec<&str> = values
+            .iter()
+            .map(String::as_str)
+            .filter(|v| v.len() >= 6)
+            .collect();
+        if needles.is_empty() {
+            return Ok(0);
+        }
+        self.with(|c| {
+            let mut st = c.prepare("SELECT id, text FROM memory")?;
+            let rows: Vec<(String, String)> = st
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut n = 0;
+            for (id, text) in rows {
+                let mut next = text.clone();
+                for v in &needles {
+                    if next.contains(v) {
+                        next = next.replace(v, "[REDACTED:vault]");
+                    }
+                }
+                if next == text {
+                    continue;
+                }
+                c.execute("UPDATE memory SET text = ?2 WHERE id = ?1", params![id, next])?;
+                c.execute("DELETE FROM memory_fts WHERE id = ?1", params![id])?;
+                c.execute(
+                    "INSERT INTO memory_fts(text, id, tier) SELECT text, id, tier FROM memory WHERE id = ?1",
+                    params![id],
+                )?;
+                n += 1;
+            }
+            Ok(n)
+        })
+    }
+
     // ---- memory -------------------------------------------------------------------------------
 
     #[allow(clippy::too_many_arguments)]
