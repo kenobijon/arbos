@@ -465,14 +465,16 @@ struct SettingsRow: View {
                 .font(.system(size: Theme.body))
                 .foregroundStyle(theme.text)
                 .lineLimit(1)
+                .layoutPriority(1)
             Spacer(minLength: 8)
             if let value, !value.isEmpty {
+                // The value takes what the title leaves and clips at its end
+                // (Apple's Settings), not in the middle ("3 secret…assword").
                 Text(value)
                     .font(.system(size: Theme.body))
                     .foregroundStyle(valueTint ?? theme.muted)
                     .lineLimit(1)
-                    .truncationMode(.middle)
-                    .frame(maxWidth: 170, alignment: .trailing)
+                    .truncationMode(.tail)
             }
             if chevron {
                 Image(systemName: "chevron.right")
