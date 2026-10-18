@@ -88,6 +88,10 @@ extension AppModel {
         Task { await secretsAction("Remove from all agents") { _ = try await self.relay.revokeSecretEverywhere(secretId) } }
     }
 
+    func scrubSecret(_ secretId: String) {
+        Task { await secretsAction("Scrub from context") { _ = try await self.relay.scrubSecret(secretId) } }
+    }
+
     func deleteSecret(_ secretId: String) {
         secrets?.secrets.removeAll { $0.id == secretId }
         Task { await secretsAction("Delete secret") { try await self.relay.deleteSecret(secretId) } }

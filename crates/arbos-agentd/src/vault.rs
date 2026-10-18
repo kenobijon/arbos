@@ -7,8 +7,10 @@
 //! (names, hosts, URLs; never values).
 //!
 //! Standing Access comes from the relay (`GET /box/secrets`) and is refreshed on the pushes
-//! `secret_access_changed`, `secrets_paused`, `secret_value_replaced`, `secret_decided`, so a
-//! switch flipped in Settings reaches this process within one push poll (5 s).
+//! `secret_access_changed`, `secrets_paused`, `secret_value_replaced`, `secret_decided`,
+//! `secret_scrub`, so a switch flipped in Settings reaches this process within one push poll
+//! (5 s). Scrub asks the relay for the values once, then redacts them from chats, sessions,
+//! T3 and memory.
 //!
 //! Real values (D83 decision 2 as decided 2026-10-18): a secret whose owner switched "Real value
 //! in the agent's environment" on arrives from `GET /box/secrets/env` and is written to the
@@ -552,7 +554,7 @@ pub async fn refresh_all(agent: &Agent) -> Result<(), String> {
 }
 
 /// A secrets push from the relay (`secret_access_changed`, `secrets_paused`,
-/// `secret_value_replaced`, `secret_decided`, `secret_notice`).
+/// `secret_value_replaced`, `secret_decided`, `secret_notice`, `secret_scrub`).
 pub async fn on_push(agent: &Arc<Agent>, kind: &str, payload: &Value) {
     match kind {
         "secret_decided" => {
@@ -585,6 +587,34 @@ pub async fn on_push(agent: &Arc<Agent>, kind: &str, payload: &Value) {
                 json!({ "text": text, "host": payload["host"], "name": payload["env"] }),
             );
         }
+        "secret_scrub" => {
+            let secret_id = payload["secret_id"].as_str().unwrap_or("").to_owned();
+            let env = payload["env"].as_str().unwrap_or("").to_owned();
+            if secret_id.is_empty() {
+                return;
+            }
+            match scrub_secret(agent, &secret_id).await {
+                Ok(stats) => {
+                    tracing::info!(
+                        secret_id = %secret_id,
+                        env = %env,
+                        chats = stats.chats,
+                        sessions = stats.sessions,
+                        t3 = stats.t3,
+                        memory = stats.memory,
+                        "secret scrubbed from context"
+                    );
+                    agent.append_audit(
+                        "secret_scrub",
+                        json!({ "env": env, "secret_id": secret_id, "chats": stats.chats,
+                            "sessions": stats.sessions, "t3": stats.t3, "memory": stats.memory }),
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, secret_id = %secret_id, "secret scrub failed");
+                }
+            }
+        }
         _ => {
             // `secret_access_changed`, `secrets_paused`, `secret_value_replaced`: the relay is
             // the authority; take its current view (≤ 5 s after the switch, PUSH_POLL).
@@ -597,6 +627,122 @@ pub async fn on_push(agent: &Arc<Agent>, kind: &str, payload: &Value) {
             );
         }
     }
+}
+
+struct ScrubStats {
+    chats: usize,
+    sessions: usize,
+    t3: usize,
+    memory: usize,
+}
+
+/// Pull the scrub values from the relay and redact them from every local context store.
+async fn scrub_secret(agent: &Arc<Agent>, secret_id: &str) -> Result<ScrubStats, String> {
+    let v = relay_get(agent, &format!("/box/secrets/{secret_id}/scrub")).await?;
+    let values: Vec<String> = v["values"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_owned))
+                .filter(|s| s.len() >= 6)
+                .collect()
+        })
+        .unwrap_or_default();
+    if values.is_empty() {
+        return Ok(ScrubStats {
+            chats: 0,
+            sessions: 0,
+            t3: 0,
+            memory: 0,
+        });
+    }
+    for val in &values {
+        crate::store::redact_live_value(val);
+    }
+
+    // Open every known chat so historical leaks are covered, not only the ones already loaded.
+    if let Ok(chats) = agent.store.chats() {
+        for c in chats {
+            if agent.sync.host(&c.id).await.is_none() {
+                let _ = agent.sync.open_room(&c.id).await;
+            }
+        }
+    }
+
+    let mut chats = 0;
+    let hosts: Vec<_> = {
+        let map = agent.sync.hosts.lock().await;
+        map.values().cloned().collect()
+    };
+    for host in hosts {
+        let n = {
+            let mut h = host.lock().await;
+            h.doc.scrub_values(&values)
+        };
+        if n > 0 {
+            chats += n;
+            let _ = agent.sync.persist(&host).await;
+        }
+    }
+
+    let sessions = scrub_session_files(&agent.cfg, &values);
+    let t3 = agent.store.t3_scrub(&values).unwrap_or(0);
+    let memory = agent.store.memory_scrub(&values).unwrap_or(0);
+    Ok(ScrubStats {
+        chats,
+        sessions,
+        t3,
+        memory,
+    })
+}
+
+/// Walk pi / Prime / Claude session files and rewrite any that still hold a plaintext value.
+fn scrub_session_files(cfg: &crate::config::Config, values: &[String]) -> usize {
+    let mut n = 0;
+    let dirs = [
+        cfg.pi_sessions_dir(),
+        cfg.prime_dir().join("sessions"),
+        cfg.state_dir.join("claude").join("sessions"),
+        cfg.pi_dir().join("subagent-sessions"),
+    ];
+    for dir in dirs {
+        n += scrub_dir_files(&dir, values);
+    }
+    n
+}
+
+fn scrub_dir_files(dir: &Path, values: &[String]) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut n = 0;
+    for ent in entries.flatten() {
+        let path = ent.path();
+        if path.is_dir() {
+            n += scrub_dir_files(&path, values);
+            continue;
+        }
+        if scrub_one_file(&path, values) {
+            n += 1;
+        }
+    }
+    n
+}
+
+fn scrub_one_file(path: &Path, values: &[String]) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let mut next = text.clone();
+    for v in values {
+        if next.contains(v) {
+            next = next.replace(v, "[REDACTED:vault]");
+        }
+    }
+    if next == text {
+        return false;
+    }
+    std::fs::write(path, next).is_ok()
 }
 
 pub async fn secrets_list(agent: &Agent) -> Value {

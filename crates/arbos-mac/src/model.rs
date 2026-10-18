@@ -1642,6 +1642,7 @@ impl SecretActivity {
             "created" => format!("You added {name}"),
             "updated" => format!("You edited {name}"),
             "value_replaced" => format!("You replaced the value of {name}"),
+            "scrubbed" => format!("You scrubbed {name} from context"),
             "deleted" => format!("You deleted {name}"),
             "paused" if self.by == "stop_machine" => "Secrets paused with the machine".into(),
             "paused" => "You paused all secrets".into(),

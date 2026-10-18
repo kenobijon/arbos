@@ -1365,6 +1365,46 @@ pub async fn revoke_all(
     Ok(Json(json!({ "secret": secret_json(&state, &s) })).into_response())
 }
 
+/// How long a box may fetch scrub values after the owner taps Scrub from context.
+const SCRUB_WINDOW_MS: i64 = 10 * 60 * 1000;
+
+/// `POST /secrets/{id}/scrub` → `{ secret }`: find this value in every agent's context
+/// (chats, sessions, logs) and replace each copy with a redaction. Values never leave in the
+/// push; each box fetches them once through `GET /box/secrets/{id}/scrub` within the window.
+pub async fn scrub(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+) -> ApiResult {
+    let user_id = device_user(&principal)?;
+    let s = state
+        .db
+        .secret(&user_id, &id)
+        .map_err(internal)?
+        .ok_or_else(not_found)?;
+    let dek = user_dek(&state, &user_id).map_err(internal)?;
+    let plain = plain_of(&state, &dek, &s).map_err(internal)?;
+    let value_count = plain.all_values.len();
+    audit(
+        &state,
+        &user_id,
+        AuditEntry {
+            detail: json!({ "values": value_count }),
+            ..entry("scrubbed", &s, &format!("user:{user_id}"))
+        },
+    );
+    // Every agent of this owner: a paste into any chat can leak the value.
+    for p in state.db.projects_of_user(&user_id).unwrap_or_default() {
+        push_box(
+            &state,
+            &p.id,
+            "secret_scrub",
+            json!({ "secret_id": s.id, "env": s.env, "ref": placeholder(&s.env, "value") }),
+        );
+    }
+    Ok(Json(json!({ "secret": secret_json(&state, &s) })).into_response())
+}
+
 /// `GET /projects/{id}/secrets` → `{ paused, items, requests, activity }` for the agent profile.
 /// Owner or guest may read.
 pub async fn project_secrets(
@@ -1766,6 +1806,45 @@ pub async fn box_list(
         Json(json!({ "paused": paused, "items": box_items(&state, &user_id, &project_id) }))
             .into_response(),
     )
+}
+
+/// `GET /box/secrets/{id}/scrub` → `{ env, values }` for a just-requested scrub. The values
+/// exist only so the box can replace them in chats, sessions and logs; they are not granted
+/// for use. Requires a `scrubbed` audit row within [`SCRUB_WINDOW_MS`].
+pub async fn box_scrub(
+    State(state): State<AppState>,
+    principal: Principal,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult {
+    let (user_id, _project_id) = box_project(&state, &principal, &headers)?;
+    let s = state
+        .db
+        .secret(&user_id, &id)
+        .map_err(internal)?
+        .ok_or_else(not_found)?;
+    let recent = state
+        .db
+        .list_audit(
+            &user_id,
+            &AuditQuery {
+                target_id: Some(s.id.clone()),
+                since: Some(now_ms() - SCRUB_WINDOW_MS),
+                limit: 20,
+                ..Default::default()
+            },
+        )
+        .map_err(internal)?;
+    if !recent.iter().any(|a| a.action == "scrubbed") {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "no scrub in progress for this secret",
+        ));
+    }
+    let dek = user_dek(&state, &user_id).map_err(internal)?;
+    let plain = plain_of(&state, &dek, &s).map_err(internal)?;
+    Ok(Json(json!({ "env": s.env, "values": plain.all_values })).into_response())
 }
 
 #[derive(Deserialize)]

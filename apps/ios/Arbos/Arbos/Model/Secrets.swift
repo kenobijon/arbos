@@ -144,6 +144,7 @@ struct SecretActivity: Identifiable, Equatable {
         case "created": return "You added \(name)"
         case "updated": return "You edited \(name)"
         case "value_replaced": return "You replaced the value of \(name)"
+        case "scrubbed": return "You scrubbed \(name) from context"
         case "deleted": return "You deleted \(name)"
         case "paused": return by == "stop_machine" ? "Secrets paused with the machine" : "You paused all secrets"
         case "unpaused": return "You turned secrets back on"

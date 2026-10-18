@@ -401,6 +401,7 @@ struct SecretPage: View {
     @State private var editingAccess: SecretAgentAccess?
     @State private var confirmDelete = false
     @State private var confirmRevoke = false
+    @State private var confirmScrub = false
 
     private var secret: SecretItem? { model.secrets?.secrets.first { $0.id == secretId } }
 
@@ -486,6 +487,9 @@ struct SecretPage: View {
                     SettingsActionRow(title: "Remove from all agents", disabled: s.agents.allSatisfy { !$0.enabled } || model.isFixture) { confirmRevoke = true }
                 }
                 SettingsGroup {
+                    SettingsActionRow(title: "Scrub from context", disabled: model.isFixture) { confirmScrub = true }
+                }
+                SettingsGroup {
                     SettingsActionRow(title: "Delete secret", destructive: true, disabled: model.isFixture) { confirmDelete = true }
                 }
             } else {
@@ -512,6 +516,12 @@ struct SecretPage: View {
         .confirmationDialog("Remove from all agents?", isPresented: $confirmRevoke, titleVisibility: .visible) {
             Button("Remove from all agents", role: .destructive) { model.revokeSecretEverywhere(secretId) }
         } message: { Text("Every agent loses \(secret?.env ?? "it") within seconds. You can turn them back on one by one.") }
+        .confirmationDialog("Scrub \(secret?.env ?? "secret") from context?", isPresented: $confirmScrub, titleVisibility: .visible) {
+            Button("Scrub from context", role: .destructive) {
+                model.scrubSecret(secretId)
+                Task { await load() }
+            }
+        } message: { Text("Arbos looks for this value in chats, agent sessions and logs, and replaces every copy with a redaction.") }
         .sheet(isPresented: $showEdit) {
             if let s = secret {
                 NavigationStack { EditSecretSheet(secret: s) }

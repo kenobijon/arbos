@@ -59,6 +59,12 @@ extension RelayAPI {
         return SecretItem.parse(v?["secret"])
     }
 
+    /// `POST /secrets/{id}/scrub` — find the value in chats, sessions and logs; redact every copy.
+    func scrubSecret(_ id: String) async throws -> SecretItem? {
+        let v = try await json("POST", "/secrets/\(id)/scrub") as? [String: Any]
+        return SecretItem.parse(v?["secret"])
+    }
+
     func projectSecrets(_ projectId: String) async throws -> ProjectSecrets {
         guard let v = ProjectSecrets.parse(try await json("GET", "/projects/\(projectId)/secrets")) else {
             throw RelayError(status: 0, message: "Bad reply")

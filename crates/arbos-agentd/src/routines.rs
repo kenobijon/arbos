@@ -221,7 +221,8 @@ impl Agent {
             | "secrets_paused"
             | "secret_value_replaced"
             | "secret_decided"
-            | "secret_notice" => crate::vault::on_push(self, kind, &payload).await,
+            | "secret_notice"
+            | "secret_scrub" => crate::vault::on_push(self, kind, &payload).await,
             other => {
                 tracing::info!(kind = other, push = %payload, "push delivered");
                 let _ = self.store.t3_append(

@@ -851,6 +851,90 @@ impl ChatDoc {
     pub fn meta(&self) -> Value {
         lv_to_json(&self.doc.get_map("meta").get_deep_value())
     }
+
+    /// Replace every occurrence of `values` in message text (and a few string fields) with
+    /// `[REDACTED:vault]`. Used when the owner scrubs a leaked secret from context. Returns
+    /// how many replacements were made. Values shorter than 6 characters are ignored.
+    pub fn scrub_values(&mut self, values: &[String]) -> usize {
+        let needles: Vec<&str> = values
+            .iter()
+            .map(String::as_str)
+            .filter(|v| v.len() >= 6)
+            .collect();
+        if needles.is_empty() {
+            return 0;
+        }
+        let mut hits = 0;
+        let msgs = self.messages_list();
+        for i in 0..msgs.len() {
+            let Some(ValueOrContainer::Container(Container::Map(m))) = msgs.get(i) else {
+                continue;
+            };
+            let Some(ValueOrContainer::Container(Container::List(parts))) = m.get("parts") else {
+                continue;
+            };
+            for j in 0..parts.len() {
+                let Some(ValueOrContainer::Container(Container::Map(p))) = parts.get(j) else {
+                    continue;
+                };
+                for field in [
+                    "text",
+                    "reasoning",
+                    "outputSummary",
+                    "message",
+                    "summary",
+                    "title",
+                ] {
+                    match p.get(field) {
+                        Some(ValueOrContainer::Container(Container::Text(t))) => {
+                            hits += scrub_loro_text(&t, &needles);
+                        }
+                        Some(ValueOrContainer::Value(LoroValue::String(s))) => {
+                            let original = s.to_string();
+                            let scrubbed = scrub_plain(&original, &needles);
+                            if scrubbed != original {
+                                hits += 1;
+                                let _ = p.insert(field, scrubbed.as_str());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        if hits > 0 {
+            self.doc.commit();
+        }
+        hits
+    }
+}
+
+const SCRUB_REDACTED: &str = "[REDACTED:vault]";
+
+fn scrub_plain(text: &str, needles: &[&str]) -> String {
+    let mut out = text.to_owned();
+    for v in needles {
+        if out.contains(v) {
+            out = out.replace(v, SCRUB_REDACTED);
+        }
+    }
+    out
+}
+
+fn scrub_loro_text(t: &LoroText, needles: &[&str]) -> usize {
+    let original = t.to_string();
+    let scrubbed = scrub_plain(&original, needles);
+    if scrubbed == original {
+        return 0;
+    }
+    let hits = needles
+        .iter()
+        .map(|v| original.matches(v).count())
+        .sum::<usize>();
+    let len = t.len_unicode();
+    let _ = t.delete(0, len);
+    let _ = t.insert(0, &scrubbed);
+    hits.max(1)
 }
 
 /// Encode a version vector for `STATE`'s checkpoint frontier payload.
@@ -900,5 +984,31 @@ mod tests {
         assert_eq!(msgs[1].text(), "Hi there");
         assert_eq!(msgs[1].status, "done");
         assert_eq!(client.commands()[0].status, "taken");
+    }
+
+    #[test]
+    fn scrub_values_redacts_leaked_secret_from_text() {
+        let mut doc = ChatDoc::new(1, true);
+        doc.init_meta("chat1", "proj1", 1);
+        doc.append_user_message(
+            "m1",
+            "my key is sk-live-abcdefghijklmnopqrstuvwxyz012345",
+            "dev:mac",
+        );
+        let part = doc.start_assistant_message("m2", "m1", "box:1");
+        doc.append_text(
+            "m2",
+            &part,
+            "got it: sk-live-abcdefghijklmnopqrstuvwxyz012345",
+        );
+        doc.finish_message("m2", MessageStatus::Done);
+
+        let n = doc.scrub_values(&["sk-live-abcdefghijklmnopqrstuvwxyz012345".into()]);
+        assert!(n >= 2);
+        let msgs = doc.messages();
+        assert!(msgs[0].text().contains("[REDACTED:vault]"));
+        assert!(!msgs[0].text().contains("sk-live-"));
+        assert!(msgs[1].text().contains("[REDACTED:vault]"));
+        assert!(!msgs[1].text().contains("sk-live-"));
     }
 }

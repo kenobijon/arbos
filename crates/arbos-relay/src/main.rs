@@ -650,6 +650,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/secrets/{id}/value", put(secrets::replace_value))
         .route("/secrets/{id}/revoke-all", post(secrets::revoke_all))
+        .route("/secrets/{id}/scrub", post(secrets::scrub))
         .route(
             "/secrets/{id}/access/{project_id}",
             put(secrets::put_access).delete(secrets::delete_access),
@@ -658,6 +659,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/me/secrets/settings", put(secrets::put_settings))
         .route("/box/secrets", get(secrets::box_list))
         .route("/box/secrets/env", get(secrets::box_env))
+        .route("/box/secrets/{id}/scrub", get(secrets::box_scrub))
         .route("/box/secrets/request", post(secrets::box_request))
         .route(
             "/box/secrets/requests/{id}",
