@@ -11,9 +11,10 @@
 //! addresses this agent, the decision model reads recent chat context and chooses whether this
 //! agent should reply (or stay quiet) so the right agent continues the thread — or none do. Each
 //! human message is labelled with the author's display name (falling back to bare handle) and role
-//! (`owner` | `guest`) in the prompt — attribution only; in the permissive v1 a guest gets
-//! everything the owner gets. Agents address people by display name, never `@handle`. The owner's
-//! credits pay; audit lines carry `asked_by`.
+//! (`owner` | `guest`) in the prompt. Guests may direct ordinary work; they may not use the
+//! owner's secrets unless the owner added them under Who can direct for that secret. Agents
+//! address people by display name, never `@handle`. The owner's credits pay; audit lines carry
+//! `asked_by`.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -943,8 +944,13 @@ impl Agent {
             ""
         };
         let owner_spoken = info.spoken_name_of(&info.owner_user);
+        let secrets_rule = if role == "guest" {
+            " Do not use the owner's secrets (egress, browser fill, or real values in the environment) for this person unless they are listed under Who can direct for that secret; if a director note sets a limit, honour it."
+        } else {
+            ""
+        };
         let mut prelude = format!(
-            "[People chat with {}. You are @{} (the agent of {owner_spoken}'s Project \"{}\"){}.{} This message is from {spoken} ({role}); treat it as a request from another person in the conversation and address them by their display name ({spoken}), never as an @handle. Your reply is read by everyone in the chat.]\n",
+            "[People chat with {}. You are @{} (the agent of {owner_spoken}'s Project \"{}\"){}.{} This message is from {spoken} ({role}); treat it as a request from another person in the conversation and address them by their display name ({spoken}), never as an @handle. Your reply is read by everyone in the chat.{secrets_rule}]\n",
             people.join(", "),
             info.slug,
             self.cfg.project_id,
@@ -1000,7 +1006,7 @@ impl Agent {
         );
         self.people.set_current(Some(chat_id));
         Some(format!(
-            "[This message is from {spoken}, a person the owner of this Project invited to work in it with you. Address them by their display name ({spoken}), never as an @handle; they have the same say here as the owner.]\n\n"
+            "[This message is from {spoken}, a person the owner of this Project invited to work in it with you. Address them by their display name ({spoken}), never as an @handle. They may direct ordinary work here; do not use the owner's secrets for them unless the owner added them under Who can direct for that secret, and honour any director note (for example a daily credit limit).]\n\n"
         ))
     }
 

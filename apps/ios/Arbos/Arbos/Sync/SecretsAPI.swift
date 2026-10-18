@@ -59,6 +59,30 @@ extension RelayAPI {
         return SecretItem.parse(v?["secret"])
     }
 
+    /// `POST /secrets/{id}/directors { handle, note? }` — let this person direct agents to use the secret.
+    func addSecretDirector(_ id: String, handle: String, note: String?) async throws -> SecretItem {
+        var body: [String: Any] = ["handle": handle]
+        if let note { body["note"] = note }
+        let v = try await json("POST", "/secrets/\(id)/directors", body: body) as? [String: Any]
+        guard let s = SecretItem.parse(v?["secret"]) else { throw RelayError(status: 0, message: "Bad secret reply") }
+        return s
+    }
+
+    /// `PUT /secrets/{id}/directors/{userId} { note? }` — update the director's usage note.
+    func setSecretDirector(_ id: String, userId: String, note: String?) async throws -> SecretItem {
+        var body: [String: Any] = [:]
+        if let note { body["note"] = note }
+        let v = try await json("PUT", "/secrets/\(id)/directors/\(userId)", body: body) as? [String: Any]
+        guard let s = SecretItem.parse(v?["secret"]) else { throw RelayError(status: 0, message: "Bad secret reply") }
+        return s
+    }
+
+    func deleteSecretDirector(_ id: String, userId: String) async throws -> SecretItem {
+        let v = try await json("DELETE", "/secrets/\(id)/directors/\(userId)") as? [String: Any]
+        guard let s = SecretItem.parse(v?["secret"]) else { throw RelayError(status: 0, message: "Bad secret reply") }
+        return s
+    }
+
     /// `POST /secrets/{id}/scrub` — find the value in chats, sessions and logs; redact every copy.
     func scrubSecret(_ id: String) async throws -> SecretItem? {
         let v = try await json("POST", "/secrets/\(id)/scrub") as? [String: Any]

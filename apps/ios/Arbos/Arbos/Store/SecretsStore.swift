@@ -112,6 +112,42 @@ extension AppModel {
         Task { await secretsAction("Save") { _ = try await self.relay.patchSecret(secretId, body) } }
     }
 
+    func addSecretDirector(secretId: String, handle: String, note: String) {
+        Task {
+            await secretsAction("Add director") {
+                let s = try await self.relay.addSecretDirector(secretId, handle: handle, note: note.isEmpty ? nil : note)
+                if let i = self.secrets?.secrets.firstIndex(where: { $0.id == s.id }) {
+                    self.secrets?.secrets[i] = s
+                }
+            }
+        }
+    }
+
+    func updateSecretDirector(secretId: String, userId: String, note: String) {
+        Task {
+            await secretsAction("Save") {
+                let s = try await self.relay.setSecretDirector(secretId, userId: userId, note: note)
+                if let i = self.secrets?.secrets.firstIndex(where: { $0.id == s.id }) {
+                    self.secrets?.secrets[i] = s
+                }
+            }
+        }
+    }
+
+    func removeSecretDirector(secretId: String, userId: String) {
+        if let i = secrets?.secrets.firstIndex(where: { $0.id == secretId }) {
+            secrets?.secrets[i].directors.removeAll { $0.userId == userId }
+        }
+        Task {
+            await secretsAction("Remove director") {
+                let s = try await self.relay.deleteSecretDirector(secretId, userId: userId)
+                if let i = self.secrets?.secrets.firstIndex(where: { $0.id == s.id }) {
+                    self.secrets?.secrets[i] = s
+                }
+            }
+        }
+    }
+
     func decideSecretRequest(_ id: String, decision: String, projectId: String? = nil) {
         Task {
             await secretsAction("Secrets", refreshProject: projectId) { try await self.relay.decideSecretRequest(id, decision: decision) }

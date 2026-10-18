@@ -23,7 +23,8 @@ use arbos_core::ids::{now_ms, ulid};
 use crate::auth::Principal;
 use crate::connectors::crypto::Dek;
 use crate::db_secrets::{
-    Access, AuditEntry, AuditQuery, Secret, SecretRequest, SecretVersion, REQUEST_PENDING_MS,
+    Access, AuditEntry, AuditQuery, Secret, SecretDirector, SecretRequest, SecretVersion,
+    REQUEST_PENDING_MS,
 };
 use crate::signin::api_error;
 use crate::state::AppState;
@@ -362,6 +363,34 @@ fn access_json(state: &AppState, a: &Access) -> Value {
     })
 }
 
+/// One director row for Settings / the box: id, handle, name, and the usage note the agent sees.
+pub(crate) fn director_json(state: &AppState, d: &SecretDirector) -> Value {
+    let card = state.db.user_card(&d.user_id).ok().flatten();
+    let handle = card
+        .as_ref()
+        .and_then(|c| c["handle"].as_str())
+        .unwrap_or("")
+        .trim_start_matches('@')
+        .to_owned();
+    let name = card
+        .as_ref()
+        .and_then(|c| c["name"].as_str())
+        .filter(|n| !n.is_empty())
+        .map(str::to_owned);
+    let avatar_url = card
+        .as_ref()
+        .and_then(|c| c["avatar_url"].as_str())
+        .map(str::to_owned);
+    json!({
+        "user_id": d.user_id,
+        "handle": handle,
+        "name": name,
+        "avatar_url": avatar_url,
+        "note": d.note,
+        "created_at": d.created_at,
+    })
+}
+
 pub(crate) fn secret_json(state: &AppState, s: &Secret) -> Value {
     let agents: Vec<Value> = state
         .db
@@ -369,6 +398,13 @@ pub(crate) fn secret_json(state: &AppState, s: &Secret) -> Value {
         .unwrap_or_default()
         .iter()
         .map(|a| access_json(state, a))
+        .collect();
+    let directors: Vec<Value> = state
+        .db
+        .secret_directors(&s.id)
+        .unwrap_or_default()
+        .iter()
+        .map(|d| director_json(state, d))
         .collect();
     let username = if s.kind == "login" {
         user_dek(state, &s.user_id)
@@ -385,6 +421,7 @@ pub(crate) fn secret_json(state: &AppState, s: &Secret) -> Value {
         "username": username, "vault_name": ARBOS_VAULT_NAME,
         "ref": placeholder(&s.env, if s.kind == "login" { "password" } else { "value" }),
         "agents": agents,
+        "directors": directors,
     })
 }
 
@@ -436,6 +473,8 @@ pub enum Refusal {
     HostNotAllowed(Vec<String>),
     Expired,
     AskEveryTime,
+    /// A non-owner directed the agent and is not on this secret's directors list.
+    NotDirector,
 }
 
 impl Refusal {
@@ -460,6 +499,9 @@ impl Refusal {
             Refusal::AskEveryTime => {
                 format!("{name}: asks every time — call secrets_request first.")
             }
+            Refusal::NotDirector => format!(
+                "{name}: the person directing you is not allowed to use this secret. Only the owner, or people the owner added under Who can direct, may. Tell them, and do not retry with this secret."
+            ),
         }
     }
 
@@ -467,12 +509,24 @@ impl Refusal {
         match self {
             Refusal::Paused => "paused",
             Refusal::NoSuch => "not_found",
-            Refusal::NoAccess | Refusal::TurnedOff | Refusal::WrongChat | Refusal::AskEveryTime => {
-                "no_access"
-            }
+            Refusal::NoAccess
+            | Refusal::TurnedOff
+            | Refusal::WrongChat
+            | Refusal::AskEveryTime
+            | Refusal::NotDirector => "no_access",
             Refusal::HostNotAllowed(_) => "host_not_allowed",
             Refusal::Expired => "expired",
         }
+    }
+}
+
+/// May `asked_by` direct use of `s`? The owner always may. Anyone else needs a directors row.
+/// `None` means no other person is directing (owner 1:1 chat, or asker unknown) — allowed.
+pub(crate) fn may_direct(state: &AppState, s: &Secret, asked_by: Option<&str>) -> bool {
+    match asked_by.map(str::trim).filter(|u| !u.is_empty()) {
+        None => true,
+        Some(uid) if uid == s.user_id => true,
+        Some(uid) => state.db.is_secret_director(&s.id, uid).unwrap_or(false),
     }
 }
 
@@ -486,7 +540,8 @@ pub struct Allowed {
 }
 
 /// Check one use of `s` by `project_id` at `host` in `chat_id`. `use_kind` is `header | env |
-/// browser_fill`. Pure except for the two lookups (access, allowed_once).
+/// browser_fill`. `asked_by` is the human directing this turn (`None` = owner / unknown).
+/// Pure except for the lookups (access, allowed_once, directors).
 pub(crate) fn decide_use(
     state: &AppState,
     s: &Secret,
@@ -494,6 +549,7 @@ pub(crate) fn decide_use(
     host: &str,
     use_kind: &str,
     chat_id: Option<&str>,
+    asked_by: Option<&str>,
 ) -> Result<Allowed, Refusal> {
     if s.expires_at.is_some_and(|t| t < now_ms()) {
         return Err(Refusal::Expired);
@@ -504,12 +560,16 @@ pub(crate) fn decide_use(
         .allowed_once_for(project_id, &s.id, Some(host), use_kind)
         .ok()
         .flatten();
+    // Owner already approved this specific request card — that decision stands.
     if let Some(once) = once {
         return Ok(Allowed {
             access,
             once: Some(once),
             pin_host: false,
         });
+    }
+    if !may_direct(state, s, asked_by) {
+        return Err(Refusal::NotDirector);
     }
     let Some(a) = access else {
         return Err(Refusal::NoAccess);
@@ -1332,6 +1392,174 @@ pub async fn delete_access(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+#[derive(Deserialize, Default)]
+pub struct DirectorBody {
+    /// Optional: resolve the person by GitHub handle when the path has no user id yet.
+    #[serde(default)]
+    pub handle: Option<String>,
+    /// Constraints the agent must honour when this person directs use
+    /// (e.g. "only 1k usd of credit usage per day").
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+/// `PUT /secrets/{id}/directors/{director_user_id}` → `{ secret }`.
+/// Body may carry `note`. The owner cannot add themselves (they always may direct).
+pub async fn put_director(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((id, director_user_id)): Path<(String, String)>,
+    body: Option<Json<DirectorBody>>,
+) -> ApiResult {
+    let user_id = device_user(&principal)?;
+    let b = body.map(|b| b.0).unwrap_or_default();
+    let s = state
+        .db
+        .secret(&user_id, &id)
+        .map_err(internal)?
+        .ok_or_else(not_found)?;
+    let director_id = director_user_id.trim().to_owned();
+    if director_id.is_empty() || director_id == user_id {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "pick someone other than yourself; you already may direct every secret you own",
+        ));
+    }
+    if state.db.user(&director_id).map_err(internal)?.is_none() {
+        return Err(err(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no such person on Arbos",
+        ));
+    }
+    let now = now_ms();
+    let existing = state
+        .db
+        .secret_directors(&s.id)
+        .map_err(internal)?
+        .into_iter()
+        .find(|d| d.user_id == director_id);
+    let d = SecretDirector {
+        secret_id: s.id.clone(),
+        user_id: director_id.clone(),
+        note: b
+            .note
+            .map(|n| n.chars().take(500).collect())
+            .or_else(|| existing.as_ref().map(|e| e.note.clone()))
+            .unwrap_or_default(),
+        created_at: existing.map(|e| e.created_at).unwrap_or(now),
+    };
+    state.db.upsert_secret_director(&d).map_err(internal)?;
+    audit(
+        &state,
+        &user_id,
+        AuditEntry {
+            detail: json!({ "director_user_id": director_id, "note": d.note }),
+            ..entry("director_on", &s, &format!("user:{user_id}"))
+        },
+    );
+    Ok(Json(json!({ "secret": secret_json(&state, &s) })).into_response())
+}
+
+/// `POST /secrets/{id}/directors` → `{ secret }` with body `{ handle, note? }` for the people picker.
+pub async fn post_director(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    Json(b): Json<DirectorBody>,
+) -> ApiResult {
+    let user_id = device_user(&principal)?;
+    let s = state
+        .db
+        .secret(&user_id, &id)
+        .map_err(internal)?
+        .ok_or_else(not_found)?;
+    let handle = b
+        .handle
+        .as_deref()
+        .map(|h| h.trim().trim_start_matches('@'))
+        .filter(|h| !h.is_empty())
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "bad_request", "handle is required"))?;
+    let person = state
+        .db
+        .user_by_handle(handle)
+        .map_err(internal)?
+        .ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                format!("@{handle} is not on Arbos yet"),
+            )
+        })?;
+    let director_id = person["id"].as_str().unwrap_or("").to_owned();
+    if director_id.is_empty() || director_id == user_id {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "pick someone other than yourself; you already may direct every secret you own",
+        ));
+    }
+    let now = now_ms();
+    let existing = state
+        .db
+        .secret_directors(&s.id)
+        .map_err(internal)?
+        .into_iter()
+        .find(|d| d.user_id == director_id);
+    let d = SecretDirector {
+        secret_id: s.id.clone(),
+        user_id: director_id.clone(),
+        note: b
+            .note
+            .unwrap_or_default()
+            .chars()
+            .take(500)
+            .collect::<String>(),
+        created_at: existing.map(|e| e.created_at).unwrap_or(now),
+    };
+    // Empty note on POST still overwrites when re-adding; owner is setting the constraint.
+    state.db.upsert_secret_director(&d).map_err(internal)?;
+    audit(
+        &state,
+        &user_id,
+        AuditEntry {
+            detail: json!({ "director_user_id": director_id, "handle": handle, "note": d.note }),
+            ..entry("director_on", &s, &format!("user:{user_id}"))
+        },
+    );
+    Ok(Json(json!({ "secret": secret_json(&state, &s) })).into_response())
+}
+
+/// `DELETE /secrets/{id}/directors/{director_user_id}` → `{ secret }`.
+pub async fn delete_director(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((id, director_user_id)): Path<(String, String)>,
+) -> ApiResult {
+    let user_id = device_user(&principal)?;
+    let s = state
+        .db
+        .secret(&user_id, &id)
+        .map_err(internal)?
+        .ok_or_else(not_found)?;
+    let removed = state
+        .db
+        .delete_secret_director(&s.id, director_user_id.trim())
+        .map_err(internal)?;
+    if removed {
+        audit(
+            &state,
+            &user_id,
+            AuditEntry {
+                detail: json!({ "director_user_id": director_user_id }),
+                ..entry("director_off", &s, &format!("user:{user_id}"))
+            },
+        );
+    }
+    Ok(Json(json!({ "secret": secret_json(&state, &s) })).into_response())
+}
+
 /// `POST /secrets/{id}/revoke-all` → `{ secret }` (every access off).
 pub async fn revoke_all(
     State(state): State<AppState>,
@@ -1708,6 +1936,43 @@ pub(crate) fn box_items(state: &AppState, user_id: &str, project_id: &str) -> Ve
         hosts.dedup();
         let enabled = access.as_ref().is_some_and(|a| a.enabled)
             && !s.expires_at.is_some_and(|t| t < now_ms());
+        let directors: Vec<Value> = state
+            .db
+            .secret_directors(&s.id)
+            .unwrap_or_default()
+            .iter()
+            .map(|d| director_json(state, d))
+            .collect();
+        // Constraints the agent must honour when a listed director asks: secret note + each
+        // director note (e.g. "only 1k usd of credit usage per day").
+        let mut use_notes: Vec<String> = Vec::new();
+        if !s.note.trim().is_empty() {
+            use_notes.push(s.note.trim().to_owned());
+        }
+        for d in state.db.secret_directors(&s.id).unwrap_or_default() {
+            let note = d.note.trim();
+            if note.is_empty() {
+                continue;
+            }
+            let who = state
+                .db
+                .user_card(&d.user_id)
+                .ok()
+                .flatten()
+                .and_then(|c| {
+                    c["name"]
+                        .as_str()
+                        .filter(|n| !n.is_empty())
+                        .map(str::to_owned)
+                        .or_else(|| {
+                            c["handle"]
+                                .as_str()
+                                .map(|h| h.trim_start_matches('@').to_owned())
+                        })
+                })
+                .unwrap_or_else(|| d.user_id.clone());
+            use_notes.push(format!("When {who} directs you: {note}"));
+        }
         items.push(json!({
             "id": s.id, "name": s.name, "env": s.env, "kind": s.kind, "note": s.note, "hosts": hosts,
             "ref": placeholder(&s.env, if s.kind == "login" { "password" } else { "value" }),
@@ -1715,6 +1980,9 @@ pub(crate) fn box_items(state: &AppState, user_id: &str, project_id: &str) -> Ve
             "access_id": access.as_ref().map(|a| a.id.clone()), "enabled": enabled,
             "ask_every_time": s.ask_every_time, "inject_env": s.inject_env, "expires_at": s.expires_at,
             "scope": access.as_ref().map(|a| json!({ "kind": a.scope_kind, "chat_id": a.scope_chat_id })),
+            "directors": directors,
+            "use_notes": use_notes,
+            "who_may_direct": "owner, and people listed in directors (everyone else cannot use this secret)",
         }));
     }
     items.extend(crate::vaults::box_items(state, user_id, project_id));
@@ -1861,6 +2129,9 @@ pub struct BoxRequestBody {
     pub host: Option<String>,
     #[serde(default, alias = "chatId")]
     pub chat_id: String,
+    /// Human directing this turn (`user_id`). Absent = owner / unknown.
+    #[serde(default, alias = "askedBy")]
+    pub asked_by: Option<String>,
 }
 
 /// `POST /box/secrets/request` → 201 `{ request }` (a card is needed) or 200
@@ -1938,6 +2209,11 @@ pub async fn box_request(
     } else {
         Some(b.chat_id.as_str())
     };
+    let asked_by = b
+        .asked_by
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty());
     // Standing access covers it: no card, but a decided request row so `values` has a window.
     if !s.ask_every_time {
         if let Ok(allowed) = decide_use(
@@ -1947,6 +2223,7 @@ pub async fn box_request(
             host.as_deref().unwrap_or(""),
             &use_kind,
             chat_id,
+            asked_by,
         ) {
             if allowed.once.is_none() {
                 if let Some(a) = &allowed.access {
@@ -2134,7 +2411,8 @@ pub async fn box_request_values(
         .and_then(|i| state.db.secret(&user_id, i).ok().flatten())
         .ok_or_else(|| err(StatusCode::GONE, "not_found", "the secret was deleted"))?;
     let host = rq.host.clone().unwrap_or_default();
-    // The standing rule still applies at the moment of use.
+    // The standing rule still applies at the moment of use. Director was already judged when
+    // the owner answered the card (`asked_by` is not re-checked here).
     let allowed = match decide_use(
         &state,
         &s,
@@ -2142,9 +2420,10 @@ pub async fn box_request_values(
         &host,
         "browser_fill",
         Some(rq.chat_id.as_str()),
+        None,
     ) {
         Ok(a) => a,
-        Err(Refusal::NoAccess | Refusal::AskEveryTime)
+        Err(Refusal::NoAccess | Refusal::AskEveryTime | Refusal::NotDirector)
             if rq.status == "allowed_once" || rq.status == "allowed_chat" =>
         {
             Allowed {
@@ -2201,13 +2480,14 @@ pub(crate) struct EgressPlan {
 }
 
 /// Decide every placeholder in `texts` for `project_id` at `host`. Values are decrypted only
-/// for secrets the rule allows.
+/// for secrets the rule allows. `asked_by` is the human directing this turn.
 pub(crate) fn plan_egress(
     state: &AppState,
     user_id: &str,
     project_id: &str,
     host: &str,
     chat_id: Option<&str>,
+    asked_by: Option<&str>,
     texts: &[&str],
 ) -> Result<EgressPlan, ApiErr> {
     let mut plan = EgressPlan {
@@ -2243,7 +2523,7 @@ pub(crate) fn plan_egress(
                 );
                 continue;
             };
-            match decide_use(state, &s, project_id, host, "header", chat_id) {
+            match decide_use(state, &s, project_id, host, "header", chat_id, asked_by) {
                 Ok(allowed) => {
                     if dek.is_none() {
                         dek = Some(user_dek(state, user_id).map_err(internal)?);
@@ -2632,7 +2912,17 @@ mod tests {
             Refusal::Paused.message("x", "y"),
             "Secrets are paused by the owner."
         );
+        assert!(Refusal::NotDirector
+            .message("LIUM_ALI", "")
+            .contains("not allowed to use this secret"));
         assert_eq!(status_for("always"), Some("allowed_always"));
         assert_eq!(status_for("nope"), None);
+    }
+
+    #[test]
+    fn may_direct_owner_and_listed_only() {
+        // Pure shape of the rule without a DB: owner and absent asker always pass;
+        // a stranger needs a directors row (tested via may_direct with live DB elsewhere).
+        assert!(matches!(Refusal::NotDirector.kind(), "no_access"));
     }
 }

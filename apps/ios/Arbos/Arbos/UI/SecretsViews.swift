@@ -399,7 +399,9 @@ struct SecretPage: View {
     @State private var showEdit = false
     @State private var showReplace = false
     @State private var showGive = false
+    @State private var showAddDirector = false
     @State private var editingAccess: SecretAgentAccess?
+    @State private var editingDirector: SecretDirector?
     @State private var confirmDelete = false
     @State private var confirmRevoke = false
     @State private var confirmScrub = false
@@ -468,6 +470,21 @@ struct SecretPage: View {
                             .padding(.horizontal, 16).padding(.vertical, 12)
                     }
                     SecretAddRow(title: "Give another agent access…") { showGive = true }
+                }
+                SettingsGroup(header: "Who can direct", footer: "Only you can direct agents to use this secret, unless you add someone here. A note (for example a daily credit limit) is shown to the agent whenever it sees the secret.") {
+                    ForEach(s.directors) { d in
+                        Button { editingDirector = d } label: {
+                            directorRow(d)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    if s.directors.isEmpty {
+                        Text("Only you right now.")
+                            .font(.system(size: Theme.small)).foregroundStyle(theme.muted)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 16).padding(.vertical, 12)
+                    }
+                    SecretAddRow(title: "Add a person…") { showAddDirector = true }
                 }
                 SettingsGroup(header: "Activity") {
                     if activity.isEmpty {
@@ -546,6 +563,14 @@ struct SecretPage: View {
                     .presentationBackground(theme.bg).preferredColorScheme(theme.isDark ? .dark : .light)
             }
         }
+        .sheet(isPresented: $showAddDirector) {
+            if let s = secret {
+                NavigationStack { AddDirectorSheet(secret: s) }
+                    .environmentObject(model).environment(\.theme, theme)
+                    .presentationDetents([.medium, .large])
+                    .presentationBackground(theme.bg).preferredColorScheme(theme.isDark ? .dark : .light)
+            }
+        }
         .sheet(item: $editingAccess) { a in
             if let s = secret {
                 NavigationStack { AccessEditSheet(secret: s, access: a) }
@@ -554,6 +579,30 @@ struct SecretPage: View {
                     .presentationBackground(theme.bg).preferredColorScheme(theme.isDark ? .dark : .light)
             }
         }
+        .sheet(item: $editingDirector) { d in
+            if let s = secret {
+                NavigationStack { DirectorEditSheet(secret: s, director: d) }
+                    .environmentObject(model).environment(\.theme, theme)
+                    .presentationDetents([.medium, .large])
+                    .presentationBackground(theme.bg).preferredColorScheme(theme.isDark ? .dark : .light)
+            }
+        }
+    }
+
+    private func directorRow(_ d: SecretDirector) -> some View {
+        HStack(spacing: 14) {
+            PersonAvatar(url: d.avatarUrl, handle: d.handle.isEmpty ? d.userId : d.handle, size: SettingsRow.tile, name: d.name, id: d.userId)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(d.displayName).font(.system(size: Theme.body)).foregroundStyle(theme.text)
+                Text(d.note.isEmpty ? (d.handle.isEmpty ? "May direct agents to use this" : "@\(d.handle)") : d.note)
+                    .font(.system(size: Theme.tiny)).foregroundStyle(theme.muted).lineLimit(2)
+            }
+            Spacer(minLength: 8)
+            Image(systemName: "chevron.right").font(.system(size: 14, weight: .semibold)).foregroundStyle(theme.placeholder)
+        }
+        .padding(.horizontal, 16)
+        .frame(minHeight: 56)
+        .contentShape(Rectangle())
     }
 
     private func agentRow(_ s: SecretItem, _ a: SecretAgentAccess) -> some View {
@@ -857,6 +906,160 @@ struct ReplaceValueSheet: View {
             await model.refreshSecrets()
             dismiss()
         } catch let e as RelayError { error = e.message } catch { self.error = error.localizedDescription }
+    }
+}
+
+/// `Add a person…`: let someone else direct agents to use this secret, with an optional limit note.
+struct AddDirectorSheet: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    @Environment(\.dismiss) private var dismiss
+    let secret: SecretItem
+    @State private var query = ""
+    @State private var remote: [Person] = []
+    @State private var picked: Person?
+    @State private var note = ""
+    @State private var busy = false
+    @State private var error: String?
+
+    private var already: Set<String> { Set(secret.directors.map(\.userId)) }
+
+    private var candidates: [Person] {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        var out = q.isEmpty
+            ? model.directory
+            : model.directory.filter {
+                $0.handle.lowercased().contains(q) || ($0.name ?? "").lowercased().contains(q)
+            }
+        for p in remote where !out.contains(where: { $0.id == p.id }) {
+            out.append(p)
+        }
+        return out.filter { $0.id != model.user?.id && !already.contains($0.id) }
+    }
+
+    var body: some View {
+        SheetFrame(title: "Who can direct", action: "Add", canSave: picked != nil, busy: busy, save: { Task { await save() } }) {
+            Text("\(secret.env) stays yours. The person you add may ask your agents to use it; anyone else may not.")
+                .font(.system(size: Theme.small)).foregroundStyle(theme.muted)
+            SecretField(label: "Person") {
+                TextField("", text: $query, prompt: Text("Search by name or @handle").foregroundStyle(theme.placeholder))
+                    .font(.system(size: Theme.body))
+                    .foregroundStyle(theme.text)
+                    .padding(.horizontal, 14)
+                    .frame(height: Theme.fieldHeight)
+                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
+                    .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                if let picked {
+                    HStack(spacing: 10) {
+                        PersonAvatar(url: picked.avatarUrl, handle: picked.handle, size: 28, name: picked.name, id: picked.id, colorIndex: picked.avatarColorIndex)
+                        Text(picked.displayName).font(.system(size: Theme.body)).foregroundStyle(theme.text)
+                        Spacer()
+                        Button("Change") { self.picked = nil }.font(.system(size: Theme.small)).foregroundStyle(Color(hex: "#1084FE")!)
+                    }
+                    .padding(.top, 8)
+                } else if !candidates.isEmpty {
+                    VStack(spacing: 0) {
+                        ForEach(Array(candidates.prefix(8))) { p in
+                            Button {
+                                Haptics.pick()
+                                picked = p
+                                query = ""
+                            } label: {
+                                PersonRow(person: p)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.top, 4)
+                }
+            }
+            SecretField(label: "Note for the agent", hint: "Shown whenever the agent sees this secret. Example: only 1k usd of credit usage per day.") {
+                SecretTextField(placeholder: "only 1k usd of credit usage per day", text: $note, capitalization: .sentences)
+            }
+            if let error {
+                Text(error).font(.system(size: Theme.tiny)).foregroundStyle(theme.danger)
+            }
+        }
+        .task { await model.loadDirectory(force: false) }
+        .task(id: query) {
+            let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard q.count >= 2 else { remote = []; return }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            remote = await model.searchPeople(q)
+        }
+    }
+
+    private func save() async {
+        guard let picked else { return }
+        busy = true
+        defer { busy = false }
+        if let err = await model.secretsAction("Add director", {
+            let s = try await model.relay.addSecretDirector(secret.id, handle: picked.handle, note: note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : note)
+            if let i = model.secrets?.secrets.firstIndex(where: { $0.id == s.id }) {
+                model.secrets?.secrets[i] = s
+            }
+        }) {
+            error = err
+            return
+        }
+        dismiss()
+    }
+}
+
+/// Tap a director row: edit the note or remove them.
+struct DirectorEditSheet: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    @Environment(\.dismiss) private var dismiss
+    let secret: SecretItem
+    let director: SecretDirector
+    @State private var note = ""
+    @State private var busy = false
+
+    var body: some View {
+        SheetFrame(title: director.displayName, action: "Save", canSave: true, busy: busy, save: { Task { await save() } }) {
+            HStack(spacing: 12) {
+                PersonAvatar(url: director.avatarUrl, handle: director.handle.isEmpty ? director.userId : director.handle, size: 44, name: director.name, id: director.userId)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(director.displayName).font(.system(size: Theme.body)).foregroundStyle(theme.text)
+                    if !director.handle.isEmpty {
+                        Text("@\(director.handle)").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                    }
+                }
+                Spacer()
+            }
+            SecretField(label: "Note for the agent", hint: "Shown whenever the agent sees this secret.") {
+                SecretTextField(placeholder: "only 1k usd of credit usage per day", text: $note, capitalization: .sentences)
+            }
+            Button(role: .destructive) {
+                model.removeSecretDirector(secretId: secret.id, userId: director.userId)
+                dismiss()
+            } label: {
+                Text("Remove")
+                    .font(.system(size: Theme.body, weight: .semibold))
+                    .foregroundStyle(theme.danger)
+                    .frame(maxWidth: .infinity).frame(height: 48)
+                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
+            }
+            .buttonStyle(.plain)
+            .disabled(model.isFixture)
+        }
+        .onAppear { note = director.note }
+    }
+
+    private func save() async {
+        busy = true
+        defer { busy = false }
+        let text = note.trimmingCharacters(in: .whitespacesAndNewlines)
+        _ = await model.secretsAction("Save") {
+            let s = try await model.relay.setSecretDirector(secret.id, userId: director.userId, note: text)
+            if let i = model.secrets?.secrets.firstIndex(where: { $0.id == s.id }) {
+                model.secrets?.secrets[i] = s
+            }
+        }
+        dismiss()
     }
 }
 

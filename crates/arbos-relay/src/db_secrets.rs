@@ -85,6 +85,15 @@ CREATE TABLE IF NOT EXISTS vault_reads (
   vault_id TEXT NOT NULL, window TEXT NOT NULL, reads INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (vault_id, window)
 );
+-- People the owner named who may direct an agent to use this secret (feedback AE67HJ7RnX).
+-- The owner always may; everyone else needs a row. `note` is constraints the agent must honour
+-- (e.g. "only 1k usd of credit usage per day") and is shown with the secret in the box.
+CREATE TABLE IF NOT EXISTS secret_directors (
+  secret_id TEXT NOT NULL, user_id TEXT NOT NULL, note TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (secret_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS secret_directors_user ON secret_directors(user_id);
 "#;
 
 /// Forward-only, additive migrations for databases created before a column existed.
@@ -92,6 +101,14 @@ pub fn migrate_secrets(c: &rusqlite::Connection) {
     let _ = c.execute(
         "ALTER TABLE secrets ADD COLUMN inject_env INTEGER NOT NULL DEFAULT 0",
         [],
+    );
+    let _ = c.execute_batch(
+        "CREATE TABLE IF NOT EXISTS secret_directors (
+           secret_id TEXT NOT NULL, user_id TEXT NOT NULL, note TEXT NOT NULL DEFAULT '',
+           created_at INTEGER NOT NULL,
+           PRIMARY KEY (secret_id, user_id)
+         );
+         CREATE INDEX IF NOT EXISTS secret_directors_user ON secret_directors(user_id);",
     );
 }
 
@@ -133,6 +150,15 @@ pub struct SecretVersion {
     pub fields_enc: String,
     pub created_at: i64,
     pub retire_at: Option<i64>,
+}
+
+/// A person the owner authorized to direct agents to use one secret (with an optional note).
+#[derive(Debug, Clone, Serialize)]
+pub struct SecretDirector {
+    pub secret_id: String,
+    pub user_id: String,
+    pub note: String,
+    pub created_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -528,7 +554,7 @@ impl Db {
         })
     }
 
-    /// Delete a secret, its versions and its accesses; open requests expire; audit stays.
+    /// Delete a secret, its versions, its accesses and its directors; open requests expire; audit stays.
     pub fn delete_secret(&self, user_id: &str, id: &str) -> Result<bool> {
         self.with(|c| {
             let n = c.execute(
@@ -545,10 +571,66 @@ impl Db {
                     params![id],
                 )?;
                 c.execute(
+                    "DELETE FROM secret_directors WHERE secret_id = ?1",
+                    params![id],
+                )?;
+                c.execute(
                     "UPDATE secret_requests SET status = 'expired', decided_at = ?2 WHERE target_id = ?1 AND status IN ('pending', 'allowed_once')",
                     params![id, now_ms()],
                 )?;
             }
+            Ok(n > 0)
+        })
+    }
+
+    // ---- directors (who may direct the agent to use a secret) --------------------------------
+
+    pub fn upsert_secret_director(&self, d: &SecretDirector) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO secret_directors(secret_id, user_id, note, created_at) VALUES (?1,?2,?3,?4)
+                 ON CONFLICT(secret_id, user_id) DO UPDATE SET note = excluded.note",
+                params![d.secret_id, d.user_id, d.note, d.created_at],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn delete_secret_director(&self, secret_id: &str, user_id: &str) -> Result<bool> {
+        self.with(|c| {
+            let n = c.execute(
+                "DELETE FROM secret_directors WHERE secret_id = ?1 AND user_id = ?2",
+                params![secret_id, user_id],
+            )?;
+            Ok(n > 0)
+        })
+    }
+
+    pub fn secret_directors(&self, secret_id: &str) -> Result<Vec<SecretDirector>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT secret_id, user_id, note, created_at FROM secret_directors
+                 WHERE secret_id = ?1 ORDER BY created_at",
+            )?;
+            let rows = st.query_map(params![secret_id], |r| {
+                Ok(SecretDirector {
+                    secret_id: r.get(0)?,
+                    user_id: r.get(1)?,
+                    note: r.get(2)?,
+                    created_at: r.get(3)?,
+                })
+            })?;
+            rows.collect()
+        })
+    }
+
+    pub fn is_secret_director(&self, secret_id: &str, user_id: &str) -> Result<bool> {
+        self.with(|c| {
+            let n: i64 = c.query_row(
+                "SELECT COUNT(*) FROM secret_directors WHERE secret_id = ?1 AND user_id = ?2",
+                params![secret_id, user_id],
+                |r| r.get(0),
+            )?;
             Ok(n > 0)
         })
     }

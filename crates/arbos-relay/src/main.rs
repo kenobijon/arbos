@@ -655,6 +655,11 @@ async fn main() -> anyhow::Result<()> {
             "/secrets/{id}/access/{project_id}",
             put(secrets::put_access).delete(secrets::delete_access),
         )
+        .route("/secrets/{id}/directors", post(secrets::post_director))
+        .route(
+            "/secrets/{id}/directors/{director_user_id}",
+            put(secrets::put_director).delete(secrets::delete_director),
+        )
         .route("/projects/{id}/secrets", get(secrets::project_secrets))
         .route("/me/secrets/settings", put(secrets::put_settings))
         .route("/box/secrets", get(secrets::box_list))
