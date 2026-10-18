@@ -4697,6 +4697,26 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 refresh_project_secrets(&shared, &project_id).await;
             });
         }
+        ClientCommand::VaultReplaceToken { id, token } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                match shared
+                    .put_json(&format!("/vaults/{id}/token"), json!({ "token": token }))
+                    .await
+                {
+                    Ok(_) => shared.notice("Token replaced.".to_string()),
+                    Err(err) => {
+                        let text = format!("{err:#}");
+                        shared.notice(if text.contains("bad_token") {
+                            "That token didn't work. Check it was copied whole.".to_string()
+                        } else {
+                            format!("Replace token: {}", relay_message(&err))
+                        });
+                    }
+                }
+                refresh_secrets(&shared).await;
+            });
+        }
         ClientCommand::VaultDisconnect { id } => {
             let shared = shared.clone();
             tokio::spawn(async move {

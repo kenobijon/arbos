@@ -1655,6 +1655,12 @@ pub struct ConnectedVault {
     pub status: String,
     #[serde(default)]
     pub agents: Vec<SecretAgent>,
+    /// `{ reads_per_hour, reads_used_hour, reads_per_day, reads_used_day, cache_ttl_secs }`.
+    #[serde(default)]
+    pub limits: serde_json::Value,
+    /// Cached `[{ ref, title, category, fields[], urls[] }]`, names only.
+    #[serde(default)]
+    pub items: Vec<serde_json::Value>,
 }
 
 impl ConnectedVault {

@@ -3623,6 +3623,12 @@ impl AppState {
         cx.notify();
     }
 
+    pub fn vault_replace_token(&mut self, id: Id, token: String, cx: &mut Context<Self>) {
+        self.push_notice("Checking the token with 1Password…".to_string());
+        self.command(ClientCommand::VaultReplaceToken { id, token });
+        cx.notify();
+    }
+
     pub fn vault_disconnect(&mut self, id: Id, cx: &mut Context<Self>) {
         self.secrets.vaults.retain(|v| v.id != id);
         self.command(ClientCommand::VaultDisconnect { id });

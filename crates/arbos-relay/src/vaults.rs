@@ -420,6 +420,8 @@ fn vault_json(state: &AppState, v: &Vault) -> Value {
                     "cache_ttl_secs": cache_ttl().as_secs() },
         "status": v.status, "last_error": v.last_error, "last_refreshed_at": v.last_refreshed_at,
         "created_at": v.created_at, "agents": agents,
+        // Cached names only (title, category, fields, urls): small, and the Mac shows them inline.
+        "items": v.items,
     })
 }
 
