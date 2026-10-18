@@ -16,6 +16,7 @@ mod db_accounts;
 mod db_calls;
 mod db_people;
 mod db_push;
+mod db_secrets;
 mod db_voice;
 mod feedback;
 mod groups;
@@ -28,12 +29,14 @@ mod people;
 mod proxy;
 mod rooms;
 mod routines;
+mod secrets;
 mod signin;
 mod skills;
 mod smoke;
 mod state;
 mod upgrade;
 mod vault;
+mod vaults;
 mod voice;
 
 use std::collections::HashMap;
@@ -312,6 +315,10 @@ async fn main() -> anyhow::Result<()> {
     } else if state.cfg.openai_key.is_none() {
         tracing::info!("no OPENAI_API_KEY: image generation is unavailable (set ARBOS_IMAGE_MOCK=1 for placeholders)");
     }
+    if !connectors::crypto::RelayKey::from_env() && auth_mode == AuthMode::Github {
+        tracing::warn!("ARBOS_RELAY_KEY is not set: the key that protects secrets and connector tokens lives in the database next to the ciphertext. Set it in the environment (op run) for production.");
+    }
+    secrets::migrate_f8(&state)?;
     vault::seed_mock(&state)?;
 
     if auth_mode == AuthMode::Paircode && db.device_count()? == 0 {
@@ -328,6 +335,7 @@ async fn main() -> anyhow::Result<()> {
     credits::spawn_meter(state.clone()).await;
     boxes::spawn_always_on(state.clone()).await;
     upgrade::spawn_history_sweeper(state.clone()).await;
+    secrets::spawn_sweeper(state.clone()).await;
     calls::spawn_sweeper(state.clone()).await;
     boxes::spawn_project_purge(state.clone()).await;
 
@@ -625,6 +633,41 @@ async fn main() -> anyhow::Result<()> {
         .route("/vault/request", post(vault::create_request))
         .route("/vault/mock/echo", axum::routing::any(vault::mock_echo))
         .route("/egress", post(vault::egress))
+        // Secrets (D83): devices manage secrets, access and the kill switch; boxes read names
+        // and ask; values move only through /egress and the browser-fill window.
+        .route("/secrets", get(secrets::list).post(secrets::create))
+        .route("/secrets/activity", get(secrets::list_activity))
+        .route("/secrets/requests", get(secrets::list_requests))
+        .route(
+            "/secrets/requests/{id}/decide",
+            post(secrets::decide_request),
+        )
+        .route(
+            "/secrets/{id}",
+            get(secrets::get)
+                .patch(secrets::patch)
+                .delete(secrets::delete),
+        )
+        .route("/secrets/{id}/value", put(secrets::replace_value))
+        .route("/secrets/{id}/revoke-all", post(secrets::revoke_all))
+        .route(
+            "/secrets/{id}/access/{project_id}",
+            put(secrets::put_access).delete(secrets::delete_access),
+        )
+        .route("/projects/{id}/secrets", get(secrets::project_secrets))
+        .route("/me/secrets/settings", put(secrets::put_settings))
+        .route("/box/secrets", get(secrets::box_list))
+        .route("/box/secrets/request", post(secrets::box_request))
+        .route(
+            "/box/secrets/requests/{id}",
+            get(secrets::box_request_status),
+        )
+        .route(
+            "/box/secrets/requests/{id}/values",
+            post(secrets::box_request_values),
+        )
+        .route("/admin/secrets", get(secrets::admin_status))
+        .route("/admin/secrets/pause", post(secrets::admin_pause))
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(state);

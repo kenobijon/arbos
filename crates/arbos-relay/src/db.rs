@@ -385,6 +385,7 @@ pub struct ChannelPairCode {
 #[derive(Debug, Clone)]
 pub struct VaultItem {
     pub id: String,
+    #[allow(dead_code)]
     pub user_id: String,
     pub name: String,
     /// `login | secret | api_key`.
@@ -514,6 +515,7 @@ impl Db {
         c.execute_batch(crate::db_voice::VOICE_SCHEMA)?;
         crate::db_voice::migrate_voice(&c);
         Self::migrate_vault_items_per_user(&c)?;
+        c.execute_batch(crate::db_secrets::SECRETS_SCHEMA)?;
         Ok(Self(Arc::new(Mutex::new(c))))
     }
 
@@ -2692,6 +2694,9 @@ fn fts_query(q: &str) -> String {
     terms.join(" OR ")
 }
 
+/// Legacy F8 tables: read by the one-shot migration to `secrets` (`secrets::migrate_f8`) and
+/// by its tests; nothing else writes them any more.
+#[allow(dead_code)]
 impl Db {
     // ---- vault (F8) ---------------------------------------------------------------------------
 
@@ -2902,6 +2907,27 @@ impl Db {
                 Self::row_to_vault_request,
             )
             .optional()
+        })
+    }
+
+    /// Distinct owners of legacy vault items (for the one-shot F8 → secrets migration).
+    pub fn vault_item_users(&self) -> Result<Vec<String>> {
+        self.with(|c| {
+            let mut st = c.prepare("SELECT DISTINCT user_id FROM vault_items")?;
+            let rows = st.query_map([], |r| r.get(0))?;
+            rows.collect()
+        })
+    }
+
+    /// Every request ever made for one legacy item, oldest first.
+    pub fn vault_requests_for_item(&self, item_id: &str) -> Result<Vec<VaultRequest>> {
+        self.with(|c| {
+            let mut st = c.prepare(&format!(
+                "SELECT {} FROM vault_requests WHERE item_id = ?1 ORDER BY created_at",
+                Self::VAULT_REQ_COLS
+            ))?;
+            let rows = st.query_map(params![item_id], Self::row_to_vault_request)?;
+            rows.collect()
         })
     }
 

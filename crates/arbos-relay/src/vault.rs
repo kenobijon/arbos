@@ -1,15 +1,16 @@
-//! Credential vault (F8, design §4.7 "secrets, two layers", D2, D19, D28). Items live here,
-//! encrypted with the relay key; a box never receives a value. The agent gets a placeholder
-//! `arbos-secret://<item>/<field>` and sends requests through `POST /egress`, where the relay swaps
-//! the placeholder for the real value only when the user approved the item for that project and
-//! the destination host is on the item's `allowed_hosts`; the reply comes back with every value
-//! redacted. Logins are typed into the browser by agentd (`browser_fill`), which fetches the fields
-//! for one approved request and keeps them for a few seconds; the model never sees them.
+//! `POST /egress` and the F8 `/vault/*` compatibility shims. The data model moved to
+//! `secrets.rs` (D83): a box never receives a value; the agent gets a placeholder
+//! `arbos-secret://<ENV>/<field>` and sends requests through `/egress`, where the relay swaps the
+//! placeholder for the real value only when the project's Access is on, the destination host is
+//! allowed and the user has not paused secrets; the reply comes back with every value redacted.
 //!
-//! `ARBOS_VAULT_MOCK=1` seeds two items and serves an httpbin-style echo target at
-//! `/vault/mock/echo`, so the whole flow runs on one machine.
+//! The `/vault/*` routes answer the current agentd and Mac builds in their old shapes on top of
+//! the new tables; they go away one release after `/box/secrets` and `/secrets` ship everywhere.
+//!
+//! `ARBOS_VAULT_MOCK=1` seeds two secrets for the pair-code user and serves an httpbin-style echo
+//! target at `/vault/mock/echo`, so the whole flow runs on one machine.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use axum::body::Bytes;
@@ -22,111 +23,25 @@ use base64::Engine;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use arbos_core::ids::{now_ms, ulid};
-
 use crate::auth::Principal;
-use crate::db::{VaultItem, VaultRequest};
+use crate::secrets::{self, err, ApiErr, Refusal};
 use crate::state::AppState;
 
-type ApiResult = Result<Response, (StatusCode, String)>;
+type ApiResult = Result<Response, ApiErr>;
 
 pub const PLACEHOLDER_SCHEME: &str = "arbos-secret://";
 pub const REDACTED: &str = "[REDACTED:vault]";
-/// A pending request the user never answers expires after this long.
-const REQUEST_TTL_MS: i64 = 24 * 60 * 60 * 1000;
-/// Window after approval in which `browser_fill` may fetch the fields.
-const FILL_WINDOW_MS: i64 = 10 * 60 * 1000;
 const EGRESS_TIMEOUT: Duration = Duration::from_secs(30);
 const EGRESS_MAX_BODY: usize = 1024 * 1024;
-const KINDS: [&str; 3] = ["login", "secret", "api_key"];
-const USES: [&str; 3] = ["env", "header", "browser_fill"];
-/// Mock items (`ARBOS_VAULT_MOCK=1`): demo values, host-restricted to this machine.
-const MOCK_ITEMS: [(&str, &str); 2] = [("demo-login", "login"), ("demo-api-key", "api_key")];
+/// Mock secrets (`ARBOS_VAULT_MOCK=1`): demo values, host-restricted to this machine.
+const MOCK_ITEMS: [(&str, &str); 2] = [("demo-login", "login"), ("demo-api-key", "key")];
 
-fn internal(e: impl std::fmt::Display) -> (StatusCode, String) {
-    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+fn internal(e: impl std::fmt::Display) -> ApiErr {
+    err(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string())
 }
 
-fn bad(e: impl std::fmt::Display) -> (StatusCode, String) {
-    (StatusCode::BAD_REQUEST, e.to_string())
-}
-
-/// The user a device call acts for. Items belong to users; the admin token has no vault.
-fn device_user(principal: &Principal) -> Result<String, (StatusCode, String)> {
-    match principal {
-        Principal::Device { user_id, .. } => Ok(user_id.clone()),
-        Principal::Box { .. } => Err((StatusCode::FORBIDDEN, "device only".into())),
-        Principal::Admin => Err((
-            StatusCode::FORBIDDEN,
-            "vault items belong to a user; use a device token".into(),
-        )),
-    }
-}
-
-/// The user any vault call (device or box) acts for.
-fn vault_user(principal: &Principal) -> Result<String, (StatusCode, String)> {
-    principal
-        .user_id()
-        .map(str::to_owned)
-        .ok_or((StatusCode::FORBIDDEN, "device or box token required".into()))
-}
-
-fn env_name(item: &str) -> String {
-    let mut s = String::from("ARBOS_SECRET_");
-    for ch in item.chars() {
-        s.push(if ch.is_ascii_alphanumeric() {
-            ch.to_ascii_uppercase()
-        } else {
-            '_'
-        });
-    }
-    s
-}
-
-pub fn placeholder(item: &str, field: &str) -> String {
-    format!("{PLACEHOLDER_SCHEME}{item}/{field}")
-}
-
-/// The item as every reader sees it: names, kinds, hosts, field *names*; never a value.
-pub fn item_json(it: &VaultItem, fields: &[String], mock: bool) -> Value {
-    let placeholders: BTreeMap<String, String> = fields
-        .iter()
-        .map(|f| (f.clone(), placeholder(&it.name, f)))
-        .collect();
-    json!({
-        "id": it.id, "name": it.name, "kind": it.kind, "allowed_hosts": it.allowed_hosts,
-        "fields": fields, "placeholders": placeholders, "env": env_name(&it.name),
-        "created_at": it.created_at, "last_used_at": it.last_used_at,
-        "daytona": !it.daytona_secrets.as_object().is_none_or(|m| m.is_empty()),
-        "mock": mock,
-    })
-}
-
-pub fn request_json(r: &VaultRequest) -> Value {
-    json!({
-        "id": r.id, "project_id": r.project_id, "chat_id": r.chat_id, "item_id": r.item_id, "item_name": r.item_name,
-        "purpose": r.purpose, "use": r.use_kind, "status": r.status, "created_at": r.created_at,
-        "decided_at": r.decided_at, "expires_at": r.expires_at,
-    })
-}
-
-/// Decrypted fields of an item (`field → value`). Stays inside this process.
-fn fields_of(state: &AppState, it: &VaultItem) -> anyhow::Result<BTreeMap<String, String>> {
-    let plain = state.relay_key.decrypt(&it.fields_enc)?;
-    let v: Value = serde_json::from_str(&plain)?;
-    Ok(v.as_object()
-        .map(|m| {
-            m.iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_owned())))
-                .collect()
-        })
-        .unwrap_or_default())
-}
-
-fn field_names(state: &AppState, it: &VaultItem) -> Vec<String> {
-    fields_of(state, it)
-        .map(|m| m.keys().cloned().collect())
-        .unwrap_or_default()
+fn bad(e: impl std::fmt::Display) -> ApiErr {
+    err(StatusCode::BAD_REQUEST, "bad_request", e.to_string())
 }
 
 // ---- host allow-list and placeholder substitution (pure; the invariant tests cover these) -----
@@ -148,12 +63,12 @@ pub fn host_allowed(host: &str, allowed: &[String]) -> bool {
     })
 }
 
-/// A vault item with its plaintext, as the substitution step needs it.
+/// A secret with its plaintext, as the substitution step needs it.
 pub struct Resolved {
     pub name: String,
     pub allowed_hosts: Vec<String>,
     pub fields: BTreeMap<String, String>,
-    /// The project has an approved, live request for this item.
+    /// The project may use it for this request (the rule in `secrets::decide_use` said yes).
     pub approved: bool,
 }
 
@@ -194,9 +109,11 @@ pub fn substitute(text: &str, host: &str, items: &[Resolved], sub: &mut Substitu
     let mut out = text.to_owned();
     for (item, field) in find_placeholders(text) {
         let key = format!("{item}/{field}");
-        let ph = placeholder(&item, &field);
+        let ph = secrets::placeholder(&item, &field);
         let Some(res) = items.iter().find(|r| r.name == item) else {
-            sub.refused.push((key, "no such item".into()));
+            if !sub.refused.iter().any(|(k, _)| *k == key) {
+                sub.refused.push((key, "no such item".into()));
+            }
             continue;
         };
         let Some(value) = res.fields.get(&field) else {
@@ -204,8 +121,7 @@ pub fn substitute(text: &str, host: &str, items: &[Resolved], sub: &mut Substitu
             continue;
         };
         if !res.approved {
-            sub.refused
-                .push((key, "no approved vault request for this project".into()));
+            sub.refused.push((key, "no access for this project".into()));
             continue;
         }
         if !host_allowed(host, &res.allowed_hosts) {
@@ -264,456 +180,7 @@ pub fn redact_value(v: &mut Value, secrets: &[String]) {
     }
 }
 
-// ---- device endpoints: items and requests ------------------------------------------------------
-
-#[derive(Deserialize, Default)]
-pub struct ItemBody {
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub kind: Option<String>,
-    /// `{ "url", "username", "password" }` or `{ "value" }`; absent on update keeps the stored one.
-    #[serde(default)]
-    pub fields: Option<Value>,
-    #[serde(default, alias = "allowedHosts")]
-    pub allowed_hosts: Option<Vec<String>>,
-}
-
-fn validate_name(name: &str) -> Result<String, (StatusCode, String)> {
-    let name = name.trim();
-    if name.is_empty()
-        || name.len() > 64
-        || !name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
-    {
-        return Err(bad(
-            "name: 1-64 characters, letters, digits, '-', '_' or '.'",
-        ));
-    }
-    Ok(name.to_owned())
-}
-
-fn clean_hosts(hosts: Vec<String>) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for h in hosts {
-        let h = h.trim().to_ascii_lowercase();
-        let h = h
-            .trim_start_matches("https://")
-            .trim_start_matches("http://")
-            .split('/')
-            .next()
-            .unwrap_or("")
-            .split(':')
-            .next()
-            .unwrap_or("")
-            .to_owned();
-        if !h.is_empty() && !out.contains(&h) {
-            out.push(h);
-        }
-    }
-    out
-}
-
-fn fields_object(kind: &str, fields: &Value) -> Result<Value, (StatusCode, String)> {
-    let obj = fields
-        .as_object()
-        .ok_or_else(|| bad("fields must be an object of strings"))?;
-    let mut out = serde_json::Map::new();
-    for (k, v) in obj {
-        let Some(s) = v.as_str() else {
-            return Err(bad(format!("field {k} must be a string")));
-        };
-        if !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') || k.is_empty() {
-            return Err(bad(format!("field name {k}: letters, digits, '_'")));
-        }
-        out.insert(k.clone(), Value::String(s.to_owned()));
-    }
-    let required: &[&str] = match kind {
-        "login" => &["username", "password"],
-        "secret" | "api_key" => &["value"],
-        _ => &[],
-    };
-    for r in required {
-        if !out.contains_key(*r) {
-            return Err(bad(format!("{kind} needs field {r}")));
-        }
-    }
-    Ok(Value::Object(out))
-}
-
-/// `GET /vault/items` (device and box): the caller's user's items — names, kinds, hosts, field
-/// names; never values, never another user's items.
-pub async fn list_items(State(state): State<AppState>, principal: Principal) -> ApiResult {
-    let user_id = vault_user(&principal)?;
-    let mock = state.cfg.vault_mock;
-    let items: Vec<Value> = state
-        .db
-        .list_vault_items(&user_id)
-        .map_err(internal)?
-        .iter()
-        .map(|it| item_json(it, &field_names(&state, it), mock))
-        .collect();
-    Ok(Json(json!({ "mock": mock, "items": items })).into_response())
-}
-
-/// `POST /vault/items` (device): create or replace an item by name. Values are write-only.
-pub async fn create_item(
-    State(state): State<AppState>,
-    principal: Principal,
-    Json(b): Json<ItemBody>,
-) -> ApiResult {
-    let user_id = device_user(&principal)?;
-    let name = validate_name(b.name.as_deref().unwrap_or(""))?;
-    let kind = b.kind.as_deref().unwrap_or("secret").trim().to_owned();
-    if !KINDS.contains(&kind.as_str()) {
-        return Err(bad(format!("kind must be one of {}", KINDS.join(", "))));
-    }
-    let fields = fields_object(
-        &kind,
-        b.fields.as_ref().ok_or_else(|| bad("fields required"))?,
-    )?;
-    let existing = state
-        .db
-        .vault_item_by_name(&user_id, &name)
-        .map_err(internal)?;
-    let it = VaultItem {
-        id: existing.as_ref().map(|e| e.id.clone()).unwrap_or_else(ulid),
-        user_id,
-        name,
-        kind,
-        fields_enc: state
-            .relay_key
-            .encrypt(&fields.to_string())
-            .map_err(internal)?,
-        allowed_hosts: clean_hosts(b.allowed_hosts.unwrap_or_default()),
-        created_at: existing
-            .as_ref()
-            .map(|e| e.created_at)
-            .unwrap_or_else(now_ms),
-        last_used_at: existing.as_ref().and_then(|e| e.last_used_at),
-        daytona_secrets: existing
-            .as_ref()
-            .map(|e| e.daytona_secrets.clone())
-            .unwrap_or_else(|| json!({})),
-    };
-    state.db.upsert_vault_item(&it).map_err(internal)?;
-    let names = field_names(&state, &it);
-    Ok((
-        StatusCode::CREATED,
-        Json(json!({ "item": item_json(&it, &names, state.cfg.vault_mock) })),
-    )
-        .into_response())
-}
-
-/// `PUT /vault/items/{id}` (device): change hosts and/or fields.
-pub async fn update_item(
-    State(state): State<AppState>,
-    principal: Principal,
-    Path(id): Path<String>,
-    Json(b): Json<ItemBody>,
-) -> ApiResult {
-    let user_id = device_user(&principal)?;
-    let mut it = state
-        .db
-        .vault_item(&user_id, &id)
-        .map_err(internal)?
-        .ok_or((StatusCode::NOT_FOUND, "no such item".to_owned()))?;
-    if let Some(hosts) = b.allowed_hosts {
-        it.allowed_hosts = clean_hosts(hosts);
-    }
-    if let Some(fields) = b.fields.as_ref() {
-        let obj = fields_object(&it.kind, fields)?;
-        it.fields_enc = state
-            .relay_key
-            .encrypt(&obj.to_string())
-            .map_err(internal)?;
-    }
-    state.db.upsert_vault_item(&it).map_err(internal)?;
-    let names = field_names(&state, &it);
-    Ok(Json(json!({ "item": item_json(&it, &names, state.cfg.vault_mock) })).into_response())
-}
-
-pub async fn delete_item(
-    State(state): State<AppState>,
-    principal: Principal,
-    Path(id): Path<String>,
-) -> ApiResult {
-    let user_id = device_user(&principal)?;
-    let ok = state
-        .db
-        .delete_vault_item(&user_id, &id)
-        .map_err(internal)?;
-    Ok(if ok {
-        StatusCode::NO_CONTENT
-    } else {
-        StatusCode::NOT_FOUND
-    }
-    .into_response())
-}
-
-/// `GET /vault/requests` (device): the caller's projects' requests, pending first, then the
-/// newest decided ones.
-pub async fn list_requests(State(state): State<AppState>, principal: Principal) -> ApiResult {
-    let user_id = device_user(&principal)?;
-    let items: Vec<Value> = state
-        .db
-        .list_vault_requests(&user_id, 100)
-        .map_err(internal)?
-        .iter()
-        .map(request_json)
-        .collect();
-    Ok(Json(json!({ "mock": state.cfg.vault_mock, "items": items })).into_response())
-}
-
-#[derive(Deserialize)]
-pub struct DecideBody {
-    pub approve: bool,
-}
-
-/// `POST /vault/requests/{id}/decide { approve }` (device). On approve of an `env` use for a
-/// Daytona box, the item is mirrored as Daytona Secrets so the placeholder also works through
-/// Daytona's egress proxy (D28); process boxes rely on `/egress`.
-pub async fn decide_request(
-    State(state): State<AppState>,
-    principal: Principal,
-    Path(id): Path<String>,
-    Json(b): Json<DecideBody>,
-) -> ApiResult {
-    let user_id = device_user(&principal)?;
-    let rq = state
-        .db
-        .decide_vault_request(&user_id, &id, b.approve)
-        .map_err(internal)?
-        .ok_or((
-            StatusCode::CONFLICT,
-            "request is not pending (already decided, expired, or not yours)".to_owned(),
-        ))?;
-    let mut daytona: Option<String> = None;
-    if b.approve && rq.use_kind == "env" {
-        if let Some(item_id) = rq.item_id.as_deref() {
-            daytona = mirror_to_daytona(&state, &user_id, &rq.project_id, item_id).await;
-        }
-    }
-    let _ = state.db.enqueue_push(
-        &rq.project_id,
-        "vault_grant",
-        &json!({ "requestId": rq.id, "itemName": rq.item_name, "use": rq.use_kind, "status": rq.status }),
-    );
-    Ok(Json(json!({ "request": request_json(&rq), "daytona": daytona })).into_response())
-}
-
-/// Best effort: create/refresh one Daytona secret per field and mount them on the project's
-/// sandbox as `ARBOS_SECRET_<NAME>` (single-field items) or `ARBOS_SECRET_<NAME>_<FIELD>`.
-async fn mirror_to_daytona(
-    state: &AppState,
-    user_id: &str,
-    project_id: &str,
-    item_id: &str,
-) -> Option<String> {
-    let dt = state.daytona.as_ref()?;
-    let sb = state.db.box_for_project(project_id).ok().flatten()?;
-    if sb.provider != "daytona" {
-        return None;
-    }
-    let sandbox_id = sb.sandbox_id?;
-    let mut it = state.db.vault_item(user_id, item_id).ok().flatten()?;
-    let fields = fields_of(state, &it).ok()?;
-    let mut ids = it.daytona_secrets.as_object().cloned().unwrap_or_default();
-    let mut mounts = Vec::new();
-    for (field, value) in &fields {
-        let secret_name = format!("arbos-{}-{}", it.id.to_lowercase(), field);
-        let outcome = match ids.get(field).and_then(Value::as_str) {
-            Some(existing) => dt
-                .update_secret(existing, value, &it.allowed_hosts)
-                .await
-                .map(|_| existing.to_owned()),
-            None => {
-                dt.create_secret(&secret_name, value, &it.allowed_hosts)
-                    .await
-            }
-        };
-        match outcome {
-            Ok(sid) => {
-                ids.insert(field.clone(), Value::String(sid));
-                let env = if fields.len() == 1 {
-                    env_name(&it.name)
-                } else {
-                    format!("{}_{}", env_name(&it.name), field.to_ascii_uppercase())
-                };
-                let mut m = serde_json::Map::new();
-                m.insert(env, Value::String(secret_name));
-                mounts.push(m);
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, item = %it.name, "daytona secret mirror failed");
-                return Some(format!("secret mirror failed: {e}"));
-            }
-        }
-    }
-    it.daytona_secrets = Value::Object(ids);
-    let _ = state.db.upsert_vault_item(&it);
-    match dt.update_secrets(&sandbox_id, mounts).await {
-        Ok(_) => Some("mounted".into()),
-        Err(e) => {
-            tracing::warn!(error = %e, "daytona updateSecrets failed");
-            Some(format!("updateSecrets failed: {e}"))
-        }
-    }
-}
-
-// ---- box endpoints: request, status, values, egress --------------------------------------------
-
-#[derive(Deserialize)]
-pub struct RequestBody {
-    pub name: String,
-    #[serde(default)]
-    pub purpose: String,
-    #[serde(rename = "use")]
-    pub use_kind: String,
-    #[serde(default, rename = "chatId", alias = "chat_id")]
-    pub chat_id: String,
-}
-
-/// The `(user, project)` a box call is for. One box serves every project of its user (D70), so
-/// the per-workspace agentd names the project in `X-Arbos-Project`; it must belong to the box's
-/// user, and that user's items are the only ones in scope.
-fn box_project(
-    state: &AppState,
-    principal: &Principal,
-    headers: &HeaderMap,
-) -> Result<(String, String), (StatusCode, String)> {
-    let Principal::Box { user_id } = principal else {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "box token required (the agent asks, the user decides)".into(),
-        ));
-    };
-    let id = headers
-        .get("x-arbos-project")
-        .and_then(|v| v.to_str().ok())
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| bad("X-Arbos-Project header required"))?;
-    let p = state
-        .db
-        .project(id)
-        .map_err(internal)?
-        .ok_or_else(|| bad("X-Arbos-Project: no such project"))?;
-    if p.user_id != *user_id {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
-    Ok((user_id.clone(), p.id))
-}
-
-/// `POST /vault/request` (box): the agent asks to use an item. Returns `{ id, status }`.
-pub async fn create_request(
-    State(state): State<AppState>,
-    principal: Principal,
-    headers: HeaderMap,
-    Json(b): Json<RequestBody>,
-) -> ApiResult {
-    let (user_id, project_id) = box_project(&state, &principal, &headers)?;
-    if !USES.contains(&b.use_kind.as_str()) {
-        return Err(bad(format!("use must be one of {}", USES.join(", "))));
-    }
-    let name = b.name.trim().to_owned();
-    let item = state
-        .db
-        .vault_item_by_name(&user_id, &name)
-        .map_err(internal)?;
-    let Some(item) = item else {
-        return Err((
-            StatusCode::NOT_FOUND,
-            format!("no vault item named {name} (the user adds items in Settings → Vault)"),
-        ));
-    };
-    if b.use_kind == "browser_fill" && item.kind != "login" {
-        return Err(bad("browser_fill needs a login item"));
-    }
-    let now = now_ms();
-    let rq = VaultRequest {
-        id: ulid(),
-        project_id,
-        chat_id: b.chat_id,
-        item_id: Some(item.id.clone()),
-        item_name: item.name.clone(),
-        purpose: b.purpose.chars().take(400).collect(),
-        use_kind: b.use_kind,
-        status: "pending".into(),
-        created_at: now,
-        decided_at: None,
-        expires_at: now + REQUEST_TTL_MS,
-    };
-    state.db.insert_vault_request(&rq).map_err(internal)?;
-    Ok((StatusCode::CREATED, Json(request_json(&rq))).into_response())
-}
-
-/// `GET /vault/requests/{id}` (box: own project only; device: any): status, never values.
-pub async fn request_status(
-    State(state): State<AppState>,
-    principal: Principal,
-    Path(id): Path<String>,
-) -> ApiResult {
-    let rq = state
-        .db
-        .vault_request(&id)
-        .map_err(internal)?
-        .ok_or((StatusCode::NOT_FOUND, "no such request".to_owned()))?;
-    let owner = state
-        .db
-        .project(&rq.project_id)
-        .map_err(internal)?
-        .map(|p| p.user_id)
-        .unwrap_or_default();
-    if !principal.can_access_project(&owner) {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
-    Ok(Json(request_json(&rq)).into_response())
-}
-
-/// `POST /vault/requests/{id}/values` (box): the fields of a login for one approved
-/// `browser_fill` request, within ten minutes of the decision. agentd types them into the browser
-/// and forgets them; this is the only path on which a value leaves the relay in clear.
-pub async fn request_values(
-    State(state): State<AppState>,
-    principal: Principal,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> ApiResult {
-    let (user_id, project_id) = box_project(&state, &principal, &headers)?;
-    let rq = state
-        .db
-        .vault_request(&id)
-        .map_err(internal)?
-        .ok_or((StatusCode::NOT_FOUND, "no such request".to_owned()))?;
-    if rq.project_id != project_id {
-        return Err((StatusCode::FORBIDDEN, "not your project".into()));
-    }
-    if rq.use_kind != "browser_fill" {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "values are only released for browser_fill requests; use /egress".into(),
-        ));
-    }
-    if rq.status != "approved" {
-        return Err((StatusCode::CONFLICT, format!("request is {}", rq.status)));
-    }
-    if rq.decided_at.is_some_and(|t| now_ms() - t > FILL_WINDOW_MS) {
-        return Err((
-            StatusCode::CONFLICT,
-            "approval window closed; ask again".into(),
-        ));
-    }
-    let item = rq
-        .item_id
-        .as_deref()
-        .and_then(|i| state.db.vault_item(&user_id, i).ok().flatten())
-        .ok_or((StatusCode::GONE, "item was deleted".to_owned()))?;
-    let fields = fields_of(&state, &item).map_err(internal)?;
-    let _ = state.db.touch_vault_item(&user_id, &item.id);
-    Ok(Json(json!({ "name": item.name, "kind": item.kind, "allowed_hosts": item.allowed_hosts, "fields": fields }))
-        .into_response())
-}
+// ---- egress -------------------------------------------------------------------------------------
 
 #[derive(Deserialize)]
 pub struct EgressBody {
@@ -728,39 +195,21 @@ pub struct EgressBody {
     /// Optional: the placeholders the caller intends to use (reported back, not required).
     #[serde(default)]
     pub placeholders: Vec<String>,
-}
-
-/// The user's items the project may use right now, with plaintext for the substitution step.
-fn resolve_items(
-    state: &AppState,
-    user_id: &str,
-    project_id: &str,
-) -> anyhow::Result<Vec<Resolved>> {
-    let mut out = Vec::new();
-    for it in state.db.list_vault_items(user_id)? {
-        let approved = !state
-            .db
-            .approved_vault_requests(project_id, &it.id)?
-            .is_empty();
-        out.push(Resolved {
-            name: it.name.clone(),
-            allowed_hosts: it.allowed_hosts.clone(),
-            fields: fields_of(state, &it)?,
-            approved,
-        });
-    }
-    Ok(out)
+    /// The chat the tool call runs in (chat-scoped Access).
+    #[serde(default, alias = "chatId")]
+    pub chat_id: Option<String>,
 }
 
 /// `POST /egress` (box): perform an HTTP request on the box's behalf with placeholders swapped for
-/// allowed hosts, and return the reply with every substituted value redacted.
+/// allowed hosts, and return the reply with every substituted value redacted. 403 `paused` while
+/// the kill switch is on; refused placeholders stay verbatim and are listed with the reason.
 pub async fn egress(
     State(state): State<AppState>,
     principal: Principal,
     headers: HeaderMap,
     Json(b): Json<EgressBody>,
 ) -> ApiResult {
-    let (user_id, project_id) = box_project(&state, &principal, &headers)?;
+    let (user_id, project_id) = secrets::box_project(&state, &principal, &headers)?;
     let url = reqwest::Url::parse(b.url.trim()).map_err(|e| bad(format!("url: {e}")))?;
     if !matches!(url.scheme(), "http" | "https") {
         return Err(bad("url must be http(s)"));
@@ -783,26 +232,62 @@ pub async fn egress(
             "placeholders are substituted in headers and body only, never in the URL",
         ));
     }
-    let items = resolve_items(&state, &user_id, &project_id).map_err(internal)?;
-    let mut sub = Substitution::default();
-    let mut headers = BTreeMap::new();
-    for (k, v) in &b.headers {
-        headers.insert(k.clone(), substitute(v, &host, &items, &mut sub));
+    if state
+        .db
+        .secrets_settings(&user_id)
+        .map_err(internal)?
+        .paused
+    {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "paused",
+            Refusal::Paused.message("", ""),
+        ));
     }
     let body_text = match &b.body {
         None | Some(Value::Null) => None,
         Some(Value::String(s)) => Some(s.clone()),
         Some(other) => Some(other.to_string()),
     };
+    let texts: Vec<&str> = b
+        .headers
+        .values()
+        .map(String::as_str)
+        .chain(body_text.as_deref())
+        .collect();
+    let chat_id = b.chat_id.as_deref().filter(|c| !c.is_empty());
+    let plan = secrets::plan_egress(&state, &user_id, &project_id, &host, chat_id, &texts)?;
+    let mut sub = Substitution {
+        refused: plan.refused.clone(),
+        ..Default::default()
+    };
+    let mut headers = BTreeMap::new();
+    for (k, v) in &b.headers {
+        headers.insert(k.clone(), substitute(v, &host, &plan.items, &mut sub));
+    }
     let body_out = body_text
         .as_deref()
-        .map(|t| substitute(t, &host, &items, &mut sub));
-    let used: HashSet<String> = sub.substituted.iter().cloned().collect();
-    for it in state.db.list_vault_items(&user_id).map_err(internal)? {
-        if used.iter().any(|u| u.starts_with(&format!("{}/", it.name))) {
-            let _ = state.db.touch_vault_item(&user_id, &it.id);
+        .map(|t| substitute(t, &host, &plan.items, &mut sub));
+    for (s, allowed) in &plan.used {
+        if sub
+            .substituted
+            .iter()
+            .any(|k| k.starts_with(&format!("{}/", s.env)))
+        {
+            secrets::after_use(&state, s, &project_id, &host, "header", chat_id, allowed);
         }
     }
+    let mut redact = plan.redact;
+    for v in &sub.secrets {
+        if !redact.contains(v) {
+            redact.push(v.clone());
+        }
+    }
+    let refused: Vec<Value> = sub
+        .refused
+        .iter()
+        .map(|(p, r)| json!({ "placeholder": p, "reason": r }))
+        .collect();
 
     let mut req = state.http.request(method.clone(), url.clone());
     req = req.timeout(EGRESS_TIMEOUT);
@@ -815,9 +300,8 @@ pub async fn egress(
     let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
-            let mut v = json!({ "ok": false, "error": format!("{host}: {e}"), "substituted": sub.substituted,
-                "refused": sub.refused.iter().map(|(p, r)| json!({ "placeholder": p, "reason": r })).collect::<Vec<_>>() });
-            redact_value(&mut v, &sub.secrets);
+            let mut v = json!({ "ok": false, "error": format!("{host}: {e}"), "substituted": sub.substituted, "refused": refused });
+            redact_value(&mut v, &redact);
             return Ok((StatusCode::BAD_GATEWAY, Json(v)).into_response());
         }
     };
@@ -837,19 +321,318 @@ pub async fn egress(
     };
     let mut v = json!({
         "ok": status.is_success(), "status": status.as_u16(), "headers": resp_headers, "body": body_json,
-        "truncated": truncated, "substituted": sub.substituted,
-        "refused": sub.refused.iter().map(|(p, r)| json!({ "placeholder": p, "reason": r })).collect::<Vec<_>>(),
+        "truncated": truncated, "substituted": sub.substituted, "refused": refused,
         "requested_placeholders": b.placeholders,
     });
-    redact_value(&mut v, &sub.secrets);
+    redact_value(&mut v, &redact);
     Ok(Json(v).into_response())
+}
+
+// ---- F8 compatibility shims --------------------------------------------------------------------
+
+/// The F8 item shape, built from a secret: names, kind, hosts, field names, placeholders, env.
+fn legacy_item_json(item: &Value) -> Value {
+    let kind = match item["kind"].as_str() {
+        Some("login") => "login",
+        Some("text") => "secret",
+        _ => "api_key",
+    };
+    json!({
+        "id": item["id"], "name": item["env"], "kind": kind, "allowed_hosts": item["hosts"],
+        "fields": item["fields"], "placeholders": item["placeholders"], "env": item["env"],
+        "created_at": item["created_at"], "last_used_at": item["last_used_at"],
+        "daytona": false, "mock": false, "enabled": item["enabled"], "note": item["note"],
+    })
+}
+
+fn legacy_status(status: &str) -> &'static str {
+    match status {
+        "pending" => "pending",
+        "allowed_once" | "allowed_chat" | "allowed_always" => "approved",
+        "denied" => "denied",
+        _ => "expired",
+    }
+}
+
+fn legacy_request_json(r: &Value) -> Value {
+    json!({
+        "id": r["id"], "project_id": r["project_id"], "chat_id": r["chat_id"], "item_id": r["target"]["id"],
+        "item_name": r["name"], "purpose": r["purpose"], "use": r["use"],
+        "status": legacy_status(r["status"].as_str().unwrap_or("expired")),
+        "created_at": r["created_at"], "decided_at": r["decided_at"], "expires_at": r["expires_at"],
+    })
+}
+
+/// `GET /vault/items` (device and box): the caller's secrets in the F8 shape.
+pub async fn list_items(
+    State(state): State<AppState>,
+    principal: Principal,
+    headers: HeaderMap,
+) -> ApiResult {
+    let (user_id, project_id) = match &principal {
+        Principal::Box { .. } => secrets::box_project(&state, &principal, &headers)?,
+        _ => (secrets::device_user(&principal)?, String::new()),
+    };
+    let items: Vec<Value> = secrets::box_items(&state, &user_id, &project_id)
+        .iter()
+        .filter(|i| i["vault_name"] == secrets::ARBOS_VAULT_NAME)
+        .map(legacy_item_json)
+        .collect();
+    Ok(Json(json!({ "mock": state.cfg.vault_mock, "items": items })).into_response())
+}
+
+#[derive(Deserialize, Default)]
+pub struct ItemBody {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// `{ "url", "username", "password" }` or `{ "value" }`; absent on update keeps the stored one.
+    #[serde(default)]
+    pub fields: Option<Value>,
+    #[serde(default, alias = "allowedHosts")]
+    pub allowed_hosts: Option<Vec<String>>,
+}
+
+/// `POST /vault/items` (device): create a secret, or replace the value and hosts of one with
+/// the same name (the F8 "create or replace by name").
+pub async fn create_item(
+    State(state): State<AppState>,
+    principal: Principal,
+    Json(b): Json<ItemBody>,
+) -> ApiResult {
+    let user_id = secrets::device_user(&principal)?;
+    let name = b.name.clone().unwrap_or_default();
+    let kind = match b.kind.as_deref() {
+        Some("login") => "login",
+        _ => "key",
+    };
+    let fields = b.fields.clone().unwrap_or(json!({}));
+    let existing = state
+        .db
+        .secret_by_name(&user_id, name.trim())
+        .map_err(internal)?;
+    let body = if kind == "login" {
+        json!({ "name": name, "kind": kind, "fields": fields, "hosts": b.allowed_hosts })
+    } else {
+        json!({ "name": name, "kind": kind, "value": fields.get("value"), "hosts": b.allowed_hosts })
+    };
+    let s = match existing {
+        None => {
+            let created: secrets::CreateBody = serde_json::from_value(body).map_err(bad)?;
+            let resp =
+                secrets::create(State(state.clone()), principal.clone(), Json(created)).await?;
+            let v = response_json(resp).await?;
+            v["secret"].clone()
+        }
+        Some(s) => {
+            if let Some(hosts) = b.allowed_hosts.clone() {
+                let patch = secrets::PatchBody {
+                    hosts: Some(hosts),
+                    ..Default::default()
+                };
+                secrets::patch(
+                    State(state.clone()),
+                    principal.clone(),
+                    Path(s.id.clone()),
+                    Json(patch),
+                )
+                .await?;
+            }
+            let resp = secrets::replace_value(
+                State(state.clone()),
+                principal.clone(),
+                Path(s.id.clone()),
+                Json(body),
+            )
+            .await?;
+            let v = response_json(resp).await?;
+            v["secret"].clone()
+        }
+    };
+    let items = secrets::box_items(&state, &user_id, "");
+    let item = items
+        .iter()
+        .find(|i| i["id"] == s["id"])
+        .map(legacy_item_json)
+        .unwrap_or(Value::Null);
+    Ok((StatusCode::CREATED, Json(json!({ "item": item }))).into_response())
+}
+
+async fn response_json(resp: Response) -> Result<Value, ApiErr> {
+    let bytes = axum::body::to_bytes(resp.into_body(), 4 * 1024 * 1024)
+        .await
+        .map_err(internal)?;
+    serde_json::from_slice(&bytes).map_err(internal)
+}
+
+/// `PUT /vault/items/{id}` (device): hosts and/or a new value.
+pub async fn update_item(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    Json(b): Json<ItemBody>,
+) -> ApiResult {
+    let user_id = secrets::device_user(&principal)?;
+    if let Some(hosts) = b.allowed_hosts {
+        let patch = secrets::PatchBody {
+            hosts: Some(hosts),
+            ..Default::default()
+        };
+        secrets::patch(
+            State(state.clone()),
+            principal.clone(),
+            Path(id.clone()),
+            Json(patch),
+        )
+        .await?;
+    }
+    if let Some(fields) = b.fields {
+        let s = state
+            .db
+            .secret(&user_id, &id)
+            .map_err(internal)?
+            .ok_or_else(|| err(StatusCode::NOT_FOUND, "not_found", "no such item"))?;
+        let body = if s.kind == "login" {
+            json!({ "fields": fields })
+        } else {
+            json!({ "value": fields.get("value") })
+        };
+        secrets::replace_value(
+            State(state.clone()),
+            principal.clone(),
+            Path(id.clone()),
+            Json(body),
+        )
+        .await?;
+    }
+    let item = secrets::box_items(&state, &user_id, "")
+        .iter()
+        .find(|i| i["id"].as_str() == Some(id.as_str()))
+        .map(legacy_item_json)
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "not_found", "no such item"))?;
+    Ok(Json(json!({ "item": item })).into_response())
+}
+
+pub async fn delete_item(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+) -> ApiResult {
+    secrets::delete(State(state), principal, Path(id)).await
+}
+
+/// `GET /vault/requests` (device): the caller's requests in the F8 shape.
+pub async fn list_requests(State(state): State<AppState>, principal: Principal) -> ApiResult {
+    let resp = secrets::list_requests(State(state.clone()), principal).await?;
+    let v = response_json(resp).await?;
+    let items: Vec<Value> = v["items"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(legacy_request_json)
+        .collect();
+    Ok(Json(json!({ "mock": state.cfg.vault_mock, "items": items })).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct DecideBody {
+    pub approve: bool,
+}
+
+/// `POST /vault/requests/{id}/decide { approve }` (device): approve = `always`, else `deny`.
+pub async fn decide_request(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    Json(b): Json<DecideBody>,
+) -> ApiResult {
+    let user_id = secrets::device_user(&principal)?;
+    let decision = if b.approve { "always" } else { "deny" };
+    let (rq, _) = secrets::decide(&state, &user_id, &id, decision, &format!("card:{id}")).await?;
+    let v = secrets::request_json(&state, &rq);
+    Ok(Json(json!({ "request": legacy_request_json(&v), "daytona": null })).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct RequestBody {
+    pub name: String,
+    #[serde(default)]
+    pub purpose: String,
+    #[serde(rename = "use")]
+    pub use_kind: String,
+    #[serde(default, rename = "chatId", alias = "chat_id")]
+    pub chat_id: String,
+}
+
+/// `POST /vault/request` (box): the F8 ask. Returns the request in the F8 shape (201).
+pub async fn create_request(
+    State(state): State<AppState>,
+    principal: Principal,
+    headers: HeaderMap,
+    Json(b): Json<RequestBody>,
+) -> ApiResult {
+    let body = secrets::BoxRequestBody {
+        reference: None,
+        name: Some(b.name),
+        purpose: b.purpose,
+        use_kind: Some(b.use_kind),
+        host: None,
+        chat_id: b.chat_id,
+    };
+    let resp = secrets::box_request(State(state), principal, headers, Json(body)).await?;
+    let v = response_json(resp).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(legacy_request_json(&v["request"])),
+    )
+        .into_response())
+}
+
+/// `GET /vault/requests/{id}` (box: own project; device: own user): status, never values.
+pub async fn request_status(
+    State(state): State<AppState>,
+    principal: Principal,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult {
+    let rq = state
+        .db
+        .secret_request(&id)
+        .map_err(internal)?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "not_found", "no such request"))?;
+    match &principal {
+        Principal::Box { .. } => {
+            let (_u, project_id) = secrets::box_project(&state, &principal, &headers)?;
+            if rq.project_id != project_id {
+                return Err(err(StatusCode::FORBIDDEN, "not_owner", "not your project"));
+            }
+        }
+        Principal::Device { user_id, .. } => {
+            if rq.user_id != *user_id {
+                return Err(err(StatusCode::FORBIDDEN, "not_owner", "not your request"));
+            }
+        }
+        Principal::Admin => {}
+    }
+    Ok(Json(legacy_request_json(&secrets::request_json(&state, &rq))).into_response())
+}
+
+/// `POST /vault/requests/{id}/values` (box): login fields for an approved `browser_fill`.
+pub async fn request_values(
+    State(state): State<AppState>,
+    principal: Principal,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult {
+    secrets::box_request_values(State(state), principal, headers, Path(id)).await
 }
 
 // ---- mock ----------------------------------------------------------------------------------------
 
-/// `ARBOS_VAULT_MOCK=1`: two demo items whose hosts are this machine, so `/egress` against the
-/// relay's own echo target shows the substitution end to end. Seeded for the pair-code user
-/// (`u_default`), the only one a one-machine mock has.
+/// `ARBOS_VAULT_MOCK=1`: two demo secrets whose hosts are this machine, for the pair-code user,
+/// so `/egress` against the relay's own echo target shows the substitution end to end.
 pub fn seed_mock(state: &AppState) -> anyhow::Result<()> {
     if !state.cfg.vault_mock {
         return Ok(());
@@ -858,26 +641,26 @@ pub fn seed_mock(state: &AppState) -> anyhow::Result<()> {
     let echo = format!("{}/vault/mock/echo", state.cfg.public_url);
     let hosts = vec!["127.0.0.1".to_owned(), "localhost".to_owned()];
     for (name, kind) in MOCK_ITEMS {
-        if state.db.vault_item_by_name(MOCK_USER, name)?.is_some() {
+        if state.db.secret_by_name(MOCK_USER, name)?.is_some() {
             continue;
         }
-        let fields = match kind {
-            "login" => {
-                json!({ "url": echo, "username": "demo@arbos.local", "password": format!("mock-pw-{}", ulid().to_lowercase()) })
+        let body = match kind {
+            "login" => json!({ "name": name, "kind": kind, "hosts": hosts,
+                "fields": { "url": echo, "username": "demo@arbos.local", "password": format!("mock-pw-{}", arbos_core::ids::ulid().to_lowercase()) } }),
+            _ => {
+                json!({ "name": name, "kind": kind, "hosts": hosts, "value": format!("mock-key-{}", arbos_core::ids::ulid().to_lowercase()) })
             }
-            _ => json!({ "value": format!("mock-key-{}", ulid().to_lowercase()) }),
         };
-        state.db.upsert_vault_item(&VaultItem {
-            id: ulid(),
+        let created: secrets::CreateBody = serde_json::from_value(body)?;
+        let principal = Principal::Device {
+            id: "mock".into(),
+            token: String::new(),
             user_id: MOCK_USER.into(),
-            name: name.into(),
-            kind: kind.into(),
-            fields_enc: state.relay_key.encrypt(&fields.to_string())?,
-            allowed_hosts: hosts.clone(),
-            created_at: now_ms(),
-            last_used_at: None,
-            daytona_secrets: json!({}),
-        })?;
+        };
+        let state = state.clone();
+        tokio::spawn(async move {
+            let _ = secrets::create(State(state), principal, Json(created)).await;
+        });
     }
     tracing::info!(target = %echo, "ARBOS_VAULT_MOCK=1: seeded demo-login and demo-api-key (hosts 127.0.0.1, localhost)");
     Ok(())
@@ -892,7 +675,7 @@ pub async fn mock_echo(
     body: Bytes,
 ) -> ApiResult {
     if !state.cfg.vault_mock {
-        return Err((StatusCode::NOT_FOUND, "not in mock mode".into()));
+        return Err(err(StatusCode::NOT_FOUND, "not_found", "not in mock mode"));
     }
     let hdrs: BTreeMap<String, String> = headers
         .iter()
@@ -973,7 +756,7 @@ mod tests {
             &mut sub,
         );
         assert_eq!(out, "x arbos-secret://unapproved/value");
-        assert!(sub.refused[0].1.contains("no approved"));
+        assert!(sub.refused[0].1.contains("no access"));
         // Placeholders in a JSON body, several at once.
         let mut sub = Substitution::default();
         let body = r#"{"k":"arbos-secret://acme/value","again":"arbos-secret://acme/value","missing":"arbos-secret://acme/nope"}"#;
@@ -1003,42 +786,14 @@ mod tests {
         assert_eq!(reply["fine"], "untouched");
         assert_eq!(reply["headers"][REDACTED], "as a key");
 
-        // Item listing: names, kind, hosts, field names, placeholders; never the ciphertext or value.
-        let key = crate::connectors::crypto::RelayKey::derive("test-key");
-        let enc = key
-            .encrypt(&json!({ "value": secret }).to_string())
-            .unwrap();
-        let it = VaultItem {
-            id: "i1".into(),
-            user_id: "u1".into(),
-            name: "acme".into(),
-            kind: "api_key".into(),
-            fields_enc: enc.clone(),
-            allowed_hosts: vec!["api.acme.test".into()],
-            created_at: 0,
-            last_used_at: None,
-            daytona_secrets: json!({}),
-        };
-        let listing = item_json(&it, &["value".to_owned()], false).to_string();
-        assert!(
-            !listing.contains(&secret) && !listing.contains(&enc),
-            "{listing}"
-        );
-        assert!(listing.contains("arbos-secret://acme/value"));
-        let rq = VaultRequest {
-            id: "r1".into(),
-            project_id: "p1".into(),
-            chat_id: "c1".into(),
-            item_id: Some("i1".into()),
-            item_name: "acme".into(),
-            purpose: "call the API".into(),
-            use_kind: "header".into(),
-            status: "approved".into(),
-            created_at: 0,
-            decided_at: Some(1),
-            expires_at: 2,
-        };
-        assert!(!request_json(&rq).to_string().contains(&secret));
-        assert_eq!(env_name("demo-api.key"), "ARBOS_SECRET_DEMO_API_KEY");
+        // The legacy item shape carries names, kind, hosts, field names, placeholders; no value.
+        let item = json!({ "id": "i1", "env": "ACME", "kind": "key", "hosts": ["api.acme.test"], "fields": ["value"],
+            "placeholders": { "value": "arbos-secret://ACME/value" }, "created_at": 0, "last_used_at": null, "enabled": true, "note": "" });
+        let listing = legacy_item_json(&item).to_string();
+        assert!(!listing.contains(&secret), "{listing}");
+        assert!(listing.contains("arbos-secret://ACME/value"));
+        assert_eq!(legacy_status("allowed_chat"), "approved");
+        assert_eq!(legacy_status("denied"), "denied");
+        assert_eq!(legacy_status("expired"), "expired");
     }
 }
