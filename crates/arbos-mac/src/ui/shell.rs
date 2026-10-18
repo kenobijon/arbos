@@ -119,7 +119,7 @@ impl Shell {
     pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let open_settings = std::env::var("ARBOS_OPEN_SETTINGS")
             .ok()
-            .filter(|v| v == "1" || v == "bottom" || v == "connectors");
+            .filter(|v| v == "1" || v == "bottom" || v == "connectors" || v.starts_with("secrets"));
         let settings_scroll = ScrollHandle::new();
         if open_settings.as_deref() == Some("bottom") {
             settings_scroll.scroll_to_bottom();
