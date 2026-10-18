@@ -48,6 +48,7 @@ RUN curl -LsSf https://astral.sh/uv/${UV_VERSION}/install.sh | env UV_INSTALL_DI
 # cli>" works out of the box: pip falls back to a --user install when site-packages is read-only,
 # and agentd puts each workspace's ~/.local/bin on PATH (isolation::env).
 RUN PY="$(uv python find 3.11)" \
+ && find /opt/python -name EXTERNALLY-MANAGED -delete \
  && ln -s "$PY" /usr/local/bin/python3 && ln -s "$PY" /usr/local/bin/python \
  && python3 -m ensurepip --upgrade \
  && ln -s "$(dirname "$PY")/pip3" /usr/local/bin/pip3 && ln -s /usr/local/bin/pip3 /usr/local/bin/pip \
