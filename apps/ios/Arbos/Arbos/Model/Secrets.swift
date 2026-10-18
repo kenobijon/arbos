@@ -358,6 +358,12 @@ struct ProjectSecrets: Equatable {
 }
 
 enum SecretsText {
+    /// The note field: what agents may do with the key. Same words on both platforms.
+    static let notePlaceholder = "What may agents do with it? e.g. read-only · confirm before charging · may spend up to $20 without asking"
+    static let noteHint = "Agents treat this as the rule for the key — for egress and for programs that use the real value. Say what it is for, what is allowed, and any spend limit. No spending guidance means they show the option and price and confirm before anything that charges."
+    static let accessNoteHint = "Shown whenever the agent sees this secret, on top of the secret's own note. Allowed actions and spend limits for this agent, e.g. reports only · may spend up to $5 a day."
+    static let vaultNoteHint = "The rule for every item in this vault, for the agents you pick: what it is for, what is allowed, any spend limit. No spending guidance means they confirm before anything that charges."
+
     /// The variables a secret's real value takes: "$STRIPE_KEY", or
     /// "$GITHUB_LOGIN_USERNAME and $GITHUB_LOGIN_PASSWORD" for a login.
     static func realVarList(_ s: SecretItem) -> String {

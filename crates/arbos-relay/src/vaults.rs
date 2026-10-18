@@ -568,6 +568,8 @@ pub(crate) fn box_items(state: &AppState, user_id: &str, project_id: &str) -> Ve
                 "enabled": enabled && v.status == "ok", "ask_every_time": false, "expires_at": v.token_expires_at,
                 "scope": access.as_ref().map(|a| json!({ "kind": a.scope_kind, "chat_id": a.scope_chat_id })),
                 "urls": it["urls"],
+                // The owner's note on the vault Access is the policy for every item in it.
+                "use_notes": access.as_ref().map(|a| a.note.trim()).filter(|n| !n.is_empty()).map(|n| vec![n.to_owned()]).unwrap_or_default(),
             }));
         }
     }

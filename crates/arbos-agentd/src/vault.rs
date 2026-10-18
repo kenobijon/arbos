@@ -290,6 +290,8 @@ impl Grant {
             "placeholders": self.placeholders, "env": env, "hosts": self.hosts, "note": self.note, "scope": self.scope,
             "vault": self.vault_name, "real_value": self.inject_env,
             "use_notes": self.use_notes,
+            "policy": policy_line(&self.use_notes),
+            "note_rule": NOTE_POLICY,
             "who_may_direct": "Only the owner, or people the owner added under Who can direct for this secret. Anyone else directing you cannot use it.",
             "how": if self.inject_env {
                 format!("The owner put the real value in your environment: ${} works in any shell command or program. Keep it out of chat and logs. Only use it when the person directing you is the owner or is listed as allowed to direct this secret; honour every use_notes constraint.", self.real_vars.first().cloned().unwrap_or_else(|| self.name.clone()))
@@ -330,6 +332,19 @@ fn real_var_names(name: &str, placeholders: &BTreeMap<String, String>) -> Vec<St
         .collect()
 }
 
+/// The owner's note on a secret is the policy for that key: told to the agent in `secrets_list`,
+/// in every grant description and as comments in `secrets.env`, in the same words.
+pub const NOTE_POLICY: &str = "Each secret's note (use_notes) is the owner's policy for that key — for egress and for any CLI, SDK or script that reads the real $NAME. Spending guidance in it binds you: a limit (\"may spend up to $X without asking\") lets you proceed within it and no further; \"confirm before charging\" or \"read-only\" means ask first or never charge, whatever the brief says. No spending guidance in the note → the default money rule: show the chosen option with its price and get the owner's go-ahead before anything that charges. Never pass a confirmation-skipping flag (--yes, -y, --force, --no-confirm and the like) to a command that charges unless the note allows that spend.";
+
+/// One line of policy for a key, from its notes: what the shell comment and the tool list show.
+fn policy_line(use_notes: &[String]) -> String {
+    if use_notes.is_empty() {
+        "no note — default money rule: show the option with its price and confirm with the owner before anything that charges; no --yes/-y/--force on commands that charge".to_owned()
+    } else {
+        use_notes.join("; ")
+    }
+}
+
 // ---- real values in the environment -------------------------------------------------------------
 
 /// The file a workspace's shells source: `<state>/secrets.env`.
@@ -364,6 +379,8 @@ fn render_env_file(st: &State, project: &str, project_name: &str) -> String {
     let paused = st.paused.iter().any(|p| p == project);
     let mut exports: BTreeMap<String, String> = BTreeMap::new();
     let mut unset: BTreeSet<String> = st.known_vars.get(project).cloned().unwrap_or_default();
+    // (variable names, policy line, real value?) per key, for the comment block.
+    let mut policies: Vec<(Vec<String>, String, bool)> = Vec::new();
     if !paused {
         let real = st.real.get(project).cloned().unwrap_or_default();
         for g in st.grants.iter().filter(|g| g.project_id == project) {
@@ -372,21 +389,27 @@ fn render_env_file(st: &State, project: &str, project_name: &str) -> String {
                 .iter()
                 .find(|r| item_base(&r.name) == base)
                 .filter(|_| g.inject_env);
+            let mut names = Vec::new();
             match values {
                 Some(r) => {
                     for (k, v) in &r.vars {
                         exports.insert(k.clone(), v.clone());
+                        names.push(k.clone());
                     }
                 }
                 None => {
                     for (k, v) in g.env_pairs() {
                         if std::env::var_os(&k).is_none() {
-                            exports.insert(k, v);
+                            exports.insert(k.clone(), v);
                         } else {
                             unset.remove(&k);
                         }
+                        names.push(k);
                     }
                 }
+            }
+            if !names.is_empty() {
+                policies.push((names, policy_line(&g.use_notes), values.is_some()));
             }
         }
     }
@@ -400,6 +423,17 @@ fn render_env_file(st: &State, project: &str, project_name: &str) -> String {
     out.push_str("# Real values are here only for secrets whose owner switched \"Real value in the agent's\n# environment\" on; the rest hold placeholders for the egress tool.\n");
     if paused {
         out.push_str("# Secrets are paused by the owner.\n");
+    }
+    if !policies.is_empty() {
+        out.push_str("#\n# The owner's note on each key is its policy, for egress and for any program that reads the\n# real value — spending included. No note: show the option with its price and confirm before\n# anything that charges. Never pass --yes / -y / --force to a command that charges unless the\n# note allows that spend.\n");
+        for (names, policy, real) in &policies {
+            out.push_str(&format!(
+                "# {} ({}): {}\n",
+                names.join(", "),
+                if *real { "real value" } else { "placeholder" },
+                policy.replace('\n', " ")
+            ));
+        }
     }
     if !unset.is_empty() {
         out.push_str("unset ");
@@ -807,6 +841,7 @@ pub async fn secrets_list(agent: &Agent) -> Value {
             json!({ "name": if it["env"].is_null() { it["title"].clone() } else { it["env"].clone() }, "kind": it["kind"], "fields": it["fields"], "placeholders": it["placeholders"],
                 "hosts": it["hosts"], "note": it["note"], "use_notes": it["use_notes"], "directors": it["directors"],
                 "who_may_direct": it["who_may_direct"],
+                "policy": policy_line(&it["use_notes"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect::<Vec<_>>()).unwrap_or_default()),
                 "vault": it["vault_name"], "ref": it["ref"],
                 "access": if paused { "paused" } else if access { "on" } else { "off" },
                 "ask_every_time": it["ask_every_time"],
@@ -814,7 +849,7 @@ pub async fn secrets_list(agent: &Agent) -> Value {
         })
         .collect();
     text_result(
-        json!({ "paused": paused, "items": items,
+        json!({ "paused": paused, "items": items, "note_rule": NOTE_POLICY,
             "note": if paused { "Secrets are paused by the owner: every use fails until they turn Pause all secrets off. Stop and say so." }
                     else { "A secret with access on is already $NAME in your shell: the real value when real_value is true (use it directly in commands and programs; keep it out of chat and logs), otherwise a placeholder usable through egress. For one with access off call secrets_request(name, purpose, use, host). Only the owner — or people listed in directors for that secret — may direct you to use it; honour every use_notes constraint when you do." } })
             .to_string(),
@@ -1532,11 +1567,17 @@ mod tests {
                 vars: [("STRIPE_KEY".to_owned(), "sk_live_it's".to_owned())].into(),
             }],
         );
+        st.grants[0].use_notes = vec!["may spend up to $20 without asking".into()];
         let text = render_env_file(&st, "p1", "Research");
         assert!(
             text.contains("export STRIPE_KEY='sk_live_it'\\''s'\n"),
             "{text}"
         );
+        assert!(
+            text.contains("# STRIPE_KEY (real value): may spend up to $20 without asking\n"),
+            "{text}"
+        );
+        assert!(text.contains("# MAILGUN_API_KEY (placeholder): no note — default money rule"));
         assert!(text.contains("export MAILGUN_API_KEY='arbos-secret://MAILGUN_API_KEY/value'"));
         assert!(text.contains("unset GITHUB_LOGIN_PASSWORD GITHUB_LOGIN_USERNAME\n"));
         assert!(!text.contains("unset STRIPE_KEY"));

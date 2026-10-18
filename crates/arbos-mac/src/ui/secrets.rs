@@ -54,6 +54,13 @@ impl AddKind {
     }
 }
 
+/// The note field: what agents may do with the key (the iPhone's `SecretsText` twin).
+const NOTE_PLACEHOLDER: &str =
+    "What may agents do with it? e.g. read-only · confirm before charging · may spend up to $20 without asking";
+const NOTE_HINT: &str = "Agents treat this as the rule for the key — for egress and for programs that use the real value. Say what it is for, what is allowed, and any spend limit. No spending guidance means they show the option and price and confirm before anything that charges.";
+const ACCESS_NOTE_HINT: &str = "Shown whenever the agent sees this secret, on top of the secret's own note. Allowed actions and spend limits for this agent, e.g. reports only · may spend up to $5 a day.";
+const VAULT_NOTE_HINT: &str = "The rule for every item in this vault, for the agents you pick: what it is for, what is allowed, any spend limit. No spending guidance means they confirm before anything that charges.";
+
 pub struct SecretsPanel {
     state: Entity<AppState>,
     open: bool,
@@ -103,7 +110,7 @@ impl SecretsPanel {
         let url_input = mk(cx, "https://github.com/login", false);
         let user_input = mk(cx, "name@example.com", false);
         let secret_input = mk(cx, "Sent once and encrypted. You won't see it again.", true);
-        let note_input = mk(cx, "What is it for? Agents read this.", false);
+        let note_input = mk(cx, NOTE_PLACEHOLDER, false);
         let hosts_input = mk(cx, "api.stripe.com", false);
         let token_input = mk(cx, "ops_••••••••••••••••••••", true);
         {
@@ -1090,12 +1097,12 @@ impl SecretsPanel {
         ));
         let note = if inject {
             format!(
-                "{} is a normal variable in the box of every agent with access: shell commands and programs read it directly, nothing asks you. Turning access or Pause all off removes it within seconds. Arbos still redacts the value from chat and logs as best it can.",
+                "On: {} is a normal variable in the box of every agent with access. Any program the agent runs can use the key directly — including to spend money or change things on your accounts — without asking you. No card, no host check. Turning access or Pause all off removes it within seconds. Arbos still redacts the value from chat and logs as best it can.",
                 s.real_var_list()
             )
         } else {
             format!(
-                "Off: agents get a placeholder and the relay fills the value in only through egress, for the allowed hosts. Turn this on for tools that must read ${} themselves, such as CLIs and SDKs.",
+                "Off: agents get a placeholder and the relay fills the value in only through egress, for the allowed hosts. Turn this on only for keys you would hand to a CLI or SDK that must read ${} itself — once on, programs can act with it, including spending, without asking you.",
                 s.env
             )
         };
@@ -1187,7 +1194,12 @@ impl SecretsPanel {
                     .px(px(16.0))
                     .py(px(10.0))
                     .child(self.agent_chips("give", &have, theme, cx))
-                    .child(Self::field("Note", self.note_input.clone(), None, theme))
+                    .child(Self::field(
+                        "Note for the agent",
+                        self.note_input.clone(),
+                        Some(ACCESS_NOTE_HINT),
+                        theme,
+                    ))
                     .child(
                         div()
                             .flex()
@@ -1392,7 +1404,12 @@ impl SecretsPanel {
             }
         }
         form = form
-            .child(Self::field("Note", self.note_input.clone(), None, theme))
+            .child(Self::field(
+                "Note",
+                self.note_input.clone(),
+                Some(NOTE_HINT),
+                theme,
+            ))
             .child(
                 div()
                     .flex()
@@ -1457,9 +1474,9 @@ impl SecretsPanel {
                         .text_size(px(TEXT_TINY))
                         .text_color(theme.text_muted)
                         .child(if inject {
-                            format!("Agents with access get ${env_preview} itself: CLIs, SDKs and scripts read it directly. Nothing asks you per use.")
+                            format!("On: agents with access get ${env_preview} itself. Any program they run can use it directly — including to spend money — without asking you. Only for keys you would hand to a CLI.")
                         } else {
-                            "Off: agents get a placeholder; the relay fills the value in only through egress.".to_string()
+                            "Off: agents get a placeholder; the relay fills the value in only through egress, for the allowed hosts. Turn on only for keys a CLI or SDK must read itself.".to_string()
                         }),
                 ),
         );
@@ -1641,7 +1658,12 @@ impl SecretsPanel {
                     .px(px(16.0))
                     .py(px(10.0))
                     .child(chips)
-                    .child(Self::field("Note", self.note_input.clone(), None, theme))
+                    .child(Self::field(
+                        "Note for the agent",
+                        self.note_input.clone(),
+                        Some(ACCESS_NOTE_HINT),
+                        theme,
+                    ))
                     .child(
                         div()
                             .flex()
@@ -1801,7 +1823,7 @@ impl SecretsPanel {
                     .child(div().text_size(px(TEXT_TINY)).text_color(theme.text_muted).child("Agents that may use this vault"))
                     .child(self.agent_chips("connect", &[], theme, cx)),
             )
-            .child(Self::field("Note", self.note_input.clone(), None, theme));
+            .child(Self::field("Note", self.note_input.clone(), Some(VAULT_NOTE_HINT), theme));
         if let Some(err) = &self.error {
             form = form.child(
                 div()
