@@ -263,7 +263,8 @@ struct ProjectSecretAccess: Identifiable, Equatable {
     var secret: SecretItem?
     var vault: ConnectedVault?
 
-    var title: String { secret?.env ?? vault.map { "\($0.name) (vault)" } ?? "Secret" }
+    /// The vault row shows the vault name alone: its lock tile and "everything in this vault" say the rest.
+    var title: String { secret?.env ?? vault?.name ?? "Secret" }
     var icon: String { vault != nil ? "lock.rectangle.stack.fill" : (secret?.icon ?? "key.fill") }
 
     static func parse(_ v: Any?) -> ProjectSecretAccess? {

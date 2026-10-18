@@ -1206,10 +1206,26 @@ struct VaultPage: View {
                 }
                 SettingsGroup(header: "Agents", footer: "An agent with access may use any item in this vault by reference; the first use at a new host asks you.") {
                     ForEach(v.agents) { a in
-                        SecretRowLabel(icon: "person.fill", title: a.name, subtitle: a.note.isEmpty ? SecretsText.usage(lastUsedAt: a.lastUsedAt, disabledAt: a.disabledAt, enabled: a.enabled) : a.note) {
+                        // The agent's own D79 avatar, as on the Secret page.
+                        HStack(spacing: 14) {
+                            if let p = model.project(a.projectId) {
+                                AgentAvatar(project: p, theme: theme, size: SettingsRow.tile, still: true)
+                            } else {
+                                InitialsAvatar(name: a.name, handle: a.name, id: a.projectId, override: nil, size: SettingsRow.tile)
+                            }
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(a.name).font(.system(size: Theme.body)).foregroundStyle(theme.text)
+                                Text(a.note.isEmpty ? SecretsText.usage(lastUsedAt: a.lastUsedAt, disabledAt: a.disabledAt, enabled: a.enabled) : a.note)
+                                    .font(.system(size: Theme.tiny)).foregroundStyle(theme.muted).lineLimit(2)
+                            }
+                            Spacer(minLength: 8)
                             Toggle("", isOn: Binding(get: { a.enabled }, set: { model.setVaultAccess(vaultId: v.id, projectId: a.projectId, enabled: $0) }))
-                                .labelsHidden().tint(theme.online)
+                                .labelsHidden().tint(theme.online).disabled(model.isFixture)
+                                .accessibilityLabel("\(a.name) access")
                         }
+                        .padding(.horizontal, 16)
+                        .frame(minHeight: 56)
+                        .contentShape(Rectangle())
                     }
                     SecretAddRow(title: "Give another agent access…") { showGive = true }
                 }
