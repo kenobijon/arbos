@@ -117,29 +117,12 @@ fn message_spoken_name(msg: &MessageView, fallback: &str) -> String {
         .unwrap_or_else(|| fallback.to_owned())
 }
 
-/// True when every `@` token in the prose is mid-line (not the leading address).
-/// Mid-line `@person` is context ("Would you rent if @kenobijon asked?"), not who
-/// the line is for. Chip-only person targets have mentions and no `@` in the text.
-fn text_at_mentions_are_midline_only(msg: &MessageView) -> bool {
-    let text = msg.text();
-    let has_at = text.split_whitespace().any(|t| {
-        t.trim_matches(|c| matches!(c, '.' | ',' | '!' | '?' | ':' | ';'))
-            .starts_with('@')
-    });
-    if !has_at {
-        return false;
-    }
-    let Some(lead) = leading_address_token(&text) else {
-        return false;
-    };
-    !lead.starts_with('@')
-}
-
-/// True when the message names at least one person and no agent (chip or `@handle`),
-/// and that person is the addressee — a person chip with no `@` in the prose ("Call?"),
-/// or a leading `@person` — not a mid-line mention used as context.
-/// Mid-line-only person `@handles` stay with the agent / group decision model
-/// (same rule as iOS: mid-line `@jo` must not drop a sticky agent).
+/// True when the message is aimed at people and names no agent (chip or `@handle`).
+///
+/// Person chips ("Call?" with a `user:` mention and no `@` in the prose) and a leading
+/// `@handle` ("@ken …", "Yo @ken") are for humans — the reply gate must not wake an agent.
+/// A mid-line `@person` alone ("Would you rent if @ken asked?") is a reference, not an
+/// address: leave the hard gate open so the group decision model can still pick an agent.
 fn addressed_only_to_people(msg: &MessageView) -> bool {
     let Some(mentions) = msg.rest.get("mentions").and_then(Value::as_array) else {
         return false;
@@ -159,7 +142,13 @@ fn addressed_only_to_people(msg: &MessageView) -> bool {
     if !saw_person {
         return false;
     }
-    !text_at_mentions_are_midline_only(msg)
+    let text = msg.text();
+    // Chip / bare-name address: person mention with no `@` token in the prose.
+    if !text.contains('@') {
+        return true;
+    }
+    // Leading `@handle` (optional yo/hey/hi…) is still a people ping.
+    leading_address_token(&text).is_some_and(|t| t.starts_with('@'))
 }
 
 /// Leading token of the message (optional yo/hey/hi… greeting), lower-cased, punctuation stripped.
@@ -380,8 +369,9 @@ fn text_addresses_agents_collectively(msg: &MessageView) -> bool {
     false
 }
 
-/// Leading person ping in the prose (or people-only mentions) and no agent `@` in the text.
-/// Sticky chip / reply-to agent mentions must not wake an agent for "Allan?".
+/// Leading person ping in the prose (or a people chip / leading `@handle`) and no agent `@`
+/// in the text. Sticky chip / reply-to agent mentions must not wake an agent for "Allan?".
+/// Mid-line `@person` alone is not a people ping — see `addressed_only_to_people`.
 fn people_ping_not_for_agents(msg: &MessageView, info: &PeopleChatInfo) -> bool {
     if text_mentions_agent(msg, info) {
         return false;
@@ -779,9 +769,9 @@ impl Agent {
         {
             return true;
         }
-        // A person chip or leading @person with no agent address is for humans — stay quiet
+        // A person chip or leading @handle with no agent address is for humans — stay quiet
         // even in a group (the decision model must not wake an agent to decline a call meant
-        // for Ken). Mid-line @person ("…if @kenobijon asked?") is context, not the addressee.
+        // for Ken). Mid-line @person references alone still reach the decision model.
         if addressed_only_to_people(&msg) {
             return false;
         }
@@ -1212,14 +1202,27 @@ mod tests {
         let mut assistant = msg("@research", json!({}));
         assistant.role = "assistant".into();
         assert!(!addressed(&assistant, P, "research", true, true, true));
-        // Person-only mentions (chip / leading @handle) — for humans, not agents.
+        // Person-only mentions: chip (no @ in prose) or leading @handle — for humans.
         assert!(addressed_only_to_people(&msg(
             "Call?",
             json!({ "mentions": ["user:gh_ken"] })
         )));
         assert!(addressed_only_to_people(&msg(
-            "@kenobijon Call?",
+            "@ken Call?",
+            json!({ "mentions": ["user:gh_ken"] })
+        )));
+        assert!(addressed_only_to_people(&msg(
+            "Yo @ken",
+            json!({ "mentions": ["user:gh_ken"] })
+        )));
+        // Mid-line @person is a reference, not a people-only address.
+        assert!(!addressed_only_to_people(&msg(
+            "Would you rent a machine if @kenobijon asked ?",
             json!({ "mentions": ["user:kenobijon"] })
+        )));
+        assert!(!addressed_only_to_people(&msg(
+            "can you see @jo?",
+            json!({ "mentions": ["user:jo"] })
         )));
         assert!(!addressed_only_to_people(&msg(
             "Call?",
@@ -1229,15 +1232,6 @@ mod tests {
         assert!(!addressed_only_to_people(&msg(
             "hey",
             json!({ "mentions": ["agent:01HPROJ"] })
-        )));
-        // Mid-line @person is context for the agent / decision model, not a human-only ping.
-        assert!(!addressed_only_to_people(&msg(
-            "Would you rent a machine if @kenobijon asked ?",
-            json!({ "mentions": ["user:kenobijon"] })
-        )));
-        assert!(!addressed_only_to_people(&msg(
-            "can you see @jo?",
-            json!({ "mentions": ["user:jo"] })
         )));
 
         // Leading person name — even with a sticky agent mention — is for humans.
@@ -1273,17 +1267,13 @@ mod tests {
             ),
             &info
         ));
-        // Same mid-line rule without a sticky agent mention — groups leave the message
-        // unaddressed so the decision model can pick the agent who was just speaking.
+        // Mid-line @person with no agent address is also not a people ping — the group
+        // decision model may still wake an agent (e.g. follow-up that names a human).
         assert!(!people_ping_not_for_agents(
             &msg(
                 "Would you rent a machine if @kenobijon asked ?",
                 json!({ "mentions": ["user:kenobijon"] })
             ),
-            &info
-        ));
-        assert!(!people_ping_not_for_agents(
-            &msg("can you see @jo?", json!({ "mentions": ["user:jo"] })),
             &info
         ));
         assert!(!people_ping_not_for_agents(

@@ -24,7 +24,7 @@ struct SecretRowLabel<Trailing: View>: View {
                 .overlay(Image(systemName: icon).font(.system(size: 15, weight: .semibold)).foregroundStyle(.white))
                 .opacity(dim ? 0.55 : 1)
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.system(size: Theme.body)).foregroundStyle(dim ? theme.muted : theme.text).lineLimit(1)
+                Text(title).font(.system(size: Theme.body)).foregroundStyle(dim ? theme.muted : theme.text).lineLimit(2)
                 if let subtitle, !subtitle.isEmpty {
                     Text(subtitle).font(.system(size: Theme.tiny)).foregroundStyle(theme.muted).lineLimit(2)
                 }
@@ -1277,7 +1277,7 @@ struct VaultPage: View {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text((it["title"] as? String) ?? "Item").font(.system(size: Theme.body)).foregroundStyle(theme.text)
                                 Text(on ? "Real value as $\(env) in the agents' environment" : ((it["fields"] as? [String]) ?? []).joined(separator: " · "))
-                                    .font(.system(size: Theme.tiny)).foregroundStyle(on ? theme.accent : theme.muted).lineLimit(1)
+                                    .font(.system(size: Theme.tiny)).foregroundStyle(theme.muted).lineLimit(2)
                             }
                             Spacer(minLength: 8)
                             Toggle("", isOn: Binding(get: { on }, set: { setItemEnv(it, on: $0) }))
