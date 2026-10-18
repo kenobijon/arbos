@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS secrets (
   kind TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', hosts TEXT NOT NULL DEFAULT '[]',
   ask_every_time INTEGER NOT NULL DEFAULT 0, expires_at INTEGER, current_version INTEGER NOT NULL DEFAULT 1,
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, last_used_at INTEGER,
-  daytona_secrets TEXT NOT NULL DEFAULT '{}'
+  daytona_secrets TEXT NOT NULL DEFAULT '{}', inject_env INTEGER NOT NULL DEFAULT 0
 );
 CREATE UNIQUE INDEX IF NOT EXISTS secrets_user_name ON secrets(user_id, name);
 CREATE UNIQUE INDEX IF NOT EXISTS secrets_user_env ON secrets(user_id, env);
@@ -73,6 +73,12 @@ CREATE TABLE IF NOT EXISTS vault_access_hosts (
   access_id TEXT NOT NULL, item_ref TEXT NOT NULL, host TEXT NOT NULL, pinned_at INTEGER NOT NULL,
   PRIMARY KEY (access_id, item_ref, host)
 );
+-- Connected-vault items the owner put into the agents' environment as real values (D83
+-- decision 2 as decided 2026-10-18): one env name per item; the row is the switch.
+CREATE TABLE IF NOT EXISTS vault_item_env (
+  vault_id TEXT NOT NULL, item_ref TEXT NOT NULL, env TEXT NOT NULL, created_at INTEGER NOT NULL,
+  PRIMARY KEY (vault_id, item_ref)
+);
 -- Provider reads per vault, per UTC hour and per UTC day, so the Vault page can show
 -- "Reads this hour 12 / 1,000" and the resolver stays under the plan's limits.
 CREATE TABLE IF NOT EXISTS vault_reads (
@@ -80,6 +86,14 @@ CREATE TABLE IF NOT EXISTS vault_reads (
   PRIMARY KEY (vault_id, window)
 );
 "#;
+
+/// Forward-only, additive migrations for databases created before a column existed.
+pub fn migrate_secrets(c: &rusqlite::Connection) {
+    let _ = c.execute(
+        "ALTER TABLE secrets ADD COLUMN inject_env INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+}
 
 /// A pending request nobody answers expires after this long (D76: 10 min silence = denied).
 pub const REQUEST_PENDING_MS: i64 = 10 * 60 * 1000;
@@ -107,6 +121,9 @@ pub struct Secret {
     pub last_used_at: Option<i64>,
     /// field → Daytona secret id, when mirrored as Daytona Secrets (D28).
     pub daytona_secrets: Value,
+    /// "Real value in the agent's environment": agents with Access get the value itself as
+    /// `$ENV` in their box, no card per use (D83 decision 2 as decided 2026-10-18).
+    pub inject_env: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -233,7 +250,7 @@ fn to_json_list(v: &[String]) -> String {
     serde_json::to_string(v).unwrap_or_else(|_| "[]".into())
 }
 
-const SECRET_COLS: &str = "id, user_id, name, env, kind, note, hosts, ask_every_time, expires_at, current_version, created_at, updated_at, last_used_at, daytona_secrets";
+const SECRET_COLS: &str = "id, user_id, name, env, kind, note, hosts, ask_every_time, expires_at, current_version, created_at, updated_at, last_used_at, daytona_secrets, inject_env";
 
 fn row_to_secret(r: &rusqlite::Row<'_>) -> rusqlite::Result<Secret> {
     Ok(Secret {
@@ -251,6 +268,7 @@ fn row_to_secret(r: &rusqlite::Row<'_>) -> rusqlite::Result<Secret> {
         updated_at: r.get(11)?,
         last_used_at: r.get(12)?,
         daytona_secrets: serde_json::from_str(&r.get::<_, String>(13)?).unwrap_or_default(),
+        inject_env: r.get::<_, i64>(14)? != 0,
     })
 }
 
@@ -362,12 +380,12 @@ impl Db {
         self.with(|c| {
             c.execute(
                 "INSERT INTO secrets(id, user_id, name, env, kind, note, hosts, ask_every_time, expires_at, current_version,
-                   created_at, updated_at, last_used_at, daytona_secrets)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+                   created_at, updated_at, last_used_at, daytona_secrets, inject_env)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
                 params![
                     s.id, s.user_id, s.name, s.env, s.kind, s.note, to_json_list(&s.hosts),
                     s.ask_every_time as i64, s.expires_at, s.current_version, s.created_at, s.updated_at,
-                    s.last_used_at, s.daytona_secrets.to_string()
+                    s.last_used_at, s.daytona_secrets.to_string(), s.inject_env as i64
                 ],
             )?;
             c.execute(
@@ -378,17 +396,17 @@ impl Db {
         })
     }
 
-    /// Metadata update (name, env, note, hosts, ask_every_time, expires_at, daytona ids); the
-    /// owner, kind and version are untouched.
+    /// Metadata update (name, env, note, hosts, ask_every_time, inject_env, expires_at, daytona
+    /// ids); the owner, kind and version are untouched.
     pub fn update_secret(&self, s: &Secret) -> Result<()> {
         self.with(|c| {
             c.execute(
                 "UPDATE secrets SET name = ?3, env = ?4, note = ?5, hosts = ?6, ask_every_time = ?7, expires_at = ?8,
-                   updated_at = ?9, daytona_secrets = ?10
+                   updated_at = ?9, daytona_secrets = ?10, inject_env = ?11
                  WHERE id = ?1 AND user_id = ?2",
                 params![
                     s.id, s.user_id, s.name, s.env, s.note, to_json_list(&s.hosts), s.ask_every_time as i64,
-                    s.expires_at, now_ms(), s.daytona_secrets.to_string()
+                    s.expires_at, now_ms(), s.daytona_secrets.to_string(), s.inject_env as i64
                 ],
             )
             .map(|_| ())
@@ -988,11 +1006,64 @@ impl Db {
                     params![id],
                 )?;
                 c.execute(
+                    "DELETE FROM vault_item_env WHERE vault_id = ?1",
+                    params![id],
+                )?;
+                c.execute(
                     "UPDATE secret_requests SET status = 'expired', decided_at = ?2 WHERE target_kind = 'vault' AND target_id = ?1 AND status IN ('pending', 'allowed_once')",
                     params![id, now_ms()],
                 )?;
             }
             Ok(n > 0)
+        })
+    }
+
+    /// Items of one vault the owner put into the environment: `(item ref, env name)`.
+    pub fn vault_item_envs(&self, vault_id: &str) -> Result<Vec<(String, String)>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT item_ref, env FROM vault_item_env WHERE vault_id = ?1 ORDER BY created_at",
+            )?;
+            let rows = st.query_map(params![vault_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect()
+        })
+    }
+
+    /// Env names already taken across the user's vault items, with the item each belongs to.
+    pub fn vault_item_env_owner(
+        &self,
+        user_id: &str,
+        env: &str,
+    ) -> Result<Option<(String, String)>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT e.vault_id, e.item_ref FROM vault_item_env e JOIN vaults v ON v.id = e.vault_id
+                 WHERE v.user_id = ?1 AND e.env = ?2 LIMIT 1",
+                params![user_id, env],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+        })
+    }
+
+    pub fn set_vault_item_env(&self, vault_id: &str, item_ref: &str, env: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO vault_item_env(vault_id, item_ref, env, created_at) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(vault_id, item_ref) DO UPDATE SET env = excluded.env",
+                params![vault_id, item_ref, env, now_ms()],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn clear_vault_item_env(&self, vault_id: &str, item_ref: &str) -> Result<bool> {
+        self.with(|c| {
+            c.execute(
+                "DELETE FROM vault_item_env WHERE vault_id = ?1 AND item_ref = ?2",
+                params![vault_id, item_ref],
+            )
+            .map(|n| n > 0)
         })
     }
 
@@ -1107,6 +1178,7 @@ mod tests {
             updated_at: 1,
             last_used_at: None,
             daytona_secrets: serde_json::json!({}),
+            inject_env: false,
         }
     }
 
