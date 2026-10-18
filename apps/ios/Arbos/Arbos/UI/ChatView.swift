@@ -20,6 +20,8 @@ struct ChatView: View {
     @State private var rows: [Row] = []
     @State private var showModelPicker = false
     @State private var showSettings = false
+    /// Rig: `ARBOS_SHOW=agentsecrets` presents the agent's Secrets page (D83).
+    @State private var showAgentSecrets = false
     @State private var sentOnce = false
     @State private var transcribing = false
     @State private var pending: [AppModel.PendingAttachment] = []
@@ -297,6 +299,12 @@ struct ChatView: View {
                 ModelPickerView(project: project).environmentObject(model).environment(\.theme, theme)
             }
         }
+        .sheet(isPresented: $showAgentSecrets) {
+            NavigationStack { AgentSecretsPage(projectId: projectId) }
+                .environmentObject(model).environment(\.theme, theme)
+                .presentationBackground(theme.bg)
+                .preferredColorScheme(theme.isDark ? .dark : .light)
+        }
         .sheet(isPresented: $showSettings) {
             SettingsView().environmentObject(model).environment(\.theme, theme)
         }
@@ -374,6 +382,7 @@ struct ChatView: View {
                     switch show {
                     case "keyboard": composerFocused = true
                     case "settings": showSettings = true
+                    case "agentsecrets": showAgentSecrets = true
                     case "voice": startCall(.voice)
                     case "model": showModelPicker = true
                     case "profile": openHeaderProfile()

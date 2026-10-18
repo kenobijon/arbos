@@ -280,6 +280,20 @@ impl Shell {
         })
         .detach();
         let secrets = cx.new(|cx| SecretsPanel::new(state.clone(), cx));
+        // Rig: `ARBOS_OPEN_SETTINGS=secrets` (the list), `secrets:<secret env>` (one secret),
+        // `secrets-agent:<project id or name>` (an agent's page).
+        match open_settings.as_deref() {
+            Some("secrets") => secrets.update(cx, |p, cx| p.show(cx)),
+            Some(v) if v.starts_with("secrets:") => {
+                let env = v["secrets:".len()..].to_string();
+                secrets.update(cx, |p, cx| p.show_secret_env(env, cx));
+            }
+            Some(v) if v.starts_with("secrets-agent:") => {
+                let pid = v["secrets-agent:".len()..].to_string();
+                secrets.update(cx, |p, cx| p.show_agent(pid, cx));
+            }
+            _ => {}
+        }
         cx.observe(&secrets, |_, _, cx| cx.notify()).detach();
         cx.subscribe(&secrets, |this, _, event: &SecretsEvent, cx| match event {
             SecretsEvent::Back => {
@@ -330,7 +344,9 @@ impl Shell {
             focus_handle: cx.focus_handle(),
             // `ARBOS_OPEN_SETTINGS=1|bottom|connectors` opens the sheet at launch
             // (`bottom` scrolled to its end, `connectors` the Connectors panel) — rig.
-            settings_open: open_settings.as_deref().is_some_and(|v| v != "connectors"),
+            settings_open: open_settings
+                .as_deref()
+                .is_some_and(|v| v != "connectors" && !v.starts_with("secrets")),
             settings_scroll,
             row_menu: None,
             react_menu: None,
