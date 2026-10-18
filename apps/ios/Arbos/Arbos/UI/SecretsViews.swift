@@ -345,6 +345,7 @@ struct SecretsPage: View {
                 showRigVault = true
             }
             if DebugHooks.settingsPage == "connect" { showConnect = true }
+            if DebugHooks.settingsPage == "new-secret" { showAdd = true }
         }
         .navigationDestination(isPresented: $showRigSecret) {
             if let id = rigSecretId { SecretPage(secretId: id) }
@@ -1327,6 +1328,11 @@ struct VaultPage: View {
     }
 
     private func load() async {
+        if model.isFixture {
+            items = model.fixtureVaultItems
+            activity = model.secrets?.activity ?? []
+            return
+        }
         busy = true
         defer { busy = false }
         if let (v, list, acts) = try? await model.relay.vault(vaultId) {

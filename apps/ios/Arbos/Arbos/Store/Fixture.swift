@@ -179,6 +179,10 @@ extension AppModel {
         let request: [String: Any] = ["id": "fx-req-1", "project_id": "fx-comms", "project_name": "Comms", "name": "GITHUB_LOGIN",
                                       "purpose": "Sign in to post the release notes", "use": "browser_fill", "host": "github.com",
                                       "status": "pending", "created_at": now - 180_000]
+        fixtureVaultItems = [
+            ["ref": "op://Arbos — Research/Stripe", "title": "Stripe", "category": "API_CREDENTIAL", "fields": ["credential", "username"], "env": "STRIPE", "inject_env": true],
+            ["ref": "op://Arbos — Research/Postgres", "title": "Postgres", "category": "DATABASE", "fields": ["password", "hostname", "port", "database"], "env": "POSTGRES", "inject_env": false],
+        ]
         secrets = SecretsOverview.parse(["paused": false, "vaults": [vault], "secrets": [stripe, mailgun, github],
                                          "requests_pending": 1, "requests": [request], "activity": activity, "providers": ["onepassword"]])
         var stripeAccess = stripeAgents[1]

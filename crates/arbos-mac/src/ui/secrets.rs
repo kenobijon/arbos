@@ -158,6 +158,14 @@ impl SecretsPanel {
         cx.notify();
     }
 
+    /// Rig: the New secret form.
+    pub fn show_add(&mut self, cx: &mut Context<Self>) {
+        self.open = true;
+        self.page = Page::Add;
+        self.state.update(cx, |s, cx| s.secrets_refresh(cx));
+        cx.notify();
+    }
+
     /// Rig: the Connect 1Password form.
     pub fn show_connect(&mut self, cx: &mut Context<Self>) {
         self.open = true;

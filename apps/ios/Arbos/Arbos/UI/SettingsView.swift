@@ -34,7 +34,7 @@ struct SettingsView: View {
     /// `ARBOS_SETTINGS_PAGE=appearance` lands on that page (screenshot rig).
     @State private var showAppearancePage = DebugHooks.settingsPage == "appearance"
     @State private var showConnectorsPage = DebugHooks.settingsPage == "connectors"
-    @State private var showSecretsPage = ["secrets", "vault", "connect"].contains(DebugHooks.settingsPage ?? "") || DebugHooks.settingsPage?.hasPrefix("secret:") == true
+    @State private var showSecretsPage = ["secrets", "vault", "connect", "new-secret"].contains(DebugHooks.settingsPage ?? "") || DebugHooks.settingsPage?.hasPrefix("secret:") == true
 
     var body: some View {
         NavigationStack {
