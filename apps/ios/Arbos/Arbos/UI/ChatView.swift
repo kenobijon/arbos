@@ -1002,7 +1002,6 @@ struct ChatView: View {
                 .id(workingText)
             Spacer(minLength: 0)
         }
-        .padding(.leading, 12)
         .accessibilityLabel(workingText)
         .animation(.easeInOut(duration: 0.25), value: workingText)
     }
