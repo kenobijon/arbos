@@ -1240,7 +1240,7 @@ impl SecretsPanel {
                             }))
                     }),
             );
-        let env = secret_env_name(&self.name_input.read(cx).text());
+        let env = secret_env_name(self.name_input.read(cx).text());
         let name_hint = format!(
             "Letters, numbers and _. Agents see it as ${}.",
             if env.is_empty() {
