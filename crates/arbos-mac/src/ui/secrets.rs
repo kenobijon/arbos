@@ -55,9 +55,9 @@ impl AddKind {
 }
 
 /// The note field: what agents may do with the key (the iPhone's `SecretsText` twin).
-const NOTE_PLACEHOLDER: &str =
-    "What may agents do with it? e.g. read-only · confirm before charging · may spend up to $20 without asking";
-const NOTE_HINT: &str = "Agents treat this as the rule for the key — for egress and for programs that use the real value. Say what it is for, what is allowed, and any spend limit. No spending guidance means they show the option and price and confirm before anything that charges.";
+// One line in the Mac field (the iPhone's field is multiline and carries the longer example).
+const NOTE_PLACEHOLDER: &str = "What may agents do with it? e.g. read-only";
+const NOTE_HINT: &str = "Agents follow this as the rule for the key — for egress and for programs that read the real value. Say what it is for, what is allowed, and any spend limit; without one they confirm before anything that charges.";
 const ACCESS_NOTE_HINT: &str = "Shown whenever the agent sees this secret, on top of the secret's own note. Allowed actions and spend limits for this agent, e.g. reports only · may spend up to $5 a day.";
 const VAULT_NOTE_HINT: &str = "The rule for every item in this vault, for the agents you pick: what it is for, what is allowed, any spend limit. No spending guidance means they confirm before anything that charges.";
 
@@ -109,7 +109,7 @@ impl SecretsPanel {
         let name_input = mk(cx, "STRIPE_KEY", false);
         let url_input = mk(cx, "https://github.com/login", false);
         let user_input = mk(cx, "name@example.com", false);
-        let secret_input = mk(cx, "Sent once and encrypted. You won't see it again.", true);
+        let secret_input = mk(cx, "sk_live_…", true);
         let note_input = mk(cx, NOTE_PLACEHOLDER, false);
         let hosts_input = mk(cx, "api.stripe.com", false);
         let token_input = mk(cx, "ops_••••••••••••••••••••", true);
@@ -1344,6 +1344,14 @@ impl SecretsPanel {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.add_kind = k;
                                 this.error = None;
+                                // The value field's example follows the kind (the iPhone's).
+                                this.secret_input.update(cx, |i, _| {
+                                    i.set_placeholder(match k {
+                                        AddKind::Key => "sk_live_…",
+                                        AddKind::Login => "Password",
+                                        AddKind::Text => "Paste the text",
+                                    })
+                                });
                                 cx.notify();
                             }))
                     }),
