@@ -311,7 +311,7 @@ struct SettingsPage<Content: View>: View {
                 VStack(spacing: 24) {
                     // Clear the custom header + the soft end of `headerBlur`
                     // so the first card (Credits Balance, etc.) is not frosted.
-                    Color.clear.frame(height: 72)
+                    Color.clear.frame(height: 82)
                     content()
                     Color.clear.frame(height: 24)
                 }
@@ -333,12 +333,12 @@ struct SettingsPage<Content: View>: View {
                 Spacer()
             }
             .padding(.horizontal, 20)
-            .padding(.top, 6)
+            .padding(.top, 16)
             .overlay {
                 Text(title)
                     .font(.system(size: Theme.body, weight: .semibold))
                     .foregroundStyle(theme.text)
-                    .padding(.top, 6)
+                    .padding(.top, 16)
             }
         }
         .toolbar(.hidden, for: .navigationBar)
