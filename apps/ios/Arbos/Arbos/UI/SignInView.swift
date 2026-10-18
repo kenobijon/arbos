@@ -43,10 +43,10 @@ struct SignInView: View {
                     // Grok: the title sits at ~38 % of the screen height.
                     Spacer(minLength: 250)
                     Text("Arbos")
-                        .font(.system(size: 30, weight: .semibold))
+                        .font(theme.font(30, weight: .semibold))
                         .foregroundStyle(theme.text)
                     Text("Your team of always-on agents\nthat finish the work.")
-                        .font(.system(size: Theme.body))
+                        .font(theme.font(Theme.body))
                         .foregroundStyle(theme.muted)
                         .multilineTextAlignment(.center)
                         .padding(.bottom, 26)
@@ -62,7 +62,7 @@ struct SignInView: View {
                                     GitHubMark().fill(theme.onPrimary).frame(width: 20, height: 20)
                                 }
                                 Text(model.signingIn ? "Signing in…" : "Sign in with GitHub")
-                                    .font(.system(size: Theme.body, weight: .semibold))
+                                    .font(theme.font(Theme.body, weight: .semibold))
                             }
                             .foregroundStyle(theme.onPrimary)
                             .frame(maxWidth: .infinity)
@@ -75,13 +75,13 @@ struct SignInView: View {
 
                         if let err = model.signInError {
                             Text(err)
-                                .font(.system(size: Theme.small))
+                                .font(theme.font(Theme.small))
                                 .foregroundStyle(theme.danger)
                                 .multilineTextAlignment(.center)
                                 .padding(.horizontal, 28)
                         }
                         Text("Any GitHub account works. Your agents run on your own cloud machine.")
-                            .font(.system(size: Theme.tiny))
+                            .font(theme.font(Theme.tiny))
                             .foregroundStyle(theme.muted)
                             .multilineTextAlignment(.center)
                             .padding(.horizontal, 36)
@@ -94,7 +94,7 @@ struct SignInView: View {
                             Text("Advanced")
                             Image(systemName: advanced ? "chevron.up" : "chevron.down").font(.system(size: 11, weight: .semibold))
                         }
-                        .font(.system(size: Theme.tiny))
+                        .font(theme.font(Theme.tiny))
                         .foregroundStyle(theme.muted)
                     }
                     .buttonStyle(.plain)
@@ -108,12 +108,12 @@ struct SignInView: View {
                                     .keyboardType(.URL)
                                     .textInputAutocapitalization(.never)
                                     .autocorrectionDisabled()
-                                    .font(.system(size: Theme.body))
+                                    .font(theme.font(Theme.body))
                                     .foregroundStyle(theme.text)
                                     .onSubmit(applyRelay)
                                 if RelayEndpoint(relayUrl).httpUrl != model.relayUrl {
                                     Button("Use", action: applyRelay)
-                                        .font(.system(size: Theme.small, weight: .semibold))
+                                        .font(theme.font(Theme.small, weight: .semibold))
                                         .foregroundStyle(theme.text)
                                 }
                             }
@@ -122,7 +122,7 @@ struct SignInView: View {
                             .background(RoundedRectangle(cornerRadius: 25, style: .continuous).fill(theme.field))
                             .overlay(RoundedRectangle(cornerRadius: 25, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
                             Text("Self-hosting? Point the app at your own relay. Relays in pairing-code mode show a code field here.")
-                                .font(.system(size: Theme.tiny))
+                                .font(theme.font(Theme.tiny))
                                 .foregroundStyle(theme.muted)
                                 .multilineTextAlignment(.center)
                                 .padding(.horizontal, 12)
@@ -181,7 +181,7 @@ struct PairingFields: View {
                 TextField("", text: $code, prompt: Text("One-time code").foregroundStyle(theme.placeholder))
                     .keyboardType(.numberPad)
                     .textContentType(.oneTimeCode)
-                    .font(.system(size: Theme.body, design: .monospaced))
+                    .font(theme.font(Theme.body, design: .monospaced))
                     .foregroundStyle(theme.text)
                     .onChange(of: code) { _, new in
                         let digits = new.filter(\.isNumber)
@@ -196,7 +196,7 @@ struct PairingFields: View {
                 model.pair(code: code)
             } label: {
                 Text(model.pairingBusy ? "Pairing…" : "Pair this iPhone")
-                    .font(.system(size: Theme.body, weight: .semibold))
+                    .font(theme.font(Theme.body, weight: .semibold))
                     .foregroundStyle(theme.onPrimary)
                     .frame(maxWidth: .infinity)
                     .frame(height: 50)
@@ -206,10 +206,10 @@ struct PairingFields: View {
             .disabled(code.count != 6 || model.pairingBusy)
             .opacity(code.count == 6 && !model.pairingBusy ? 1 : 0.45)
             if let err = model.pairingError {
-                Text(err).font(.system(size: Theme.small)).foregroundStyle(theme.danger).multilineTextAlignment(.center)
+                Text(err).font(theme.font(Theme.small)).foregroundStyle(theme.danger).multilineTextAlignment(.center)
             }
             Text("This relay uses one-time codes: run `arbos-relay pair-code` on it.")
-                .font(.system(size: Theme.tiny)).foregroundStyle(theme.muted).multilineTextAlignment(.center)
+                .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).multilineTextAlignment(.center)
         }
         .padding(.horizontal, 24)
     }

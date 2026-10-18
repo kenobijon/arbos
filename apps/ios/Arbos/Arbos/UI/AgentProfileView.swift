@@ -30,7 +30,7 @@ struct AgentEditSheet: View {
                         hero(project)
                         card {
                             VStack(alignment: .leading, spacing: 12) {
-                                Text("Avatar colour").font(.system(size: Theme.body, weight: .medium)).foregroundStyle(theme.text)
+                                Text("Avatar colour").font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text)
                                 AvatarColorPicker(name: project.name, id: project.id, current: project.effectiveAvatarColorIndex == project.avatarColorIndex ? project.avatarColorIndex : project.avatarColorIndex) { index in
                                     guard !project.shared else { return }
                                     model.pickAvatarColorIndex(projectId, index: index)
@@ -56,13 +56,13 @@ struct AgentEditSheet: View {
                             divider
                             HStack(spacing: 14) {
                                 Image(systemName: "eye")
-                                    .font(.system(size: 16, weight: .medium))
+                                    .font(theme.font(16, weight: .medium))
                                     .foregroundStyle(theme.text)
                                     .frame(width: 28)
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text("Camera vision").font(.system(size: Theme.body)).foregroundStyle(theme.text)
+                                    Text("Camera vision").font(theme.font(Theme.body)).foregroundStyle(theme.text)
                                     Text("On video calls \(project.name) can see your camera while it is on.")
-                                        .font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                                        .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                                 }
                                 Spacer()
                                 Toggle("", isOn: Binding(get: { project.visionEnabled }, set: { model.setVision(projectId, enabled: $0) }))
@@ -95,7 +95,7 @@ struct AgentEditSheet: View {
                         Text(project.shared
                              ? "A shared agent. Its owner pays for it and can remove you any time."
                              : "Mention @\(mentionSlug(project.name)) in a chat with a person to bring this agent in.")
-                            .font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                            .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                             .multilineTextAlignment(.center)
                             .padding(.horizontal, 36).padding(.top, 18)
                         Color.clear.frame(height: 40)
@@ -112,7 +112,7 @@ struct AgentEditSheet: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     if editingName {
-                        Button("Save") { commitName() }.font(.system(size: Theme.body, weight: .semibold))
+                        Button("Save") { commitName() }.font(theme.font(Theme.body, weight: .semibold))
                     } else {
                         Button("Done") { dismiss() }
                     }
@@ -147,7 +147,7 @@ struct AgentEditSheet: View {
                 .animation(.snappy, value: project.color)
             if editingName {
                 TextField("", text: $name, prompt: Text("Agent name").foregroundStyle(theme.placeholder))
-                    .font(.system(size: 24, weight: .semibold))
+                    .font(theme.font(24, weight: .semibold))
                     .foregroundStyle(theme.text)
                     .multilineTextAlignment(.center)
                     .autocorrectionDisabled()
@@ -167,7 +167,7 @@ struct AgentEditSheet: View {
                 } label: {
                     HStack(spacing: 6) {
                         Text(project.name)
-                            .font(.system(size: 24, weight: .semibold))
+                            .font(theme.font(24, weight: .semibold))
                             .foregroundStyle(theme.text)
                             .lineLimit(1)
                         if !project.shared {
@@ -178,7 +178,7 @@ struct AgentEditSheet: View {
                 .buttonStyle(.plain)
             }
             Text("@\(mentionSlug(editingName ? name : project.name))")
-                .font(.system(size: Theme.small)).foregroundStyle(theme.muted)
+                .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
         }
         .frame(maxWidth: .infinity)
     }
@@ -220,13 +220,13 @@ struct AgentEditSheet: View {
     private func row(icon: String, title: String, value: String, chevron: Bool = true) -> some View {
         HStack(spacing: 14) {
             Image(systemName: icon)
-                .font(.system(size: 16, weight: .medium))
+                .font(theme.font(16, weight: .medium))
                 .foregroundStyle(theme.text)
                 .frame(width: 28)
-            Text(title).font(.system(size: Theme.body)).foregroundStyle(theme.text)
+            Text(title).font(theme.font(Theme.body)).foregroundStyle(theme.text)
             Spacer()
             Text(value)
-                .font(.system(size: Theme.small))
+                .font(theme.font(Theme.small))
                 .foregroundStyle(theme.muted)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -344,7 +344,7 @@ struct AgentProfileView: View {
             ProfileTopBar {
                 if isMine {
                     Button("Edit") { showEdit = true }
-                        .font(.system(size: Theme.body, weight: .medium)).foregroundStyle(theme.text)
+                        .font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text)
                         .padding(.horizontal, 14).frame(height: Theme.control)
                         .background(Capsule().fill(theme.field))
                 }
@@ -431,10 +431,10 @@ struct AgentProfileView: View {
             HStack(spacing: 12) {
                 PersonAvatar(url: person.avatarUrl, handle: handle, size: 36, name: person.name, id: person.id, colorIndex: person.avatarColorIndex)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("owner").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                    Text("owner").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                     HStack(spacing: 6) {
-                        Text("@\(handle)").font(.system(size: Theme.body)).foregroundStyle(theme.text)
-                        Text(status.0).font(.system(size: Theme.tiny)).foregroundStyle(status.1 ? Color(hex: "#1084FE")! : theme.muted)
+                        Text("@\(handle)").font(theme.font(Theme.body)).foregroundStyle(theme.text)
+                        Text(status.0).font(theme.font(Theme.tiny)).foregroundStyle(status.1 ? Color(hex: "#1084FE")! : theme.muted)
                     }
                 }
                 Spacer()

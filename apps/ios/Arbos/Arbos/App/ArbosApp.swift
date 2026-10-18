@@ -24,7 +24,7 @@ struct RootView: View {
     @State private var showPrimer = false
 
     private var theme: Theme {
-        Theme.resolve(appearance: model.appearance, surface: model.surface, systemDark: systemScheme == .dark)
+        Theme.resolve(appearance: model.appearance, surface: model.surface, systemDark: systemScheme == .dark, textScale: model.textScale)
     }
 
     var body: some View {

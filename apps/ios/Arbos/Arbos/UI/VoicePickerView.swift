@@ -42,7 +42,7 @@ struct VoicePickerView: View {
                     }
                 } footer: {
                     Text("How \(current.name) sounds on calls. Tap ▶ to hear a sample; tap a row to choose it.")
-                        .font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                        .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                 }
             }
             .scrollContentBackground(.hidden)
@@ -75,7 +75,7 @@ struct VoicePickerView: View {
                         ProgressView().controlSize(.small)
                     } else {
                         Image(systemName: player.isPlaying(key) ? "stop.fill" : "play.fill")
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(theme.font(12, weight: .semibold))
                             .foregroundStyle(theme.text)
                             .offset(x: player.isPlaying(key) ? 0 : 1)
                     }
@@ -93,9 +93,9 @@ struct VoicePickerView: View {
             } label: {
                 HStack(spacing: 10) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(name).font(.system(size: Theme.body, weight: selected ? .semibold : .regular)).foregroundStyle(theme.text)
+                        Text(name).font(theme.font(Theme.body, weight: selected ? .semibold : .regular)).foregroundStyle(theme.text)
                         if let description, !description.isEmpty {
-                            Text(description).font(.system(size: Theme.tiny)).foregroundStyle(theme.muted).lineLimit(2)
+                            Text(description).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).lineLimit(2)
                         }
                     }
                     Spacer()

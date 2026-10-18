@@ -71,6 +71,15 @@ final class AppModel: ObservableObject {
     /// blurs the transcript under it). The key is only written when the user
     /// picks a surface in Settings, so an absent key means "never chose" → Glass,
     /// and an explicit "matte" stays Matte.
+    /// Q6 text size factor (`TextScale.steps`), on-device only.
+    @Published var textScaleSetting: Double = {
+        let v = UserDefaults.standard.double(forKey: TextScale.key)
+        return v > 0 ? v : 1
+    }() {
+        didSet { UserDefaults.standard.set(textScaleSetting, forKey: TextScale.key) }
+    }
+    var textScale: CGFloat { CGFloat(textScaleSetting) }
+
     @Published var surfaceSetting: String = UserDefaults.standard.string(forKey: "surface") ?? Surface.glass.rawValue {
         didSet { UserDefaults.standard.set(surfaceSetting, forKey: "surface") }
     }
@@ -351,6 +360,11 @@ final class AppModel: ObservableObject {
 
     init() {
         LaunchClock.mark("app-init")
+        #if DEBUG
+        if let scale = DebugHooks.textScale, TextScale.steps.contains(where: { abs($0 - CGFloat(scale)) < 0.001 }) {
+            textScaleSetting = scale
+        }
+        #endif
         var saved = UserDefaults.standard.string(forKey: "relayUrl") ?? AppModel.defaultRelayUrl
         var creds: DeviceCredentials?
         #if DEBUG

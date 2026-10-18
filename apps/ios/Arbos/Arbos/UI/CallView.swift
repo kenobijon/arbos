@@ -61,7 +61,7 @@ struct CallScreen: View {
                 ZStack {
                     TimelineView(.periodic(from: .now, by: 1)) { _ in
                         Text(headline)
-                            .font(.system(size: Theme.small, weight: .semibold))
+                            .font(theme.font(Theme.small, weight: .semibold))
                             .foregroundStyle(theme.muted)
                     }
                     HStack {
@@ -94,7 +94,7 @@ struct CallScreen: View {
             if let err = calls.error {
                 VStack {
                     Spacer()
-                    Text(err).font(.system(size: Theme.tiny)).foregroundStyle(theme.danger)
+                    Text(err).font(theme.font(Theme.tiny)).foregroundStyle(theme.danger)
                         .multilineTextAlignment(.center).padding(.horizontal, 32).padding(.bottom, 150)
                 }
             }
@@ -187,7 +187,7 @@ struct CallScreen: View {
                                     GlassCircle(size: 108) { Image(systemName: "person.fill").font(.system(size: 40)).foregroundStyle(theme.muted) }
                                 }
                                 Image(systemName: primary?.cameraOn == true ? "video.fill" : "waveform")
-                                    .font(.system(size: 22, weight: .semibold))
+                                    .font(theme.font(22, weight: .semibold))
                                     .foregroundStyle(theme.muted)
                             }
                         }
@@ -202,11 +202,11 @@ struct CallScreen: View {
                 }
             }
             Text(groupTitle ?? primaryPerson?.displayName ?? calls.call?.startedBy?.displayName ?? "Call")
-                .font(.system(size: 28, weight: .semibold))
+                .font(theme.font(28, weight: .semibold))
                 .foregroundStyle(theme.text)
                 .padding(.top, 28)
             Text(status)
-                .font(.system(size: Theme.body))
+                .font(theme.font(Theme.body))
                 .foregroundStyle(theme.muted)
                 .padding(.top, 6)
                 .multilineTextAlignment(.center)
@@ -246,15 +246,15 @@ struct CallScreen: View {
                 .frame(width: geo.size.width, height: geo.size.height, alignment: .center)
             }
             if let groupTitle {
-                Text(groupTitle).font(.system(size: 22, weight: .semibold)).foregroundStyle(theme.text)
+                Text(groupTitle).font(theme.font(22, weight: .semibold)).foregroundStyle(theme.text)
             }
             Text(status)
-                .font(.system(size: Theme.body))
+                .font(theme.font(Theme.body))
                 .foregroundStyle(theme.muted)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 24)
             if !calls.tiles.isEmpty {
-                Text("\(calls.tiles.count + 1) in the call").font(.system(size: Theme.small)).foregroundStyle(theme.muted)
+                Text("\(calls.tiles.count + 1) in the call").font(theme.font(Theme.small)).foregroundStyle(theme.muted)
             }
         }
         .padding(.top, 12)
@@ -273,7 +273,7 @@ struct CallScreen: View {
             }
             HStack(spacing: 5) {
                 if !micOn { Image(systemName: "mic.slash.fill").font(.system(size: 10, weight: .bold)) }
-                Text(person.displayName).font(.system(size: 12, weight: .semibold)).lineLimit(1)
+                Text(person.displayName).font(theme.font(12, weight: .semibold)).lineLimit(1)
             }
             .foregroundStyle(.white)
             .padding(.horizontal, 8).padding(.vertical, 4)
@@ -317,7 +317,7 @@ struct CallScreen: View {
                 VStack(spacing: 8) {
                     Circle().fill(theme.danger).frame(width: 64, height: 64)
                         .overlay(Image(systemName: "phone.down.fill").font(.system(size: 24, weight: .semibold)).foregroundStyle(.white))
-                    Text("Hang up").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                    Text("Hang up").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                 }
             }
             .buttonStyle(.plain)
@@ -332,7 +332,7 @@ struct CallScreen: View {
                     if on { Circle().fill(theme.text).frame(width: 64, height: 64) } else { GlassCircle(size: 64) { EmptyView() } }
                     Image(systemName: icon).font(.system(size: 22, weight: .medium)).foregroundStyle(on ? theme.bg : theme.text)
                 }
-                Text(label).font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                Text(label).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
             }
         }
         .buttonStyle(.plain)
@@ -358,6 +358,7 @@ struct CallScreen: View {
 /// accessibility label still names the agent.
 struct AgentSeesBadge: View {
     @ObservedObject private var calls = CallManager.shared
+    @Environment(\.theme) private var theme
     var compact: Bool
 
     var body: some View {
@@ -365,7 +366,7 @@ struct AgentSeesBadge: View {
             HStack(spacing: 4) {
                 Image(systemName: "eye.fill").font(.system(size: compact ? 9 : 10, weight: .bold))
                 Text(compact ? "can see" : "\(calls.seeingAgentName ?? "Agent") can see")
-                    .font(.system(size: compact ? 9 : 11, weight: .semibold))
+                    .font(theme.font(compact ? 9 : 11, weight: .semibold))
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
             }
@@ -390,14 +391,14 @@ struct IncomingCallView: View {
             if let inc = calls.incoming {
                 VStack(spacing: 0) {
                     Text("Incoming call")
-                        .font(.system(size: Theme.small, weight: .semibold)).foregroundStyle(theme.muted)
+                        .font(theme.font(Theme.small, weight: .semibold)).foregroundStyle(theme.muted)
                         .padding(.top, 14)
                     Spacer()
                     if let p = inc.from ?? inc.call.startedBy {
                         CallPersonAvatar(person: p, size: 128)
                             .overlay(Circle().strokeBorder(theme.fieldBorder, lineWidth: 1).frame(width: 150, height: 150))
-                        Text(p.displayName).font(.system(size: 28, weight: .semibold)).foregroundStyle(theme.text).padding(.top, 28)
-                        Text("@\(p.handle)").font(.system(size: Theme.body)).foregroundStyle(theme.muted).padding(.top, 4)
+                        Text(p.displayName).font(theme.font(28, weight: .semibold)).foregroundStyle(theme.text).padding(.top, 28)
+                        Text("@\(p.handle)").font(theme.font(Theme.body)).foregroundStyle(theme.muted).padding(.top, 4)
                     }
                     Spacer()
                     HStack(spacing: 72) {
@@ -407,7 +408,7 @@ struct IncomingCallView: View {
                                     .overlay(Image(systemName: "phone.down.fill").font(.system(size: 26, weight: .semibold)).foregroundStyle(.white))
                             }
                             .buttonStyle(.plain)
-                            Text("Decline").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                            Text("Decline").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                         }
                         VStack(spacing: 8) {
                             Button { calls.acceptFromUI() } label: {
@@ -415,7 +416,7 @@ struct IncomingCallView: View {
                                     .overlay(Image(systemName: "phone.fill").font(.system(size: 26, weight: .semibold)).foregroundStyle(.white))
                             }
                             .buttonStyle(.plain)
-                            Text("Accept").font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
+                            Text("Accept").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                         }
                     }
                     .padding(.bottom, 56)
@@ -437,13 +438,13 @@ struct CallBar: View {
             HStack(spacing: 10) {
                 Image(systemName: "phone.fill").font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.online)
                 Text(calls.call?.callId == call.callId ? "On this call" : "On a call")
-                    .font(.system(size: Theme.small, weight: .semibold)).foregroundStyle(theme.text)
+                    .font(theme.font(Theme.small, weight: .semibold)).foregroundStyle(theme.text)
                 if !call.participants.isEmpty {
-                    Text("· \(call.participants.count)").font(.system(size: Theme.small)).foregroundStyle(theme.muted)
+                    Text("· \(call.participants.count)").font(theme.font(Theme.small)).foregroundStyle(theme.muted)
                 }
                 Spacer()
                 Text(calls.call?.callId == call.callId ? "Return" : "Join")
-                    .font(.system(size: Theme.tiny, weight: .semibold)).foregroundStyle(theme.onPrimary)
+                    .font(theme.font(Theme.tiny, weight: .semibold)).foregroundStyle(theme.onPrimary)
                     .padding(.horizontal, 12).frame(height: 28)
                     .background(Capsule().fill(theme.primary))
             }

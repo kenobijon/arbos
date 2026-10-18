@@ -86,7 +86,7 @@ struct FirstLoginView: View {
             }
             if greetingAlpha > 0 {
                 Text(greetingText(state))
-                    .font(.system(size: Theme.body))
+                    .font(theme.font(Theme.body))
                     .lineSpacing(Theme.bodyLineSpacing)
                     .foregroundStyle(theme.text)
                     .padding(.horizontal, Theme.bubbleHPad)
@@ -123,17 +123,17 @@ struct FirstLoginView: View {
                     Image(systemName: "desktopcomputer").font(.system(size: 14))
                     Text(state.title)
                 }
-                .font(.system(size: Theme.body, weight: .semibold))
+                .font(theme.font(Theme.body, weight: .semibold))
                 .foregroundStyle(theme.text)
                 if let error = state.error {
                     Text(error)
-                        .font(.system(size: Theme.small))
+                        .font(theme.font(Theme.small))
                         .foregroundStyle(theme.muted)
                         .multilineTextAlignment(.center)
                 }
                 Button { model.retryFirstLogin() } label: {
                     Text("Retry")
-                        .font(.system(size: Theme.small, weight: .semibold))
+                        .font(theme.font(Theme.small, weight: .semibold))
                         .foregroundStyle(theme.text)
                         .padding(.horizontal, 18)
                         .padding(.vertical, 9)
@@ -148,13 +148,13 @@ struct FirstLoginView: View {
         } else {
             VStack(spacing: 8) {
                 Text(state.title)
-                    .font(.system(size: 22, weight: .semibold))
+                    .font(theme.font(22, weight: .semibold))
                     .foregroundStyle(theme.text)
                     .id("title-\(state.title)")
                     .transition(.asymmetric(insertion: .opacity.combined(with: .offset(y: 6)),
                                             removal: .opacity.combined(with: .offset(y: -6))))
                 Text(state.detail ?? " ")
-                    .font(.system(size: Theme.small))
+                    .font(theme.font(Theme.small))
                     .foregroundStyle(theme.muted)
                     .multilineTextAlignment(.center)
                     .contentTransition(.opacity)
