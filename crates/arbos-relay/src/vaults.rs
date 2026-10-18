@@ -764,25 +764,16 @@ pub async fn get(
             v = v2;
         }
     }
-    let activity: Vec<Value> = state
-        .db
-        .list_audit(
-            &user_id,
-            &AuditQuery {
-                target_id: Some(v.id.clone()),
-                since: Some(now_ms() - ACTIVITY_WINDOW_MS),
-                limit: 50,
-                ..Default::default()
-            },
-        )
-        .unwrap_or_default()
-        .iter()
-        .map(|a| {
-            let mut j = serde_json::to_value(a).unwrap_or(Value::Null);
-            j["name"] = json!(a.target_name);
-            j
-        })
-        .collect();
+    let activity = secrets::activity(
+        &state,
+        &user_id,
+        AuditQuery {
+            target_id: Some(v.id.clone()),
+            since: Some(now_ms() - ACTIVITY_WINDOW_MS),
+            limit: 50,
+            ..Default::default()
+        },
+    );
     Ok(
         Json(json!({ "vault": vault_json(&state, &v), "items": v.items, "activity": activity }))
             .into_response(),
