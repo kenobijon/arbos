@@ -3483,6 +3483,15 @@ impl AppState {
         if let Some(s) = self.secrets.secrets.iter_mut().find(|s| s.id == id) {
             if let Some(a) = body.get("ask_every_time").and_then(|v| v.as_bool()) {
                 s.ask_every_time = a;
+                if a {
+                    s.inject_env = false;
+                }
+            }
+            if let Some(i) = body.get("inject_env").and_then(|v| v.as_bool()) {
+                s.inject_env = i;
+                if i {
+                    s.ask_every_time = false;
+                }
             }
             if let Some(n) = body.get("note").and_then(|v| v.as_str()) {
                 s.note = n.to_string();
@@ -3597,6 +3606,24 @@ impl AppState {
             agents,
             note,
         });
+        cx.notify();
+    }
+
+    /// One vault item's real value into (or out of) the environment of every agent with Access.
+    pub fn vault_item_env(&mut self, id: Id, reference: String, on: bool, cx: &mut Context<Self>) {
+        if let Some(v) = self.secrets.vaults.iter_mut().find(|v| v.id == id) {
+            for it in v.items.iter_mut() {
+                if it["ref"].as_str() == Some(reference.as_str()) {
+                    it["inject_env"] = serde_json::json!(on);
+                }
+            }
+            v.env_items = v
+                .items
+                .iter()
+                .filter(|it| it["inject_env"].as_bool().unwrap_or(false))
+                .count() as i64;
+        }
+        self.command(ClientCommand::VaultItemEnv { id, reference, on });
         cx.notify();
     }
 

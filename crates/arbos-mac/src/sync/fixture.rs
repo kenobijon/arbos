@@ -1033,6 +1033,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     note: item.note.clone(),
                     hosts: item.hosts.clone(),
                     ask_every_time: false,
+                    inject_env: item.inject_env,
                     expires_at: None,
                     version: 1,
                     created_at: now_ms() as i64,
@@ -1059,6 +1060,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 if let Some(s) = view.secrets.iter_mut().find(|s| s.id == id) {
                     if let Some(a) = body.get("ask_every_time").and_then(|v| v.as_bool()) {
                         s.ask_every_time = a;
+                        if a {
+                            s.inject_env = false;
+                        }
+                    }
+                    if let Some(i) = body.get("inject_env").and_then(|v| v.as_bool()) {
+                        s.inject_env = i;
+                        if i {
+                            s.ask_every_time = false;
+                        }
                     }
                     if let Some(n) = body.get("note").and_then(|v| v.as_str()) {
                         s.note = n.to_string();
@@ -1150,6 +1160,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         }
         ClientCommand::VaultConnect { .. }
         | ClientCommand::VaultAccess { .. }
+        | ClientCommand::VaultItemEnv { .. }
         | ClientCommand::VaultReplaceToken { .. }
         | ClientCommand::VaultDisconnect { .. } => {
             let _ = shared.events.send(SyncEvent::Notice(
@@ -1568,6 +1579,7 @@ fn seed_secrets() -> SecretsView {
         note: note.into(),
         hosts: hosts.iter().map(|h| h.to_string()).collect(),
         ask_every_time: false,
+        inject_env: false,
         expires_at: None,
         version: 1,
         created_at: now - days_ago * 86_400_000,
@@ -1576,24 +1588,27 @@ fn seed_secrets() -> SecretsView {
         vault_name: "Arbos".into(),
         agents,
     };
+    let mut stripe = secret(
+        "STRIPE_KEY",
+        "key",
+        "Stripe live key — refunds and reports. Never for payouts.",
+        &["api.stripe.com"],
+        vec![
+            fixture_agent(PROJECT_AFFINE, "Affine", true, "pull refund reports"),
+            fixture_agent(
+                PROJECT_COMMS,
+                "Comms",
+                true,
+                "monthly revenue line in the newsletter",
+            ),
+            fixture_agent(PROJECT_ARBOS, "Arbos", false, ""),
+        ],
+        12,
+    );
+    // The iPhone fixture's twin: the Stripe key is a real value in the agents' environment.
+    stripe.inject_env = true;
     let secrets = vec![
-        secret(
-            "STRIPE_KEY",
-            "key",
-            "Stripe live key — refunds and reports. Never for payouts.",
-            &["api.stripe.com"],
-            vec![
-                fixture_agent(PROJECT_AFFINE, "Affine", true, "pull refund reports"),
-                fixture_agent(
-                    PROJECT_COMMS,
-                    "Comms",
-                    true,
-                    "monthly revenue line in the newsletter",
-                ),
-                fixture_agent(PROJECT_ARBOS, "Arbos", false, ""),
-            ],
-            12,
-        ),
+        stripe,
         secret(
             "MAILGUN_API_KEY",
             "key",
@@ -1695,9 +1710,10 @@ fn seed_secrets() -> SecretsView {
         ],
         limits: serde_json::json!({ "reads_per_hour": 1000, "reads_used_hour": 3 }),
         items: vec![
-            serde_json::json!({ "ref": "op://Arbos - Research/Stripe", "title": "Stripe", "category": "API_CREDENTIAL", "fields": ["credential", "username"], "urls": ["https://dashboard.stripe.com"] }),
-            serde_json::json!({ "ref": "op://Arbos - Research/Postgres", "title": "Postgres", "category": "DATABASE", "fields": ["password", "hostname", "port", "database"], "urls": [] }),
+            serde_json::json!({ "ref": "op://Arbos - Research/Stripe", "title": "Stripe", "category": "API_CREDENTIAL", "fields": ["credential", "username"], "urls": ["https://dashboard.stripe.com"], "env": "STRIPE", "inject_env": true }),
+            serde_json::json!({ "ref": "op://Arbos - Research/Postgres", "title": "Postgres", "category": "DATABASE", "fields": ["password", "hostname", "port", "database"], "urls": [], "env": "POSTGRES", "inject_env": false }),
         ],
+        env_items: 1,
     }];
     SecretsView {
         paused: false,

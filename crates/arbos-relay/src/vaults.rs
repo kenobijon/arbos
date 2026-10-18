@@ -421,8 +421,64 @@ fn vault_json(state: &AppState, v: &Vault) -> Value {
         "status": v.status, "last_error": v.last_error, "last_refreshed_at": v.last_refreshed_at,
         "created_at": v.created_at, "agents": agents,
         // Cached names only (title, category, fields, urls): small, and the Mac shows them inline.
-        "items": v.items,
+        "items": items_json(state, v),
+        "env_items": state.db.vault_item_envs(&v.id).map(|e| e.len()).unwrap_or(0),
     })
+}
+
+/// The cached items with the owner's env mapping on each: `env` (the name agents get the real
+/// value under, or the name they would get) and `inject_env` (whether they do).
+pub(crate) fn items_json(state: &AppState, v: &Vault) -> Vec<Value> {
+    let envs = state.db.vault_item_envs(&v.id).unwrap_or_default();
+    v.items
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|mut it| {
+            let r = item_base(it["ref"].as_str().unwrap_or(""));
+            match envs.iter().find(|(i, _)| *i == r) {
+                Some((_, env)) => {
+                    it["env"] = json!(env);
+                    it["inject_env"] = json!(true);
+                }
+                None => {
+                    it["env"] = json!(secrets::env_from_name(it["title"].as_str().unwrap_or("")));
+                    it["inject_env"] = json!(false);
+                }
+            }
+            it
+        })
+        .collect()
+}
+
+/// Variable names for one vault item's fields: `ENV` for the main field (credential, password,
+/// note, key…), `ENV_FIELD` for the rest (`username`, `hostname`…).
+pub(crate) fn item_env_vars(env: &str, fields: &[String]) -> Vec<(String, String)> {
+    const PRIMARY: [&str; 6] = [
+        "credential",
+        "password",
+        "notesPlain",
+        "private_key",
+        "number",
+        "value",
+    ];
+    let primary = PRIMARY
+        .iter()
+        .find(|p| fields.iter().any(|f| f == *p))
+        .map(|p| (*p).to_owned())
+        .or_else(|| fields.first().cloned());
+    fields
+        .iter()
+        .map(|f| {
+            let name = if Some(f) == primary.as_ref() {
+                env.to_owned()
+            } else {
+                format!("{env}_{}", f.to_ascii_uppercase())
+            };
+            (f.clone(), name)
+        })
+        .collect()
 }
 
 fn access_json(state: &AppState, a: &Access) -> Value {
@@ -475,6 +531,7 @@ pub(crate) fn box_items(state: &AppState, user_id: &str, project_id: &str) -> Ve
     for v in state.db.list_vaults(user_id).unwrap_or_default() {
         let access = state.db.access(project_id, "vault", &v.id).ok().flatten();
         let enabled = access.as_ref().is_some_and(|a| a.enabled);
+        let envs = state.db.vault_item_envs(&v.id).unwrap_or_default();
         for it in v.items.as_array().cloned().unwrap_or_default() {
             let r = it["ref"].as_str().unwrap_or("").to_owned();
             let hosts: Vec<String> = access
@@ -497,8 +554,14 @@ pub(crate) fn box_items(state: &AppState, user_id: &str, project_id: &str) -> Ve
                 .iter()
                 .map(|f| (f.clone(), Value::String(format!("{base}/{f}"))))
                 .collect();
+            let env = envs
+                .iter()
+                .find(|(i, _)| *i == item_base(&r))
+                .map(|(_, e)| e.clone());
             out.push(json!({
                 "id": format!("{}:{}", v.id, it["id"].as_str().unwrap_or("")), "name": it["title"], "env": Value::Null,
+                "inject_env": env.is_some(), "real_env": env,
+                "real_vars": env.as_deref().map(|e| item_env_vars(e, &fields).into_iter().map(|(_, n)| n).collect::<Vec<_>>()),
                 "kind": it["category"].as_str().map(|c| c.to_ascii_lowercase()).unwrap_or_default(),
                 "note": "", "hosts": hosts, "ref": r, "fields": fields, "placeholders": placeholders,
                 "vault_name": v.name, "vault_id": v.id, "access_id": access.as_ref().map(|a| a.id.clone()),
@@ -509,6 +572,172 @@ pub(crate) fn box_items(state: &AppState, user_id: &str, project_id: &str) -> Ve
         }
     }
     out
+}
+
+/// Real values of the connected-vault items this project's box puts in its environment: the
+/// owner mapped the item to an env name, the agent's vault Access is on, the token is healthy.
+/// Resolved here (cache first); a failed read skips the item and is logged, never fatal.
+pub(crate) async fn box_env_items(state: &AppState, user_id: &str, project_id: &str) -> Vec<Value> {
+    let mut out = Vec::new();
+    for v in state.db.list_vaults(user_id).unwrap_or_default() {
+        if v.status != "ok" {
+            continue;
+        }
+        let Some(access) = state
+            .db
+            .access(project_id, "vault", &v.id)
+            .ok()
+            .flatten()
+            .filter(|a| a.enabled)
+        else {
+            continue;
+        };
+        let envs = state.db.vault_item_envs(&v.id).unwrap_or_default();
+        if envs.is_empty() {
+            continue;
+        }
+        for it in v.items.as_array().cloned().unwrap_or_default() {
+            let base = item_base(it["ref"].as_str().unwrap_or(""));
+            let Some((_, env)) = envs.iter().find(|(i, _)| *i == base) else {
+                continue;
+            };
+            let fields: Vec<String> = it["fields"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|f| f.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut vars = serde_json::Map::new();
+            for (field, name) in item_env_vars(env, &fields) {
+                match resolve(state, &v, &format!("{base}/{field}")).await {
+                    Ok(value) => {
+                        vars.insert(name, Value::String(value));
+                    }
+                    Err(e) => {
+                        tracing::warn!(vault = %v.name, item = %base, field, error = ?e.1, "vault item env: read failed");
+                    }
+                }
+            }
+            if vars.is_empty() {
+                continue;
+            }
+            audit(
+                state,
+                user_id,
+                AuditEntry {
+                    project_id: Some(project_id.to_owned()),
+                    access_id: Some(access.id.clone()),
+                    use_kind: Some("env".into()),
+                    detail: json!({ "ref": base, "env": env, "vars": vars.keys().collect::<Vec<_>>() }),
+                    ..entry("injected", &v, &format!("agent:{project_id}"))
+                },
+            );
+            out.push(json!({ "id": format!("{}:{}", v.id, it["id"].as_str().unwrap_or("")), "name": it["title"],
+                "env": env, "kind": it["category"].as_str().map(|c| c.to_ascii_lowercase()).unwrap_or_default(),
+                "ref": base, "vault_name": v.name, "vars": vars }));
+        }
+    }
+    out
+}
+
+#[derive(Deserialize)]
+pub struct ItemEnvBody {
+    #[serde(rename = "ref")]
+    pub reference: String,
+    pub inject_env: bool,
+    /// The env name; defaults to one derived from the item's title.
+    #[serde(default)]
+    pub env: Option<String>,
+}
+
+/// `PUT /vaults/{id}/items/env { ref, inject_env, env? }` → `{ vault, items }`: put one item's
+/// real value into the environment of every agent with Access to this vault (or take it out).
+pub async fn put_item_env(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    Json(b): Json<ItemEnvBody>,
+) -> ApiResult {
+    let user_id = device_user(&principal)?;
+    let v = load_vault(&state, &user_id, &id)?;
+    let base = item_base(b.reference.trim());
+    let item = v
+        .items
+        .as_array()
+        .and_then(|a| {
+            a.iter()
+                .find(|it| item_base(it["ref"].as_str().unwrap_or("")) == base)
+        })
+        .cloned()
+        .ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "no such item in this vault",
+            )
+        })?;
+    let title = item["title"].as_str().unwrap_or("").to_owned();
+    let env = if b.inject_env {
+        let wanted = b
+            .env
+            .as_deref()
+            .filter(|e| !e.trim().is_empty())
+            .unwrap_or(&title);
+        let (_, env) = secrets::validate_name(wanted)?;
+        if state
+            .db
+            .secret_by_name(&user_id, &env)
+            .map_err(internal)?
+            .is_some()
+            || state
+                .db
+                .vault_item_env_owner(&user_id, &env)
+                .map_err(internal)?
+                .is_some_and(|(vid, r)| vid != v.id || r != base)
+        {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "already_exists",
+                format!("${env} is already another secret's name."),
+            ));
+        }
+        state
+            .db
+            .set_vault_item_env(&v.id, &base, &env)
+            .map_err(internal)?;
+        Some(env)
+    } else {
+        state
+            .db
+            .clear_vault_item_env(&v.id, &base)
+            .map_err(internal)?;
+        None
+    };
+    audit(
+        &state,
+        &user_id,
+        AuditEntry {
+            detail: json!({ "ref": base, "item": title, "env": env }),
+            ..entry(
+                if env.is_some() { "env_on" } else { "env_off" },
+                &v,
+                &format!("user:{user_id}"),
+            )
+        },
+    );
+    for a in state
+        .db
+        .accesses_of_target("vault", &v.id)
+        .unwrap_or_default()
+    {
+        after_access_change(&state, &v, &a);
+    }
+    Ok(
+        Json(json!({ "vault": vault_json(&state, &v), "items": items_json(&state, &v) }))
+            .into_response(),
+    )
 }
 
 pub(crate) fn admin_status(state: &AppState) -> Value {
@@ -777,7 +1006,7 @@ pub async fn get(
         },
     );
     Ok(
-        Json(json!({ "vault": vault_json(&state, &v), "items": v.items, "activity": activity }))
+        Json(json!({ "vault": vault_json(&state, &v), "items": items_json(&state, &v), "activity": activity }))
             .into_response(),
     )
 }
@@ -1434,6 +1663,33 @@ pub async fn put_item_hosts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn item_env_vars_name_the_main_field_plainly() {
+        let api = ["credential".to_owned(), "username".to_owned()];
+        assert_eq!(
+            item_env_vars("STRIPE", &api),
+            vec![
+                ("credential".to_owned(), "STRIPE".to_owned()),
+                ("username".to_owned(), "STRIPE_USERNAME".to_owned())
+            ]
+        );
+        let note = ["notesPlain".to_owned()];
+        assert_eq!(
+            item_env_vars("RUNBOOK", &note),
+            vec![("notesPlain".to_owned(), "RUNBOOK".to_owned())]
+        );
+        let db = [
+            "username".to_owned(),
+            "password".to_owned(),
+            "hostname".to_owned(),
+        ];
+        let names: Vec<String> = item_env_vars("PG", &db)
+            .into_iter()
+            .map(|(_, n)| n)
+            .collect();
+        assert_eq!(names, vec!["PG_USERNAME", "PG", "PG_HOSTNAME"]);
+    }
 
     #[test]
     fn refs_are_found_and_pinned_per_item() {

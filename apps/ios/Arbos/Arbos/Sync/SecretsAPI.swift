@@ -120,4 +120,10 @@ extension RelayAPI {
     func deleteVault(_ id: String) async throws {
         _ = try await request("DELETE", "/vaults/\(id)")
     }
+
+    /// `PUT /vaults/{id}/items/env { ref, inject_env }` → the vault's items with the mapping.
+    func setVaultItemEnv(_ id: String, ref: String, on: Bool) async throws -> [[String: Any]] {
+        let v = try await json("PUT", "/vaults/\(id)/items/env", body: ["ref": ref, "inject_env": on]) as? [String: Any]
+        return (v?["items"] as? [[String: Any]]) ?? []
+    }
 }

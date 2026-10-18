@@ -94,6 +94,17 @@ extension AppModel {
     }
 
     func patchSecret(_ secretId: String, _ body: [String: Any]) {
+        // The two switches are exclusive on the relay; show that at once.
+        if let i = secrets?.secrets.firstIndex(where: { $0.id == secretId }) {
+            if let on = body["inject_env"] as? Bool {
+                secrets?.secrets[i].injectEnv = on
+                if on { secrets?.secrets[i].askEveryTime = false }
+            }
+            if let ask = body["ask_every_time"] as? Bool {
+                secrets?.secrets[i].askEveryTime = ask
+                if ask { secrets?.secrets[i].injectEnv = false }
+            }
+        }
         Task { await secretsAction("Save") { _ = try await self.relay.patchSecret(secretId, body) } }
     }
 

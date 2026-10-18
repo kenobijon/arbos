@@ -657,6 +657,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/projects/{id}/secrets", get(secrets::project_secrets))
         .route("/me/secrets/settings", put(secrets::put_settings))
         .route("/box/secrets", get(secrets::box_list))
+        .route("/box/secrets/env", get(secrets::box_env))
         .route("/box/secrets/request", post(secrets::box_request))
         .route(
             "/box/secrets/requests/{id}",
@@ -675,6 +676,7 @@ async fn main() -> anyhow::Result<()> {
             "/vaults/{id}/access/{project_id}/hosts",
             put(vaults::put_item_hosts),
         )
+        .route("/vaults/{id}/items/env", put(vaults::put_item_env))
         .route("/admin/secrets", get(secrets::admin_status))
         .route("/admin/secrets/pause", post(secrets::admin_pause))
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024))

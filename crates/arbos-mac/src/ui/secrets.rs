@@ -59,6 +59,8 @@ pub struct SecretsPanel {
     open: bool,
     page: Page,
     add_kind: AddKind,
+    /// Add form: "Real value in the agent's environment" from the start.
+    add_inject: bool,
     /// Agents picked in the Add / Connect / Give-access forms.
     picked: Vec<Id>,
     /// Inline pickers open on the Secret / Agent pages.
@@ -117,6 +119,7 @@ impl SecretsPanel {
             open: false,
             page: Page::List,
             add_kind: AddKind::Key,
+            add_inject: false,
             picked: Vec::new(),
             giving: false,
             replacing: false,
@@ -299,7 +302,9 @@ impl SecretsPanel {
             note: self.note_input.read(cx).text().trim().to_string(),
             hosts: self.hosts_from(cx),
             agents: self.picked.clone(),
+            inject_env: self.add_inject,
         };
+        self.add_inject = false;
         self.state.update(cx, |s, cx| s.secret_add(item, cx));
         self.go(Page::List, cx);
     }
@@ -1051,6 +1056,49 @@ impl SecretsPanel {
             theme,
         )));
 
+        // Real value in the agent's environment (D83 decision 2 as decided).
+        let inject = s.inject_env;
+        let sid_inject = sid.clone();
+        let row = Self::row(
+            "secret-inject",
+            "terminal",
+            "Real value in the environment",
+            Some(if inject {
+                "On · agents with access see the value".to_string()
+            } else {
+                format!("Agents with access get {} itself", s.real_var_list())
+            }),
+            false,
+            theme,
+        )
+        .border_b_0();
+        let g = Self::group(theme).child(Self::switch_row("x", row, inject, theme).on_click(
+            cx.listener(move |this, _, _, cx| {
+                let id = sid_inject.clone();
+                this.state.update(cx, |st, cx| {
+                    st.secret_patch(id, serde_json::json!({ "inject_env": !inject }), cx)
+                });
+            }),
+        ));
+        let note = if inject {
+            format!(
+                "{} is a normal variable in the box of every agent with access: shell commands and programs read it directly, nothing asks you. Turning access or Pause all off removes it within seconds. Arbos still redacts the value from chat and logs as best it can.",
+                s.real_var_list()
+            )
+        } else {
+            format!(
+                "Off: agents get a placeholder and the relay fills the value in only through egress, for the allowed hosts. Turn this on for tools that must read ${} themselves, such as CLIs and SDKs.",
+                s.env
+            )
+        };
+        body = body.child(
+            div()
+                .flex()
+                .flex_col()
+                .child(g)
+                .child(Self::footnote(note, theme)),
+        );
+
         // Agents.
         let mut g = Self::group(theme);
         for a in &s.agents {
@@ -1356,6 +1404,57 @@ impl SecretsPanel {
                 Some("Leave empty to decide the first time an agent uses it."),
                 theme,
             ));
+        let inject = self.add_inject;
+        let env_preview = {
+            let n = secret_env_name(self.name_input.read(cx).text().trim());
+            if n.is_empty() {
+                "NAME".to_string()
+            } else {
+                n
+            }
+        };
+        form = form.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(5.0))
+                .child(
+                    div()
+                        .text_size(px(TEXT_TINY))
+                        .text_color(theme.text_muted)
+                        .child("In the agent's environment"),
+                )
+                .child(
+                    div()
+                        .id("add-inject")
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(10.0))
+                        .cursor_pointer()
+                        .child(
+                            div()
+                                .text_size(px(TEXT_BODY))
+                                .text_color(theme.text)
+                                .child("Real value in the agent's environment"),
+                        )
+                        .child(glass::switch(inject, theme))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.add_inject = !inject;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    div()
+                        .text_size(px(TEXT_TINY))
+                        .text_color(theme.text_muted)
+                        .child(if inject {
+                            format!("Agents with access get ${env_preview} itself: CLIs, SDKs and scripts read it directly. Nothing asks you per use.")
+                        } else {
+                            "Off: agents get a placeholder; the relay fills the value in only through egress.".to_string()
+                        }),
+                ),
+        );
         if let Some(err) = &self.error {
             form = form.child(
                 div()
@@ -1405,17 +1504,24 @@ impl SecretsPanel {
         let mut g = Self::group(theme);
         for item in &data.items {
             let (glyph, title, sub) = if let Some(v) = &item.vault {
-                (
-                    "lock",
-                    v.name.clone(),
-                    format!(
-                        "everything in this vault · {} item{}",
-                        v.items_count,
-                        if v.items_count == 1 { "" } else { "s" }
-                    ),
-                )
+                let mut sub = format!(
+                    "everything in this vault · {} item{}",
+                    v.items_count,
+                    if v.items_count == 1 { "" } else { "s" }
+                );
+                if v.env_items > 0 {
+                    sub.push_str(&format!(
+                        " · {} as real value{}",
+                        v.env_items,
+                        if v.env_items == 1 { "" } else { "s" }
+                    ));
+                }
+                ("lock", v.name.clone(), sub)
             } else {
                 let mut sub: Vec<String> = Vec::new();
+                if item.secret.as_ref().is_some_and(|s| s.inject_env) {
+                    sub.push("Real value in its environment".into());
+                }
                 if !item.note.is_empty() {
                     sub.push(item.note.clone());
                 }
@@ -1576,8 +1682,23 @@ impl SecretsPanel {
         let note = if data.items.is_empty() {
             format!("{name} has no secrets yet.")
         } else {
+            let real: Vec<&str> = data
+                .items
+                .iter()
+                .filter_map(|i| i.secret.as_ref())
+                .filter(|s| s.inject_env)
+                .map(|s| s.env.as_str())
+                .collect();
+            let except = if real.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    ", except {} — a real value in its environment",
+                    real.join(", ")
+                )
+            };
             format!(
-                "{name} uses these without seeing them. Turn one off and it stops within seconds."
+                "{name} uses these without seeing them{except}. Turn one off and it stops within seconds."
             )
         };
         body = body.child(Self::section("Secrets", g, Some(note), theme));
@@ -1846,39 +1967,67 @@ impl SecretsPanel {
         if v.items.is_empty() {
             g = g.child(Self::footnote("No items listed yet.", theme).pb(px(8.0)));
         }
-        for it in v.items.iter().take(50) {
+        for (i, it) in v.items.iter().take(50).enumerate() {
             let fields: Vec<&str> = it["fields"]
                 .as_array()
                 .map(|a| a.iter().filter_map(|f| f.as_str()).collect())
                 .unwrap_or_default();
+            let on = it["inject_env"].as_bool().unwrap_or(false);
+            let env = it["env"].as_str().unwrap_or("").to_string();
+            let reference = it["ref"].as_str().unwrap_or("").to_string();
+            let vid = v.id.clone();
             g = g.child(
                 div()
+                    .id(format!("vault-item-{i}"))
                     .flex()
-                    .flex_col()
-                    .gap(px(2.0))
+                    .items_center()
+                    .gap(px(10.0))
                     .px(px(16.0))
                     .py(px(8.0))
                     .border_b_1()
                     .border_color(theme.border)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.surface_2))
                     .child(
                         div()
-                            .text_size(px(TEXT_BODY))
-                            .text_color(theme.text)
-                            .child(it["title"].as_str().unwrap_or("Item").to_string()),
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .child(
+                                div()
+                                    .text_size(px(TEXT_BODY))
+                                    .text_color(theme.text)
+                                    .child(it["title"].as_str().unwrap_or("Item").to_string()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(TEXT_TINY))
+                                    .text_color(if on { theme.accent } else { theme.text_muted })
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .child(if on {
+                                        format!("Real value as ${env} in the agents' environment")
+                                    } else {
+                                        fields.join(" · ")
+                                    }),
+                            ),
                     )
-                    .child(
-                        div()
-                            .text_size(px(TEXT_TINY))
-                            .text_color(theme.text_muted)
-                            .child(fields.join(" · ")),
-                    ),
+                    .child(glass::switch(on, theme))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let (vid, reference) = (vid.clone(), reference.clone());
+                        this.state
+                            .update(cx, |st, cx| st.vault_item_env(vid, reference, !on, cx));
+                    })),
             );
         }
         body = body.child(Self::section(
             "Items",
             g,
             Some(format!(
-                "Agents reference an item as op://{}/<item>/<field>.",
+                "Agents reference an item as op://{}/<item>/<field>. Switch an item on to put its real value in the environment of every agent with access, as $NAME.",
                 v.name
             )),
             theme,

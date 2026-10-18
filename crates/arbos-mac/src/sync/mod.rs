@@ -555,6 +555,12 @@ pub enum ClientCommand {
     VaultDisconnect {
         id: Id,
     },
+    /// `PUT /vaults/{id}/items/env`: one item's real value into (or out of) the agents' environment.
+    VaultItemEnv {
+        id: Id,
+        reference: String,
+        on: bool,
+    },
     /// `PUT /vaults/{id}/token`: a new service-account token (validated by the relay first).
     VaultReplaceToken {
         id: Id,

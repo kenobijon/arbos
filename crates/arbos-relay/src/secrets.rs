@@ -380,7 +380,7 @@ pub(crate) fn secret_json(state: &AppState, s: &Secret) -> Value {
     };
     json!({
         "id": s.id, "name": s.name, "env": s.env, "kind": s.kind, "note": s.note, "hosts": s.hosts,
-        "ask_every_time": s.ask_every_time, "expires_at": s.expires_at, "version": s.current_version,
+        "ask_every_time": s.ask_every_time, "inject_env": s.inject_env, "expires_at": s.expires_at, "version": s.current_version,
         "created_at": s.created_at, "updated_at": s.updated_at, "last_used_at": s.last_used_at,
         "username": username, "vault_name": ARBOS_VAULT_NAME,
         "ref": placeholder(&s.env, if s.kind == "login" { "password" } else { "value" }),
@@ -733,7 +733,8 @@ fn after_access_change(state: &AppState, s: &Secret, a: &Access) {
         &a.project_id,
         "secret_access_changed",
         json!({ "access_id": a.id, "ref": placeholder(&s.env, if s.kind == "login" { "password" } else { "value" }),
-            "env": s.env, "name": s.name, "kind": s.kind, "enabled": a.enabled, "hosts": s.hosts.iter().chain(a.hosts.iter()).collect::<Vec<_>>() }),
+            "env": s.env, "name": s.name, "kind": s.kind, "enabled": a.enabled, "inject_env": s.inject_env,
+            "hosts": s.hosts.iter().chain(a.hosts.iter()).collect::<Vec<_>>() }),
     );
     spawn_remount(state.clone(), s.user_id.clone());
 }
@@ -804,6 +805,8 @@ pub struct CreateBody {
     pub hosts: Option<Vec<String>>,
     #[serde(default)]
     pub ask_every_time: Option<bool>,
+    #[serde(default)]
+    pub inject_env: Option<bool>,
     #[serde(default)]
     pub expires_at: Option<i64>,
     #[serde(default)]
@@ -877,13 +880,16 @@ pub async fn create(
         kind,
         note: b.note.unwrap_or_default().chars().take(500).collect(),
         hosts,
-        ask_every_time: b.ask_every_time.unwrap_or(false),
+        ask_every_time: b.ask_every_time.unwrap_or(false) && !b.inject_env.unwrap_or(false),
         expires_at: b.expires_at,
         current_version: 1,
         created_at: now,
         updated_at: now,
         last_used_at: None,
         daytona_secrets: json!({}),
+        // Real value in the environment is a choice the owner makes; it also turns off
+        // Ask every time, which has nothing to ask once the value is just there.
+        inject_env: b.inject_env.unwrap_or(false),
     };
     let v1 = SecretVersion {
         secret_id: id.clone(),
@@ -1030,6 +1036,10 @@ pub struct PatchBody {
     pub hosts: Option<Vec<String>>,
     #[serde(default)]
     pub ask_every_time: Option<bool>,
+    /// "Real value in the agent's environment" (D83 decision 2 as decided). On and Ask every
+    /// time are exclusive: turning either on turns the other off.
+    #[serde(default)]
+    pub inject_env: Option<bool>,
     /// `null` clears; absent keeps.
     #[serde(default, deserialize_with = "deserialize_double_option")]
     pub expires_at: Option<Option<i64>>,
@@ -1080,6 +1090,16 @@ pub async fn patch(
     }
     if let Some(a) = b.ask_every_time {
         s.ask_every_time = a;
+        if a {
+            s.inject_env = false;
+        }
+    }
+    let inject_changed = b.inject_env.is_some_and(|i| i != s.inject_env);
+    if let Some(i) = b.inject_env {
+        s.inject_env = i;
+        if i {
+            s.ask_every_time = false;
+        }
     }
     if let Some(e) = b.expires_at {
         s.expires_at = e;
@@ -1089,11 +1109,23 @@ pub async fn patch(
         &state,
         &user_id,
         AuditEntry {
-            detail: json!({ "hosts": s.hosts, "ask_every_time": s.ask_every_time, "expires_at": s.expires_at }),
-            ..entry("updated", &s, &format!("user:{user_id}"))
+            detail: json!({ "hosts": s.hosts, "ask_every_time": s.ask_every_time, "inject_env": s.inject_env, "expires_at": s.expires_at }),
+            ..entry(
+                if inject_changed {
+                    if s.inject_env {
+                        "env_on"
+                    } else {
+                        "env_off"
+                    }
+                } else {
+                    "updated"
+                },
+                &s,
+                &format!("user:{user_id}"),
+            )
         },
     );
-    if hosts_changed {
+    if hosts_changed || inject_changed {
         for a in state
             .db
             .accesses_of_target("secret", &s.id)
@@ -1359,7 +1391,8 @@ pub async fn project_secrets(
             if let Some(s) = state.db.secret(&owner, &a.target_id).map_err(internal)? {
                 let mut v = access_json(&state, &a);
                 v["secret"] = json!({ "id": s.id, "name": s.name, "env": s.env, "kind": s.kind, "note": s.note,
-                    "hosts": s.hosts, "last_used_at": s.last_used_at, "vault_name": ARBOS_VAULT_NAME });
+                    "hosts": s.hosts, "last_used_at": s.last_used_at, "vault_name": ARBOS_VAULT_NAME,
+                    "inject_env": s.inject_env });
                 items.push(v);
             }
         } else if let Some(v) = crate::vaults::access_item_json(&state, &owner, &a) {
@@ -1640,12 +1673,81 @@ pub(crate) fn box_items(state: &AppState, user_id: &str, project_id: &str) -> Ve
             "ref": placeholder(&s.env, if s.kind == "login" { "password" } else { "value" }),
             "fields": fields, "placeholders": placeholders, "vault_name": ARBOS_VAULT_NAME,
             "access_id": access.as_ref().map(|a| a.id.clone()), "enabled": enabled,
-            "ask_every_time": s.ask_every_time, "expires_at": s.expires_at,
+            "ask_every_time": s.ask_every_time, "inject_env": s.inject_env, "expires_at": s.expires_at,
             "scope": access.as_ref().map(|a| json!({ "kind": a.scope_kind, "chat_id": a.scope_chat_id })),
         }));
     }
     items.extend(crate::vaults::box_items(state, user_id, project_id));
     items
+}
+
+/// `GET /box/secrets/env` → `{ paused, items: [{ id, name, env, kind, vault_name, vars: { NAME: value } }] }`:
+/// the real values this project's box puts in its environment — secrets whose owner switched
+/// "Real value in the agent's environment" on and gave this agent Access, plus connected-vault
+/// items the owner mapped to an env name (resolved here, never in the box). Empty while paused.
+/// Every value handed over is audited as `injected` (D83 decision 2 as decided 2026-10-18).
+pub async fn box_env(
+    State(state): State<AppState>,
+    principal: Principal,
+    headers: HeaderMap,
+) -> ApiResult {
+    let (user_id, project_id) = box_project(&state, &principal, &headers)?;
+    let paused = state
+        .db
+        .secrets_settings(&user_id)
+        .map(|s| s.paused)
+        .unwrap_or(false);
+    let mut items = Vec::new();
+    if !paused {
+        let dek = user_dek(&state, &user_id).map_err(internal)?;
+        for s in state.db.list_secrets(&user_id).map_err(internal)? {
+            if !s.inject_env || s.expires_at.is_some_and(|t| t < now_ms()) {
+                continue;
+            }
+            let Some(a) = state
+                .db
+                .access(&project_id, "secret", &s.id)
+                .map_err(internal)?
+                .filter(|a| a.enabled)
+            else {
+                continue;
+            };
+            let plain = plain_of(&state, &dek, &s).map_err(internal)?;
+            let vars = env_vars(&s.env, &plain.current);
+            audit(
+                &state,
+                &user_id,
+                AuditEntry {
+                    project_id: Some(project_id.clone()),
+                    access_id: Some(a.id.clone()),
+                    use_kind: Some("env".into()),
+                    detail: json!({ "vars": vars.keys().collect::<Vec<_>>() }),
+                    ..entry("injected", &s, &format!("agent:{project_id}"))
+                },
+            );
+            items.push(
+                json!({ "id": s.id, "name": s.name, "env": s.env, "kind": s.kind,
+                "vault_name": ARBOS_VAULT_NAME, "vars": vars }),
+            );
+        }
+        items.extend(crate::vaults::box_env_items(&state, &user_id, &project_id).await);
+    }
+    Ok(Json(json!({ "paused": paused, "items": items })).into_response())
+}
+
+/// `ENV` for a one-field secret, `ENV_FIELD` for logins; `url` is metadata, not a variable.
+pub(crate) fn env_vars(env: &str, fields: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    let vars: Vec<(&String, &String)> = fields.iter().filter(|(k, _)| *k != "url").collect();
+    vars.into_iter()
+        .map(|(k, v)| {
+            let name = if k == "value" || fields.len() == 1 {
+                env.to_owned()
+            } else {
+                format!("{env}_{}", k.to_ascii_uppercase())
+            };
+            (name, v.clone())
+        })
+        .collect()
 }
 
 /// `GET /box/secrets` → `{ paused, items }`.
@@ -2216,6 +2318,7 @@ pub fn migrate_f8(state: &AppState) -> anyhow::Result<()> {
                 updated_at: now,
                 last_used_at: it.last_used_at,
                 daytona_secrets: it.daytona_secrets.clone(),
+                inject_env: false,
             };
             let v1 = SecretVersion {
                 secret_id: s.id.clone(),
@@ -2382,6 +2485,31 @@ async fn sweep_once(state: &AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn env_vars_follow_the_placeholder_names() {
+        let key: BTreeMap<String, String> = [("value".to_owned(), "sk_live_1".to_owned())].into();
+        assert_eq!(
+            env_vars("STRIPE_KEY", &key),
+            [("STRIPE_KEY".to_owned(), "sk_live_1".to_owned())].into()
+        );
+        let login: BTreeMap<String, String> = [
+            ("url".to_owned(), "https://github.com/login".to_owned()),
+            ("username".to_owned(), "unarbos".to_owned()),
+            ("password".to_owned(), "hunter22".to_owned()),
+        ]
+        .into();
+        let vars = env_vars("GITHUB_LOGIN", &login);
+        assert_eq!(
+            vars.get("GITHUB_LOGIN_USERNAME").map(String::as_str),
+            Some("unarbos")
+        );
+        assert_eq!(
+            vars.get("GITHUB_LOGIN_PASSWORD").map(String::as_str),
+            Some("hunter22")
+        );
+        assert!(!vars.values().any(|v| v.contains("github.com")));
+    }
 
     #[test]
     fn env_names_follow_the_spec() {

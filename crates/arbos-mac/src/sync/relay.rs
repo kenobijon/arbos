@@ -4522,6 +4522,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             let shared = shared.clone();
             tokio::spawn(async move {
                 let mut body = json!({ "name": item.name, "kind": item.kind, "note": item.note, "hosts": item.hosts,
+                    "inject_env": item.inject_env,
                     "agents": item.agents.iter().map(|p| json!({ "project_id": p })).collect::<Vec<_>>() });
                 if item.kind == "login" {
                     let fields: serde_json::Map<String, Value> = item
@@ -4695,6 +4696,21 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
                 refresh_secrets(&shared).await;
                 refresh_project_secrets(&shared, &project_id).await;
+            });
+        }
+        ClientCommand::VaultItemEnv { id, reference, on } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared
+                    .put_json(
+                        &format!("/vaults/{id}/items/env"),
+                        json!({ "ref": reference, "inject_env": on }),
+                    )
+                    .await
+                {
+                    shared.notice(format!("Secrets: {}", relay_message(&err)));
+                }
+                refresh_secrets(&shared).await;
             });
         }
         ClientCommand::VaultReplaceToken { id, token } => {
