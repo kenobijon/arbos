@@ -343,8 +343,25 @@ struct SettingsPage<Content: View>: View {
         }
         .toolbar(.hidden, for: .navigationBar)
         .navigationBarBackButtonHidden(true)
-        // Hiding the system back button also disables the edge-swipe pop; re-enable it.
-        .background(InteractivePopGestureEnabler())
+        // Custom back hides the system edge-swipe; ScrollView in this sheet also
+        // eats InteractivePopGestureEnabler. Same swipe-right → back as ChatView.
+        .simultaneousGesture(settingsBackSwipe)
+    }
+
+    /// Swipe right pops a pushed settings page (Credits, Machine, …). Root
+    /// Settings passes `onBack` to dismiss the sheet — leave that to the
+    /// back button / sheet drag so a casual swipe does not close Settings.
+    private var settingsBackSwipe: some Gesture {
+        DragGesture(minimumDistance: 50, coordinateSpace: .local)
+            .onEnded { value in
+                guard onBack == nil else { return }
+                let dx = value.translation.width
+                let absX = abs(dx), absY = abs(value.translation.height)
+                let vx = value.velocity.width, vy = value.velocity.height
+                if dx > 0, absX > 70, absX > absY * 1.25, abs(vx) >= abs(vy) || absX > 120 {
+                    dismiss()
+                }
+            }
     }
 
     /// Strip under the back button + title — Apple Account always frosts what
