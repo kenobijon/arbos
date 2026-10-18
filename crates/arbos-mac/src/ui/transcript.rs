@@ -38,6 +38,65 @@ pub const COLUMN_MAX_WIDTH: f32 = 820.0;
 pub const ASSISTANT_MAX_WIDTH: f32 = 620.0;
 /// A new time stamp line whenever messages are this far apart.
 const STAMP_GAP_MS: u64 = 60 * 60 * 1000;
+/// Messages for Mac fades a row's hover-only affordances (time, react glyph)
+/// in and out rather than snapping them.
+const HOVER_FADE_MS: f32 = 150.0;
+
+/// Which bubble row the pointer is over, and the one it just left, with the
+/// moment each happened: the fade is computed from those at render time.
+#[derive(Default)]
+struct HoverFade {
+    over: Option<(String, Instant)>,
+    left: Option<(String, Instant)>,
+}
+
+impl HoverFade {
+    /// Record a hover change for `row_id`; `true` when something changed.
+    fn set(&mut self, row_id: &str, hovered: bool, now: Instant) -> bool {
+        let is_over = self.over.as_ref().is_some_and(|(id, _)| id == row_id);
+        if hovered == is_over {
+            return false;
+        }
+        if hovered {
+            if let Some((prev, _)) = self.over.take() {
+                self.left = Some((prev, now));
+            }
+            // Re-entering mid-fade starts the fade-in from the current level.
+            let head_start = match &self.left {
+                Some((id, at)) if id == row_id => {
+                    let remaining = 1.0 - Self::progress(*at, now);
+                    Duration::from_secs_f32(remaining * HOVER_FADE_MS / 1000.0)
+                }
+                _ => Duration::ZERO,
+            };
+            self.left = None;
+            self.over = Some((row_id.to_string(), now - head_start));
+        } else {
+            self.over = None;
+            self.left = Some((row_id.to_string(), now));
+        }
+        true
+    }
+
+    fn progress(since: Instant, now: Instant) -> f32 {
+        (now.saturating_duration_since(since).as_millis() as f32 / HOVER_FADE_MS).clamp(0.0, 1.0)
+    }
+
+    /// Opacity for `row_id`'s affordances now, and whether it is still moving.
+    fn opacity(&self, row_id: &str, now: Instant) -> (f32, bool) {
+        match (&self.over, &self.left) {
+            (Some((id, at)), _) if id == row_id => {
+                let t = Self::progress(*at, now);
+                (crate::ui::motion::ease_out_cubic(t), t < 1.0)
+            }
+            (_, Some((id, at))) if id == row_id => {
+                let t = Self::progress(*at, now);
+                (1.0 - crate::ui::motion::ease_out_cubic(t), t < 1.0)
+            }
+            _ => (0.0, false),
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub enum RowKind {
@@ -191,6 +250,7 @@ pub struct Transcript {
     repin_check_pending: bool,
     /// The working line's current text and when it changed (fade on swap).
     activity_shown: Option<(String, Instant)>,
+    hover: HoverFade,
 }
 
 impl Transcript {
@@ -223,7 +283,41 @@ impl Transcript {
             spring: StickSpring::default(),
             repin_check_pending: false,
             activity_shown: None,
+            hover: HoverFade::default(),
         }
+    }
+
+    /// The row around a bubble: tracks the pointer so the time and react glyph
+    /// can fade, and reports their opacity for this frame. With Reduce Motion
+    /// the fade collapses to the snap it replaced.
+    fn hover_row(
+        &self,
+        row_id: &str,
+        now: Instant,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> (Stateful<Div>, f32) {
+        let (opacity, moving) = self.hover.opacity(row_id, now);
+        let opacity = if cx.reduce_motion() {
+            opacity.round()
+        } else {
+            if moving {
+                window.request_animation_frame();
+            }
+            opacity
+        };
+        let id = row_id.to_string();
+        let row = div()
+            .id(SharedString::from(format!("{row_id}#row")))
+            .w_full()
+            .flex()
+            .items_center()
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if this.hover.set(&id, *hovered, Instant::now()) {
+                    cx.notify();
+                }
+            }));
+        (row, opacity)
     }
 
     /// Runs inside the list's own scroll callback while `ListState` is
@@ -400,12 +494,7 @@ impl Transcript {
         )
     }
 
-    fn render_row(
-        &mut self,
-        ix: usize,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn render_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(row) = self.rows.get(ix).cloned() else {
             return div().into_any_element();
         };
@@ -507,12 +596,9 @@ impl Transcript {
                                     });
                                 })
                         })
-                        .child(
-                            div()
-                                .group("bubble-row")
-                                .w_full()
-                                .flex()
-                                .items_center()
+                        .child({
+                            let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
+                            row_el
                                 .justify_start()
                                 .child(
                                     bubble
@@ -522,8 +608,8 @@ impl Transcript {
                                         .border_color(Theme::with_alpha(color, 0.7))
                                         .when(pending, |el| el.opacity(0.6)),
                                 )
-                                .children(hover_time(time, &theme).map(|t| t.ml(px(8.0)))),
-                        )
+                                .children(hover_time(time, reveal, &theme).map(|t| t.ml(px(8.0))))
+                        })
                         .into_any_element();
                 }
                 div()
@@ -542,17 +628,14 @@ impl Transcript {
                                 .child(label),
                         )
                     })
-                    .child(
+                    .child({
                         // My bubble sits right, so its outer edge (and time) is on the left.
-                        div()
-                            .group("bubble-row")
-                            .w_full()
-                            .flex()
-                            .items_center()
+                        let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
+                        row_el
                             .justify_end()
-                            .children(hover_time(time, &theme).map(|t| t.mr(px(8.0))))
-                            .child(bubble.when(pending, |el| el.opacity(0.6))),
-                    )
+                            .children(hover_time(time, reveal, &theme).map(|t| t.mr(px(8.0))))
+                            .child(bubble.when(pending, |el| el.opacity(0.6)))
+                    })
                     .into_any_element()
             }
             RowKind::Markdown {
@@ -590,6 +673,7 @@ impl Transcript {
                     .when(!last, |el| el.pb(px(3.0)))
                     .bg(theme.bubble_assistant)
                     .child(render_block(&row.id, &block, veil.as_ref(), now, &theme));
+                let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
                 // Grok Mac (ref 58): a muted react glyph appears right of the
                 // bubble on hover; it opens the same bar as a right-click.
                 let hover_react = (last && !live).then(|| {
@@ -605,8 +689,7 @@ impl Transcript {
                         .justify_center()
                         .rounded_full()
                         .cursor_pointer()
-                        .opacity(0.0)
-                        .group_hover("bubble-row", |s| s.opacity(1.0))
+                        .opacity(reveal)
                         .hover(|s| s.bg(theme.surface_2))
                         .child(icon("face-smile", 16.0, theme.text_muted))
                         .on_click(cx.listener(move |_, event: &gpui::ClickEvent, _, cx| {
@@ -621,13 +704,9 @@ impl Transcript {
                 });
                 // Messages for Mac: the bubble's time shows beside the glyph on hover.
                 let hover_time = (last && !live)
-                    .then(|| hover_time(time, &theme).map(|t| t.ml(px(8.0))))
+                    .then(|| hover_time(time, reveal, &theme).map(|t| t.ml(px(8.0))))
                     .flatten();
-                div()
-                    .group("bubble-row")
-                    .w_full()
-                    .flex()
-                    .items_center()
+                row_el
                     .justify_start()
                     .when(first, |el| el.pt(px(6.0)))
                     .when(last, |el| el.pb(px(6.0)))
@@ -1161,15 +1240,14 @@ fn clock_label(ms: u64) -> Option<String> {
         .map(|t| t.format("%-I:%M %p").to_string())
 }
 
-/// The 11 pt muted time beside a bubble; invisible until its row is hovered.
-fn hover_time(time: Option<String>, theme: &Theme) -> Option<Div> {
+/// The 11 pt muted time beside a bubble, at the row's current hover opacity.
+fn hover_time(time: Option<String>, opacity: f32, theme: &Theme) -> Option<Div> {
     time.map(|label| {
         div()
             .flex_shrink_0()
             .text_size(px(11.0))
             .text_color(theme.text_muted)
-            .opacity(0.0)
-            .group_hover("bubble-row", |s| s.opacity(1.0))
+            .opacity(opacity)
             .child(label)
     })
 }
