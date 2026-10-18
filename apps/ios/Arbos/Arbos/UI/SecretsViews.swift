@@ -447,8 +447,8 @@ struct SecretPage: View {
                 SettingsGroup(footer: s.injectEnv
                               ? "\(SecretsText.realVarList(s)) is a normal variable in the box of every agent with access: shell commands and programs read it directly, nothing asks you. Turning access or Pause all off removes it within seconds. Arbos still redacts the value from chat and logs as best it can."
                               : "Off: agents get a placeholder and the relay fills the value in only through egress, for the allowed hosts. Turn this on for tools that must read $\(s.env) themselves, such as CLIs and SDKs.") {
-                    SecretToggleRow(icon: "terminal.fill", title: "Real value in the agent's environment",
-                                    subtitle: s.injectEnv ? "On · agents with access see the value" : nil,
+                    SecretToggleRow(icon: "terminal.fill", title: "Real value in the environment",
+                                    subtitle: s.injectEnv ? "On · agents with access see the value" : "Agents with access get \(SecretsText.realVarList(s)) itself",
                                     isOn: Binding(get: { s.injectEnv }, set: { model.patchSecret(s.id, ["inject_env": $0]) }),
                                     disabled: model.isFixture)
                 }
@@ -998,9 +998,7 @@ struct AgentSecretsPage: View {
 
     var body: some View {
         SettingsPage(title: "\(name) · Secrets") {
-            SettingsGroup(footer: data?.items.isEmpty ?? true
-                          ? "\(name) has no secrets yet."
-                          : "\(name) uses these without seeing them. Turn one off and it stops within seconds.") {
+            SettingsGroup(footer: agentFooter) {
                 if let d = data, d.paused {
                     Text("Secrets are paused. Agents can't use any secret until you turn this off.")
                         .font(.system(size: Theme.small)).foregroundStyle(theme.danger)
@@ -1061,6 +1059,14 @@ struct AgentSecretsPage: View {
                 .presentationDetents([.medium, .large])
                 .presentationBackground(theme.bg).preferredColorScheme(theme.isDark ? .dark : .light)
         }
+    }
+
+    /// "Comms uses these without seeing them" — except the ones whose real value it holds.
+    private var agentFooter: String {
+        guard let items = data?.items, !items.isEmpty else { return "\(name) has no secrets yet." }
+        let real = items.compactMap { $0.secret }.filter(\.injectEnv).map(\.env)
+        let except = real.isEmpty ? "" : ", except \(real.joined(separator: ", ")) — a real value in its environment"
+        return "\(name) uses these without seeing them\(except). Turn one off and it stops within seconds."
     }
 
     private func itemSubtitle(_ item: ProjectSecretAccess) -> String {
