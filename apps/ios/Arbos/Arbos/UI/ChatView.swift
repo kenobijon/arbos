@@ -1624,9 +1624,12 @@ struct ModelPickerView: View {
     @State private var query = ""
     @State private var effort: Effort = .low
 
+    /// Live project so the checkmark and effort writes follow `setModel`, not the sheet's snapshot.
+    private var current: Project { model.project(project.id) ?? project }
+
     private var ids: [String] {
         var all = model.models
-        if !all.contains(project.model) { all.insert(project.model, at: 0) }
+        if !all.contains(current.model) { all.insert(current.model, at: 0) }
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
         return q.isEmpty ? all : all.filter { $0.lowercased().contains(q) }
     }
@@ -1659,7 +1662,7 @@ struct ModelPickerView: View {
                     }
                     .pickerStyle(.segmented)
                     .onChange(of: effort) { _, new in
-                        model.setModel(projectId: project.id, model: project.model, effort: new)
+                        model.setModel(projectId: project.id, model: current.model, effort: new)
                     }
                 }
                 Section("Model") {
@@ -1677,17 +1680,21 @@ struct ModelPickerView: View {
                                     Text(id).font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
                                 }
                                 Spacer()
-                                if id == project.model {
+                                if id == current.model {
                                     Image(systemName: "checkmark").foregroundStyle(theme.text)
                                 }
                             }
+                            .contentShape(Rectangle())
                         }
+                        .buttonStyle(.plain)
                         .listRowBackground(theme.card)
+                        .accessibilityLabel("\(Project.shortModel(id))\(id == current.model ? ", selected" : "")")
+                        .accessibilityAddTraits(id == current.model ? [.isSelected] : [])
                     }
                 }
-                if !project.modelNote.isEmpty {
+                if !current.modelNote.isEmpty {
                     Section {
-                        Text(project.modelNote).font(.system(size: Theme.tiny)).foregroundStyle(theme.warn)
+                        Text(current.modelNote).font(.system(size: Theme.tiny)).foregroundStyle(theme.warn)
                     }
                 }
             }
@@ -1698,7 +1705,7 @@ struct ModelPickerView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } }
             }
-            .onAppear { effort = project.effort }
+            .onAppear { effort = current.effort }
         }
         .presentationDetents([.medium, .large])
     }
