@@ -302,7 +302,7 @@ for s in sorted(items, key=lambda x: x.get("createdAt", "")):
   local id name st created code
   while read -r id name st created; do
     [[ "$name" == arbos-agent-* ]] || continue
-    if echo " $keep " | grep -q " $name "; then continue; fi
+    if [[ " $keep " == *" $name "* ]]; then continue; fi
     (( count <= 25 )) && break
     code="$(curl -s -o /dev/null -w '%{http_code}' -X DELETE -H "Authorization: Bearer $key" "$api/snapshots/$id")"
     if [[ "$code" =~ ^2 ]]; then
@@ -537,7 +537,9 @@ handle_request() {
   fi
   # A merged branch's tip is an ancestor of main but not main itself: deploy the merge instead
   # (the first-parent commit that brought it in), so nothing main already had goes missing.
-  if ! git -C "$REPO" rev-list --first-parent origin/main -n 200 | grep -qx "$full"; then
+  local first_parents
+  first_parents="$(git -C "$REPO" rev-list --first-parent origin/main -n 200)"
+  if ! grep -qx "$full" <<< "$first_parents"; then
     local merge
     merge="$(git -C "$REPO" rev-list --first-parent --ancestry-path "$full..origin/main" | tail -1)"
     if [[ -n "$merge" ]]; then

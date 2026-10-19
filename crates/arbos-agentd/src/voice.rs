@@ -10,7 +10,9 @@
 //!   ref}]`, camera frames from the worker's `look` tool, already in the chat's blob slot) become
 //!   attachment parts on that row, so the agent sees the picture like any attached image;
 //! * `voice_rows` — transcript lines (what people said, what the agent said) and system lines
-//!   ("Arbos joined the call") written into the chat doc as finished rows, never as turns.
+//!   ("Arbos joined the call") written into the chat doc as finished rows, never as turns;
+//! * `voice_cancel` — the call ended or this agent left: stop any in-flight voice turn for the
+//!   chat so a later typed message is not stuck behind it.
 //!
 //! Frames are JSON text; every request carries an `id` answered by `{type: "result", id, …}`.
 
@@ -116,6 +118,18 @@ async fn handle_frame(sup: Arc<Supervisor>, frame: Value, out: mpsc::Sender<Stri
     };
     match kind.as_str() {
         "ping" => reply(json!({ "type": "pong" })).await,
+        // Call over / agent left: release any voice turn still holding the chat so typed
+        // messages after hang-up are answered (feedback app-01M5B5ZZNJP3W8770YVMGXPBKY).
+        "voice_cancel" => {
+            let Some(ws) = sup.get(project_id).await else {
+                return;
+            };
+            if chat_id.is_empty() {
+                return;
+            }
+            tracing::info!(call = %call_id, chat = %chat_id, project = %project_id, "voice cancel → stop turn");
+            let _ = ws.agent.stop_turn(&chat_id).await;
+        }
         "voice_context" | "voice_tool" | "voice_rows" => {
             let Some(ws) = sup.get(project_id).await else {
                 if !id.is_empty() {

@@ -172,6 +172,7 @@ jobs:
       - name: Tell the relay
         if: env.UPLOAD == 'true'
         env:
+          ARBOS_RELAY_ADMIN_TOKEN: ${{ env.ARBOS_RELAY_ADMIN_TOKEN || secrets.ARBOS_RELAY_ADMIN_TOKEN }}
           BUILD_NUMBER: ${{ steps.build.outputs.number }}
           RELAY_URL: ${{ vars.ARBOS_RELAY_URL || 'https://relay.arbos.life' }}
         run: |

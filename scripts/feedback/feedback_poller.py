@@ -2120,9 +2120,21 @@ class Loop:
                 built = st.get("release_superseded_by") or sha
                 edge = next((r["tag_name"] for r in self.gh.releases()
                              if r["tag_name"].startswith("edge-") and r.get("target_commitish", "").startswith(built[:7])), None)
+                if not edge and any(f.startswith(("crates/arbos-mac/", "crates/arbos-update/")) for f in st.get("files") or []):
+                    # A green Release run is not a release: with per-fix auto-stable tags the published release
+                    # may lag or fail to publish. Find any release (stable or edge, newest first) whose commit
+                    # contains the fix; until one exists the item stays `pushed` / fixed-on-main (#1079, 23:07).
+                    edge = next((r["tag_name"] for r in self.gh.releases()
+                                 if r.get("target_commitish") and not r.get("draft") and self.gh.contains(r["tag_name"], sha)), None)
+                    if not edge:
+                        if st.get("release_wait_noted") != rel["html_url"]:
+                            st["release_wait_noted"] = rel["html_url"]
+                            self.store.save_state(fid, st)
+                            log(f"[{fid}] Release run green ({rel['html_url']}) but no published release carries {sha[:8]} yet; waiting")
+                        return
                 st.update(release_done=True, release_run=rel["html_url"], edge_release=edge, release_at=rel["updated_at"])
                 self.store.event(fid, "edge_released", release=edge, run=rel["html_url"])
-                self.gh.comment(st["issue"], f"Mac edge release: **{edge or '?'}** ({rel['html_url']}).")
+                self.gh.comment(st["issue"], f"Mac release: **{edge or '?'}** ({rel['html_url']}).")
             else:
                 st.update(release_done=True, release_run=rel["html_url"], release_failed=True)
                 self.store.event(fid, "release_failed", run=rel["html_url"])
@@ -2210,8 +2222,13 @@ class Loop:
         if st.get("testflight_build") or (ios_files and st.get("status") == "shipped"):
             parts.append(f"TestFlight {st.get('testflight_build') or 'build'}")
         if mac_files or st.get("edge_release"):
-            stable = self.gh.latest_stable_release() if commit else None
-            tag = stable["tag_name"] if stable and self.gh.contains(stable["tag_name"], commit) else None
+            tag = None
+            if commit:
+                for r in self.gh.releases():
+                    if not r.get("prerelease") and not r.get("draft") and re.fullmatch(r"v\d+\.\d+\.\d+", r.get("tag_name") or "") \
+                            and self.gh.contains(r["tag_name"], commit):
+                        tag = r["tag_name"]  # newest stable release that carries the fix
+                        break
             edge = st.get("edge_release")
             if tag and edge:
                 parts.append(f"Mac {tag} ({edge})")
