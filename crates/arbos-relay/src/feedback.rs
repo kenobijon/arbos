@@ -153,23 +153,23 @@ fn ext_for(mime: &str) -> Option<&'static str> {
     }
 }
 
-fn decode_image(raw: &str) -> Result<Option<Vec<u8>>, Response> {
+fn decode_image(raw: &str) -> Result<Option<Vec<u8>>, Box<Response>> {
     let raw = raw.trim();
     if raw.is_empty() {
         return Ok(None);
     }
     match base64::engine::general_purpose::STANDARD.decode(raw) {
         Ok(b) if !b.is_empty() && b.len() <= MAX_IMAGE_BYTES => Ok(Some(b)),
-        Ok(_) => Err(api_error(
+        Ok(_) => Err(Box::new(api_error(
             StatusCode::PAYLOAD_TOO_LARGE,
             "image",
             "image must be 1 byte to 15 MB",
-        )),
-        Err(_) => Err(api_error(
+        ))),
+        Err(_) => Err(Box::new(api_error(
             StatusCode::BAD_REQUEST,
             "image",
             "image is not base64",
-        )),
+        ))),
     }
 }
 
@@ -194,12 +194,23 @@ async fn read_meta(dir: &std::path::Path) -> Option<Item> {
     serde_json::from_slice::<Item>(&bytes).ok()
 }
 
-async fn write_meta(dir: &std::path::Path, item: &Item) -> Result<(), Response> {
-    let meta = serde_json::to_vec_pretty(item)
-        .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, "json", e.to_string()))?;
+async fn write_meta(dir: &std::path::Path, item: &Item) -> Result<(), Box<Response>> {
+    let meta = serde_json::to_vec_pretty(item).map_err(|e| {
+        Box::new(api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "json",
+            e.to_string(),
+        ))
+    })?;
     tokio::fs::write(dir.join("meta.json"), meta)
         .await
-        .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, "io", e.to_string()))
+        .map_err(|e| {
+            Box::new(api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "io",
+                e.to_string(),
+            ))
+        })
 }
 
 /// `POST /feedback` (signed-in device, or the user's box): keep the optional screenshot and the note.
@@ -238,7 +249,7 @@ pub async fn submit(
     let note: String = body.note.chars().take(4000).collect();
     let mut image = match decode_image(&body.image) {
         Ok(i) => i,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let mut mime = body.mime.clone();
     let mut width = body.width;
@@ -367,7 +378,7 @@ pub async fn submit(
         issue: None,
     };
     if let Err(resp) = write_meta(&dir, &item).await {
-        return resp;
+        return *resp;
     }
     (
         StatusCode::CREATED,
@@ -472,7 +483,7 @@ pub async fn admin_set_issue(
     let url: String = body.url.chars().take(300).collect();
     item.issue = Some(json!({ "number": body.number, "url": url }));
     if let Err(resp) = write_meta(&dir, &item).await {
-        return resp;
+        return *resp;
     }
     let mut pushed = false;
     if !already && item.submitted_by == "agent" {
@@ -658,7 +669,7 @@ pub async fn device_capture(
     }
     let image = match decode_image(&body.image) {
         Ok(i) => i,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let dev_key: String = device_id
         .chars()

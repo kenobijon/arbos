@@ -632,10 +632,8 @@ fn capture_key_window() -> Result<Shot> {
     let Some(n) = key_window_number() else {
         return Err(anyhow!("no key window"));
     };
-    let path = std::env::temp_dir().join(format!(
-        "arbos-feedback-capture-{}.png",
-        std::process::id()
-    ));
+    let path =
+        std::env::temp_dir().join(format!("arbos-feedback-capture-{}.png", std::process::id()));
     let status = std::process::Command::new("screencapture")
         .args(["-x", "-o"])
         .arg(format!("-l{n}"))
