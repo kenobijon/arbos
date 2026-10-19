@@ -14,7 +14,8 @@ use gpui::{
 
 use crate::app::{AppEvent, AppState, DetailsTarget};
 use crate::model::{
-    Attachment, Id, Message, MessageStatus, Part, Person, Role, StatusKind, TurnKind,
+    Attachment, AttachmentKind, Id, Message, MessageStatus, Part, Person, Role, StatusKind,
+    TurnKind,
 };
 use crate::ui::approve::{approval_card, ApprovalView};
 use crate::ui::attachments;
@@ -102,7 +103,6 @@ impl HoverFade {
 pub enum RowKind {
     User {
         text: String,
-        attachments: Vec<Attachment>,
         pending: bool,
         /// Caption for prompts not typed by the user (a routine, another project).
         sender_label: Option<String>,
@@ -141,9 +141,10 @@ pub enum RowKind {
         names: Vec<String>,
         total: u32,
     },
-    /// A file the agent produced for the user.
+    /// An image or file in the chat (agent or user). `mine` right-aligns my sends.
     Attachment {
         attachment: Attachment,
+        mine: bool,
     },
     /// S8: the agent asked a question.
     AskUser {
@@ -503,13 +504,12 @@ impl Transcript {
         let inner: AnyElement = match row.kind {
             RowKind::User {
                 text,
-                attachments,
                 pending,
                 sender_label,
                 from,
                 time,
             } => {
-                let mut bubble = self
+                let bubble = self
                     .react_target(
                         div().id(SharedString::from(format!("{}#bubble", row.id))),
                         &row.message_id,
@@ -525,30 +525,8 @@ impl Transcript {
                     .bg(theme.bubble)
                     .text_color(theme.bubble_text())
                     .text_size(px(TEXT_BODY))
-                    .line_height(px(LINE_HEIGHT));
-                if !attachments.is_empty() {
-                    let mut chips = div().flex().flex_wrap().gap(px(6.0));
-                    for a in attachments {
-                        // A voice memo chip (F11) is marked with a note glyph.
-                        let label = if a.is_audio() {
-                            format!("♪ {}", a.name)
-                        } else {
-                            a.name
-                        };
-                        chips = chips.child(
-                            div()
-                                .px(px(9.0))
-                                .py(px(3.0))
-                                .rounded_full()
-                                .bg(Theme::with_alpha(theme.bg, 0.35))
-                                .text_size(px(TEXT_TINY))
-                                .text_color(theme.text)
-                                .child(label),
-                        );
-                    }
-                    bubble = bubble.child(chips);
-                }
-                bubble = bubble.child(text);
+                    .line_height(px(LINE_HEIGHT))
+                    .child(text);
                 if let Some(person) = from {
                     // Someone else: left-aligned, their avatar and handle above.
                     // Must not early-return: the match arm still needs the
@@ -842,7 +820,7 @@ impl Transcript {
                     .child(line)
                     .into_any_element()
             }
-            RowKind::Attachment { attachment } => {
+            RowKind::Attachment { attachment, mine } => {
                 let thumbnail = attachment
                     .blob_ref
                     .as_ref()
@@ -851,6 +829,7 @@ impl Transcript {
                     .w_full()
                     .py(px(4.0))
                     .flex()
+                    .when(mine, |el| el.justify_end())
                     .child(attachments::card(
                         &row.id,
                         &attachment,
@@ -1232,6 +1211,14 @@ fn sender_caption(message: &Message) -> Option<String> {
 }
 
 /// The bubble's own clock ("9:41 PM"), the iPhone's drag-to-reveal time.
+/// UTType-style labels some clients leave as the only text on a media-only send.
+fn is_generic_media_label(text: &str) -> bool {
+    matches!(
+        text.trim().to_ascii_lowercase().as_str(),
+        "image" | "photo" | "video" | "attachment" | "(attachment)"
+    )
+}
+
 fn clock_label(ms: u64) -> Option<String> {
     use chrono::{Local, TimeZone};
     if ms == 0 {
@@ -1310,15 +1297,19 @@ pub fn build_rows(
         match message.role {
             Role::User => {
                 let text = message.plain_text();
-                let attachments: Vec<Attachment> = message
+                let attachment_parts: Vec<(String, Attachment)> = message
                     .parts
                     .iter()
                     .filter_map(|p| match p {
-                        Part::Attachment { attachment, .. } => Some(attachment.clone()),
+                        Part::Attachment { id, attachment } => {
+                            Some((id.clone(), attachment.clone()))
+                        }
                         _ => None,
                     })
                     .collect();
-                let id = format!("{}#user", message.id);
+                let has_image = attachment_parts
+                    .iter()
+                    .any(|(_, a)| a.kind() == AttachmentKind::Image);
                 let from = if message.sender.starts_with("user:") && !mine(message) {
                     Some(Person {
                         id: message.sender.trim_start_matches("user:").to_string(),
@@ -1342,28 +1333,51 @@ pub fn build_rows(
                 } else {
                     sender_caption(message)
                 };
-                rows.push(Row {
-                    version: hash_version(
-                        &(
-                            &text,
-                            message.pending,
-                            attachments.len(),
-                            &sender_label,
-                            from.as_ref().map(|p| &p.handle),
+                // Image preview / file card rows (same cards as agent attachments).
+                let is_mine = from.is_none();
+                for (part_id, attachment) in &attachment_parts {
+                    rows.push(Row {
+                        version: hash_version(
+                            &(
+                                &attachment.name,
+                                &attachment.title,
+                                attachment.bytes,
+                                is_mine,
+                            ),
+                            false,
                         ),
-                        false,
-                    ),
-                    id,
-                    message_id: message.id.clone(),
-                    kind: RowKind::User {
-                        text,
-                        attachments,
-                        pending: message.pending,
-                        sender_label,
-                        from,
-                        time: clock_label(message.created_at),
-                    },
-                });
+                        id: format!("{}#{}", message.id, part_id),
+                        message_id: message.id.clone(),
+                        kind: RowKind::Attachment {
+                            attachment: attachment.clone(),
+                            mine: is_mine,
+                        },
+                    });
+                }
+                // Skip a bare "Image"/"Photo" bubble when the attachment already shows it.
+                let show_text = !text.is_empty() && !(has_image && is_generic_media_label(&text));
+                if show_text || attachment_parts.is_empty() {
+                    rows.push(Row {
+                        version: hash_version(
+                            &(
+                                &text,
+                                message.pending,
+                                &sender_label,
+                                from.as_ref().map(|p| &p.handle),
+                            ),
+                            false,
+                        ),
+                        id: format!("{}#user", message.id),
+                        message_id: message.id.clone(),
+                        kind: RowKind::User {
+                            text,
+                            pending: message.pending,
+                            sender_label,
+                            from,
+                            time: clock_label(message.created_at),
+                        },
+                    });
+                }
                 if message.status == MessageStatus::Queued {
                     queued = true;
                 }
@@ -1564,6 +1578,7 @@ pub fn build_rows(
                             message_id: message.id.clone(),
                             kind: RowKind::Attachment {
                                 attachment: attachment.clone(),
+                                mine: false,
                             },
                         }),
                         // Legacy `waiting_user` row: only when no `question` part carries it.

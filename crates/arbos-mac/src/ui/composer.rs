@@ -13,9 +13,10 @@ use std::rc::Rc;
 use gpui::{
     actions, div, fill, point, prelude::*, px, relative, size, App, Bounds, ClipboardItem, Context,
     CursorStyle, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter,
-    FocusHandle, Focusable, GlobalElementId, InspectorElementId, IntoElement, LayoutId,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render,
-    SharedString, Style, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine,
+    ExternalPaths, FocusHandle, Focusable, GlobalElementId, InspectorElementId, IntoElement,
+    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
+    Render, SharedString, Style, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window,
+    WrappedLine,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -1170,12 +1171,21 @@ impl Composer {
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(paths))) = rx.await {
                 let _ = this.update(cx, |composer, cx| {
-                    composer.attachments.extend(paths);
-                    cx.notify();
+                    composer.add_paths(paths, cx);
                 });
             }
         })
         .detach();
+    }
+
+    /// Paths from the "+" picker or a drop onto the chat box.
+    fn add_paths(&mut self, paths: impl IntoIterator<Item = PathBuf>, cx: &mut Context<Self>) {
+        for path in paths {
+            if path.is_file() {
+                self.attachments.push(path);
+            }
+        }
+        cx.notify();
     }
 
     /// The `@token` being typed at the end of the input, if any.
@@ -1620,7 +1630,10 @@ impl Render for Composer {
                 .child(self.input.clone())
         };
 
+        let drop_border = theme.accent;
+        let drop_fill = theme.accent_soft;
         let mut field = div()
+            .id("composer-field")
             .flex_1()
             .min_w_0()
             .min_h(px(COMPOSER_HEIGHT))
@@ -1633,6 +1646,9 @@ impl Render for Composer {
             .bg(theme.field)
             .border_1()
             .border_color(border_color)
+            .drag_over::<ExternalPaths>(move |style, _, _, _| {
+                style.border_color(drop_border).bg(drop_fill)
+            })
             .child(
                 div()
                     .h(px(COMPOSER_HEIGHT - 2.0))
@@ -1658,7 +1674,17 @@ impl Render for Composer {
         trailing = trailing.child(primary_button);
         field = field.child(trailing);
 
-        let mut column = div().relative().w_full().flex().flex_col().gap(px(8.0));
+        let mut column = div()
+            .id("composer")
+            .relative()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .can_drop(|dragged, _, _| dragged.is::<ExternalPaths>())
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                this.add_paths(paths.paths().iter().cloned(), cx);
+            }));
 
         if !self.attachments.is_empty() {
             let mut chips = div().flex().flex_wrap().gap(px(6.0)).pl(px(8.0));

@@ -1897,20 +1897,24 @@ impl AppState {
         // same id replaces it (§3.6).
         let mut parts: Vec<Part> = attachments
             .iter()
-            .map(|path| Part::Attachment {
-                id: new_id(),
-                attachment: crate::model::Attachment {
-                    name: path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("attachment")
-                        .to_string(),
-                    mime: "application/octet-stream".into(),
-                    blob_ref: None,
-                    bytes: None,
-                    kind: None,
-                    title: None,
-                },
+            .map(|path| {
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("attachment")
+                    .to_string();
+                let mime = mime_for_path(path).to_string();
+                Part::Attachment {
+                    id: new_id(),
+                    attachment: crate::model::Attachment {
+                        name,
+                        mime,
+                        blob_ref: None,
+                        bytes: std::fs::metadata(path).ok().map(|m| m.len()),
+                        kind: None,
+                        title: None,
+                    },
+                }
             })
             .collect();
         if voice_wav.is_some() {
@@ -4607,6 +4611,31 @@ pub fn title_from(text: &str) -> String {
         "New chat".into()
     } else {
         out
+    }
+}
+
+/// MIME from a local path's extension (optimistic echo before the relay replies).
+fn mime_for_path(path: &std::path::Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "heic" => "image/heic",
+        "pdf" => "application/pdf",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "m4a" => "audio/mp4",
+        "mp4" => "video/mp4",
+        "mov" => "video/quicktime",
+        "md" | "txt" => "text/plain",
+        _ => "application/octet-stream",
     }
 }
 
