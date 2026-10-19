@@ -161,7 +161,14 @@ struct SettingsView: View {
             .navigationDestination(isPresented: $showCreditsPage) { CreditsPage() }
             .navigationDestination(isPresented: $showNotificationsPage) { NotificationsPage() }
             .navigationDestination(isPresented: $showAboutPage) { AboutPage() }
-            .navigationDestination(isPresented: $showRelayPage) { RelayPage() }
+            .navigationDestination(isPresented: $showRelayPage) {
+                // RelayPage only exists in Debug; the Release (TestFlight) build has no such type.
+                #if DEBUG
+                RelayPage()
+                #else
+                EmptyView()
+                #endif
+            }
             .navigationDestination(isPresented: $showSecretsPage) { SecretsPage() }
             .sheet(isPresented: $showProfileEdit) {
                 NavigationStack {
