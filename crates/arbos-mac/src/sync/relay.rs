@@ -2900,6 +2900,7 @@ async fn send_message(
     voice_wav: Option<Arc<Vec<u8>>>,
     command: &'static str,
     answer: Option<(String, serde_json::Value)>,
+    reply_to: Option<String>,
 ) {
     let project_id = project_of(&shared, &chat_id).unwrap_or_default();
     // People chats keep their blobs under `people:<chat_id>` and have no box to wake.
@@ -3017,7 +3018,7 @@ async fn send_message(
             in_reply_to: None,
             routine_name: None,
             sender_icon: None,
-            reply_to: None,
+            reply_to,
             asked_by_handle: None,
             owner_handle: None,
             usage: None,
@@ -3284,6 +3285,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 Vec::new(),
                 Some(wav),
                 "send",
+                None,
                 None,
             ));
         }
@@ -3812,6 +3814,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             message_id,
             text,
             attachments,
+            reply_to,
         } => {
             tokio::spawn(send_message(
                 shared.clone(),
@@ -3822,6 +3825,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 None,
                 "send",
                 None,
+                reply_to,
             ));
         }
         ClientCommand::Answer {
@@ -3841,6 +3845,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 None,
                 "answer",
                 answer,
+                None,
             ));
         }
         ClientCommand::Stop { chat_id } => {
