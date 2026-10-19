@@ -1590,6 +1590,16 @@ class Loop:
                 return
             cur = self.store.cursor()
         ready = self.rust_gate_ready()
+        tree = cur.get("rust_gate_tree")
+        if tree:
+            # An integration tree prepared by hand (`gate-tree <sha> <fid>…`): gate it as one run, land it whole.
+            cur.pop("rust_gate_tree", None)
+            tree.update(started=iso(), warm=False, needs_mac=True, linux="pending", mac="pending", mac_started=None, land_tree=True)
+            cur["rust_gate"] = tree
+            self.store.save_cursor(cur)
+            log(f"Rust gate {tree['id']}: integration tree {tree['tree'][:8]} with {len(tree['members'])} fixes (CI on {tree['branch']}; Mac release build)")
+            self.rust_gate_mac_start(cur)
+            return
         plan = cur.get("rust_gate_plan") or []
         members: dict[str, str] = {}
         while plan and not members:
@@ -1721,6 +1731,65 @@ class Loop:
         self.gh.delete_branch(active["branch"])
         return False
 
+    def land_tree(self, active: dict, ok: bool) -> None:
+        """A hand-prepared integration tree (conflicts resolved by its owner) lands as ONE merge commit on main;
+        every member whose tagged commit is in the tree becomes `pushed` with that commit, its branch deleted.
+        Red → nothing lands; the diagnostics go to every member's issue (bisecting a resolved tree is the
+        owner's call)."""
+        tree, members = active["tree"], active["members"]
+        commits = self.gh.compare(active["base"], tree).get("commits", [])
+        note = (f"Rust gate ✓ (CI on Linux {active.get('linux_run') or ''}; arbos-mac release build on the Mac)" if ok
+                else f"Rust gate red (linux={active['linux']}, mac={active['mac']})")
+        if not ok:
+            diag = ""
+            if active["linux"] == "fail":
+                diag += "\n".join(active.get("linux_errors") or []) + "\n"
+            if active["mac"] == "fail":
+                diag += active.get("mac_tail") or ""
+            for fid in members:
+                st = self.store.state(fid)
+                if st.get("issue"):
+                    self.gh.comment(st["issue"], f"{note} for integration tree `{tree[:8]}` — not merged. {st.get('handed_off_to') or 'owner'}: fix on the "
+                                    "integration branch and ask for a new `gate-tree` run.\n\n```\n" + diag[-5000:] + "\n```")
+            log(f"Rust gate {active['id']}: integration tree {tree[:8]} red; nothing landed")
+            return
+        merged = self.gh.merge_into_main(tree, f"Merge integration tree {tree[:8]}: {len(members)} feedback fixes [gate {active['id']}]")
+        if merged is None:
+            log(f"Rust gate {active['id']}: integration tree {tree[:8]} no longer merges into main (main moved); ask for a rebuilt tree")
+            for fid in members:
+                st = self.store.state(fid)
+                if st.get("issue"):
+                    self.gh.comment(st["issue"], f"{note}, but the integration tree `{tree[:8]}` no longer merges into `main` (main moved). "
+                                    "Owner: merge main into the integration branch and ask for a new `gate-tree` run.")
+            return
+        merged = merged or {"sha": tree, "html_url": f"https://github.com/{self.cfg.github_repo}/commit/{tree}", "commit": {"committer": {"date": iso()}}}
+        for fid in members:
+            st = self.store.state(fid)
+            tagged = [c for c in commits if f"[feedback {fid}]" in c["commit"]["message"] and not c["commit"]["message"].startswith("Merge")]
+            fix = (tagged or [c for c in commits if f"[feedback {fid}]" in c["commit"]["message"]] or [None])[-1]
+            if not fix or st.get("status") not in ("gating", "handed_off", "running"):
+                log(f"[{fid}] not in the integration tree or not landable ({st.get('status')}); untouched")
+                continue
+            files = [f["filename"] for f in self.gh.commit(fix["sha"]).get("files", [])]
+            st.update(status="pushed", commit=fix["sha"], commit_url=fix["html_url"], commit_message=fix["commit"]["message"].splitlines()[0],
+                      pushed_at=iso(), merge_sha=merged["sha"], merge_url=merged["html_url"], commit_date=merged["commit"]["committer"]["date"],
+                      files=files, expects_ios=any(f.startswith("apps/ios/") for f in files), expects_ci=any(not f.startswith("apps/ios/") for f in files),
+                      rust_gate={"head": members.get(fid), "ok": True, "verdict": "ok", "at": iso(), "run": active["id"], "batch": len(members),
+                                 "linux_run": active.get("linux_run"), "mac": active["mac"], "tree": tree})
+            for k in ("branch_head", "gated_head"):
+                st.pop(k, None)
+            self.store.save_state(fid, st)
+            self.store.event(fid, "pushed", commit=fix["sha"], merge=merged["sha"], files=files, tree=tree, run=active["id"])
+            if st.get("issue"):
+                self.gh.comment(st["issue"], f"Merged to `main` as part of integration tree `{tree[:8]}`: {merged['html_url']} (fix {fix['html_url']} — "
+                                f"`{st['commit_message']}`). {note}.\n\nFiles: {', '.join(f'`{f}`' for f in files) or '—'}")
+                self.gh.set_labels(st["issue"], [], ["in-progress"])
+            self.gh.delete_branch(f"feedback/{fid}")
+        cur = self.store.cursor()
+        cur["rust_gate_warm"] = tree if active["mac"] == "ok" else None
+        self.store.save_cursor(cur)
+        log(f"Rust gate {active['id']}: integration tree {tree[:8]} landed as {merged['sha'][:8]} ({len(members)} fixes)")
+
     def rust_gate_conflict(self, fid: str, head: str, kind: str, run_id: str) -> None:
         st = self.store.state(fid)
         if not st or st.get("status") != "gating" or st.get("branch_head") != head:
@@ -1743,6 +1812,9 @@ class Loop:
         order = list(members)
         ok = active["linux"] == "ok" and active["mac"] in ("ok", "skipped")
         log(f"Rust gate {active['id']}: settle linux={active['linux']} mac={active['mac']} members={len(order)}")
+        if active.get("land_tree"):
+            self.land_tree(active, ok)
+            return
         if ok:
             for fid in order:
                 st = self.store.state(fid)
@@ -2606,6 +2678,28 @@ def main(argv: list[str]) -> int:
         store.save_state(fid, st)
         store.event(fid, "tracked", issue=number, owner=owner)
         print(f"{fid}: tracking #{number} (handed off to {owner}); lands when a main commit carries [feedback {fid}]")
+        return 0
+    if cmd == "gate-tree":
+        # `gate-tree <sha-or-branch> <fid>…`: gate a hand-prepared integration tree (main + several fix branches,
+        # conflicts resolved by its owner) as one run and land it whole when green.
+        store = Store(cfg)
+        loop = Loop(cfg)
+        ref, fids = argv[2], argv[3:]
+        tree = ref if re.fullmatch(r"[0-9a-f]{40}", ref) else loop.gh.branch_head(ref)
+        if not tree:
+            print(f"{ref}: not found")
+            return 2
+        run_id = f"tree-{utcnow().strftime('%Y%m%dT%H%M%S')}-{len(fids)}"
+        branch = f"gate/{run_id}"
+        loop.gh.create_branch(branch, tree)  # CI (the Linux half) starts on this push
+        members = {fid: (store.state(fid).get("branch_head") or loop.gh.branch_head(f"feedback/{fid}") or "") for fid in fids}
+        cur = store.cursor()
+        cur["rust_gate_tree"] = {"id": run_id, "branch": branch, "base": loop.gh.branch_head("main"), "tree": tree, "members": members,
+                                 "conflicts": {}, "queued": iso()}
+        store.save_cursor(cur)
+        for fid in fids:
+            store.event(fid, "rust_gate_tree_queued", run=run_id, tree=tree)
+        print(f"{run_id}: tree {tree[:8]} on {branch}; CI started; the Mac build starts when the gate slot is free; members {len(members)}")
         return 0
     if cmd == "handoff":
         # A dedicated worker owns this item: cancel the agent run, stop tracking, label the issue.
