@@ -2521,10 +2521,12 @@ impl Shell {
             return None;
         }
         PulseClock::request(cx);
+        // Top right, under the header: never over the composer's send / mic
+        // button or an error banner above it (the busy end of the column).
         let mut stack = div()
             .absolute()
             .right(px(16.0))
-            .bottom(px(16.0))
+            .top(px(HEADER_HEIGHT + 12.0))
             .flex()
             .flex_col()
             .gap(px(6.0));
