@@ -432,20 +432,18 @@ pub fn new_chat_sheet(
     let header = glass::sheet_header(
         &title,
         Some(
-            glass::sheet_button("new-chat-close", "Cancel", &theme).on_click(cx.listener(
-                |this, _, window, cx| {
-                    this.state.update(cx, |s, cx| {
-                        s.new_project_open = false;
-                        s.close_new_chat(cx)
-                    });
-                    crate::ui::composer::Composer::focus(&this.composer, window, cx);
-                },
-            )),
+            glass::sheet_button("new-chat-close", "Cancel", &theme)
+                .on_click(cx.listener(|this, _, window, cx| this.close_new_chat_sheet(window, cx))),
         ),
         None,
         &theme,
     );
-    glass::sheet(460.0, &theme, header, body.max_h(px(620.0)))
+    // Cancel and a click on the dimmed area around the card both close the
+    // sheet (including while the New agent form is open); clicks inside stay.
+    glass::sheet(460.0, &theme, header, body.max_h(px(620.0))).on_mouse_down(
+        gpui::MouseButton::Left,
+        cx.listener(|this, _, window, cx| this.close_new_chat_sheet(window, cx)),
+    )
 }
 
 /// Chips under the header of a people chat: each agent in the room and

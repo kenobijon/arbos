@@ -818,6 +818,16 @@ impl Shell {
         Composer::focus(&self.composer, window, cx);
     }
 
+    /// Close the New Message sheet (Cancel, click outside); drops an in-progress
+    /// New agent form and returns the keyboard to the composer.
+    pub(crate) fn close_new_chat_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, cx| {
+            s.new_project_open = false;
+            s.close_new_chat(cx);
+        });
+        Composer::focus(&self.composer, window, cx);
+    }
+
     /// The agent page's "Done": save whichever of the name / description
     /// fields are open (unchanged text is not sent) and leave edit mode.
     pub(crate) fn finish_edit_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
