@@ -1,5 +1,6 @@
 //! Calls v1 UI, Grok Bot call-screen style (the iPhone call screen scaled
-//! up): header buttons to start a voice / video call, the call screen over
+//! up): start a call from the composer (mic + phone) or the "…" menu —
+//! always audio-only until Camera is toggled here — the call screen over
 //! the conversation (tiles with the camera or the avatar, name, Mute ·
 //! Camera · Hang up), the slim call bar it collapses to, the "On a call ·
 //! Join" bar for a call I am not in, and the ringing card.

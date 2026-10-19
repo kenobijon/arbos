@@ -1,10 +1,10 @@
 //! The conversation header, Grok Bot Mac layout: the avatar and name on the
 //! left (click an agent to open its profile), then — for an agent — its chat
 //! tabs ("Main", groups with their heads, "+" for a new chat, "×" archives),
-//! icon buttons on the right (browser view, "…", and "add people" in a DM).
-//! Under it, one optional chips row: the members of a people chat. The "…"
-//! menu holds what the iPhone keeps there: New chat, Archived, Model,
-//! Members / Share, Avatar, voice, Stop, Settings.
+//! icon buttons on the right ("…", and "add people" in a DM). Under it, one
+//! optional chips row: the members of a people chat. The "…" menu holds what
+//! the iPhone keeps there: New chat, Archived, Model, Members / Share, Avatar,
+//! voice, Stop, Settings.
 
 use gpui::{
     div, prelude::*, px, AnyElement, Context, Div, ElementId, Focusable as _, FontWeight,
@@ -24,8 +24,7 @@ use crate::ui::people;
 use crate::ui::shell::Shell;
 use crate::ui::sidebar::machine_dot;
 use crate::ui::theme::{
-    Theme, AVATAR_HEADER, CONTROL, HEADER_HEIGHT, RIGHT_PANEL_WIDTH, TEXT_BODY, TEXT_SMALL,
-    TEXT_TINY,
+    Theme, AVATAR_HEADER, CONTROL, HEADER_HEIGHT, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
 };
 use crate::ui::voicepicker;
 
@@ -40,13 +39,6 @@ pub fn render(
     let is_people = space.is_people();
     let in_call = shell.voice.read(cx).in_call();
     let menu_open = shell.menu_open;
-    let panel_open = state.right_panel_open;
-    // Calls: start a voice / video call in a people chat, a shared project, or with the agent.
-    let in_call_here = state
-        .my_call
-        .as_ref()
-        .map(|c| c.call.space_id() == space.id)
-        .unwrap_or(false);
 
     // ----- left: avatar + name (click an agent to open its profile) -----------
     let mut title = div()
@@ -179,6 +171,11 @@ pub fn render(
         let streaming = state.project_is_streaming(&space.id);
         let machine = state.machine.shown_state();
         let pid = space.id.clone();
+        let can_rename = !space.is_guest();
+        let renaming = state
+            .renaming_project
+            .as_ref()
+            .is_some_and(|p| p == &space.id);
         let sub = if streaming {
             Some(format!("{} is working", space.name))
         } else if space.is_guest() {
@@ -192,6 +189,30 @@ pub fn render(
             ))
         } else {
             None
+        };
+        let name_el = if renaming {
+            div()
+                .id("header-rename")
+                .w(px(160.0))
+                .h(px(22.0))
+                .px(px(6.0))
+                .rounded(px(6.0))
+                .bg(theme.field)
+                .border_1()
+                .border_color(theme.field_border)
+                .text_size(px(TEXT_BODY))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.text)
+                .child(shell.agent_name_input.clone())
+                .into_any_element()
+        } else {
+            div()
+                .text_size(px(TEXT_BODY))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.text)
+                .truncate()
+                .child(space.name.clone())
+                .into_any_element()
         };
         title = title
             .child(
@@ -224,14 +245,7 @@ pub fn render(
                     .flex()
                     .flex_col()
                     .min_w_0()
-                    .child(
-                        div()
-                            .text_size(px(TEXT_BODY))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.text)
-                            .truncate()
-                            .child(space.name.clone()),
-                    )
+                    .child(name_el)
                     .when_some(sub, |el, s| {
                         el.child(
                             div()
@@ -247,23 +261,30 @@ pub fn render(
         }
         // A group chat or a project with other people: the group page; my
         // own solo agent: its profile (with the tree + colour picker).
+        // Double-click the name to rename (owned agents only).
         let groupish = space.is_groupish();
         title = title
             .cursor_pointer()
             .hover(|s| s.bg(theme.surface_2))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.menu_open = false;
-                this.members_open = false;
-                this.add_agent_open = false;
-                let p = pid.clone();
-                this.state.update(cx, |s, cx| {
-                    if groupish {
-                        s.open_profile(ProfilePage::Group { space_id: p }, cx);
-                    } else {
-                        s.toggle_avatar_picker(p, cx);
+            .on_click(
+                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                    this.menu_open = false;
+                    this.members_open = false;
+                    this.add_agent_open = false;
+                    let p = pid.clone();
+                    if can_rename && event.click_count() >= 2 {
+                        this.start_rename_agent(p, window, cx);
+                        return;
                     }
-                });
-            }));
+                    this.state.update(cx, |s, cx| {
+                        if groupish {
+                            s.open_profile(ProfilePage::Group { space_id: p }, cx);
+                        } else {
+                            s.toggle_avatar_picker(p, cx);
+                        }
+                    });
+                }),
+            );
     }
 
     // ----- right: icon buttons --------------------------------------------------
@@ -289,28 +310,9 @@ pub fn render(
                 if on { theme.text } else { theme.text_muted },
             ))
     };
+    // Match the iPhone: no dual call / camera icons here. Start a call from
+    // the composer (mic + phone) or the "…" menu; camera defaults off.
     let mut right = div().flex().items_center().gap(px(2.0));
-    if callview::callable(space) && !in_call_here {
-        right = right
-            .child(
-                button("header-voice-call", "phone", false, &theme).on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.menu_open = false;
-                        this.state
-                            .update(cx, |s, cx| s.start_call_in_chat(CallKind::Voice, cx));
-                    },
-                )),
-            )
-            .child(
-                button("header-video-call", "camera", false, &theme).on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.menu_open = false;
-                        this.state
-                            .update(cx, |s, cx| s.start_call_in_chat(CallKind::Video, cx));
-                    },
-                )),
-            );
-    }
     if is_people {
         right = right.child(
             button("header-members", "person-plus", shell.members_open, &theme).on_mouse_down(
@@ -334,27 +336,19 @@ pub fn render(
                 })),
         );
     }
-    right = right
-        .child(
-            button("header-panel", "window", panel_open, &theme).on_click(cx.listener(
-                |this, _, _, cx| {
-                    this.state.update(cx, |s, cx| s.toggle_right_panel(cx));
-                },
-            )),
-        )
-        .child(
-            button("header-menu", "ellipsis", menu_open, &theme).on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.menu_open = !this.menu_open;
-                    this.members_open = false;
-                    this.add_agent_open = false;
-                    this.set_group_picker(false, cx);
-                    cx.notify();
-                }),
-            ),
-        );
+    right = right.child(
+        button("header-menu", "ellipsis", menu_open, &theme).on_mouse_down(
+            gpui::MouseButton::Left,
+            cx.listener(|this, _, _, cx| {
+                cx.stop_propagation();
+                this.menu_open = !this.menu_open;
+                this.members_open = false;
+                this.add_agent_open = false;
+                this.set_group_picker(false, cx);
+                cx.notify();
+            }),
+        ),
+    );
 
     let tabs = if is_people {
         None
@@ -636,12 +630,7 @@ fn agent_tabs(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option
 pub fn archived_list(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
     let theme = Theme::of(cx).clone();
     let state = shell.state.read(cx);
-    let panel_open = state.right_panel_open;
-    let right = if panel_open {
-        RIGHT_PANEL_WIDTH + 16.0
-    } else {
-        16.0
-    };
+    let right = 16.0;
     let archived: Vec<Chat> = state
         .archived_tabs(&space.id)
         .into_iter()
@@ -777,9 +766,9 @@ pub fn menu(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
     let state = shell.state.read(cx);
     let is_people = space.is_people();
     let streaming = state.project_is_streaming(&space.id);
-    let panel_open = state.right_panel_open;
     let voice_mode = state.voice_mode;
     let in_call = shell.voice.read(cx).in_call();
+    let in_livekit = state.my_call.is_some();
     let projects_count = state.projects.iter().filter(|p| !p.is_people()).count();
     let name = if space.is_people_group() {
         space.name.clone()
@@ -791,11 +780,7 @@ pub fn menu(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
     } else {
         space.name.clone()
     };
-    let right = if panel_open {
-        RIGHT_PANEL_WIDTH + 16.0
-    } else {
-        16.0
-    };
+    let right = 16.0;
 
     let mut body = div().flex().flex_col().gap(px(1.0));
     if is_people {
@@ -1056,13 +1041,33 @@ pub fn menu(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
             glass::menu_row(
                 "menu-call",
                 "phone",
-                if in_call { "Hang up" } else { "Voice call" },
+                if in_livekit || in_call {
+                    "Hang up"
+                } else {
+                    "Call"
+                },
                 false,
                 &theme,
             )
             .on_click(cx.listener(|this, _, _, cx| {
                 this.menu_open = false;
-                this.voice.update(cx, |v, cx| v.toggle_call(cx));
+                // LiveKit call first (same as the iPhone); else voice-mode hang-up /
+                // start. Calls always begin audio-only; turn the camera on in-call.
+                let live = this.state.read(cx).my_call.is_some();
+                let voice_on = this.voice.read(cx).in_call();
+                if live {
+                    this.state.update(cx, |s, cx| s.leave_call(cx));
+                } else if voice_on {
+                    this.voice.update(cx, |v, cx| v.toggle_call(cx));
+                } else if this
+                    .state
+                    .read(cx)
+                    .selected()
+                    .is_some_and(callview::callable)
+                {
+                    this.state
+                        .update(cx, |s, cx| s.start_call_in_chat(CallKind::Voice, cx));
+                }
             })),
         );
     if streaming {

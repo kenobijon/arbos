@@ -18,7 +18,7 @@ use crate::ui::theme::{Theme, TEXT_BODY};
 
 use super::{
     action_button, action_row, badge, card, chats_of, collect, empty, file_list, frame, hero,
-    link_list, list_row, media_grid, more_menu, tab_bar, Action,
+    hero_name, link_list, list_row, media_grid, more_menu, tab_bar, Action,
 };
 
 const TABS: [&str; 5] = ["Members", "Media", "Files", "Voice", "Links"];
@@ -122,7 +122,13 @@ pub(super) fn page(space_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> Op
     } else {
         avatars::project(&space, 112.0, &theme).into_any_element()
     };
-    let hero = hero(avatar, &space.name, &count_text, theme.text_muted, &theme);
+    let hero = hero(
+        avatar,
+        hero_name(&space.name, &theme).into_any_element(),
+        &count_text,
+        theme.text_muted,
+        &theme,
+    );
 
     // ----- actions --------------------------------------------------------------
     let sid = space.id.clone();

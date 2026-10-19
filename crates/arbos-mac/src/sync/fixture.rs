@@ -367,6 +367,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             message_id,
             text,
             attachments,
+            reply_to,
         } => {
             let parts: Vec<Part> = attachments
                 .iter()
@@ -386,7 +387,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     },
                 })
                 .collect();
-            send_user(shared, chat_id, message_id, text, parts);
+            send_user(shared, chat_id, message_id, text, parts, reply_to);
         }
         ClientCommand::SendVoice {
             chat_id,
@@ -408,7 +409,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     title: None,
                 },
             }];
-            send_user(shared, chat_id, message_id, text, parts);
+            send_user(shared, chat_id, message_id, text, parts, None);
         }
         ClientCommand::Transcribe {
             request_id, wav, ..
@@ -761,6 +762,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             }
             emit_projects(shared);
         }
+        ClientCommand::SetProjectName { project_id, name } => {
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
+                    p.name = name;
+                }
+            }
+            emit_projects(shared);
+        }
         ClientCommand::SetMuted { space_id, muted } => {
             {
                 let mut projects = shared.projects.lock().unwrap();
@@ -918,13 +928,6 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             }
         }
-        ClientCommand::WatchBrowser { on: true, .. } => {
-            let _ = shared.events.send(SyncEvent::Notice(
-                "Fixture has no browser stream; the relay source shows the box's JPEG frames here."
-                    .into(),
-            ));
-        }
-        ClientCommand::WatchBrowser { on: false, .. } => {}
         ClientCommand::RefreshConnectors => emit_connectors(shared),
         ClientCommand::ConnectorConnect { provider, token } => {
             // Mock relay: the "OAuth dance" completes by itself after a moment.
@@ -1462,6 +1465,7 @@ fn send_user(
     message_id: Id,
     text: String,
     mut parts: Vec<Part>,
+    reply_to: Option<String>,
 ) {
     let project_id = project_of(shared, &chat_id);
     if let Some(space) = people_space_of(shared, &chat_id) {
@@ -1469,6 +1473,7 @@ fn send_user(
         let mut msg = human_message(&chat_id, &me(), &text, now_ms());
         msg.id = message_id.clone();
         msg.mentions = mentions.clone();
+        msg.reply_to = reply_to;
         msg.parts = parts;
         msg.parts.push(text_part(&text));
         with_doc(shared, &chat_id, |doc| {
@@ -1511,7 +1516,7 @@ fn send_user(
                 sender_avatar: None,
                 sender_avatar_color: None,
                 mentions: Vec::new(),
-                reply_to: None,
+                reply_to,
                 asked_by_handle: None,
                 owner_handle: None,
                 usage: None,

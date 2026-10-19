@@ -1,6 +1,7 @@
 //! The composer, Grok Bot layout: a "+" circle for attachments, the pill
-//! field ("Message <name>") with the hold-to-talk mic, and the round white button
-//! that sends text, stops a running turn, or starts a voice call when empty.
+//! field ("Message <name>") with the hold-to-talk mic (transcribe), and the
+//! round white button that sends text, stops a running turn, or starts a call
+//! when empty — same as the iPhone (mic + phone; calls start audio-only).
 //! Hand-rolled multi-line text input with IME (`EntityInputHandler`,
 //! zeron-study §4.6). Enter sends, Shift+Enter inserts a newline. The model
 //! and reasoning pickers open from the header's "…" menu.
@@ -12,15 +13,17 @@ use std::rc::Rc;
 use gpui::{
     actions, div, fill, point, prelude::*, px, relative, size, App, Bounds, ClipboardItem, Context,
     CursorStyle, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter,
-    FocusHandle, Focusable, GlobalElementId, InspectorElementId, IntoElement, LayoutId,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render,
-    SharedString, Style, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine,
+    ExternalPaths, FocusHandle, Focusable, GlobalElementId, InspectorElementId, IntoElement,
+    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
+    Render, SharedString, Style, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window,
+    WrappedLine,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::app::{AppState, ComposerMode};
-use crate::model::Effort;
+use crate::model::{CallKind, Effort};
 use crate::sync::fixture::MODELS;
+use crate::ui::callview;
 use crate::ui::frost::{frosted, MENU_BLUR, PANEL_BLUR};
 use crate::ui::glass;
 use crate::ui::icons::icon;
@@ -39,11 +42,17 @@ actions!(
         Delete,
         Left,
         Right,
+        Up,
+        Down,
         SelectLeft,
         SelectRight,
+        SelectUp,
+        SelectDown,
         SelectAll,
         Home,
         End,
+        SelectHome,
+        SelectEnd,
         Paste,
         Copy,
         Cut,
@@ -61,7 +70,11 @@ const INPUT_FONT_SIZE: f32 = TEXT_BODY;
 
 #[derive(Clone, Debug)]
 pub enum ComposerEvent {
-    Send(String, Vec<PathBuf>),
+    Send {
+        text: String,
+        attachments: Vec<PathBuf>,
+        reply_to: Option<String>,
+    },
     Stop,
 }
 
@@ -254,6 +267,22 @@ impl ComposerInput {
         }
     }
 
+    fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            self.move_to(self.offset_for_vertical_move(true), cx);
+        } else {
+            self.move_to(self.selected_range.start, cx)
+        }
+    }
+
+    fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            self.move_to(self.offset_for_vertical_move(false), cx);
+        } else {
+            self.move_to(self.selected_range.end, cx)
+        }
+    }
+
     fn select_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
         self.select_to(self.previous_boundary(self.cursor_offset()), cx);
     }
@@ -262,26 +291,33 @@ impl ComposerInput {
         self.select_to(self.next_boundary(self.cursor_offset()), cx);
     }
 
+    fn select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.offset_for_vertical_move(true), cx);
+    }
+
+    fn select_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.offset_for_vertical_move(false), cx);
+    }
+
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
         self.move_to(0, cx);
         self.select_to(self.content.len(), cx)
     }
 
     fn home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
-        let start = self.content[..self.cursor_offset()]
-            .rfind('\n')
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        self.move_to(start, cx);
+        self.move_to(self.line_start(self.cursor_offset()), cx);
     }
 
     fn end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
-        let cursor = self.cursor_offset();
-        let end = self.content[cursor..]
-            .find('\n')
-            .map(|i| cursor + i)
-            .unwrap_or(self.content.len());
-        self.move_to(end, cx);
+        self.move_to(self.line_end(self.cursor_offset()), cx);
+    }
+
+    fn select_home(&mut self, _: &SelectHome, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.line_start(self.cursor_offset()), cx);
+    }
+
+    fn select_end(&mut self, _: &SelectEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.line_end(self.cursor_offset()), cx);
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
@@ -441,6 +477,61 @@ impl ComposerInput {
             .grapheme_indices(true)
             .find_map(|(idx, _)| (idx > offset).then_some(idx))
             .unwrap_or(self.content.len())
+    }
+
+    fn line_start(&self, offset: usize) -> usize {
+        self.content[..offset]
+            .rfind('\n')
+            .map(|i| i + 1)
+            .unwrap_or(0)
+    }
+
+    fn line_end(&self, offset: usize) -> usize {
+        self.content[offset..]
+            .find('\n')
+            .map(|i| offset + i)
+            .unwrap_or(self.content.len())
+    }
+
+    /// Byte offset one wrapped line above/below the caret, keeping column when
+    /// the layout is known; falls back to hard newlines before the first paint.
+    fn offset_for_vertical_move(&self, up: bool) -> usize {
+        let cursor = self.cursor_offset();
+        let Some(layout) = self.layout.as_ref() else {
+            return self.offset_for_hard_line_move(up);
+        };
+        if layout.lines.is_empty() {
+            return cursor;
+        }
+        let Some(pos) = position_for_index(&layout.lines, cursor) else {
+            return self.offset_for_hard_line_move(up);
+        };
+        let lh = px(INPUT_LINE_HEIGHT);
+        let target_y = if up { pos.y - lh } else { pos.y + lh };
+        let window_pos = point(layout.bounds.left() + pos.x, layout.bounds.top() + target_y);
+        index_for_position(&layout.lines, layout.bounds, window_pos, self.content.len())
+    }
+
+    fn offset_for_hard_line_move(&self, up: bool) -> usize {
+        let cursor = self.cursor_offset();
+        let line_start = self.line_start(cursor);
+        let col = cursor - line_start;
+        if up {
+            if line_start == 0 {
+                return 0;
+            }
+            let prev_end = line_start - 1;
+            let prev_start = self.line_start(prev_end);
+            prev_start + col.min(prev_end - prev_start)
+        } else {
+            let line_end = self.line_end(cursor);
+            if line_end >= self.content.len() {
+                return self.content.len();
+            }
+            let next_start = line_end + 1;
+            let next_end = self.line_end(next_start);
+            next_start + col.min(next_end - next_start)
+        }
     }
 
     fn position_for_index(&self, index: usize) -> Option<Point<Pixels>> {
@@ -927,11 +1018,17 @@ impl Render for ComposerInput {
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::left))
             .on_action(cx.listener(Self::right))
+            .on_action(cx.listener(Self::up))
+            .on_action(cx.listener(Self::down))
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
+            .on_action(cx.listener(Self::select_up))
+            .on_action(cx.listener(Self::select_down))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
+            .on_action(cx.listener(Self::select_home))
+            .on_action(cx.listener(Self::select_end))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
@@ -1068,7 +1165,18 @@ impl Composer {
                 }
                 let attachments = std::mem::take(&mut self.attachments);
                 self.input.update(cx, |input, cx| input.clear(cx));
-                cx.emit(ComposerEvent::Send(text, attachments));
+                let reply_to = self.state.read(cx).active_chat_id().and_then(|cid| {
+                    self.state
+                        .read(cx)
+                        .chat_ui
+                        .get(&cid)
+                        .and_then(|ui| ui.reply_to.clone())
+                });
+                cx.emit(ComposerEvent::Send {
+                    text,
+                    attachments,
+                    reply_to,
+                });
             }
         }
         self.open_picker = None;
@@ -1085,12 +1193,21 @@ impl Composer {
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(paths))) = rx.await {
                 let _ = this.update(cx, |composer, cx| {
-                    composer.attachments.extend(paths);
-                    cx.notify();
+                    composer.add_paths(paths, cx);
                 });
             }
         })
         .detach();
+    }
+
+    /// Paths from the "+" picker or a drop onto the chat box.
+    fn add_paths(&mut self, paths: impl IntoIterator<Item = PathBuf>, cx: &mut Context<Self>) {
+        for path in paths {
+            if path.is_file() {
+                self.attachments.push(path);
+            }
+        }
+        cx.notify();
     }
 
     /// The `@token` being typed at the end of the input, if any.
@@ -1361,6 +1478,7 @@ impl Render for Composer {
                 v.notice().map(str::to_owned),
             )
         };
+        let in_livekit = state.my_call.is_some();
         let has_text = !self.input.read(cx).text().trim().is_empty();
 
         self.input.update(cx, |input, _| {
@@ -1394,22 +1512,22 @@ impl Render for Composer {
         };
 
         // The round primary button: send text, stop a running turn when the
-        // field is empty, or start / end a voice call when idle and empty.
+        // field is empty, or start / end a call when idle and empty (iPhone:
+        // phone next to the mic; calls start audio-only).
+        let hanging_up = in_call || in_livekit;
         let (glyph, action): (&str, ButtonAction) = if has_text {
             ("arrow-up", ButtonAction::Send)
         } else if running {
             ("stop", ButtonAction::Stop)
-        } else if in_call {
-            ("phone", ButtonAction::Call)
         } else {
-            ("waveform", ButtonAction::Call)
+            ("phone", ButtonAction::Call)
         };
         let primary_button = div()
             .id("composer-send")
             .size(px(SEND_BUTTON))
             .flex_shrink_0()
             .rounded_full()
-            .bg(if action == ButtonAction::Call && in_call {
+            .bg(if action == ButtonAction::Call && hanging_up {
                 theme.danger
             } else {
                 theme.primary
@@ -1422,7 +1540,7 @@ impl Render for Composer {
             .child(icon(
                 glyph,
                 if glyph == "stop" { 14.0 } else { 16.0 },
-                if action == ButtonAction::Call && in_call {
+                if action == ButtonAction::Call && hanging_up {
                     theme.text
                 } else {
                     theme.on_primary
@@ -1431,7 +1549,24 @@ impl Render for Composer {
             .on_click(cx.listener(move |this, _, window, cx| match action {
                 ButtonAction::Send => this.submit(window, cx),
                 ButtonAction::Stop => cx.emit(ComposerEvent::Stop),
-                ButtonAction::Call => this.voice.update(cx, |v, cx| v.toggle_call(cx)),
+                ButtonAction::Call => {
+                    let live = this.state.read(cx).my_call.is_some();
+                    let voice_on = this.voice.read(cx).in_call();
+                    if live {
+                        this.state.update(cx, |s, cx| s.leave_call(cx));
+                    } else if voice_on {
+                        this.voice.update(cx, |v, cx| v.toggle_call(cx));
+                    } else if this
+                        .state
+                        .read(cx)
+                        .selected()
+                        .is_some_and(callview::callable)
+                    {
+                        // Audio-only; camera is toggled on the call screen.
+                        this.state
+                            .update(cx, |s, cx| s.start_call_in_chat(CallKind::Voice, cx));
+                    }
+                }
             }));
 
         // Hold to record a voice memo, or click to toggle recording. Idle it is
@@ -1517,7 +1652,10 @@ impl Render for Composer {
                 .child(self.input.clone())
         };
 
+        let drop_border = theme.accent;
+        let drop_fill = theme.accent_soft;
         let mut field = div()
+            .id("composer-field")
             .flex_1()
             .min_w_0()
             .min_h(px(COMPOSER_HEIGHT))
@@ -1530,6 +1668,9 @@ impl Render for Composer {
             .bg(theme.field)
             .border_1()
             .border_color(border_color)
+            .drag_over::<ExternalPaths>(move |style, _, _, _| {
+                style.border_color(drop_border).bg(drop_fill)
+            })
             .child(
                 div()
                     .h(px(COMPOSER_HEIGHT - 2.0))
@@ -1539,8 +1680,8 @@ impl Render for Composer {
                     .child(plus),
             )
             .child(field_body);
-        // Grok Mac: the mic alone while the field is idle; the round button
-        // appears for text (send), a running turn (stop) or a call (hang up).
+        // Match the iPhone: mic (transcribe) + phone (call) while the field is
+        // idle and empty; send / stop / hang-up replace the phone as needed.
         let mut trailing = div()
             .flex()
             .items_center()
@@ -1550,12 +1691,103 @@ impl Render for Composer {
         if !has_text && !recording {
             trailing = trailing.child(mic_button);
         }
-        if has_text || running || in_call || voice_mode || recording {
-            trailing = trailing.child(primary_button);
-        }
+        // Always show the round button: phone when idle (like the iPhone), else
+        // send / stop / hang-up.
+        trailing = trailing.child(primary_button);
         field = field.child(trailing);
 
-        let mut column = div().relative().w_full().flex().flex_col().gap(px(8.0));
+        let mut column = div()
+            .id("composer")
+            .relative()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .can_drop(|dragged, _, _| dragged.is::<ExternalPaths>())
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                this.add_paths(paths.paths().iter().cloned(), cx);
+            }));
+
+        // Reply chip (iPhone parity): set by the hover reply icon on a message.
+        if let Some(chat_id) = self.state.read(cx).active_chat_id() {
+            let reply_id = self
+                .state
+                .read(cx)
+                .chat_ui
+                .get(&chat_id)
+                .and_then(|ui| ui.reply_to.clone());
+            if let Some(reply_id) = reply_id {
+                let (who, preview) =
+                    self.state
+                        .read(cx)
+                        .messages
+                        .get(&chat_id)
+                        .and_then(|list| list.iter().find(|m| m.id == reply_id))
+                        .map(|m| {
+                            let who =
+                                m.sender_handle
+                                    .as_deref()
+                                    .map(|h| format!("@{h}"))
+                                    .unwrap_or_else(|| match m.role {
+                                        crate::model::Role::Assistant => "agent".into(),
+                                        crate::model::Role::User => "you".into(),
+                                        crate::model::Role::System
+                                        | crate::model::Role::Project => "message".into(),
+                                    });
+                            let mut preview = m.plain_text();
+                            if preview.chars().count() > 72 {
+                                preview = preview.chars().take(72).collect::<String>() + "…";
+                            }
+                            (who, preview)
+                        })
+                        .unwrap_or_else(|| ("message".into(), String::new()));
+                let clear_chat = chat_id.clone();
+                column = column.child(
+                    div()
+                        .id("composer-reply")
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .px(px(14.0))
+                        .py(px(8.0))
+                        .ml(px(PLUS_BUTTON + 12.0))
+                        .rounded(px(14.0))
+                        .bg(theme.bubble_assistant)
+                        .child(icon("reply", 12.0, theme.text_muted))
+                        .child(
+                            div()
+                                .text_size(px(TEXT_TINY))
+                                .text_color(theme.text_muted)
+                                .child(format!("Replying to {who}")),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(px(TEXT_TINY))
+                                .text_color(theme.text)
+                                .truncate()
+                                .child(preview),
+                        )
+                        .child(
+                            div()
+                                .id("composer-reply-clear")
+                                .size(px(18.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_full()
+                                .cursor_pointer()
+                                .hover(|s| s.bg(theme.surface_2))
+                                .child(icon("xmark", 10.0, theme.text_muted))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.state
+                                        .update(cx, |s, cx| s.clear_reply_to(&clear_chat, cx));
+                                })),
+                        ),
+                );
+            }
+        }
 
         if !self.attachments.is_empty() {
             let mut chips = div().flex().flex_wrap().gap(px(6.0)).pl(px(8.0));
