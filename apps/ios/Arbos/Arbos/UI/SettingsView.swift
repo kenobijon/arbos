@@ -728,7 +728,8 @@ struct ConnectorsPage: View {
                             .foregroundStyle(.white)
                     )
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(p.label).font(theme.font(Theme.body)).foregroundStyle(theme.text).lineLimit(2)
+                    // Long labels ("Harness Comms (Beeper + Gmail)") may run to four lines at the larger text sizes (the SE needs the fourth).
+                    Text(p.label).font(theme.font(Theme.body)).foregroundStyle(theme.text).lineLimit(theme.textScale > 1.05 ? 4 : 2)
                     Text(connectorSubline(p, cn: cn))
                         .font(theme.font(Theme.tiny))
                         .foregroundStyle(theme.muted)
