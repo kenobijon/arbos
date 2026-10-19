@@ -38,6 +38,7 @@ pub fn label(tool_name: &str, args: &Value) -> Option<String> {
         "web_search" | "search_web" => Some("Searching the web".into()),
         "generate_image" => Some("Making the image".into()),
         "deliver_file" => Some("Sending the file".into()),
+        "submit_feedback" => Some("Filing your feedback".into()),
         "connector_call" | "connectors_list" => Some("Checking your connected accounts".into()),
         "local_run" | "local_read" | "local_list" | "local_devices" => {
             Some("Working on your computer".into())
@@ -264,6 +265,7 @@ fn code_label(code: &str) -> Option<String> {
         "connector_call" | "connectors_list" => "Checking your connected accounts",
         "web_search" => "Searching the web",
         "web_fetch" => "Reading the docs",
+        "submit_feedback" => "Filing your feedback",
         _ => return None,
     };
     Some(l.into())

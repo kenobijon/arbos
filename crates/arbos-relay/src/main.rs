@@ -579,8 +579,18 @@ async fn main() -> anyhow::Result<()> {
         .route("/room/{project}/{chat}/stats", get(rooms::room_stats))
         .route("/blob/{project}/{key}", get(blobs::get).put(blobs::put))
         .route("/feedback", post(feedback::submit))
+        .route("/feedback/capture/{id}", post(feedback::device_capture))
+        .route("/box/feedback/capture", post(feedback::box_capture_request))
+        .route(
+            "/box/feedback/capture/{id}",
+            get(feedback::box_capture_status),
+        )
         .route("/admin/feedback", get(feedback::admin_list))
         .route("/admin/feedback/{id}/image", get(feedback::admin_image))
+        .route(
+            "/admin/feedback/{id}/issue",
+            post(feedback::admin_set_issue),
+        )
         .route("/bootstrap/{file}", get(blobs::bootstrap))
         .route("/proxy/v1/models", get(proxy::openai_models))
         .route("/proxy/v1/images/generations", post(images::generations))
