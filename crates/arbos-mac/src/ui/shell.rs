@@ -85,6 +85,8 @@ pub struct Shell {
     pub(crate) menu_open: bool,
     /// Right-click menu on a sidebar row: the space and where the click landed.
     pub(crate) row_menu: Option<(crate::model::Id, gpui::Point<gpui::Pixels>)>,
+    /// Right-click menu on a chat tab or archived chat: the chat and click point.
+    pub(crate) chat_menu: Option<(crate::model::Id, gpui::Point<gpui::Pixels>)>,
     /// People chats (D72): the @search field, the header pickers.
     pub people_input: Entity<ComposerInput>,
     /// Agent profile page: inline description editor.
@@ -399,6 +401,7 @@ impl Shell {
                 .is_some_and(|v| v != "connectors" && !v.starts_with("secrets")),
             settings_scroll,
             row_menu: None,
+            chat_menu: None,
             react_menu: None,
             group_picker_open: false,
             archived_open: false,
@@ -549,6 +552,7 @@ impl Shell {
             || self.add_agent_open
             || self.group_picker_open
             || self.row_menu.is_some()
+            || self.chat_menu.is_some()
             || self.react_menu.is_some();
         self.close_popovers(cx);
         if floating {
@@ -627,6 +631,7 @@ impl Shell {
             || self.group_picker_open
             || self.archived_open
             || self.row_menu.is_some()
+            || self.chat_menu.is_some()
             || self.react_menu.is_some()
         {
             self.menu_open = false;
@@ -635,6 +640,7 @@ impl Shell {
             self.group_picker_open = false;
             self.archived_open = false;
             self.row_menu = None;
+            self.chat_menu = None;
             self.react_menu = None;
             cx.notify();
         }
@@ -2705,6 +2711,9 @@ impl Render for Shell {
             }
         }
         if let Some(menu) = sidebar::row_menu(self, cx) {
+            root = root.child(menu);
+        }
+        if let Some(menu) = sidebar::chat_menu(self, cx) {
             root = root.child(menu);
         }
         if let Some(menu) = self.react_menu(cx) {
