@@ -807,6 +807,19 @@ impl AppState {
                 reachable,
             } => self.on_call_ready(call, created, reachable, cx),
             SyncEvent::CallStarted { call, sender } => self.on_call_started(call, sender, cx),
+            SyncEvent::FeedbackCapture {
+                request_id,
+                expires_at,
+            } => {
+                let screen = self
+                    .selected()
+                    .map(|p| format!("project:{}", p.name))
+                    .unwrap_or_else(|| "home".into());
+                if crate::ui::feedback::answer_capture(request_id, expires_at, screen, cx) {
+                    self.push_notice("Screenshot added to your feedback");
+                    cx.notify();
+                }
+            }
             SyncEvent::CallEnded(ended) => self.on_call_ended(ended, cx),
             SyncEvent::CallMissed(missed) => self.on_call_missed(missed, cx),
             SyncEvent::CallInfo(call) => self.on_call_info(call, cx),

@@ -1315,6 +1315,19 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
                     archived_at,
                 });
             }
+            "feedback_capture" => {
+                let request_id = push
+                    .pointer("/payload/request_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                if !request_id.is_empty() {
+                    let _ = shared.events.send(SyncEvent::FeedbackCapture {
+                        request_id,
+                        expires_at: push.pointer("/payload/expires_at").and_then(Value::as_i64),
+                    });
+                }
+            }
             "call_missed" => {
                 if let Some(missed) = push
                     .get("payload")

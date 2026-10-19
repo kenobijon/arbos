@@ -540,6 +540,144 @@ impl Render for FeedbackSheet {
     }
 }
 
+/// `feedback_capture` push from the relay: the user's agent is filing their feedback
+/// (`submit_feedback`) and wants the screen they are looking at. When this app is the active
+/// one, grab the Arbos window exactly as the sheet does and upload it to
+/// `POST /feedback/capture/{id}`; otherwise tell the relay why there is no picture. Returns
+/// whether a picture was taken (the caller shows a one-line notice).
+pub fn answer_capture(
+    request_id: String,
+    expires_at: Option<i64>,
+    screen: String,
+    cx: &mut App,
+) -> bool {
+    if let Some(exp) = expires_at {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        if exp > 0 && now > exp {
+            return false;
+        }
+    }
+    let relay_url = crate::sync::configured_relay_url();
+    let Some(creds) = credentials::load(&relay_url) else {
+        return false;
+    };
+    let shot = if app_is_active() {
+        capture_key_window().map(Some)
+    } else {
+        Ok(None)
+    };
+    let mut body = serde_json::json!({
+        "platform": "mac",
+        "app_version": crate::update::current_version(),
+        "os": format!("macOS {}", os_version()).trim().to_string(),
+        "device": hardware_model(),
+        "screen": screen,
+    });
+    let taken = match &shot {
+        Ok(Some(s)) => {
+            body["image"] = serde_json::json!(
+                base64::engine::general_purpose::STANDARD.encode(s.bytes.as_slice())
+            );
+            body["mime"] = serde_json::json!(s.mime);
+            body["width"] = serde_json::json!(s.width);
+            body["height"] = serde_json::json!(s.height);
+            true
+        }
+        Ok(None) => {
+            body["skipped"] = serde_json::json!("background");
+            false
+        }
+        Err(e) => {
+            body["skipped"] = serde_json::json!(format!("failed: {e:#}"));
+            false
+        }
+    };
+    let url = format!(
+        "{}/feedback/capture/{}",
+        relay_url.trim_end_matches('/'),
+        request_id
+    );
+    let token = creds.access_token.clone();
+    Tokio::spawn(cx, async move {
+        let client = match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(45))
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("feedback capture: http client: {e}");
+                return;
+            }
+        };
+        match client.post(url).bearer_auth(token).json(&body).send().await {
+            Ok(r) if !r.status().is_success() => {
+                eprintln!("feedback capture: relay answered {}", r.status())
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("feedback capture: upload failed: {e}"),
+        }
+    })
+    .detach();
+    taken
+}
+
+/// The Arbos window as a PNG by window number (no `Window` needed; used by the push responder).
+fn capture_key_window() -> Result<Shot> {
+    if !cfg!(target_os = "macos") {
+        return Err(anyhow!("window capture is macOS only"));
+    }
+    let Some(n) = key_window_number() else {
+        return Err(anyhow!("no key window"));
+    };
+    let path =
+        std::env::temp_dir().join(format!("arbos-feedback-capture-{}.png", std::process::id()));
+    let status = std::process::Command::new("screencapture")
+        .args(["-x", "-o"])
+        .arg(format!("-l{n}"))
+        .arg(&path)
+        .status()
+        .context("run screencapture")?;
+    if !status.success() {
+        return Err(anyhow!(
+            "screencapture exited with {status} (Screen Recording permission?)"
+        ));
+    }
+    let bytes = std::fs::read(&path).context("read the capture")?;
+    let _ = std::fs::remove_file(&path);
+    Shot::from_bytes(bytes, "Arbos window".into())
+}
+
+/// `sysctl -n hw.model` → "MacBookPro18,3"; empty when unknown.
+fn hardware_model() -> String {
+    if !cfg!(target_os = "macos") {
+        return String::new();
+    }
+    std::process::Command::new("sysctl")
+        .args(["-n", "hw.model"])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "macos")]
+fn app_is_active() -> bool {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSApplication;
+    let Some(mtm) = MainThreadMarker::new() else {
+        return false;
+    };
+    NSApplication::sharedApplication(mtm).isActive()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn app_is_active() -> bool {
+    false
+}
+
 fn load_file(path: &PathBuf) -> Result<Shot> {
     let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
     let name = path

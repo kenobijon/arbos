@@ -108,6 +108,12 @@ pub enum SyncEvent {
         chat_id: Id,
         archived_at: Option<u64>,
     },
+    /// `feedback_capture` push: the user's agent is filing feedback and wants a picture of the
+    /// screen; the app answers `POST /feedback/capture/{id}` if it is in the foreground.
+    FeedbackCapture {
+        request_id: String,
+        expires_at: Option<i64>,
+    },
     /// `GET /voices`: the call voices an agent can use, and the default's id.
     Voices {
         default: Option<String>,

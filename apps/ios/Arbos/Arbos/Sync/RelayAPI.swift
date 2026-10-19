@@ -459,6 +459,25 @@ final class RelayAPI {
         return (v as? [String: Any])?["id"] as? String
     }
 
+    /// `POST /feedback/capture/{id}` (device token): the answer to a `feedback_capture` push from
+    /// the user's agent (`submit_feedback`). `{image: base64 JPEG/PNG, mime, width, height,
+    /// platform: "ios", app_version, os, device, screen}`; or `{skipped: "<why>"}` with no image.
+    func sendFeedbackCapture(requestId: String, image: Data?, mime: String, width: Int, height: Int,
+                             appVersion: String, os: String, device: String, screen: String, skipped: String?) async throws {
+        var body: [String: Any] = [
+            "platform": "ios", "app_version": appVersion, "os": os, "device": device, "screen": screen,
+        ]
+        if let image {
+            body["image"] = image.base64EncodedString()
+            body["mime"] = mime
+            body["width"] = width
+            body["height"] = height
+        }
+        if let skipped { body["skipped"] = skipped }
+        let safe = requestId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? requestId
+        _ = try await json("POST", "/feedback/capture/\(safe)", body: body)
+    }
+
     /// `POST /proxy/v1/audio/transcriptions` (multipart `file` + `model`) → the memo's text.
     /// The relay meters it on `projectId` (`X-Arbos-Project`).
     func transcribe(projectId: Id?, data: Data, mime: String) async throws -> String {

@@ -223,6 +223,8 @@ impl Agent {
             | "secret_decided"
             | "secret_notice"
             | "secret_scrub" => crate::vault::on_push(self, kind, &payload).await,
+            // The feedback loop opened the issue for a report the agent filed (`submit_feedback`).
+            "feedback_issue" => crate::feedback::on_issue_push(self, &payload).await,
             other => {
                 tracing::info!(kind = other, push = %payload, "push delivered");
                 let _ = self.store.t3_append(
