@@ -260,6 +260,9 @@ fn code_label(code: &str) -> Option<String> {
         "routines_create" | "routines_update" | "routines_delete" | "routines_list" => {
             "Setting the schedule"
         }
+        "goals_create" | "goals_update" | "goals_delete" | "goals_list" | "goals_log" => {
+            "Updating a goal"
+        }
         "vault_list" | "vault_request" | "secrets_list" | "secrets_request" | "egress"
         | "browser_fill" => "Using your secrets",
         "connector_call" | "connectors_list" => "Checking your connected accounts",

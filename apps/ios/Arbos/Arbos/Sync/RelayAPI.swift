@@ -863,4 +863,39 @@ final class RelayAPI {
     func roomURL(room: String) -> URL? {
         URL(string: "\(endpoint.wsUrl)/room/\(room)?token=\(token())")
     }
+
+    // MARK: Goals (long-running objectives)
+
+    /// `GET /goals` — every goal across the caller's projects.
+    func goals() async throws -> [GoalItem] {
+        let v = try await json("GET", "/goals") as? [String: Any]
+        return ((v?["goals"] as? [Any]) ?? []).compactMap(GoalItem.parse)
+    }
+
+    func projectGoals(_ projectId: Id) async throws -> [GoalItem] {
+        let v = try await json("GET", "/projects/\(projectId)/goals") as? [String: Any]
+        return ((v?["goals"] as? [Any]) ?? []).compactMap(GoalItem.parse)
+    }
+
+    func createGoal(projectId: Id, _ body: [String: Any]) async throws -> GoalItem {
+        let v = try await json("POST", "/projects/\(projectId)/goals", body: body)
+        guard let g = GoalItem.parse(v) else { throw RelayError(status: 0, message: "Bad goal reply") }
+        return g
+    }
+
+    func patchGoal(projectId: Id, goalId: String, _ body: [String: Any]) async throws -> GoalItem {
+        let v = try await json("PATCH", "/projects/\(projectId)/goals/\(goalId)", body: body)
+        guard let g = GoalItem.parse(v) else { throw RelayError(status: 0, message: "Bad goal reply") }
+        return g
+    }
+
+    func deleteGoal(projectId: Id, goalId: String) async throws {
+        _ = try await request("DELETE", "/projects/\(projectId)/goals/\(goalId)")
+    }
+
+    func appendGoalLog(projectId: Id, goalId: String, text: String) async throws -> GoalItem {
+        let v = try await json("POST", "/projects/\(projectId)/goals/\(goalId)/log", body: ["text": text])
+        guard let g = GoalItem.parse(v) else { throw RelayError(status: 0, message: "Bad goal reply") }
+        return g
+    }
 }

@@ -7,6 +7,7 @@ mod config;
 mod connectors;
 mod eval;
 mod feedback;
+mod goals;
 mod groups;
 mod harness;
 mod hooks;

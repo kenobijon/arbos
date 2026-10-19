@@ -4,7 +4,8 @@
 //! spawn_subagent, wake_subagent, connectors_list, connector_call, local_devices,
 //! local_run, local_read, local_list, deliver_file, generate_image, group_send, vault_list,
 //! vault_request, egress, browser_fill, routines_list, routines_create, routines_update,
-//! routines_delete, web_search, web_fetch, submit_feedback.
+//! routines_delete, goals_list, goals_create, goals_update, goals_log, goals_delete,
+//! web_search, web_fetch, submit_feedback.
 //!
 //! Sessions authenticate with a role-bound bearer token (main vs subagent, `Config::
 //! mcp_token_for_role`); tools that speak to other Projects are refused to subagents (D69).
@@ -81,6 +82,7 @@ fn tools() -> Value {
         a.extend(crate::media::tool_specs());
         a.extend(crate::vault::tool_specs());
         a.extend(crate::routines::tool_specs());
+        a.extend(crate::goals::tool_specs());
         a.extend(crate::web::tool_specs());
         a.extend(crate::feedback::tool_specs());
     }
@@ -675,6 +677,9 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
         "browser_fill" => crate::vault::browser_fill(a, args, &chat_for_scratch).await,
         "routines_list" | "routines_create" | "routines_update" | "routines_delete" => {
             crate::routines::call_tool(a, name, args, &chat_for_scratch).await
+        }
+        "goals_list" | "goals_create" | "goals_update" | "goals_log" | "goals_delete" => {
+            crate::goals::call_tool(a, name, args, &chat_for_scratch).await
         }
         _ => err_result(format!("unknown tool {name}")),
     }

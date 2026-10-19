@@ -289,6 +289,37 @@ pub struct Routine {
     pub next_run_at: Option<i64>,
 }
 
+/// A long-running objective the agent tracks across days (Goals, feedback #1091).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Goal {
+    pub id: String,
+    pub project_id: String,
+    pub chat_id: Option<String>,
+    pub title: String,
+    pub outcome: String,
+    /// JSON array of `{ id?, title, status? }` steps.
+    pub plan: serde_json::Value,
+    /// `active | blocked | waiting | paused | done`.
+    pub status: String,
+    /// JSON array of `{ at, text }` progress notes.
+    pub progress_log: serde_json::Value,
+    pub next_step: String,
+    /// Five-field cron for check-ins; `None` means no automatic check-in.
+    pub check_in_cron: Option<String>,
+    pub check_in_tz: String,
+    /// Linked routine that fires the check-in prompt.
+    pub routine_id: Option<String>,
+    /// `ask | suggest | act` — how much the agent may do without asking.
+    pub autonomy: String,
+    pub linked_chat_ids: serde_json::Value,
+    pub linked_subagent_ids: serde_json::Value,
+    /// Last question asked of the user; set to avoid repeated nags.
+    pub waiting_question: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub last_moved_at: Option<i64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoutineRun {
     pub id: String,
@@ -517,6 +548,23 @@ impl Db {
         Self::migrate_vault_items_per_user(&c)?;
         c.execute_batch(crate::db_secrets::SECRETS_SCHEMA)?;
         crate::db_secrets::migrate_secrets(&c);
+        c.execute_batch(
+            "CREATE TABLE IF NOT EXISTS goals (
+               id TEXT PRIMARY KEY, project_id TEXT NOT NULL, chat_id TEXT,
+               title TEXT NOT NULL, outcome TEXT NOT NULL DEFAULT '',
+               plan TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL DEFAULT 'active',
+               progress_log TEXT NOT NULL DEFAULT '[]', next_step TEXT NOT NULL DEFAULT '',
+               check_in_cron TEXT, check_in_tz TEXT NOT NULL DEFAULT 'UTC',
+               routine_id TEXT, autonomy TEXT NOT NULL DEFAULT 'ask',
+               linked_chat_ids TEXT NOT NULL DEFAULT '[]',
+               linked_subagent_ids TEXT NOT NULL DEFAULT '[]',
+               waiting_question TEXT,
+               created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+               last_moved_at INTEGER
+             );
+             CREATE INDEX IF NOT EXISTS goals_project ON goals(project_id, status);
+             CREATE INDEX IF NOT EXISTS goals_moved ON goals(last_moved_at);",
+        )?;
         Ok(Self(Arc::new(Mutex::new(c))))
     }
 
@@ -2484,6 +2532,131 @@ impl Db {
             )?;
             let rows = st.query_map(params![now_ms() - max_age_ms], Self::row_to_run)?;
             rows.collect()
+        })
+    }
+
+    // ---- goals (long-running objectives) ------------------------------------------------------
+
+    const GOAL_COLS: &'static str = "id, project_id, chat_id, title, outcome, plan, status, progress_log, next_step, check_in_cron, check_in_tz, routine_id, autonomy, linked_chat_ids, linked_subagent_ids, waiting_question, created_at, updated_at, last_moved_at";
+
+    fn row_to_goal(r: &rusqlite::Row<'_>) -> rusqlite::Result<Goal> {
+        let parse = |i: usize| -> rusqlite::Result<serde_json::Value> {
+            let s: String = r.get(i)?;
+            Ok(serde_json::from_str(&s).unwrap_or_else(|_| serde_json::json!([])))
+        };
+        Ok(Goal {
+            id: r.get(0)?,
+            project_id: r.get(1)?,
+            chat_id: r.get(2)?,
+            title: r.get(3)?,
+            outcome: r.get(4)?,
+            plan: parse(5)?,
+            status: r.get(6)?,
+            progress_log: parse(7)?,
+            next_step: r.get(8)?,
+            check_in_cron: r.get(9)?,
+            check_in_tz: r.get(10)?,
+            routine_id: r.get(11)?,
+            autonomy: r.get(12)?,
+            linked_chat_ids: parse(13)?,
+            linked_subagent_ids: parse(14)?,
+            waiting_question: r.get(15)?,
+            created_at: r.get(16)?,
+            updated_at: r.get(17)?,
+            last_moved_at: r.get(18)?,
+        })
+    }
+
+    pub fn insert_goal(&self, g: &Goal) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                &format!(
+                    "INSERT INTO goals({}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+                    Self::GOAL_COLS
+                ),
+                params![
+                    g.id,
+                    g.project_id,
+                    g.chat_id,
+                    g.title,
+                    g.outcome,
+                    g.plan.to_string(),
+                    g.status,
+                    g.progress_log.to_string(),
+                    g.next_step,
+                    g.check_in_cron,
+                    g.check_in_tz,
+                    g.routine_id,
+                    g.autonomy,
+                    g.linked_chat_ids.to_string(),
+                    g.linked_subagent_ids.to_string(),
+                    g.waiting_question,
+                    g.created_at,
+                    g.updated_at,
+                    g.last_moved_at,
+                ],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn goal(&self, id: &str) -> Result<Option<Goal>> {
+        self.with(|c| {
+            c.query_row(
+                &format!("SELECT {} FROM goals WHERE id = ?1", Self::GOAL_COLS),
+                params![id],
+                Self::row_to_goal,
+            )
+            .optional()
+        })
+    }
+
+    pub fn list_goals(&self, project_id: &str) -> Result<Vec<Goal>> {
+        self.with(|c| {
+            let mut st = c.prepare(&format!(
+                "SELECT {} FROM goals WHERE project_id = ?1 ORDER BY COALESCE(last_moved_at, updated_at) DESC",
+                Self::GOAL_COLS
+            ))?;
+            let rows = st.query_map(params![project_id], Self::row_to_goal)?;
+            rows.collect()
+        })
+    }
+
+    pub fn update_goal(&self, g: &Goal) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE goals SET chat_id=?2, title=?3, outcome=?4, plan=?5, status=?6, progress_log=?7,
+                 next_step=?8, check_in_cron=?9, check_in_tz=?10, routine_id=?11, autonomy=?12,
+                 linked_chat_ids=?13, linked_subagent_ids=?14, waiting_question=?15,
+                 updated_at=?16, last_moved_at=?17 WHERE id=?1",
+                params![
+                    g.id,
+                    g.chat_id,
+                    g.title,
+                    g.outcome,
+                    g.plan.to_string(),
+                    g.status,
+                    g.progress_log.to_string(),
+                    g.next_step,
+                    g.check_in_cron,
+                    g.check_in_tz,
+                    g.routine_id,
+                    g.autonomy,
+                    g.linked_chat_ids.to_string(),
+                    g.linked_subagent_ids.to_string(),
+                    g.waiting_question,
+                    g.updated_at,
+                    g.last_moved_at,
+                ],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn delete_goal(&self, id: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute("DELETE FROM goals WHERE id = ?1", params![id])
+                .map(|_| ())
         })
     }
 

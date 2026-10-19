@@ -237,6 +237,7 @@ impl Supervisor {
             agent.dispatch_push(p.clone());
         }
         agent.spawn_push_poller();
+        agent.spawn_goals_poller();
         if let Err(e) = crate::vault::refresh_all(&agent).await {
             tracing::info!(project = %project_id, error = %e, "secrets: no grants yet");
         }

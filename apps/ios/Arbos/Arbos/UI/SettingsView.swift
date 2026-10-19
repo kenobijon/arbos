@@ -60,6 +60,9 @@ struct SettingsView: View {
                             SettingsRow(icon: "key.fill", title: "Secrets", value: model.secretsRowValue,
                                         valueTint: model.secrets?.paused == true ? theme.danger : nil)
                         }
+                        NavigationLink { GoalsPage() } label: {
+                            SettingsRow(icon: "flag.fill", title: "Goals", value: model.goalsRowValue)
+                        }
                     }
                     if !model.isFixture {
                         SettingsRow(icon: "iphone", title: "On this iPhone", value: storageLine, chevron: false)
@@ -123,6 +126,7 @@ struct SettingsView: View {
                 model.refreshConnectors()
                 Task { await push.refreshStatus() }
                 Task { await model.refreshSecrets() }
+                Task { await model.refreshGoals() }
             }
             // After Google OAuth in Safari, refresh so "Needs sign-in" flips to Connected.
             .onChange(of: scenePhase) { _, phase in
@@ -1302,3 +1306,352 @@ struct RelayPage: View {
     }
 }
 #endif
+
+// MARK: - Goals (long-running objectives)
+
+struct GoalsPage: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    @State private var showNew = false
+
+    private var open: [GoalItem] { model.goals.filter(\.isOpen) }
+    private var closed: [GoalItem] { model.goals.filter { !$0.isOpen } }
+
+    var body: some View {
+        SettingsPage(title: "Goals") {
+            if model.goals.isEmpty {
+                Text("Long-running objectives the agent tracks across days. Say “make this a goal” in a chat, or start one here.")
+                    .font(theme.font(Theme.small))
+                    .foregroundStyle(theme.muted)
+                    .padding(.horizontal, 4)
+                    .padding(.bottom, 8)
+            }
+            if !open.isEmpty {
+                SettingsGroup(header: "Active") {
+                    ForEach(open) { g in
+                        NavigationLink { GoalDetailPage(goalId: g.id) } label: {
+                            GoalRow(goal: g)
+                        }
+                    }
+                }
+            }
+            if !closed.isEmpty {
+                SettingsGroup(header: "Paused & done") {
+                    ForEach(closed) { g in
+                        NavigationLink { GoalDetailPage(goalId: g.id) } label: {
+                            GoalRow(goal: g)
+                        }
+                    }
+                }
+            }
+            SettingsGroup {
+                Button { showNew = true } label: {
+                    SettingsRow(icon: "plus", title: "New goal")
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .task { await model.refreshGoals() }
+        .sheet(isPresented: $showNew) {
+            NavigationStack {
+                NewGoalSheet().environmentObject(model).environment(\.theme, theme)
+            }
+        }
+    }
+}
+
+struct GoalRow: View {
+    @Environment(\.theme) private var theme
+    let goal: GoalItem
+
+    var body: some View {
+        HStack(spacing: 14) {
+            RoundedRectangle(cornerRadius: 7.5, style: .continuous)
+                .fill(statusColor)
+                .frame(width: SettingsRow.tile, height: SettingsRow.tile)
+                .overlay(
+                    Image(systemName: "flag.fill")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.white)
+                )
+            VStack(alignment: .leading, spacing: 2) {
+                Text(goal.title)
+                    .font(theme.font(Theme.body))
+                    .foregroundStyle(theme.text)
+                    .lineLimit(2)
+                Text(subtitle)
+                    .font(theme.font(Theme.tiny))
+                    .foregroundStyle(theme.muted)
+                    .lineLimit(2)
+            }
+            Spacer(minLength: 8)
+            Image(systemName: "chevron.right")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(theme.placeholder)
+        }
+        .padding(.horizontal, 16)
+        .frame(minHeight: 56)
+        .contentShape(Rectangle())
+    }
+
+    private var subtitle: String {
+        var parts: [String] = [goal.statusLabel]
+        if !goal.nextStep.isEmpty { parts.append(goal.nextStep) }
+        if let moved = goal.lastMovedAt {
+            parts.append(SecretsText.ago(moved))
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private var statusColor: Color {
+        switch goal.status {
+        case "blocked": return theme.danger
+        case "waiting": return theme.warn
+        case "done": return theme.online
+        case "paused": return theme.muted
+        default: return theme.primary
+        }
+    }
+}
+
+struct GoalDetailPage: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    let goalId: String
+
+    private var goal: GoalItem? { model.goals.first { $0.id == goalId } }
+
+    var body: some View {
+        Group {
+            if let goal {
+                SettingsPage(title: goal.title) {
+                    SettingsGroup(footer: goal.outcome.isEmpty ? nil : goal.outcome) {
+                        SettingsValueRow("Status", value: goal.statusLabel)
+                        if let name = goal.projectName ?? model.project(goal.projectId)?.name {
+                            SettingsValueRow("Agent", value: name)
+                        }
+                        SettingsValueRow("Next step", value: goal.nextStep.isEmpty ? "—" : goal.nextStep)
+                        SettingsValueRow("Check-in", value: goal.checkInLabel)
+                        SettingsValueRow("Autonomy", value: goal.autonomyLabel)
+                        if let q = goal.waitingQuestion, !q.isEmpty {
+                            SettingsValueRow("Waiting", value: q)
+                        }
+                    }
+                    if !goal.plan.isEmpty {
+                        SettingsGroup(header: "Plan") {
+                            ForEach(goal.plan) { step in
+                                SettingsValueRow(step.title, value: step.status)
+                            }
+                        }
+                    }
+                    if !goal.progressLog.isEmpty {
+                        SettingsGroup(header: "Progress") {
+                            ForEach(goal.progressLog.reversed()) { entry in
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(entry.text)
+                                        .font(theme.font(Theme.small))
+                                        .foregroundStyle(theme.text)
+                                    if entry.at > 0 {
+                                        Text(SecretsText.ago(entry.at))
+                                            .font(theme.font(Theme.tiny))
+                                            .foregroundStyle(theme.muted)
+                                    }
+                                }
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 12)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                    }
+                    SettingsGroup {
+                        if goal.status != "paused" && goal.status != "done" {
+                            Button { model.setGoalStatus(goal, status: "paused") } label: {
+                                SettingsRow(icon: "pause.fill", title: "Pause")
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        if goal.status == "paused" || goal.status == "done" {
+                            Button { model.setGoalStatus(goal, status: "active") } label: {
+                                SettingsRow(icon: "play.fill", title: "Resume")
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        if goal.status != "done" {
+                            Button { model.setGoalStatus(goal, status: "done") } label: {
+                                SettingsRow(icon: "checkmark", title: "Mark done")
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    SettingsGroup(header: "Check-in") {
+                        ForEach(GoalCheckInPreset.all) { preset in
+                            Button {
+                                var body: [String: Any] = [
+                                    "checkInCron": preset.cron ?? "",
+                                ]
+                                if preset.cron != nil {
+                                    body["checkInTz"] = TimeZone.current.identifier
+                                }
+                                model.patchGoal(goal, body)
+                            } label: {
+                                SettingsRow(
+                                    icon: "clock",
+                                    title: preset.label,
+                                    value: goal.checkInCron == preset.cron || (preset.cron == nil && goal.checkInCron == nil) ? "Selected" : nil
+                                )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    SettingsGroup(header: "Autonomy", footer: "How much the agent may do on check-in without asking. Uses the same approval cards as the rest of Arbos.") {
+                        ForEach(GoalAutonomyPreset.all) { preset in
+                            Button { model.patchGoal(goal, ["autonomy": preset.id]) } label: {
+                                SettingsRow(
+                                    icon: "hand.raised.fill",
+                                    title: preset.label,
+                                    value: goal.autonomy == preset.id ? "Selected" : nil
+                                )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    SettingsGroup {
+                        Button(role: .destructive) { model.deleteGoal(goal) } label: {
+                            Text("Delete goal")
+                                .font(theme.font(Theme.body))
+                                .foregroundStyle(theme.danger)
+                                .frame(maxWidth: .infinity, minHeight: SettingsRow.height)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            } else {
+                SettingsPage(title: "Goal") {
+                    Text("This goal is gone.")
+                        .font(theme.font(Theme.small))
+                        .foregroundStyle(theme.muted)
+                }
+            }
+        }
+        .task { await model.refreshGoals() }
+    }
+}
+
+private struct GoalCheckInPreset: Identifiable {
+    let id: String
+    let label: String
+    let cron: String?
+    static let all: [GoalCheckInPreset] = [
+        .init(id: "daily", label: "Every day", cron: "0 9 * * *"),
+        .init(id: "weekdays", label: "Weekdays", cron: "0 9 * * 1-5"),
+        .init(id: "weekly", label: "Weekly", cron: "0 9 * * 1"),
+        .init(id: "manual", label: "Manual only", cron: nil),
+    ]
+}
+
+private struct GoalAutonomyPreset: Identifiable {
+    let id: String
+    let label: String
+    static let all: [GoalAutonomyPreset] = [
+        .init(id: "ask", label: "Ask first"),
+        .init(id: "suggest", label: "Suggest first"),
+        .init(id: "act", label: "Act freely"),
+    ]
+}
+
+struct NewGoalSheet: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    @Environment(\.dismiss) private var dismiss
+    @State private var title = ""
+    @State private var outcome = ""
+    @State private var nextStep = ""
+    @State private var projectId: Id = ""
+    @State private var checkIn = GoalCheckInPreset.all[0]
+    @State private var autonomy = GoalAutonomyPreset.all[0]
+
+    private var projects: [Project] { model.projects.filter { !$0.shared } }
+
+    var body: some View {
+        SettingsPage(title: "New goal", onBack: { dismiss() }) {
+            SettingsGroup {
+                SecretField(label: "Title") {
+                    SecretTextField(placeholder: "What are you working toward?", text: $title, capitalization: .sentences)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                SecretField(label: "Desired outcome") {
+                    SecretTextField(placeholder: "What done looks like", text: $outcome, multiline: true, capitalization: .sentences)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                SecretField(label: "Next step") {
+                    SecretTextField(placeholder: "First thing to do", text: $nextStep, capitalization: .sentences)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+            }
+            if !projects.isEmpty {
+                SettingsGroup(header: "Agent") {
+                    ForEach(projects) { p in
+                        Button {
+                            projectId = p.id
+                        } label: {
+                            SettingsRow(
+                                icon: "person.crop.circle",
+                                title: p.name,
+                                value: projectId == p.id ? "Selected" : nil
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            SettingsGroup(header: "Check-in") {
+                ForEach(GoalCheckInPreset.all) { preset in
+                    Button { checkIn = preset } label: {
+                        SettingsRow(icon: "clock", title: preset.label, value: checkIn.id == preset.id ? "Selected" : nil)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            SettingsGroup(header: "Autonomy") {
+                ForEach(GoalAutonomyPreset.all) { preset in
+                    Button { autonomy = preset } label: {
+                        SettingsRow(icon: "hand.raised.fill", title: preset.label, value: autonomy.id == preset.id ? "Selected" : nil)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            SettingsGroup {
+                Button {
+                    let pid = projectId.isEmpty ? (projects.first?.id ?? "") : projectId
+                    guard !pid.isEmpty, !title.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+                    model.createGoal(
+                        projectId: pid,
+                        title: title.trimmingCharacters(in: .whitespaces),
+                        outcome: outcome.trimmingCharacters(in: .whitespacesAndNewlines),
+                        nextStep: nextStep.trimmingCharacters(in: .whitespacesAndNewlines),
+                        checkInCron: checkIn.cron,
+                        autonomy: autonomy.id
+                    )
+                    dismiss()
+                } label: {
+                    Text("Create goal")
+                        .font(theme.font(Theme.body, weight: .semibold))
+                        .foregroundStyle(theme.onPrimary)
+                        .frame(maxWidth: .infinity, minHeight: SettingsRow.height)
+                        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.primary))
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                }
+                .buttonStyle(.plain)
+                .disabled(title.trimmingCharacters(in: .whitespaces).isEmpty || projects.isEmpty)
+            }
+        }
+        .onAppear {
+            if projectId.isEmpty { projectId = projects.first?.id ?? "" }
+        }
+    }
+}

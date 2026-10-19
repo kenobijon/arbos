@@ -166,3 +166,91 @@ extension AppModel {
         Task { await secretsAction("Disconnect") { try await self.relay.deleteVault(vaultId) } }
     }
 }
+
+// MARK: - Goals (long-running objectives)
+
+@MainActor
+extension AppModel {
+    var goalsRowValue: String? {
+        guard credentials != nil else { return nil }
+        let open = goals.filter(\.isOpen)
+        if open.isEmpty { return goals.isEmpty ? "No goals yet" : "\(goals.count) done" }
+        return "\(open.count) active"
+    }
+
+    var openGoals: [GoalItem] { goals.filter(\.isOpen) }
+
+    func refreshGoals() async {
+        guard credentials != nil, !isFixture else { return }
+        do {
+            goals = try await relay.goals()
+        } catch let e as RelayError where e.status == 404 {
+            goals = []
+        } catch {
+            // Keep the previous list; opening Settings must not alert on a blip.
+        }
+    }
+
+    @discardableResult
+    func goalsAction(_ what: String, _ body: @escaping () async throws -> Void) async -> String? {
+        guard !goalsBusy else { return "Busy" }
+        goalsBusy = true
+        defer { goalsBusy = false }
+        do {
+            try await body()
+            await refreshGoals()
+            return nil
+        } catch {
+            let text = (error as? RelayError).map { $0.message.isEmpty ? "HTTP \($0.status)" : $0.message } ?? error.localizedDescription
+            notice = Notice(text: "\(what): \(text)")
+            return text
+        }
+    }
+
+    func createGoal(projectId: Id, title: String, outcome: String, nextStep: String, checkInCron: String?, autonomy: String) {
+        var body: [String: Any] = [
+            "title": title,
+            "outcome": outcome,
+            "next_step": nextStep,
+            "status": "active",
+            "autonomy": autonomy,
+        ]
+        if let checkInCron, !checkInCron.isEmpty {
+            body["checkInCron"] = checkInCron
+            body["checkInTz"] = TimeZone.current.identifier
+        }
+        Task {
+            await goalsAction("Create goal") {
+                _ = try await self.relay.createGoal(projectId: projectId, body)
+            }
+        }
+    }
+
+    func patchGoal(_ goal: GoalItem, _ body: [String: Any]) {
+        if let i = goals.firstIndex(where: { $0.id == goal.id }) {
+            if let s = body["status"] as? String { goals[i].status = s }
+            if let t = body["title"] as? String { goals[i].title = t }
+            if let n = body["next_step"] as? String { goals[i].nextStep = n }
+            if let a = body["autonomy"] as? String { goals[i].autonomy = a }
+            if let c = body["checkInCron"] as? String { goals[i].checkInCron = c.isEmpty ? nil : c }
+        }
+        Task {
+            await goalsAction("Save goal") {
+                _ = try await self.relay.patchGoal(projectId: goal.projectId, goalId: goal.id, body)
+            }
+        }
+    }
+
+    func setGoalStatus(_ goal: GoalItem, status: String) {
+        patchGoal(goal, ["status": status])
+    }
+
+    func deleteGoal(_ goal: GoalItem) {
+        goals.removeAll { $0.id == goal.id }
+        Task {
+            await goalsAction("Delete goal") {
+                try await self.relay.deleteGoal(projectId: goal.projectId, goalId: goal.id)
+            }
+        }
+    }
+}
