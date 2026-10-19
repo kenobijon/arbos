@@ -385,21 +385,20 @@ pub fn render(
     } else {
         agent_tabs(shell, space, cx)
     };
-    // Without the docked sidebar (collapsed, or the window is too narrow for
-    // it) a toggle brings it back: docked when it fits, floating when not.
-    let sidebar_toggle = sidebar_hidden.then(|| {
-        let overlay = shell.state.read(cx).sidebar_overlay;
-        button("header-sidebar", "sidebar-left", overlay, &theme).on_click(cx.listener(
-            |this, _, window, cx| {
-                this.menu_open = false;
-                let width: f32 = window.viewport_size().width.into();
-                this.state.update(cx, |s, cx| {
-                    let narrow = s.window_is_narrow(width);
-                    s.toggle_rail(narrow, cx)
-                });
-            },
-        ))
-    });
+    // Sidebar toggle (⌘B): collapse when docked, bring it back when hidden
+    // (docked when the window fits it, floating overlay when narrow).
+    let overlay = shell.state.read(cx).sidebar_overlay;
+    let sidebar_open = !sidebar_hidden || overlay;
+    let sidebar_toggle = button("header-sidebar", "sidebar-left", sidebar_open, &theme).on_click(
+        cx.listener(|this, _, window, cx| {
+            this.menu_open = false;
+            let width: f32 = window.viewport_size().width.into();
+            this.state.update(cx, |s, cx| {
+                let narrow = s.window_is_narrow(width);
+                s.toggle_rail(narrow, cx)
+            });
+        }),
+    );
     div()
         .h(px(HEADER_HEIGHT))
         .flex_shrink_0()
@@ -419,7 +418,7 @@ pub fn render(
                 .items_center()
                 .gap(px(4.0))
                 .flex_shrink_0()
-                .children(sidebar_toggle)
+                .child(sidebar_toggle)
                 .child(title.flex_shrink_0().max_w(px(300.0))),
         )
         .when_some(tabs, |el, t| el.child(t))
