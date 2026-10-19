@@ -154,9 +154,11 @@ pub struct Shell {
     handle_input: Entity<ComposerInput>,
     pub add_agent_open: bool,
     pub members_open: bool,
-    /// The agent's "Archived" chats list (header strip).
-    pub(crate) archived_open: bool,
-    /// Per-agent call voice picker sheet (profile → voice).
+    /// The tab strip's "+" dropdown: New chat + the agent's previous chats.
+    pub(crate) tab_menu_open: bool,
+    /// The tab strip's scroll row, so a new or reopened tab comes into view.
+    pub(crate) tabs_scroll: ScrollHandle,
+    /// Per-agent call voice picker sheet ("…" menu → Voice, profile → voice).
     pub(crate) voice_picker_open: bool,
     /// Video picture-in-picture while the call screen is collapsed: offset
     /// from the window's bottom-right (right, bottom), and the drag in flight
@@ -486,7 +488,8 @@ impl Shell {
             chat_menu: None,
             react_menu: None,
             group_picker_open: false,
-            archived_open: false,
+            tab_menu_open: false,
+            tabs_scroll: ScrollHandle::new(),
             voice_picker_open: false,
             pip_offset: (24.0, 96.0),
             pip_drag: None,
@@ -782,8 +785,31 @@ impl Shell {
     }
 
     fn new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_new_tab(window, cx);
+    }
+
+    /// ⌘T / "+" / "New chat": a new chat after the last tab, scrolled into
+    /// view, with the composer focused.
+    pub(crate) fn open_new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| s.new_tab(cx));
+        self.reveal_active_tab(cx);
         Composer::focus(&self.composer, window, cx);
+    }
+
+    /// Scroll the tab strip so the selected agent's active tab is visible.
+    pub(crate) fn reveal_active_tab(&self, cx: &Context<Self>) {
+        let state = self.state.read(cx);
+        let Some(project_id) = state.selected_project.as_deref() else {
+            return;
+        };
+        let active = state.active_tab.get(project_id);
+        if let Some(ix) = state
+            .visible_tabs(project_id)
+            .iter()
+            .position(|c| Some(&c.id) == active)
+        {
+            self.tabs_scroll.scroll_to_item(ix);
+        }
     }
 
     fn toggle_rail(&mut self, _: &ToggleRail, window: &mut Window, cx: &mut Context<Self>) {
@@ -821,6 +847,7 @@ impl Shell {
             || self.members_open
             || self.add_agent_open
             || self.group_picker_open
+            || self.tab_menu_open
             || self.row_menu.is_some()
             || self.chat_menu.is_some()
             || self.react_menu.is_some();
@@ -905,7 +932,7 @@ impl Shell {
             || self.members_open
             || self.add_agent_open
             || self.group_picker_open
-            || self.archived_open
+            || self.tab_menu_open
             || self.row_menu.is_some()
             || self.chat_menu.is_some()
             || self.react_menu.is_some()
@@ -914,7 +941,7 @@ impl Shell {
             self.members_open = false;
             self.add_agent_open = false;
             self.group_picker_open = false;
-            self.archived_open = false;
+            self.tab_menu_open = false;
             self.row_menu = None;
             self.chat_menu = None;
             self.react_menu = None;
@@ -3000,11 +3027,6 @@ impl Render for Shell {
         }
         if let Some(target) = details {
             root = root.child(self.render_details(&target, cx));
-        }
-        if self.archived_open {
-            if let Some(space) = selected.as_ref() {
-                root = root.child(glass::popover(header::archived_list(self, space, cx)));
-            }
         }
         if let Some(menu) = sidebar::row_menu(self, cx) {
             root = root.child(menu);

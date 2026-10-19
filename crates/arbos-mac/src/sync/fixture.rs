@@ -286,10 +286,22 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::InviteToProject { .. }
         | ClientCommand::RemoveProjectMember { .. }
         | ClientCommand::FetchAvatar { .. }
-        | ClientCommand::ArchiveChat { .. }
         | ClientCommand::DeleteProject { .. }
         | ClientCommand::DeletePeopleChat { .. }
         | ClientCommand::CloseChat { .. } => {}
+        // The relay keeps archive state; the fixture does the same so a chat
+        // brought back from the "+" dropdown stays back when the list is re-sent.
+        ClientCommand::ArchiveChat { chat_id, archived } => {
+            if let Some(c) = shared
+                .chats
+                .lock()
+                .unwrap()
+                .iter_mut()
+                .find(|c| c.id == chat_id)
+            {
+                c.archived_at = archived.then(now_ms);
+            }
+        }
         ClientCommand::OpenChat { chat_id } => {
             *shared.open_chat.lock().unwrap() = Some(chat_id.clone());
             mark_read(shared, &chat_id);
@@ -3610,21 +3622,29 @@ fn seed_chats() -> Vec<Chat> {
             false,
             40,
         ),
-        chat(
-            CHAT_ARBOS_LAUNCH,
-            PROJECT_ARBOS,
-            "Launch planning",
-            false,
-            95,
-        ),
+        // Two archived chats, so the tab strip's "+" dropdown has previous
+        // chats to bring back.
+        Chat {
+            archived_at: Some(t.saturating_sub(80 * 60_000)),
+            ..chat(
+                CHAT_ARBOS_LAUNCH,
+                PROJECT_ARBOS,
+                "Launch planning",
+                false,
+                95,
+            )
+        },
         chat(CHAT_ARBOS_WIDGETS, PROJECT_ARBOS, "Beta release", false, 12),
-        chat(
-            CHAT_ARBOS_DRAFTS,
-            PROJECT_ARBOS,
-            "Investor update",
-            false,
-            12,
-        ),
+        Chat {
+            archived_at: Some(t.saturating_sub(10 * 60_000)),
+            ..chat(
+                CHAT_ARBOS_DRAFTS,
+                PROJECT_ARBOS,
+                "Investor update",
+                false,
+                12,
+            )
+        },
         chat(CHAT_ARBOS_MEDIA, PROJECT_ARBOS, "Deliverables", false, 18),
         chat(CHAT_ARBOS_VOICE, PROJECT_ARBOS, "Voice memo", false, 6),
         Chat {

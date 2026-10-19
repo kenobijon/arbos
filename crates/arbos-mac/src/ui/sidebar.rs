@@ -1062,7 +1062,7 @@ pub fn chat_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
             glass::menu_row("chat-menu-fork", "branch", "Fork", false, &theme).on_click(
                 cx.listener(move |this, _, _, cx| {
                     this.chat_menu = None;
-                    this.archived_open = false;
+                    this.tab_menu_open = false;
                     let id = fork_id.clone();
                     this.state.update(cx, |s, cx| s.duplicate_project(id, cx));
                 }),
@@ -1074,7 +1074,7 @@ pub fn chat_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
             glass::menu_row("chat-menu-delete", "trash", "Delete", true, &theme).on_click(
                 cx.listener(move |this, _, _, cx| {
                     this.chat_menu = None;
-                    this.archived_open = false;
+                    this.tab_menu_open = false;
                     let id = delete_id.clone();
                     this.state.update(cx, |s, cx| {
                         if delete_archived {
