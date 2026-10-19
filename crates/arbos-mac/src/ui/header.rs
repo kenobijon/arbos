@@ -16,7 +16,7 @@ use crate::model::{CallKind, Chat, Project};
 use crate::ui::avatars;
 use crate::ui::callview;
 use crate::ui::composer::{Composer, Picker};
-use crate::ui::glass;
+use crate::ui::glass::{self, WindowDrag};
 use crate::ui::groups;
 use crate::ui::icons::icon;
 use crate::ui::motion::PulseClock;
@@ -388,7 +388,7 @@ pub fn render(
         .pr(px(10.0))
         .border_b_1()
         .border_color(theme.border)
-        .window_control_area(gpui::WindowControlArea::Drag)
+        .window_drag()
         .child(
             div()
                 .flex()
