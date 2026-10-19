@@ -541,6 +541,15 @@ impl Shell {
         cx.notify();
     }
 
+    /// Close the profile page (back button, click outside); the composer takes
+    /// the keyboard back.
+    pub(crate) fn close_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, cx| {
+            s.close_profile(cx);
+        });
+        Composer::focus(&self.composer, window, cx);
+    }
+
     /// The agent page's "Done": save whichever of the name / description
     /// fields are open (unchanged text is not sent) and leave edit mode.
     pub(crate) fn finish_edit_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {

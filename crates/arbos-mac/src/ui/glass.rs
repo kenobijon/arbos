@@ -344,9 +344,12 @@ pub fn sheet(width: f32, theme: &Theme, header: Div, body: impl IntoElement) -> 
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(header)
         .child(body);
+    // The backdrop is modal: nothing under it is hovered or clicked (GPUI
+    // delivers mouse events to every hitbox under the pointer otherwise).
     div()
         .absolute()
         .inset_0()
+        .occlude()
         .flex()
         .items_center()
         .justify_center()
