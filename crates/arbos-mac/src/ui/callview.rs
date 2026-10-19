@@ -13,7 +13,7 @@ use gpui::{
 use crate::app::{ActiveCall, CallParticipant, CallStatus};
 use crate::model::{now_ms, Call, CallKind, Project, Sender};
 use crate::ui::avatars;
-use crate::ui::glass;
+use crate::ui::glass::{self, WindowDrag};
 use crate::ui::icons::icon;
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
@@ -339,7 +339,7 @@ pub fn screen(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> Di
                 .flex()
                 .items_center()
                 .px(px(12.0))
-                .window_control_area(gpui::WindowControlArea::Drag)
+                .window_drag()
                 .child(
                     div()
                         .id("call-collapse")

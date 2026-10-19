@@ -2,11 +2,58 @@
 //! buttons), the glass pill (header title), grouped cards and rows for the
 //! sheets, menu rows, and the centered sheet scaffold every modal uses.
 
-use gpui::{div, prelude::*, px, Div, ElementId, FontWeight, SharedString, Stateful};
+use std::cell::Cell;
+use std::rc::Rc;
+
+use gpui::{
+    div, prelude::*, px, Div, ElementId, FontWeight, InteractiveElement, MouseButton, SharedString,
+    Stateful, WindowControlArea,
+};
 
 use crate::ui::frost::{frosted, MENU_BLUR, PANEL_BLUR};
 use crate::ui::icons::icon;
 use crate::ui::theme::{Theme, PANEL_RADIUS, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
+
+/// Drag this region to move the window.
+///
+/// macOS windows open with `app_owns_titlebar_drag`, so AppKit will not move
+/// the window itself. Mark the title-strip (and any other chrome the user
+/// should pull) with this; a left-drag calls [`gpui::Window::start_window_move`].
+/// Interactive children should `cx.stop_propagation()` on mouse-down so a
+/// click on a button does not start a move.
+pub trait WindowDrag: InteractiveElement + Sized {
+    fn window_drag(self) -> Self {
+        let pending = Rc::new(Cell::new(false));
+        self.window_control_area(WindowControlArea::Drag)
+            .on_mouse_down(MouseButton::Left, {
+                let pending = pending.clone();
+                move |_, _, _| pending.set(true)
+            })
+            .on_mouse_up(MouseButton::Left, {
+                let pending = pending.clone();
+                move |_, _, _| pending.set(false)
+            })
+            .on_mouse_up_out(MouseButton::Left, {
+                let pending = pending.clone();
+                move |_, _, _| pending.set(false)
+            })
+            .on_mouse_down_out({
+                let pending = pending.clone();
+                move |_, _, _| pending.set(false)
+            })
+            .on_mouse_move({
+                let pending = pending.clone();
+                move |_, window, _| {
+                    if pending.get() {
+                        pending.set(false);
+                        window.start_window_move();
+                    }
+                }
+            })
+    }
+}
+
+impl<E: InteractiveElement> WindowDrag for E {}
 
 /// A glass circle: field fill at 85 %, hairline rim. Content centred.
 pub fn circle(id: impl Into<ElementId>, size: f32, theme: &Theme) -> Stateful<Div> {

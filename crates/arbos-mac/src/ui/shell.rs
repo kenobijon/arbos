@@ -21,7 +21,7 @@ use crate::ui::composer::{Composer, ComposerEvent, ComposerInput};
 use crate::ui::connectors::{ConnectorsEvent, ConnectorsPanel};
 use crate::ui::feedback::{FeedbackSheet, SendFeedback};
 use crate::ui::frost::{frosted, rounded_clip, MENU_BLUR, PANEL_BLUR};
-use crate::ui::glass;
+use crate::ui::glass::{self, WindowDrag};
 use crate::ui::groups;
 use crate::ui::header;
 use crate::ui::icons::icon;
@@ -902,7 +902,7 @@ impl Shell {
                     div()
                         .h(px(HEADER_HEIGHT))
                         .w_full()
-                        .window_control_area(gpui::WindowControlArea::Drag),
+                        .window_drag(),
                 )
                 .child(
                     div()
@@ -2337,7 +2337,7 @@ impl Shell {
             .justify_center()
             .gap(px(14.0))
             .px(px(28.0))
-            .window_control_area(gpui::WindowControlArea::Drag)
+            .window_drag()
             .child(wordmark)
             .child(
                 div()
@@ -2369,6 +2369,7 @@ impl Shell {
                 .px(px(22.0))
                 .text_size(px(TEXT_BODY))
                 .when(busy, |el| el.opacity(0.7))
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.state.update(cx, |s, cx| s.sign_in(cx));
                 }));
@@ -2401,6 +2402,7 @@ impl Shell {
                     } else {
                         theme.field_border
                     })
+                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(self.pairing_input.clone())
                     .child(
                         glass::primary_button(
@@ -2409,6 +2411,7 @@ impl Shell {
                             &theme,
                         )
                         .h(px(34.0))
+                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(|this, _, _, cx| this.submit_pairing(cx))),
                     );
                 screen
