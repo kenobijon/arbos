@@ -273,8 +273,6 @@ pub struct AppState {
     pub thumbnails: HashMap<String, Arc<RenderImage>>,
     /// Thumbnail fetches in flight or failed (never asked twice).
     thumbnails_requested: HashSet<String>,
-    pub browser_frame: Option<Arc<RenderImage>>,
-    pub browser_frames_seen: u64,
     pub notices: Vec<Notice>,
     pub selected_project: Option<Id>,
     /// Bytes and chats kept on this Mac by the on-device store (Settings → About).
@@ -294,7 +292,6 @@ pub struct AppState {
     /// Below [`NARROW_WINDOW`](crate::ui::theme::NARROW_WINDOW) the sidebar
     /// auto-hides; the header toggle (or ⌘B) floats it over the chat instead.
     pub sidebar_overlay: bool,
-    pub right_panel_open: bool,
     pub details_open: Option<DetailsTarget>,
     pub new_project_open: bool,
     /// Debug: per-message "Show details" disclosures in the transcript.
@@ -544,8 +541,6 @@ impl AppState {
             blobs: HashMap::new(),
             thumbnails: HashMap::new(),
             thumbnails_requested: HashSet::new(),
-            browser_frame: None,
-            browser_frames_seen: 0,
             notices: Vec::new(),
             selected_project: None,
             store_usage: (0, 0),
@@ -556,7 +551,6 @@ impl AppState {
             link: Link::Connecting,
             rail_collapsed: false,
             sidebar_overlay: false,
-            right_panel_open: false,
             details_open: None,
             new_project_open: false,
             show_details: false,
@@ -952,16 +946,6 @@ impl AppState {
                 self.push_notice(format!("Saved to {}", path.display()));
                 crate::ui::attachments::reveal(&path);
                 cx.notify();
-            }
-            SyncEvent::BrowserFrame { project_id, jpeg } => {
-                if self.selected_project.as_deref() != Some(project_id.as_str()) {
-                    return;
-                }
-                if let Some(image) = decode_image(&jpeg) {
-                    self.browser_frame = Some(Arc::new(image));
-                    self.browser_frames_seen += 1;
-                    cx.notify();
-                }
             }
             SyncEvent::Notice(text) => {
                 self.push_notice(text);
@@ -1918,29 +1902,51 @@ impl AppState {
             chat.title = title_from(&text);
         }
         // Optimistic echo: the row shows at once; the source's frame with the
-        // same id replaces it (§3.6).
-        let mut parts: Vec<Part> = attachments
-            .iter()
-            .map(|path| {
-                let name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("attachment")
-                    .to_string();
-                let mime = mime_for_path(path).to_string();
-                Part::Attachment {
-                    id: new_id(),
-                    attachment: crate::model::Attachment {
-                        name,
-                        mime,
-                        blob_ref: None,
-                        bytes: std::fs::metadata(path).ok().map(|m| m.len()),
-                        kind: None,
-                        title: None,
-                    },
+        // same id replaces it (§3.6). Image files get a local thumbnail so the
+        // card shows a picture immediately, not "No preview".
+        let mut parts: Vec<Part> = Vec::new();
+        for path in &attachments {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("attachment")
+                .to_string();
+            let mime = mime_for_path(path).to_string();
+            let att_id = new_id();
+            let mut blob_ref = None;
+            let bytes = if let Ok(data) = std::fs::read(path) {
+                let probe = crate::model::Attachment {
+                    name: name.clone(),
+                    mime: mime.clone(),
+                    blob_ref: None,
+                    bytes: Some(data.len() as u64),
+                    kind: None,
+                    title: None,
+                };
+                if probe.is_image() {
+                    if let Some(image) = decode_image(&data) {
+                        let key = format!("local:{att_id}");
+                        self.thumbnails.insert(key.clone(), Arc::new(image));
+                        self.thumbnails_requested.insert(key.clone());
+                        blob_ref = Some(key);
+                    }
                 }
-            })
-            .collect();
+                Some(data.len() as u64)
+            } else {
+                std::fs::metadata(path).ok().map(|m| m.len())
+            };
+            parts.push(Part::Attachment {
+                id: att_id,
+                attachment: crate::model::Attachment {
+                    name,
+                    mime,
+                    blob_ref,
+                    bytes,
+                    kind: None,
+                    title: None,
+                },
+            });
+        }
         if voice_wav.is_some() {
             parts.push(Part::Attachment {
                 id: new_id(),
@@ -2733,13 +2739,6 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn toggle_right_panel(&mut self, cx: &mut Context<Self>) {
-        self.right_panel_open = !self.right_panel_open;
-        let on = self.right_panel_open;
-        self.watch_browser(on, cx);
-        cx.notify();
-    }
-
     pub fn open_details(&mut self, target: DetailsTarget, cx: &mut Context<Self>) {
         self.details_open = Some(target);
         cx.notify();
@@ -3500,6 +3499,10 @@ impl AppState {
                 let Some(key) = attachment.blob_ref.clone() else {
                     continue;
                 };
+                // Optimistic send stores a decoded preview under `local:…`.
+                if key.starts_with("local:") {
+                    continue;
+                }
                 if !self.thumbnails_requested.insert(key.clone()) {
                     continue;
                 }
@@ -3522,17 +3525,6 @@ impl AppState {
             key,
             name,
         });
-        cx.notify();
-    }
-
-    pub fn watch_browser(&mut self, on: bool, cx: &mut Context<Self>) {
-        let Some(project_id) = self.selected_project.clone() else {
-            return;
-        };
-        if !on {
-            self.browser_frame = None;
-        }
-        self.command(ClientCommand::WatchBrowser { project_id, on });
         cx.notify();
     }
 
@@ -3962,28 +3954,6 @@ impl AppState {
         self.selected_project
             .as_deref()
             .and_then(|id| self.project_docs.get(id))
-    }
-
-    /// The live browser card of the selected project, if any (S16).
-    pub fn live_browser(&self) -> Option<(String, String, String)> {
-        let project_id = self.selected_project.as_deref()?;
-        for chat in self.tabs(project_id) {
-            for m in self.messages_of(&chat.id).iter().rev() {
-                for p in &m.parts {
-                    if let Part::Browser {
-                        title,
-                        url,
-                        last_action,
-                        live: true,
-                        ..
-                    } = p
-                    {
-                        return Some((title.clone(), url.clone(), last_action.clone()));
-                    }
-                }
-            }
-        }
-        None
     }
 
     pub fn box_state(&self) -> Option<BoxState> {

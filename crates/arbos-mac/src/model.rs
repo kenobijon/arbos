@@ -854,6 +854,11 @@ impl Attachment {
     pub fn is_audio(&self) -> bool {
         self.kind() == AttachmentKind::Audio || self.mime.starts_with("audio/")
     }
+
+    /// An image that should render as a picture in the transcript, not a file name.
+    pub fn is_image(&self) -> bool {
+        self.kind() == AttachmentKind::Image || self.mime.starts_with("image/")
+    }
 }
 
 /// One row of `messages[].parts` (`crdt-sync.md` §6.2). Unknown kinds decode
