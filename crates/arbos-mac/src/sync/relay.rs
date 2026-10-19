@@ -2810,7 +2810,7 @@ fn send_wake(shared: &Arc<Shared>, project_id: &str, reason: &'static str) {
     });
 }
 
-fn mime_for(path: &Path) -> &'static str {
+pub(crate) fn mime_for(path: &Path) -> &'static str {
     match path
         .extension()
         .and_then(|e| e.to_str())

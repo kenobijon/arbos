@@ -4,12 +4,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    div, list, prelude::*, px, Animation, AnimationExt, AnyElement, Context, Div, Entity,
-    FontWeight, ListAlignment, ListScrollEvent, ListState, Render, SharedString, Stateful,
-    StyledText, TextRun, Window,
+    div, img, list, prelude::*, px, Animation, AnimationExt, AnyElement, Context, Div, Entity,
+    FontWeight, ListAlignment, ListScrollEvent, ListState, ObjectFit, Render, RenderImage,
+    SharedString, Stateful, StyledText, TextRun, Window,
 };
 
 use crate::app::{AppEvent, AppState, DetailsTarget};
@@ -397,7 +398,8 @@ impl Transcript {
             voice_mode: state.voice_mode,
         };
         let me_id = state.me_id();
-        let new_rows = build_rows(&messages, show_details, speech, &me_id);
+        let thumb_keys: HashSet<&str> = state.thumbnails.keys().map(|k| k.as_str()).collect();
+        let new_rows = build_rows(&messages, show_details, speech, &me_id, &thumb_keys);
 
         // Veils: observe text growth of live markdown rows.
         for row in &new_rows {
@@ -527,8 +529,22 @@ impl Transcript {
                     .text_size(px(TEXT_BODY))
                     .line_height(px(LINE_HEIGHT));
                 if !attachments.is_empty() {
+                    let mut images = div().flex().flex_col().gap(px(6.0));
                     let mut chips = div().flex().flex_wrap().gap(px(6.0));
+                    let mut has_images = false;
+                    let mut has_chips = false;
                     for a in attachments {
+                        if a.is_image() {
+                            has_images = true;
+                            let thumbnail = a
+                                .blob_ref
+                                .as_ref()
+                                .and_then(|k| self.state.read(cx).thumbnails.get(k).cloned());
+                            images =
+                                images.child(user_image_preview(&row.id, &a, thumbnail, &theme));
+                            continue;
+                        }
+                        has_chips = true;
                         // A voice memo chip (F11) is marked with a note glyph.
                         let label = if a.is_audio() {
                             format!("♪ {}", a.name)
@@ -546,7 +562,12 @@ impl Transcript {
                                 .child(label),
                         );
                     }
-                    bubble = bubble.child(chips);
+                    if has_images {
+                        bubble = bubble.child(images);
+                    }
+                    if has_chips {
+                        bubble = bubble.child(chips);
+                    }
                 }
                 bubble = bubble.child(text);
                 if let Some(person) = from {
@@ -1205,6 +1226,51 @@ fn hash_version<T: Hash>(value: &T, live: bool) -> u64 {
     (h.finish() << 1) | (live as u64)
 }
 
+/// Inline picture for a user-sent image (not a bare file-name chip).
+fn user_image_preview(
+    row_id: &str,
+    attachment: &Attachment,
+    thumbnail: Option<Arc<RenderImage>>,
+    theme: &Theme,
+) -> AnyElement {
+    let key = attachment.blob_ref.as_deref();
+    let preview = div()
+        .id(SharedString::from(format!(
+            "{row_id}#img-{}",
+            attachment.name
+        )))
+        .w_full()
+        .max_w(px(280.0))
+        .h(px(180.0))
+        .rounded(px(10.0))
+        .overflow_hidden()
+        .bg(Theme::with_alpha(theme.bg, 0.35))
+        .flex()
+        .items_center()
+        .justify_center();
+    match thumbnail {
+        Some(image) => preview
+            .child(img(image).w_full().h_full().object_fit(ObjectFit::Cover))
+            .into_any_element(),
+        None => {
+            let placeholder: SharedString = if key.is_some() {
+                "Loading preview…".into()
+            } else {
+                attachment.name.clone().into()
+            };
+            preview
+                .child(
+                    div()
+                        .text_size(px(TEXT_TINY))
+                        .text_color(theme.bubble_text())
+                        .opacity(0.7)
+                        .child(placeholder),
+                )
+                .into_any_element()
+        }
+    }
+}
+
 fn block_text_len(block: &Block) -> usize {
     match block {
         Block::Paragraph(t) | Block::Heading { text: t, .. } => t.len(),
@@ -1278,11 +1344,15 @@ fn is_json_block(block: &Block) -> bool {
 /// questions, errors. Everything the agent did (tool calls, status events,
 /// JSON, usage) is hidden; the Details drawer has it. One indicator per chat
 /// pulses under the last message while anything runs.
+///
+/// `thumb_keys` are blob refs that already have a decoded preview; they are
+/// mixed into row versions so a late thumbnail reloads the picture row.
 pub fn build_rows(
     messages: &[Message],
     show_details: bool,
     speech: SpeechRows<'_>,
     me_id: &str,
+    thumb_keys: &HashSet<&str>,
 ) -> Vec<Row> {
     let mine = |m: &Message| {
         m.sender == "user" || m.sender.is_empty() || m.sender == format!("user:{me_id}")
@@ -1342,12 +1412,25 @@ pub fn build_rows(
                 } else {
                     sender_caption(message)
                 };
+                let attachment_sig: Vec<_> = attachments
+                    .iter()
+                    .map(|a| {
+                        (
+                            a.name.as_str(),
+                            a.blob_ref.as_deref(),
+                            a.is_image(),
+                            a.blob_ref
+                                .as_deref()
+                                .is_some_and(|k| thumb_keys.contains(k)),
+                        )
+                    })
+                    .collect();
                 rows.push(Row {
                     version: hash_version(
                         &(
                             &text,
                             message.pending,
-                            attachments.len(),
+                            &attachment_sig,
                             &sender_label,
                             from.as_ref().map(|p| &p.handle),
                         ),
@@ -1555,17 +1638,29 @@ pub fn build_rows(
                                 block_ix += 1;
                             }
                         }
-                        Part::Attachment { id, attachment } => rows.push(Row {
-                            version: hash_version(
-                                &(&attachment.name, &attachment.title, attachment.bytes),
-                                false,
-                            ),
-                            id: format!("{}#{}", message.id, id),
-                            message_id: message.id.clone(),
-                            kind: RowKind::Attachment {
-                                attachment: attachment.clone(),
-                            },
-                        }),
+                        Part::Attachment { id, attachment } => {
+                            let has_thumb = attachment
+                                .blob_ref
+                                .as_deref()
+                                .is_some_and(|k| thumb_keys.contains(k));
+                            rows.push(Row {
+                                version: hash_version(
+                                    &(
+                                        &attachment.name,
+                                        &attachment.title,
+                                        attachment.bytes,
+                                        &attachment.blob_ref,
+                                        has_thumb,
+                                    ),
+                                    false,
+                                ),
+                                id: format!("{}#{}", message.id, id),
+                                message_id: message.id.clone(),
+                                kind: RowKind::Attachment {
+                                    attachment: attachment.clone(),
+                                },
+                            })
+                        }
                         // Legacy `waiting_user` row: only when no `question` part carries it.
                         Part::Status {
                             id,
