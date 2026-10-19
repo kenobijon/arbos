@@ -39,11 +39,19 @@ actions!(
         Delete,
         Left,
         Right,
+        WordLeft,
+        WordRight,
         SelectLeft,
         SelectRight,
+        SelectWordLeft,
+        SelectWordRight,
         SelectAll,
         Home,
         End,
+        SelectHome,
+        SelectEnd,
+        DeleteWordBackward,
+        DeleteWordForward,
         Paste,
         Copy,
         Cut,
@@ -247,6 +255,14 @@ impl ComposerInput {
         }
     }
 
+    fn word_left(&mut self, _: &WordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(self.previous_word_boundary(self.cursor_offset()), cx);
+    }
+
+    fn word_right(&mut self, _: &WordRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(self.next_word_boundary(self.cursor_offset()), cx);
+    }
+
     fn select_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
         self.select_to(self.previous_boundary(self.cursor_offset()), cx);
     }
@@ -255,26 +271,48 @@ impl ComposerInput {
         self.select_to(self.next_boundary(self.cursor_offset()), cx);
     }
 
+    fn select_word_left(&mut self, _: &SelectWordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.previous_word_boundary(self.cursor_offset()), cx);
+    }
+
+    fn select_word_right(&mut self, _: &SelectWordRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.next_word_boundary(self.cursor_offset()), cx);
+    }
+
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
         self.move_to(0, cx);
         self.select_to(self.content.len(), cx)
     }
 
-    fn home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
-        let start = self.content[..self.cursor_offset()]
+    fn line_start(&self) -> usize {
+        self.content[..self.cursor_offset()]
             .rfind('\n')
             .map(|i| i + 1)
-            .unwrap_or(0);
-        self.move_to(start, cx);
+            .unwrap_or(0)
+    }
+
+    fn line_end(&self) -> usize {
+        let cursor = self.cursor_offset();
+        self.content[cursor..]
+            .find('\n')
+            .map(|i| cursor + i)
+            .unwrap_or(self.content.len())
+    }
+
+    fn home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(self.line_start(), cx);
     }
 
     fn end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
-        let cursor = self.cursor_offset();
-        let end = self.content[cursor..]
-            .find('\n')
-            .map(|i| cursor + i)
-            .unwrap_or(self.content.len());
-        self.move_to(end, cx);
+        self.move_to(self.line_end(), cx);
+    }
+
+    fn select_home(&mut self, _: &SelectHome, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.line_start(), cx);
+    }
+
+    fn select_end(&mut self, _: &SelectEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.line_end(), cx);
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
@@ -295,6 +333,38 @@ impl ComposerInput {
                 return;
             }
             self.select_to(next, cx)
+        }
+        self.replace_text_in_range(None, "", window, cx)
+    }
+
+    fn delete_word_backward(
+        &mut self,
+        _: &DeleteWordBackward,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            let prev = self.previous_word_boundary(self.cursor_offset());
+            if self.cursor_offset() == prev {
+                return;
+            }
+            self.select_to(prev, cx);
+        }
+        self.replace_text_in_range(None, "", window, cx)
+    }
+
+    fn delete_word_forward(
+        &mut self,
+        _: &DeleteWordForward,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            let next = self.next_word_boundary(self.cursor_offset());
+            if self.cursor_offset() == next {
+                return;
+            }
+            self.select_to(next, cx);
         }
         self.replace_text_in_range(None, "", window, cx)
     }
@@ -436,10 +506,56 @@ impl ComposerInput {
             .unwrap_or(self.content.len())
     }
 
+    /// Start of the previous word (macOS Control/Option+Left).
+    fn previous_word_boundary(&self, offset: usize) -> usize {
+        let offset = offset.min(self.content.len());
+        let mut chars: Vec<(usize, char)> = self.content[..offset].char_indices().collect();
+        while chars.last().is_some_and(|(_, c)| c.is_whitespace()) {
+            chars.pop();
+        }
+        if chars.is_empty() {
+            return 0;
+        }
+        let class = is_word_char(chars[chars.len() - 1].1);
+        while chars
+            .last()
+            .is_some_and(|(_, c)| !c.is_whitespace() && is_word_char(*c) == class)
+        {
+            chars.pop();
+        }
+        chars.last().map(|(i, c)| i + c.len_utf8()).unwrap_or(0)
+    }
+
+    /// End of the next word (macOS Control/Option+Right).
+    fn next_word_boundary(&self, offset: usize) -> usize {
+        let offset = offset.min(self.content.len());
+        let slice = &self.content[offset..];
+        let mut iter = slice.char_indices().peekable();
+        while iter.peek().is_some_and(|(_, c)| c.is_whitespace()) {
+            iter.next();
+        }
+        let Some(&(_, first)) = iter.peek() else {
+            return self.content.len();
+        };
+        let class = is_word_char(first);
+        let mut end = offset;
+        for (i, c) in iter {
+            if c.is_whitespace() || is_word_char(c) != class {
+                return offset + i;
+            }
+            end = offset + i + c.len_utf8();
+        }
+        end
+    }
+
     fn position_for_index(&self, index: usize) -> Option<Point<Pixels>> {
         let layout = self.layout.as_ref()?;
         position_for_index(&layout.lines, index)
     }
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
 }
 
 /// Pixel position (relative to the text origin) of a byte index.
@@ -918,13 +1034,21 @@ impl Render for ComposerInput {
             .on_action(cx.listener(Self::newline))
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
+            .on_action(cx.listener(Self::delete_word_backward))
+            .on_action(cx.listener(Self::delete_word_forward))
             .on_action(cx.listener(Self::left))
             .on_action(cx.listener(Self::right))
+            .on_action(cx.listener(Self::word_left))
+            .on_action(cx.listener(Self::word_right))
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
+            .on_action(cx.listener(Self::select_word_left))
+            .on_action(cx.listener(Self::select_word_right))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
+            .on_action(cx.listener(Self::select_home))
+            .on_action(cx.listener(Self::select_end))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
