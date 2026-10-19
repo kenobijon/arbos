@@ -284,7 +284,7 @@ pub struct AppState {
     /// The chat last opened per agent on this Mac (on-device store).
     pub last_chats: HashMap<Id, Id>,
     /// Chats archived for me (§9c, synced through the relay; the store keeps an
-    /// offline copy): off the tab strip, listed under "Archived", still open on
+    /// offline copy): off the tab strip, listed in the "+" dropdown, still open on
     /// the relay (history in context, memory and search), never badge or notify.
     pub archived_chats: HashSet<Id>,
     pub link: Link,
@@ -1120,8 +1120,8 @@ impl AppState {
                         self.active_tab.insert(project_id.clone(), first.id.clone());
                     }
                 }
-                // Keep the order the strip already shows (a new chat sits after
-                // "Main"); chats the relay no longer lists leave, new ones append.
+                // Keep the order the strip already shows (a new chat sits last,
+                // beside "+"); chats the relay no longer lists leave, new ones append.
                 let chats = match self.chats.get(&project_id) {
                     Some(current) if !current.is_empty() => {
                         let mut merged: Vec<Chat> = current
@@ -1431,7 +1431,7 @@ impl AppState {
         })
     }
 
-    /// The agent's chats archived on this Mac (the "Archived" list).
+    /// The agent's archived chats (the "+" dropdown's previous chats).
     pub fn archived_tabs(&self, project_id: &str) -> Vec<&Chat> {
         self.tabs(project_id)
             .iter()
@@ -1440,7 +1440,7 @@ impl AppState {
     }
 
     /// Archive a chat on this Mac (the tab's "×", ⌘W): it leaves the strip and
-    /// goes to "Archived"; nothing is deleted or closed on the relay.
+    /// waits in the "+" dropdown; nothing is deleted or closed on the relay.
     pub fn archive_chat(&mut self, chat_id: Id, cx: &mut Context<Self>) {
         let Some(project_id) = self.project_of_chat(&chat_id).map(|p| p.id.clone()) else {
             return;
@@ -1721,31 +1721,23 @@ impl AppState {
             return;
         };
         let chat_id = new_id();
-        {
-            // Right after "Main", where the strip shows it without scrolling.
-            let tabs = self.chats.entry(project_id.clone()).or_default();
-            let at = tabs
-                .iter()
-                .position(|c| c.is_pinned)
-                .map(|i| i + 1)
-                .unwrap_or(0)
-                .min(tabs.len());
-            tabs.insert(
-                at,
-                Chat {
-                    id: chat_id.clone(),
-                    project_id: project_id.clone(),
-                    title: "New chat".into(),
-                    is_pinned: false,
-                    is_system: false,
-                    kind: ChatKind::Chat,
-                    participants: Vec::new(),
-                    unread: false,
-                    last_message_at: now_ms(),
-                    archived_at: None,
-                },
-            );
-        }
+        // After the last tab, where the strip's "+" sits (the shell scrolls it
+        // into view).
+        self.chats
+            .entry(project_id.clone())
+            .or_default()
+            .push(Chat {
+                id: chat_id.clone(),
+                project_id: project_id.clone(),
+                title: "New chat".into(),
+                is_pinned: false,
+                is_system: false,
+                kind: ChatKind::Chat,
+                participants: Vec::new(),
+                unread: false,
+                last_message_at: now_ms(),
+                archived_at: None,
+            });
         self.messages.insert(chat_id.clone(), Vec::new());
         self.chat_ui.insert(chat_id.clone(), ChatUi::default());
         self.active_tab.insert(project_id.clone(), chat_id.clone());

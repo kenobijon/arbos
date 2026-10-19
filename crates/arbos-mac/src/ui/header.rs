@@ -1,14 +1,15 @@
 //! The conversation header, Grok Bot Mac layout: the avatar and name on the
 //! left (click an agent to open its profile), then — for an agent — its chat
-//! tabs ("Main", groups with their heads, "+" for a new chat, "×" archives),
+//! tabs ("Main", groups with their heads, "×" archives, "+" right after the
+//! last tab: a new chat, or a dropdown of the previous chats to bring back),
 //! icon buttons on the right ("…", and "add people" in a DM). Under it, one
 //! optional chips row: the members of a people chat. The "…" menu holds what
-//! the iPhone keeps there: New chat, Archived, Model, Members / Share, Avatar,
-//! voice, Stop, Settings.
+//! the iPhone keeps there: New chat, Previous chats, Model, Members / Share,
+//! Avatar, voice, Stop, Settings.
 
 use gpui::{
-    div, prelude::*, px, AnyElement, Context, Div, ElementId, Focusable as _, FontWeight,
-    SharedString,
+    anchored, deferred, div, point, prelude::*, px, AnyElement, Context, Div, Edges, ElementId,
+    Focusable as _, FontWeight, SharedString,
 };
 
 use crate::app::ProfilePage;
@@ -397,9 +398,10 @@ pub fn render(
 
 /// The agent's chat tabs, next to its name: every visible chat as a pill
 /// (groups with their participants' heads), "×" on each but the pinned "Main"
-/// (archives it), "+" for a new chat, and an "Archived" pill when there is
-/// something in it. With multi-chat off: the primary, groups and the
-/// Projects tab only, no "+", no "×", no Archived.
+/// (archives it), and "+" right after the last tab — a new chat opens there;
+/// with previous (archived) chats it drops down a menu to bring one back.
+/// With multi-chat off: the primary, groups and the Projects tab only, no
+/// "+", no "×".
 fn agent_tabs(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option<Div> {
     let theme = Theme::of(cx).clone();
     let state = shell.state.read(cx);
@@ -415,7 +417,7 @@ fn agent_tabs(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option
             )
         })
         .collect();
-    let archived = state.archived_tabs(&space.id).len();
+    let previous = state.archived_tabs(&space.id).len();
     if tabs.is_empty() {
         return None;
     }
@@ -423,15 +425,16 @@ fn agent_tabs(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option
         return None;
     }
     let projects = state.projects.clone();
-    // The tabs scroll; "+" and "Archived" stay put after them.
+    // The row is as wide as its tabs (it scrolls once they overflow), so "+"
+    // sits right beside the last tab instead of at the far end of the header.
     let mut row = div()
         .id("chat-tabs")
-        .flex_1()
         .min_w_0()
         .flex()
         .items_center()
         .gap(px(6.0))
-        .overflow_x_scroll();
+        .overflow_x_scroll()
+        .track_scroll(&shell.tabs_scroll);
     for (chat, active, streaming) in tabs {
         if streaming {
             PulseClock::request(cx);
@@ -533,184 +536,149 @@ fn agent_tabs(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option
         .gap(px(6.0))
         .child(row);
     if multi_chat {
-        strip = strip.child(
-            div()
-                .id("tab-new")
-                .flex_shrink_0()
-                .size(px(28.0))
-                .rounded_full()
-                .bg(theme.bubble_assistant)
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                .hover(|s| s.bg(theme.surface_2))
-                .child(icon("plus", 13.0, theme.text_muted))
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.state.update(cx, |s, cx| s.new_tab(cx));
-                    Composer::focus(&this.composer, window, cx);
-                })),
-        );
-        if archived > 0 {
-            let open = shell.archived_open;
-            strip = strip.child(
-                div()
-                    .id("tab-archived")
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .gap(px(5.0))
-                    .h(px(28.0))
-                    .px(px(10.0))
-                    .rounded_full()
-                    .bg(if open {
-                        theme.surface_2
-                    } else {
-                        gpui::transparent_black()
-                    })
-                    .text_size(px(TEXT_SMALL))
-                    .text_color(theme.text_muted)
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.surface_2).text_color(theme.text))
-                    .child(icon("archivebox", 13.0, theme.text_muted))
-                    .child(format!("Archived · {archived}"))
-                    .on_mouse_down(
-                        gpui::MouseButton::Left,
-                        cx.listener(|this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.archived_open = !this.archived_open;
-                            this.menu_open = false;
-                            cx.notify();
-                        }),
-                    ),
+        let open = shell.tab_menu_open;
+        let plus = div()
+            .id("tab-new")
+            .flex_shrink_0()
+            .size(px(28.0))
+            .rounded_full()
+            .bg(if open {
+                theme.surface_2
+            } else {
+                theme.bubble_assistant
+            })
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.surface_2))
+            .child(icon("plus", 13.0, theme.text_muted))
+            // Mouse-down, not click: the root closes every popover on
+            // mouse-down, so a click handler could never toggle this one shut.
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.menu_open = false;
+                    if previous == 0 {
+                        // Nothing to bring back: "+" opens the new chat directly.
+                        this.tab_menu_open = false;
+                        this.open_new_tab(window, cx);
+                        return;
+                    }
+                    this.tab_menu_open = !this.tab_menu_open;
+                    cx.notify();
+                }),
             );
-        }
+        // The dropdown hangs off the "+" itself: anchored to this wrapper
+        // (taffy places it relative to its parent), deferred so it paints over
+        // the transcript, kept inside the window.
+        let anchor = div()
+            .relative()
+            .flex()
+            .flex_shrink_0()
+            .child(plus)
+            .when(open, |el| {
+                el.child(
+                    deferred(
+                        anchored()
+                            .offset(point(px(0.0), px(34.0)))
+                            .snap_to_window_with_margin(Edges::all(px(8.0)))
+                            .child(glass::popover(tab_menu(shell, space, cx))),
+                    )
+                    .with_priority(1),
+                )
+            });
+        strip = strip.child(anchor);
     }
     Some(strip)
 }
 
-/// The "Archived" dropdown: the agent's archived chats, each with "Unarchive".
-pub fn archived_list(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
+/// The "+" dropdown: "New chat", then the agent's previous (archived) chats,
+/// newest first — clicking one brings it back as a tab.
+fn tab_menu(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl IntoElement {
     let theme = Theme::of(cx).clone();
     let state = shell.state.read(cx);
-    let right = 16.0;
-    let archived: Vec<Chat> = state
+    let mut previous: Vec<Chat> = state
         .archived_tabs(&space.id)
         .into_iter()
         .cloned()
         .collect();
-    let mut body = div().flex().flex_col().gap(px(1.0));
-    body = body.child(
-        div()
-            .px(px(12.0))
-            .pt(px(6.0))
-            .pb(px(4.0))
-            .text_size(px(TEXT_TINY))
-            .text_color(theme.text_faint)
-            .child(if archived.is_empty() {
-                "Archived".to_string()
-            } else {
-                format!("Archived · {}", archived.len())
-            }),
+    previous.sort_by_key(|c| std::cmp::Reverse(c.last_message_at));
+    let mut body = div().flex().flex_col().gap(px(1.0)).child(
+        glass::menu_row("tab-menu-new", "square-pencil", "New chat", false, &theme)
+            .child(
+                div()
+                    .text_size(px(TEXT_TINY))
+                    .text_color(theme.text_faint)
+                    .child("⌘T"),
+            )
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.tab_menu_open = false;
+                this.open_new_tab(window, cx);
+            })),
     );
-    if archived.is_empty() {
-        body = body.child(
+    if !previous.is_empty() {
+        body = body.child(glass::menu_divider(&theme)).child(
             div()
                 .px(px(12.0))
-                .pb(px(10.0))
-                .text_size(px(TEXT_SMALL))
-                .text_color(theme.text_muted)
-                .child("No archived chats. Close a tab with × to archive it."),
+                .pt(px(4.0))
+                .pb(px(2.0))
+                .text_size(px(TEXT_TINY))
+                .text_color(theme.text_faint)
+                .child("Previous chats"),
         );
+        let mut list = div()
+            .id("tab-menu-previous")
+            .flex()
+            .flex_col()
+            .gap(px(1.0))
+            .max_h(px(320.0))
+            .overflow_y_scroll();
+        for chat in previous {
+            let id = chat.id.clone();
+            list = list.child(
+                div()
+                    .id(ElementId::Name(SharedString::from(format!(
+                        "tab-menu-previous-{}",
+                        chat.id
+                    ))))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .h(px(36.0))
+                    .px(px(12.0))
+                    .rounded(px(9.0))
+                    .text_size(px(TEXT_SMALL))
+                    .text_color(theme.text)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.surface_2))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(chat.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(TEXT_TINY))
+                            .text_color(theme.text_faint)
+                            .child(crate::ui::sidebar::time_label(chat.last_message_at)),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.tab_menu_open = false;
+                        let id = id.clone();
+                        this.state.update(cx, |s, cx| s.unarchive_chat(id, cx));
+                        this.reveal_active_tab(cx);
+                        Composer::focus(&this.composer, window, cx);
+                    })),
+            );
+        }
+        body = body.child(list);
     }
-    for chat in archived {
-        let id = chat.id.clone();
-        let open_id = chat.id.clone();
-        let preview = state
-            .messages_of(&chat.id)
-            .iter()
-            .rev()
-            .find(|m| !m.plain_text().trim().is_empty())
-            .map(|m| crate::ui::sidebar::plain(&m.plain_text()))
-            .unwrap_or_default();
-        body = body.child(
-            div()
-                .id(ElementId::Name(SharedString::from(format!(
-                    "archived-{}",
-                    chat.id
-                ))))
-                .flex()
-                .items_center()
-                .gap(px(10.0))
-                .h(px(44.0))
-                .px(px(12.0))
-                .rounded(px(9.0))
-                .cursor_pointer()
-                .hover(|s| s.bg(theme.surface_2))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.archived_open = false;
-                    this.state
-                        .update(cx, |s, cx| s.unarchive_chat(open_id.clone(), cx));
-                    Composer::focus(&this.composer, window, cx);
-                }))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .child(
-                            div()
-                                .text_size(px(TEXT_SMALL))
-                                .text_color(theme.text)
-                                .truncate()
-                                .child(chat.title.clone()),
-                        )
-                        .when(!preview.is_empty(), |el| {
-                            el.child(
-                                div()
-                                    .text_size(px(TEXT_TINY))
-                                    .text_color(theme.text_muted)
-                                    .truncate()
-                                    .child(preview),
-                            )
-                        }),
-                )
-                .child(
-                    div()
-                        .id(ElementId::Name(SharedString::from(format!(
-                            "unarchive-{}",
-                            chat.id
-                        ))))
-                        .flex_shrink_0()
-                        .h(px(26.0))
-                        .px(px(10.0))
-                        .rounded_full()
-                        .bg(theme.field)
-                        .border_1()
-                        .border_color(theme.field_border)
-                        .flex()
-                        .items_center()
-                        .text_size(px(TEXT_TINY))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.text)
-                        .hover(|s| s.bg(theme.surface_2))
-                        .child("Unarchive")
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            cx.stop_propagation();
-                            this.archived_open = false;
-                            this.state
-                                .update(cx, |s, cx| s.unarchive_chat(id.clone(), cx));
-                            Composer::focus(&this.composer, window, cx);
-                        })),
-                ),
-        );
-    }
-    div()
-        .absolute()
-        .top(px(HEADER_HEIGHT - 4.0))
-        .right(px(right))
-        .child(glass::frosted_menu(320.0, &theme, body))
+    glass::frosted_menu(260.0, &theme, body)
 }
 
 /// Chips under the header: agents + "Add agent" for a people chat. `None` for
@@ -797,7 +765,7 @@ pub fn menu(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
         let effort = space.effort.label();
         let multi_chat = state.multi_chat;
         if multi_chat {
-            let archived = state.archived_tabs(&space.id).len();
+            let previous = state.archived_tabs(&space.id).len();
             body = body
                 .child(
                     glass::menu_row("menu-new-chat", "square-pencil", "New chat", false, &theme)
@@ -809,29 +777,35 @@ pub fn menu(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
                         )
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.menu_open = false;
-                            this.state.update(cx, |s, cx| s.new_tab(cx));
-                            Composer::focus(&this.composer, window, cx);
+                            this.open_new_tab(window, cx);
                         })),
                 )
                 .child(
-                    glass::menu_row("menu-archived", "archivebox", "Archived", false, &theme)
-                        .when(archived > 0, |el| {
-                            el.child(
-                                div()
-                                    .text_size(px(TEXT_TINY))
-                                    .text_color(theme.text_faint)
-                                    .child(archived.to_string()),
-                            )
-                        })
-                        .on_mouse_down(
-                            gpui::MouseButton::Left,
-                            cx.listener(|this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.menu_open = false;
-                                this.archived_open = true;
-                                cx.notify();
-                            }),
-                        ),
+                    glass::menu_row(
+                        "menu-previous",
+                        "archivebox",
+                        "Previous chats",
+                        false,
+                        &theme,
+                    )
+                    .when(previous > 0, |el| {
+                        el.child(
+                            div()
+                                .text_size(px(TEXT_TINY))
+                                .text_color(theme.text_faint)
+                                .child(previous.to_string()),
+                        )
+                    })
+                    // Opens the "+" dropdown in the tab strip.
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.menu_open = false;
+                            this.tab_menu_open = true;
+                            cx.notify();
+                        }),
+                    ),
                 );
         }
         if !space.is_guest() {
