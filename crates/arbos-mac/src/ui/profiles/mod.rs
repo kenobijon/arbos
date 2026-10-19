@@ -53,6 +53,8 @@ pub fn sheet(page: &ProfilePage, shell: &Shell, cx: &mut Context<Shell>) -> Opti
 
 /// `[‹ back] (title) [right]` header + scrolling body in the centred glass
 /// sheet; `scroll` tracks the body's scroll when a page needs to move it.
+/// The back button and a click on the backdrop around the card both close
+/// the page; clicks inside the card (pickers, menus, fields) stay inside.
 pub(super) fn frame(
     body: Div,
     right: Option<Stateful<Div>>,
@@ -62,12 +64,7 @@ pub(super) fn frame(
 ) -> Div {
     let back = glass::circle("profile-back", 34.0, theme)
         .child(icon("chevron-left", 15.0, theme.text))
-        .on_click(cx.listener(|this, _, window, cx| {
-            this.state.update(cx, |s, cx| {
-                s.close_profile(cx);
-            });
-            crate::ui::composer::Composer::focus(&this.composer, window, cx);
-        }));
+        .on_click(cx.listener(|this, _, window, cx| this.close_profile(window, cx)));
     let header = glass::sheet_header("", Some(back), right, theme);
     glass::sheet(
         SHEET_WIDTH,
@@ -78,6 +75,10 @@ pub(super) fn frame(
             .overflow_y_scroll()
             .when_some(scroll, |el, h| el.track_scroll(h))
             .max_h(px(SHEET_MAX_HEIGHT)),
+    )
+    .on_mouse_down(
+        gpui::MouseButton::Left,
+        cx.listener(|this, _, window, cx| this.close_profile(window, cx)),
     )
 }
 

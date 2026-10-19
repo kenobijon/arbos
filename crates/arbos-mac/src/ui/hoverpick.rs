@@ -163,8 +163,13 @@ impl Shell {
             let mut offset = self.profile_scroll.offset();
             offset.y -= shift;
             self.profile_scroll.set_offset(offset);
-            window.refresh();
-            cx.notify();
+            // This runs mid-draw, where `refresh` / `notify` are ignored:
+            // ask for the redraw once this frame is out.
+            let shell = cx.entity();
+            window.on_next_frame(move |window, cx| {
+                shell.update(cx, |_, cx| cx.notify());
+                window.refresh();
+            });
         }
     }
 
