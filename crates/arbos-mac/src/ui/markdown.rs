@@ -313,6 +313,130 @@ fn merge(a: InlineStyle, b: InlineStyle) -> InlineStyle {
     }
 }
 
+/// Display polish for assistant bubbles already in the doc: insert a missing space
+/// after `.`/`!`/`?` when the next character is uppercase ("have.Checking" →
+/// "have. Checking"), and drop a trailing short tool-narration sentence
+/// ("Checking the latest…") so the bubble stays prose-only.
+pub fn polish_assistant_prose(text: &str) -> String {
+    let without_tail = strip_trailing_tool_narration(text);
+    fix_glued_sentence_spaces(&without_tail)
+}
+
+fn fix_glued_sentence_spaces(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        out.push(c);
+        if matches!(c, '.' | '!' | '?') {
+            let abbrev =
+                c == '.' && i >= 2 && chars[i - 1].is_ascii_lowercase() && chars[i - 2] == '.';
+            if !abbrev {
+                if let Some(next) = chars.get(i + 1) {
+                    if next.is_uppercase() {
+                        out.push(' ');
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+fn strip_trailing_tool_narration(text: &str) -> String {
+    let (body, nl) = match text.strip_suffix('\n') {
+        Some(b) => match b.strip_suffix('\r') {
+            Some(b2) => (b2, "\r\n"),
+            None => (b, "\n"),
+        },
+        None => (text, ""),
+    };
+    let trimmed = body.trim_end();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    // Walk back to the last sentence boundary (period/!/?), including glued ".Word".
+    let bytes = trimmed.as_bytes();
+    let mut split_at: Option<usize> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'.' || b == b'!' || b == b'?' {
+            let abbrev =
+                b == b'.' && i >= 2 && bytes[i - 1].is_ascii_lowercase() && bytes[i - 2] == b'.';
+            if !abbrev {
+                let after = &trimmed[i + 1..];
+                if after.is_empty() {
+                    break;
+                }
+                if after.starts_with(' ')
+                    || after.starts_with('\n')
+                    || after.starts_with('\r')
+                    || after.chars().next().is_some_and(|c| c.is_uppercase())
+                {
+                    split_at = Some(i + 1);
+                }
+            }
+        }
+        i += if b < 0x80 {
+            1
+        } else if b >> 5 == 0b110 {
+            2
+        } else if b >> 4 == 0b1110 {
+            3
+        } else {
+            4
+        };
+    }
+    let Some(at) = split_at else {
+        return if is_short_tool_narration(trimmed) {
+            String::new()
+        } else {
+            format!("{trimmed}{nl}")
+        };
+    };
+    let head = trimmed[..at].trim_end();
+    let tail = trimmed[at..].trim_start();
+    if is_short_tool_narration(tail) {
+        format!("{head}{nl}")
+    } else {
+        format!("{trimmed}{nl}")
+    }
+}
+
+fn is_short_tool_narration(sentence: &str) -> bool {
+    let l = sentence
+        .trim()
+        .trim_start_matches(['*', '_', '#', '>', '-', ' '])
+        .to_ascii_lowercase();
+    if l.is_empty() || l.chars().count() > 90 {
+        return false;
+    }
+    [
+        "running ",
+        "executing ",
+        "calling ",
+        "invoking ",
+        "let me check",
+        "let me run",
+        "let me look",
+        "i'll check",
+        "i will check",
+        "i'll run",
+        "i will run",
+        "checking ",
+        "reading the file",
+        "first, i",
+        "first i",
+        "now i'll",
+        "now i will",
+    ]
+    .iter()
+    .any(|p| l.starts_with(p))
+}
+
 fn slice_starts(chars: &[char], at: usize, needle: &str) -> bool {
     let n: Vec<char> = needle.chars().collect();
     at + n.len() <= chars.len() && chars[at..at + n.len()] == n[..]
