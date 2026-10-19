@@ -41,11 +41,17 @@ actions!(
         Delete,
         Left,
         Right,
+        Up,
+        Down,
         SelectLeft,
         SelectRight,
+        SelectUp,
+        SelectDown,
         SelectAll,
         Home,
         End,
+        SelectHome,
+        SelectEnd,
         Paste,
         Copy,
         Cut,
@@ -249,6 +255,22 @@ impl ComposerInput {
         }
     }
 
+    fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            self.move_to(self.offset_for_vertical_move(true), cx);
+        } else {
+            self.move_to(self.selected_range.start, cx)
+        }
+    }
+
+    fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            self.move_to(self.offset_for_vertical_move(false), cx);
+        } else {
+            self.move_to(self.selected_range.end, cx)
+        }
+    }
+
     fn select_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
         self.select_to(self.previous_boundary(self.cursor_offset()), cx);
     }
@@ -257,26 +279,33 @@ impl ComposerInput {
         self.select_to(self.next_boundary(self.cursor_offset()), cx);
     }
 
+    fn select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.offset_for_vertical_move(true), cx);
+    }
+
+    fn select_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.offset_for_vertical_move(false), cx);
+    }
+
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
         self.move_to(0, cx);
         self.select_to(self.content.len(), cx)
     }
 
     fn home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
-        let start = self.content[..self.cursor_offset()]
-            .rfind('\n')
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        self.move_to(start, cx);
+        self.move_to(self.line_start(self.cursor_offset()), cx);
     }
 
     fn end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
-        let cursor = self.cursor_offset();
-        let end = self.content[cursor..]
-            .find('\n')
-            .map(|i| cursor + i)
-            .unwrap_or(self.content.len());
-        self.move_to(end, cx);
+        self.move_to(self.line_end(self.cursor_offset()), cx);
+    }
+
+    fn select_home(&mut self, _: &SelectHome, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.line_start(self.cursor_offset()), cx);
+    }
+
+    fn select_end(&mut self, _: &SelectEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.line_end(self.cursor_offset()), cx);
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
@@ -436,6 +465,61 @@ impl ComposerInput {
             .grapheme_indices(true)
             .find_map(|(idx, _)| (idx > offset).then_some(idx))
             .unwrap_or(self.content.len())
+    }
+
+    fn line_start(&self, offset: usize) -> usize {
+        self.content[..offset]
+            .rfind('\n')
+            .map(|i| i + 1)
+            .unwrap_or(0)
+    }
+
+    fn line_end(&self, offset: usize) -> usize {
+        self.content[offset..]
+            .find('\n')
+            .map(|i| offset + i)
+            .unwrap_or(self.content.len())
+    }
+
+    /// Byte offset one wrapped line above/below the caret, keeping column when
+    /// the layout is known; falls back to hard newlines before the first paint.
+    fn offset_for_vertical_move(&self, up: bool) -> usize {
+        let cursor = self.cursor_offset();
+        let Some(layout) = self.layout.as_ref() else {
+            return self.offset_for_hard_line_move(up);
+        };
+        if layout.lines.is_empty() {
+            return cursor;
+        }
+        let Some(pos) = position_for_index(&layout.lines, cursor) else {
+            return self.offset_for_hard_line_move(up);
+        };
+        let lh = px(INPUT_LINE_HEIGHT);
+        let target_y = if up { pos.y - lh } else { pos.y + lh };
+        let window_pos = point(layout.bounds.left() + pos.x, layout.bounds.top() + target_y);
+        index_for_position(&layout.lines, layout.bounds, window_pos, self.content.len())
+    }
+
+    fn offset_for_hard_line_move(&self, up: bool) -> usize {
+        let cursor = self.cursor_offset();
+        let line_start = self.line_start(cursor);
+        let col = cursor - line_start;
+        if up {
+            if line_start == 0 {
+                return 0;
+            }
+            let prev_end = line_start - 1;
+            let prev_start = self.line_start(prev_end);
+            prev_start + col.min(prev_end - prev_start)
+        } else {
+            let line_end = self.line_end(cursor);
+            if line_end >= self.content.len() {
+                return self.content.len();
+            }
+            let next_start = line_end + 1;
+            let next_end = self.line_end(next_start);
+            next_start + col.min(next_end - next_start)
+        }
     }
 
     fn position_for_index(&self, index: usize) -> Option<Point<Pixels>> {
@@ -922,11 +1006,17 @@ impl Render for ComposerInput {
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::left))
             .on_action(cx.listener(Self::right))
+            .on_action(cx.listener(Self::up))
+            .on_action(cx.listener(Self::down))
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
+            .on_action(cx.listener(Self::select_up))
+            .on_action(cx.listener(Self::select_down))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
+            .on_action(cx.listener(Self::select_home))
+            .on_action(cx.listener(Self::select_end))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
