@@ -24,6 +24,9 @@ struct HomeView: View {
     @State private var deletePeople: PeopleChat? = nil
     /// "Hidden chats N ›" footer → the list of archived agents and people chats.
     @State private var showHidden = false
+    /// Goals list (long-running objectives) from the home sidebar section.
+    @State private var showGoals = false
+    @State private var openGoalId: String?
 
     private var hiddenProjects: [Project] {
         model.projects.filter { model.isArchived($0.id) }.sorted { lastActivity($0) > lastActivity($1) }
@@ -86,6 +89,9 @@ struct HomeView: View {
                                     .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
                                     .listRowSeparator(.hidden)
                                     .listRowBackground(theme.bg)
+                            }
+                            if !model.openGoals.isEmpty {
+                                goalsSection
                             }
                         }
                         ForEach(homeRows) { row in
@@ -272,6 +278,17 @@ struct HomeView: View {
             .navigationDestination(isPresented: $showHidden) {
                 HiddenChatsView().environmentObject(model).environment(\.theme, theme)
             }
+            .navigationDestination(isPresented: $showGoals) {
+                GoalsPage().environmentObject(model).environment(\.theme, theme)
+            }
+            .navigationDestination(isPresented: Binding(
+                get: { openGoalId != nil },
+                set: { if !$0 { openGoalId = nil } }
+            )) {
+                GoalDetailPage(goalId: openGoalId ?? "")
+                    .environmentObject(model)
+                    .environment(\.theme, theme)
+            }
             .sheet(isPresented: $showSettings) {
                 SettingsView().environmentObject(model).environment(\.theme, theme)
             }
@@ -325,6 +342,7 @@ struct HomeView: View {
                 if let p = model.project(id) { model.open(project: p) }
             }
         }
+        .task { await model.refreshGoals() }
         .onAppear {
             if DebugHooks.show == "newchat" || DebugHooks.show == "newagent", DebugHooks.openProject == nil {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showNewChat = true }
@@ -367,6 +385,67 @@ struct HomeView: View {
         guard let c = deletePeople else { return "this chat" }
         if c.isGroup { return c.title.isEmpty ? "this group" : c.title }
         return c.counterpart(me: model.user?.id)?.displayName ?? c.title
+    }
+
+    /// Goals section: status, next step, last moved — tap opens the goal.
+    private var goalsSection: some View {
+        Section {
+            ForEach(model.openGoals.prefix(6)) { goal in
+                Button { openGoalId = goal.id } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "flag.fill")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(theme.accent)
+                            .frame(width: 28, height: 28)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(goal.title)
+                                .font(theme.font(Theme.body, weight: .medium))
+                                .foregroundStyle(theme.text)
+                                .lineLimit(1)
+                            Text(goalHomeSubtitle(goal))
+                                .font(theme.font(Theme.tiny))
+                                .foregroundStyle(theme.muted)
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.borderless)
+                .listRowInsets(EdgeInsets(top: 6, leading: 20, bottom: 6, trailing: 22))
+                .listRowSeparator(.hidden)
+                .listRowBackground(theme.bg)
+            }
+            Button { showGoals = true } label: {
+                HStack(spacing: 8) {
+                    Text("All goals")
+                        .font(theme.font(Theme.small))
+                        .foregroundStyle(theme.muted)
+                    Image(systemName: "chevron.right")
+                        .font(theme.font(11, weight: .semibold))
+                        .foregroundStyle(theme.placeholder)
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 10, trailing: 22))
+            .listRowSeparator(.hidden)
+            .listRowBackground(theme.bg)
+            .accessibilityLabel("All goals")
+        } header: {
+            Text("Goals")
+                .font(theme.font(Theme.tiny, weight: .medium))
+                .foregroundStyle(theme.muted)
+                .textCase(nil)
+        }
+    }
+
+    private func goalHomeSubtitle(_ goal: GoalItem) -> String {
+        var parts: [String] = [goal.statusLabel]
+        if !goal.nextStep.isEmpty { parts.append(goal.nextStep) }
+        if let moved = goal.lastMovedAt { parts.append(SecretsText.ago(moved)) }
+        return parts.joined(separator: " · ")
     }
 
     /// Grok's "Hidden chats  N  ›" line under the list (measured: 15 pt muted,

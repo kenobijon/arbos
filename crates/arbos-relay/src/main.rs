@@ -19,6 +19,7 @@ mod db_push;
 mod db_secrets;
 mod db_voice;
 mod feedback;
+mod goals;
 mod groups;
 mod images;
 mod livekit;
@@ -553,6 +554,13 @@ async fn main() -> anyhow::Result<()> {
             post(routines::report_run),
         )
         .route("/routines/{rid}/fire", post(routines::webhook_fire))
+        .route("/goals", get(goals::list_all))
+        .route("/projects/{id}/goals", get(goals::list).post(goals::create))
+        .route(
+            "/projects/{id}/goals/{gid}",
+            get(goals::get).patch(goals::patch).delete(goals::delete),
+        )
+        .route("/projects/{id}/goals/{gid}/log", post(goals::append_log))
         .route("/skills", get(skills::list).post(skills::create))
         .route("/skills/search", get(skills::list))
         .route("/skills/index", get(skills::index))

@@ -781,6 +781,135 @@ struct ConnectorsView: Equatable {
     }
 }
 
+// MARK: - Goals (long-running objectives, feedback #1091)
+
+/// One step in a goal's plan (`plan[]`).
+struct GoalStep: Identifiable, Equatable {
+    var id: String
+    var title: String
+    /// `todo | doing | done | skipped` (free-form; UI treats unknown as todo).
+    var status: String
+
+    static func parse(_ v: Any?) -> GoalStep? {
+        if let s = v as? String {
+            let t = s.trimmingCharacters(in: .whitespaces)
+            guard !t.isEmpty else { return nil }
+            return GoalStep(id: t, title: t, status: "todo")
+        }
+        guard let m = v as? [String: Any] else { return nil }
+        let title = DocJSON.str(m["title"]) ?? DocJSON.str(m["text"]) ?? ""
+        guard !title.isEmpty else { return nil }
+        return GoalStep(
+            id: DocJSON.str(m["id"]) ?? title,
+            title: title,
+            status: DocJSON.str(m["status"]) ?? "todo"
+        )
+    }
+}
+
+/// One dated progress note (`progress_log[]`).
+struct GoalLogEntry: Identifiable, Equatable {
+    var id: String { "\(at)-\(text.prefix(24))" }
+    var at: Int64
+    var text: String
+
+    static func parse(_ v: Any?) -> GoalLogEntry? {
+        guard let m = v as? [String: Any], let text = DocJSON.str(m["text"]), !text.isEmpty else { return nil }
+        return GoalLogEntry(at: DocJSON.int(m["at"]) ?? 0, text: text)
+    }
+}
+
+/// A long-running objective the agent tracks across days.
+struct GoalItem: Identifiable, Equatable {
+    var id: String
+    var projectId: String
+    var projectName: String?
+    var chatId: String?
+    var title: String
+    var outcome: String
+    var plan: [GoalStep]
+    /// `active | blocked | waiting | paused | done`
+    var status: String
+    var progressLog: [GoalLogEntry]
+    var nextStep: String
+    var checkInCron: String?
+    var checkInTz: String
+    var routineId: String?
+    /// `ask | suggest | act`
+    var autonomy: String
+    var linkedChatIds: [String]
+    var linkedSubagentIds: [String]
+    var waitingQuestion: String?
+    var createdAt: Int64
+    var updatedAt: Int64
+    var lastMovedAt: Int64?
+
+    var isOpen: Bool {
+        switch status {
+        case "active", "blocked", "waiting": return true
+        default: return false
+        }
+    }
+
+    var statusLabel: String {
+        switch status {
+        case "active": return "Active"
+        case "blocked": return "Blocked"
+        case "waiting": return "Waiting on you"
+        case "paused": return "Paused"
+        case "done": return "Done"
+        default: return status.capitalized
+        }
+    }
+
+    var autonomyLabel: String {
+        switch autonomy {
+        case "act": return "Act freely"
+        case "suggest": return "Suggest first"
+        default: return "Ask first"
+        }
+    }
+
+    /// Human check-in cadence from the cron, when we recognize common presets.
+    var checkInLabel: String {
+        guard let c = checkInCron?.trimmingCharacters(in: .whitespaces), !c.isEmpty else {
+            return "Manual"
+        }
+        switch c {
+        case "0 9 * * *": return "Every day"
+        case "0 9 * * 1-5": return "Weekdays"
+        case "0 9 * * 1": return "Weekly"
+        default: return c
+        }
+    }
+
+    static func parse(_ v: Any?) -> GoalItem? {
+        guard let m = v as? [String: Any], let id = DocJSON.str(m["id"]) else { return nil }
+        return GoalItem(
+            id: id,
+            projectId: DocJSON.str(m["project_id"]) ?? "",
+            projectName: DocJSON.str(m["project_name"]),
+            chatId: DocJSON.str(m["chat_id"]),
+            title: DocJSON.str(m["title"]) ?? id,
+            outcome: DocJSON.str(m["outcome"]) ?? "",
+            plan: ((m["plan"] as? [Any]) ?? []).compactMap(GoalStep.parse),
+            status: DocJSON.str(m["status"]) ?? "active",
+            progressLog: ((m["progress_log"] as? [Any]) ?? []).compactMap(GoalLogEntry.parse),
+            nextStep: DocJSON.str(m["next_step"]) ?? "",
+            checkInCron: DocJSON.str(m["check_in_cron"]),
+            checkInTz: DocJSON.str(m["check_in_tz"]) ?? "UTC",
+            routineId: DocJSON.str(m["routine_id"]),
+            autonomy: DocJSON.str(m["autonomy"]) ?? "ask",
+            linkedChatIds: (m["linked_chat_ids"] as? [Any])?.compactMap { $0 as? String } ?? [],
+            linkedSubagentIds: (m["linked_subagent_ids"] as? [Any])?.compactMap { $0 as? String } ?? [],
+            waitingQuestion: DocJSON.str(m["waiting_question"]),
+            createdAt: DocJSON.int(m["created_at"]) ?? 0,
+            updatedAt: DocJSON.int(m["updated_at"]) ?? 0,
+            lastMovedAt: DocJSON.int(m["last_moved_at"])
+        )
+    }
+}
+
 func newId() -> Id {
     ULID.generate()
 }

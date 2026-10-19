@@ -325,6 +325,11 @@ final class AppModel: ObservableObject {
     /// Fixture only: the Vault page's item list (the relay answers this live).
     var fixtureVaultItems: [[String: Any]] = []
     @Published var secretsBusy = false
+    /// Home / Settings → Goals (long-running objectives). Empty until first refresh.
+    @Published var goals: [GoalItem] = []
+    @Published var goalsBusy = false
+    /// Open a goal detail from Home or Settings.
+    @Published var selectedGoalId: String?
 
     private var api: RelayAPI
     /// The relay client, for feature extensions in other files.

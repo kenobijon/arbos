@@ -721,6 +721,8 @@ pub struct Agent {
     pub people: crate::people::PeopleState,
     /// Image inputs for the next pi prompt (set by `handle_send` from the message's attachments).
     pub turn_images: std::sync::Mutex<Vec<Value>>,
+    /// Cached active-goals blurb for the working set (Goals, feedback #1091).
+    pub goals_cache: std::sync::Mutex<String>,
 }
 
 impl Agent {
@@ -792,7 +794,27 @@ impl Agent {
             groups: crate::groups::GroupState::default(),
             people: crate::people::PeopleState::default(),
             turn_images: std::sync::Mutex::new(Vec::new()),
+            goals_cache: std::sync::Mutex::new(String::new()),
         })
+    }
+
+    /// Refresh the active-goals blurb used by the working set.
+    pub async fn refresh_goals_cache(self: &Arc<Self>) {
+        let text = self.active_goals_text().await;
+        if let Ok(mut g) = self.goals_cache.lock() {
+            *g = text;
+        }
+    }
+
+    /// Poll active goals so every chat's working set stays current.
+    pub fn spawn_goals_poller(self: &Arc<Self>) {
+        let agent = self.clone();
+        tokio::spawn(async move {
+            loop {
+                agent.refresh_goals_cache().await;
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            }
+        });
     }
 
     /// Refetch the skills index from the relay (60 s timer, `skills_rev` change, after a save).
@@ -3130,6 +3152,15 @@ impl Agent {
                 v.chars().take(120).collect::<String>()
             ));
         }
+        // Goals are pinned in memory (cached; refreshed by the goals poller / MCP tools).
+        let goals = self
+            .goals_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if !goals.is_empty() {
+            lines.push(goals);
+        }
         lines.into_iter().take(40).collect::<Vec<_>>().join("\n")
     }
 
@@ -3227,7 +3258,7 @@ impl Agent {
             s.push_str(&skills_text);
             s.push_str("\n\n");
         }
-        s.push_str("## Tools\n\nMCP server `arbos`: context_search, context_open, context_around (this Project's memory tree: raw events plus index cards of episodes and threads), history_search, history_read, read_thread, memory_search, memory_read (you may search and read the entire history of this Project), peek, sub_llm, remember/recall, projects_list, ask_user (optional widget: choice, multi_select, text, date, form), skills_list/skills_read/skills_save (reusable how-tos), draft_message (an outbound email or chat message shown to the user as an approval card; nothing is sent without their click), connectors_list/connector_call (the user's Gmail, Calendar, Slack, GitHub, Harness Comms through the relay; write/send actions need the user's approval), local_devices/local_run/local_read/local_list (the user's own computer through the arbos-local helper; every command and, unless the user allowed reads, every file read needs the user's approval), deliver_file (hand a file you made to the user as a card), generate_image (an image from a prompt, delivered as a card), secrets_list/secrets_request/egress/browser_fill (the owner's secrets: you only ever get a placeholder such as `arbos-secret://STRIPE_KEY/value`, `$STRIPE_KEY` in a shell, or an `op://` reference; send it through `egress` or use it as `$NAME`; never try to read, print, encode or copy a value; a secret with no access → secrets_request and wait for the owner's card; if they deny or pause, stop and say so; logins are typed by browser_fill), routines_list/routines_create/routines_update/routines_delete (cron jobs and one-shot reminders on the relay scheduler), web_search/web_fetch (search the web; read a public page, spec or file as text), submit_feedback (file the user's feedback or bug report for them: captures their screen from their app, or attaches a PNG/JPEG they already provided via image_path; also attaches the recent conversation, tool calls and timings scrubbed of secrets, and returns a reference id; use it whenever the user asks to submit, send or report feedback or a bug — never point them to a menu, settings screen or another channel).\n\n");
+        s.push_str("## Tools\n\nMCP server `arbos`: context_search, context_open, context_around (this Project's memory tree: raw events plus index cards of episodes and threads), history_search, history_read, read_thread, memory_search, memory_read (you may search and read the entire history of this Project), peek, sub_llm, remember/recall, projects_list, ask_user (optional widget: choice, multi_select, text, date, form), skills_list/skills_read/skills_save (reusable how-tos), draft_message (an outbound email or chat message shown to the user as an approval card; nothing is sent without their click), connectors_list/connector_call (the user's Gmail, Calendar, Slack, GitHub, Harness Comms through the relay; write/send actions need the user's approval), local_devices/local_run/local_read/local_list (the user's own computer through the arbos-local helper; every command and, unless the user allowed reads, every file read needs the user's approval), deliver_file (hand a file you made to the user as a card), generate_image (an image from a prompt, delivered as a card), secrets_list/secrets_request/egress/browser_fill (the owner's secrets: you only ever get a placeholder such as `arbos-secret://STRIPE_KEY/value`, `$STRIPE_KEY` in a shell, or an `op://` reference; send it through `egress` or use it as `$NAME`; never try to read, print, encode or copy a value; a secret with no access → secrets_request and wait for the owner's card; if they deny or pause, stop and say so; logins are typed by browser_fill), routines_list/routines_create/routines_update/routines_delete (cron jobs and one-shot reminders on the relay scheduler), goals_list/goals_create/goals_update/goals_log/goals_delete (long-running objectives across days: plan, status, progress log, check-ins via routines; active goals stay pinned in the working set; autonomy ask|suggest|act), web_search/web_fetch (search the web; read a public page, spec or file as text), submit_feedback (file the user's feedback or bug report for them: captures their screen from their app, or attaches a PNG/JPEG they already provided via image_path; also attaches the recent conversation, tool calls and timings scrubbed of secrets, and returns a reference id; use it whenever the user asks to submit, send or report feedback or a bug — never point them to a menu, settings screen or another channel).\n\n");
         s.push_str(RESEARCH_SECTION);
         s.push_str(&crate::media::prompt_section(&self.cfg));
         s.push_str("## Return contract\n\nEnd your final reply with one fenced ```json block:\n{ \"status\": \"done\" | \"blocked\" | \"partial\" | \"needs_input\", \"summary\": \"<= 5 lines\", \"artifacts\": [ { \"kind\": \"file\" | \"commit\" | \"url\" | \"command\", \"ref\": \"…\", \"note\": \"…\" } ], \"acceptance\": [ { \"criterion\": \"…\", \"met\": true, \"evidence\": \"…\" } ], \"open_items\": [], \"proposed_memory\": [ { \"kind\": \"decision\", \"scope\": \"project\", \"text\": \"…\" } ], \"questions\": [] }\n");
