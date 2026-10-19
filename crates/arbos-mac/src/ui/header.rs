@@ -1,10 +1,10 @@
 //! The conversation header, Grok Bot Mac layout: the avatar and name on the
 //! left (click an agent to open its profile), then — for an agent — its chat
 //! tabs ("Main", groups with their heads, "+" for a new chat, "×" archives),
-//! icon buttons on the right (browser view, "…", and "add people" in a DM).
-//! Under it, one optional chips row: the members of a people chat. The "…"
-//! menu holds what the iPhone keeps there: New chat, Archived, Model,
-//! Members / Share, Avatar, voice, Stop, Settings.
+//! icon buttons on the right ("…", and "add people" in a DM). Under it, one
+//! optional chips row: the members of a people chat. The "…" menu holds what
+//! the iPhone keeps there: New chat, Archived, Model, Members / Share, Avatar,
+//! voice, Stop, Settings.
 
 use gpui::{
     div, prelude::*, px, AnyElement, Context, Div, ElementId, Focusable as _, FontWeight,
@@ -24,8 +24,7 @@ use crate::ui::people;
 use crate::ui::shell::Shell;
 use crate::ui::sidebar::machine_dot;
 use crate::ui::theme::{
-    Theme, AVATAR_HEADER, CONTROL, HEADER_HEIGHT, RIGHT_PANEL_WIDTH, TEXT_BODY, TEXT_SMALL,
-    TEXT_TINY,
+    Theme, AVATAR_HEADER, CONTROL, HEADER_HEIGHT, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
 };
 use crate::ui::voicepicker;
 
@@ -40,7 +39,6 @@ pub fn render(
     let is_people = space.is_people();
     let in_call = shell.voice.read(cx).in_call();
     let menu_open = shell.menu_open;
-    let panel_open = state.right_panel_open;
 
     // ----- left: avatar + name (click an agent to open its profile) -----------
     let mut title = div()
@@ -338,27 +336,19 @@ pub fn render(
                 })),
         );
     }
-    right = right
-        .child(
-            button("header-panel", "window", panel_open, &theme).on_click(cx.listener(
-                |this, _, _, cx| {
-                    this.state.update(cx, |s, cx| s.toggle_right_panel(cx));
-                },
-            )),
-        )
-        .child(
-            button("header-menu", "ellipsis", menu_open, &theme).on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.menu_open = !this.menu_open;
-                    this.members_open = false;
-                    this.add_agent_open = false;
-                    this.set_group_picker(false, cx);
-                    cx.notify();
-                }),
-            ),
-        );
+    right = right.child(
+        button("header-menu", "ellipsis", menu_open, &theme).on_mouse_down(
+            gpui::MouseButton::Left,
+            cx.listener(|this, _, _, cx| {
+                cx.stop_propagation();
+                this.menu_open = !this.menu_open;
+                this.members_open = false;
+                this.add_agent_open = false;
+                this.set_group_picker(false, cx);
+                cx.notify();
+            }),
+        ),
+    );
 
     let tabs = if is_people {
         None
@@ -603,12 +593,7 @@ fn agent_tabs(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option
 pub fn archived_list(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
     let theme = Theme::of(cx).clone();
     let state = shell.state.read(cx);
-    let panel_open = state.right_panel_open;
-    let right = if panel_open {
-        RIGHT_PANEL_WIDTH + 16.0
-    } else {
-        16.0
-    };
+    let right = 16.0;
     let archived: Vec<Chat> = state
         .archived_tabs(&space.id)
         .into_iter()
@@ -744,7 +729,6 @@ pub fn menu(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
     let state = shell.state.read(cx);
     let is_people = space.is_people();
     let streaming = state.project_is_streaming(&space.id);
-    let panel_open = state.right_panel_open;
     let voice_mode = state.voice_mode;
     let in_call = shell.voice.read(cx).in_call();
     let in_livekit = state.my_call.is_some();
@@ -759,11 +743,7 @@ pub fn menu(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
     } else {
         space.name.clone()
     };
-    let right = if panel_open {
-        RIGHT_PANEL_WIDTH + 16.0
-    } else {
-        16.0
-    };
+    let right = 16.0;
 
     let mut body = div().flex().flex_col().gap(px(1.0));
     if is_people {
