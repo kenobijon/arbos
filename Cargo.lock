@@ -304,7 +304,7 @@ dependencies = [
 
 [[package]]
 name = "arbos-agentd"
-version = "0.6.26"
+version = "0.6.27"
 dependencies = [
  "anyhow",
  "arbos-core",
@@ -336,7 +336,7 @@ dependencies = [
 
 [[package]]
 name = "arbos-core"
-version = "0.6.26"
+version = "0.6.27"
 dependencies = [
  "anyhow",
  "bytes",
@@ -354,7 +354,7 @@ dependencies = [
 
 [[package]]
 name = "arbos-local"
-version = "0.6.26"
+version = "0.6.27"
 dependencies = [
  "anyhow",
  "arbos-core",
@@ -373,7 +373,7 @@ dependencies = [
 
 [[package]]
 name = "arbos-mac"
-version = "0.6.26"
+version = "0.6.27"
 dependencies = [
  "anyhow",
  "arbos-core",
@@ -381,9 +381,11 @@ dependencies = [
  "base64 0.22.1",
  "block2 0.6.2",
  "chrono",
+ "core-graphics 0.24.0",
  "cosmic-text",
  "cpal",
  "env_logger",
+ "foreign-types 0.5.0",
  "futures",
  "gpui",
  "gpui_platform",
@@ -412,7 +414,7 @@ dependencies = [
 
 [[package]]
 name = "arbos-relay"
-version = "0.6.26"
+version = "0.6.27"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -447,7 +449,7 @@ dependencies = [
 
 [[package]]
 name = "arbos-update"
-version = "0.6.26"
+version = "0.6.27"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -469,7 +471,7 @@ dependencies = [
 
 [[package]]
 name = "arbosctl"
-version = "0.6.26"
+version = "0.6.27"
 dependencies = [
  "anyhow",
  "arbos-core",

@@ -16,7 +16,7 @@ use crate::model::{CallKind, Chat, Project};
 use crate::ui::avatars;
 use crate::ui::callview;
 use crate::ui::composer::{Composer, Picker};
-use crate::ui::glass;
+use crate::ui::glass::{self, WindowDrag};
 use crate::ui::groups;
 use crate::ui::icons::icon;
 use crate::ui::motion::PulseClock;
@@ -39,12 +39,6 @@ pub fn render(
     let is_people = space.is_people();
     let in_call = shell.voice.read(cx).in_call();
     let menu_open = shell.menu_open;
-    // Calls: start a voice / video call in a people chat, a shared project, or with the agent.
-    let in_call_here = state
-        .my_call
-        .as_ref()
-        .map(|c| c.call.space_id() == space.id)
-        .unwrap_or(false);
 
     // ----- left: avatar + name (click an agent to open its profile) -----------
     let mut title = div()
@@ -287,28 +281,9 @@ pub fn render(
                 if on { theme.text } else { theme.text_muted },
             ))
     };
+    // Match the iPhone: no dual call / camera icons here. Start a call from
+    // the composer (mic + phone) or the "…" menu; camera defaults off.
     let mut right = div().flex().items_center().gap(px(2.0));
-    if callview::callable(space) && !in_call_here {
-        right = right
-            .child(
-                button("header-voice-call", "phone", false, &theme).on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.menu_open = false;
-                        this.state
-                            .update(cx, |s, cx| s.start_call_in_chat(CallKind::Voice, cx));
-                    },
-                )),
-            )
-            .child(
-                button("header-video-call", "camera", false, &theme).on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.menu_open = false;
-                        this.state
-                            .update(cx, |s, cx| s.start_call_in_chat(CallKind::Video, cx));
-                    },
-                )),
-            );
-    }
     if is_people {
         right = right.child(
             button("header-members", "person-plus", shell.members_open, &theme).on_mouse_down(
@@ -351,21 +326,20 @@ pub fn render(
     } else {
         agent_tabs(shell, space, cx)
     };
-    // Without the docked sidebar (collapsed, or the window is too narrow for
-    // it) a toggle brings it back: docked when it fits, floating when not.
-    let sidebar_toggle = sidebar_hidden.then(|| {
-        let overlay = shell.state.read(cx).sidebar_overlay;
-        button("header-sidebar", "sidebar-left", overlay, &theme).on_click(cx.listener(
-            |this, _, window, cx| {
-                this.menu_open = false;
-                let width: f32 = window.viewport_size().width.into();
-                this.state.update(cx, |s, cx| {
-                    let narrow = s.window_is_narrow(width);
-                    s.toggle_rail(narrow, cx)
-                });
-            },
-        ))
-    });
+    // Sidebar toggle (⌘B): collapse when docked, bring it back when hidden
+    // (docked when the window fits it, floating overlay when narrow).
+    let overlay = shell.state.read(cx).sidebar_overlay;
+    let sidebar_open = !sidebar_hidden || overlay;
+    let sidebar_toggle = button("header-sidebar", "sidebar-left", sidebar_open, &theme).on_click(
+        cx.listener(|this, _, window, cx| {
+            this.menu_open = false;
+            let width: f32 = window.viewport_size().width.into();
+            this.state.update(cx, |s, cx| {
+                let narrow = s.window_is_narrow(width);
+                s.toggle_rail(narrow, cx)
+            });
+        }),
+    );
     div()
         .h(px(HEADER_HEIGHT))
         .flex_shrink_0()
@@ -378,14 +352,14 @@ pub fn render(
         .pr(px(10.0))
         .border_b_1()
         .border_color(theme.border)
-        .window_control_area(gpui::WindowControlArea::Drag)
+        .window_drag()
         .child(
             div()
                 .flex()
                 .items_center()
                 .gap(px(4.0))
                 .flex_shrink_0()
-                .children(sidebar_toggle)
+                .child(sidebar_toggle)
                 .child(title.flex_shrink_0().max_w(px(300.0))),
         )
         .when_some(tabs, |el, t| el.child(t))
@@ -728,6 +702,7 @@ pub fn menu(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
     let streaming = state.project_is_streaming(&space.id);
     let voice_mode = state.voice_mode;
     let in_call = shell.voice.read(cx).in_call();
+    let in_livekit = state.my_call.is_some();
     let projects_count = state.projects.iter().filter(|p| !p.is_people()).count();
     let name = if space.is_people_group() {
         space.name.clone()
@@ -1000,13 +975,33 @@ pub fn menu(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
             glass::menu_row(
                 "menu-call",
                 "phone",
-                if in_call { "Hang up" } else { "Voice call" },
+                if in_livekit || in_call {
+                    "Hang up"
+                } else {
+                    "Call"
+                },
                 false,
                 &theme,
             )
             .on_click(cx.listener(|this, _, _, cx| {
                 this.menu_open = false;
-                this.voice.update(cx, |v, cx| v.toggle_call(cx));
+                // LiveKit call first (same as the iPhone); else voice-mode hang-up /
+                // start. Calls always begin audio-only; turn the camera on in-call.
+                let live = this.state.read(cx).my_call.is_some();
+                let voice_on = this.voice.read(cx).in_call();
+                if live {
+                    this.state.update(cx, |s, cx| s.leave_call(cx));
+                } else if voice_on {
+                    this.voice.update(cx, |v, cx| v.toggle_call(cx));
+                } else if this
+                    .state
+                    .read(cx)
+                    .selected()
+                    .is_some_and(callview::callable)
+                {
+                    this.state
+                        .update(cx, |s, cx| s.start_call_in_chat(CallKind::Voice, cx));
+                }
             })),
         );
     if streaming {

@@ -51,6 +51,10 @@ hound = "3.5"
 # Sign in with GitHub (ASWebAuthenticationSession), notifications
 # (UNUserNotificationCenter) and the Dock badge through objc2 (macOS only).
 [target.'cfg(target_os = "macos")'.dependencies]
+# Feedback screenshots: CGWindowListCreateImage of our own window (no Screen Recording permission
+# needed for the app's own windows, unlike the `screencapture` CLI).
+core-graphics = "0.24"
+foreign-types = "0.5"
 # Calls v1 camera capture: AVFoundation through nokhwa.
 nokhwa = { version = "0.10", default-features = false, features = ["input-avfoundation"] }
 objc2 = "0.6"
