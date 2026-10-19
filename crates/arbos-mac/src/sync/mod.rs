@@ -464,6 +464,11 @@ pub enum ClientCommand {
         project_id: Id,
         description: String,
     },
+    /// Rename an agent: `PATCH /projects/{id} {name}` (API §9).
+    SetProjectName {
+        project_id: Id,
+        name: String,
+    },
     /// Profile pages: `PUT /chats/{id}/settings {muted}` for a people chat (syncs
     /// across devices); projects keep the local mute list.
     SetMuted {

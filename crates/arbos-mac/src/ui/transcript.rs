@@ -4,18 +4,18 @@
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    div, img, list, prelude::*, px, Animation, AnimationExt, AnyElement, Context, Div, Entity,
-    FontWeight, ListAlignment, ListScrollEvent, ListState, ObjectFit, Render, RenderImage,
-    SharedString, Stateful, StyledText, TextRun, Window,
+    div, list, prelude::*, px, Animation, AnimationExt, AnyElement, Context, Div, Entity,
+    FontWeight, ListAlignment, ListScrollEvent, ListState, Render, SharedString, Stateful,
+    StyledText, TextRun, Window,
 };
 
 use crate::app::{AppEvent, AppState, DetailsTarget};
 use crate::model::{
-    Attachment, Id, Message, MessageStatus, Part, Person, Role, StatusKind, TurnKind,
+    Attachment, AttachmentKind, Id, Message, MessageStatus, Part, Person, Role, StatusKind,
+    TurnKind,
 };
 use crate::ui::approve::{approval_card, ApprovalView};
 use crate::ui::attachments;
@@ -103,7 +103,6 @@ impl HoverFade {
 pub enum RowKind {
     User {
         text: String,
-        attachments: Vec<Attachment>,
         pending: bool,
         /// Caption for prompts not typed by the user (a routine, another project).
         sender_label: Option<String>,
@@ -142,9 +141,10 @@ pub enum RowKind {
         names: Vec<String>,
         total: u32,
     },
-    /// A file the agent produced for the user.
+    /// An image or file in the chat (agent or user). `mine` right-aligns my sends.
     Attachment {
         attachment: Attachment,
+        mine: bool,
     },
     /// S8: the agent asked a question.
     AskUser {
@@ -505,13 +505,12 @@ impl Transcript {
         let inner: AnyElement = match row.kind {
             RowKind::User {
                 text,
-                attachments,
                 pending,
                 sender_label,
                 from,
                 time,
             } => {
-                let mut bubble = self
+                let bubble = self
                     .react_target(
                         div().id(SharedString::from(format!("{}#bubble", row.id))),
                         &row.message_id,
@@ -527,49 +526,8 @@ impl Transcript {
                     .bg(theme.bubble)
                     .text_color(theme.bubble_text())
                     .text_size(px(TEXT_BODY))
-                    .line_height(px(LINE_HEIGHT));
-                if !attachments.is_empty() {
-                    let mut images = div().flex().flex_col().gap(px(6.0));
-                    let mut chips = div().flex().flex_wrap().gap(px(6.0));
-                    let mut has_images = false;
-                    let mut has_chips = false;
-                    for a in attachments {
-                        if a.is_image() {
-                            has_images = true;
-                            let thumbnail = a
-                                .blob_ref
-                                .as_ref()
-                                .and_then(|k| self.state.read(cx).thumbnails.get(k).cloned());
-                            images =
-                                images.child(user_image_preview(&row.id, &a, thumbnail, &theme));
-                            continue;
-                        }
-                        has_chips = true;
-                        // A voice memo chip (F11) is marked with a note glyph.
-                        let label = if a.is_audio() {
-                            format!("♪ {}", a.name)
-                        } else {
-                            a.name
-                        };
-                        chips = chips.child(
-                            div()
-                                .px(px(9.0))
-                                .py(px(3.0))
-                                .rounded_full()
-                                .bg(Theme::with_alpha(theme.bg, 0.35))
-                                .text_size(px(TEXT_TINY))
-                                .text_color(theme.text)
-                                .child(label),
-                        );
-                    }
-                    if has_images {
-                        bubble = bubble.child(images);
-                    }
-                    if has_chips {
-                        bubble = bubble.child(chips);
-                    }
-                }
-                bubble = bubble.child(text);
+                    .line_height(px(LINE_HEIGHT))
+                    .child(text);
                 if let Some(person) = from {
                     // Someone else: left-aligned, their avatar and handle above.
                     // Must not early-return: the match arm still needs the
@@ -863,7 +821,7 @@ impl Transcript {
                     .child(line)
                     .into_any_element()
             }
-            RowKind::Attachment { attachment } => {
+            RowKind::Attachment { attachment, mine } => {
                 let thumbnail = attachment
                     .blob_ref
                     .as_ref()
@@ -872,6 +830,7 @@ impl Transcript {
                     .w_full()
                     .py(px(4.0))
                     .flex()
+                    .when(mine, |el| el.justify_end())
                     .child(attachments::card(
                         &row.id,
                         &attachment,
@@ -1226,51 +1185,6 @@ fn hash_version<T: Hash>(value: &T, live: bool) -> u64 {
     (h.finish() << 1) | (live as u64)
 }
 
-/// Inline picture for a user-sent image (not a bare file-name chip).
-fn user_image_preview(
-    row_id: &str,
-    attachment: &Attachment,
-    thumbnail: Option<Arc<RenderImage>>,
-    theme: &Theme,
-) -> AnyElement {
-    let key = attachment.blob_ref.as_deref();
-    let preview = div()
-        .id(SharedString::from(format!(
-            "{row_id}#img-{}",
-            attachment.name
-        )))
-        .w_full()
-        .max_w(px(280.0))
-        .h(px(180.0))
-        .rounded(px(10.0))
-        .overflow_hidden()
-        .bg(Theme::with_alpha(theme.bg, 0.35))
-        .flex()
-        .items_center()
-        .justify_center();
-    match thumbnail {
-        Some(image) => preview
-            .child(img(image).w_full().h_full().object_fit(ObjectFit::Cover))
-            .into_any_element(),
-        None => {
-            let placeholder: SharedString = if key.is_some() {
-                "Loading preview…".into()
-            } else {
-                attachment.name.clone().into()
-            };
-            preview
-                .child(
-                    div()
-                        .text_size(px(TEXT_TINY))
-                        .text_color(theme.bubble_text())
-                        .opacity(0.7)
-                        .child(placeholder),
-                )
-                .into_any_element()
-        }
-    }
-}
-
 fn block_text_len(block: &Block) -> usize {
     match block {
         Block::Paragraph(t) | Block::Heading { text: t, .. } => t.len(),
@@ -1298,6 +1212,14 @@ fn sender_caption(message: &Message) -> Option<String> {
 }
 
 /// The bubble's own clock ("9:41 PM"), the iPhone's drag-to-reveal time.
+/// UTType-style labels some clients leave as the only text on a media-only send.
+fn is_generic_media_label(text: &str) -> bool {
+    matches!(
+        text.trim().to_ascii_lowercase().as_str(),
+        "image" | "photo" | "video" | "attachment" | "(attachment)"
+    )
+}
+
 fn clock_label(ms: u64) -> Option<String> {
     use chrono::{Local, TimeZone};
     if ms == 0 {
@@ -1380,15 +1302,19 @@ pub fn build_rows(
         match message.role {
             Role::User => {
                 let text = message.plain_text();
-                let attachments: Vec<Attachment> = message
+                let attachment_parts: Vec<(String, Attachment)> = message
                     .parts
                     .iter()
                     .filter_map(|p| match p {
-                        Part::Attachment { attachment, .. } => Some(attachment.clone()),
+                        Part::Attachment { id, attachment } => {
+                            Some((id.clone(), attachment.clone()))
+                        }
                         _ => None,
                     })
                     .collect();
-                let id = format!("{}#user", message.id);
+                let has_image = attachment_parts
+                    .iter()
+                    .any(|(_, a)| a.kind() == AttachmentKind::Image);
                 let from = if message.sender.starts_with("user:") && !mine(message) {
                     Some(Person {
                         id: message.sender.trim_start_matches("user:").to_string(),
@@ -1412,41 +1338,57 @@ pub fn build_rows(
                 } else {
                     sender_caption(message)
                 };
-                let attachment_sig: Vec<_> = attachments
-                    .iter()
-                    .map(|a| {
-                        (
-                            a.name.as_str(),
-                            a.blob_ref.as_deref(),
-                            a.is_image(),
-                            a.blob_ref
-                                .as_deref()
-                                .is_some_and(|k| thumb_keys.contains(k)),
-                        )
-                    })
-                    .collect();
-                rows.push(Row {
-                    version: hash_version(
-                        &(
-                            &text,
-                            message.pending,
-                            &attachment_sig,
-                            &sender_label,
-                            from.as_ref().map(|p| &p.handle),
+                // Image preview / file card rows (same cards as agent attachments).
+                let is_mine = from.is_none();
+                for (part_id, attachment) in &attachment_parts {
+                    let has_thumb = attachment
+                        .blob_ref
+                        .as_deref()
+                        .is_some_and(|k| thumb_keys.contains(k));
+                    rows.push(Row {
+                        version: hash_version(
+                            &(
+                                &attachment.name,
+                                &attachment.title,
+                                attachment.bytes,
+                                &attachment.blob_ref,
+                                is_mine,
+                                has_thumb,
+                            ),
+                            false,
                         ),
-                        false,
-                    ),
-                    id,
-                    message_id: message.id.clone(),
-                    kind: RowKind::User {
-                        text,
-                        attachments,
-                        pending: message.pending,
-                        sender_label,
-                        from,
-                        time: clock_label(message.created_at),
-                    },
-                });
+                        id: format!("{}#{}", message.id, part_id),
+                        message_id: message.id.clone(),
+                        kind: RowKind::Attachment {
+                            attachment: attachment.clone(),
+                            mine: is_mine,
+                        },
+                    });
+                }
+                // Skip a bare "Image"/"Photo" bubble when the attachment already shows it.
+                let show_text = !text.is_empty() && !(has_image && is_generic_media_label(&text));
+                if show_text || attachment_parts.is_empty() {
+                    rows.push(Row {
+                        version: hash_version(
+                            &(
+                                &text,
+                                message.pending,
+                                &sender_label,
+                                from.as_ref().map(|p| &p.handle),
+                            ),
+                            false,
+                        ),
+                        id: format!("{}#user", message.id),
+                        message_id: message.id.clone(),
+                        kind: RowKind::User {
+                            text,
+                            pending: message.pending,
+                            sender_label,
+                            from,
+                            time: clock_label(message.created_at),
+                        },
+                    });
+                }
                 if message.status == MessageStatus::Queued {
                     queued = true;
                 }
@@ -1658,6 +1600,7 @@ pub fn build_rows(
                                 message_id: message.id.clone(),
                                 kind: RowKind::Attachment {
                                     attachment: attachment.clone(),
+                                    mine: false,
                                 },
                             })
                         }

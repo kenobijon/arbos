@@ -323,6 +323,8 @@ pub struct AppState {
     pub profile_more_open: bool,
     /// Agent page: the owner is editing the description inline.
     pub profile_editing_description: bool,
+    /// Double-click rename: the project whose name is being edited inline.
+    pub renaming_project: Option<Id>,
     /// Spaces whose notifications are muted (`<config>/muted.json`).
     pub muted: HashSet<Id>,
     /// Last presence frame seen per handle (ms): "online" while fresh.
@@ -570,6 +572,7 @@ impl AppState {
             profile_picker_open: false,
             profile_more_open: false,
             profile_editing_description: false,
+            renaming_project: None,
             muted: load_muted(),
             presence_seen: HashMap::new(),
             notify_prompt_answered: false,
@@ -1662,6 +1665,13 @@ impl AppState {
     }
 
     pub fn select_project(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        if self
+            .renaming_project
+            .as_ref()
+            .is_some_and(|id| id != &project_id)
+        {
+            self.renaming_project = None;
+        }
         self.selected_project = Some(project_id.clone());
         self.sidebar_overlay = false;
         // Agents: the last chat used here, else the primary (enforce_tab picks).
@@ -1885,7 +1895,7 @@ impl AppState {
         }
         // Optimistic echo: the row shows at once; the source's frame with the
         // same id replaces it (§3.6). Image files get a local thumbnail so the
-        // bubble shows a picture immediately, not a bare file name.
+        // card shows a picture immediately, not "No preview".
         let mut parts: Vec<Part> = Vec::new();
         for path in &attachments {
             let name = path
@@ -1893,17 +1903,15 @@ impl AppState {
                 .and_then(|n| n.to_str())
                 .unwrap_or("attachment")
                 .to_string();
-            let mime = crate::sync::relay::mime_for(path).to_string();
+            let mime = mime_for_path(path).to_string();
             let att_id = new_id();
             let mut blob_ref = None;
-            let mut bytes = None;
-            if let Ok(data) = std::fs::read(path) {
-                bytes = Some(data.len() as u64);
+            let bytes = if let Ok(data) = std::fs::read(path) {
                 let probe = crate::model::Attachment {
                     name: name.clone(),
                     mime: mime.clone(),
                     blob_ref: None,
-                    bytes,
+                    bytes: Some(data.len() as u64),
                     kind: None,
                     title: None,
                 };
@@ -1915,7 +1923,10 @@ impl AppState {
                         blob_ref = Some(key);
                     }
                 }
-            }
+                Some(data.len() as u64)
+            } else {
+                std::fs::metadata(path).ok().map(|m| m.len())
+            };
             parts.push(Part::Attachment {
                 id: att_id,
                 attachment: crate::model::Attachment {
@@ -2508,6 +2519,7 @@ impl AppState {
         self.profile_picker_open = false;
         self.profile_more_open = false;
         self.profile_editing_description = false;
+        self.renaming_project = None;
         cx.notify();
     }
 
@@ -2527,6 +2539,26 @@ impl AppState {
         cx.notify();
     }
 
+    /// Start an inline rename of an owned agent (double-click on its name).
+    pub fn start_renaming(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        let ok = self
+            .projects
+            .iter()
+            .any(|p| p.id == project_id && !p.is_guest() && !p.is_people());
+        if !ok {
+            return;
+        }
+        self.renaming_project = Some(project_id);
+        self.profile_editing_description = false;
+        cx.notify();
+    }
+
+    pub fn cancel_renaming(&mut self, cx: &mut Context<Self>) {
+        if self.renaming_project.take().is_some() {
+            cx.notify();
+        }
+    }
+
     /// Agent page: save the description (`""` clears) — optimistic, then PATCH.
     pub fn set_description(&mut self, project_id: Id, description: String, cx: &mut Context<Self>) {
         let description = description.trim().chars().take(500).collect::<String>();
@@ -2538,6 +2570,26 @@ impl AppState {
             project_id,
             description,
         });
+        cx.notify();
+    }
+
+    /// Rename an owned agent — optimistic, then `PATCH /projects/{id} {name}`.
+    pub fn set_project_name(&mut self, project_id: Id, name: String, cx: &mut Context<Self>) {
+        let name = name.trim().chars().take(64).collect::<String>();
+        if name.is_empty() {
+            self.cancel_renaming(cx);
+            return;
+        }
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
+            if p.name == name {
+                self.renaming_project = None;
+                cx.notify();
+                return;
+            }
+            p.name = name.clone();
+        }
+        self.renaming_project = None;
+        self.command(ClientCommand::SetProjectName { project_id, name });
         cx.notify();
     }
 
@@ -4585,6 +4637,31 @@ pub fn title_from(text: &str) -> String {
         "New chat".into()
     } else {
         out
+    }
+}
+
+/// MIME from a local path's extension (optimistic echo before the relay replies).
+fn mime_for_path(path: &std::path::Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "heic" => "image/heic",
+        "pdf" => "application/pdf",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "m4a" => "audio/mp4",
+        "mp4" => "video/mp4",
+        "mov" => "video/quicktime",
+        "md" | "txt" => "text/plain",
+        _ => "application/octet-stream",
     }
 }
 

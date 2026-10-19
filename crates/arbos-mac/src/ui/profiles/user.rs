@@ -1,4 +1,4 @@
-//! A person's page: avatar, name, presence, call / video / mute / search /
+//! A person's page: avatar, name, presence, call / mute / search /
 //! more, the info card (@handle, Send Message, Block), and the Links /
 //! Groups tabs built from the chats and projects we share with them.
 
@@ -14,8 +14,8 @@ use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, TEXT_SMALL};
 
 use super::{
-    action_button, action_row, card, chats_of, collect, empty, frame, hero, info_action, info_row,
-    link_list, list_row, more_menu, tab_bar, Action,
+    action_button, action_row, card, chats_of, collect, empty, frame, hero, hero_name, info_action,
+    info_row, link_list, list_row, more_menu, tab_bar, Action,
 };
 
 const TABS: [&str; 2] = ["Links", "Groups"];
@@ -114,7 +114,7 @@ pub(super) fn page(
         .into_any_element();
     let hero = hero(
         avatar,
-        &person.display_name(),
+        hero_name(&person.display_name(), &theme).into_any_element(),
         &status,
         if online {
             super::presence_blue()
@@ -126,9 +126,9 @@ pub(super) fn page(
 
     // ----- actions --------------------------------------------------------------
     let h1 = handle_s.clone();
-    let h2 = handle_s.clone();
     let mute_target = mute_space.clone();
     let h3 = handle_s.clone();
+    // Calls start audio-only; camera is toggled on the call screen (same as iPhone).
     let actions = action_row(vec![
         action_button(&Action::new("profile-call", "phone", "call"), &theme).on_click(cx.listener(
             move |this, _, _, cx| {
@@ -137,13 +137,6 @@ pub(super) fn page(
                     .update(cx, |s, cx| s.start_call(CallTarget::User(h), false, cx));
             },
         )),
-        action_button(&Action::new("profile-video", "video", "video"), &theme).on_click(
-            cx.listener(move |this, _, _, cx| {
-                let h = h2.clone();
-                this.state
-                    .update(cx, |s, cx| s.start_call(CallTarget::User(h), true, cx));
-            }),
-        ),
         {
             let a = Action::new(
                 "profile-mute",

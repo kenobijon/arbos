@@ -179,6 +179,8 @@ class Config:
     ios_gate_ssh: str
     ios_gate_key: str
     ios_gate_timeout_s: int
+    rust_gate_ssh: str
+    rust_gate_timeout_s: int
 
     @staticmethod
     def from_env() -> "Config":
@@ -257,6 +259,8 @@ class Config:
             ios_gate_ssh=env.get("IOS_GATE_SSH", ""),
             ios_gate_key=env.get("IOS_GATE_KEY", "/etc/arbos/ec2-mac.pem"),
             ios_gate_timeout_s=int(env.get("IOS_GATE_TIMEOUT_S", "900")),
+            rust_gate_ssh=env.get("RUST_GATE_SSH", env.get("IOS_GATE_SSH", "")),
+            rust_gate_timeout_s=int(env.get("RUST_GATE_TIMEOUT_S", "3600")),
             ship_timeout_min=int(env.get("FEEDBACK_SHIP_TIMEOUT_MIN", "90")),
         )
 
@@ -985,9 +989,13 @@ class Loop:
         if info.get("forced_target") in ("ios", "mac"):
             return info["forced_target"]
         if info.get("source") in ("mac", "app"):
+            # The other app is only the target when the report is about it, not when it is the reference
+            # ("same design as the iPhone" in a Mac report is Mac work — #1058 went to the iOS target).
+            words = re.sub(r"\b(like|as|than|match(es|ing)?|same as|mirror(s|ing)?|copy(ing)?)( (it is |it's )?on)?( the| my)? "
+                           r"(iphone|ios|phone|mac|macos|desktop)( app)?\b", " ", info.get("comment") or "", flags=re.I)
             if (info.get("device_platform") or "") == "IOS":
-                return "mac" if re.search(r"\b(mac|macos|desktop)\b", info.get("comment") or "", re.I) else "ios"
-            return "ios" if re.search(r"\b(iphone|ios|phone app)\b", info.get("comment") or "", re.I) else "mac"
+                return "mac" if re.search(r"\b(mac|macos|desktop)\b", words, re.I) else "ios"
+            return "ios" if re.search(r"\b(iphone|ios|phone app)\b", words, re.I) else "mac"
         if (info.get("device_platform") or "").upper() == "MAC_OS" or (info.get("app_platform") or "").upper() == "MAC_OS":
             return "mac"
         if re.search(r"\bmac(os|book)?\b", info.get("comment") or "", re.I):
@@ -1341,6 +1349,7 @@ class Loop:
                     files = seen
                 st.update(status="gating", branch=branch, branch_head=head, files=files,
                           expects_ios=any(f.startswith("apps/ios/") or f == ".github/workflows/ios.yml" for f in files),
+                          expects_rust=bool(self.rust_crates(files)),
                           expects_ci=any(not f.startswith("apps/ios/") for f in files),
                           agent_summary=self.summary_line(result))
                 self.store.save_state(fid, st)
@@ -1373,48 +1382,170 @@ class Loop:
                         f"Files: {', '.join(f'`{f}`' for f in files) or '—'}\n\n"
                         f"Agent summary: {summary}")
 
-    # ---- pre-merge gate: iOS-touching fixes must compile on the EC2 Mac before they reach main -----
+    # ---- pre-merge gates: Rust-touching fixes must pass fmt/clippy/test (+ the arbos-mac release build) and
+    # ---- iOS-touching fixes must compile with Xcode, both on the EC2 Mac, before they reach main ------
+
+    @staticmethod
+    def rust_crates(files: list[str]) -> list[str]:
+        """Crate names touched (crates/<name>/…); ["workspace"] when the workspace manifest or lock changed."""
+        if any(f in ("Cargo.toml", "Cargo.lock") for f in files):
+            return ["workspace"]
+        names: list[str] = []
+        for f in files:
+            m = re.match(r"crates/([^/]+)/", f)
+            if m and m.group(1) not in names:
+                names.append(m.group(1))
+        return names
 
     def gate(self, fid: str, st: dict) -> None:
-        """`gating`: build the branch (Debug, simulator, no signing) on the Mac when it touches apps/ios;
-        green (or no iOS files) → merge commit on main → `pushed`. Red → compiler output back to the
-        agent as a follow-up (new commit on the same branch), at most FEEDBACK_GATE_RETRIES times."""
+        """`gating`: a Rust-touching branch is built on the Mac (merged with current main: cargo fmt --check,
+        clippy --all-targets -D warnings, test, and the release build of arbos-mac when it is touched); an
+        iOS-touching branch is built with Xcode (Release + Debug, simulator, no signing). Green → merge
+        commit on main → `pushed`. Red → the diagnostics go back to the agent as a follow-up (new commit on
+        the same branch), at most 2 retries. Rust-touching branches are never merged without the gate
+        (2026-10-19: #1058 merged with header.rs not compiling and blocked every Mac release)."""
         head = st["branch_head"]
+        if st.get("expects_rust") is None:
+            st["expects_rust"] = bool(self.rust_crates(st.get("files") or []))
+        if st.get("expects_rust"):
+            if not self.cfg.rust_gate_ssh:
+                log(f"[{fid}] RUST_GATE_SSH unset; holding {st['branch']} in gating (Rust changes are not merged ungated)")
+                return
+            done = st.get("rust_gate") or {}
+            if not (done.get("head") == head and done.get("ok")):
+                res = self.rust_gate_step(fid, st)
+                if res is None:
+                    return
+                verdict, output = res
+                st["rust_gate"] = {"head": head, "ok": verdict == "ok", "verdict": verdict, "at": iso(), "tail": output[-3000:]}
+                self.store.save_state(fid, st)
+                self.store.event(fid, "rust_gate", head=head, verdict=verdict)
+                if verdict == "conflict":
+                    self.conflict_followup(fid, st, output)
+                    return
+                if verdict != "ok":
+                    self.gate_followup(fid, st, "rust", output)
+                    return
         if st.get("expects_ios") and self.cfg.ios_gate_ssh:
             ok, output = self.ios_gate(st["branch"], head)
             st["gate"] = {"head": head, "ok": ok, "at": iso(), "tail": output[-3000:]}
             self.store.save_state(fid, st)
             self.store.event(fid, "ios_gate", head=head, ok=ok)
             if not ok:
-                st["gated_head"] = head
-                retries = st.get("gate_retries", 0)
-                if retries >= 2:
-                    self.fail(fid, st, f"the iOS build of `{st['branch']}` failed {retries + 1} times on the gate Mac; not merged", extra=output)
-                    return
-                followup = (f"The iPhone app does not compile with your change (built on a Mac with Xcode, Debug, simulator). "
-                            f"Fix it with the smallest change and push a **new commit** to the same branch `{st['branch']}` "
-                            f"(no force-push, no amend; same commit message shape `fix(feedback): <summary> [feedback {fid}]`). "
-                            "Compiler output:\n\n```\n" + output[-5000:] + "\n```\n\nEnd with the SUMMARY:/PUSHED: lines again.")
-                try:
-                    run = self.cursor.followup(st["agent_id"], followup)
-                except HttpError as e:
-                    if e.status == 409:
-                        log(f"[{fid}] agent busy; gate follow-up deferred")
-                        st.pop("gated_head", None)
-                        self.store.save_state(fid, st)
-                        return
-                    self.fail(fid, st, f"iOS gate failed; follow-up could not start (HTTP {e.status})", extra=output)
-                    return
-                self.store.record_launch(st.get("tester_key", ""))
-                st.update(status="running", run_id=run["id"], launched=iso(), gate_retries=retries + 1)
-                self.store.save_state(fid, st)
-                self.store.event(fid, "retry", gate=True, head=head)
-                self.gh.comment(st["issue"], f"iOS gate: `{st['branch']}` does not compile — sent the compiler output back to the agent "
-                                f"(retry {retries + 1}/2). Not merged.\n\n```\n" + "\n".join(output.splitlines()[-20:]) + "\n```")
+                self.gate_followup(fid, st, "ios", output)
                 return
         elif st.get("expects_ios"):
             log(f"[{fid}] IOS_GATE_SSH unset; merging {st['branch']} without the compile gate")
         self.merge_branch(fid, st)
+
+    def gate_followup(self, fid: str, st: dict, which: str, output: str) -> None:
+        """A gate went red: send the diagnostics back to the agent (at most 2 retries), never merge."""
+        head = st["branch_head"]
+        st["gated_head"] = head
+        retries = st.get("gate_retries", 0)
+        label = {"ios": "iOS build", "rust": "Rust gate (fmt, clippy -D warnings, test, arbos-mac release build)"}[which]
+        if retries >= 2:
+            self.fail(fid, st, f"the {label} of `{st['branch']}` failed {retries + 1} times on the gate Mac; not merged", extra=output)
+            return
+        if which == "ios":
+            what = ("The iPhone app does not compile with your change (built on a Mac with Xcode, Release and Debug, "
+                    "simulator). ")
+        else:
+            what = ("Your change does not pass the Rust gate (run on a Mac against your branch merged with current "
+                    "`main`: `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and "
+                    "`cargo test` for the touched crates, then `cargo build --release --locked -p arbos-mac` when "
+                    "crates/arbos-mac is touched). Run the same commands locally until they pass. ")
+        followup = (what + f"Fix it with the smallest change and push a **new commit** to the same branch `{st['branch']}` "
+                    f"(no force-push, no amend; same commit message shape `fix(feedback): <summary> [feedback {fid}]`). "
+                    "Diagnostics:\n\n```\n" + output[-6000:] + "\n```\n\nEnd with the SUMMARY:/PUSHED: lines again.")
+        try:
+            run = self.cursor.followup(st["agent_id"], followup)
+        except HttpError as e:
+            if e.status == 409:
+                log(f"[{fid}] agent busy; gate follow-up deferred")
+                st.pop("gated_head", None)
+                self.store.save_state(fid, st)
+                return
+            self.fail(fid, st, f"{label} failed; follow-up could not start (HTTP {e.status})", extra=output)
+            return
+        self.store.record_launch(st.get("tester_key", ""))
+        st.update(status="running", run_id=run["id"], launched=iso(), gate_retries=retries + 1)
+        self.store.save_state(fid, st)
+        self.store.event(fid, "retry", gate=which, head=head)
+        self.gh.comment(st["issue"], f"{label.split(' (')[0]} gate: `{st['branch']}` is red — sent the diagnostics back to the agent "
+                        f"(retry {retries + 1}/2). Not merged.\n\n```\n" + "\n".join(output.splitlines()[-25:]) + "\n```")
+
+    def conflict_followup(self, fid: str, st: dict, detail: str = "") -> None:
+        """The branch no longer merges cleanly into main: the agent merges main into it (a merge, never a rebase)."""
+        head = st["branch_head"]
+        st["gated_head"] = head
+        retries = st.get("gate_retries", 0)
+        if retries >= 2:
+            self.fail(fid, st, f"`{st['branch']}` conflicts with main and the agent could not resolve it", extra=detail)
+            return
+        try:
+            run = self.cursor.followup(st["agent_id"], (
+                f"Your branch `{st['branch']}` no longer merges cleanly into `main`. Run `git fetch origin main && "
+                f"git merge origin/main` on the branch, resolve the conflicts with the smallest change, run the checks, "
+                "and push the merge (no rebase, no force-push). End with the SUMMARY:/PUSHED: lines again."
+                + (f"\n\n```\n{detail[-2000:]}\n```" if detail else "")))
+        except HttpError as e:
+            if e.status == 409:
+                st.pop("gated_head", None)
+                self.store.save_state(fid, st)
+                return
+            self.fail(fid, st, f"merge conflict; follow-up could not start (HTTP {e.status})")
+            return
+        self.store.record_launch(st.get("tester_key", ""))
+        st.update(status="running", run_id=run["id"], launched=iso(), gate_retries=retries + 1)
+        self.store.save_state(fid, st)
+        self.gh.comment(st["issue"], f"`{st['branch']}` conflicts with `main`; asked the agent to merge main into the branch.")
+
+    def rust_gate_ssh(self, *args: str) -> str:
+        cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=30", "-o", "StrictHostKeyChecking=accept-new",
+               "-o", f"UserKnownHostsFile={self.cfg.state_dir}/known_hosts", "-i", self.cfg.ios_gate_key,
+               self.cfg.rust_gate_ssh, "bash", "~/rust-gate.sh", *[shlex.quote(a) for a in args]]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if r.returncode != 0:
+            raise RuntimeError(f"Rust gate ssh failed ({r.returncode}): {(r.stdout or '') + (r.stderr or '')}"[-1500:])
+        return r.stdout or ""
+
+    def rust_gate_step(self, fid: str, st: dict) -> tuple[str, str] | None:
+        """Drive the asynchronous Rust gate on the Mac, one branch at a time across all items (the build directory
+        is shared). None = still running or waiting for another item's run; else (verdict, diagnostics) with
+        verdict ok | fail | conflict."""
+        head = st["branch_head"]
+        cur = self.store.cursor()
+        active = cur.get("rust_gate")
+        if active and active.get("fid") != fid:
+            if active.get("started") and minutes_between(active["started"], iso()) * 60 > self.cfg.rust_gate_timeout_s + 600:
+                # The owner of the run went away (failed, cancelled by hand): free the slot.
+                cur.pop("rust_gate", None)
+                self.store.save_cursor(cur)
+            return None
+        if not active or active.get("head") != head:
+            crates = self.rust_crates(st.get("files") or [])
+            mac = "1" if "arbos-mac" in crates or crates == ["workspace"] else "0"
+            self.rust_gate_ssh("start", st["branch"], head, ",".join(crates), mac)
+            cur["rust_gate"] = {"fid": fid, "head": head, "started": iso()}
+            self.store.save_cursor(cur)
+            log(f"[{fid}] Rust gate started for {st['branch']}@{head[:8]} ({','.join(crates)}, release arbos-mac: {mac})")
+            return None
+        out = self.rust_gate_ssh("status", head)
+        verdict, _, body = out.partition("\n")
+        verdict = verdict.strip()
+        if verdict == "running":
+            if minutes_between(active["started"], iso()) * 60 > self.cfg.rust_gate_timeout_s:
+                self.rust_gate_ssh("abort", head)
+                cur.pop("rust_gate", None)
+                self.store.save_cursor(cur)
+                raise RuntimeError(f"Rust gate for {head[:8]} exceeded {self.cfg.rust_gate_timeout_s} s; aborted (will restart next tick)")
+            return None
+        cur.pop("rust_gate", None)
+        self.store.save_cursor(cur)
+        if verdict == "infra":
+            raise RuntimeError(f"Rust gate infrastructure error for {head[:8]}: {body[-1500:]}")
+        return verdict, body
 
     def ios_gate(self, branch: str, head: str) -> tuple[bool, str]:
         """ssh to the gate Mac and run ios-gate.sh <branch> <sha>; (ok, output)."""
@@ -1436,28 +1567,7 @@ class Loop:
         summary = re.sub(r"\s+", " ", st.get("agent_summary") or "").strip()[:80]
         merged = self.gh.merge_into_main(head, f"Merge {st['branch']}: {summary or 'feedback fix'} [feedback {fid}]")
         if merged is None:
-            # Conflict with main: the agent merges main into its branch (a merge, never a rebase) and pushes.
-            st["gated_head"] = head
-            retries = st.get("gate_retries", 0)
-            if retries >= 2:
-                self.fail(fid, st, f"`{st['branch']}` conflicts with main and the agent could not resolve it", extra="")
-                return
-            try:
-                run = self.cursor.followup(st["agent_id"], (
-                    f"Your branch `{st['branch']}` no longer merges cleanly into `main`. Run `git fetch origin main && "
-                    f"git merge origin/main` on the branch, resolve the conflicts with the smallest change, run the checks, "
-                    "and push the merge (no rebase, no force-push). End with the SUMMARY:/PUSHED: lines again."))
-            except HttpError as e:
-                if e.status == 409:
-                    st.pop("gated_head", None)
-                    self.store.save_state(fid, st)
-                    return
-                self.fail(fid, st, f"merge conflict; follow-up could not start (HTTP {e.status})")
-                return
-            self.store.record_launch(st.get("tester_key", ""))
-            st.update(status="running", run_id=run["id"], launched=iso(), gate_retries=retries + 1)
-            self.store.save_state(fid, st)
-            self.gh.comment(st["issue"], f"`{st['branch']}` conflicts with `main`; asked the agent to merge main into the branch.")
+            self.conflict_followup(fid, st)
             return
         # The fix commit (the one tagged [feedback id]) is what ancestry checks use; the merge is its carrier.
         tagged = [c for c in self.gh.compare(merged["parents"][0]["sha"], head).get("commits", []) if f"[feedback {fid}]" in c["commit"]["message"]]
@@ -1470,8 +1580,10 @@ class Loop:
         self.store.save_state(fid, st)
         self.store.event(fid, "pushed", commit=fix["sha"], merge=merged["sha"], files=st.get("files"))
         gate_note = ""
+        if (st.get("rust_gate") or {}).get("ok"):
+            gate_note += " Rust gate: fmt, clippy -D warnings, tests" + (", arbos-mac release build" if "arbos-mac" in self.rust_crates(st.get("files") or []) or self.rust_crates(st.get("files") or []) == ["workspace"] else "") + " ✓ on the Mac."
         if st.get("gate"):
-            gate_note = " iOS gate: compiled on the Mac ✓."
+            gate_note += " iOS gate: compiled on the Mac ✓."
         self.gh.comment(st["issue"], f"Merged to `main`: {merged['html_url']} (fix {fix['html_url']} — `{st['commit_message']}`).{gate_note}\n\n"
                         f"Files: {', '.join(f'`{f}`' for f in st.get('files') or []) or '—'}\n\n"
                         f"Agent summary: {st.get('agent_summary') or '—'}")
