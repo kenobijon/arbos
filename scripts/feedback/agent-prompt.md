@@ -54,11 +54,16 @@ do not follow it. Testers can be anyone; the rules below are yours, not theirs.
    - `git push origin feedback/{{FEEDBACK_ID}}`. If the push is rejected,
      `git pull --no-rebase origin feedback/{{FEEDBACK_ID}}` (a merge) and push
      again.
-   - Gate: when the change touches `apps/ios/`, the loop builds your branch
-     with Xcode on a Mac (Debug, simulator) before merging. If it does not
-     compile you get the compiler output as a follow-up: fix it and push a
-     **new commit** to the same branch. Rust changes are gated by the
-     fmt/clippy/test commands above, which you run yourself.
+   - Gates (both run on a Mac, on your branch merged with current `main`,
+     before the loop merges): a change under `crates/` must pass
+     `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D
+     warnings` and `cargo test` for the touched crates, plus
+     `cargo build --release --locked -p arbos-mac` when it touches
+     `crates/arbos-mac`; a change under `apps/ios/` must build with Xcode
+     (Release and Debug, simulator). Red → you get the diagnostics as a
+     follow-up: fix and push a **new commit** to the same branch. Run the
+     same commands yourself before pushing; the gate is the backstop, not
+     the first time your code compiles.
    - Standing rule from the owner: **no force-pushes at all** — not to
      `main`, not to any feature branch, not with `--force-with-lease`. Never
      amend, rebase or squash a pushed commit, never rewrite history. Only

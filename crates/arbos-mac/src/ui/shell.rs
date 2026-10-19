@@ -1,7 +1,7 @@
 //! Root view, Grok Bot layout: chat-list sidebar (the iPhone home list) ·
 //! one conversation pane (floating glass header, bubbles, the composer) ·
-//! optional browser live view and the debug Details drawer. Sheets (Settings,
-//! New Message, agent profile) float centred over everything.
+//! and the debug Details drawer. Sheets (Settings, New Message, agent profile)
+//! float centred over everything.
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -20,7 +20,7 @@ use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
 use crate::ui::composer::{Composer, ComposerEvent, ComposerInput};
 use crate::ui::connectors::{ConnectorsEvent, ConnectorsPanel};
 use crate::ui::feedback::{FeedbackSheet, SendFeedback};
-use crate::ui::frost::{frosted, rounded_clip, MENU_BLUR, PANEL_BLUR};
+use crate::ui::frost::{frosted, MENU_BLUR, PANEL_BLUR};
 use crate::ui::glass::{self, WindowDrag};
 use crate::ui::groups;
 use crate::ui::header;
@@ -36,17 +36,14 @@ use crate::ui::sidebar;
 use crate::ui::skills::SkillsPanel;
 use crate::ui::theme::{
     reapply_window_background, AppearancePref, Surface, Theme, COLUMN_MARGIN, COMPOSER_WIDTH,
-    DRAWER_WIDTH, HEADER_HEIGHT, LINE_HEIGHT, PANEL_RADIUS, PLUS_BUTTON, RIGHT_PANEL_WIDTH,
-    SIDEBAR_WIDTH, TAB_BAR_HEIGHT, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
+    DRAWER_WIDTH, HEADER_HEIGHT, LINE_HEIGHT, PANEL_RADIUS, PLUS_BUTTON, SIDEBAR_WIDTH,
+    TAB_BAR_HEIGHT, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
 };
 use crate::ui::transcript::{Transcript, TranscriptEvent, COLUMN_MAX_WIDTH};
 use crate::ui::voice::Voice;
 use crate::ui::voicepicker;
 
-actions!(
-    shell,
-    [CloseTab, NewTab, ToggleRail, TogglePanel, Escape, Quit]
-);
+actions!(shell, [CloseTab, NewTab, ToggleRail, Escape, Quit]);
 
 /// Left inset for the conversation header while the sidebar is hidden: the window's traffic lights.
 const TRAFFIC_LIGHTS_INSET: f32 = 72.0;
@@ -94,6 +91,8 @@ pub struct Shell {
     pub people_input: Entity<ComposerInput>,
     /// Agent profile page: inline description editor.
     pub(crate) description_input: Entity<ComposerInput>,
+    /// Double-click rename: the inline name field for an agent.
+    pub(crate) agent_name_input: Entity<ComposerInput>,
     /// Settings header: editing my display name and handle (`PATCH /me`).
     profile_edit_open: bool,
     name_input: Entity<ComposerInput>,
@@ -144,6 +143,16 @@ impl Shell {
                     this.react_menu = Some((chat_id.clone(), message_id.clone(), *position));
                     cx.notify();
                 }
+                TranscriptEvent::Reply {
+                    chat_id,
+                    message_id,
+                } => {
+                    this.close_popovers(cx);
+                    this.state.update(cx, |s, cx| {
+                        s.set_reply_to(chat_id.clone(), message_id.clone(), cx)
+                    });
+                    cx.notify();
+                }
             },
         )
         .detach();
@@ -176,10 +185,16 @@ impl Shell {
         cx.subscribe(
             &composer,
             |this, _, event: &ComposerEvent, cx| match event {
-                ComposerEvent::Send(text, attachments) => {
+                ComposerEvent::Send {
+                    text,
+                    attachments,
+                    reply_to,
+                } => {
                     let text = text.clone();
                     let attachments = attachments.clone();
-                    this.state.update(cx, |s, cx| s.send(text, attachments, cx));
+                    let reply_to = reply_to.clone();
+                    this.state
+                        .update(cx, |s, cx| s.send(text, attachments, reply_to, cx));
                 }
                 ComposerEvent::Stop => this.state.update(cx, |s, cx| s.stop(cx)),
             },
@@ -217,6 +232,18 @@ impl Shell {
             input.set_placeholder("What does this agent do?")
         });
         cx.observe(&description_input, |_, _, cx| cx.notify())
+            .detach();
+        let agent_name_input = cx.new(ComposerInput::new);
+        {
+            let weak = cx.weak_entity();
+            agent_name_input.update(cx, |input, _| {
+                input.set_placeholder("Agent name");
+                input.on_submit = Some(Rc::new(move |window, cx| {
+                    let _ = weak.update(cx, |this, cx| this.commit_rename_agent(window, cx));
+                }));
+            });
+        }
+        cx.observe(&agent_name_input, |_, _, cx| cx.notify())
             .detach();
         let name_input = cx.new(ComposerInput::new);
         name_input.update(cx, |input, _| input.set_placeholder("Display name"));
@@ -385,6 +412,7 @@ impl Shell {
             menu_open: false,
             people_input,
             description_input,
+            agent_name_input,
             profile_edit_open: false,
             name_input,
             handle_input,
@@ -439,6 +467,50 @@ impl Shell {
         Composer::focus(&self.composer, window, cx);
     }
 
+    /// Double-click an agent's name: load it into the rename field and focus.
+    pub(crate) fn start_rename_agent(
+        &mut self,
+        project_id: crate::model::Id,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = {
+            let state = self.state.read(cx);
+            let Some(p) = state.project(&project_id) else {
+                return;
+            };
+            if p.is_guest() || p.is_people() {
+                return;
+            }
+            p.name.clone()
+        };
+        self.menu_open = false;
+        self.row_menu = None;
+        self.agent_name_input
+            .update(cx, |input, cx| input.set_text(name, cx));
+        self.state
+            .update(cx, |s, cx| s.start_renaming(project_id, cx));
+        let handle = self.agent_name_input.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn commit_rename_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project_id) = self.state.read(cx).renaming_project.clone() else {
+            return;
+        };
+        let name = self.agent_name_input.read(cx).text().to_string();
+        self.state
+            .update(cx, |s, cx| s.set_project_name(project_id, name, cx));
+        Composer::focus(&self.composer, window, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_rename_agent(&mut self, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, cx| s.cancel_renaming(cx));
+        cx.notify();
+    }
+
     fn close_tab(&mut self, _: &CloseTab, _: &mut Window, cx: &mut Context<Self>) {
         let active = self.state.read(cx).active_chat_id();
         if let Some(chat_id) = active {
@@ -463,12 +535,13 @@ impl Shell {
         });
     }
 
-    fn toggle_panel(&mut self, _: &TogglePanel, _: &mut Window, cx: &mut Context<Self>) {
-        self.state.update(cx, |s, cx| s.toggle_right_panel(cx));
-    }
-
     /// Escape closes whatever floats: menus, then sheets.
     fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        if self.state.read(cx).renaming_project.is_some() {
+            self.cancel_rename_agent(cx);
+            Composer::focus(&self.composer, window, cx);
+            return;
+        }
         let floating = self.menu_open
             || self.members_open
             || self.add_agent_open
@@ -1085,105 +1158,6 @@ impl Shell {
                 .child(composer_row);
         }
         column
-    }
-
-    fn render_right_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx).clone();
-        let state = self.state.read(cx);
-        let live = state.live_browser();
-        let frame = state.browser_frame.clone();
-        let frames_seen = state.browser_frames_seen;
-        if frame.is_some() || live.is_some() {
-            PulseClock::request(cx);
-        }
-        let mut panel = div()
-            .w(px(RIGHT_PANEL_WIDTH))
-            .flex_shrink_0()
-            .h_full()
-            .flex()
-            .flex_col()
-            .border_l_1()
-            .border_color(theme.border)
-            .bg(theme.chrome());
-        panel = panel.child(
-            div()
-                .h(px(TAB_BAR_HEIGHT))
-                .flex()
-                .items_center()
-                .justify_between()
-                .px(px(12.0))
-                .border_b_1()
-                .border_color(theme.border)
-                .text_size(px(12.5))
-                .text_color(theme.text)
-                .child("Browser live view")
-                .child(
-                    div()
-                        .id("panel-close")
-                        .text_color(theme.text_faint)
-                        .cursor_pointer()
-                        .child("×")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.state.update(cx, |s, cx| s.toggle_right_panel(cx));
-                        })),
-                ),
-        );
-        let (title, url, action) = live.unwrap_or_default();
-        let body = match frame {
-            Some(image) => div()
-                .flex()
-                .flex_col()
-                .gap(px(10.0))
-                .p(px(12.0))
-                .child(rounded_clip(
-                    8.0,
-                    div()
-                        .w_full()
-                        .h(px(220.0))
-                        .rounded(px(8.0))
-                        .border_1()
-                        .border_color(theme.border)
-                        .bg(theme.code_bg)
-                        .child(gpui::img(image).w_full().h_full().object_fit(gpui::ObjectFit::Contain)),
-                ))
-                .child(div().text_size(px(12.5)).text_color(theme.text).child(if title.is_empty() { "Live".to_string() } else { title }))
-                .child(div().text_size(px(11.0)).text_color(theme.text_faint).child(url))
-                .child(
-                    div()
-                        .text_size(px(11.5))
-                        .text_color(theme.text_muted)
-                        .child(format!("frames: {frames_seen} · last action: {action}")),
-                )
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(theme.text_faint)
-                        .child("Watch only in v1 — the agent drives the page."),
-                ),
-            None => div()
-                .flex_1()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(px(8.0))
-                .p(px(16.0))
-                .text_size(px(12.5))
-                .text_color(theme.text_muted)
-                .child(if title.is_empty() {
-                    "No browser session is running.".to_string()
-                } else {
-                    format!("Connecting to the box stream for “{title}”…")
-                })
-                .child(
-                    div()
-                        .text_size(px(11.5))
-                        .text_color(theme.text_faint)
-                        .text_center()
-                        .child("When a subagent opens the browser, agentd's /browser/stream frames show here."),
-                ),
-        };
-        frosted(0.0, PANEL_BLUR, panel.child(body))
     }
 
     fn render_details(&self, target: &DetailsTarget, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2628,7 +2602,6 @@ impl Render for Shell {
         let state = self.state.read(cx);
         let sidebar_hidden = state.rail_collapsed || state.window_is_narrow(width);
         let sidebar_overlay = sidebar_hidden && state.sidebar_overlay;
-        let panel_open = state.right_panel_open;
         let details = state.details_open.clone();
         let pairing = state.pairing.clone();
         let new_chat_open = state.new_chat_open;
@@ -2643,7 +2616,6 @@ impl Render for Shell {
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::toggle_rail))
-            .on_action(cx.listener(Self::toggle_panel))
             .on_action(cx.listener(Self::escape))
             .on_action(cx.listener(Self::send_feedback))
             // Clicks on chrome must not strand keyboard focus: unless another
@@ -2717,9 +2689,6 @@ impl Render for Shell {
             }
         }
         root = root.child(self.render_center(sidebar_hidden, cx));
-        if panel_open {
-            root = root.child(self.render_right_panel(cx));
-        }
         if sidebar_overlay {
             root = root.child(self.render_sidebar_overlay(&theme, cx));
         }
@@ -2746,24 +2715,15 @@ impl Render for Shell {
             root = root.child(menu);
         }
         if self.group_picker_open {
-            let right = if panel_open {
-                RIGHT_PANEL_WIDTH + 16.0
-            } else {
-                16.0
-            };
             root = root.child(glass::popover(groups::picker(
                 &self.state,
                 TAB_BAR_HEIGHT - 4.0,
-                right,
+                16.0,
                 cx,
             )));
         }
         if let Some(space) = people_space {
-            let right = if panel_open {
-                RIGHT_PANEL_WIDTH + 16.0
-            } else {
-                16.0
-            };
+            let right = 16.0;
             if self.add_agent_open {
                 root = root.child(glass::popover(people::add_agent_picker(
                     &space,
@@ -2781,11 +2741,7 @@ impl Render for Shell {
                 )));
             }
         } else if let Some(project) = project_space {
-            let right = if panel_open {
-                RIGHT_PANEL_WIDTH + 16.0
-            } else {
-                16.0
-            };
+            let right = 16.0;
             if self.members_open {
                 root = root.child(glass::popover(people::project_members_popover(
                     &project,
