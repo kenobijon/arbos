@@ -15,7 +15,7 @@ use crate::model::{Id, MachineState, Message, Project, Role};
 use crate::ui::avatars;
 use crate::ui::composer::Composer;
 use crate::ui::frost::edge_faded;
-use crate::ui::glass;
+use crate::ui::glass::{self, WindowDrag};
 use crate::ui::icons::icon;
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
@@ -250,6 +250,7 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         .cursor_pointer()
         .hover(|s| s.bg(theme.surface_2))
         .child(icon("plus", 17.0, theme.text_muted))
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(cx.listener(|this, _, window, cx| {
             this.menu_open = false;
             this.settings_open = false;
@@ -267,7 +268,7 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         .px(px(12.0))
         .pb(px(2.0))
         .child(plus)
-        .window_control_area(gpui::WindowControlArea::Drag);
+        .window_drag();
     let search = div()
         .id("sidebar-search")
         .mx(px(12.0))
