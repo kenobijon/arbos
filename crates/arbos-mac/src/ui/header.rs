@@ -21,7 +21,7 @@ use crate::ui::icons::icon;
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
 use crate::ui::shell::Shell;
-use crate::ui::sidebar::{is_control_click, machine_dot};
+use crate::ui::sidebar::machine_dot;
 use crate::ui::theme::{
     Theme, AVATAR_HEADER, CONTROL, HEADER_HEIGHT, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
 };
@@ -446,10 +446,7 @@ fn agent_tabs(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option
             })
             .cursor_pointer()
             .when(!active, |el| el.hover(|s| s.text_color(theme.text)))
-            .on_click(cx.listener(move |this, event, window, cx| {
-                if is_control_click(event) {
-                    return;
-                }
+            .on_click(cx.listener(move |this, _, window, cx| {
                 this.chat_menu = None;
                 this.state.update(cx, |s, cx| s.select_tab(id.clone(), cx));
                 Composer::focus(&this.composer, window, cx);
@@ -644,10 +641,7 @@ pub fn archived_list(shell: &Shell, space: &Project, cx: &mut Context<Shell>) ->
                 .rounded(px(9.0))
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.surface_2))
-                .on_click(cx.listener(move |this, event, window, cx| {
-                    if is_control_click(event) {
-                        return;
-                    }
+                .on_click(cx.listener(move |this, _, window, cx| {
                     this.archived_open = false;
                     this.chat_menu = None;
                     this.state
