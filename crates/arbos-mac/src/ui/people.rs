@@ -11,6 +11,7 @@ use gpui::{
 
 use crate::app::AppState;
 use crate::model::{AgentMember, Person, Project};
+use crate::ui::avatars;
 use crate::ui::composer::ComposerInput;
 use crate::ui::frost::{frosted, MENU_BLUR};
 use crate::ui::glass;
@@ -47,6 +48,109 @@ pub fn avatar(image: Option<Arc<RenderImage>>, person: &Person, size: f32, theme
 /// A shared agent's avatar: its initials disc (D79).
 pub fn agent_glyph(agent: &AgentMember, size: f32, theme: &Theme) -> Div {
     crate::ui::avatars::agent_member(agent, size, theme)
+}
+
+/// What the new agent will look like (the iPhone's Create agent page, Grok's
+/// New Bot): the D79 initials disc for the typed name, its `@slug`, and the
+/// seven swatches with "Automatic" first. Before the project exists there is
+/// no id, so the automatic colour previews the name's hash like the iPhone.
+fn new_agent_preview(shell: &Shell, cx: &mut Context<Shell>) -> Div {
+    let theme = Theme::of(cx).clone();
+    let typed = shell.project_input.read(cx).text().trim().to_string();
+    let picked = shell.new_agent_color;
+    let seed = if typed.is_empty() {
+        "new"
+    } else {
+        typed.as_str()
+    };
+    let name = if typed.is_empty() {
+        "Agent"
+    } else {
+        typed.as_str()
+    };
+    let auto_index = avatars::color_index(seed);
+    let caption = if typed.is_empty() {
+        "Name your agent".to_string()
+    } else {
+        format!("@{}", Project::mention_slug(&typed))
+    };
+    let ring = |selected: bool| {
+        div()
+            .size(px(32.0))
+            .flex_shrink_0()
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .border_2()
+            .border_color(if selected {
+                theme.text
+            } else {
+                gpui::transparent_black()
+            })
+            .cursor_pointer()
+            .hover(|st| st.border_color(theme.border_strong))
+    };
+    let mut swatches = div().flex().items_center().gap(px(9.0)).child(
+        ring(picked.is_none())
+            .id("new-agent-color-auto")
+            .child(
+                avatars::swatch(auto_index, 26.0, &theme)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(12.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(gpui::white())
+                    .child("A"),
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.new_agent_color = None;
+                cx.notify();
+            })),
+    );
+    for i in 0..avatars::GRADIENTS.len() as u8 {
+        swatches = swatches.child(
+            ring(picked == Some(i))
+                .id(ElementId::Name(SharedString::from(format!(
+                    "new-agent-color-{i}"
+                ))))
+                .child(avatars::swatch(i, 26.0, &theme))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.new_agent_color = Some(i);
+                    cx.notify();
+                })),
+        );
+    }
+    let hint = match picked {
+        None => {
+            "Automatic: the colour comes from the agent's id, the same on every device.".to_string()
+        }
+        Some(i) => format!("{}, chosen by you.", avatars::GRADIENTS[i as usize].name),
+    };
+    div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(8.0))
+        .px(px(14.0))
+        .pt(px(14.0))
+        .pb(px(4.0))
+        .child(avatars::element(seed, name, picked, 64.0, &theme))
+        .child(
+            div()
+                .text_size(px(TEXT_SMALL))
+                .text_color(theme.text_muted)
+                .child(caption),
+        )
+        .child(swatches.pt(px(4.0)))
+        .child(
+            div()
+                .text_size(px(TEXT_TINY))
+                .text_color(theme.text_muted)
+                .text_center()
+                .child(hint),
+        )
 }
 
 /// The "New Message" sheet (iPhone / Telegram layout): Cancel · title, a
@@ -160,9 +264,14 @@ pub fn new_chat_sheet(
         if creating {
             agent_row = agent_row.border_b_1().border_color(theme.border);
         }
-        let mut group = glass::group(&theme).mx(px(16.0)).child(agent_row);
+        // Inside the scrolling body the card must keep its height, or the
+        // expanded form is squeezed and clipped once the list below is long.
+        let mut group = glass::group(&theme)
+            .flex_shrink_0()
+            .mx(px(16.0))
+            .child(agent_row);
         if creating {
-            group = group.child(
+            group = group.child(new_agent_preview(shell, cx)).child(
                 div()
                     .flex()
                     .items_center()

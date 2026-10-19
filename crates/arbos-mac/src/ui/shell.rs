@@ -59,6 +59,8 @@ pub struct Shell {
     pub(crate) voice: Entity<Voice>,
     pairing_input: Entity<ComposerInput>,
     pub(crate) project_input: Entity<ComposerInput>,
+    /// D79: the swatch picked for the agent being created; `None` = automatic.
+    pub(crate) new_agent_color: Option<u8>,
     /// Sidebar search field.
     pub(crate) search_input: Entity<ComposerInput>,
     connectors: Entity<ConnectorsPanel>,
@@ -343,6 +345,7 @@ impl Shell {
             voice,
             pairing_input,
             project_input,
+            new_agent_color: None,
             search_input,
             connectors,
             skills,
@@ -415,10 +418,11 @@ impl Shell {
             return;
         }
         self.project_input.update(cx, |input, cx| input.clear(cx));
+        let color = self.new_agent_color.take();
         self.state.update(cx, |s, cx| {
             s.new_project_open = false;
             s.close_new_chat(cx);
-            s.create_project(name, cx);
+            s.create_project(name, color, cx);
         });
         Composer::focus(&self.composer, window, cx);
     }

@@ -990,6 +990,7 @@ impl AppState {
                         self.awaiting_new_project = true;
                         self.command(ClientCommand::CreateProject {
                             name: "Home".into(),
+                            avatar_color_index: None,
                         });
                     }
                 }
@@ -3324,10 +3325,18 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn create_project(&mut self, name: String, cx: &mut Context<Self>) {
+    pub fn create_project(
+        &mut self,
+        name: String,
+        avatar_color_index: Option<u8>,
+        cx: &mut Context<Self>,
+    ) {
         self.new_project_open = false;
         self.awaiting_new_project = true;
-        self.command(ClientCommand::CreateProject { name });
+        self.command(ClientCommand::CreateProject {
+            name,
+            avatar_color_index,
+        });
         self.push_notice("Creating project…");
         cx.notify();
     }

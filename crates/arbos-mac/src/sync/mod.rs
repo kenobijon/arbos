@@ -435,6 +435,8 @@ pub enum ClientCommand {
     },
     CreateProject {
         name: String,
+        /// D79: the owner's swatch pick at creation; `None` = automatic (the id's colour).
+        avatar_color_index: Option<u8>,
     },
     MachineStart,
     MachineStop,

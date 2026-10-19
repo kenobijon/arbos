@@ -4283,13 +4283,19 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             });
         }
-        ClientCommand::CreateProject { name } => {
+        ClientCommand::CreateProject {
+            name,
+            avatar_color_index,
+        } => {
             let shared = shared.clone();
             tokio::spawn(async move {
                 let provider = std::env::var("ARBOS_BOX_PROVIDER").ok();
                 let mut body = json!({ "name": name });
                 if let Some(p) = provider {
                     body["provider"] = json!(p);
+                }
+                if let Some(i) = avatar_color_index {
+                    body["avatar_color_index"] = json!(i);
                 }
                 match shared.post_json("/projects", body).await {
                     Ok(_) => {

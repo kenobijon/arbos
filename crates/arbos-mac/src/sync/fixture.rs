@@ -773,7 +773,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 relay_url: "fixture".into(),
             });
         }
-        ClientCommand::CreateProject { name } => {
+        ClientCommand::CreateProject {
+            name,
+            avatar_color_index,
+        } => {
             let id = new_id();
             let icon = name
                 .chars()
@@ -807,8 +810,9 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 primary_chat: None,
                 voice: None,
                 vision_enabled: true,
-                avatar_color_index: None,
-                avatar_color_override: None,
+                avatar_color_index: avatar_color_index
+                    .map(|i| crate::ui::avatars::index_for(&id, Some(i))),
+                avatar_color_override: avatar_color_index,
             });
             let chat_id = new_id();
             shared.chats.lock().unwrap().push(Chat {
