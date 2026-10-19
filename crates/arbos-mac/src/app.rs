@@ -323,6 +323,8 @@ pub struct AppState {
     pub profile_more_open: bool,
     /// Agent page: the owner is editing the description inline.
     pub profile_editing_description: bool,
+    /// Double-click rename: the project whose name is being edited inline.
+    pub renaming_project: Option<Id>,
     /// Spaces whose notifications are muted (`<config>/muted.json`).
     pub muted: HashSet<Id>,
     /// Last presence frame seen per handle (ms): "online" while fresh.
@@ -570,6 +572,7 @@ impl AppState {
             profile_picker_open: false,
             profile_more_open: false,
             profile_editing_description: false,
+            renaming_project: None,
             muted: load_muted(),
             presence_seen: HashMap::new(),
             notify_prompt_answered: false,
@@ -1662,6 +1665,13 @@ impl AppState {
     }
 
     pub fn select_project(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        if self
+            .renaming_project
+            .as_ref()
+            .is_some_and(|id| id != &project_id)
+        {
+            self.renaming_project = None;
+        }
         self.selected_project = Some(project_id.clone());
         self.sidebar_overlay = false;
         // Agents: the last chat used here, else the primary (enforce_tab picks).
@@ -2483,6 +2493,7 @@ impl AppState {
         self.profile_picker_open = false;
         self.profile_more_open = false;
         self.profile_editing_description = false;
+        self.renaming_project = None;
         cx.notify();
     }
 
@@ -2502,6 +2513,26 @@ impl AppState {
         cx.notify();
     }
 
+    /// Start an inline rename of an owned agent (double-click on its name).
+    pub fn start_renaming(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        let ok = self
+            .projects
+            .iter()
+            .any(|p| p.id == project_id && !p.is_guest() && !p.is_people());
+        if !ok {
+            return;
+        }
+        self.renaming_project = Some(project_id);
+        self.profile_editing_description = false;
+        cx.notify();
+    }
+
+    pub fn cancel_renaming(&mut self, cx: &mut Context<Self>) {
+        if self.renaming_project.take().is_some() {
+            cx.notify();
+        }
+    }
+
     /// Agent page: save the description (`""` clears) — optimistic, then PATCH.
     pub fn set_description(&mut self, project_id: Id, description: String, cx: &mut Context<Self>) {
         let description = description.trim().chars().take(500).collect::<String>();
@@ -2513,6 +2544,26 @@ impl AppState {
             project_id,
             description,
         });
+        cx.notify();
+    }
+
+    /// Rename an owned agent — optimistic, then `PATCH /projects/{id} {name}`.
+    pub fn set_project_name(&mut self, project_id: Id, name: String, cx: &mut Context<Self>) {
+        let name = name.trim().chars().take(64).collect::<String>();
+        if name.is_empty() {
+            self.cancel_renaming(cx);
+            return;
+        }
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
+            if p.name == name {
+                self.renaming_project = None;
+                cx.notify();
+                return;
+            }
+            p.name = name.clone();
+        }
+        self.renaming_project = None;
+        self.command(ClientCommand::SetProjectName { project_id, name });
         cx.notify();
     }
 

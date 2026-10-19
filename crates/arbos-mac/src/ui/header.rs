@@ -173,6 +173,11 @@ pub fn render(
         let streaming = state.project_is_streaming(&space.id);
         let machine = state.machine.shown_state();
         let pid = space.id.clone();
+        let can_rename = !space.is_guest();
+        let renaming = state
+            .renaming_project
+            .as_ref()
+            .is_some_and(|p| p == &space.id);
         let sub = if streaming {
             Some(format!("{} is working", space.name))
         } else if space.is_guest() {
@@ -186,6 +191,30 @@ pub fn render(
             ))
         } else {
             None
+        };
+        let name_el = if renaming {
+            div()
+                .id("header-rename")
+                .w(px(160.0))
+                .h(px(22.0))
+                .px(px(6.0))
+                .rounded(px(6.0))
+                .bg(theme.field)
+                .border_1()
+                .border_color(theme.field_border)
+                .text_size(px(TEXT_BODY))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.text)
+                .child(shell.agent_name_input.clone())
+                .into_any_element()
+        } else {
+            div()
+                .text_size(px(TEXT_BODY))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.text)
+                .truncate()
+                .child(space.name.clone())
+                .into_any_element()
         };
         title = title
             .child(
@@ -218,14 +247,7 @@ pub fn render(
                     .flex()
                     .flex_col()
                     .min_w_0()
-                    .child(
-                        div()
-                            .text_size(px(TEXT_BODY))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.text)
-                            .truncate()
-                            .child(space.name.clone()),
-                    )
+                    .child(name_el)
                     .when_some(sub, |el, s| {
                         el.child(
                             div()
@@ -241,23 +263,30 @@ pub fn render(
         }
         // A group chat or a project with other people: the group page; my
         // own solo agent: its profile (with the tree + colour picker).
+        // Double-click the name to rename (owned agents only).
         let groupish = space.is_groupish();
         title = title
             .cursor_pointer()
             .hover(|s| s.bg(theme.surface_2))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.menu_open = false;
-                this.members_open = false;
-                this.add_agent_open = false;
-                let p = pid.clone();
-                this.state.update(cx, |s, cx| {
-                    if groupish {
-                        s.open_profile(ProfilePage::Group { space_id: p }, cx);
-                    } else {
-                        s.toggle_avatar_picker(p, cx);
+            .on_click(
+                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                    this.menu_open = false;
+                    this.members_open = false;
+                    this.add_agent_open = false;
+                    let p = pid.clone();
+                    if can_rename && event.click_count() >= 2 {
+                        this.start_rename_agent(p, window, cx);
+                        return;
                     }
-                });
-            }));
+                    this.state.update(cx, |s, cx| {
+                        if groupish {
+                            s.open_profile(ProfilePage::Group { space_id: p }, cx);
+                        } else {
+                            s.toggle_avatar_picker(p, cx);
+                        }
+                    });
+                }),
+            );
     }
 
     // ----- right: icon buttons --------------------------------------------------
