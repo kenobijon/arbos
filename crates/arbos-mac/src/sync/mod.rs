@@ -355,6 +355,14 @@ pub enum ClientCommand {
         /// People-chat / hover-reply: the message this send answers (`replyTo`).
         reply_to: Option<String>,
     },
+    /// Guide: inject `text` into the agent's currently running turn (`steer` command).
+    /// Same message shape as `Send`; the box calls pi/Prime `Steer` instead of queuing.
+    Steer {
+        chat_id: Id,
+        message_id: Id,
+        text: String,
+        reply_to: Option<String>,
+    },
     /// Reply to an `ask_user` question (S8). Same shape as `Send`, different outbox kind.
     /// A typed widget answer carries `question_id` and the structured `value`; `text` is
     /// the rendered form shown in the user's bubble.
@@ -447,6 +455,25 @@ pub enum ClientCommand {
         name: String,
         /// D79: the owner's swatch pick at creation; `None` = automatic (the id's colour).
         avatar_color_index: Option<u8>,
+        /// Fork: copy this agent's workspace (files + memory) into the new one.
+        source_project_id: Option<Id>,
+        /// Optional profile blurb for the new agent (forks copy the source's).
+        description: Option<String>,
+        /// Optional hex accent; forks copy the source's.
+        color: Option<String>,
+    },
+    /// Soft-delete an owned agent (`DELETE /projects/{id}`).
+    DeleteProject {
+        project_id: Id,
+    },
+    /// Delete a people chat I own (`DELETE /chats/{id}`).
+    DeletePeopleChat {
+        chat_id: Id,
+    },
+    /// Close a non-pinned chat tab (`DELETE /projects/{id}/chats/{chat}`).
+    CloseChat {
+        project_id: Id,
+        chat_id: Id,
     },
     MachineStart,
     MachineStop,

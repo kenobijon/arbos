@@ -12,7 +12,7 @@ use gpui::{
 };
 
 use crate::app::SignInMode;
-use crate::app::{AppState, DetailsTarget};
+use crate::app::{AppState, DetailsTarget, ProfilePage};
 use crate::model::{now_ms, CallKind, Link, MachineState};
 use crate::ui::avatars;
 use crate::ui::callview;
@@ -75,34 +75,41 @@ pub struct Shell {
     routines: Entity<RoutinesPanel>,
     routines_open: bool,
     channels: Entity<ChannelsPanel>,
-    /// F6: the "add a project to this chat" picker (from the "…" menu).
+    /// F6: the "add a project to this chat" picker (sidebar row menu).
     group_picker_open: bool,
     pub(crate) secrets: Entity<SecretsPanel>,
     shake_started_at: Option<u64>,
     /// True while the sign-in screen is up; its clearing focuses the composer.
     signing_in: bool,
-    /// The header's "…" menu.
+    /// Flag of the header's former "…" menu (removed, feedback
+    /// app-01M5ATBWSY9E1HHBKH2QQVDEZX); nothing renders it any more. Kept
+    /// only because the agent profile's "Edit" still sets it — goes with
+    /// that button's rework.
     pub(crate) menu_open: bool,
     /// Right-click menu on a sidebar row: the space and where the click landed.
     pub(crate) row_menu: Option<(crate::model::Id, gpui::Point<gpui::Pixels>)>,
+    /// Right-click menu on a chat tab or archived chat: the chat and click point.
+    pub(crate) chat_menu: Option<(crate::model::Id, gpui::Point<gpui::Pixels>)>,
     /// People chats (D72): the @search field, the header pickers.
     pub people_input: Entity<ComposerInput>,
     /// Agent profile page: inline description editor.
     pub(crate) description_input: Entity<ComposerInput>,
     /// Double-click rename: the inline name field for an agent.
     pub(crate) agent_name_input: Entity<ComposerInput>,
+    /// Agent page: the filter field in the Model dropdown (`ui::hoverpick`).
+    pub(crate) model_search_input: Entity<ComposerInput>,
     /// Settings header: editing my display name and handle (`PATCH /me`).
     profile_edit_open: bool,
     name_input: Entity<ComposerInput>,
     handle_input: Entity<ComposerInput>,
     pub add_agent_open: bool,
     pub members_open: bool,
-    /// The agent's "Archived" chats list (header strip / "…" menu).
+    /// The agent's "Archived" chats list (header strip).
     pub(crate) archived_open: bool,
     /// Double-click rename on a chat tab: the chat being edited, and its field.
     pub(crate) renaming_tab: Option<crate::model::Id>,
     pub(crate) tab_rename_input: Entity<ComposerInput>,
-    /// Per-agent call voice picker sheet ("…" menu → Voice, profile → voice).
+    /// Per-agent call voice picker sheet (profile → voice).
     pub(crate) voice_picker_open: bool,
     /// Video picture-in-picture while the call screen is collapsed: offset
     /// from the window's bottom-right (right, bottom), and the drag in flight
@@ -197,6 +204,11 @@ impl Shell {
                     this.state
                         .update(cx, |s, cx| s.send(text, attachments, reply_to, cx));
                 }
+                ComposerEvent::Guide { text, reply_to } => {
+                    let text = text.clone();
+                    let reply_to = reply_to.clone();
+                    this.state.update(cx, |s, cx| s.guide(text, reply_to, cx));
+                }
                 ComposerEvent::Stop => this.state.update(cx, |s, cx| s.stop(cx)),
             },
         )
@@ -245,6 +257,18 @@ impl Shell {
             });
         }
         cx.observe(&agent_name_input, |_, _, cx| cx.notify())
+            .detach();
+        let model_search_input = cx.new(ComposerInput::new);
+        {
+            let weak = cx.weak_entity();
+            model_search_input.update(cx, |input, _| {
+                input.set_placeholder("Search models");
+                input.on_submit = Some(Rc::new(move |window, cx| {
+                    let _ = weak.update(cx, |this, cx| this.pick_first_model(window, cx));
+                }));
+            });
+        }
+        cx.observe(&model_search_input, |_, _, cx| cx.notify())
             .detach();
         let name_input = cx.new(ComposerInput::new);
         name_input.update(cx, |input, _| input.set_placeholder("Display name"));
@@ -409,6 +433,7 @@ impl Shell {
                 .is_some_and(|v| v != "connectors" && !v.starts_with("secrets")),
             settings_scroll,
             row_menu: None,
+            chat_menu: None,
             react_menu: None,
             group_picker_open: false,
             archived_open: false,
@@ -427,6 +452,7 @@ impl Shell {
             people_input,
             description_input,
             agent_name_input,
+            model_search_input,
             profile_edit_open: false,
             name_input,
             handle_input,
@@ -567,6 +593,87 @@ impl Shell {
         cx.notify();
     }
 
+    /// The agent page's "Edit": name and description become fields, inside the
+    /// sheet (owned agents only); the name field takes the keyboard.
+    pub(crate) fn start_edit_agent(
+        &mut self,
+        project_id: crate::model::Id,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (name, description) = {
+            let state = self.state.read(cx);
+            let Some(p) = state.project(&project_id) else {
+                return;
+            };
+            if p.is_guest() || p.is_people() {
+                return;
+            }
+            (p.name.clone(), p.description.clone().unwrap_or_default())
+        };
+        self.menu_open = false;
+        self.row_menu = None;
+        self.agent_name_input
+            .update(cx, |input, cx| input.set_text(name, cx));
+        self.description_input
+            .update(cx, |input, cx| input.set_text(description, cx));
+        self.state.update(cx, |s, cx| {
+            s.start_renaming(project_id, cx);
+            s.set_profile_editing_description(true, cx);
+        });
+        let handle = self.agent_name_input.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    /// Close the profile page (back button, click outside); the composer takes
+    /// the keyboard back.
+    pub(crate) fn close_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, cx| {
+            s.close_profile(cx);
+        });
+        Composer::focus(&self.composer, window, cx);
+    }
+
+    /// The agent page's "Done": save whichever of the name / description
+    /// fields are open (unchanged text is not sent) and leave edit mode.
+    pub(crate) fn finish_edit_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (project_id, renaming, editing, current) = {
+            let state = self.state.read(cx);
+            let Some(ProfilePage::Agent { project_id }) = state.profile.clone() else {
+                return;
+            };
+            let renaming = state.renaming_project.as_ref() == Some(&project_id);
+            let current = state
+                .project(&project_id)
+                .and_then(|p| p.description.clone())
+                .unwrap_or_default();
+            (
+                project_id,
+                renaming,
+                state.profile_editing_description,
+                current,
+            )
+        };
+        if renaming {
+            let name = self.agent_name_input.read(cx).text().to_string();
+            self.state
+                .update(cx, |s, cx| s.set_project_name(project_id.clone(), name, cx));
+        }
+        if editing {
+            let text = self.description_input.read(cx).text().to_string();
+            self.state.update(cx, |s, cx| {
+                if text.trim() == current.trim() {
+                    s.set_profile_editing_description(false, cx);
+                } else {
+                    s.set_description(project_id, text, cx);
+                }
+            });
+        }
+        Composer::focus(&self.composer, window, cx);
+        cx.notify();
+    }
+
     fn close_tab(&mut self, _: &CloseTab, _: &mut Window, cx: &mut Context<Self>) {
         let active = self.state.read(cx).active_chat_id();
         if let Some(chat_id) = active {
@@ -597,9 +704,20 @@ impl Shell {
             self.cancel_tab_rename(window, cx);
             return;
         }
-        if self.state.read(cx).renaming_project.is_some() {
+        let editing_agent = {
+            let s = self.state.read(cx);
+            s.renaming_project.is_some() || (s.profile.is_some() && s.profile_editing_description)
+        };
+        if editing_agent {
+            // The agent page's edit mode (name and/or description fields) ends
+            // without saving; the page itself stays up.
             self.cancel_rename_agent(cx);
+            self.state
+                .update(cx, |s, cx| s.set_profile_editing_description(false, cx));
             Composer::focus(&self.composer, window, cx);
+            return;
+        }
+        if self.close_agent_pick(Some(window), cx) {
             return;
         }
         let floating = self.menu_open
@@ -607,6 +725,7 @@ impl Shell {
             || self.add_agent_open
             || self.group_picker_open
             || self.row_menu.is_some()
+            || self.chat_menu.is_some()
             || self.react_menu.is_some();
         self.close_popovers(cx);
         if floating {
@@ -679,12 +798,14 @@ impl Shell {
 
     /// Everything that floats closes on a click elsewhere.
     fn close_popovers(&mut self, cx: &mut Context<Self>) {
+        self.close_agent_pick(None, cx);
         if self.menu_open
             || self.members_open
             || self.add_agent_open
             || self.group_picker_open
             || self.archived_open
             || self.row_menu.is_some()
+            || self.chat_menu.is_some()
             || self.react_menu.is_some()
         {
             self.menu_open = false;
@@ -693,6 +814,7 @@ impl Shell {
             self.group_picker_open = false;
             self.archived_open = false;
             self.row_menu = None;
+            self.chat_menu = None;
             self.react_menu = None;
             cx.notify();
         }
@@ -2758,17 +2880,15 @@ impl Render for Shell {
         if let Some(target) = details {
             root = root.child(self.render_details(&target, cx));
         }
-        if self.menu_open {
-            if let Some(space) = selected.as_ref() {
-                root = root.child(glass::popover(header::menu(self, space, cx)));
-            }
-        }
         if self.archived_open {
             if let Some(space) = selected.as_ref() {
                 root = root.child(glass::popover(header::archived_list(self, space, cx)));
             }
         }
         if let Some(menu) = sidebar::row_menu(self, cx) {
+            root = root.child(menu);
+        }
+        if let Some(menu) = sidebar::chat_menu(self, cx) {
             root = root.child(menu);
         }
         if let Some(menu) = self.react_menu(cx) {
