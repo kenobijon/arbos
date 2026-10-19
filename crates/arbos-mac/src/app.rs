@@ -1005,6 +1005,9 @@ impl AppState {
                         self.command(ClientCommand::CreateProject {
                             name: "Home".into(),
                             avatar_color_index: None,
+                            source_project_id: None,
+                            description: None,
+                            color: None,
                         });
                     }
                 }
@@ -1848,12 +1851,17 @@ impl AppState {
         reply_to: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        self.send_with(text, attachments, None, reply_to, cx);
+        self.send_with(text, attachments, None, reply_to, false, cx);
+    }
+
+    /// Guide: inject `text` into the agent's running turn instead of queuing a follow-up.
+    pub fn guide(&mut self, text: String, reply_to: Option<String>, cx: &mut Context<Self>) {
+        self.send_with(text, Vec::new(), None, reply_to, true, cx);
     }
 
     /// F11: a spoken message; `wav` is kept on the row as an `audio` attachment.
     pub fn send_voice(&mut self, text: String, wav: Arc<Vec<u8>>, cx: &mut Context<Self>) {
-        self.send_with(text, Vec::new(), Some(wav), None, cx);
+        self.send_with(text, Vec::new(), Some(wav), None, false, cx);
     }
 
     /// Hover reply: the next send in this chat answers `message_id`.
@@ -1876,13 +1884,15 @@ impl AppState {
         attachments: Vec<PathBuf>,
         voice_wav: Option<Arc<Vec<u8>>>,
         reply_to: Option<String>,
+        steer: bool,
         cx: &mut Context<Self>,
     ) {
         let Some(chat_id) = self.active_chat_id() else {
             return;
         };
         let message_id = new_id();
-        let answer = self.chat_needs_answer(&chat_id);
+        // Guide never answers a card — it steers the live turn.
+        let answer = !steer && self.chat_needs_answer(&chat_id);
         {
             let ui = self.chat_ui.entry(chat_id.clone()).or_default();
             if !ui.composer_dropped {
@@ -1902,29 +1912,51 @@ impl AppState {
             chat.title = title_from(&text);
         }
         // Optimistic echo: the row shows at once; the source's frame with the
-        // same id replaces it (§3.6).
-        let mut parts: Vec<Part> = attachments
-            .iter()
-            .map(|path| {
-                let name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("attachment")
-                    .to_string();
-                let mime = mime_for_path(path).to_string();
-                Part::Attachment {
-                    id: new_id(),
-                    attachment: crate::model::Attachment {
-                        name,
-                        mime,
-                        blob_ref: None,
-                        bytes: std::fs::metadata(path).ok().map(|m| m.len()),
-                        kind: None,
-                        title: None,
-                    },
+        // same id replaces it (§3.6). Image files get a local thumbnail so the
+        // card shows a picture immediately, not "No preview".
+        let mut parts: Vec<Part> = Vec::new();
+        for path in &attachments {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("attachment")
+                .to_string();
+            let mime = mime_for_path(path).to_string();
+            let att_id = new_id();
+            let mut blob_ref = None;
+            let bytes = if let Ok(data) = std::fs::read(path) {
+                let probe = crate::model::Attachment {
+                    name: name.clone(),
+                    mime: mime.clone(),
+                    blob_ref: None,
+                    bytes: Some(data.len() as u64),
+                    kind: None,
+                    title: None,
+                };
+                if probe.is_image() {
+                    if let Some(image) = decode_image(&data) {
+                        let key = format!("local:{att_id}");
+                        self.thumbnails.insert(key.clone(), Arc::new(image));
+                        self.thumbnails_requested.insert(key.clone());
+                        blob_ref = Some(key);
+                    }
                 }
-            })
-            .collect();
+                Some(data.len() as u64)
+            } else {
+                std::fs::metadata(path).ok().map(|m| m.len())
+            };
+            parts.push(Part::Attachment {
+                id: att_id,
+                attachment: crate::model::Attachment {
+                    name,
+                    mime,
+                    blob_ref,
+                    bytes,
+                    kind: None,
+                    title: None,
+                },
+            });
+        }
         if voice_wav.is_some() {
             parts.push(Part::Attachment {
                 id: new_id(),
@@ -1950,7 +1982,12 @@ impl AppState {
                 chat_id: chat_id.clone(),
                 role: Role::User,
                 sender: "user".into(),
-                status: MessageStatus::Queued,
+                // Guide lands in the live turn (not queued behind it).
+                status: if steer {
+                    MessageStatus::Done
+                } else {
+                    MessageStatus::Queued
+                },
                 turn: None,
                 decision: None,
                 subagent_id: None,
@@ -1975,7 +2012,7 @@ impl AppState {
                 model: None,
                 effort: None,
                 created_at: now_ms(),
-                completed_at: None,
+                completed_at: if steer { Some(now_ms()) } else { None },
                 call_id: None,
                 activity: None,
                 pending: true,
@@ -1997,6 +2034,13 @@ impl AppState {
                 text,
                 question_id,
                 value,
+            });
+        } else if steer {
+            self.command(ClientCommand::Steer {
+                chat_id: chat_id.clone(),
+                message_id,
+                text,
+                reply_to,
             });
         } else if let Some(wav) = voice_wav {
             self.command(ClientCommand::SendVoice {
@@ -3433,9 +3477,143 @@ impl AppState {
         self.command(ClientCommand::CreateProject {
             name,
             avatar_color_index,
+            source_project_id: None,
+            description: None,
+            color: None,
         });
         self.push_notice("Creating project…");
         cx.notify();
+    }
+
+    /// Grok / iPhone "Fork": a new agent with the same look and workspace
+    /// context (files + memory). Own agents only; chat history stays empty.
+    pub fn duplicate_project(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        let Some(src) = self
+            .project(&project_id)
+            .filter(|p| !p.shared && !p.is_people())
+        else {
+            return;
+        };
+        let name = Self::unique_copy_name(&src.name, &self.projects);
+        let description = src.description.clone();
+        let color = Some(src.color.clone());
+        let avatar_color_index = src.avatar_color_override;
+        self.awaiting_new_project = true;
+        self.command(ClientCommand::CreateProject {
+            name,
+            avatar_color_index,
+            source_project_id: Some(project_id),
+            description,
+            color,
+        });
+        self.push_notice("Forking…");
+        cx.notify();
+    }
+
+    /// Soft-delete an owned agent from every list (`DELETE /projects/{id}`).
+    pub fn delete_project(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        let Some(p) = self.project(&project_id) else {
+            return;
+        };
+        if p.shared || p.is_people() {
+            return;
+        }
+        if self.selected_project.as_deref() == Some(project_id.as_str()) {
+            self.selected_project = None;
+        }
+        if let Some(tabs) = self.chats.remove(&project_id) {
+            for c in tabs {
+                self.messages.remove(&c.id);
+                self.chat_ui.remove(&c.id);
+                self.archived_chats.remove(&c.id);
+            }
+        }
+        self.active_tab.remove(&project_id);
+        self.last_chats.remove(&project_id);
+        self.projects.retain(|p| p.id != project_id);
+        self.muted.remove(&project_id);
+        self.command(ClientCommand::DeleteProject { project_id });
+        cx.notify();
+    }
+
+    /// Delete a people chat I own (`DELETE /chats/{id}`).
+    pub fn delete_people_chat(&mut self, chat_id: Id, cx: &mut Context<Self>) {
+        if !self.project(&chat_id).is_some_and(|p| p.is_people()) {
+            return;
+        }
+        if self.selected_project.as_deref() == Some(chat_id.as_str()) {
+            self.selected_project = None;
+        }
+        self.messages.remove(&chat_id);
+        self.chat_ui.remove(&chat_id);
+        self.chats.remove(&chat_id);
+        self.archived_chats.remove(&chat_id);
+        self.projects.retain(|p| p.id != chat_id);
+        self.muted.remove(&chat_id);
+        self.command(ClientCommand::DeletePeopleChat { chat_id });
+        cx.notify();
+    }
+
+    /// Permanently close a non-pinned chat tab (drops it from Archived too).
+    pub fn delete_chat_tab(&mut self, chat_id: Id, cx: &mut Context<Self>) {
+        if !self.multi_chat {
+            return;
+        }
+        let Some(project_id) = self.project_of_chat(&chat_id).map(|p| p.id.clone()) else {
+            return;
+        };
+        if self
+            .tabs(&project_id)
+            .iter()
+            .any(|c| c.id == chat_id && c.is_pinned)
+        {
+            return;
+        }
+        self.archived_chats.remove(&chat_id);
+        if let Some(tabs) = self.chats.get_mut(&project_id) {
+            tabs.retain(|c| c.id != chat_id);
+        }
+        self.messages.remove(&chat_id);
+        self.chat_ui.remove(&chat_id);
+        if self.active_tab.get(&project_id) == Some(&chat_id) {
+            let pick = self
+                .visible_tabs(&project_id)
+                .into_iter()
+                .next()
+                .map(|c| c.id.clone());
+            if let Some(pick) = pick {
+                self.active_tab.insert(project_id.clone(), pick.clone());
+                self.last_chats.insert(project_id.clone(), pick.clone());
+                self.command(ClientCommand::OpenChat { chat_id: pick });
+            } else {
+                self.active_tab.remove(&project_id);
+            }
+        }
+        self.command(ClientCommand::CloseChat {
+            project_id,
+            chat_id,
+        });
+        cx.notify();
+    }
+
+    /// "`Name` copy", then "`Name` copy 2"… so the relay's unique-name check passes.
+    fn unique_copy_name(name: &str, projects: &[Project]) -> String {
+        let owned: HashSet<&str> = projects
+            .iter()
+            .filter(|p| !p.shared && !p.is_people())
+            .map(|p| p.name.as_str())
+            .collect();
+        let base = format!("{name} copy");
+        if !owned.contains(base.as_str()) {
+            return base;
+        }
+        for i in 2..=99 {
+            let candidate = format!("{name} copy {i}");
+            if !owned.contains(candidate.as_str()) {
+                return candidate;
+            }
+        }
+        format!("{name} copy {}", &new_id()[..4])
     }
 
     pub fn fetch_blob(&mut self, key: String, save: bool, cx: &mut Context<Self>) {
@@ -3477,6 +3655,10 @@ impl AppState {
                 let Some(key) = attachment.blob_ref.clone() else {
                     continue;
                 };
+                // Optimistic send stores a decoded preview under `local:…`.
+                if key.starts_with("local:") {
+                    continue;
+                }
                 if !self.thumbnails_requested.insert(key.clone()) {
                     continue;
                 }

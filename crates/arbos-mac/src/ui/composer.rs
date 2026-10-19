@@ -1,10 +1,11 @@
 //! The composer, Grok Bot layout: a "+" circle for attachments, the pill
 //! field ("Message <name>") with the hold-to-talk mic (transcribe), and the
-//! round white button that sends text, stops a running turn, or starts a call
-//! when empty — same as the iPhone (mic + phone; calls start audio-only).
-//! Hand-rolled multi-line text input with IME (`EntityInputHandler`,
-//! zeron-study §4.6). Enter sends, Shift+Enter inserts a newline. The model
-//! and reasoning pickers open from the header's "…" menu.
+//! round white button that sends text, Guides a running turn, stops when the
+//! field is empty mid-turn, or starts a call when empty — same as the iPhone
+//! (mic + phone; calls start audio-only). Hand-rolled multi-line text input
+//! with IME (`EntityInputHandler`, zeron-study §4.6). Enter sends (or Guides
+//! mid-task), Shift+Enter inserts a newline. The model and reasoning pickers
+//! open from the header's "…" menu.
 
 use std::ops::Range;
 use std::path::PathBuf;
@@ -42,17 +43,23 @@ actions!(
         Delete,
         Left,
         Right,
+        WordLeft,
+        WordRight,
         Up,
         Down,
         SelectLeft,
         SelectRight,
         SelectUp,
         SelectDown,
+        SelectWordLeft,
+        SelectWordRight,
         SelectAll,
         Home,
         End,
         SelectHome,
         SelectEnd,
+        DeleteWordBackward,
+        DeleteWordForward,
         Paste,
         Copy,
         Cut,
@@ -73,6 +80,11 @@ pub enum ComposerEvent {
     Send {
         text: String,
         attachments: Vec<PathBuf>,
+        reply_to: Option<String>,
+    },
+    /// Inject `text` into the agent's currently running turn (Guide).
+    Guide {
+        text: String,
         reply_to: Option<String>,
     },
     Stop,
@@ -260,6 +272,14 @@ impl ComposerInput {
         }
     }
 
+    fn word_left(&mut self, _: &WordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(self.previous_word_boundary(self.cursor_offset()), cx);
+    }
+
+    fn word_right(&mut self, _: &WordRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(self.next_word_boundary(self.cursor_offset()), cx);
+    }
+
     fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             self.move_to(self.offset_for_vertical_move(true), cx);
@@ -282,6 +302,14 @@ impl ComposerInput {
 
     fn select_right(&mut self, _: &SelectRight, _: &mut Window, cx: &mut Context<Self>) {
         self.select_to(self.next_boundary(self.cursor_offset()), cx);
+    }
+
+    fn select_word_left(&mut self, _: &SelectWordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.previous_word_boundary(self.cursor_offset()), cx);
+    }
+
+    fn select_word_right(&mut self, _: &SelectWordRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.next_word_boundary(self.cursor_offset()), cx);
     }
 
     fn select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
@@ -331,6 +359,38 @@ impl ComposerInput {
                 return;
             }
             self.select_to(next, cx)
+        }
+        self.replace_text_in_range(None, "", window, cx)
+    }
+
+    fn delete_word_backward(
+        &mut self,
+        _: &DeleteWordBackward,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            let prev = self.previous_word_boundary(self.cursor_offset());
+            if self.cursor_offset() == prev {
+                return;
+            }
+            self.select_to(prev, cx);
+        }
+        self.replace_text_in_range(None, "", window, cx)
+    }
+
+    fn delete_word_forward(
+        &mut self,
+        _: &DeleteWordForward,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            let next = self.next_word_boundary(self.cursor_offset());
+            if self.cursor_offset() == next {
+                return;
+            }
+            self.select_to(next, cx);
         }
         self.replace_text_in_range(None, "", window, cx)
     }
@@ -472,6 +532,48 @@ impl ComposerInput {
             .unwrap_or(self.content.len())
     }
 
+    /// Start of the previous word (macOS Control/Option+Left).
+    fn previous_word_boundary(&self, offset: usize) -> usize {
+        let offset = offset.min(self.content.len());
+        let mut chars: Vec<(usize, char)> = self.content[..offset].char_indices().collect();
+        while chars.last().is_some_and(|(_, c)| c.is_whitespace()) {
+            chars.pop();
+        }
+        if chars.is_empty() {
+            return 0;
+        }
+        let class = is_word_char(chars[chars.len() - 1].1);
+        while chars
+            .last()
+            .is_some_and(|(_, c)| !c.is_whitespace() && is_word_char(*c) == class)
+        {
+            chars.pop();
+        }
+        chars.last().map(|(i, c)| i + c.len_utf8()).unwrap_or(0)
+    }
+
+    /// End of the next word (macOS Control/Option+Right).
+    fn next_word_boundary(&self, offset: usize) -> usize {
+        let offset = offset.min(self.content.len());
+        let slice = &self.content[offset..];
+        let mut iter = slice.char_indices().peekable();
+        while iter.peek().is_some_and(|(_, c)| c.is_whitespace()) {
+            iter.next();
+        }
+        let Some(&(_, first)) = iter.peek() else {
+            return self.content.len();
+        };
+        let class = is_word_char(first);
+        let mut end = offset;
+        for (i, c) in iter {
+            if c.is_whitespace() || is_word_char(c) != class {
+                return offset + i;
+            }
+            end = offset + i + c.len_utf8();
+        }
+        end
+    }
+
     fn line_start(&self, offset: usize) -> usize {
         self.content[..offset]
             .rfind('\n')
@@ -531,6 +633,10 @@ impl ComposerInput {
         let layout = self.layout.as_ref()?;
         position_for_index(&layout.lines, index)
     }
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
 }
 
 /// Pixel position (relative to the text origin) of a byte index.
@@ -1009,14 +1115,20 @@ impl Render for ComposerInput {
             .on_action(cx.listener(Self::newline))
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
+            .on_action(cx.listener(Self::delete_word_backward))
+            .on_action(cx.listener(Self::delete_word_forward))
             .on_action(cx.listener(Self::left))
             .on_action(cx.listener(Self::right))
+            .on_action(cx.listener(Self::word_left))
+            .on_action(cx.listener(Self::word_right))
             .on_action(cx.listener(Self::up))
             .on_action(cx.listener(Self::down))
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
             .on_action(cx.listener(Self::select_up))
             .on_action(cx.listener(Self::select_down))
+            .on_action(cx.listener(Self::select_word_left))
+            .on_action(cx.listener(Self::select_word_right))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
@@ -1156,6 +1268,12 @@ impl Composer {
                     cx.notify();
                     return;
                 }
+                let running = self
+                    .state
+                    .read(cx)
+                    .active_chat_id()
+                    .map(|id| self.state.read(cx).chat_is_streaming(&id))
+                    .unwrap_or(false);
                 let attachments = std::mem::take(&mut self.attachments);
                 self.input.update(cx, |input, cx| input.clear(cx));
                 let reply_to = self.state.read(cx).active_chat_id().and_then(|cid| {
@@ -1165,11 +1283,17 @@ impl Composer {
                         .get(&cid)
                         .and_then(|ui| ui.reply_to.clone())
                 });
-                cx.emit(ComposerEvent::Send {
-                    text,
-                    attachments,
-                    reply_to,
-                });
+                // Mid-task + typed text → Guide (steer into the live turn). Attachments still
+                // queue as a normal send so the box can fetch them for the next turn.
+                if running && !text.is_empty() && attachments.is_empty() {
+                    cx.emit(ComposerEvent::Guide { text, reply_to });
+                } else {
+                    cx.emit(ComposerEvent::Send {
+                        text,
+                        attachments,
+                        reply_to,
+                    });
+                }
             }
         }
         self.open_picker = None;
@@ -1504,63 +1628,90 @@ impl Render for Composer {
             }
         };
 
-        // The round primary button: send text, stop a running turn when the
-        // field is empty, or start / end a call when idle and empty (iPhone:
-        // phone next to the mic; calls start audio-only).
+        // The round primary button: Guide while a turn is running and the field
+        // has text; otherwise send, stop when empty mid-turn, or start / end a
+        // call when idle and empty (iPhone: phone next to the mic; calls start
+        // audio-only).
         let hanging_up = in_call || in_livekit;
-        let (glyph, action): (&str, ButtonAction) = if has_text {
+        let guide = running && has_text && self.attachments.is_empty();
+        let (glyph, action): (&str, ButtonAction) = if guide {
+            ("", ButtonAction::Guide)
+        } else if has_text {
             ("arrow-up", ButtonAction::Send)
         } else if running {
             ("stop", ButtonAction::Stop)
         } else {
             ("phone", ButtonAction::Call)
         };
-        let primary_button = div()
-            .id("composer-send")
-            .size(px(SEND_BUTTON))
-            .flex_shrink_0()
-            .rounded_full()
-            .bg(if action == ButtonAction::Call && hanging_up {
-                theme.danger
-            } else {
-                theme.primary
-            })
-            .flex()
-            .items_center()
-            .justify_center()
-            .cursor_pointer()
-            .hover(|s| s.opacity(0.88))
-            .child(icon(
-                glyph,
-                if glyph == "stop" { 14.0 } else { 16.0 },
-                if action == ButtonAction::Call && hanging_up {
-                    theme.text
+        let primary_button = if action == ButtonAction::Guide {
+            div()
+                .id("composer-guide")
+                .h(px(SEND_BUTTON))
+                .px(px(14.0))
+                .flex_shrink_0()
+                .rounded_full()
+                .bg(theme.primary)
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|s| s.opacity(0.88))
+                .child(
+                    div()
+                        .text_size(px(TEXT_TINY))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme.on_primary)
+                        .child("Guide"),
+                )
+                .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx)))
+        } else {
+            div()
+                .id("composer-send")
+                .size(px(SEND_BUTTON))
+                .flex_shrink_0()
+                .rounded_full()
+                .bg(if action == ButtonAction::Call && hanging_up {
+                    theme.danger
                 } else {
-                    theme.on_primary
-                },
-            ))
-            .on_click(cx.listener(move |this, _, window, cx| match action {
-                ButtonAction::Send => this.submit(window, cx),
-                ButtonAction::Stop => cx.emit(ComposerEvent::Stop),
-                ButtonAction::Call => {
-                    let live = this.state.read(cx).my_call.is_some();
-                    let voice_on = this.voice.read(cx).in_call();
-                    if live {
-                        this.state.update(cx, |s, cx| s.leave_call(cx));
-                    } else if voice_on {
-                        this.voice.update(cx, |v, cx| v.toggle_call(cx));
-                    } else if this
-                        .state
-                        .read(cx)
-                        .selected()
-                        .is_some_and(callview::callable)
-                    {
-                        // Audio-only; camera is toggled on the call screen.
-                        this.state
-                            .update(cx, |s, cx| s.start_call_in_chat(CallKind::Voice, cx));
+                    theme.primary
+                })
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|s| s.opacity(0.88))
+                .child(icon(
+                    glyph,
+                    if glyph == "stop" { 14.0 } else { 16.0 },
+                    if action == ButtonAction::Call && hanging_up {
+                        theme.text
+                    } else {
+                        theme.on_primary
+                    },
+                ))
+                .on_click(cx.listener(move |this, _, window, cx| match action {
+                    ButtonAction::Send | ButtonAction::Guide => this.submit(window, cx),
+                    ButtonAction::Stop => cx.emit(ComposerEvent::Stop),
+                    ButtonAction::Call => {
+                        let live = this.state.read(cx).my_call.is_some();
+                        let voice_on = this.voice.read(cx).in_call();
+                        if live {
+                            this.state.update(cx, |s, cx| s.leave_call(cx));
+                        } else if voice_on {
+                            this.voice.update(cx, |v, cx| v.toggle_call(cx));
+                        } else if this
+                            .state
+                            .read(cx)
+                            .selected()
+                            .is_some_and(callview::callable)
+                        {
+                            // Audio-only; camera is toggled on the call screen.
+                            this.state
+                                .update(cx, |s, cx| s.start_call_in_chat(CallKind::Voice, cx));
+                        }
                     }
-                }
-            }));
+                }))
+        };
 
         // Hold to record a voice memo, or click to toggle recording. Idle it is
         // Grok Mac's filled round mic (black on light, white on dark).
@@ -1864,6 +2015,7 @@ impl Render for Composer {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ButtonAction {
     Send,
+    Guide,
     Stop,
     Call,
 }
