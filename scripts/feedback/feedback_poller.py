@@ -2202,7 +2202,7 @@ class Loop:
             elif edge:
                 parts.append(f"Mac {edge} (stable follows)")
         if st.get("deployed_note"):
-            parts.append(f"live on {st['deployed_note']}" if not st["deployed_note"].startswith(("the relay", "all ", "live")) else st["deployed_note"])
+            parts.append("live on the server side (" + st["deployed_note"].rstrip(".") + ")")
         elif not parts and not ios_files and not mac_files and files:
             parts.append("live on the relay / site")
         return ", ".join(parts) or "the current builds"
