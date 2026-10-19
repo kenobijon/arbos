@@ -3442,23 +3442,22 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     s.put_json(store::KEY_LAST_CHATS, &last);
                 });
             }
-            if shared.is_people(&chat_id) {
-                let seq = shared
-                    .room_seq
-                    .lock()
-                    .unwrap()
-                    .get(&chat_id)
-                    .copied()
-                    .unwrap_or(0);
-                if seq > 0 {
-                    let shared = shared.clone();
-                    tokio::spawn(async move {
-                        let _ = shared
-                            .put_json(&format!("/chats/{chat_id}/read"), json!({ "seq": seq }))
-                            .await;
-                    });
-                }
-            }
+            // Always PUT /read so chat_events unread clears on other devices
+            // (people DMs and project/agent chats). Mirrors iOS markRead /
+            // markPeopleRead — local unread alone left the phone's bold dots.
+            let seq = shared
+                .room_seq
+                .lock()
+                .unwrap()
+                .get(&chat_id)
+                .copied()
+                .unwrap_or(0);
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let _ = shared
+                    .put_json(&format!("/chats/{chat_id}/read"), json!({ "seq": seq }))
+                    .await;
+            });
         }
         ClientCommand::SearchPeople { query } => {
             let shared = shared.clone();
