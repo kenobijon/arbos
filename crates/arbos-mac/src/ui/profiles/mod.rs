@@ -1,7 +1,8 @@
 //! Telegram-style profile pages in the Grok Bot look: a user, a group (people
 //! chat or shared project) or an agent. One glass sheet, the same skeleton
 //! for all three — hero (avatar, name, status line), a row of round action
-//! buttons, an info card, a segmented tab bar and the tab's list.
+//! buttons, an info card, a segmented tab bar and the tab's list. The agent
+//! page keeps the tree + colour picker as its Appearance section.
 //!
 //! Everything shown is derived from state the app already holds: members from
 //! the space, media / files / voice / links from the loaded chat docs,
