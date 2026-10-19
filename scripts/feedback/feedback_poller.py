@@ -95,7 +95,7 @@ CURSOR_API = "https://api.cursor.com/v1"
 GITHUB_API = "https://api.github.com"
 ASSET_RELEASE_TAG = "feedback-screenshots"
 RELAY_DEPLOYED_SHA_FILE = "/etc/arbos/relay.deployed-sha"  # written by scripts/deploy/relay-server.sh
-DEPLOY_HOOK = "/usr/local/bin/arbos-deploy-hook"  # CD worker's hook: `<relay|agentd|voice> <sha>`, idempotent, debounced; sudoers for arbos-feedback
+DEPLOY_HOOK = "/usr/local/bin/arbos-deploy-hook"  # CD worker's hook: `<relay|agentd|voice> <sha>`, idempotent, debounced; called directly (no sudo)
 USER_AGENT = "arbos-feedback-poller/1 (+https://github.com/unarbos/arbos)"
 
 TERMINAL = {"shipped", "failed", "ignored", "rejected", "duplicate", "no_change", "handed_off", "deferred"}
@@ -2294,7 +2294,9 @@ class Loop:
             return
         for kind in kinds:
             try:
-                r = subprocess.run(["sudo", "-n", DEPLOY_HOOK, kind, sha], capture_output=True, text=True, timeout=60)
+                # Direct call: the unit runs with NoNewPrivileges, so no sudo; the hook queues the request under
+                # /var/lib/arbos-feedback/deploy-requests/ (inside the unit's ReadWritePaths) for the CD worker.
+                r = subprocess.run([DEPLOY_HOOK, kind, sha], capture_output=True, text=True, timeout=60)
                 log(f"[{fid}] deploy hook {kind} {sha[:8]}: exit {r.returncode} {(r.stdout or r.stderr).strip()[:120]}")
                 self.store.event(fid, "deploy_requested", deploy=kind, commit=sha, exit=r.returncode)
             except (OSError, subprocess.TimeoutExpired) as e:
