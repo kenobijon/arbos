@@ -479,11 +479,12 @@ roll_image() {
 # ---------------------------------------------------------------------------------------------
 
 newest_green() {
-  # The newest commit on main whose CI run is green (main moves while CI runs; deploy what is
-  # proven, not the head of the minute). Cached per tick.
+  # The newest commit on main's first-parent line whose CI run is green (main moves while CI
+  # runs; deploy what is proven, not the head of the minute). First-parent only: a merged
+  # branch's own tip is "on main" too, but lacks everything main had before the merge.
   if [[ -n "${NEWEST_GREEN:-}" ]]; then echo "$NEWEST_GREEN"; return; fi
   local sha
-  for sha in $(git -C "$REPO" rev-list origin/main -n 25); do
+  for sha in $(git -C "$REPO" rev-list --first-parent origin/main -n 25); do
     if [[ "$(ci_state "$sha")" == success ]]; then
       NEWEST_GREEN="$sha"
       echo "$sha"
@@ -533,6 +534,16 @@ handle_request() {
     log "$kind: request $sha is not a commit on main; dropped"
     rm -f "$file"
     return 0
+  fi
+  # A merged branch's tip is an ancestor of main but not main itself: deploy the merge instead
+  # (the first-parent commit that brought it in), so nothing main already had goes missing.
+  if ! git -C "$REPO" rev-list --first-parent origin/main -n 200 | grep -qx "$full"; then
+    local merge
+    merge="$(git -C "$REPO" rev-list --first-parent --ancestry-path "$full..origin/main" | tail -1)"
+    if [[ -n "$merge" ]]; then
+      log "$kind: $full is a branch commit; deploying its merge $merge instead"
+      full="$merge"
+    fi
   fi
   if [[ -e "$(failed_marker "$kind" "$full")" ]]; then
     local attempts at
