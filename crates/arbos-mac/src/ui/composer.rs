@@ -61,7 +61,11 @@ const INPUT_FONT_SIZE: f32 = TEXT_BODY;
 
 #[derive(Clone, Debug)]
 pub enum ComposerEvent {
-    Send(String, Vec<PathBuf>),
+    Send {
+        text: String,
+        attachments: Vec<PathBuf>,
+        reply_to: Option<String>,
+    },
     Stop,
 }
 
@@ -1061,7 +1065,18 @@ impl Composer {
                 }
                 let attachments = std::mem::take(&mut self.attachments);
                 self.input.update(cx, |input, cx| input.clear(cx));
-                cx.emit(ComposerEvent::Send(text, attachments));
+                let reply_to = self.state.read(cx).active_chat_id().and_then(|cid| {
+                    self.state
+                        .read(cx)
+                        .chat_ui
+                        .get(&cid)
+                        .and_then(|ui| ui.reply_to.clone())
+                });
+                cx.emit(ComposerEvent::Send {
+                    text,
+                    attachments,
+                    reply_to,
+                });
             }
         }
         self.open_picker = None;
@@ -1549,6 +1564,87 @@ impl Render for Composer {
         field = field.child(trailing);
 
         let mut column = div().relative().w_full().flex().flex_col().gap(px(8.0));
+
+        // Reply chip (iPhone parity): set by the hover reply icon on a message.
+        if let Some(chat_id) = self.state.read(cx).active_chat_id() {
+            let reply_id = self
+                .state
+                .read(cx)
+                .chat_ui
+                .get(&chat_id)
+                .and_then(|ui| ui.reply_to.clone());
+            if let Some(reply_id) = reply_id {
+                let (who, preview) =
+                    self.state
+                        .read(cx)
+                        .messages
+                        .get(&chat_id)
+                        .and_then(|list| list.iter().find(|m| m.id == reply_id))
+                        .map(|m| {
+                            let who =
+                                m.sender_handle
+                                    .as_deref()
+                                    .map(|h| format!("@{h}"))
+                                    .unwrap_or_else(|| match m.role {
+                                        crate::model::Role::Assistant => "agent".into(),
+                                        crate::model::Role::User => "you".into(),
+                                        crate::model::Role::System
+                                        | crate::model::Role::Project => "message".into(),
+                                    });
+                            let mut preview = m.plain_text();
+                            if preview.chars().count() > 72 {
+                                preview = preview.chars().take(72).collect::<String>() + "…";
+                            }
+                            (who, preview)
+                        })
+                        .unwrap_or_else(|| ("message".into(), String::new()));
+                let clear_chat = chat_id.clone();
+                column = column.child(
+                    div()
+                        .id("composer-reply")
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .px(px(14.0))
+                        .py(px(8.0))
+                        .ml(px(PLUS_BUTTON + 12.0))
+                        .rounded(px(14.0))
+                        .bg(theme.bubble_assistant)
+                        .child(icon("reply", 12.0, theme.text_muted))
+                        .child(
+                            div()
+                                .text_size(px(TEXT_TINY))
+                                .text_color(theme.text_muted)
+                                .child(format!("Replying to {who}")),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(px(TEXT_TINY))
+                                .text_color(theme.text)
+                                .truncate()
+                                .child(preview),
+                        )
+                        .child(
+                            div()
+                                .id("composer-reply-clear")
+                                .size(px(18.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_full()
+                                .cursor_pointer()
+                                .hover(|s| s.bg(theme.surface_2))
+                                .child(icon("xmark", 10.0, theme.text_muted))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.state
+                                        .update(cx, |s, cx| s.clear_reply_to(&clear_chat, cx));
+                                })),
+                        ),
+                );
+            }
+        }
 
         if !self.attachments.is_empty() {
             let mut chips = div().flex().flex_wrap().gap(px(6.0)).pl(px(8.0));

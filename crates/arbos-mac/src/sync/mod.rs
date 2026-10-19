@@ -357,6 +357,8 @@ pub enum ClientCommand {
         message_id: Id,
         text: String,
         attachments: Vec<PathBuf>,
+        /// People-chat / hover-reply: the message this send answers (`replyTo`).
+        reply_to: Option<String>,
     },
     /// Reply to an `ask_user` question (S8). Same shape as `Send`, different outbox kind.
     /// A typed widget answer carries `question_id` and the structured `value`; `text` is

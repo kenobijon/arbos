@@ -7,7 +7,7 @@ use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    div, list, prelude::*, px, Animation, AnimationExt, AnyElement, Context, Div, Entity,
+    div, list, prelude::*, px, Animation, AnimationExt, AnyElement, App, Context, Div, Entity,
     FontWeight, ListAlignment, ListScrollEvent, ListState, Render, SharedString, Stateful,
     StyledText, TextRun, Window,
 };
@@ -224,12 +224,17 @@ pub const STICK_THRESHOLD_PX: f32 = 70.0;
 /// How far above the end the user must be before the ↓ button shows.
 const JUMP_BUTTON_AFTER_PX: f32 = 160.0;
 
-/// Right-click / control-click on a bubble: the shell opens the react menu there.
+/// Right-click on a bubble: the shell opens the react menu there.
+/// Hover reply: the shell sets the composer's reply target.
 pub enum TranscriptEvent {
     ReactMenu {
         chat_id: Id,
         message_id: Id,
         position: gpui::Point<gpui::Pixels>,
+    },
+    Reply {
+        chat_id: Id,
+        message_id: Id,
     },
 }
 
@@ -455,7 +460,26 @@ impl Transcript {
         cx.notify();
     }
 
-    /// Right-click (or control-click) a bubble → the shell shows the react menu.
+    /// Plain text of a message in this chat, for copy / control-click.
+    fn message_plain(&self, message_id: &Id, cx: &App) -> Option<String> {
+        let chat_id = self.chat_id.as_ref()?;
+        self.state
+            .read(cx)
+            .messages
+            .get(chat_id)
+            .and_then(|list| list.iter().find(|m| m.id == *message_id))
+            .map(|m| m.plain_text())
+    }
+
+    fn copy_message(&self, message_id: &Id, cx: &mut Context<Self>) {
+        if let Some(text) = self.message_plain(message_id, cx) {
+            if !text.is_empty() {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+            }
+        }
+    }
+
+    /// Right-click → react menu. Control-click → copy the message text.
     fn react_target(
         &self,
         el: Stateful<Div>,
@@ -465,8 +489,8 @@ impl Transcript {
         let Some(chat_id) = self.chat_id.clone() else {
             return el;
         };
-        let (right_chat, right_msg) = (chat_id.clone(), message_id.clone());
-        let (ctrl_chat, ctrl_msg) = (chat_id, message_id.clone());
+        let (right_chat, right_msg) = (chat_id, message_id.clone());
+        let ctrl_msg = message_id.clone();
         el.on_mouse_down(
             gpui::MouseButton::Right,
             cx.listener(move |_, event: &gpui::MouseDownEvent, _, cx| {
@@ -480,18 +504,62 @@ impl Transcript {
         )
         .on_mouse_down(
             gpui::MouseButton::Left,
-            cx.listener(move |_, event: &gpui::MouseDownEvent, _, cx| {
+            cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
                 if !event.modifiers.control {
                     return;
                 }
                 cx.stop_propagation();
-                cx.emit(TranscriptEvent::ReactMenu {
-                    chat_id: ctrl_chat.clone(),
-                    message_id: ctrl_msg.clone(),
-                    position: event.position,
-                });
+                this.copy_message(&ctrl_msg, cx);
             }),
         )
+    }
+
+    /// Hover-only reply + copy glyphs beside a bubble (fade with the row).
+    fn hover_reply_copy(
+        &self,
+        row_id: &str,
+        message_id: &Id,
+        opacity: f32,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let chat_id = self.chat_id.clone();
+        let reply_msg = message_id.clone();
+        let copy_msg = message_id.clone();
+        let btn = |id: SharedString, glyph: &'static str| {
+            div()
+                .id(id)
+                .size(px(24.0))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .cursor_pointer()
+                .opacity(opacity)
+                .hover(|s| s.bg(theme.surface_2))
+                .child(icon(glyph, 16.0, theme.text_muted))
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .child(
+                btn(SharedString::from(format!("{row_id}#reply")), "reply").on_click(cx.listener(
+                    move |_, _, _, cx| {
+                        if let Some(chat_id) = chat_id.clone() {
+                            cx.emit(TranscriptEvent::Reply {
+                                chat_id,
+                                message_id: reply_msg.clone(),
+                            });
+                        }
+                    },
+                )),
+            )
+            .child(
+                btn(SharedString::from(format!("{row_id}#copy")), "copy")
+                    .on_click(cx.listener(move |this, _, _, cx| this.copy_message(&copy_msg, cx))),
+            )
     }
 
     fn render_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -600,6 +668,8 @@ impl Transcript {
                         })
                         .child({
                             let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
+                            let actions =
+                                self.hover_reply_copy(&row.id, &row.message_id, reveal, &theme, cx);
                             row_el
                                 .justify_start()
                                 .child(
@@ -610,6 +680,7 @@ impl Transcript {
                                         .border_color(Theme::with_alpha(color, 0.7))
                                         .when(pending, |el| el.opacity(0.6)),
                                 )
+                                .child(actions.ml(px(6.0)))
                                 .children(hover_time(time, reveal, &theme).map(|t| t.ml(px(8.0))))
                         })
                         .into_any_element()
@@ -633,9 +704,12 @@ impl Transcript {
                         .child({
                             // My bubble sits right, so its outer edge (and time) is on the left.
                             let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
+                            let actions =
+                                self.hover_reply_copy(&row.id, &row.message_id, reveal, &theme, cx);
                             row_el
                                 .justify_end()
                                 .children(hover_time(time, reveal, &theme).map(|t| t.mr(px(8.0))))
+                                .child(actions.mr(px(6.0)))
                                 .child(bubble.when(pending, |el| el.opacity(0.6)))
                         })
                         .into_any_element()
@@ -677,14 +751,15 @@ impl Transcript {
                     .bg(theme.bubble_assistant)
                     .child(render_block(&row.id, &block, veil.as_ref(), now, &theme));
                 let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
-                // Grok Mac (ref 58): a muted react glyph appears right of the
-                // bubble on hover; it opens the same bar as a right-click.
-                let hover_react = (last && !live).then(|| {
+                // Hover: reply + copy, then Grok Mac's muted react glyph (opens
+                // the same bar as a right-click).
+                let hover_actions = (last && !live).then(|| {
+                    let actions =
+                        self.hover_reply_copy(&row.id, &row.message_id, reveal, &theme, cx);
                     let chat_id = self.chat_id.clone();
                     let message_id = row.message_id.clone();
-                    div()
+                    let react = div()
                         .id(SharedString::from(format!("{}#react", row.id)))
-                        .ml(px(8.0))
                         .size(px(24.0))
                         .flex_shrink_0()
                         .flex()
@@ -703,7 +778,14 @@ impl Transcript {
                                     position: event.position(),
                                 });
                             }
-                        }))
+                        }));
+                    div()
+                        .ml(px(6.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(2.0))
+                        .child(actions)
+                        .child(react)
                 });
                 // Messages for Mac: the bubble's time shows beside the glyph on hover.
                 let hover_time = (last && !live)
@@ -714,7 +796,7 @@ impl Transcript {
                     .when(first, |el| el.pt(px(6.0)))
                     .when(last, |el| el.pb(px(6.0)))
                     .child(bubble)
-                    .children(hover_react)
+                    .children(hover_actions)
                     .children(hover_time)
                     .into_any_element()
             }
