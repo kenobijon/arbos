@@ -497,6 +497,15 @@ impl SyncSource for RelaySource {
             let shared = Arc::new(Shared {
                 http: reqwest::Client::builder()
                     .timeout(Duration::from_secs(30))
+                    // Every request says what runs here (`mac/0.6.30`, `mac/0.6.29 (1084)`):
+                    // the relay's "installed version" signal for continuous delivery.
+                    .default_headers({
+                        let mut h = reqwest::header::HeaderMap::new();
+                        if let Ok(v) = update::client_header().parse() {
+                            h.insert("x-arbos-client", v);
+                        }
+                        h
+                    })
                     .build()
                     .context("http client")?,
                 http_url: self.http_url.clone(),
@@ -1312,6 +1321,23 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
                     chat_id,
                     archived_at,
                 });
+            }
+            "release_published" => {
+                let platform = push
+                    .pointer("/payload/platform")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let version = push
+                    .pointer("/payload/version")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                if !platform.is_empty() {
+                    let _ = shared
+                        .events
+                        .send(SyncEvent::ReleasePublished { platform, version });
+                }
             }
             "feedback_capture" => {
                 let request_id = push

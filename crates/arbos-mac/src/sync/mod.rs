@@ -110,6 +110,11 @@ pub enum SyncEvent {
     },
     /// `feedback_capture` push: the user's agent is filing feedback and wants a picture of the
     /// screen; the app answers `POST /feedback/capture/{id}` if it is in the foreground.
+    /// The relay's `release_published` push: a new build of `platform` is installable.
+    ReleasePublished {
+        platform: String,
+        version: String,
+    },
     FeedbackCapture {
         request_id: String,
         expires_at: Option<i64>,
