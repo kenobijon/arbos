@@ -143,7 +143,10 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-right", composer::SelectRight, input),
         KeyBinding::new("shift-up", composer::SelectUp, input),
         KeyBinding::new("shift-down", composer::SelectDown, input),
-        // Word movement: Control+Left/Right (reported) and Option+Left/Right (macOS).
+        // Word movement: Option+Left/Right is the macOS default. Control+Left/Right
+        // (as reported) is bound too, but a stock Mac routes ^← / ^→ to Mission
+        // Control ("Move left/right a space") before any app sees them; it only
+        // reaches us when that system shortcut is off. Cmd+Left/Right is line start/end.
         KeyBinding::new("ctrl-left", composer::WordLeft, input),
         KeyBinding::new("ctrl-right", composer::WordRight, input),
         KeyBinding::new("alt-left", composer::WordLeft, input),

@@ -36,7 +36,12 @@ fi
 if [[ ! -f /var/lib/arbos-deploy/agentd.deployed-sha && -n "${AGENTD_DEPLOYED_SHA:-}" ]]; then
   echo "$AGENTD_DEPLOYED_SHA" > /var/lib/arbos-deploy/agentd.deployed-sha
 fi
+# /download/mac flips the moment the relay hears about a stable Mac release (the 15-min timer stays).
+install -m 0644 "$HERE/arbos-refresh-mac-download.path" /etc/systemd/system/arbos-refresh-mac-download.path
 systemctl daemon-reload
 systemctl enable --now arbos-deploy.timer
+if systemctl list-unit-files arbos-refresh-mac-download.service >/dev/null 2>&1; then
+  systemctl enable --now arbos-refresh-mac-download.path
+fi
 echo "installed: arbos-deploy-hook, arbos-deploy-worker, arbos-deploy.timer ($(systemctl is-active arbos-deploy.timer))"
 echo "kill switch: touch /etc/arbos/deploy.disabled"

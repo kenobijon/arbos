@@ -475,6 +475,8 @@ jobs:
       - name: Tell the relay
         if: needs.plan.outputs.promote == 'true'
         env:
+          # From 1Password above when OP_SERVICE_ACCOUNT_TOKEN is set, else the repository secret.
+          ARBOS_RELAY_ADMIN_TOKEN: ${{ env.ARBOS_RELAY_ADMIN_TOKEN || secrets.ARBOS_RELAY_ADMIN_TOKEN }}
           CHANNEL: ${{ needs.plan.outputs.channel }}
           VERSION: ${{ needs.plan.outputs.version }}
           BUILD: ${{ needs.plan.outputs.build }}
