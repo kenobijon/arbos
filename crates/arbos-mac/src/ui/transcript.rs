@@ -7,14 +7,15 @@ use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    div, list, prelude::*, px, Animation, AnimationExt, AnyElement, Context, Div, Entity,
+    div, list, prelude::*, px, Animation, AnimationExt, AnyElement, App, Context, Div, Entity,
     FontWeight, ListAlignment, ListScrollEvent, ListState, Render, SharedString, Stateful,
     StyledText, TextRun, Window,
 };
 
 use crate::app::{AppEvent, AppState, DetailsTarget};
 use crate::model::{
-    Attachment, Id, Message, MessageStatus, Part, Person, Role, StatusKind, TurnKind,
+    Attachment, AttachmentKind, Id, Message, MessageStatus, Part, Person, Role, StatusKind,
+    TurnKind,
 };
 use crate::ui::approve::{approval_card, ApprovalView};
 use crate::ui::attachments;
@@ -102,7 +103,6 @@ impl HoverFade {
 pub enum RowKind {
     User {
         text: String,
-        attachments: Vec<Attachment>,
         pending: bool,
         /// Caption for prompts not typed by the user (a routine, another project).
         sender_label: Option<String>,
@@ -141,9 +141,10 @@ pub enum RowKind {
         names: Vec<String>,
         total: u32,
     },
-    /// A file the agent produced for the user.
+    /// An image or file in the chat (agent or user). `mine` right-aligns my sends.
     Attachment {
         attachment: Attachment,
+        mine: bool,
     },
     /// S8: the agent asked a question.
     AskUser {
@@ -224,12 +225,17 @@ pub const STICK_THRESHOLD_PX: f32 = 70.0;
 /// How far above the end the user must be before the ↓ button shows.
 const JUMP_BUTTON_AFTER_PX: f32 = 160.0;
 
-/// Right-click / control-click on a bubble: the shell opens the react menu there.
+/// Right-click on a bubble: the shell opens the react menu there.
+/// Hover reply: the shell sets the composer's reply target.
 pub enum TranscriptEvent {
     ReactMenu {
         chat_id: Id,
         message_id: Id,
         position: gpui::Point<gpui::Pixels>,
+    },
+    Reply {
+        chat_id: Id,
+        message_id: Id,
     },
 }
 
@@ -400,7 +406,8 @@ impl Transcript {
             voice_mode: state.voice_mode,
         };
         let me_id = state.me_id();
-        let new_rows = build_rows(&messages, show_details, speech, &me_id);
+        let thumb_keys: HashSet<&str> = state.thumbnails.keys().map(|k| k.as_str()).collect();
+        let new_rows = build_rows(&messages, show_details, speech, &me_id, &thumb_keys);
 
         // Veils: observe text growth of live markdown rows.
         for row in &new_rows {
@@ -491,7 +498,26 @@ impl Transcript {
         cx.notify();
     }
 
-    /// Right-click (or control-click) a bubble → the shell shows the react menu.
+    /// Plain text of a message in this chat, for copy / control-click.
+    fn message_plain(&self, message_id: &Id, cx: &App) -> Option<String> {
+        let chat_id = self.chat_id.as_ref()?;
+        self.state
+            .read(cx)
+            .messages
+            .get(chat_id)
+            .and_then(|list| list.iter().find(|m| m.id == *message_id))
+            .map(|m| m.plain_text())
+    }
+
+    fn copy_message(&self, message_id: &Id, cx: &mut Context<Self>) {
+        if let Some(text) = self.message_plain(message_id, cx) {
+            if !text.is_empty() {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+            }
+        }
+    }
+
+    /// Right-click → react menu. Control-click → copy the message text.
     fn react_target(
         &self,
         el: Stateful<Div>,
@@ -501,8 +527,8 @@ impl Transcript {
         let Some(chat_id) = self.chat_id.clone() else {
             return el;
         };
-        let (right_chat, right_msg) = (chat_id.clone(), message_id.clone());
-        let (ctrl_chat, ctrl_msg) = (chat_id, message_id.clone());
+        let (right_chat, right_msg) = (chat_id, message_id.clone());
+        let ctrl_msg = message_id.clone();
         el.on_mouse_down(
             gpui::MouseButton::Right,
             cx.listener(move |_, event: &gpui::MouseDownEvent, _, cx| {
@@ -516,18 +542,62 @@ impl Transcript {
         )
         .on_mouse_down(
             gpui::MouseButton::Left,
-            cx.listener(move |_, event: &gpui::MouseDownEvent, _, cx| {
+            cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
                 if !event.modifiers.control {
                     return;
                 }
                 cx.stop_propagation();
-                cx.emit(TranscriptEvent::ReactMenu {
-                    chat_id: ctrl_chat.clone(),
-                    message_id: ctrl_msg.clone(),
-                    position: event.position,
-                });
+                this.copy_message(&ctrl_msg, cx);
             }),
         )
+    }
+
+    /// Hover-only reply + copy glyphs beside a bubble (fade with the row).
+    fn hover_reply_copy(
+        &self,
+        row_id: &str,
+        message_id: &Id,
+        opacity: f32,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let chat_id = self.chat_id.clone();
+        let reply_msg = message_id.clone();
+        let copy_msg = message_id.clone();
+        let btn = |id: SharedString, glyph: &'static str| {
+            div()
+                .id(id)
+                .size(px(24.0))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .cursor_pointer()
+                .opacity(opacity)
+                .hover(|s| s.bg(theme.surface_2))
+                .child(icon(glyph, 16.0, theme.text_muted))
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .child(
+                btn(SharedString::from(format!("{row_id}#reply")), "reply").on_click(cx.listener(
+                    move |_, _, _, cx| {
+                        if let Some(chat_id) = chat_id.clone() {
+                            cx.emit(TranscriptEvent::Reply {
+                                chat_id,
+                                message_id: reply_msg.clone(),
+                            });
+                        }
+                    },
+                )),
+            )
+            .child(
+                btn(SharedString::from(format!("{row_id}#copy")), "copy")
+                    .on_click(cx.listener(move |this, _, _, cx| this.copy_message(&copy_msg, cx))),
+            )
     }
 
     fn render_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -539,13 +609,12 @@ impl Transcript {
         let inner: AnyElement = match row.kind {
             RowKind::User {
                 text,
-                attachments,
                 pending,
                 sender_label,
                 from,
                 time,
             } => {
-                let mut bubble = self
+                let bubble = self
                     .react_target(
                         div().id(SharedString::from(format!("{}#bubble", row.id))),
                         &row.message_id,
@@ -561,30 +630,8 @@ impl Transcript {
                     .bg(theme.bubble)
                     .text_color(theme.bubble_text())
                     .text_size(px(TEXT_BODY))
-                    .line_height(px(LINE_HEIGHT));
-                if !attachments.is_empty() {
-                    let mut chips = div().flex().flex_wrap().gap(px(6.0));
-                    for a in attachments {
-                        // A voice memo chip (F11) is marked with a note glyph.
-                        let label = if a.is_audio() {
-                            format!("♪ {}", a.name)
-                        } else {
-                            a.name
-                        };
-                        chips = chips.child(
-                            div()
-                                .px(px(9.0))
-                                .py(px(3.0))
-                                .rounded_full()
-                                .bg(Theme::with_alpha(theme.bg, 0.35))
-                                .text_size(px(TEXT_TINY))
-                                .text_color(theme.text)
-                                .child(label),
-                        );
-                    }
-                    bubble = bubble.child(chips);
-                }
-                bubble = bubble.child(text);
+                    .line_height(px(LINE_HEIGHT))
+                    .child(text);
                 if let Some(person) = from {
                     // Someone else: left-aligned, their avatar and handle above.
                     // Must not early-return: the match arm still needs the
@@ -636,6 +683,8 @@ impl Transcript {
                         })
                         .child({
                             let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
+                            let actions =
+                                self.hover_reply_copy(&row.id, &row.message_id, reveal, &theme, cx);
                             row_el
                                 .justify_start()
                                 .child(
@@ -646,6 +695,7 @@ impl Transcript {
                                         .border_color(Theme::with_alpha(color, 0.7))
                                         .when(pending, |el| el.opacity(0.6)),
                                 )
+                                .child(actions.ml(px(6.0)))
                                 .children(hover_time(time, reveal, &theme).map(|t| t.ml(px(8.0))))
                         })
                         .into_any_element()
@@ -669,9 +719,12 @@ impl Transcript {
                         .child({
                             // My bubble sits right, so its outer edge (and time) is on the left.
                             let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
+                            let actions =
+                                self.hover_reply_copy(&row.id, &row.message_id, reveal, &theme, cx);
                             row_el
                                 .justify_end()
                                 .children(hover_time(time, reveal, &theme).map(|t| t.mr(px(8.0))))
+                                .child(actions.mr(px(6.0)))
                                 .child(bubble.when(pending, |el| el.opacity(0.6)))
                         })
                         .into_any_element()
@@ -713,14 +766,15 @@ impl Transcript {
                     .bg(theme.bubble_assistant)
                     .child(render_block(&row.id, &block, veil.as_ref(), now, &theme));
                 let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
-                // Grok Mac (ref 58): a muted react glyph appears right of the
-                // bubble on hover; it opens the same bar as a right-click.
-                let hover_react = (last && !live).then(|| {
+                // Hover: reply + copy, then Grok Mac's muted react glyph (opens
+                // the same bar as a right-click).
+                let hover_actions = (last && !live).then(|| {
+                    let actions =
+                        self.hover_reply_copy(&row.id, &row.message_id, reveal, &theme, cx);
                     let chat_id = self.chat_id.clone();
                     let message_id = row.message_id.clone();
-                    div()
+                    let react = div()
                         .id(SharedString::from(format!("{}#react", row.id)))
-                        .ml(px(8.0))
                         .size(px(24.0))
                         .flex_shrink_0()
                         .flex()
@@ -739,7 +793,14 @@ impl Transcript {
                                     position: event.position(),
                                 });
                             }
-                        }))
+                        }));
+                    div()
+                        .ml(px(6.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(2.0))
+                        .child(actions)
+                        .child(react)
                 });
                 // Messages for Mac: the bubble's time shows beside the glyph on hover.
                 let hover_time = (last && !live)
@@ -750,7 +811,7 @@ impl Transcript {
                     .when(first, |el| el.pt(px(6.0)))
                     .when(last, |el| el.pb(px(6.0)))
                     .child(bubble)
-                    .children(hover_react)
+                    .children(hover_actions)
                     .children(hover_time)
                     .into_any_element()
             }
@@ -878,7 +939,7 @@ impl Transcript {
                     .child(line)
                     .into_any_element()
             }
-            RowKind::Attachment { attachment } => {
+            RowKind::Attachment { attachment, mine } => {
                 let thumbnail = attachment
                     .blob_ref
                     .as_ref()
@@ -887,6 +948,7 @@ impl Transcript {
                     .w_full()
                     .py(px(4.0))
                     .flex()
+                    .when(mine, |el| el.justify_end())
                     .child(attachments::card(
                         &row.id,
                         &attachment,
@@ -1273,6 +1335,14 @@ fn sender_caption(message: &Message) -> Option<String> {
 }
 
 /// The bubble's own clock ("9:41 PM"), the iPhone's drag-to-reveal time.
+/// UTType-style labels some clients leave as the only text on a media-only send.
+fn is_generic_media_label(text: &str) -> bool {
+    matches!(
+        text.trim().to_ascii_lowercase().as_str(),
+        "image" | "photo" | "video" | "attachment" | "(attachment)"
+    )
+}
+
 fn clock_label(ms: u64) -> Option<String> {
     use chrono::{Local, TimeZone};
     if ms == 0 {
@@ -1319,11 +1389,15 @@ fn is_json_block(block: &Block) -> bool {
 /// questions, errors. Everything the agent did (tool calls, status events,
 /// JSON, usage) is hidden; the Details drawer has it. One indicator per chat
 /// pulses under the last message while anything runs.
+///
+/// `thumb_keys` are blob refs that already have a decoded preview; they are
+/// mixed into row versions so a late thumbnail reloads the picture row.
 pub fn build_rows(
     messages: &[Message],
     show_details: bool,
     speech: SpeechRows<'_>,
     me_id: &str,
+    thumb_keys: &HashSet<&str>,
 ) -> Vec<Row> {
     let mine = |m: &Message| {
         m.sender == "user" || m.sender.is_empty() || m.sender == format!("user:{me_id}")
@@ -1351,15 +1425,19 @@ pub fn build_rows(
         match message.role {
             Role::User => {
                 let text = message.plain_text();
-                let attachments: Vec<Attachment> = message
+                let attachment_parts: Vec<(String, Attachment)> = message
                     .parts
                     .iter()
                     .filter_map(|p| match p {
-                        Part::Attachment { attachment, .. } => Some(attachment.clone()),
+                        Part::Attachment { id, attachment } => {
+                            Some((id.clone(), attachment.clone()))
+                        }
                         _ => None,
                     })
                     .collect();
-                let id = format!("{}#user", message.id);
+                let has_image = attachment_parts
+                    .iter()
+                    .any(|(_, a)| a.kind() == AttachmentKind::Image);
                 let from = if message.sender.starts_with("user:") && !mine(message) {
                     Some(Person {
                         id: message.sender.trim_start_matches("user:").to_string(),
@@ -1383,28 +1461,57 @@ pub fn build_rows(
                 } else {
                     sender_caption(message)
                 };
-                rows.push(Row {
-                    version: hash_version(
-                        &(
-                            &text,
-                            message.pending,
-                            attachments.len(),
-                            &sender_label,
-                            from.as_ref().map(|p| &p.handle),
+                // Image preview / file card rows (same cards as agent attachments).
+                let is_mine = from.is_none();
+                for (part_id, attachment) in &attachment_parts {
+                    let has_thumb = attachment
+                        .blob_ref
+                        .as_deref()
+                        .is_some_and(|k| thumb_keys.contains(k));
+                    rows.push(Row {
+                        version: hash_version(
+                            &(
+                                &attachment.name,
+                                &attachment.title,
+                                attachment.bytes,
+                                &attachment.blob_ref,
+                                is_mine,
+                                has_thumb,
+                            ),
+                            false,
                         ),
-                        false,
-                    ),
-                    id,
-                    message_id: message.id.clone(),
-                    kind: RowKind::User {
-                        text,
-                        attachments,
-                        pending: message.pending,
-                        sender_label,
-                        from,
-                        time: clock_label(message.created_at),
-                    },
-                });
+                        id: format!("{}#{}", message.id, part_id),
+                        message_id: message.id.clone(),
+                        kind: RowKind::Attachment {
+                            attachment: attachment.clone(),
+                            mine: is_mine,
+                        },
+                    });
+                }
+                // Skip a bare "Image"/"Photo" bubble when the attachment already shows it.
+                let show_text = !text.is_empty() && !(has_image && is_generic_media_label(&text));
+                if show_text || attachment_parts.is_empty() {
+                    rows.push(Row {
+                        version: hash_version(
+                            &(
+                                &text,
+                                message.pending,
+                                &sender_label,
+                                from.as_ref().map(|p| &p.handle),
+                            ),
+                            false,
+                        ),
+                        id: format!("{}#user", message.id),
+                        message_id: message.id.clone(),
+                        kind: RowKind::User {
+                            text,
+                            pending: message.pending,
+                            sender_label,
+                            from,
+                            time: clock_label(message.created_at),
+                        },
+                    });
+                }
                 if message.status == MessageStatus::Queued {
                     queued = true;
                 }
@@ -1596,17 +1703,30 @@ pub fn build_rows(
                                 block_ix += 1;
                             }
                         }
-                        Part::Attachment { id, attachment } => rows.push(Row {
-                            version: hash_version(
-                                &(&attachment.name, &attachment.title, attachment.bytes),
-                                false,
-                            ),
-                            id: format!("{}#{}", message.id, id),
-                            message_id: message.id.clone(),
-                            kind: RowKind::Attachment {
-                                attachment: attachment.clone(),
-                            },
-                        }),
+                        Part::Attachment { id, attachment } => {
+                            let has_thumb = attachment
+                                .blob_ref
+                                .as_deref()
+                                .is_some_and(|k| thumb_keys.contains(k));
+                            rows.push(Row {
+                                version: hash_version(
+                                    &(
+                                        &attachment.name,
+                                        &attachment.title,
+                                        attachment.bytes,
+                                        &attachment.blob_ref,
+                                        has_thumb,
+                                    ),
+                                    false,
+                                ),
+                                id: format!("{}#{}", message.id, id),
+                                message_id: message.id.clone(),
+                                kind: RowKind::Attachment {
+                                    attachment: attachment.clone(),
+                                    mine: false,
+                                },
+                            })
+                        }
                         // Legacy `waiting_user` row: only when no `question` part carries it.
                         Part::Status {
                             id,

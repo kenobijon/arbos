@@ -81,10 +81,10 @@ pub(super) fn frame(
 /// Big avatar, name, status line.
 pub(super) fn hero(
     avatar: AnyElement,
-    name: &str,
+    name: AnyElement,
     status: &str,
     status_color: Hsla,
-    theme: &Theme,
+    _theme: &Theme,
 ) -> Div {
     div()
         .flex_shrink_0()
@@ -95,22 +95,23 @@ pub(super) fn hero(
         .pt(px(4.0))
         .pb(px(18.0))
         .child(div().size(px(HERO_AVATAR)).child(avatar))
-        .child(
-            div()
-                .pt(px(8.0))
-                .text_size(px(TEXT_BODY + 8.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.text)
-                .max_w(px(SHEET_WIDTH - 80.0))
-                .truncate()
-                .child(name.to_string()),
-        )
+        .child(div().pt(px(8.0)).max_w(px(SHEET_WIDTH - 80.0)).child(name))
         .child(
             div()
                 .text_size(px(TEXT_SMALL))
                 .text_color(status_color)
                 .child(status.to_string()),
         )
+}
+
+/// Default hero name label (semibold, truncated).
+pub(super) fn hero_name(name: &str, theme: &Theme) -> Div {
+    div()
+        .text_size(px(TEXT_BODY + 8.0))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(theme.text)
+        .truncate()
+        .child(name.to_string())
 }
 
 /// One round action: glyph above a caption, like Telegram's call / mute / search row.

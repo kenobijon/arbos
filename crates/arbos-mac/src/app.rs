@@ -222,6 +222,8 @@ pub struct ChatUi {
     pub composer_dropped: bool,
     /// When the drop animation started (ms since epoch).
     pub drop_started_at: Option<u64>,
+    /// Message the next send replies to (hover reply / people-chat parity).
+    pub reply_to: Option<Id>,
 }
 
 pub struct AppState {
@@ -271,8 +273,6 @@ pub struct AppState {
     pub thumbnails: HashMap<String, Arc<RenderImage>>,
     /// Thumbnail fetches in flight or failed (never asked twice).
     thumbnails_requested: HashSet<String>,
-    pub browser_frame: Option<Arc<RenderImage>>,
-    pub browser_frames_seen: u64,
     pub notices: Vec<Notice>,
     pub selected_project: Option<Id>,
     /// Bytes and chats kept on this Mac by the on-device store (Settings → About).
@@ -298,7 +298,6 @@ pub struct AppState {
     /// Below [`NARROW_WINDOW`](crate::ui::theme::NARROW_WINDOW) the sidebar
     /// auto-hides; the header toggle (or ⌘B) floats it over the chat instead.
     pub sidebar_overlay: bool,
-    pub right_panel_open: bool,
     pub details_open: Option<DetailsTarget>,
     pub new_project_open: bool,
     /// Debug: per-message "Show details" disclosures in the transcript.
@@ -329,6 +328,8 @@ pub struct AppState {
     pub profile_more_open: bool,
     /// Agent page: the owner is editing the description inline.
     pub profile_editing_description: bool,
+    /// Double-click rename: the project whose name is being edited inline.
+    pub renaming_project: Option<Id>,
     /// Spaces whose notifications are muted (`<config>/muted.json`).
     pub muted: HashSet<Id>,
     /// Last presence frame seen per handle (ms): "online" while fresh.
@@ -546,8 +547,6 @@ impl AppState {
             blobs: HashMap::new(),
             thumbnails: HashMap::new(),
             thumbnails_requested: HashSet::new(),
-            browser_frame: None,
-            browser_frames_seen: 0,
             notices: Vec::new(),
             selected_project: None,
             store_usage: (0, 0),
@@ -561,7 +560,6 @@ impl AppState {
             link: Link::Connecting,
             rail_collapsed: false,
             sidebar_overlay: false,
-            right_panel_open: false,
             details_open: None,
             new_project_open: false,
             show_details: false,
@@ -579,6 +577,7 @@ impl AppState {
             profile_picker_open: false,
             profile_more_open: false,
             profile_editing_description: false,
+            renaming_project: None,
             muted: load_muted(),
             presence_seen: HashMap::new(),
             notify_prompt_answered: false,
@@ -956,16 +955,6 @@ impl AppState {
                 self.push_notice(format!("Saved to {}", path.display()));
                 crate::ui::attachments::reveal(&path);
                 cx.notify();
-            }
-            SyncEvent::BrowserFrame { project_id, jpeg } => {
-                if self.selected_project.as_deref() != Some(project_id.as_str()) {
-                    return;
-                }
-                if let Some(image) = decode_image(&jpeg) {
-                    self.browser_frame = Some(Arc::new(image));
-                    self.browser_frames_seen += 1;
-                    cx.notify();
-                }
             }
             SyncEvent::Notice(text) => {
                 self.push_notice(text);
@@ -1678,6 +1667,13 @@ impl AppState {
         }
         self.reveal_message = None;
         self.highlight_message = None;
+        if self
+            .renaming_project
+            .as_ref()
+            .is_some_and(|id| id != &project_id)
+        {
+            self.renaming_project = None;
+        }
         self.selected_project = Some(project_id.clone());
         self.sidebar_overlay = false;
         // Agents: the last chat used here, else the primary (enforce_tab picks).
@@ -1964,13 +1960,33 @@ impl AppState {
         true
     }
 
-    pub fn send(&mut self, text: String, attachments: Vec<PathBuf>, cx: &mut Context<Self>) {
-        self.send_with(text, attachments, None, cx);
+    pub fn send(
+        &mut self,
+        text: String,
+        attachments: Vec<PathBuf>,
+        reply_to: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.send_with(text, attachments, None, reply_to, cx);
     }
 
     /// F11: a spoken message; `wav` is kept on the row as an `audio` attachment.
     pub fn send_voice(&mut self, text: String, wav: Arc<Vec<u8>>, cx: &mut Context<Self>) {
-        self.send_with(text, Vec::new(), Some(wav), cx);
+        self.send_with(text, Vec::new(), Some(wav), None, cx);
+    }
+
+    /// Hover reply: the next send in this chat answers `message_id`.
+    pub fn set_reply_to(&mut self, chat_id: Id, message_id: Id, cx: &mut Context<Self>) {
+        self.chat_ui.entry(chat_id).or_default().reply_to = Some(message_id);
+        cx.notify();
+    }
+
+    /// Clear the reply chip above the composer.
+    pub fn clear_reply_to(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        if let Some(ui) = self.chat_ui.get_mut(chat_id) {
+            ui.reply_to = None;
+        }
+        cx.notify();
     }
 
     fn send_with(
@@ -1978,6 +1994,7 @@ impl AppState {
         text: String,
         attachments: Vec<PathBuf>,
         voice_wav: Option<Arc<Vec<u8>>>,
+        reply_to: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let Some(chat_id) = self.active_chat_id() else {
@@ -1991,6 +2008,7 @@ impl AppState {
                 ui.composer_dropped = true;
                 ui.drop_started_at = Some(now_ms());
             }
+            ui.reply_to = None;
         }
         // Title from the first message (§3.4); the source also queues a
         // `retitle` command for the box.
@@ -2003,25 +2021,51 @@ impl AppState {
             chat.title = title_from(&text);
         }
         // Optimistic echo: the row shows at once; the source's frame with the
-        // same id replaces it (§3.6).
-        let mut parts: Vec<Part> = attachments
-            .iter()
-            .map(|path| Part::Attachment {
-                id: new_id(),
-                attachment: crate::model::Attachment {
-                    name: path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("attachment")
-                        .to_string(),
-                    mime: "application/octet-stream".into(),
+        // same id replaces it (§3.6). Image files get a local thumbnail so the
+        // card shows a picture immediately, not "No preview".
+        let mut parts: Vec<Part> = Vec::new();
+        for path in &attachments {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("attachment")
+                .to_string();
+            let mime = mime_for_path(path).to_string();
+            let att_id = new_id();
+            let mut blob_ref = None;
+            let bytes = if let Ok(data) = std::fs::read(path) {
+                let probe = crate::model::Attachment {
+                    name: name.clone(),
+                    mime: mime.clone(),
                     blob_ref: None,
-                    bytes: None,
+                    bytes: Some(data.len() as u64),
+                    kind: None,
+                    title: None,
+                };
+                if probe.is_image() {
+                    if let Some(image) = decode_image(&data) {
+                        let key = format!("local:{att_id}");
+                        self.thumbnails.insert(key.clone(), Arc::new(image));
+                        self.thumbnails_requested.insert(key.clone());
+                        blob_ref = Some(key);
+                    }
+                }
+                Some(data.len() as u64)
+            } else {
+                std::fs::metadata(path).ok().map(|m| m.len())
+            };
+            parts.push(Part::Attachment {
+                id: att_id,
+                attachment: crate::model::Attachment {
+                    name,
+                    mime,
+                    blob_ref,
+                    bytes,
                     kind: None,
                     title: None,
                 },
-            })
-            .collect();
+            });
+        }
         if voice_wav.is_some() {
             parts.push(Part::Attachment {
                 id: new_id(),
@@ -2062,7 +2106,7 @@ impl AppState {
                 sender_avatar: None,
                 sender_avatar_color: None,
                 mentions: Vec::new(),
-                reply_to: None,
+                reply_to: reply_to.clone(),
                 asked_by_handle: None,
                 owner_handle: None,
                 usage: None,
@@ -2108,6 +2152,7 @@ impl AppState {
                 message_id,
                 text,
                 attachments,
+                reply_to,
             });
         }
         cx.emit(AppEvent::TranscriptChanged { chat_id });
@@ -2602,6 +2647,7 @@ impl AppState {
         self.profile_picker_open = false;
         self.profile_more_open = false;
         self.profile_editing_description = false;
+        self.renaming_project = None;
         cx.notify();
     }
 
@@ -2621,6 +2667,26 @@ impl AppState {
         cx.notify();
     }
 
+    /// Start an inline rename of an owned agent (double-click on its name).
+    pub fn start_renaming(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        let ok = self
+            .projects
+            .iter()
+            .any(|p| p.id == project_id && !p.is_guest() && !p.is_people());
+        if !ok {
+            return;
+        }
+        self.renaming_project = Some(project_id);
+        self.profile_editing_description = false;
+        cx.notify();
+    }
+
+    pub fn cancel_renaming(&mut self, cx: &mut Context<Self>) {
+        if self.renaming_project.take().is_some() {
+            cx.notify();
+        }
+    }
+
     /// Agent page: save the description (`""` clears) — optimistic, then PATCH.
     pub fn set_description(&mut self, project_id: Id, description: String, cx: &mut Context<Self>) {
         let description = description.trim().chars().take(500).collect::<String>();
@@ -2632,6 +2698,26 @@ impl AppState {
             project_id,
             description,
         });
+        cx.notify();
+    }
+
+    /// Rename an owned agent — optimistic, then `PATCH /projects/{id} {name}`.
+    pub fn set_project_name(&mut self, project_id: Id, name: String, cx: &mut Context<Self>) {
+        let name = name.trim().chars().take(64).collect::<String>();
+        if name.is_empty() {
+            self.cancel_renaming(cx);
+            return;
+        }
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
+            if p.name == name {
+                self.renaming_project = None;
+                cx.notify();
+                return;
+            }
+            p.name = name.clone();
+        }
+        self.renaming_project = None;
+        self.command(ClientCommand::SetProjectName { project_id, name });
         cx.notify();
     }
 
@@ -2769,13 +2855,6 @@ impl AppState {
         if let Some(chat_id) = self.active_chat_id() {
             cx.emit(AppEvent::TranscriptChanged { chat_id });
         }
-        cx.notify();
-    }
-
-    pub fn toggle_right_panel(&mut self, cx: &mut Context<Self>) {
-        self.right_panel_open = !self.right_panel_open;
-        let on = self.right_panel_open;
-        self.watch_browser(on, cx);
         cx.notify();
     }
 
@@ -3539,6 +3618,10 @@ impl AppState {
                 let Some(key) = attachment.blob_ref.clone() else {
                     continue;
                 };
+                // Optimistic send stores a decoded preview under `local:…`.
+                if key.starts_with("local:") {
+                    continue;
+                }
                 if !self.thumbnails_requested.insert(key.clone()) {
                     continue;
                 }
@@ -3561,17 +3644,6 @@ impl AppState {
             key,
             name,
         });
-        cx.notify();
-    }
-
-    pub fn watch_browser(&mut self, on: bool, cx: &mut Context<Self>) {
-        let Some(project_id) = self.selected_project.clone() else {
-            return;
-        };
-        if !on {
-            self.browser_frame = None;
-        }
-        self.command(ClientCommand::WatchBrowser { project_id, on });
         cx.notify();
     }
 
@@ -4001,28 +4073,6 @@ impl AppState {
         self.selected_project
             .as_deref()
             .and_then(|id| self.project_docs.get(id))
-    }
-
-    /// The live browser card of the selected project, if any (S16).
-    pub fn live_browser(&self) -> Option<(String, String, String)> {
-        let project_id = self.selected_project.as_deref()?;
-        for chat in self.tabs(project_id) {
-            for m in self.messages_of(&chat.id).iter().rev() {
-                for p in &m.parts {
-                    if let Part::Browser {
-                        title,
-                        url,
-                        last_action,
-                        live: true,
-                        ..
-                    } = p
-                    {
-                        return Some((title.clone(), url.clone(), last_action.clone()));
-                    }
-                }
-            }
-        }
-        None
     }
 
     pub fn box_state(&self) -> Option<BoxState> {
@@ -4675,6 +4725,31 @@ pub fn title_from(text: &str) -> String {
         "New chat".into()
     } else {
         out
+    }
+}
+
+/// MIME from a local path's extension (optimistic echo before the relay replies).
+fn mime_for_path(path: &std::path::Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "heic" => "image/heic",
+        "pdf" => "application/pdf",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "m4a" => "audio/mp4",
+        "mp4" => "video/mp4",
+        "mov" => "video/quicktime",
+        "md" | "txt" => "text/plain",
+        _ => "application/octet-stream",
     }
 }
 

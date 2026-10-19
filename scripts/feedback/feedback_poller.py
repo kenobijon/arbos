@@ -454,6 +454,10 @@ class GitHub:
                     return a["browser_download_url"]
             raise
 
+    def comments_since(self, number: int, since_iso: str) -> list[dict]:
+        q = urllib.parse.urlencode({"since": since_iso, "per_page": 50})
+        return self.repo_api("GET", f"/issues/{number}/comments?{q}")
+
     def commits_since(self, since_iso: str) -> list[dict]:
         q = urllib.parse.urlencode({"sha": "main", "since": since_iso, "per_page": 100})
         return self.repo_api("GET", f"/commits?{q}")
@@ -474,12 +478,21 @@ class GitHub:
 
     def merge_into_main(self, head_sha: str, message: str) -> dict | None:
         """A merge commit on main (never a rewrite). None when GitHub reports a conflict (409)."""
+        return self.merge_into("main", head_sha, message)
+
+    def merge_into(self, base: str, head_sha: str, message: str) -> dict | None:
+        """A merge commit on `base` (never a rewrite). None when GitHub reports a conflict (409); {} when
+        `head` is already contained (204)."""
         try:
-            return self.repo_api("POST", "/merges", json_body={"base": "main", "head": head_sha, "commit_message": message})
+            doc = self.repo_api("POST", "/merges", json_body={"base": base, "head": head_sha, "commit_message": message})
+            return doc or {}
         except HttpError as e:
             if e.status == 409:
                 return None
             raise
+
+    def create_branch(self, branch: str, sha: str) -> None:
+        self.repo_api("POST", "/git/refs", json_body={"ref": f"refs/heads/{branch}", "sha": sha})
 
     def delete_branch(self, branch: str) -> None:
         with contextlib.suppress(HttpError):
@@ -1065,6 +1078,10 @@ class Loop:
         owner (priority tier) gets the pattern screen only: his intent is not in question, and the model
         misreads security *requests* ("scrub the leaked key from context") as attacks."""
         text = (info.get("comment") or "").strip()
+        # The submit_feedback tool appends "— filed by the user's agent <name> …": boilerplate, not the user's
+        # words, and "the user" in it sits within 30 chars of any trailing "delete" (#1085 was flagged for a
+        # "fork or delete" context menu).
+        text = re.sub(r"\s*[—-]+\s*filed by the user'?s agent\b.*$", "", text, flags=re.I | re.S).strip()
         for pat in MALICE_PATTERNS:
             if re.search(pat, text, re.I | re.S):
                 return "malicious", f"matches pattern `{pat}`"
@@ -1185,32 +1202,9 @@ class Loop:
             summary = summary[:67].rstrip() + "…"
         return f"[feedback {fid}] {summary}"
 
-    def launch(self, fid: str, st: dict) -> None:
-        info = self.store.submission(fid)
-        st.setdefault("tester_key", self.tester_key(info))
-        if not st.get("tier"):
-            # Items queued before tiers existed.
-            st["tier"] = self.tier(info)
-            st["tester"] = self.tester_label(info, st["tier"])
-            self.store.save_state(fid, st)
-        deferral = self.deferral_for(info, st.get("target") or self.pick_target(info))
-        reason = None if deferral else self.rate_limit_reason(st)
-        if reason:
-            if st.get("deferred_reason") != reason.split(" (")[0]:
-                st["deferred_reason"] = reason.split(" (")[0]
-                self.store.save_state(fid, st)
-                log(f"[{fid}] deferred: {reason}")
-            return
-        shots = self.store.screenshots(fid)
-        # TestFlight lets a tester send words without a screenshot; the comment is the evidence then
-        # (same as a relayed chat report). Only an item with neither image nor words cannot run.
-        if not shots and not (info.get("comment") or "").strip():
-            st.update(status="failed", error="no screenshot and no comment")
-            self.store.save_state(fid, st)
-            self.store.event(fid, "failed", error="no screenshot and no comment")
-            return
-
-        # 1. screenshot assets + issue
+    def open_issue(self, fid: str, st: dict, info: dict, deferral: str | None, shots: list[Path]) -> bool:
+        """Screenshots to the release assets, intent screen, GitHub issue (labels, agent evidence). False = the
+        item stops here (screened as malicious, or deferred by rule); True = ready for an agent."""
         asset_urls = []
         for n, p in enumerate(shots, start=1):
             asset_urls.append(self.gh.upload_asset(p, f"{fid}-{n}{p.suffix.lower()}", mime_for(p)))
@@ -1270,14 +1264,47 @@ class Loop:
             self.store.event(fid, "rejected", reason=why, tester=st.get("tester"))
             self.gh.comment(issue["number"], f"Not built: the intent screen flagged this as obviously malicious ({why}). "
                             "Jacob, if this is a false positive, say so here and I will run it by hand.")
-            return
+            return False
         if deferral:
             st.update(status="deferred", error=deferral)
             self.store.save_state(fid, st)
             self.store.event(fid, "deferred", reason=deferral, tester=st.get("tester"))
             self.gh.comment(issue["number"], deferral)
             self.gh.set_labels(issue["number"], ["deferred"], [])
+            return False
+        return True
+
+    def launch(self, fid: str, st: dict) -> None:
+        info = self.store.submission(fid)
+        st.setdefault("tester_key", self.tester_key(info))
+        if not st.get("tier"):
+            # Items queued before tiers existed.
+            st["tier"] = self.tier(info)
+            st["tester"] = self.tester_label(info, st["tier"])
+            self.store.save_state(fid, st)
+        deferral = self.deferral_for(info, st.get("target") or self.pick_target(info))
+        shots = self.store.screenshots(fid)
+        # TestFlight lets a tester send words without a screenshot; the comment is the evidence then
+        # (same as a relayed chat report). Only an item with neither image nor words cannot run.
+        if not shots and not (info.get("comment") or "").strip():
+            st.update(status="failed", error="no screenshot and no comment")
+            self.store.save_state(fid, st)
+            self.store.event(fid, "failed", error="no screenshot and no comment")
             return
+        # 1. The issue is opened as soon as the item is admitted (dedupe already happened), so every report is
+        # visible and claimable at once; only the agent launch waits for the launch rate limits.
+        if not st.get("issue") or not st.get("screen") or (st.get("screen_override") and "operator override" not in (st.get("screen") or "")):
+            if not self.open_issue(fid, st, info, deferral, shots):
+                return
+        reason = None if deferral else self.rate_limit_reason(st)
+        if reason:
+            if st.get("deferred_reason") != reason.split(" (")[0]:
+                st["deferred_reason"] = reason.split(" (")[0]
+                self.store.save_state(fid, st)
+                log(f"[{fid}] deferred: {reason}")
+            return
+        issue = {"number": st["issue"], "html_url": st["issue_url"]}
+        t = self.target_info(st["target"])
 
         # 2. Cursor agent
         images = []
@@ -1413,19 +1440,9 @@ class Loop:
                 return
             done = st.get("rust_gate") or {}
             if not (done.get("head") == head and done.get("ok")):
-                res = self.rust_gate_step(fid, st)
-                if res is None:
-                    return
-                verdict, output = res
-                st["rust_gate"] = {"head": head, "ok": verdict == "ok", "verdict": verdict, "at": iso(), "tail": output[-3000:]}
-                self.store.save_state(fid, st)
-                self.store.event(fid, "rust_gate", head=head, verdict=verdict)
-                if verdict == "conflict":
-                    self.conflict_followup(fid, st, output)
-                    return
-                if verdict != "ok":
-                    self.gate_followup(fid, st, "rust", output)
-                    return
+                # The batch scheduler (rust_gate_tick) builds every ready branch together and records the
+                # verdict here; red → gate_followup, conflict → conflict_followup, both from the scheduler.
+                return
         if st.get("expects_ios") and self.cfg.ios_gate_ssh:
             ok, output = self.ios_gate(st["branch"], head)
             st["gate"] = {"head": head, "ok": ok, "at": iso(), "tail": output[-3000:]}
@@ -1443,7 +1460,15 @@ class Loop:
         head = st["branch_head"]
         st["gated_head"] = head
         retries = st.get("gate_retries", 0)
-        label = {"ios": "iOS build", "rust": "Rust gate (fmt, clippy -D warnings, test, arbos-mac release build)"}[which]
+        label = {"ios": "iOS build", "rust": "Rust gate (CI on the integration tree + arbos-mac release build)"}[which]
+        if st.get("handed_off_to"):
+            # Not the loop's agent: the owner reads the issue and pushes a new commit, which re-gates.
+            st["status"] = "handed_off"
+            self.store.save_state(fid, st)
+            self.gh.comment(st["issue"], f"{label.split(' (')[0]} gate: `{st['branch']}`@{head[:8]} is red — not merged. "
+                            f"{st['handed_off_to']}: fix and push a new commit to the same branch (no force-push) to re-gate.\n\n```\n"
+                            + "\n".join(output.splitlines()[-40:]) + "\n```")
+            return
         if retries >= 2:
             self.fail(fid, st, f"the {label} of `{st['branch']}` failed {retries + 1} times on the gate Mac; not merged", extra=output)
             return
@@ -1451,9 +1476,9 @@ class Loop:
             what = ("The iPhone app does not compile with your change (built on a Mac with Xcode, Release and Debug, "
                     "simulator). ")
         else:
-            what = ("Your change does not pass the Rust gate (run on a Mac against your branch merged with current "
-                    "`main`: `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and "
-                    "`cargo test` for the touched crates, then `cargo build --release --locked -p arbos-mac` when "
+            what = ("Your change does not pass the Rust gate (your branch merged with current `main`: CI on Linux — "
+                    "`cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, "
+                    "`cargo test --workspace --locked` — and `cargo build --release --locked -p arbos-mac` on a Mac when "
                     "crates/arbos-mac is touched). Run the same commands locally until they pass. ")
         followup = (what + f"Fix it with the smallest change and push a **new commit** to the same branch `{st['branch']}` "
                     f"(no force-push, no amend; same commit message shape `fix(feedback): <summary> [feedback {fid}]`). "
@@ -1480,6 +1505,13 @@ class Loop:
         head = st["branch_head"]
         st["gated_head"] = head
         retries = st.get("gate_retries", 0)
+        if st.get("handed_off_to"):
+            st["status"] = "handed_off"
+            self.store.save_state(fid, st)
+            self.gh.comment(st["issue"], f"`{st['branch']}`@{head[:8]} conflicts with `main` — not merged. {st['handed_off_to']}: "
+                            "merge `origin/main` into the branch (a merge, never a rebase), resolve, push; the loop re-gates."
+                            + (f"\n\n```\n{detail[-2000:]}\n```" if detail else ""))
+            return
         if retries >= 2:
             self.fail(fid, st, f"`{st['branch']}` conflicts with main and the agent could not resolve it", extra=detail)
             return
@@ -1510,42 +1542,246 @@ class Loop:
             raise RuntimeError(f"Rust gate ssh failed ({r.returncode}): {(r.stdout or '') + (r.stderr or '')}"[-1500:])
         return r.stdout or ""
 
-    def rust_gate_step(self, fid: str, st: dict) -> tuple[str, str] | None:
-        """Drive the asynchronous Rust gate on the Mac, one branch at a time across all items (the build directory
-        is shared). None = still running or waiting for another item's run; else (verdict, diagnostics) with
-        verdict ok | fail | conflict."""
-        head = st["branch_head"]
+    def rust_gate_ready(self) -> list[tuple[str, dict]]:
+        """Gating items that need a Rust verdict for their current head, oldest first."""
+        out = []
+        for fid in self.store.items():
+            st = self.store.state(fid)
+            if st.get("status") != "gating" or not st.get("expects_rust") or not st.get("branch_head"):
+                continue
+            done = st.get("rust_gate") or {}
+            if done.get("head") == st["branch_head"] and done.get("ok"):
+                continue
+            out.append((fid, st))
+        return out
+
+    def rust_gate_tick(self) -> None:
+        """Batch mode for the Rust gate, split in two halves that run at the same time:
+        every ready branch is merged with current main into one integration branch `gate/<run>` on GitHub
+        (what will land). Linux half: CI on that branch (fmt --check, clippy --workspace -D warnings, test,
+        plus layout/harness) on a GitHub-hosted runner. Mac half: `cargo build --release -p arbos-mac` of the
+        same tree on the EC2 Mac (only when crates/arbos-mac or the workspace manifest is touched). Both green →
+        every merged branch lands on main, in the same order. Either red → bisect: the first half is gated
+        next, then the rest, so one bad branch costs the others one extra run; a batch of one that is red goes
+        back to its agent with the diagnostics. A branch that does not merge is `conflict-main` (follow-up to
+        the agent) or `conflict-sibling` (left for the next batch; after 3 rounds treated as a main conflict).
+        While the Mac is unreachable the Linux half still runs and branches are pre-validated; they land the
+        moment the Mac build passes. With nothing ready and main moved, a warm-up Mac build of main keeps the
+        next release build incremental."""
+        if not self.cfg.rust_gate_ssh:
+            return
         cur = self.store.cursor()
         active = cur.get("rust_gate")
-        if active and active.get("fid") != fid:
-            if active.get("started") and minutes_between(active["started"], iso()) * 60 > self.cfg.rust_gate_timeout_s + 600:
-                # The owner of the run went away (failed, cancelled by hand): free the slot.
-                cur.pop("rust_gate", None)
-                self.store.save_cursor(cur)
-            return None
-        if not active or active.get("head") != head:
-            crates = self.rust_crates(st.get("files") or [])
-            mac = "1" if "arbos-mac" in crates or crates == ["workspace"] else "0"
-            self.rust_gate_ssh("start", st["branch"], head, ",".join(crates), mac)
-            cur["rust_gate"] = {"fid": fid, "head": head, "started": iso()}
+        if active and active.get("fid"):
+            # A run from the one-at-a-time scheduler (before batch mode): nothing to resume, re-batch it.
+            cur.pop("rust_gate", None); self.store.save_cursor(cur); active = None
+        if active and active.get("warm"):
+            out = self.rust_gate_mac("status", active["id"])
+            verdict = (out or "running\n").partition("\n")[0].strip()
+            if verdict == "running" and not self.rust_gate_ready() and minutes_between(active["started"], iso()) * 60 < self.cfg.rust_gate_timeout_s:
+                return
+            if verdict == "running":
+                self.rust_gate_mac("abort", active["id"])
+            elif verdict == "ok":
+                cur["rust_gate_warm"] = active.get("base")
+            cur.pop("rust_gate", None); self.store.save_cursor(cur); active = None
+        if active:
+            if self.rust_gate_poll(active):
+                return
+            cur = self.store.cursor()
+        ready = self.rust_gate_ready()
+        plan = cur.get("rust_gate_plan") or []
+        members: dict[str, str] = {}
+        while plan and not members:
+            half = plan.pop(0)
+            members = {fid: head for fid, head in half.items() if any(f == fid and st["branch_head"] == head for f, st in ready)}
+        if not members:
+            members = {fid: st["branch_head"] for fid, st in ready}
+        cur["rust_gate_plan"] = plan
+        self.store.save_cursor(cur)
+        if members:
+            self.rust_gate_start(members)
+            return
+        main_head = self.gh.branch_head("main")
+        if main_head and cur.get("rust_gate_warm") != main_head and self.rust_gate_mac("start-batch", f"warm-{main_head[:8]}", main_head, "1") is not None:
+            cur["rust_gate"] = {"id": f"warm-{main_head[:8]}", "members": {}, "started": iso(), "warm": True, "base": main_head}
             self.store.save_cursor(cur)
-            log(f"[{fid}] Rust gate started for {st['branch']}@{head[:8]} ({','.join(crates)}, release arbos-mac: {mac})")
+            log(f"Rust gate: warm-up release build of main {main_head[:8]} started on the Mac")
+
+    def rust_gate_mac(self, *args: str) -> str | None:
+        """ssh to the gate Mac; None when it is unreachable (the Linux half keeps going, the Mac half waits)."""
+        try:
+            return self.rust_gate_ssh(*args)
+        except (RuntimeError, subprocess.TimeoutExpired) as e:
+            log(f"Rust gate Mac unreachable: {str(e)[-200:]}")
             return None
-        out = self.rust_gate_ssh("status", head)
-        verdict, _, body = out.partition("\n")
-        verdict = verdict.strip()
-        if verdict == "running":
-            if minutes_between(active["started"], iso()) * 60 > self.cfg.rust_gate_timeout_s:
-                self.rust_gate_ssh("abort", head)
-                cur.pop("rust_gate", None)
+
+    def rust_gate_start(self, members: dict[str, str]) -> None:
+        """Build the integration branch gate/<run> on GitHub (main + every member, in order); CI starts on the
+        push; the Mac release build starts if the Mac answers (else it is started on a later tick)."""
+        run_id = f"{utcnow().strftime('%Y%m%dT%H%M%S')}-{len(members)}"
+        branch = f"gate/{run_id}"
+        base = self.gh.branch_head("main")
+        self.gh.create_branch(branch, base)
+        merged: list[str] = []
+        conflicts: dict[str, str] = {}
+        for fid, head in members.items():
+            res = self.gh.merge_into(branch, head, f"gate: merge feedback/{fid} [gate {run_id}]")
+            if res is None:
+                conflicts[fid] = "conflict-main" if not merged else "conflict-sibling"
+            else:
+                merged.append(fid)
+        tree = self.gh.branch_head(branch) or base
+        files: list[str] = []
+        for fid in merged:
+            files += self.store.state(fid).get("files") or []
+        crates = self.rust_crates(files)
+        mac = "arbos-mac" in crates or crates == ["workspace"]
+        cur = self.store.cursor()
+        cur["rust_gate"] = {"id": run_id, "branch": branch, "base": base, "tree": tree, "members": {fid: members[fid] for fid in merged},
+                            "conflicts": conflicts, "started": iso(), "warm": False, "needs_mac": mac,
+                            "linux": "pending", "mac": "pending" if mac else "skipped", "mac_started": None}
+        self.store.save_cursor(cur)
+        for fid, kind in conflicts.items():
+            self.rust_gate_conflict(fid, members[fid], kind, run_id)
+        if not merged:
+            self.gh.delete_branch(branch)
+            cur.pop("rust_gate", None); self.store.save_cursor(cur)
+            return
+        for fid in merged:
+            self.store.event(fid, "rust_gate_started", run=run_id, members=len(merged), tree=tree, mac=mac)
+        log(f"Rust gate {run_id}: {len(merged)} branch(es) on {branch}@{tree[:8]} (base {base[:8]}; CI on GitHub"
+            + ("; arbos-mac release build on the Mac" if mac else "") + f"; conflicts: {len(conflicts)})")
+        if mac:
+            self.rust_gate_mac_start(cur)
+
+    def rust_gate_mac_start(self, cur: dict) -> None:
+        active = cur["rust_gate"]
+        if self.rust_gate_mac("start-batch", active["id"], active["tree"], "1") is not None:
+            active["mac_started"] = iso()
+            self.store.save_cursor(cur)
+            log(f"Rust gate {active['id']}: Mac release build started for {active['tree'][:8]}")
+
+    def rust_gate_poll(self, active: dict) -> bool:
+        """Advance a running batch. True = still running (nothing more to do this tick)."""
+        cur = self.store.cursor()
+        # Linux half: the CI run on the integration branch.
+        if active["linux"] == "pending":
+            runs = [r for r in self.gh.runs_for_sha(active["tree"]) if r.get("name") == "CI"]
+            run = runs[0] if runs else None
+            if run and run["status"] == "completed":
+                active["linux"] = "ok" if run["conclusion"] == "success" else "fail"
+                active["linux_run"] = run["html_url"]
+                if active["linux"] == "fail":
+                    active["linux_errors"] = self.gh.run_error_lines(run["id"], limit=60)
                 self.store.save_cursor(cur)
-                raise RuntimeError(f"Rust gate for {head[:8]} exceeded {self.cfg.rust_gate_timeout_s} s; aborted (will restart next tick)")
-            return None
+                log(f"Rust gate {active['id']}: Linux half {active['linux']} ({run['html_url']})")
+            elif not run and minutes_between(active["started"], iso()) > 10:
+                # Not the branches' fault: drop the run without verdicts; the next tick re-batches.
+                log(f"Rust gate {active['id']}: CI did not start on {active['branch']} within 10 min; re-batching")
+                if active.get("mac_started") and active["mac"] == "pending":
+                    self.rust_gate_mac("abort", active["id"])
+                cur.pop("rust_gate", None); self.store.save_cursor(cur)
+                self.gh.delete_branch(active["branch"])
+                return False
+        # Mac half: the release build of the same tree.
+        if active["mac"] == "pending":
+            if not active.get("mac_started"):
+                self.rust_gate_mac_start(cur)
+            else:
+                out = self.rust_gate_mac("status", active["id"])
+                if out is not None:
+                    verdict, _, body = out.partition("\n")
+                    verdict = verdict.strip()
+                    if verdict == "running":
+                        if minutes_between(active["mac_started"], iso()) * 60 > self.cfg.rust_gate_timeout_s:
+                            self.rust_gate_mac("abort", active["id"])
+                            active["mac_started"] = None  # restart next tick
+                            self.store.save_cursor(cur)
+                    elif verdict == "infra":
+                        log(f"Rust gate {active['id']}: Mac infrastructure error, retrying: {body[-300:]}")
+                        active["mac_started"] = None
+                        self.store.save_cursor(cur)
+                    else:
+                        active["mac"] = verdict  # ok | fail
+                        active["mac_tail"] = body[-4000:]
+                        self.store.save_cursor(cur)
+                        log(f"Rust gate {active['id']}: Mac half {verdict}")
+        if active["linux"] == "pending" or active["mac"] == "pending":
+            if active["linux"] == "fail" or active["mac"] == "fail":
+                # One half is already red: settle now; a Mac build still running is for a dead tree.
+                if active["mac"] == "pending" and active.get("mac_started"):
+                    self.rust_gate_mac("abort", active["id"])
+            else:
+                return True
+        self.rust_gate_settle(active)
+        cur = self.store.cursor()
         cur.pop("rust_gate", None)
         self.store.save_cursor(cur)
-        if verdict == "infra":
-            raise RuntimeError(f"Rust gate infrastructure error for {head[:8]}: {body[-1500:]}")
-        return verdict, body
+        self.gh.delete_branch(active["branch"])
+        return False
+
+    def rust_gate_conflict(self, fid: str, head: str, kind: str, run_id: str) -> None:
+        st = self.store.state(fid)
+        if not st or st.get("status") != "gating" or st.get("branch_head") != head:
+            return
+        if kind == "conflict-sibling":
+            st["sibling_conflicts"] = st.get("sibling_conflicts", 0) + 1
+            if st["sibling_conflicts"] < 3:
+                self.store.save_state(fid, st)
+                log(f"[{fid}] conflicts with a sibling branch in gate {run_id}; retried in the next batch")
+                return
+            detail = "the branch conflicts with the other fixes landing alongside it (3 rounds)"
+        else:
+            detail = "the branch does not merge into current main"
+        st["rust_gate"] = {"head": head, "ok": False, "verdict": "conflict", "at": iso(), "run": run_id}
+        self.store.event(fid, "rust_gate", head=head, verdict="conflict", run=run_id)
+        self.conflict_followup(fid, st, detail)
+
+    def rust_gate_settle(self, active: dict) -> None:
+        members: dict[str, str] = active["members"]
+        order = list(members)
+        ok = active["linux"] == "ok" and active["mac"] in ("ok", "skipped")
+        log(f"Rust gate {active['id']}: settle linux={active['linux']} mac={active['mac']} members={len(order)}")
+        if ok:
+            for fid in order:
+                st = self.store.state(fid)
+                if st.get("status") != "gating" or st.get("branch_head") != members[fid]:
+                    continue
+                st["rust_gate"] = {"head": members[fid], "ok": True, "verdict": "ok", "at": iso(), "run": active["id"], "batch": len(order),
+                                   "linux_run": active.get("linux_run"), "mac": active["mac"]}
+                self.store.save_state(fid, st)
+                self.store.event(fid, "rust_gate", head=members[fid], verdict="ok", run=active["id"], batch=len(order))
+                try:
+                    self.gate(fid, st)  # iOS gate if needed, then the merge
+                except Exception as e:  # noqa: BLE001
+                    log(f"[{fid}] merge after the Rust gate failed: {e}")
+            cur = self.store.cursor()
+            cur["rust_gate_warm"] = active["tree"] if active["mac"] == "ok" else None
+            self.store.save_cursor(cur)
+            return
+        diagnostics = ""
+        if active["linux"] == "fail":
+            diagnostics += f"Linux (CI on the integration tree, {active.get('linux_run') or 'no run'}):\n" + "\n".join(active.get("linux_errors") or []) + "\n"
+        if active["mac"] == "fail":
+            diagnostics += f"Mac (cargo build --release -p arbos-mac on the integration tree):\n{active.get('mac_tail') or ''}\n"
+        if len(order) == 1:
+            fid = order[0]
+            st = self.store.state(fid)
+            if st.get("status") == "gating" and st.get("branch_head") == members[fid]:
+                st["rust_gate"] = {"head": members[fid], "ok": False, "verdict": "fail", "at": iso(), "tail": diagnostics[-3000:], "run": active["id"]}
+                self.store.event(fid, "rust_gate", head=members[fid], verdict="fail", run=active["id"])
+                self.gate_followup(fid, st, "rust", diagnostics)
+            return
+        half = len(order) // 2
+        first = {fid: members[fid] for fid in order[:half]}
+        rest = {fid: members[fid] for fid in order[half:]}
+        cur = self.store.cursor()
+        cur["rust_gate_plan"] = [first, rest] + (cur.get("rust_gate_plan") or [])
+        self.store.save_cursor(cur)
+        log(f"Rust gate {active['id']} red with {len(order)} branches: bisecting into {len(first)} + {len(rest)}")
+        for fid in order:
+            self.store.event(fid, "rust_gate_bisect", run=active["id"], members=len(order))
 
     def ios_gate(self, branch: str, head: str) -> tuple[bool, str]:
         """ssh to the gate Mac and run ios-gate.sh <branch> <sha>; (ok, output)."""
@@ -1580,8 +1816,11 @@ class Loop:
         self.store.save_state(fid, st)
         self.store.event(fid, "pushed", commit=fix["sha"], merge=merged["sha"], files=st.get("files"))
         gate_note = ""
-        if (st.get("rust_gate") or {}).get("ok"):
-            gate_note += " Rust gate: fmt, clippy -D warnings, tests" + (", arbos-mac release build" if "arbos-mac" in self.rust_crates(st.get("files") or []) or self.rust_crates(st.get("files") or []) == ["workspace"] else "") + " ✓ on the Mac."
+        rg = st.get("rust_gate") or {}
+        if rg.get("ok"):
+            gate_note += (f" Rust gate ✓ (integration tree of {rg.get('batch', 1)} branch(es): CI on Linux — fmt, clippy -D warnings, tests"
+                          + (f" {rg['linux_run']}" if rg.get("linux_run") else "")
+                          + ("; arbos-mac release build on the Mac" if rg.get("mac") == "ok" else "") + ").")
         if st.get("gate"):
             gate_note += " iOS gate: compiled on the Mac ✓."
         self.gh.comment(st["issue"], f"Merged to `main`: {merged['html_url']} (fix {fix['html_url']} — `{st['commit_message']}`).{gate_note}\n\n"
@@ -1672,6 +1911,13 @@ class Loop:
                                 "Waiting for Apple to finish processing.")
             else:
                 errors = self.gh.run_error_lines(ios["id"])
+                if st.get("handed_off_to") and not st.get("ios_failed_noted"):
+                    st["ios_failed_noted"] = True
+                    self.store.save_state(fid, st)
+                    self.gh.comment(st["issue"], f"The iOS build on `main` failed after the merge ({ios['html_url']}). {st['handed_off_to']}: "
+                                    f"push the repair as a new commit on `feedback/{fid}` from `origin/main` (the loop gates and merges it).\n\n```\n"
+                                    + "\n".join(errors or ["(no error lines captured; open the run)"]) + "\n```")
+                    return
                 if st.get("retries", 0) < 1:
                     st["retries"] = st.get("retries", 0) + 1
                     reason = self.rate_limit_reason()
@@ -1760,7 +2006,13 @@ class Loop:
                 self.gh.comment(st["issue"], f"Release workflow failed: {rel['html_url']} (the iOS build is unaffected).")
         if st.get("expects_ci") and ci and ci["status"] == "completed" and ci["conclusion"] != "success" and not st.get("ci_failed_noted"):
             errors = self.gh.run_error_lines(ci["id"])
-            if st.get("retries", 0) < 1 and not (self.rate_limit_reason() or "").endswith("already today"):
+            if st.get("handed_off_to"):
+                st["ci_failed_noted"] = True
+                self.store.save_state(fid, st)
+                self.gh.comment(st["issue"], f"CI on `main` failed after the merge ({ci['html_url']}). {st['handed_off_to']}: push the repair as a "
+                                f"new commit on `feedback/{fid}` from `origin/main` (the loop gates and merges it).\n\n```\n"
+                                + "\n".join(errors or ["(no error lines captured; open the run)"]) + "\n```")
+            elif st.get("retries", 0) < 1 and not (self.rate_limit_reason() or "").endswith("already today"):
                 followup = (f"CI on `main` failed after your push ({ci['html_url']}): fmt, clippy (-D warnings) or tests. "
                             "Fix it with the smallest change, run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings` "
                             f"and `cargo test --workspace --locked` before pushing, keep the commit message shape (`fix(feedback): <summary> [feedback {fid}]`), "
@@ -1889,9 +2141,17 @@ class Loop:
         self.intake()
         self.advance_all()
         try:
+            self.rust_gate_tick()
+        except Exception as e:  # noqa: BLE001
+            log(f"Rust gate scheduler failed: {e}")
+        try:
             self.reconcile_testflight()
         except Exception as e:  # noqa: BLE001
             log(f"TestFlight reconciliation failed: {e}")
+        try:
+            self.watch_claims()
+        except Exception as e:  # noqa: BLE001
+            log(f"claim watch failed: {e}")
         try:
             self.watch_deploys()
         except Exception as e:  # noqa: BLE001
@@ -1904,16 +2164,103 @@ class Loop:
 
     # ---- handed-off items: a dedicated worker fixes them; the loop still tracks the landing -------
 
+    CLAIM_RE = re.compile(r"\b(claim(ed|ing|s)?|taking( over)?|take over|handoff|hand-off|owned by)\b.*?\b(bc-[0-9a-f]{8}[0-9a-f-]*)", re.I | re.S)
+
+    def watch_claims(self) -> None:
+        """A dedicated worker claims an item by commenting on its issue — any sentence with "claim"/"taking"/
+        "take over" and its agent id (`bc-…`). Queued, failed, no-change or deferred items hand off at once;
+        an item the loop's own agent is mid-fix on (running/gating) hands off only when the comment says
+        "take over" (the run is cancelled), otherwise the loop answers and keeps its agent. The worker then
+        pushes `feedback/<id>` (gated and merged by the loop, see watch_handoffs) or lands a commit tagged
+        `[feedback <id>]` on main."""
+        cur = self.store.cursor()
+        since = cur.get("claims_checked") or iso()
+        now = iso()
+        for fid in self.store.items():
+            st = self.store.state(fid)
+            if not st.get("issue") or st.get("status") not in ("queued", "running", "gating", "failed", "no_change", "deferred", "rejected"):
+                continue
+            try:
+                comments = self.gh.comments_since(st["issue"], since)
+            except HttpError as e:
+                log(f"[{fid}] claims: comments fetch failed HTTP {e.status}")
+                continue
+            for c in comments:
+                body = c.get("body") or ""
+                if "scripts/feedback/feedback_poller.py" in body or body.startswith(("Cursor agent started", "Merged to", "Handed off", "Pushed to")):
+                    continue
+                m = self.CLAIM_RE.search(body)
+                if not m:
+                    continue
+                owner = m.group(4)
+                mid_fix = st.get("status") in ("running", "gating")
+                if mid_fix and not re.search(r"\btak(e|ing) ?over\b", body, re.I):
+                    self.gh.comment(st["issue"], f"The loop's own agent is mid-fix on this one ({st.get('agent_url') or 'running'}, state `{st['status']}`); "
+                                    f"it keeps it. Comment `take over bc-…` if {owner} should have it instead — the run is cancelled and the item handed off.")
+                    log(f"[{fid}] claim by {owner} declined: loop agent mid-fix ({st['status']})")
+                    break
+                self.hand_off(fid, st, owner, label="handed-off", by="claim comment")
+                break
+        cur["claims_checked"] = now
+        self.store.save_cursor(cur)
+
+    def hand_off(self, fid: str, st: dict, owner: str, label: str = "handed-off", by: str = "operator") -> None:
+        """A dedicated worker owns this item: cancel the loop's agent run, track the branch/commit, label the issue."""
+        if st.get("status") in ("running", "gating") and st.get("agent_id") and st.get("run_id"):
+            self.cursor.cancel(st["agent_id"], st["run_id"])
+        if st.get("status") == "gating" and (self.store.cursor().get("rust_gate") or {}).get("fid") == fid:
+            # Its Rust gate run, if any, finishes on its own; the result is simply not consumed.
+            cur = self.store.cursor(); cur.pop("rust_gate", None); self.store.save_cursor(cur)
+        st.update(status="handed_off", handed_off_to=owner, handed_off_at=iso(), track_commit=True)
+        for k in ("branch_head", "gated_head", "gate", "rust_gate"):
+            st.pop(k, None)
+        self.store.save_state(fid, st)
+        self.store.event(fid, "handed_off", label=owner, by=by, previous_status=st.get("run_status"))
+        if st.get("issue"):
+            self.gh.ensure_label(label, "5319E7", "Owned by a dedicated workstream; the loop does not patch it")
+            self.gh.ensure_label("in-progress", "FBCA04", "Being built by a planned workstream")
+            self.gh.comment(st["issue"], f"Handed off to {owner}: the loop's agent stops here. To land the fix push a branch `feedback/{fid}` "
+                            f"(commit message `fix(feedback): <summary> [feedback {fid}]`, no force-push): the loop runs the Rust gate "
+                            "(fmt, clippy -D warnings, test, arbos-mac release build; branch merged with current main) and the iOS gate on it, "
+                            "merges it into `main` when green and tracks it to the builds — a red gate is posted here with the diagnostics, "
+                            "push a new commit to re-gate. A commit tagged `[feedback <id>]` that reaches `main` directly is tracked too.")
+            self.gh.set_labels(st["issue"], [label, "in-progress"], ["shipped", "needs-human", "no-change"])
+
     def watch_handoffs(self) -> None:
-        """A handed-off item whose owner tags the commit `[feedback <id>]` is picked up when that commit
-        reaches main: the item becomes shipped-or-landed like a loop fix (iOS/Mac parts through the
-        builds, voice/agentd/relay parts through watch_deploys), so the audit follows it to the fleet."""
+        """A handed-off item is picked up two ways: its owner pushes `feedback/<id>` (the loop gates and merges it
+        like one of its own, diagnostics go to the issue instead of an agent), or tags a commit `[feedback <id>]`
+        that reaches main. Either way the item becomes shipped-or-landed like a loop fix (iOS/Mac parts
+        through the builds, voice/agentd/relay parts through watch_deploys), so the audit follows it."""
         for fid in self.store.items():
             st = self.store.state(fid)
             if st.get("status") != "handed_off" or st.get("commit") or not st.get("track_commit"):
                 continue
-            commit = self.find_commit(fid, st.get("created") or iso())
-            if not commit:
+            head = self.gh.branch_head(f"feedback/{fid}")
+            if head and head != st.get("gated_head"):
+                cmp = self.gh.compare("main", head)
+                tagged = any(f"[feedback {fid}]" in c["commit"]["message"] for c in cmp.get("commits", []))
+                if cmp.get("status") in ("ahead", "diverged") and tagged:
+                    files = [f["filename"] for f in cmp.get("files", [])]
+                    if not files:
+                        seen: list[str] = []
+                        for c in cmp.get("commits", []):
+                            if f"[feedback {fid}]" in c["commit"]["message"]:
+                                for f in self.gh.commit(c["sha"]).get("files", []):
+                                    if f["filename"] not in seen:
+                                        seen.append(f["filename"])
+                        files = seen
+                    st.update(status="gating", branch=f"feedback/{fid}", branch_head=head, files=files,
+                              expects_ios=any(f.startswith("apps/ios/") or f == ".github/workflows/ios.yml" for f in files),
+                              expects_rust=bool(self.rust_crates(files)),
+                              expects_ci=any(not f.startswith("apps/ios/") for f in files),
+                              agent_summary=f"handed-off fix by {st.get('handed_off_to')}")
+                    self.store.save_state(fid, st)
+                    self.store.event(fid, "branch_pushed", branch=st["branch"], head=head, files=files, by=st.get("handed_off_to"))
+                    continue
+            # Only commits newer than the hand-off count: an earlier loop merge that was reverted (#1058,
+            # 51ec9524) still carries the tag and must not be taken for the owner's landing.
+            commit = self.find_commit(fid, max(st.get("created") or "", st.get("handed_off_at") or "") or iso())
+            if not commit or commit["sha"] in (st.get("reverted") or []):
                 continue
             files = [f["filename"] for f in self.gh.commit(commit["sha"]).get("files", [])]
             st.update(status="pushed", commit=commit["sha"], commit_url=commit["html_url"],
@@ -2269,16 +2616,7 @@ def main(argv: list[str]) -> int:
         if not st:
             print(f"{fid}: unknown")
             return 2
-        if st.get("status") == "running" and st.get("agent_id") and st.get("run_id"):
-            loop.cursor.cancel(st["agent_id"], st["run_id"])
-        st.update(status="handed_off", handed_off_to=label)
-        store.save_state(fid, st)
-        store.event(fid, "handed_off", label=label, previous_status=st.get("run_status"))
-        if st.get("issue"):
-            loop.gh.ensure_label(label, "5319E7", "Owned by a dedicated workstream; the loop does not patch it")
-            loop.gh.ensure_label("in-progress", "FBCA04", "Being built by a planned workstream")
-            loop.gh.comment(st["issue"], f"Handed off: a dedicated worker owns this ({label}); the automatic loop stops here.")
-            loop.gh.set_labels(st["issue"], [label, "in-progress"], ["shipped", "needs-human"])
+        loop.hand_off(fid, st, label, label="handed-off" if label.startswith("bc-") else label, by="operator")
         print(f"{fid}: handed off ({label})")
         return 0
     if cmd == "prioritize":
