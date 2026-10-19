@@ -75,13 +75,16 @@ pub struct Shell {
     routines: Entity<RoutinesPanel>,
     routines_open: bool,
     channels: Entity<ChannelsPanel>,
-    /// F6: the "add a project to this chat" picker (from the "…" menu).
+    /// F6: the "add a project to this chat" picker (sidebar row menu).
     group_picker_open: bool,
     pub(crate) secrets: Entity<SecretsPanel>,
     shake_started_at: Option<u64>,
     /// True while the sign-in screen is up; its clearing focuses the composer.
     signing_in: bool,
-    /// The header's "…" menu.
+    /// Flag of the header's former "…" menu (removed, feedback
+    /// app-01M5ATBWSY9E1HHBKH2QQVDEZX); nothing renders it any more. Kept
+    /// only because the agent profile's "Edit" still sets it — goes with
+    /// that button's rework.
     pub(crate) menu_open: bool,
     /// Right-click menu on a sidebar row: the space and where the click landed.
     pub(crate) row_menu: Option<(crate::model::Id, gpui::Point<gpui::Pixels>)>,
@@ -2834,11 +2837,6 @@ impl Render for Shell {
         }
         if let Some(target) = details {
             root = root.child(self.render_details(&target, cx));
-        }
-        if self.menu_open {
-            if let Some(space) = selected.as_ref() {
-                root = root.child(glass::popover(header::menu(self, space, cx)));
-            }
         }
         if let Some(menu) = sidebar::row_menu(self, cx) {
             root = root.child(menu);
