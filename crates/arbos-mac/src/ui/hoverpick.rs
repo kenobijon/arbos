@@ -7,8 +7,8 @@
 //! checkmark confirms the choice until the pointer moves on.
 
 use gpui::{
-    div, prelude::*, px, AnyElement, Context, Div, ElementId, Focusable as _, FontWeight,
-    SharedString, Stateful, Window,
+    div, prelude::*, px, AnyElement, Bounds, Context, Div, ElementId, Focusable as _, FontWeight,
+    Pixels, SharedString, Stateful, Window,
 };
 
 use crate::app::AgentPick;
@@ -125,6 +125,7 @@ impl Shell {
             s.stop_voice_sample(cx);
             s.set_agent_pick(Some(which), cx);
         });
+        self.agent_pick_reveal = true;
         match which {
             AgentPick::Model => {
                 self.model_search_input.update(cx, |i, cx| i.clear(cx));
@@ -135,6 +136,36 @@ impl Shell {
             AgentPick::Reasoning => {}
         }
         cx.notify();
+    }
+
+    /// Prepaint of the info card holding the rows: the first frame after a
+    /// row opened, scroll the sheet body just enough for its list to show
+    /// (never pushing the row's own header off the top). Once, so a later
+    /// manual scroll is left alone.
+    pub(crate) fn reveal_agent_pick(
+        &mut self,
+        row: Option<&Bounds<Pixels>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.agent_pick_reveal {
+            return;
+        }
+        let Some(row) = row else {
+            return;
+        };
+        self.agent_pick_reveal = false;
+        let view = self.profile_scroll.bounds();
+        let overflow = row.bottom() - view.bottom();
+        let room = row.top() - view.top();
+        let shift = overflow.min(room);
+        if shift > px(0.5) {
+            let mut offset = self.profile_scroll.offset();
+            offset.y -= shift;
+            self.profile_scroll.set_offset(offset);
+            window.refresh();
+            cx.notify();
+        }
     }
 
     /// Fold the open row; `true` when one was open. With a window, keyboard

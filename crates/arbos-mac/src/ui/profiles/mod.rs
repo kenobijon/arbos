@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use gpui::{
     div, prelude::*, px, AnyElement, Context, Div, ElementId, FontWeight, Hsla, RenderImage,
-    SharedString, Stateful,
+    ScrollHandle, SharedString, Stateful,
 };
 
 use crate::app::{AppState, ProfilePage};
@@ -51,10 +51,12 @@ pub fn sheet(page: &ProfilePage, shell: &Shell, cx: &mut Context<Shell>) -> Opti
 
 // ----- scaffold ----------------------------------------------------------------
 
-/// `[‹ back] (title) [right]` header + scrolling body in the centred glass sheet.
+/// `[‹ back] (title) [right]` header + scrolling body in the centred glass
+/// sheet; `scroll` tracks the body's scroll when a page needs to move it.
 pub(super) fn frame(
     body: Div,
     right: Option<Stateful<Div>>,
+    scroll: Option<&ScrollHandle>,
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> Div {
@@ -74,6 +76,7 @@ pub(super) fn frame(
         body.id("profile-body")
             .min_h_0()
             .overflow_y_scroll()
+            .when_some(scroll, |el, h| el.track_scroll(h))
             .max_h(px(SHEET_MAX_HEIGHT)),
     )
 }

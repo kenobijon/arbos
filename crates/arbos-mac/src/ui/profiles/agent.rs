@@ -350,6 +350,22 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
                 &theme,
                 cx,
             ));
+        // Rows are the card's children 2 / 3 / 4; when one has just opened,
+        // scroll the sheet so its list is in view.
+        if let Some(open) = pick {
+            let open_ix = 2 + match open {
+                AgentPick::Model => 0,
+                AgentPick::Reasoning => 1,
+                AgentPick::Voice => 2,
+            };
+            let reveal = cx.listener(
+                move |this, bounds: &Vec<gpui::Bounds<gpui::Pixels>>, window, cx| {
+                    this.reveal_agent_pick(bounds.get(open_ix), window, cx);
+                },
+            );
+            info =
+                info.on_children_prepainted(move |bounds, window, cx| reveal(&bounds, window, cx));
+        }
     } else {
         info = info.child(info_row("model", model_text, &theme));
     }
@@ -622,7 +638,7 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
             },
         ))
     });
-    Some(frame(body, edit, &theme, cx))
+    Some(frame(body, edit, Some(&shell.profile_scroll), &theme, cx))
 }
 
 fn colour_row(project: &Project, theme: &Theme, cx: &mut Context<Shell>) -> Div {

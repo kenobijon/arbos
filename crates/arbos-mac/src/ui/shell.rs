@@ -93,6 +93,10 @@ pub struct Shell {
     pub(crate) agent_name_input: Entity<ComposerInput>,
     /// Agent page: the filter field in the Model dropdown (`ui::hoverpick`).
     pub(crate) model_search_input: Entity<ComposerInput>,
+    /// Agent page: the sheet body's scroll, so a dropped-down row can be
+    /// scrolled into view once (`agent_pick_reveal`) when it opens.
+    pub(crate) profile_scroll: ScrollHandle,
+    pub(crate) agent_pick_reveal: bool,
     /// Settings header: editing my display name and handle (`PATCH /me`).
     profile_edit_open: bool,
     name_input: Entity<ComposerInput>,
@@ -425,6 +429,8 @@ impl Shell {
             description_input,
             agent_name_input,
             model_search_input,
+            profile_scroll: ScrollHandle::new(),
+            agent_pick_reveal: false,
             profile_edit_open: false,
             name_input,
             handle_input,
