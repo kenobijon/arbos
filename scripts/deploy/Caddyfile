@@ -66,7 +66,13 @@ arbos.life {
 	# a ?v= in its URL (the OG image is hashed by scripts/site/build-og.py). Browsers, Google and Safari
 	# fetch the root favicons by their fixed names, so those get a short lifetime instead (D84 rollout).
 	header /assets/* Cache-Control "public, max-age=604800, immutable"
-	header /*.png Cache-Control "public, max-age=86400"
+	# Caddy runs same-named directives longest-path-first, so the generic png rule would overwrite the
+	# touch icon's header; keep it out of that rule instead.
+	@png {
+		path /*.png
+		not path /apple-touch-icon.png
+	}
+	header @png Cache-Control "public, max-age=86400"
 	header /favicon.ico Cache-Control "public, max-age=3600"
 	header /favicon.svg Cache-Control "public, max-age=3600"
 	header /apple-touch-icon.png Cache-Control "public, max-age=3600"
