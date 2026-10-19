@@ -95,7 +95,7 @@ CURSOR_API = "https://api.cursor.com/v1"
 GITHUB_API = "https://api.github.com"
 ASSET_RELEASE_TAG = "feedback-screenshots"
 RELAY_DEPLOYED_SHA_FILE = "/etc/arbos/relay.deployed-sha"  # written by scripts/deploy/relay-server.sh
-DEPLOY_HOOK = "/usr/local/bin/arbos-deploy-hook"  # CD worker's hook: `<relay|agentd|voice> <sha>`, idempotent, debounced; sudoers for arbos-feedback
+DEPLOY_HOOK = "/usr/local/bin/arbos-deploy-hook"  # CD worker's hook: `<relay|agentd|voice> <sha>`, idempotent, debounced; called directly (no sudo)
 USER_AGENT = "arbos-feedback-poller/1 (+https://github.com/unarbos/arbos)"
 
 TERMINAL = {"shipped", "failed", "ignored", "rejected", "duplicate", "no_change", "handed_off", "deferred"}
@@ -518,6 +518,16 @@ class GitHub:
             return self.compare(ref, sha).get("status") in ("identical", "behind")
         except HttpError:
             return False
+
+    def dispatch_ci(self, branch: str) -> bool:
+        """workflow_dispatch ci.yml on `branch`; False when the ref's workflow file has no dispatch trigger (422)."""
+        try:
+            self.repo_api("POST", "/actions/workflows/ci.yml/dispatches", json_body={"ref": branch})
+            return True
+        except HttpError as e:
+            if e.status in (404, 422):
+                return False
+            raise
 
     def create_branch(self, branch: str, sha: str) -> None:
         self.repo_api("POST", "/git/refs", json_body={"ref": f"refs/heads/{branch}", "sha": sha})
@@ -1710,6 +1720,13 @@ class Loop:
         if active["linux"] == "pending":
             runs = [r for r in self.gh.runs_for_sha(active["tree"]) if r.get("name") == "CI"]
             run = runs[0] if runs else None
+            if not run and not active.get("ci_dispatched") and minutes_between(active["started"], iso()) >= 1.5:
+                # A branch made through the API without a new commit raises no push event (an integration tree
+                # that already contained main): start CI by hand.
+                active["ci_dispatched"] = iso()
+                ok = self.gh.dispatch_ci(active["branch"])
+                self.store.save_cursor(cur)
+                log(f"Rust gate {active['id']}: no CI run for {active['tree'][:8]} yet; workflow_dispatch on {active['branch']} → {'ok' if ok else 'not accepted (workflow file on that ref has no dispatch trigger)'}")
             if run and run["status"] == "completed":
                 active["linux"] = "ok" if run["conclusion"] == "success" else "fail"
                 active["linux_run"] = run["html_url"]
@@ -2294,7 +2311,9 @@ class Loop:
             return
         for kind in kinds:
             try:
-                r = subprocess.run(["sudo", "-n", DEPLOY_HOOK, kind, sha], capture_output=True, text=True, timeout=60)
+                # Direct call: the unit runs with NoNewPrivileges, so no sudo; the hook queues the request under
+                # /var/lib/arbos-feedback/deploy-requests/ (inside the unit's ReadWritePaths) for the CD worker.
+                r = subprocess.run([DEPLOY_HOOK, kind, sha], capture_output=True, text=True, timeout=60)
                 log(f"[{fid}] deploy hook {kind} {sha[:8]}: exit {r.returncode} {(r.stdout or r.stderr).strip()[:120]}")
                 self.store.event(fid, "deploy_requested", deploy=kind, commit=sha, exit=r.returncode)
             except (OSError, subprocess.TimeoutExpired) as e:

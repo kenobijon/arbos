@@ -25,6 +25,9 @@ pub struct LocalPanel {
     show_install: bool,
     /// Set for a moment after Copy so the button says so.
     copied_at: Option<u64>,
+    /// Shown as a page inside the Settings sheet (#1086) rather than as the
+    /// bottom-left popover; the sheet's header carries the back button.
+    pub(crate) embedded: bool,
     focus_handle: FocusHandle,
 }
 
@@ -63,12 +66,18 @@ impl LocalPanel {
             open: false,
             show_install: false,
             copied_at: None,
+            embedded: false,
             focus_handle: cx.focus_handle(),
         }
     }
 
     pub fn is_open(&self) -> bool {
         self.open
+    }
+
+    /// Open as the bottom-left popover (not inside the Settings sheet).
+    pub fn is_floating(&self) -> bool {
+        self.open && !self.embedded
     }
 
     pub fn show(&mut self, cx: &mut Context<Self>) {
@@ -80,6 +89,7 @@ impl LocalPanel {
 
     pub fn hide(&mut self, cx: &mut Context<Self>) {
         self.open = false;
+        self.embedded = false;
         cx.notify();
     }
 
@@ -356,29 +366,32 @@ impl Render for LocalPanel {
         let theme = Theme::of(cx).clone();
         let view = self.state.read(cx).local.clone();
 
+        let embedded = self.embedded;
         let header = div()
             .flex()
             .items_center()
             .gap(px(8.0))
-            .child(
-                div()
-                    .id("local-back")
-                    .text_size(px(11.5))
-                    .text_color(theme.text_muted)
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(theme.text))
-                    .child("‹ Settings")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.hide(cx);
-                        cx.emit(LocalEvent::Back);
-                    })),
-            )
+            .when(!embedded, |el| {
+                el.child(
+                    div()
+                        .id("local-back")
+                        .text_size(px(11.5))
+                        .text_color(theme.text_muted)
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(theme.text))
+                        .child("‹ Settings")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.hide(cx);
+                            cx.emit(LocalEvent::Back);
+                        })),
+                )
+            })
             .child(
                 div()
                     .flex_1()
                     .text_size(px(11.0))
                     .text_color(theme.text_faint)
-                    .child("THIS MAC"),
+                    .when(!embedded, |el| el.child("THIS MAC")),
             )
             .child(
                 div()
@@ -414,16 +427,10 @@ impl Render for LocalPanel {
         let card = div()
             .id("local-popover")
             .track_focus(&self.focus_handle)
-            .w(px(400.0))
             .flex()
             .flex_col()
             .gap(px(6.0))
             .p(px(10.0))
-            .rounded(px(PANEL_RADIUS))
-            .bg(theme.card())
-            .border_1()
-            .border_color(theme.border_strong)
-            .shadow_lg()
             .child(header)
             .child(
                 div()
@@ -433,10 +440,21 @@ impl Render for LocalPanel {
             )
             .child(list)
             .child(self.render_install(&view, &theme, cx));
+        if embedded {
+            return card.w_full().into_any_element();
+        }
+        let card = card
+            .w(px(400.0))
+            .rounded(px(PANEL_RADIUS))
+            .bg(theme.card())
+            .border_1()
+            .border_color(theme.border_strong)
+            .shadow_lg();
         div()
             .absolute()
             .left(px(RAIL_WIDTH + 8.0))
             .bottom(px(14.0))
             .child(frosted(PANEL_RADIUS, MENU_BLUR, card))
+            .into_any_element()
     }
 }
