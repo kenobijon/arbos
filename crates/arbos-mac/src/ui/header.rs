@@ -467,6 +467,9 @@ fn agent_tabs(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option
                 el.hover(|s| s.text_color(theme.text))
             });
         if editing {
+            // Stop propagation so the header's window_drag and the shell root
+            // do not treat a click in the field as "elsewhere" (which would
+            // commit) or start a window move.
             pill = pill
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(
@@ -474,9 +477,12 @@ fn agent_tabs(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option
                         .w(px(120.0))
                         .min_w(px(72.0))
                         .max_w(px(160.0))
+                        .h(px(22.0))
                         .child(shell.tab_rename_input.clone()),
                 );
         } else {
+            let rename_label = title.clone();
+            let rename_id = id.clone();
             pill = pill
                 .on_mouse_down(
                     gpui::MouseButton::Right,
@@ -490,18 +496,29 @@ fn agent_tabs(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option
                 )
                 .on_mouse_down(
                     gpui::MouseButton::Left,
-                    cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
-                        if !event.modifiers.control {
+                    cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                        // Always stop: the header is a window_drag region, and
+                        // interactive children must not let mouse-down bubble
+                        // or a drag/move steals the double-click.
+                        cx.stop_propagation();
+                        if event.modifiers.control {
+                            this.menu_open = false;
+                            this.row_menu = None;
+                            this.chat_menu = Some((ctrl_chat_id.clone(), event.position));
+                            cx.notify();
                             return;
                         }
-                        cx.stop_propagation();
-                        this.menu_open = false;
-                        this.row_menu = None;
-                        this.chat_menu = Some((ctrl_chat_id.clone(), event.position));
-                        cx.notify();
+                        if event.click_count >= 2 && this.renaming_tab.as_ref() != Some(&rename_id)
+                        {
+                            this.begin_tab_rename(
+                                rename_id.clone(),
+                                rename_label.clone(),
+                                window,
+                                cx,
+                            );
+                        }
                     }),
                 );
-            let rename_label = title.clone();
             pill = pill.on_click(
                 cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                     // Control-click opened the chat menu on mouse-down; the click
@@ -509,10 +526,9 @@ fn agent_tabs(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option
                     if event.modifiers().control {
                         return;
                     }
-                    if event.click_count() >= 2 {
-                        if this.renaming_tab.as_ref() != Some(&id) {
-                            this.begin_tab_rename(id.clone(), rename_label.clone(), window, cx);
-                        }
+                    // Double-click rename starts on mouse-down; ignore the
+                    // matching click so we do not select/focus away from it.
+                    if event.click_count() >= 2 || this.renaming_tab.as_ref() == Some(&id) {
                         return;
                     }
                     this.chat_menu = None;
@@ -557,6 +573,7 @@ fn agent_tabs(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option
                                 theme.text_muted
                             },
                         ))
+                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
                             this.state.update(cx, |s, cx| {
