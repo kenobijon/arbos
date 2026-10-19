@@ -28,6 +28,7 @@ use crate::ui::callview;
 use crate::ui::frost::{frosted, MENU_BLUR, PANEL_BLUR};
 use crate::ui::glass;
 use crate::ui::icons::icon;
+use crate::ui::select::word_range;
 use crate::ui::theme::{
     Theme, COMPOSER_HEIGHT, LINE_HEIGHT, PANEL_RADIUS, PLUS_BUTTON, SEND_BUTTON, TEXT_BODY,
     TEXT_TINY,
@@ -438,6 +439,12 @@ impl ComposerInput {
         let ix = self.index_for_mouse_position(event.position);
         if event.modifiers.shift {
             self.select_to(ix, cx);
+        } else if event.click_count >= 2 {
+            // Double-click (and beyond): select the Unicode word under the
+            // pointer — same word_range the transcript bubbles use.
+            self.selected_range = word_range(&self.content, ix);
+            self.selection_reversed = false;
+            cx.notify();
         } else {
             self.move_to(ix, cx)
         }
