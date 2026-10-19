@@ -458,6 +458,22 @@ pub async fn end_call(
     };
     announce_ended(state, &call, reason, writer.as_deref()).await;
     announce_missed(state, &call).await;
+    // Drop any voice turn still running on the box (typed chat after hang-up).
+    for pid in state.db.call_agents_live(&call.id).unwrap_or_default() {
+        if let Ok(Some(p)) = state.db.project(&pid) {
+            let _ = crate::voice::box_notify(
+                state,
+                &p.user_id,
+                serde_json::json!({
+                    "type": "voice_cancel",
+                    "call_id": call.id,
+                    "chat_id": call.chat_id,
+                    "project_id": p.id,
+                }),
+            )
+            .await;
+        }
+    }
     if let Some(lk) = &state.livekit {
         lk.delete_room(&state.http, &call.room).await;
     }

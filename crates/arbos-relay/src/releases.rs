@@ -4,7 +4,9 @@
 //!   workflow (Mac) and `ios.yml` (TestFlight, after distribute) say "this build is installable".
 //!   Stored as the current build of that platform/channel and fanned out as the push kind
 //!   `release_published` on `/me/pushes` to every live device, so a Mac checks its appcast at
-//!   once instead of waiting for its next poll.
+//!   once instead of waiting for its next poll. A stable Mac release also resets the
+//!   `/download/mac` redirect cache and touches `<data>/release-published`, which the relay
+//!   host's `arbos-refresh-mac-download.path` unit turns into an immediate refresh.
 //! - `GET /releases/current` (device) — the current builds, one per platform/channel.
 //! - `GET /admin/installs[?since=<ms>]` (admin token) — one row per device and app version with
 //!   `installed_at` = the first time the relay saw that device on that version. The feedback loop
@@ -246,6 +248,16 @@ pub async fn admin_release(
         .set_release(&platform, &channel, &version, &build, &url, now)
     {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+    }
+    if platform == "mac" && channel == "stable" {
+        // /download/mac must point at the new DMG at once: drop the relay's own redirect cache
+        // and touch the flag that arbos-refresh-mac-download.path watches on the relay host
+        // (the 15-minute timer stays as the fallback).
+        *state.download_cache.lock().await = None;
+        let flag = state.cfg.data_dir.join("release-published");
+        if let Err(e) = std::fs::write(&flag, format!("{platform} {channel} {version} {now}\n")) {
+            tracing::warn!(error = %e, "release-published flag not written");
+        }
     }
     let payload = json!({
         "platform": platform, "channel": channel, "version": version, "build": build,

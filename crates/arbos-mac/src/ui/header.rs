@@ -504,6 +504,11 @@ fn agent_tabs(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option
             let rename_label = title.clone();
             pill = pill.on_click(
                 cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                    // Control-click opened the chat menu on mouse-down; the click
+                    // that follows must not select the tab and close it again.
+                    if event.modifiers().control {
+                        return;
+                    }
                     if event.click_count() >= 2 {
                         if this.renaming_tab.as_ref() != Some(&id) {
                             this.begin_tab_rename(id.clone(), rename_label.clone(), window, cx);
