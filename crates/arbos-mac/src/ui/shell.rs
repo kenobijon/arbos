@@ -971,7 +971,9 @@ impl Shell {
         if !dropped {
             // S1/S2: empty chat — the agent's picture and a line, composer centred.
             let is_people = space.is_people();
-            let name = if is_people {
+            let name = if space.is_people_group() {
+                space.name.clone()
+            } else if is_people {
                 space
                     .person()
                     .map(|p| p.display_name())

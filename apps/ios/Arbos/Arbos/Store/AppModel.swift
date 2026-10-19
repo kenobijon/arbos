@@ -2313,6 +2313,8 @@ final class AppModel: ObservableObject {
             case "people_chat_created":
                 needChats = true
                 if let by = p.payload["by_handle"] { PushManager.post(id: p.id, title: "@\(by)", body: "Started a chat with you", chatId: p.payload["chat_id"] ?? "") }
+            case "people_chat_updated":
+                needChats = true
             case "people_agent_added", "people_agent_removed", "people_member_added", "people_member_removed":
                 needChats = true
             case "call_started":
