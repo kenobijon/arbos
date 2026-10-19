@@ -17,13 +17,16 @@ use crate::ui::composer::ComposerInput;
 use crate::ui::frost::{frosted, MENU_BLUR};
 use crate::ui::theme::{Theme, PANEL_RADIUS, RAIL_WIDTH};
 
-const CARD_WIDTH: f32 = 760.0;
+pub const CARD_WIDTH: f32 = 760.0;
 const CARD_HEIGHT: f32 = 640.0;
 const LIST_WIDTH: f32 = 260.0;
 
 pub struct SkillsPanel {
     state: Entity<AppState>,
     pub open: bool,
+    /// Shown as a page inside the Settings sheet (#1086) rather than as the
+    /// bottom-left popover; the sheet's header carries the back button.
+    pub(crate) embedded: bool,
     /// Slug of the skill in the editor; `None` while drafting a new one.
     selected: Option<String>,
     drafting: bool,
@@ -67,6 +70,7 @@ impl SkillsPanel {
             body: field(cx, "Steps, pitfalls, examples (Markdown)", true),
             state,
             open: false,
+            embedded: false,
             selected: None,
             drafting: false,
             draft_shared: false,
@@ -90,7 +94,13 @@ impl SkillsPanel {
 
     pub fn close(&mut self, cx: &mut Context<Self>) {
         self.open = false;
+        self.embedded = false;
         cx.notify();
+    }
+
+    /// Open as the bottom-left popover (not inside the Settings sheet).
+    pub fn is_floating(&self) -> bool {
+        self.open && !self.embedded
     }
 
     /// True when one of the editor fields has keyboard focus.
@@ -514,13 +524,15 @@ impl Render for SkillsPanel {
                     .flex()
                     .items_baseline()
                     .gap(px(8.0))
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.text)
-                            .child("Skills"),
-                    )
+                    .when(!self.embedded, |el| {
+                        el.child(
+                            div()
+                                .text_size(px(13.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme.text)
+                                .child("Skills"),
+                        )
+                    })
                     .child(
                         div()
                             .text_size(px(11.0))
@@ -547,17 +559,11 @@ impl Render for SkillsPanel {
         let card = div()
             .id("skills-card")
             .occlude()
-            .w(px(CARD_WIDTH))
             .h(px(CARD_HEIGHT))
             .flex()
             .flex_col()
             .gap(px(10.0))
             .p(px(14.0))
-            .rounded(px(PANEL_RADIUS))
-            .bg(theme.card())
-            .border_1()
-            .border_color(theme.border_strong)
-            .shadow_lg()
             .child(header)
             .child(div().h(px(1.0)).bg(theme.border))
             .child(
@@ -570,11 +576,22 @@ impl Render for SkillsPanel {
                     .child(div().w(px(1.0)).h_full().bg(theme.border))
                     .child(self.render_editor(&theme, cx)),
             );
+        if self.embedded {
+            return card.w_full().into_any_element();
+        }
+        let card = card
+            .w(px(CARD_WIDTH))
+            .rounded(px(PANEL_RADIUS))
+            .bg(theme.card())
+            .border_1()
+            .border_color(theme.border_strong)
+            .shadow_lg();
         div()
             .absolute()
             .left(px(RAIL_WIDTH + 8.0))
             .bottom(px(14.0))
             .child(frosted(PANEL_RADIUS, MENU_BLUR, card))
+            .into_any_element()
     }
 }
 
