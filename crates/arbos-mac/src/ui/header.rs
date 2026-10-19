@@ -717,13 +717,18 @@ fn tab_menu(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl Int
                             .text_color(theme.text_faint)
                             .child(crate::ui::sidebar::time_label(chat.last_message_at)),
                     )
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.tab_menu_open = false;
-                        let id = id.clone();
-                        this.state.update(cx, |s, cx| s.unarchive_chat(id, cx));
-                        this.reveal_active_tab(cx);
-                        Composer::focus(&this.composer, window, cx);
-                    })),
+                    .on_click(
+                        cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                            if event.modifiers().control {
+                                return;
+                            }
+                            this.tab_menu_open = false;
+                            let id = id.clone();
+                            this.state.update(cx, |s, cx| s.unarchive_chat(id, cx));
+                            this.reveal_active_tab(cx);
+                            Composer::focus(&this.composer, window, cx);
+                        }),
+                    ),
             );
         }
         body = body.child(list);
