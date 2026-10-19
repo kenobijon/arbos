@@ -5,6 +5,9 @@ name: CI
 # on push, without a pull request.
 
 on:
+  # The feedback loop dispatches CI on a gate/** branch when GitHub ran nothing for
+  # it (a branch created through the API without a new commit raises no push event).
+  workflow_dispatch:
   push:
     # gate/** = the feedback loop's integration branches (current main + the ready
     # fix branches); this run is the Linux half of its pre-merge gate.

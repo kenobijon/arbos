@@ -1,7 +1,8 @@
 //! The chat list: the iPhone home screen as a Mac sidebar. A top bar with the
-//! account circle (its dot is the machine state), search and "+", then every
-//! agent and person as one row — tree avatar, name, time, last line. The
-//! Update pill sits at the bottom only while a newer build exists.
+//! collapse control and "+", search, then every agent and person as one row —
+//! avatar, name, time, last line. The account circle (its dot is the machine
+//! state) and gear sit at the bottom; the Update pill only while a newer build
+//! exists.
 
 use std::sync::Arc;
 
@@ -24,7 +25,7 @@ use crate::ui::theme::{
     Theme, AVATAR_ROW, PANEL_RADIUS, SIDEBAR_WIDTH, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
 };
 
-/// The drag strip beside the traffic lights (the "+" sits in it on the right).
+/// The drag strip beside the traffic lights (collapse + "+" on the right).
 fn top_strip() -> f32 {
     if cfg!(target_os = "macos") {
         38.0
@@ -230,7 +231,30 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         PulseClock::request(cx);
     }
 
-    // ----- top: "+" beside the traffic lights, then the search pill ------------
+    // ----- top: collapse + "+" beside the traffic lights, then search ----------
+    // Collapse lives here (not the chat header). When the rail is hidden the
+    // header still shows an expand control so the list can come back.
+    let collapse = div()
+        .id("sidebar-collapse")
+        .size(px(28.0))
+        .flex_shrink_0()
+        .rounded(px(7.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .bg(theme.surface_2)
+        .hover(|s| s.bg(theme.surface_2))
+        .child(icon("sidebar-left", 17.0, theme.text))
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(cx.listener(|this, _, window, cx| {
+            this.menu_open = false;
+            let width: f32 = window.viewport_size().width.into();
+            this.state.update(cx, |s, cx| {
+                let narrow = s.window_is_narrow(width);
+                s.toggle_rail(narrow, cx)
+            });
+        }));
     let plus = div()
         .id("sidebar-new")
         .size(px(28.0))
@@ -257,8 +281,10 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         .flex()
         .items_end()
         .justify_end()
+        .gap(px(2.0))
         .px(px(12.0))
         .pb(px(2.0))
+        .child(collapse)
         .child(plus)
         .window_drag();
     let search = div()
@@ -1062,7 +1088,7 @@ pub fn chat_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
             glass::menu_row("chat-menu-fork", "branch", "Fork", false, &theme).on_click(
                 cx.listener(move |this, _, _, cx| {
                     this.chat_menu = None;
-                    this.archived_open = false;
+                    this.tab_menu_open = false;
                     let id = fork_id.clone();
                     this.state.update(cx, |s, cx| s.duplicate_project(id, cx));
                 }),
@@ -1074,7 +1100,7 @@ pub fn chat_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
             glass::menu_row("chat-menu-delete", "trash", "Delete", true, &theme).on_click(
                 cx.listener(move |this, _, _, cx| {
                     this.chat_menu = None;
-                    this.archived_open = false;
+                    this.tab_menu_open = false;
                     let id = delete_id.clone();
                     this.state.update(cx, |s, cx| {
                         if delete_archived {

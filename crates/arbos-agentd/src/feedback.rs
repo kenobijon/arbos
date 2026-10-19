@@ -1,16 +1,19 @@
 //! `submit_feedback`: the agent files the user's bug report or feedback itself. It asks the
 //! user's signed-in apps for a picture of their screen (relay push `feedback_capture`; the app in
-//! the foreground captures its own window and uploads it), gathers the rollout of this chat
-//! (recent turns, tool calls, errors and timings from the T3 store), scrubs secrets and secret
-//! placeholders out of it, adds platform / version / agent / box facts, and posts everything to
-//! the relay's `POST /feedback` as the user's agent (`submitted_by: "agent"`). The relay-side
-//! feedback loop turns the item into a tracked issue; when it exists, the relay pushes
+//! the foreground captures its own window and uploads it), or attaches a PNG/JPEG the user
+//! already provided (`image_path`, usually a chat attachment under `in/`), gathers the rollout of
+//! this chat (recent turns, tool calls, errors and timings from the T3 store), scrubs secrets and
+//! secret placeholders out of it, adds platform / version / agent / box facts, and posts
+//! everything to the relay's `POST /feedback` as the user's agent (`submitted_by: "agent"`). The
+//! relay-side feedback loop turns the item into a tracked issue; when it exists, the relay pushes
 //! `feedback_issue` back and the agent leaves one line in the chat with the number.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use base64::Engine as _;
 use serde_json::{json, Value};
 
 use arbos_core::ids::{now_ms, ulid};
@@ -33,17 +36,74 @@ const ROLLOUT_ROWS: i64 = 60;
 const ROW_CHARS: usize = 1_200;
 const TOOL_OUTPUT_CHARS: usize = 700;
 const ROLLOUT_CHARS: usize = 40_000;
+/// Same ceiling as the relay's `POST /feedback` image field.
+const MAX_ATTACH_BYTES: usize = 15 * 1024 * 1024;
 
 pub fn tool_specs() -> Vec<Value> {
     vec![json!({
         "name": "submit_feedback",
-        "description": "File the user's feedback or bug report for them. Use it whenever the user asks to submit, send, file or report feedback, a bug, a problem, a crash or a suggestion about this app or about you. It captures a picture of the user's current screen from their app, attaches the recent conversation and your tool calls, errors and timings (scrubbed of secrets), adds platform and version details, and files the report. Returns a reference id to give the user. Call it once per report; do not ask the user to use a menu, settings screen or another channel instead.",
+        "description": "File the user's feedback or bug report for them. Use it whenever the user asks to submit, send, file or report feedback, a bug, a problem, a crash or a suggestion about this app or about you. By default it captures a picture of the user's current screen from their app; when they already attached or saved a PNG/JPEG for the report, pass image_path instead. It also attaches the recent conversation and your tool calls, errors and timings (scrubbed of secrets), adds platform and version details, and files the report. Returns a reference id to give the user. Call it once per report; do not ask the user to use a menu, settings screen or another channel instead.",
         "inputSchema": { "type": "object", "properties": {
             "description": { "type": "string", "description": "What the user reported, in their words plus what you observed (what happened, what they expected). Required; ask one short question first only when you have nothing to say here." },
             "expected": { "type": "string", "description": "Optional: what should have happened instead." },
-            "include_screenshot": { "type": "boolean", "description": "Default true. false when the user says the screen is not relevant." }
+            "include_screenshot": { "type": "boolean", "description": "Default true. false when the user says the screen is not relevant. Ignored when image_path is set (the file replaces the live capture)." },
+            "image_path": { "type": "string", "description": "Optional path to a PNG or JPEG the user attached or saved for this report (usually under in/). Attaches that file instead of capturing the live screen. Pass it whenever the user provides their own image." }
         }, "required": ["description"] }
     })]
+}
+
+/// A PNG/JPEG the user (or the agent) already has on disk for this report.
+struct UserImage {
+    bytes: Vec<u8>,
+    mime: &'static str,
+    label: String,
+}
+
+/// Read a project-folder image for `image_path`. Rejects paths outside the workspace and
+/// anything that is not a PNG or JPEG within the relay's size limit.
+fn read_user_image(a: &Agent, path: &str) -> Result<UserImage, String> {
+    let raw = Path::new(path.trim());
+    if path.trim().is_empty() {
+        return Err("path is empty".into());
+    }
+    let abs: PathBuf = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        a.cfg.work_dir.join(raw)
+    };
+    let root = a
+        .cfg
+        .work_dir
+        .canonicalize()
+        .unwrap_or_else(|_| a.cfg.work_dir.clone());
+    let canon = abs
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", abs.display()))?;
+    if !canon.starts_with(&root) {
+        return Err("path must be inside the project folder".into());
+    }
+    let meta = std::fs::metadata(&canon).map_err(|e| format!("{}: {e}", canon.display()))?;
+    if !meta.is_file() {
+        return Err(format!("{} is not a file", canon.display()));
+    }
+    if meta.len() as usize > MAX_ATTACH_BYTES {
+        return Err(format!(
+            "{} is {} MB; the limit is 15 MB",
+            canon.display(),
+            meta.len() / (1024 * 1024)
+        ));
+    }
+    let bytes = std::fs::read(&canon).map_err(|e| format!("{}: {e}", canon.display()))?;
+    let mime = match bytes.get(..4) {
+        Some([0x89, b'P', b'N', b'G']) => "image/png",
+        Some([0xFF, 0xD8, ..]) => "image/jpeg",
+        _ => return Err("not a PNG or JPEG".into()),
+    };
+    let label = canon
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "image".into());
+    Ok(UserImage { bytes, mime, label })
 }
 
 /// Secret values (D19 redaction) and secret placeholders / vault references, so a report never
@@ -345,40 +405,60 @@ pub async fn submit_feedback(a: &Arc<Agent>, args: &Value, chat_id: &str) -> Val
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    let want_shot = args
-        .get("include_screenshot")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
+    let user_image = match args
+        .get("image_path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(path) => match read_user_image(a, path) {
+            Ok(img) => Some(img),
+            Err(e) => {
+                return err_result(format!(
+                    "image_path: {e}. Pass a PNG or JPEG under the project folder (chat attachments land in in/), or omit image_path to capture the live screen."
+                ));
+            }
+        },
+        None => None,
+    };
+    // A user-provided file replaces the live capture; include_screenshot is ignored then.
+    let want_shot = user_image.is_none()
+        && args
+            .get("include_screenshot")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
 
-    a.post_activity(chat_id, Some("Capturing your screen".into()));
     let preferred = preferred_device(a, chat_id).await;
-    let reused = if want_shot {
-        recent_captures()
+    let capture = if let Some(ref img) = user_image {
+        a.post_activity(chat_id, Some(format!("Attaching {}", img.label)));
+        None
+    } else if !want_shot {
+        a.post_activity(chat_id, Some("Filing your feedback".into()));
+        None
+    } else {
+        a.post_activity(chat_id, Some("Capturing your screen".into()));
+        let reused = recent_captures()
             .lock()
             .ok()
             .and_then(|m| m.get(chat_id).cloned())
             .filter(|(c, at)| c.has_image && at.elapsed() < CAPTURE_REUSE)
-            .map(|(c, _)| c)
-    } else {
-        None
-    };
-    let capture = if !want_shot {
-        None
-    } else if reused.is_some() {
-        reused
-    } else {
-        match request_capture(a, chat_id, preferred.as_deref()).await {
-            Ok(c) => {
-                if let Some(cap) = c.as_ref().filter(|c| c.has_image) {
-                    if let Ok(mut m) = recent_captures().lock() {
-                        m.insert(chat_id.to_owned(), (cap.clone(), Instant::now()));
+            .map(|(c, _)| c);
+        if reused.is_some() {
+            reused
+        } else {
+            match request_capture(a, chat_id, preferred.as_deref()).await {
+                Ok(c) => {
+                    if let Some(cap) = c.as_ref().filter(|c| c.has_image) {
+                        if let Ok(mut m) = recent_captures().lock() {
+                            m.insert(chat_id.to_owned(), (cap.clone(), Instant::now()));
+                        }
                     }
+                    c
                 }
-                c
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "feedback: capture request failed");
-                None
+                Err(e) => {
+                    tracing::warn!(error = %e, "feedback: capture request failed");
+                    None
+                }
             }
         }
     };
@@ -412,57 +492,67 @@ pub async fn submit_feedback(a: &Arc<Agent>, args: &Value, chat_id: &str) -> Val
     let mut platform = "agent".to_owned();
     let mut app_version = String::new();
     let mut os = String::new();
-    let (capture_id, capture_device, shot_line) = match &capture {
-        Some(c) => {
-            if let Some(map) = context.as_object_mut() {
-                map.insert("platform".into(), json!(c.platform));
-                map.insert("app_version".into(), json!(c.app_version));
-                map.insert("os".into(), json!(c.os));
-                map.insert("device".into(), json!(c.device));
-                map.insert("screen".into(), json!(c.screen));
-                map.insert("capture_device_id".into(), json!(c.device_id));
-                map.insert("screenshot".into(), json!(c.has_image));
-                map.insert("screenshot_skipped".into(), json!(c.skipped));
-            }
-            if !c.platform.is_empty() {
-                platform = c.platform.clone();
-            }
-            app_version = c.app_version.clone();
-            os = c.os.clone();
-            let line = if c.has_image {
-                format!(
-                    "screenshot attached from the {} app",
-                    platform_name(&c.platform)
-                )
-            } else {
-                format!(
-                    "no screenshot ({}); device facts attached",
-                    c.skipped.as_deref().unwrap_or("the app could not capture")
-                )
-            };
-            (Some(c.request_id.clone()), Some(c.device_id.clone()), line)
+    let (capture_id, capture_device, shot_line) = if let Some(img) = user_image.as_ref() {
+        if let Some(map) = context.as_object_mut() {
+            map.insert("screenshot".into(), json!(true));
+            map.insert("user_image".into(), json!(true));
+            map.insert("user_image_name".into(), json!(img.label));
+            map.insert("screenshot_skipped".into(), json!("user-provided image"));
         }
-        None => {
-            if let Some(map) = context.as_object_mut() {
-                map.insert("screenshot".into(), json!(false));
-                map.insert(
-                    "screenshot_skipped".into(),
-                    json!(if want_shot {
-                        "no app answered the capture request (none in the foreground, or capture denied)"
-                    } else {
-                        "not requested"
-                    }),
-                );
-            }
-            (
-                None,
-                None,
-                if want_shot {
-                    "no screenshot (no app was in the foreground to capture one)".to_owned()
+        (None, None, format!("user image attached ({})", img.label))
+    } else {
+        match &capture {
+            Some(c) => {
+                if let Some(map) = context.as_object_mut() {
+                    map.insert("platform".into(), json!(c.platform));
+                    map.insert("app_version".into(), json!(c.app_version));
+                    map.insert("os".into(), json!(c.os));
+                    map.insert("device".into(), json!(c.device));
+                    map.insert("screen".into(), json!(c.screen));
+                    map.insert("capture_device_id".into(), json!(c.device_id));
+                    map.insert("screenshot".into(), json!(c.has_image));
+                    map.insert("screenshot_skipped".into(), json!(c.skipped));
+                }
+                if !c.platform.is_empty() {
+                    platform = c.platform.clone();
+                }
+                app_version = c.app_version.clone();
+                os = c.os.clone();
+                let line = if c.has_image {
+                    format!(
+                        "screenshot attached from the {} app",
+                        platform_name(&c.platform)
+                    )
                 } else {
-                    "no screenshot (not requested)".to_owned()
-                },
-            )
+                    format!(
+                        "no screenshot ({}); device facts attached",
+                        c.skipped.as_deref().unwrap_or("the app could not capture")
+                    )
+                };
+                (Some(c.request_id.clone()), Some(c.device_id.clone()), line)
+            }
+            None => {
+                if let Some(map) = context.as_object_mut() {
+                    map.insert("screenshot".into(), json!(false));
+                    map.insert(
+                        "screenshot_skipped".into(),
+                        json!(if want_shot {
+                            "no app answered the capture request (none in the foreground, or capture denied)"
+                        } else {
+                            "not requested"
+                        }),
+                    );
+                }
+                (
+                    None,
+                    None,
+                    if want_shot {
+                        "no screenshot (no app was in the foreground to capture one)".to_owned()
+                    } else {
+                        "no screenshot (not requested)".to_owned()
+                    },
+                )
+            }
         }
     };
 
@@ -478,13 +568,17 @@ pub async fn submit_feedback(a: &Arc<Agent>, args: &Value, chat_id: &str) -> Val
     let note: String = note.chars().take(3_900).collect();
     let rollout_text = rollout(a, chat_id);
 
-    let body = json!({
+    let mut body = json!({
         "note": note, "platform": platform, "app_version": app_version, "os": os,
         "project_id": a.cfg.project_id, "chat_id": chat_id,
         "submitted_by": "agent", "agent_name": a.cfg.project_name,
         "rollout": rollout_text, "context": context,
         "capture_id": capture_id, "capture_device_id": capture_device,
     });
+    if let Some(img) = user_image.as_ref() {
+        body["image"] = json!(base64::engine::general_purpose::STANDARD.encode(&img.bytes));
+        body["mime"] = json!(img.mime);
+    }
     let resp = a
         .http_client()
         .post(format!("{}/feedback", a.cfg.relay_url))
