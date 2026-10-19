@@ -52,6 +52,27 @@ pub enum ProfilePage {
     Agent { project_id: Id },
 }
 
+/// Which agent-settings row on the agent's profile page is expanded into its
+/// dropdown (hover / click to open; see `ui::hoverpick`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentPick {
+    Model,
+    Reasoning,
+    Voice,
+}
+
+impl AgentPick {
+    /// `ARBOS_OPEN_PROFILE=agent:<model|reasoning|voice>` (rig).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "model" => Some(Self::Model),
+            "reasoning" | "effort" => Some(Self::Reasoning),
+            "voice" => Some(Self::Voice),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CallTarget {
     User(String),
@@ -287,6 +308,12 @@ pub struct AppState {
     /// offline copy): off the tab strip, listed under "Archived", still open on
     /// the relay (history in context, memory and search), never badge or notify.
     pub archived_chats: HashSet<Id>,
+    /// Chat a home-search hit opened; kept visible while single-chat would hide it.
+    search_chat: Option<Id>,
+    /// Scroll the transcript to this `(chat_id, message_id)` once its rows exist.
+    pub reveal_message: Option<(Id, Id)>,
+    /// Brief highlight on the message a home-search hit opened.
+    pub highlight_message: Option<Id>,
     pub link: Link,
     pub rail_collapsed: bool,
     /// Below [`NARROW_WINDOW`](crate::ui::theme::NARROW_WINDOW) the sidebar
@@ -320,6 +347,8 @@ pub struct AppState {
     pub profile_picker_open: bool,
     /// Agent page / user page "more" menu is open.
     pub profile_more_open: bool,
+    /// Agent page: which settings row (model / reasoning / voice) is dropped down.
+    pub agent_pick: Option<AgentPick>,
     /// Agent page: the owner is editing the description inline.
     pub profile_editing_description: bool,
     /// Double-click rename: the project whose name is being edited inline.
@@ -548,6 +577,9 @@ impl AppState {
             multi_chat: multi_chat_enabled(),
             last_chats: HashMap::new(),
             archived_chats: HashSet::new(),
+            search_chat: None,
+            reveal_message: None,
+            highlight_message: None,
             link: Link::Connecting,
             rail_collapsed: false,
             sidebar_overlay: false,
@@ -567,6 +599,7 @@ impl AppState {
             profile_tab: 0,
             profile_picker_open: false,
             profile_more_open: false,
+            agent_pick: None,
             profile_editing_description: false,
             renaming_project: None,
             muted: load_muted(),
@@ -1005,6 +1038,9 @@ impl AppState {
                         self.command(ClientCommand::CreateProject {
                             name: "Home".into(),
                             avatar_color_index: None,
+                            source_project_id: None,
+                            description: None,
+                            color: None,
                         });
                     }
                 }
@@ -1065,7 +1101,18 @@ impl AppState {
                         self.active_tab.insert(project_id.clone(), chat_id);
                     }
                     // select_project() keeps the tab within the visible chats.
-                    self.select_project(project_id, cx);
+                    self.select_project(project_id.clone(), cx);
+                    // Rig: `ARBOS_OPEN_PROFILE=agent[:model|reasoning|voice]` opens
+                    // the agent's page (with one settings row dropped down).
+                    if let Ok(spec) = std::env::var("ARBOS_OPEN_PROFILE") {
+                        if let Some(rest) = spec.strip_prefix("agent") {
+                            self.open_profile(ProfilePage::Agent { project_id }, cx);
+                            self.agent_pick = rest.strip_prefix(':').and_then(AgentPick::parse);
+                            if self.agent_pick == Some(AgentPick::Voice) {
+                                self.fetch_voices();
+                            }
+                        }
+                    }
                 }
             }
             SyncEvent::ChatPrefs {
@@ -1510,10 +1557,12 @@ impl AppState {
         if visible.is_empty() {
             return false;
         }
+        // A search hit may open a chat the strip would hide until another tab
+        // is chosen.
         if self
             .active_tab
             .get(project_id)
-            .is_some_and(|a| visible.contains(a))
+            .is_some_and(|a| visible.contains(a) || self.search_chat.as_deref() == Some(a.as_str()))
         {
             return false;
         }
@@ -1651,6 +1700,11 @@ impl AppState {
     }
 
     pub fn select_project(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        if self.selected_project.as_deref() != Some(project_id.as_str()) {
+            self.search_chat = None;
+        }
+        self.reveal_message = None;
+        self.highlight_message = None;
         if self
             .renaming_project
             .as_ref()
@@ -1677,15 +1731,118 @@ impl AppState {
         cx.notify();
     }
 
+    /// Home-search row click: open the chat that holds the matching message and
+    /// ask the transcript to scroll to it. Name-only matches open normally.
+    pub fn open_from_home_search(&mut self, project_id: Id, query: &str, cx: &mut Context<Self>) {
+        let q = query.trim().to_lowercase();
+        let hit = if q.is_empty() {
+            None
+        } else {
+            self.find_message_match(&project_id, &q)
+        };
+        let Some((chat_id, message_id)) = hit else {
+            self.select_project(project_id, cx);
+            return;
+        };
+        self.search_chat = Some(chat_id.clone());
+        if self.archived_chats.remove(&chat_id) {
+            self.command(ClientCommand::ArchiveChat {
+                chat_id: chat_id.clone(),
+                archived: false,
+            });
+        }
+        self.selected_project = Some(project_id.clone());
+        self.sidebar_overlay = false;
+        self.active_tab.insert(project_id.clone(), chat_id.clone());
+        self.last_chats.insert(project_id, chat_id.clone());
+        if let Some(chat) = self
+            .chats
+            .values_mut()
+            .flat_map(|v| v.iter_mut())
+            .find(|c| c.id == chat_id)
+        {
+            chat.unread = false;
+        }
+        self.command(ClientCommand::OpenChat {
+            chat_id: chat_id.clone(),
+        });
+        self.highlight_message = Some(message_id.clone());
+        self.reveal_message = Some((chat_id, message_id));
+        self.sync_focus();
+        cx.notify();
+    }
+
+    /// Newest user/assistant/project message whose prose contains `query`
+    /// (already lowercased). Searches every chat under the space.
+    fn find_message_match(&self, project_id: &str, query: &str) -> Option<(Id, Id)> {
+        let mut best: Option<(u64, Id, Id)> = None;
+        for chat in self.tabs(project_id) {
+            for m in self.messages_of(&chat.id) {
+                match m.role {
+                    Role::User | Role::Assistant | Role::Project => {}
+                    Role::System => continue,
+                }
+                let text = m.plain_text();
+                if text.trim().is_empty() {
+                    continue;
+                }
+                if !text.to_lowercase().contains(query) {
+                    continue;
+                }
+                let better = best
+                    .as_ref()
+                    .map(|(at, _, _)| m.created_at >= *at)
+                    .unwrap_or(true);
+                if better {
+                    best = Some((m.created_at, chat.id.clone(), m.id.clone()));
+                }
+            }
+        }
+        best.map(|(_, chat, msg)| (chat, msg))
+    }
+
+    /// Whether the space name, a chat title, or any loaded message matches `query`.
+    pub fn space_matches_query(&self, space: &Project, query: &str) -> bool {
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
+            return true;
+        }
+        let hay = format!(
+            "{} {}",
+            space.name.to_lowercase(),
+            space
+                .person()
+                .map(|x| x.handle.to_lowercase())
+                .unwrap_or_default()
+        );
+        if hay.contains(&q) {
+            return true;
+        }
+        if self
+            .tabs(&space.id)
+            .iter()
+            .any(|c| c.title.to_lowercase().contains(&q))
+        {
+            return true;
+        }
+        self.find_message_match(&space.id, &q).is_some()
+    }
+
     pub fn select_tab(&mut self, chat_id: Id, cx: &mut Context<Self>) {
         let Some(project_id) = self.selected_project.clone() else {
             return;
         };
+        if self.search_chat.as_deref() != Some(chat_id.as_str()) {
+            self.search_chat = None;
+        }
+        self.reveal_message = None;
+        self.highlight_message = None;
         // Single-chat: an agent has one chat, whichever one was asked for.
         let chat_id = if self
             .visible_tabs(&project_id)
             .iter()
             .any(|c| c.id == chat_id)
+            || self.search_chat.as_deref() == Some(chat_id.as_str())
         {
             chat_id
         } else {
@@ -1848,12 +2005,17 @@ impl AppState {
         reply_to: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        self.send_with(text, attachments, None, reply_to, cx);
+        self.send_with(text, attachments, None, reply_to, false, cx);
+    }
+
+    /// Guide: inject `text` into the agent's running turn instead of queuing a follow-up.
+    pub fn guide(&mut self, text: String, reply_to: Option<String>, cx: &mut Context<Self>) {
+        self.send_with(text, Vec::new(), None, reply_to, true, cx);
     }
 
     /// F11: a spoken message; `wav` is kept on the row as an `audio` attachment.
     pub fn send_voice(&mut self, text: String, wav: Arc<Vec<u8>>, cx: &mut Context<Self>) {
-        self.send_with(text, Vec::new(), Some(wav), None, cx);
+        self.send_with(text, Vec::new(), Some(wav), None, false, cx);
     }
 
     /// Hover reply: the next send in this chat answers `message_id`.
@@ -1876,13 +2038,15 @@ impl AppState {
         attachments: Vec<PathBuf>,
         voice_wav: Option<Arc<Vec<u8>>>,
         reply_to: Option<String>,
+        steer: bool,
         cx: &mut Context<Self>,
     ) {
         let Some(chat_id) = self.active_chat_id() else {
             return;
         };
         let message_id = new_id();
-        let answer = self.chat_needs_answer(&chat_id);
+        // Guide never answers a card — it steers the live turn.
+        let answer = !steer && self.chat_needs_answer(&chat_id);
         {
             let ui = self.chat_ui.entry(chat_id.clone()).or_default();
             if !ui.composer_dropped {
@@ -1972,7 +2136,12 @@ impl AppState {
                 chat_id: chat_id.clone(),
                 role: Role::User,
                 sender: "user".into(),
-                status: MessageStatus::Queued,
+                // Guide lands in the live turn (not queued behind it).
+                status: if steer {
+                    MessageStatus::Done
+                } else {
+                    MessageStatus::Queued
+                },
                 turn: None,
                 decision: None,
                 subagent_id: None,
@@ -1997,7 +2166,7 @@ impl AppState {
                 model: None,
                 effort: None,
                 created_at: now_ms(),
-                completed_at: None,
+                completed_at: if steer { Some(now_ms()) } else { None },
                 call_id: None,
                 activity: None,
                 pending: true,
@@ -2019,6 +2188,13 @@ impl AppState {
                 text,
                 question_id,
                 value,
+            });
+        } else if steer {
+            self.command(ClientCommand::Steer {
+                chat_id: chat_id.clone(),
+                message_id,
+                text,
+                reply_to,
             });
         } else if let Some(wav) = voice_wav {
             self.command(ClientCommand::SendVoice {
@@ -2350,9 +2526,16 @@ impl AppState {
         let Some(project_id) = self.selected_project.clone() else {
             return;
         };
-        let effort = self.selected().map(|p| p.effort).unwrap_or(Effort::High);
+        self.set_project_model(project_id, model, cx);
+    }
+
+    /// The agent's model (profile page picker) — optimistic, then `SetModel`
+    /// with its current effort.
+    pub fn set_project_model(&mut self, project_id: Id, model: String, cx: &mut Context<Self>) {
+        let mut effort = Effort::High;
         if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
             p.model = model.clone();
+            effort = p.effort;
         }
         self.command(ClientCommand::SetModel {
             project_id,
@@ -2436,9 +2619,16 @@ impl AppState {
         let Some(project_id) = self.selected_project.clone() else {
             return;
         };
-        let model = self.selected().map(|p| p.model.clone()).unwrap_or_default();
+        self.set_project_effort(project_id, effort, cx);
+    }
+
+    /// The agent's reasoning effort (profile page picker) — optimistic, then
+    /// `SetModel` with its current model.
+    pub fn set_project_effort(&mut self, project_id: Id, effort: Effort, cx: &mut Context<Self>) {
+        let mut model = String::new();
         if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
             p.effort = effort;
+            model = p.model.clone();
         }
         self.command(ClientCommand::SetModel {
             project_id,
@@ -2527,6 +2717,7 @@ impl AppState {
         self.profile_tab = 0;
         self.profile_picker_open = false;
         self.profile_more_open = false;
+        self.agent_pick = None;
         self.profile_editing_description = false;
         self.renaming_project = None;
         cx.notify();
@@ -2602,12 +2793,16 @@ impl AppState {
         cx.notify();
     }
 
-    /// Closes the sheet; `true` when one was open.
+    /// Closes the sheet; `true` when one was open. An edit in progress on the
+    /// agent page (name, description) is dropped with it.
     pub fn close_profile(&mut self, cx: &mut Context<Self>) -> bool {
         self.avatar_picker = None;
         self.profile_more_open = false;
+        self.agent_pick = None;
         let was = self.profile.take().is_some();
         if was {
+            self.renaming_project = None;
+            self.profile_editing_description = false;
             cx.notify();
         }
         was
@@ -2626,6 +2821,14 @@ impl AppState {
     pub fn toggle_profile_more(&mut self, cx: &mut Context<Self>) {
         self.profile_more_open = !self.profile_more_open;
         cx.notify();
+    }
+
+    /// Agent page: drop one settings row down (`None` folds them all).
+    pub fn set_agent_pick(&mut self, pick: Option<AgentPick>, cx: &mut Context<Self>) {
+        if self.agent_pick != pick {
+            self.agent_pick = pick;
+            cx.notify();
+        }
     }
 
     /// Muted: the relay's `me.muted` for a people chat (synced across devices),
@@ -3455,9 +3658,143 @@ impl AppState {
         self.command(ClientCommand::CreateProject {
             name,
             avatar_color_index,
+            source_project_id: None,
+            description: None,
+            color: None,
         });
         self.push_notice("Creating project…");
         cx.notify();
+    }
+
+    /// Grok / iPhone "Fork": a new agent with the same look and workspace
+    /// context (files + memory). Own agents only; chat history stays empty.
+    pub fn duplicate_project(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        let Some(src) = self
+            .project(&project_id)
+            .filter(|p| !p.shared && !p.is_people())
+        else {
+            return;
+        };
+        let name = Self::unique_copy_name(&src.name, &self.projects);
+        let description = src.description.clone();
+        let color = Some(src.color.clone());
+        let avatar_color_index = src.avatar_color_override;
+        self.awaiting_new_project = true;
+        self.command(ClientCommand::CreateProject {
+            name,
+            avatar_color_index,
+            source_project_id: Some(project_id),
+            description,
+            color,
+        });
+        self.push_notice("Forking…");
+        cx.notify();
+    }
+
+    /// Soft-delete an owned agent from every list (`DELETE /projects/{id}`).
+    pub fn delete_project(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        let Some(p) = self.project(&project_id) else {
+            return;
+        };
+        if p.shared || p.is_people() {
+            return;
+        }
+        if self.selected_project.as_deref() == Some(project_id.as_str()) {
+            self.selected_project = None;
+        }
+        if let Some(tabs) = self.chats.remove(&project_id) {
+            for c in tabs {
+                self.messages.remove(&c.id);
+                self.chat_ui.remove(&c.id);
+                self.archived_chats.remove(&c.id);
+            }
+        }
+        self.active_tab.remove(&project_id);
+        self.last_chats.remove(&project_id);
+        self.projects.retain(|p| p.id != project_id);
+        self.muted.remove(&project_id);
+        self.command(ClientCommand::DeleteProject { project_id });
+        cx.notify();
+    }
+
+    /// Delete a people chat I own (`DELETE /chats/{id}`).
+    pub fn delete_people_chat(&mut self, chat_id: Id, cx: &mut Context<Self>) {
+        if !self.project(&chat_id).is_some_and(|p| p.is_people()) {
+            return;
+        }
+        if self.selected_project.as_deref() == Some(chat_id.as_str()) {
+            self.selected_project = None;
+        }
+        self.messages.remove(&chat_id);
+        self.chat_ui.remove(&chat_id);
+        self.chats.remove(&chat_id);
+        self.archived_chats.remove(&chat_id);
+        self.projects.retain(|p| p.id != chat_id);
+        self.muted.remove(&chat_id);
+        self.command(ClientCommand::DeletePeopleChat { chat_id });
+        cx.notify();
+    }
+
+    /// Permanently close a non-pinned chat tab (drops it from Archived too).
+    pub fn delete_chat_tab(&mut self, chat_id: Id, cx: &mut Context<Self>) {
+        if !self.multi_chat {
+            return;
+        }
+        let Some(project_id) = self.project_of_chat(&chat_id).map(|p| p.id.clone()) else {
+            return;
+        };
+        if self
+            .tabs(&project_id)
+            .iter()
+            .any(|c| c.id == chat_id && c.is_pinned)
+        {
+            return;
+        }
+        self.archived_chats.remove(&chat_id);
+        if let Some(tabs) = self.chats.get_mut(&project_id) {
+            tabs.retain(|c| c.id != chat_id);
+        }
+        self.messages.remove(&chat_id);
+        self.chat_ui.remove(&chat_id);
+        if self.active_tab.get(&project_id) == Some(&chat_id) {
+            let pick = self
+                .visible_tabs(&project_id)
+                .into_iter()
+                .next()
+                .map(|c| c.id.clone());
+            if let Some(pick) = pick {
+                self.active_tab.insert(project_id.clone(), pick.clone());
+                self.last_chats.insert(project_id.clone(), pick.clone());
+                self.command(ClientCommand::OpenChat { chat_id: pick });
+            } else {
+                self.active_tab.remove(&project_id);
+            }
+        }
+        self.command(ClientCommand::CloseChat {
+            project_id,
+            chat_id,
+        });
+        cx.notify();
+    }
+
+    /// "`Name` copy", then "`Name` copy 2"… so the relay's unique-name check passes.
+    fn unique_copy_name(name: &str, projects: &[Project]) -> String {
+        let owned: HashSet<&str> = projects
+            .iter()
+            .filter(|p| !p.shared && !p.is_people())
+            .map(|p| p.name.as_str())
+            .collect();
+        let base = format!("{name} copy");
+        if !owned.contains(base.as_str()) {
+            return base;
+        }
+        for i in 2..=99 {
+            let candidate = format!("{name} copy {i}");
+            if !owned.contains(candidate.as_str()) {
+                return candidate;
+            }
+        }
+        format!("{name} copy {}", &new_id()[..4])
     }
 
     pub fn fetch_blob(&mut self, key: String, save: bool, cx: &mut Context<Self>) {
