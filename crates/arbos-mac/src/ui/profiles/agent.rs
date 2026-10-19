@@ -1,7 +1,11 @@
-//! An agent's page: the coloured tree, name, what it is doing, call / voice
-//! (soon) / mute / search / more, the info card (owner, machine, model,
-//! description), an Appearance section holding the tree + colour picker,
-//! then Media / Files / Links from its chats.
+//! An agent's page: the D79 avatar, name, what it is doing, call / mute /
+//! search / more, the info card (owner, machine, model, description), an
+//! Appearance section holding the avatar colour picker (D79 override, saved
+//! on the relay), then Media / Files / Links from its chats.
+//!
+//! Only controls that work end to end are shown (#1066): the colour swatches
+//! PATCH `avatar_color_index`; there is no avatar-image picker on the Mac yet,
+//! so none is offered.
 
 use gpui::{div, prelude::*, px, Context, Div, ElementId, Focusable, SharedString};
 
@@ -203,9 +207,10 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
 
     // ----- actions --------------------------------------------------------------
     let p_call = pid.clone();
-    let p_voice = pid.clone();
     let p_mute = pid.clone();
     let name_q = project.name.clone();
+    // No separate "voice" tile: calls always start audio-only, so it was the
+    // same action as "call" under a second name (#1066).
     let actions = action_row(vec![
         action_button(&Action::new("profile-call", "phone", "call"), &theme).on_click(cx.listener(
             move |this, _, _, cx| {
@@ -214,13 +219,6 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
                     .update(cx, |s, cx| s.start_call(CallTarget::Agent(p), false, cx));
             },
         )),
-        action_button(&Action::new("profile-voice", "waveform", "voice"), &theme).on_click(
-            cx.listener(move |this, _, _, cx| {
-                let p = p_voice.clone();
-                this.state
-                    .update(cx, |s, cx| s.start_call(CallTarget::Agent(p), false, cx));
-            }),
-        ),
         action_button(
             &Action::new(
                 "profile-mute",
