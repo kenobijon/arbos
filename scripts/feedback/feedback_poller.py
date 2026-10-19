@@ -2053,8 +2053,10 @@ class Loop:
                     self.store.save_state(fid, st)
                     self.store.event(fid, "branch_pushed", branch=st["branch"], head=head, files=files, by=st.get("handed_off_to"))
                     continue
-            commit = self.find_commit(fid, st.get("created") or iso())
-            if not commit:
+            # Only commits newer than the hand-off count: an earlier loop merge that was reverted (#1058,
+            # 51ec9524) still carries the tag and must not be taken for the owner's landing.
+            commit = self.find_commit(fid, max(st.get("created") or "", st.get("handed_off_at") or "") or iso())
+            if not commit or commit["sha"] in (st.get("reverted") or []):
                 continue
             files = [f["filename"] for f in self.gh.commit(commit["sha"]).get("files", [])]
             st.update(status="pushed", commit=commit["sha"], commit_url=commit["html_url"],
