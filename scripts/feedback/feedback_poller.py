@@ -491,6 +491,33 @@ class GitHub:
                 return None
             raise
 
+    def close_issue(self, number: int, reason: str, comment: str | None = None) -> None:
+        """reason: completed (fixed and released) | not_planned (won't fix, duplicate, no change, superseded)."""
+        if comment:
+            self.comment(number, comment)
+        self.repo_api("PATCH", f"/issues/{number}", json_body={"state": "closed", "state_reason": reason})
+
+    def reopen_issue(self, number: int, comment: str | None = None) -> None:
+        self.repo_api("PATCH", f"/issues/{number}", json_body={"state": "open"})
+        if comment:
+            self.comment(number, comment)
+
+    def issue(self, number: int) -> dict:
+        return self.repo_api("GET", f"/issues/{number}")
+
+    def latest_stable_release(self) -> dict | None:
+        rels = self.repo_api("GET", "/releases?per_page=30")
+        stable = [r for r in rels if not r.get("prerelease") and not r.get("draft") and re.fullmatch(r"v\d+\.\d+\.\d+", r.get("tag_name") or "")]
+        stable.sort(key=lambda r: r.get("created_at") or "", reverse=True)
+        return stable[0] if stable else None
+
+    def contains(self, ref: str, sha: str) -> bool:
+        """True when `ref` (tag/branch/sha) already contains commit `sha`."""
+        try:
+            return self.compare(ref, sha).get("status") in ("identical", "behind")
+        except HttpError:
+            return False
+
     def create_branch(self, branch: str, sha: str) -> None:
         self.repo_api("POST", "/git/refs", json_body={"ref": f"refs/heads/{branch}", "sha": sha})
 
@@ -1271,6 +1298,7 @@ class Loop:
             self.store.event(fid, "deferred", reason=deferral, tester=st.get("tester"))
             self.gh.comment(issue["number"], deferral)
             self.gh.set_labels(issue["number"], ["deferred"], [])
+            self.close_not_planned(fid, st, f"deferred by rule — {deferral}")
             return False
         return True
 
@@ -1393,6 +1421,7 @@ class Loop:
                 self.gh.ensure_label("no-change", "C5DEF5", "The agent looked and found nothing to change")
                 self.gh.comment(st["issue"], f"No change: {self.summary_line(result)}\n\nAgent: {st.get('agent_url')}")
                 self.gh.set_labels(st["issue"], ["no-change"], [])
+                self.close_not_planned(fid, st, f"no change — {self.summary_line(result)}")
                 return
             self.fail(fid, st, "agent finished without pushing a [feedback] commit (branch feedback/<id> or main)", extra=result)
             return
@@ -1408,6 +1437,7 @@ class Loop:
         self.gh.comment(st["issue"], f"Pushed to `main`: {commit['html_url']} — `{st['commit_message']}`\n\n"
                         f"Files: {', '.join(f'`{f}`' for f in files) or '—'}\n\n"
                         f"Agent summary: {summary}")
+        self.note_fixed_on_main(st)
 
     # ---- pre-merge gates: Rust-touching fixes must pass fmt/clippy/test (+ the arbos-mac release build) and
     # ---- iOS-touching fixes must compile with Xcode, both on the EC2 Mac, before they reach main ------
@@ -1688,7 +1718,8 @@ class Loop:
                 log(f"Rust gate {active['id']}: Linux half {active['linux']} ({run['html_url']})")
             elif not run and minutes_between(active["started"], iso()) > 10:
                 # Not the branches' fault: drop the run without verdicts; the next tick re-batches.
-                log(f"Rust gate {active['id']}: CI did not start on {active['branch']} within 10 min; re-batching")
+                log(f"Rust gate {active['id']}: CI did not start on {active['branch']} within 10 min; "
+                    + ("the integration tree run is dropped — re-run gate-tree" if active.get("land_tree") else "re-batching"))
                 if active.get("mac_started") and active["mac"] == "pending":
                     self.rust_gate_mac("abort", active["id"])
                 cur.pop("rust_gate", None); self.store.save_cursor(cur)
@@ -1784,6 +1815,7 @@ class Loop:
                 self.gh.comment(st["issue"], f"Merged to `main` as part of integration tree `{tree[:8]}`: {merged['html_url']} (fix {fix['html_url']} — "
                                 f"`{st['commit_message']}`). {note}.\n\nFiles: {', '.join(f'`{f}`' for f in files) or '—'}")
                 self.gh.set_labels(st["issue"], [], ["in-progress"])
+                self.note_fixed_on_main(st)
             self.gh.delete_branch(f"feedback/{fid}")
         cur = self.store.cursor()
         cur["rust_gate_warm"] = tree if active["mac"] == "ok" else None
@@ -1898,6 +1930,7 @@ class Loop:
         self.gh.comment(st["issue"], f"Merged to `main`: {merged['html_url']} (fix {fix['html_url']} — `{st['commit_message']}`).{gate_note}\n\n"
                         f"Files: {', '.join(f'`{f}`' for f in st.get('files') or []) or '—'}\n\n"
                         f"Agent summary: {st.get('agent_summary') or '—'}")
+        self.note_fixed_on_main(st)
         self.gh.delete_branch(st["branch"])
 
     def resolve_build_number(self, prefix: str, run_id: int) -> str:
@@ -2149,6 +2182,66 @@ class Loop:
     DEPLOY_WHERE = {"voice": "the voice pod (voice-calls worker deploys it)", "agentd": "the sandbox image (next image roll)",
                     "relay": "the relay (next relay deploy)"}
 
+    def fixed_in(self, st: dict) -> str:
+        """Where Jacob can install the fix: 'Mac v0.6.28 (edge-0.6.28.1070)', 'TestFlight 2026…', 'live on relay …'."""
+        parts: list[str] = []
+        files = st.get("files") or []
+        commit = st.get("commit") or ""
+        mac_files = any(f.startswith("crates/arbos-mac/") or f.startswith("crates/arbos-update/") for f in files)
+        ios_files = any(f.startswith("apps/ios/") for f in files)
+        if st.get("testflight_build") or (ios_files and st.get("status") == "shipped"):
+            parts.append(f"TestFlight {st.get('testflight_build') or 'build'}")
+        if mac_files or st.get("edge_release"):
+            stable = self.gh.latest_stable_release() if commit else None
+            tag = stable["tag_name"] if stable and self.gh.contains(stable["tag_name"], commit) else None
+            edge = st.get("edge_release")
+            if tag and edge:
+                parts.append(f"Mac {tag} ({edge})")
+            elif tag:
+                parts.append(f"Mac {tag}")
+            elif edge:
+                parts.append(f"Mac {edge} (stable follows)")
+        if st.get("deployed_note"):
+            parts.append(f"live on {st['deployed_note']}" if not st["deployed_note"].startswith(("the relay", "all ", "live")) else st["deployed_note"])
+        elif not parts and not ios_files and not mac_files and files:
+            parts.append("live on the relay / site")
+        return ", ".join(parts) or "the current builds"
+
+    def close_fixed(self, fid: str, st: dict) -> None:
+        """Jacob's rule: a fix that is in a build he can install closes the issue (reason completed) with a short
+        'what changed + where' comment; device-evidence items close too, noted as unverified on device."""
+        if not st.get("issue") or st.get("pending_deploy"):
+            return
+        what = (st.get("commit_message") or st.get("agent_summary") or "").split("\n")[0]
+        what = re.sub(r"^fix\(feedback\):\s*", "", what)
+        what = re.sub(r"\s*\[feedback [^\]]+\]\s*$", "", what).strip()
+        unverified = st.get("device_evidence") == "pending"
+        body = f"Fixed in {self.fixed_in(st)}: {what or 'see the commit above'}." + (" Unverified on device (audio / call / notification path); say so here if it does not work for you." if unverified else "")
+        with contextlib.suppress(HttpError):
+            self.gh.close_issue(st["issue"], "completed", body)
+            self.gh.set_labels(st["issue"], [], ["fixed-on-main", "in-progress", "landed-not-shipped"])
+        st["closed"] = {"reason": "completed", "at": iso(), "where": self.fixed_in(st)}
+        self.store.save_state(fid, st)
+        self.store.event(fid, "closed", reason="completed", where=st["closed"]["where"])
+
+    def close_not_planned(self, fid: str, st: dict, why: str) -> None:
+        """Won't-fix / duplicate / no-change / superseded: closed with reason not_planned and one line of why."""
+        if not st.get("issue"):
+            return
+        with contextlib.suppress(HttpError):
+            self.gh.close_issue(st["issue"], "not_planned", f"Closed, not planned: {why.strip().rstrip('.')}.")
+        st["closed"] = {"reason": "not_planned", "at": iso(), "why": why[:300]}
+        self.store.save_state(fid, st)
+        self.store.event(fid, "closed", reason="not_planned", why=why[:300])
+
+    def note_fixed_on_main(self, st: dict) -> None:
+        """Merged, not yet in a release: label fixed-on-main; the issue closes when the release carries it."""
+        if not st.get("issue"):
+            return
+        self.gh.ensure_label("fixed-on-main", "0E8A16", "Merged to main; ships in the next release, closes then")
+        self.gh.set_labels(st["issue"], ["fixed-on-main"], ["needs-human"])
+        self.gh.comment(st["issue"], "Fixed on main, ships in the next release.")
+
     def ship(self, fid: str, st: dict, partial: bool = False) -> None:
         info = self.store.submission(fid)
         parts = []
@@ -2190,6 +2283,7 @@ class Loop:
                            if unverified else ""))
         self.gh.ensure_label("shipped-unverified", "C2E0C6", "Built and in TestFlight/edge; needs device-level confirmation (audio/call/haptic/notification)")
         self.gh.set_labels(st["issue"], ["shipped-unverified"] if unverified else ["shipped"], ["needs-human", "landed-not-shipped"])
+        self.close_fixed(fid, st)
 
     def fail(self, fid: str, st: dict, error: str, extra: str = "") -> None:
         st.update(status="failed", error=error, failed_at=iso())
@@ -2346,6 +2440,7 @@ class Loop:
                 self.gh.comment(st["issue"], f"The owner's fix landed on `main`: {commit['html_url']} — `{st['commit_message']}`\n\n"
                                 f"Files: {', '.join(f'`{f}`' for f in files) or '—'}\n\nThe loop now tracks it to the builds / fleet.")
                 self.gh.set_labels(st["issue"], [], ["in-progress"])
+                self.note_fixed_on_main(st)
 
     # ---- landed-not-shipped: code that is on main but runs somewhere no build carries ------------
 
@@ -2426,6 +2521,8 @@ class Loop:
                 " This is an audio / call / notification change the simulator cannot prove, so it is `shipped-unverified` "
                 "until the reporter confirms it on a device." if unverified else ""))
             self.gh.set_labels(st["issue"], ["shipped-unverified"] if unverified else ["shipped"], ["landed-not-shipped"])
+            if st.get("status") == "shipped":
+                self.close_fixed(fid, st)
         log(f"[{fid}] deployed: {note}")
 
     # ---- TestFlight public group: nothing stays unsubmitted --------------------------------------
@@ -2614,8 +2711,11 @@ def main(argv: list[str]) -> int:
             loop.gh.delete_branch(f"feedback/{fid}")  # a fresh agent starts its branch from main again
             if st.get("issue"):
                 with contextlib.suppress(HttpError):
-                    loop.gh.comment(st["issue"], "Requeued by the operator; a new agent run follows.")
-                    loop.gh.set_labels(st["issue"], [], ["needs-human"])
+                    if loop.gh.issue(st["issue"]).get("state") == "closed":
+                        loop.gh.reopen_issue(st["issue"], "Reopened: the audit found the fix missing or regressed in the current build; a new agent run follows.")
+                    else:
+                        loop.gh.comment(st["issue"], "Requeued by the operator; a new agent run follows.")
+                    loop.gh.set_labels(st["issue"], [], ["needs-human", "fixed-on-main", "shipped", "shipped-unverified", "no-change"])
             print(f"{fid}: queued ({tier}, {st['tester']})")
         return 0
     if cmd == "confirm":
@@ -2679,6 +2779,45 @@ def main(argv: list[str]) -> int:
         store.event(fid, "tracked", issue=number, owner=owner)
         print(f"{fid}: tracking #{number} (handed off to {owner}); lands when a main commit carries [feedback {fid}]")
         return 0
+    if cmd == "backfill-close":
+        # Jacob's rule applied to everything already in the store: shipped → closed completed; merged-unreleased →
+        # fixed-on-main; no-change / deferred / superseded → closed not_planned. Prints what stays open and why.
+        store = Store(cfg)
+        loop = Loop(cfg)
+        closed = {"completed": 0, "not_planned": 0}; labelled = 0; open_left: list[str] = []
+        for fid in store.items():
+            st = store.state(fid)
+            if not st.get("issue"):
+                continue
+            try:
+                gh_issue = loop.gh.issue(st["issue"])
+            except HttpError as e:
+                print(f"#{st['issue']}: GET failed {e.status}"); continue
+            labels = {lb["name"] for lb in gh_issue.get("labels", [])}
+            if gh_issue.get("state") == "closed":
+                continue
+            status = st.get("status")
+            if st.get("superseded") or status == "superseded":
+                loop.close_not_planned(fid, st, f"superseded — {st.get('error') or st.get('superseded') or 'owner decision'}")
+                closed["not_planned"] += 1
+            elif status == "shipped" and not st.get("pending_deploy"):
+                loop.close_fixed(fid, st); closed["completed"] += 1
+            elif status == "no_change":
+                loop.close_not_planned(fid, st, f"no change — {st.get('error') or 'nothing to change'}"); closed["not_planned"] += 1
+            elif status == "deferred":
+                loop.close_not_planned(fid, st, f"deferred by rule — {st.get('error') or ''}"); closed["not_planned"] += 1
+            elif status == "pushed":
+                if "fixed-on-main" not in labels:
+                    loop.note_fixed_on_main(st); labelled += 1
+                open_left.append(f"#{st['issue']} merged, awaiting release ({str(st.get('commit'))[:8]})")
+            elif status == "shipped" and st.get("pending_deploy"):
+                open_left.append(f"#{st['issue']} landed, not shipped (needs deploy: {st['pending_deploy']})")
+            else:
+                open_left.append(f"#{st['issue']} {status} ({st.get('handed_off_to') or st.get('error') or ''})".rstrip(" ()"))
+            time.sleep(0.3)
+        print(f"closed completed: {closed['completed']}, closed not_planned: {closed['not_planned']}, labelled fixed-on-main: {labelled}")
+        print("still open:"); [print("  " + o) for o in open_left]
+        return 0
     if cmd == "gate-tree":
         # `gate-tree <sha-or-branch> <fid>…`: gate a hand-prepared integration tree (main + several fix branches,
         # conflicts resolved by its owner) as one run and land it whole when green.
@@ -2691,7 +2830,16 @@ def main(argv: list[str]) -> int:
             return 2
         run_id = f"tree-{utcnow().strftime('%Y%m%dT%H%M%S')}-{len(fids)}"
         branch = f"gate/{run_id}"
-        loop.gh.create_branch(branch, tree)  # CI (the Linux half) starts on this push
+        loop.gh.create_branch(branch, tree)
+        # Bring the tree up to current main first: what lands is tree+main, and the CI trigger for gate/**
+        # lives in main's workflow file (a tree built from an older main would never start the Linux half).
+        main_head = loop.gh.branch_head("main")
+        res = loop.gh.merge_into(branch, main_head, f"gate: merge main into integration tree {tree[:8]} [gate {run_id}]")
+        if res is None:
+            loop.gh.delete_branch(branch)
+            print(f"{ref}: the tree conflicts with current main ({main_head[:8]}); merge main into it and try again")
+            return 2
+        tree = loop.gh.branch_head(branch) or tree  # CI (the Linux half) starts on this push
         members = {fid: (store.state(fid).get("branch_head") or loop.gh.branch_head(f"feedback/{fid}") or "") for fid in fids}
         cur = store.cursor()
         cur["rust_gate_tree"] = {"id": run_id, "branch": branch, "base": loop.gh.branch_head("main"), "tree": tree, "members": members,
