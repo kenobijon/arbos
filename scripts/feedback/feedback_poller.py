@@ -906,9 +906,11 @@ class Loop:
             theirs = self.normalized(other.get("comment", ""))
             if mine and theirs and len(mine) >= 12 and difflib.SequenceMatcher(None, mine, theirs).ratio() >= 0.85:
                 return fid
-            for shot in self.store.screenshots(fid):
-                if hashlib.md5(shot.read_bytes()).hexdigest() in my_hashes:
-                    return fid
+            # The same screenshot is a duplicate only when the words agree too (or one side has none):
+            # the Mac sheet re-sends the captured window, so two different reports in a row share bytes.
+            same_shot = any(hashlib.md5(shot.read_bytes()).hexdigest() in my_hashes for shot in self.store.screenshots(fid))
+            if same_shot and (not mine or not theirs or difflib.SequenceMatcher(None, mine, theirs).ratio() >= 0.5):
+                return fid
         return None
 
     def admit(self, info: dict) -> None:
