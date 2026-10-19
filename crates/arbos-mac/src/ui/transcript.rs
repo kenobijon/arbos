@@ -551,9 +551,11 @@ impl Transcript {
                 bubble = bubble.child(text);
                 if let Some(person) = from {
                     // Someone else: left-aligned, their avatar and handle above.
+                    // Must not early-return: the match arm still needs the
+                    // COLUMN_MARGIN wrapper (same padding as agent bubbles).
                     let image = self.state.read(cx).avatar(&person.avatar_url);
                     let color = groups::sender_color(&person.handle, &theme);
-                    return div()
+                    div()
                         .w_full()
                         .flex()
                         .flex_col()
@@ -610,33 +612,34 @@ impl Transcript {
                                 )
                                 .children(hover_time(time, reveal, &theme).map(|t| t.ml(px(8.0))))
                         })
-                        .into_any_element();
+                        .into_any_element()
+                } else {
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .items_end()
+                        .gap(px(3.0))
+                        .py(px(6.0))
+                        .when_some(sender_label, |el, label| {
+                            el.child(
+                                div()
+                                    .pr(px(6.0))
+                                    .text_size(px(TEXT_TINY))
+                                    .text_color(theme.text_muted)
+                                    .child(label),
+                            )
+                        })
+                        .child({
+                            // My bubble sits right, so its outer edge (and time) is on the left.
+                            let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
+                            row_el
+                                .justify_end()
+                                .children(hover_time(time, reveal, &theme).map(|t| t.mr(px(8.0))))
+                                .child(bubble.when(pending, |el| el.opacity(0.6)))
+                        })
+                        .into_any_element()
                 }
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .items_end()
-                    .gap(px(3.0))
-                    .py(px(6.0))
-                    .when_some(sender_label, |el, label| {
-                        el.child(
-                            div()
-                                .pr(px(6.0))
-                                .text_size(px(TEXT_TINY))
-                                .text_color(theme.text_muted)
-                                .child(label),
-                        )
-                    })
-                    .child({
-                        // My bubble sits right, so its outer edge (and time) is on the left.
-                        let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
-                        row_el
-                            .justify_end()
-                            .children(hover_time(time, reveal, &theme).map(|t| t.mr(px(8.0))))
-                            .child(bubble.when(pending, |el| el.opacity(0.6)))
-                    })
-                    .into_any_element()
             }
             RowKind::Markdown {
                 block,
