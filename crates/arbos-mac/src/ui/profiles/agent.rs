@@ -1,13 +1,9 @@
 //! An agent's page: the D79 avatar, name, what it is doing, call / mute /
-//! search / more, the info card (owner, machine, then — for my own agent —
-//! Model / Reasoning / Voice rows that drop down on hover, secrets, camera
-//! vision, description), an Appearance section holding the avatar colour
-//! picker (D79 override, saved on the relay), then Media / Files / Links
-//! from its chats.
-//!
-//! Only controls that work end to end are shown (#1066): the colour swatches
-//! PATCH `avatar_color_index`. Clicking the big avatar (owned agents) opens
-//! that picker — there is no separate photo upload on the Mac yet.
+//! search / more, the info card (for my own agent — Model / Reasoning / Voice
+//! rows that drop down on hover, secrets, camera vision, description), then
+//! Media / Files / Links from its chats. Owner and machine stay off this
+//! page. Clicking the big avatar (owned agents) opens the colour picker —
+//! there is no separate photo upload on the Mac yet.
 
 use gpui::{div, prelude::*, px, Context, Div, ElementId, Focusable, SharedString};
 
@@ -78,12 +74,6 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
         .as_ref()
         .map(|m| m.always_on)
         .unwrap_or(state.machine.always_on);
-    let machine_class = project
-        .machine_info
-        .as_ref()
-        .map(|m| m.class.clone())
-        .filter(|c| !c.is_empty() && c != "none")
-        .or_else(|| state.machine.class.clone());
     let status = if streaming {
         "working".to_string()
     } else if always_on || machine_state == MachineState::Awake {
@@ -100,33 +90,10 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
         .owner_person
         .clone()
         .or_else(|| project.owner().cloned());
-    let owner_text = match (&owner, mine) {
-        (Some(o), _) => format!(
-            "@{}{}",
-            o.handle,
-            if state.is_online(o) { " · online" } else { "" }
-        ),
-        (None, true) => format!("@{} (you)", state.me_handle()),
-        (None, false) => project
-            .owner_handle
-            .clone()
-            .map(|h| format!("@{h}"))
-            .unwrap_or_else(|| "—".into()),
-    };
     let model_text = if project.model.is_empty() {
         "default".to_string()
     } else {
         project.model.clone()
-    };
-    let machine_text = {
-        let mut s = machine_state.label().to_string();
-        if always_on {
-            s.push_str(" · always on");
-        }
-        if let Some(c) = &machine_class {
-            s.push_str(&format!(" · {c}"));
-        }
-        s
     };
     let tab = state.profile_tab;
     let more_open = state.profile_more_open;
@@ -143,8 +110,8 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
     }
 
     // ----- hero ----------------------------------------------------------------
-    // Owned agents: click the picture to open the avatar-colour picker (same
-    // as Appearance → Avatar colour). That replaces the old header "Edit".
+    // Owned agents: click the picture to open the avatar-colour picker. That
+    // replaces the old header "Edit".
     let avatar = div()
         .id("profile-avatar")
         .relative()
@@ -318,9 +285,10 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
     });
 
     // ----- info card -------------------------------------------------------------
-    let mut info = card(&theme)
-        .child(info_row("owner", owner_text, &theme))
-        .child(info_row("machine", machine_text, &theme));
+    // Essentials only: model / reasoning / voice / secrets (plus camera vision
+    // and about for my agents). Owner and machine are gone; avatar colour opens
+    // from a click on the big avatar, not as a settings row.
+    let mut info = card(&theme);
     if mine {
         // The agent's own settings: Model (searchable), Reasoning and Voice
         // drop down on hover (or a click) and apply at once.
@@ -355,10 +323,10 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
                 &theme,
                 cx,
             ));
-        // Rows are the card's children 2 / 3 / 4; when one has just opened,
+        // Rows are the card's children 0 / 1 / 2; when one has just opened,
         // scroll the sheet so its list is in view.
         if let Some(open) = pick {
-            let open_ix = 2 + match open {
+            let open_ix = match open {
                 AgentPick::Model => 0,
                 AgentPick::Reasoning => 1,
                 AgentPick::Voice => 2,
@@ -573,37 +541,31 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
         }
     }
 
-    // ----- appearance (mine only): Automatic + the seven gradients, folded ----
-    let appearance = mine.then(|| {
-        let current_index = avatars::index_for(&project.id, project.avatar_color_override);
-        let label = match project.avatar_color_override {
-            None => format!("Automatic · {}", avatars::GRADIENTS[current_index as usize].name),
-            Some(i) => avatars::GRADIENTS[(i as usize) % 7].name.to_string(),
-        };
-        let mut section = card(&theme).child(
-            glass::nav_row(
-                "profile-appearance",
-                "Avatar colour",
-                Some(if picker_open { "pick".into() } else { label }),
-                &theme,
+    // ----- appearance (avatar click): Automatic + the seven gradients ----------
+    // Shown only while the picker is open so Avatar colour is not a permanent
+    // settings row. Owned agents open it by clicking the big avatar.
+    let appearance = (mine && picker_open).then(|| {
+        card(&theme)
+            .child(
+                glass::nav_row(
+                    "profile-appearance",
+                    "Avatar colour",
+                    Some("pick".into()),
+                    &theme,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.state.update(cx, |s, cx| s.toggle_profile_picker(cx));
+                })),
             )
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.state.update(cx, |s, cx| s.toggle_profile_picker(cx));
-            })),
-        );
-        if picker_open {
-            section = section
-                .child(colour_row(&project, &theme, cx))
-                .child(
-                    div()
-                        .px(px(16.0))
-                        .pb(px(12.0))
-                        .text_size(px(TEXT_TINY))
-                        .text_color(theme.text_muted)
-                        .child("Automatic picks the colour from the agent's id, the same on every device; choose one to make it yours."),
-                );
-        }
-        section
+            .child(colour_row(&project, &theme, cx))
+            .child(
+                div()
+                    .px(px(16.0))
+                    .pb(px(12.0))
+                    .text_size(px(TEXT_TINY))
+                    .text_color(theme.text_muted)
+                    .child("Automatic picks the colour from the agent's id, the same on every device; choose one to make it yours."),
+            )
     });
 
     // ----- tabs -----------------------------------------------------------------
@@ -621,9 +583,8 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
         .child(hero)
         .child(actions)
         .children(more)
-        // Avatar colour sits right under the big avatar it changes.
-        .children(appearance)
         .child(info)
+        .children(appearance)
         .child(tabs)
         .child(body_tab);
     // No "Edit" — click the avatar to change its colour; double-click the
