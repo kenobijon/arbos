@@ -8,20 +8,21 @@
 //! open from the sidebar row's control-click menu.
 
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::{
-    actions, div, fill, point, prelude::*, px, relative, size, App, Bounds, ClipboardItem, Context,
-    CursorStyle, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter,
-    ExternalPaths, FocusHandle, Focusable, GlobalElementId, InspectorElementId, IntoElement,
-    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
-    Render, SharedString, Style, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window,
-    WrappedLine,
+    actions, div, fill, img, point, prelude::*, px, relative, size, App, Bounds, ClipboardItem,
+    Context, CursorStyle, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler,
+    EventEmitter, ExternalPaths, FocusHandle, Focusable, GlobalElementId, InspectorElementId,
+    IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
+    PaintQuad, Pixels, Point, Render, RenderImage, SharedString, Style, TextAlign, TextRun,
+    UTF16Selection, UnderlineStyle, Window, WrappedLine,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::app::{AppState, ComposerMode};
+use crate::app::{decode_image, AppState, ComposerMode};
 use crate::model::{CallKind, Effort};
 use crate::sync::fixture::MODELS;
 use crate::ui::callview;
@@ -1166,12 +1167,18 @@ pub enum Picker {
     Effort,
 }
 
+/// A file staged in the composer; image paths carry a decoded thumbnail for the pill.
+struct StagedAttachment {
+    path: PathBuf,
+    preview: Option<Arc<RenderImage>>,
+}
+
 pub struct Composer {
     state: Entity<AppState>,
     pub input: Entity<ComposerInput>,
     /// F11: mic button, voice mode, spoken replies.
     voice: Entity<Voice>,
-    attachments: Vec<PathBuf>,
+    attachments: Vec<StagedAttachment>,
     /// Which chat the input text belongs to; drafts are kept per chat.
     draft_chat: Option<crate::model::Id>,
     drafts: std::collections::HashMap<crate::model::Id, String>,
@@ -1281,7 +1288,10 @@ impl Composer {
                     .active_chat_id()
                     .map(|id| self.state.read(cx).chat_is_streaming(&id))
                     .unwrap_or(false);
-                let attachments = std::mem::take(&mut self.attachments);
+                let attachments: Vec<PathBuf> = std::mem::take(&mut self.attachments)
+                    .into_iter()
+                    .map(|a| a.path)
+                    .collect();
                 self.input.update(cx, |input, cx| input.clear(cx));
                 let reply_to = self.state.read(cx).active_chat_id().and_then(|cid| {
                     self.state
@@ -1328,7 +1338,8 @@ impl Composer {
     fn add_paths(&mut self, paths: impl IntoIterator<Item = PathBuf>, cx: &mut Context<Self>) {
         for path in paths {
             if path.is_file() {
-                self.attachments.push(path);
+                let preview = image_preview_for(&path);
+                self.attachments.push(StagedAttachment { path, preview });
             }
         }
         cx.notify();
@@ -1956,37 +1967,48 @@ impl Render for Composer {
 
         if !self.attachments.is_empty() {
             let mut chips = div().flex().flex_wrap().gap(px(6.0)).pl(px(8.0));
-            for (i, path) in self.attachments.iter().enumerate() {
-                let name_owned = path
+            for (i, staged) in self.attachments.iter().enumerate() {
+                let name_owned = staged
+                    .path
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("attachment")
                     .to_string();
-                let is_image = matches!(
-                    path.extension()
-                        .and_then(|e| e.to_str())
-                        .map(|e| e.to_lowercase())
-                        .as_deref(),
-                    Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "heic")
-                );
+                let is_image = is_image_path(&staged.path);
+                let leading = match staged.preview.clone() {
+                    Some(image) => div()
+                        .size(px(28.0))
+                        .rounded(px(6.0))
+                        .overflow_hidden()
+                        .flex_shrink_0()
+                        .child(img(image).size(px(28.0)).object_fit(ObjectFit::Cover))
+                        .into_any_element(),
+                    None => icon(if is_image { "photo" } else { "doc" }, 12.0, theme.text)
+                        .into_any_element(),
+                };
                 chips = chips.child(
                     div()
                         .id(ElementId::NamedInteger("attachment".into(), i as u64))
                         .flex()
                         .items_center()
                         .gap(px(6.0))
-                        .px(px(10.0))
-                        .py(px(5.0))
+                        .pl(if staged.preview.is_some() {
+                            px(4.0)
+                        } else {
+                            px(10.0)
+                        })
+                        .pr(px(10.0))
+                        .py(if staged.preview.is_some() {
+                            px(3.0)
+                        } else {
+                            px(5.0)
+                        })
                         .rounded_full()
                         .bg(theme.bubble_assistant)
                         .text_size(px(TEXT_TINY))
                         .text_color(theme.text)
                         .cursor_pointer()
-                        .child(icon(
-                            if is_image { "photo" } else { "doc" },
-                            12.0,
-                            theme.text,
-                        ))
+                        .child(leading)
                         .child(div().max_w(px(220.0)).truncate().child(name_owned))
                         .child(icon("xmark", 9.0, theme.text_muted))
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -2054,6 +2076,25 @@ impl ButtonAction {
             ButtonAction::Call => "phone",
         }
     }
+}
+
+fn is_image_path(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase())
+            .as_deref(),
+        Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "heic")
+    )
+}
+
+/// Decode a small thumbnail for the composer attachment pill (local file only).
+fn image_preview_for(path: &Path) -> Option<Arc<RenderImage>> {
+    if !is_image_path(path) {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    decode_image(&bytes).map(Arc::new)
 }
 
 /// What the round primary button does. A recording memo wins: the user needs
