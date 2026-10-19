@@ -3,7 +3,7 @@
 //! button that plays the cached sample, and a checkmark on the selected one.
 //! Saving is a click (`PATCH /projects/{id} {voice}`).
 
-use gpui::{div, prelude::*, px, Context, Div, ElementId, FontWeight, SharedString};
+use gpui::{div, prelude::*, px, Context, Div, ElementId, FontWeight, SharedString, Stateful};
 
 use crate::model::{Project, Voice};
 use crate::ui::glass;
@@ -248,6 +248,149 @@ pub fn sheet(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
         )
         .child(list);
     glass::sheet(440.0, &theme, header, body.max_h(px(620.0)))
+}
+
+/// The compact list for the agent page's hover-expanding "voice" row (#1064):
+/// Default first, then every voice with its play button and a checkmark on
+/// the selected one. Picking is a click; the parent decides when to collapse.
+pub fn inline_list(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Stateful<Div> {
+    let theme = Theme::of(cx).clone();
+    let state = shell.state.read(cx);
+    let voices: Vec<Voice> = state.voices.clone();
+    let selected = space.voice.clone();
+    let pid = space.id.clone();
+    let default_voice = state
+        .default_voice
+        .as_deref()
+        .and_then(|id| voices.iter().find(|v| v.id == id))
+        .cloned();
+    let default_label = match &default_voice {
+        Some(v) => format!("Default ({})", v.name),
+        None => "Default".to_string(),
+    };
+
+    let play_button = |id: ElementId, url: Option<String>, playing: bool, theme: &Theme| {
+        let has = url.is_some();
+        div()
+            .id(id)
+            .flex_shrink_0()
+            .size(px(26.0))
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(if playing {
+                theme.text
+            } else {
+                Theme::with_alpha(theme.text, 0.08)
+            })
+            .when(!has, |el| el.opacity(0.35))
+            .hover(|s| s.opacity(0.85))
+            .child(icon(
+                if playing { "stop" } else { "play" },
+                11.0,
+                if playing { theme.bg } else { theme.text },
+            ))
+            .when_some(url, |el, url| {
+                el.on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.state
+                            .update(cx, |s, cx| s.toggle_voice_sample(url.clone(), cx));
+                    }),
+                )
+            })
+    };
+    let item = |id: ElementId, label: String, on: bool, theme: &Theme| {
+        div()
+            .id(id)
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .px(px(10.0))
+            .py(px(6.0))
+            .text_size(px(TEXT_SMALL))
+            .text_color(theme.text)
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.surface_2))
+            .child(div().flex_1().min_w_0().truncate().child(label))
+            .when(on, |el| el.child(icon("check", 13.0, theme.accent)))
+    };
+
+    let mut list = div()
+        .id("agent-voice-list")
+        .flex()
+        .flex_col()
+        .max_h(px(240.0))
+        .overflow_y_scroll();
+    {
+        let p = pid.clone();
+        let url = default_voice
+            .as_ref()
+            .map(|v| v.sample_url.clone())
+            .filter(|u| !u.is_empty());
+        let playing = url
+            .as_deref()
+            .is_some_and(|u| state.voice_sample_playing(u));
+        list = list.child(
+            item(
+                ElementId::Name("agent-voice-default".into()),
+                default_label,
+                selected.is_none(),
+                &theme,
+            )
+            .child(play_button(
+                ElementId::Name("agent-voice-play-default".into()),
+                url,
+                playing,
+                &theme,
+            ))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.state
+                    .update(cx, |s, cx| s.set_voice(p.clone(), None, cx));
+                this.agent_picker = None;
+                cx.notify();
+            })),
+        );
+    }
+    if voices.is_empty() {
+        list = list.child(
+            div()
+                .px(px(10.0))
+                .py(px(8.0))
+                .text_size(px(TEXT_TINY))
+                .text_color(theme.text_muted)
+                .child("Loading voices…"),
+        );
+    }
+    for v in voices {
+        let on = selected.as_deref() == Some(v.id.as_str());
+        let playing = state.voice_sample_playing(&v.sample_url);
+        let p = pid.clone();
+        let vid = v.id.clone();
+        list = list.child(
+            item(
+                ElementId::Name(SharedString::from(format!("agent-voice-{}", v.id))),
+                v.name.clone(),
+                on,
+                &theme,
+            )
+            .child(play_button(
+                ElementId::Name(SharedString::from(format!("agent-voice-play-{}", v.id))),
+                Some(v.sample_url.clone()).filter(|u| !u.is_empty()),
+                playing,
+                &theme,
+            ))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.state
+                    .update(cx, |s, cx| s.set_voice(p.clone(), Some(vid.clone()), cx));
+                this.agent_picker = None;
+                cx.notify();
+            })),
+        );
+    }
+    list
 }
 
 /// The label for the "…" menu row and the profile's info row.

@@ -2350,7 +2350,15 @@ impl AppState {
         let Some(project_id) = self.selected_project.clone() else {
             return;
         };
-        let effort = self.selected().map(|p| p.effort).unwrap_or(Effort::High);
+        self.set_project_model(project_id, model, cx);
+    }
+
+    /// Agent page picker: the model of one agent (not necessarily the selected one).
+    pub fn set_project_model(&mut self, project_id: Id, model: String, cx: &mut Context<Self>) {
+        let effort = self
+            .project(&project_id)
+            .map(|p| p.effort)
+            .unwrap_or(Effort::High);
         if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
             p.model = model.clone();
         }
@@ -2436,7 +2444,15 @@ impl AppState {
         let Some(project_id) = self.selected_project.clone() else {
             return;
         };
-        let model = self.selected().map(|p| p.model.clone()).unwrap_or_default();
+        self.set_project_effort(project_id, effort, cx);
+    }
+
+    /// Agent page picker: the reasoning effort of one agent.
+    pub fn set_project_effort(&mut self, project_id: Id, effort: Effort, cx: &mut Context<Self>) {
+        let model = self
+            .project(&project_id)
+            .map(|p| p.model.clone())
+            .unwrap_or_default();
         if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
             p.effort = effort;
         }
