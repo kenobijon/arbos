@@ -193,17 +193,9 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
 
     let mut rows: Vec<(u64, RowView)> = Vec::new();
     for p in state.projects.iter() {
-        if !query.is_empty() {
-            let hay = format!(
-                "{} {}",
-                p.name.to_lowercase(),
-                p.person()
-                    .map(|x| x.handle.to_lowercase())
-                    .unwrap_or_default()
-            );
-            if !hay.contains(&query) {
-                continue;
-            }
+        // Name, @handle, chat title, or any loaded message text.
+        if !query.is_empty() && !state.space_matches_query(p, &query) {
+            continue;
         }
         let streaming = state.project_is_streaming(&p.id);
         let shown_people: Vec<_> = if p.is_guest() {
@@ -627,8 +619,14 @@ fn render_row(
                     this.start_rename_agent(id.clone(), window, cx);
                     return;
                 }
-                this.state
-                    .update(cx, |s, cx| s.select_project(id.clone(), cx));
+                let q = this.search_input.read(cx).text().to_string();
+                this.state.update(cx, |s, cx| {
+                    if q.trim().is_empty() {
+                        s.select_project(id.clone(), cx);
+                    } else {
+                        s.open_from_home_search(id.clone(), &q, cx);
+                    }
+                });
                 Composer::focus(&this.composer, window, cx);
             })
         })

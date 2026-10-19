@@ -287,6 +287,12 @@ pub struct AppState {
     /// offline copy): off the tab strip, listed under "Archived", still open on
     /// the relay (history in context, memory and search), never badge or notify.
     pub archived_chats: HashSet<Id>,
+    /// Chat a home-search hit opened; kept visible while single-chat would hide it.
+    search_chat: Option<Id>,
+    /// Scroll the transcript to this `(chat_id, message_id)` once its rows exist.
+    pub reveal_message: Option<(Id, Id)>,
+    /// Brief highlight on the message a home-search hit opened.
+    pub highlight_message: Option<Id>,
     pub link: Link,
     pub rail_collapsed: bool,
     /// Below [`NARROW_WINDOW`](crate::ui::theme::NARROW_WINDOW) the sidebar
@@ -548,6 +554,9 @@ impl AppState {
             multi_chat: multi_chat_enabled(),
             last_chats: HashMap::new(),
             archived_chats: HashSet::new(),
+            search_chat: None,
+            reveal_message: None,
+            highlight_message: None,
             link: Link::Connecting,
             rail_collapsed: false,
             sidebar_overlay: false,
@@ -1513,10 +1522,12 @@ impl AppState {
         if visible.is_empty() {
             return false;
         }
+        // A search hit may open a chat the strip would hide until another tab
+        // is chosen.
         if self
             .active_tab
             .get(project_id)
-            .is_some_and(|a| visible.contains(a))
+            .is_some_and(|a| visible.contains(a) || self.search_chat.as_deref() == Some(a.as_str()))
         {
             return false;
         }
@@ -1654,6 +1665,11 @@ impl AppState {
     }
 
     pub fn select_project(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        if self.selected_project.as_deref() != Some(project_id.as_str()) {
+            self.search_chat = None;
+        }
+        self.reveal_message = None;
+        self.highlight_message = None;
         if self
             .renaming_project
             .as_ref()
@@ -1680,15 +1696,118 @@ impl AppState {
         cx.notify();
     }
 
+    /// Home-search row click: open the chat that holds the matching message and
+    /// ask the transcript to scroll to it. Name-only matches open normally.
+    pub fn open_from_home_search(&mut self, project_id: Id, query: &str, cx: &mut Context<Self>) {
+        let q = query.trim().to_lowercase();
+        let hit = if q.is_empty() {
+            None
+        } else {
+            self.find_message_match(&project_id, &q)
+        };
+        let Some((chat_id, message_id)) = hit else {
+            self.select_project(project_id, cx);
+            return;
+        };
+        self.search_chat = Some(chat_id.clone());
+        if self.archived_chats.remove(&chat_id) {
+            self.command(ClientCommand::ArchiveChat {
+                chat_id: chat_id.clone(),
+                archived: false,
+            });
+        }
+        self.selected_project = Some(project_id.clone());
+        self.sidebar_overlay = false;
+        self.active_tab.insert(project_id.clone(), chat_id.clone());
+        self.last_chats.insert(project_id, chat_id.clone());
+        if let Some(chat) = self
+            .chats
+            .values_mut()
+            .flat_map(|v| v.iter_mut())
+            .find(|c| c.id == chat_id)
+        {
+            chat.unread = false;
+        }
+        self.command(ClientCommand::OpenChat {
+            chat_id: chat_id.clone(),
+        });
+        self.highlight_message = Some(message_id.clone());
+        self.reveal_message = Some((chat_id, message_id));
+        self.sync_focus();
+        cx.notify();
+    }
+
+    /// Newest user/assistant/project message whose prose contains `query`
+    /// (already lowercased). Searches every chat under the space.
+    fn find_message_match(&self, project_id: &str, query: &str) -> Option<(Id, Id)> {
+        let mut best: Option<(u64, Id, Id)> = None;
+        for chat in self.tabs(project_id) {
+            for m in self.messages_of(&chat.id) {
+                match m.role {
+                    Role::User | Role::Assistant | Role::Project => {}
+                    Role::System => continue,
+                }
+                let text = m.plain_text();
+                if text.trim().is_empty() {
+                    continue;
+                }
+                if !text.to_lowercase().contains(query) {
+                    continue;
+                }
+                let better = best
+                    .as_ref()
+                    .map(|(at, _, _)| m.created_at >= *at)
+                    .unwrap_or(true);
+                if better {
+                    best = Some((m.created_at, chat.id.clone(), m.id.clone()));
+                }
+            }
+        }
+        best.map(|(_, chat, msg)| (chat, msg))
+    }
+
+    /// Whether the space name, a chat title, or any loaded message matches `query`.
+    pub fn space_matches_query(&self, space: &Project, query: &str) -> bool {
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
+            return true;
+        }
+        let hay = format!(
+            "{} {}",
+            space.name.to_lowercase(),
+            space
+                .person()
+                .map(|x| x.handle.to_lowercase())
+                .unwrap_or_default()
+        );
+        if hay.contains(&q) {
+            return true;
+        }
+        if self
+            .tabs(&space.id)
+            .iter()
+            .any(|c| c.title.to_lowercase().contains(&q))
+        {
+            return true;
+        }
+        self.find_message_match(&space.id, &q).is_some()
+    }
+
     pub fn select_tab(&mut self, chat_id: Id, cx: &mut Context<Self>) {
         let Some(project_id) = self.selected_project.clone() else {
             return;
         };
+        if self.search_chat.as_deref() != Some(chat_id.as_str()) {
+            self.search_chat = None;
+        }
+        self.reveal_message = None;
+        self.highlight_message = None;
         // Single-chat: an agent has one chat, whichever one was asked for.
         let chat_id = if self
             .visible_tabs(&project_id)
             .iter()
             .any(|c| c.id == chat_id)
+            || self.search_chat.as_deref() == Some(chat_id.as_str())
         {
             chat_id
         } else {
