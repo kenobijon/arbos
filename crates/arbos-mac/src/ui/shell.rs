@@ -75,13 +75,16 @@ pub struct Shell {
     routines: Entity<RoutinesPanel>,
     routines_open: bool,
     channels: Entity<ChannelsPanel>,
-    /// F6: the "add a project to this chat" picker (from the "…" menu).
+    /// F6: the "add a project to this chat" picker (sidebar row menu).
     group_picker_open: bool,
     pub(crate) secrets: Entity<SecretsPanel>,
     shake_started_at: Option<u64>,
     /// True while the sign-in screen is up; its clearing focuses the composer.
     signing_in: bool,
-    /// The header's "…" menu.
+    /// Flag of the header's former "…" menu (removed, feedback
+    /// app-01M5ATBWSY9E1HHBKH2QQVDEZX); nothing renders it any more. Kept
+    /// only because the agent profile's "Edit" still sets it — goes with
+    /// that button's rework.
     pub(crate) menu_open: bool,
     /// Right-click menu on a sidebar row: the space and where the click landed.
     pub(crate) row_menu: Option<(crate::model::Id, gpui::Point<gpui::Pixels>)>,
@@ -93,15 +96,17 @@ pub struct Shell {
     pub(crate) description_input: Entity<ComposerInput>,
     /// Double-click rename: the inline name field for an agent.
     pub(crate) agent_name_input: Entity<ComposerInput>,
+    /// Agent page: the filter field in the Model dropdown (`ui::hoverpick`).
+    pub(crate) model_search_input: Entity<ComposerInput>,
     /// Settings header: editing my display name and handle (`PATCH /me`).
     profile_edit_open: bool,
     name_input: Entity<ComposerInput>,
     handle_input: Entity<ComposerInput>,
     pub add_agent_open: bool,
     pub members_open: bool,
-    /// The agent's "Archived" chats list (header strip / "…" menu).
+    /// The agent's "Archived" chats list (header strip).
     pub(crate) archived_open: bool,
-    /// Per-agent call voice picker sheet ("…" menu → Voice, profile → voice).
+    /// Per-agent call voice picker sheet (profile → voice).
     pub(crate) voice_picker_open: bool,
     /// Video picture-in-picture while the call screen is collapsed: offset
     /// from the window's bottom-right (right, bottom), and the drag in flight
@@ -249,6 +254,18 @@ impl Shell {
             });
         }
         cx.observe(&agent_name_input, |_, _, cx| cx.notify())
+            .detach();
+        let model_search_input = cx.new(ComposerInput::new);
+        {
+            let weak = cx.weak_entity();
+            model_search_input.update(cx, |input, _| {
+                input.set_placeholder("Search models");
+                input.on_submit = Some(Rc::new(move |window, cx| {
+                    let _ = weak.update(cx, |this, cx| this.pick_first_model(window, cx));
+                }));
+            });
+        }
+        cx.observe(&model_search_input, |_, _, cx| cx.notify())
             .detach();
         let name_input = cx.new(ComposerInput::new);
         name_input.update(cx, |input, _| input.set_placeholder("Display name"));
@@ -418,6 +435,7 @@ impl Shell {
             people_input,
             description_input,
             agent_name_input,
+            model_search_input,
             profile_edit_open: false,
             name_input,
             handle_input,
@@ -636,6 +654,9 @@ impl Shell {
             Composer::focus(&self.composer, window, cx);
             return;
         }
+        if self.close_agent_pick(Some(window), cx) {
+            return;
+        }
         let floating = self.menu_open
             || self.members_open
             || self.add_agent_open
@@ -714,6 +735,7 @@ impl Shell {
 
     /// Everything that floats closes on a click elsewhere.
     fn close_popovers(&mut self, cx: &mut Context<Self>) {
+        self.close_agent_pick(None, cx);
         if self.menu_open
             || self.members_open
             || self.add_agent_open
@@ -2788,11 +2810,6 @@ impl Render for Shell {
         }
         if let Some(target) = details {
             root = root.child(self.render_details(&target, cx));
-        }
-        if self.menu_open {
-            if let Some(space) = selected.as_ref() {
-                root = root.child(glass::popover(header::menu(self, space, cx)));
-            }
         }
         if self.archived_open {
             if let Some(space) = selected.as_ref() {
