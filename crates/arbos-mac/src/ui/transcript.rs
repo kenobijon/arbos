@@ -7,9 +7,9 @@ use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    div, list, prelude::*, px, Animation, AnimationExt, AnyElement, App, Context, Div, Entity,
-    FontWeight, ListAlignment, ListScrollEvent, ListState, Render, SharedString, Stateful,
-    StyledText, TextRun, Window,
+    actions, div, list, prelude::*, px, Animation, AnimationExt, AnyElement, App, Context, Div,
+    Entity, FontWeight, ListAlignment, ListScrollEvent, ListState, Render, SharedString, Stateful,
+    TextRun, Window,
 };
 
 use crate::app::{AppEvent, AppState, DetailsTarget};
@@ -26,12 +26,15 @@ use crate::ui::icons::icon;
 use crate::ui::markdown::{inline_spans, polish_assistant_prose, split_blocks, Block};
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
+use crate::ui::select::{Selectable, TextSelection};
 use crate::ui::theme::{
     Theme, BUBBLE_RADIUS, COLUMN_MARGIN, LINE_HEIGHT, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
 };
 use crate::ui::veil::Veil;
 use crate::ui::widgets::QuestionCard;
 use serde_json::Value;
+
+actions!(transcript, [Copy]);
 
 const OVERDRAW_PX: f32 = 320.0;
 pub const COLUMN_MAX_WIDTH: f32 = 820.0;
@@ -250,6 +253,8 @@ pub struct Transcript {
     /// One stateful card per typed question, keyed by question id; dropped with its row.
     cards: HashMap<String, Entity<QuestionCard>>,
     pinned_to_bottom: bool,
+    /// Message id we already scrolled to for the current reveal request.
+    revealed: Option<Id>,
     spring: StickSpring,
     /// Set by the scroll callback; the next frame re-pins when the user
     /// stopped within `STICK_THRESHOLD_PX` of the end.
@@ -257,6 +262,8 @@ pub struct Transcript {
     /// The working line's current text and when it changed (fade on swap).
     activity_shown: Option<(String, Instant)>,
     hover: HoverFade,
+    /// Text selected in a bubble (drag / double-click / triple-click); ⌘C copies it.
+    selection: Entity<TextSelection>,
 }
 
 impl Transcript {
@@ -266,6 +273,8 @@ impl Transcript {
         list.set_scroll_handler(move |event: &ListScrollEvent, _, cx| {
             let _ = weak.update(cx, |this, _| this.handle_scroll(event));
         });
+        let selection = cx.new(TextSelection::new);
+        cx.observe(&selection, |_, _, cx| cx.notify()).detach();
         cx.observe(&state, |this, _, cx| this.sync(cx)).detach();
         cx.subscribe(&state, |this, _, event: &AppEvent, cx| match event {
             AppEvent::TranscriptText { chat_id, .. } | AppEvent::TranscriptChanged { chat_id } => {
@@ -286,10 +295,19 @@ impl Transcript {
             veils: HashMap::new(),
             cards: HashMap::new(),
             pinned_to_bottom: true,
+            revealed: None,
             spring: StickSpring::default(),
             repin_check_pending: false,
             activity_shown: None,
             hover: HoverFade::default(),
+            selection,
+        }
+    }
+
+    /// ⌘C with text selected in a bubble.
+    fn copy_selection(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = self.selection.read(cx).selected_text() {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
         }
     }
 
@@ -432,16 +450,20 @@ impl Transcript {
             self.rows = new_rows;
             self.list.reset(self.rows.len());
             self.pinned_to_bottom = true;
+            self.revealed = None;
             self.list.scroll_to_end();
             // `ARBOS_SCROLL_UP=1`: open at the top instead (screenshot rig; the
             // GUI session accepts no synthetic wheel events).
-            if std::env::var("ARBOS_SCROLL_UP").is_ok_and(|v| v == "1") {
+            if std::env::var("ARBOS_SCROLL_UP").is_ok_and(|v| v == "1")
+                && self.state.read(cx).reveal_message.is_none()
+            {
                 self.pinned_to_bottom = false;
                 self.list.scroll_to(gpui::ListOffset {
                     item_ix: 0,
                     offset_in_item: px(0.0),
                 });
             }
+            self.reveal_hit(cx);
             cx.notify();
             return;
         }
@@ -453,12 +475,41 @@ impl Transcript {
             .take_while(|(a, b)| a.id == b.id && a.version == b.version)
             .count();
         if prefix == self.rows.len() && prefix == new_rows.len() {
+            self.reveal_hit(cx);
             return;
         }
         let old_len = self.rows.len();
         self.rows = new_rows;
         self.list.splice(prefix..old_len, self.rows.len() - prefix);
+        self.reveal_hit(cx);
         // While pinned the spring glides to the new end on the next frames.
+        cx.notify();
+    }
+
+    /// A home-search hit asked to land on a message. Scroll once, when its row exists.
+    fn reveal_hit(&mut self, cx: &mut Context<Self>) {
+        let Some((chat, msg)) = self.state.read(cx).reveal_message.clone() else {
+            self.revealed = None;
+            return;
+        };
+        if self.chat_id.as_deref() != Some(chat.as_str()) {
+            return;
+        }
+        if self.revealed.as_deref() == Some(msg.as_str()) {
+            return;
+        }
+        let Some(ix) = self.rows.iter().position(|r| {
+            r.message_id == msg
+                && !matches!(r.kind, RowKind::Stamp { .. } | RowKind::Indicator { .. })
+        }) else {
+            return;
+        };
+        self.pinned_to_bottom = false;
+        self.list.scroll_to(gpui::ListOffset {
+            item_ix: ix,
+            offset_in_item: px(0.0),
+        });
+        self.revealed = Some(msg);
         cx.notify();
     }
 
@@ -570,6 +621,7 @@ impl Transcript {
         };
         let theme = Theme::of(cx).clone();
         let now = Instant::now();
+        let selectable = Selectable::new(&self.selection, theme.accent_soft, cx);
         let inner: AnyElement = match row.kind {
             RowKind::User {
                 text,
@@ -578,6 +630,23 @@ impl Transcript {
                 from,
                 time,
             } => {
+                // My bubble is dark in both appearances: white text, a
+                // stronger highlight than the soft one on the grey bubbles.
+                let (text_color, bubble_selectable) = if from.is_some() {
+                    (theme.text, selectable.clone())
+                } else {
+                    (
+                        theme.bubble_text(),
+                        selectable.with_color(Theme::with_alpha(theme.accent, 0.45)),
+                    )
+                };
+                let text = plain_text(
+                    &format!("{}.u", row.id),
+                    &text,
+                    text_color,
+                    &theme,
+                    &bubble_selectable,
+                );
                 let bubble = self
                     .react_target(
                         div().id(SharedString::from(format!("{}#bubble", row.id))),
@@ -728,7 +797,14 @@ impl Transcript {
                     .when(last, |el| el.pb(px(11.0)).rounded_b(r))
                     .when(!last, |el| el.pb(px(3.0)))
                     .bg(theme.bubble_assistant)
-                    .child(render_block(&row.id, &block, veil.as_ref(), now, &theme));
+                    .child(render_block(
+                        &row.id,
+                        &block,
+                        veil.as_ref(),
+                        now,
+                        &theme,
+                        &selectable,
+                    ));
                 let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
                 // Hover: reply + copy, then Grok Mac's muted react glyph (opens
                 // the same bar as a right-click).
@@ -1184,11 +1260,16 @@ impl Transcript {
                     .into_any_element()
             }
         };
+        let highlighted =
+            self.state.read(cx).highlight_message.as_deref() == Some(row.message_id.as_str());
         div()
             .w_full()
             .flex()
             .justify_center()
             .px(px(COLUMN_MARGIN))
+            .when(highlighted, |el| {
+                el.bg(Theme::with_alpha(theme.accent, 0.14))
+            })
             .child(div().w_full().max_w(px(COLUMN_MAX_WIDTH)).child(inner))
             .into_any_element()
     }
@@ -1207,9 +1288,23 @@ impl Render for Transcript {
         let max = f32::from(self.list.max_offset_for_scrollbar().y);
         let cur = -f32::from(self.list.scroll_px_offset_for_scrollbar().y);
         let show_jump = !self.pinned_to_bottom && max - cur > JUMP_BUTTON_AFTER_PX;
+        // A selection lives as long as the transcript keeps keyboard focus:
+        // clicking into the composer (or anywhere else) drops the highlight,
+        // so a highlight always means ⌘C will copy it.
+        let focus = self.selection.read(cx).focus_handle.clone();
+        if !focus.is_focused(window) {
+            self.selection.update(cx, |s, cx| {
+                if s.clear_settled() {
+                    cx.notify();
+                }
+            });
+        }
         div()
             .relative()
             .size_full()
+            .key_context("Transcript")
+            .track_focus(&focus)
+            .on_action(cx.listener(Self::copy_selection))
             .on_scroll_wheel(cx.listener(|this, event, _, cx| this.on_wheel(event, cx)))
             .child(edge_faded(
                 24.0,
@@ -1885,6 +1980,37 @@ fn push_reactions(rows: &mut Vec<Row>, message: &Message, mine: bool) {
 // Markdown rendering with the veil
 // ---------------------------------------------------------------------------
 
+fn sans_font(theme: &Theme) -> gpui::Font {
+    gpui::Font {
+        family: theme.font_sans.into(),
+        features: Default::default(),
+        fallbacks: None,
+        weight: FontWeight::NORMAL,
+        style: gpui::FontStyle::Normal,
+    }
+}
+
+/// Unstyled selectable text (a user bubble): one run in the body font.
+fn plain_text(
+    id: &str,
+    text: &str,
+    color: gpui::Hsla,
+    theme: &Theme,
+    selectable: &Selectable,
+) -> AnyElement {
+    let runs = vec![TextRun {
+        len: text.len(),
+        font: sans_font(theme),
+        color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    }];
+    selectable
+        .text(id.to_string(), text.to_string(), runs)
+        .into_any_element()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn styled_text(
     id: &str,
@@ -1894,18 +2020,13 @@ fn styled_text(
     veil: Option<&Veil>,
     now: Instant,
     offset: usize,
+    selectable: &Selectable,
 ) -> AnyElement {
     let spans = inline_spans(text);
     let mut full = String::new();
     let mut runs: Vec<TextRun> = Vec::new();
     let mut links: Vec<(std::ops::Range<usize>, String)> = Vec::new();
-    let sans = gpui::Font {
-        family: theme.font_sans.into(),
-        features: Default::default(),
-        fallbacks: None,
-        weight: FontWeight::NORMAL,
-        style: gpui::FontStyle::Normal,
-    };
+    let sans = sans_font(theme);
     let mono = gpui::Font {
         family: theme.font_mono.into(),
         ..sans.clone()
@@ -1953,18 +2074,9 @@ fn styled_text(
         Some(veil) => apply_veil(runs, &veil.spans(now), offset),
         None => runs,
     };
-    let styled = StyledText::new(SharedString::from(full)).with_runs(runs);
-    if links.is_empty() {
-        return styled.into_any_element();
-    }
-    let ranges: Vec<std::ops::Range<usize>> = links.iter().map(|(r, _)| r.clone()).collect();
-    let hrefs: Vec<String> = links.into_iter().map(|(_, h)| h).collect();
-    gpui::InteractiveText::new(SharedString::from(id.to_string()), styled)
-        .on_click(ranges, move |ix, _, cx| {
-            if let Some(href) = hrefs.get(ix) {
-                cx.open_url(href);
-            }
-        })
+    selectable
+        .text(id.to_string(), full, runs)
+        .with_links(links)
         .into_any_element()
 }
 
@@ -2025,6 +2137,7 @@ fn render_block(
     veil: Option<&Veil>,
     now: Instant,
     theme: &Theme,
+    selectable: &Selectable,
 ) -> AnyElement {
     let base = div()
         .w_full()
@@ -2042,6 +2155,7 @@ fn render_block(
                 veil,
                 now,
                 0,
+                selectable,
             ))
             .into_any_element(),
         Block::Heading { level, text } => {
@@ -2061,6 +2175,7 @@ fn render_block(
                     veil,
                     now,
                     0,
+                    selectable,
                 ))
                 .into_any_element()
         }
@@ -2099,6 +2214,7 @@ fn render_block(
                             veil,
                             now,
                             offset,
+                            selectable,
                         ))),
                 );
                 offset += item.len() + 1;
@@ -2215,7 +2331,7 @@ fn render_block(
                     .py(px(8.0))
                     .text_size(px(12.5))
                     .line_height(px(18.0))
-                    .child(StyledText::new(SharedString::from(code.clone())).with_runs(runs)),
+                    .child(selectable.text(format!("{row_id}.code"), code.clone(), runs)),
             );
             card.into_any_element()
         }

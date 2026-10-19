@@ -21,6 +21,7 @@ use crate::ui::feedback;
 use crate::ui::motion::{self, PulseClock};
 use crate::ui::shell::{self, Shell};
 use crate::ui::theme::{reapply_window_background, AppearancePref, Surface, Theme};
+use crate::ui::transcript;
 use crate::ui::widgets;
 
 fn main() {
@@ -130,6 +131,10 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("tab", composer::AcceptMention, input),
         KeyBinding::new("backspace", composer::Backspace, input),
         KeyBinding::new("delete", composer::Delete, input),
+        KeyBinding::new("alt-backspace", composer::DeleteWordBackward, input),
+        KeyBinding::new("ctrl-backspace", composer::DeleteWordBackward, input),
+        KeyBinding::new("alt-delete", composer::DeleteWordForward, input),
+        KeyBinding::new("ctrl-delete", composer::DeleteWordForward, input),
         KeyBinding::new("left", composer::Left, input),
         KeyBinding::new("right", composer::Right, input),
         KeyBinding::new("up", composer::Up, input),
@@ -138,19 +143,23 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-right", composer::SelectRight, input),
         KeyBinding::new("shift-up", composer::SelectUp, input),
         KeyBinding::new("shift-down", composer::SelectDown, input),
+        // Word movement: Control+Left/Right (reported) and Option+Left/Right (macOS).
+        KeyBinding::new("ctrl-left", composer::WordLeft, input),
+        KeyBinding::new("ctrl-right", composer::WordRight, input),
+        KeyBinding::new("alt-left", composer::WordLeft, input),
+        KeyBinding::new("alt-right", composer::WordRight, input),
+        KeyBinding::new("ctrl-shift-left", composer::SelectWordLeft, input),
+        KeyBinding::new("ctrl-shift-right", composer::SelectWordRight, input),
+        KeyBinding::new("alt-shift-left", composer::SelectWordLeft, input),
+        KeyBinding::new("alt-shift-right", composer::SelectWordRight, input),
         KeyBinding::new("home", composer::Home, input),
         KeyBinding::new("end", composer::End, input),
         KeyBinding::new("shift-home", composer::SelectHome, input),
         KeyBinding::new("shift-end", composer::SelectEnd, input),
-        // macOS / Linux line ends: ⌘←/→ and Ctrl+←/→ (Home/End keys are rare on Mac).
         KeyBinding::new("cmd-left", composer::Home, input),
         KeyBinding::new("cmd-right", composer::End, input),
-        KeyBinding::new("ctrl-left", composer::Home, input),
-        KeyBinding::new("ctrl-right", composer::End, input),
         KeyBinding::new("cmd-shift-left", composer::SelectHome, input),
         KeyBinding::new("cmd-shift-right", composer::SelectEnd, input),
-        KeyBinding::new("ctrl-shift-left", composer::SelectHome, input),
-        KeyBinding::new("ctrl-shift-right", composer::SelectEnd, input),
         KeyBinding::new("cmd-a", composer::SelectAll, input),
         KeyBinding::new("ctrl-a", composer::SelectAll, input),
         KeyBinding::new("cmd-v", composer::Paste, input),
@@ -165,6 +174,9 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("up", widgets::PrevOption, Some("QuestionCard")),
         KeyBinding::new("left", widgets::PrevOption, Some("QuestionCard")),
         KeyBinding::new("space", widgets::ToggleOption, Some("QuestionCard")),
+        // Text selected in a chat bubble (drag / double-click) takes focus; ⌘C copies it.
+        KeyBinding::new("cmd-c", transcript::Copy, Some("Transcript")),
+        KeyBinding::new("ctrl-c", transcript::Copy, Some("Transcript")),
         KeyBinding::new("cmd-w", shell::CloseTab, None),
         KeyBinding::new("ctrl-w", shell::CloseTab, None),
         KeyBinding::new("cmd-t", shell::NewTab, None),
