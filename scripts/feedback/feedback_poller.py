@@ -1010,6 +1010,7 @@ class Loop:
     # ---- state machine ------------------------------------------------------------------------
 
     def advance_all(self) -> None:
+        self.rust_slot_freed = False
         # Priority testers go first, but a tester item that has waited FEEDBACK_TESTER_MAX_WAIT_MIN
         # joins the front of the line by age, so a long priority burst cannot starve everyone else.
         def rank(fid: str) -> tuple[int, str]:
@@ -1524,6 +1525,10 @@ class Loop:
                 self.store.save_cursor(cur)
             return None
         if not active or active.get("head") != head:
+            if getattr(self, "rust_slot_freed", False):
+                # A run finished earlier in this tick; leave the slot for the oldest waiting item next tick
+                # (otherwise whoever follows the finisher in iteration order starves the items before it).
+                return None
             crates = self.rust_crates(st.get("files") or [])
             mac = "1" if "arbos-mac" in crates or crates == ["workspace"] else "0"
             self.rust_gate_ssh("start", st["branch"], head, ",".join(crates), mac)
@@ -1543,6 +1548,7 @@ class Loop:
             return None
         cur.pop("rust_gate", None)
         self.store.save_cursor(cur)
+        self.rust_slot_freed = True
         if verdict == "infra":
             raise RuntimeError(f"Rust gate infrastructure error for {head[:8]}: {body[-1500:]}")
         return verdict, body
