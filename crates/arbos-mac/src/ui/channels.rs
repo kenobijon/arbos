@@ -22,6 +22,9 @@ pub enum ChannelsEvent {
 pub struct ChannelsPanel {
     state: Entity<AppState>,
     open: bool,
+    /// Shown as a page inside the Settings sheet (#1086) rather than as the
+    /// bottom-left popover; the sheet's header carries the back button.
+    pub(crate) embedded: bool,
     focus_handle: FocusHandle,
 }
 
@@ -33,12 +36,18 @@ impl ChannelsPanel {
         Self {
             state,
             open: false,
+            embedded: false,
             focus_handle: cx.focus_handle(),
         }
     }
 
     pub fn is_open(&self) -> bool {
         self.open
+    }
+
+    /// Open as the bottom-left popover (not inside the Settings sheet).
+    pub fn is_floating(&self) -> bool {
+        self.open && !self.embedded
     }
 
     pub fn show(&mut self, cx: &mut Context<Self>) {
@@ -49,6 +58,7 @@ impl ChannelsPanel {
 
     pub fn hide(&mut self, cx: &mut Context<Self>) {
         self.open = false;
+        self.embedded = false;
         cx.notify();
     }
 
@@ -355,23 +365,26 @@ impl Render for ChannelsPanel {
         let theme = Theme::of(cx).clone();
         let view = self.state.read(cx).channels.clone();
 
+        let embedded = self.embedded;
         let mut header = div()
             .flex()
             .items_center()
             .gap(px(8.0))
-            .child(
-                div()
-                    .id("channels-back")
-                    .text_size(px(11.5))
-                    .text_color(theme.text_muted)
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(theme.text))
-                    .child("‹ Settings")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.hide(cx);
-                        cx.emit(ChannelsEvent::Back);
-                    })),
-            )
+            .when(!embedded, |el| {
+                el.child(
+                    div()
+                        .id("channels-back")
+                        .text_size(px(11.5))
+                        .text_color(theme.text_muted)
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(theme.text))
+                        .child("‹ Settings")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.hide(cx);
+                            cx.emit(ChannelsEvent::Back);
+                        })),
+                )
+            })
             .child(
                 div()
                     .flex_1()
@@ -432,16 +445,10 @@ impl Render for ChannelsPanel {
         let card = div()
             .id("channels-popover")
             .track_focus(&self.focus_handle)
-            .w(px(380.0))
             .flex()
             .flex_col()
             .gap(px(4.0))
             .p(px(10.0))
-            .rounded(px(PANEL_RADIUS))
-            .bg(theme.card())
-            .border_1()
-            .border_color(theme.border_strong)
-            .shadow_lg()
             .child(header)
             .child(Self::section_title(&theme, "PAIR A CHAT"))
             .child(self.render_pairing(&view, &theme, cx))
@@ -460,10 +467,21 @@ impl Render for ChannelsPanel {
                         "Messages from a paired chat run as your turn in the bound chat; the reply goes back the same way."
                     }),
             );
+        if embedded {
+            return card.w_full().into_any_element();
+        }
+        let card = card
+            .w(px(380.0))
+            .rounded(px(PANEL_RADIUS))
+            .bg(theme.card())
+            .border_1()
+            .border_color(theme.border_strong)
+            .shadow_lg();
         div()
             .absolute()
             .left(px(RAIL_WIDTH + 8.0))
             .bottom(px(14.0))
             .child(frosted(PANEL_RADIUS, MENU_BLUR, card))
+            .into_any_element()
     }
 }

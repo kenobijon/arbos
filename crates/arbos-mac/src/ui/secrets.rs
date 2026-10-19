@@ -87,6 +87,9 @@ pub struct SecretsPanel {
     pending_env: Option<String>,
     /// Rig: open the first vault as soon as the list arrives.
     pending_vault: bool,
+    /// Shown as a page inside the Settings sheet (#1086) rather than as the
+    /// bottom-left popover; the sheet's header carries the back button.
+    pub(crate) embedded: bool,
     focus_handle: FocusHandle,
 }
 
@@ -141,12 +144,18 @@ impl SecretsPanel {
             error: None,
             pending_env: None,
             pending_vault: false,
+            embedded: false,
             focus_handle: cx.focus_handle(),
         }
     }
 
     pub fn is_open(&self) -> bool {
         self.open
+    }
+
+    /// Open as the bottom-left popover (not inside the Settings sheet).
+    pub fn is_floating(&self) -> bool {
+        self.open && !self.embedded
     }
 
     pub fn show(&mut self, cx: &mut Context<Self>) {
@@ -211,6 +220,7 @@ impl SecretsPanel {
 
     pub fn hide(&mut self, cx: &mut Context<Self>) {
         self.open = false;
+        self.embedded = false;
         self.reset_form(cx);
         self.page = Page::List;
         cx.notify();
@@ -2272,34 +2282,39 @@ impl Render for SecretsPanel {
             }
         }
         let title = self.title(&view, cx);
+        let embedded = self.embedded;
         let back_label = if self.page == Page::List {
             "‹ Settings"
         } else {
             "‹ Secrets"
         };
 
+        // Inside the Settings sheet the list page has the sheet's own back
+        // button; sub-pages keep "‹ Secrets" to return to the list.
         let header = div()
             .flex()
             .items_center()
             .gap(px(8.0))
             .px(px(4.0))
-            .child(
-                div()
-                    .id("secrets-back")
-                    .text_size(px(TEXT_SMALL))
-                    .text_color(theme.text_muted)
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(theme.text))
-                    .child(back_label)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if this.page == Page::List {
-                            this.hide(cx);
-                            cx.emit(SecretsEvent::Back);
-                        } else {
-                            this.go(Page::List, cx);
-                        }
-                    })),
-            )
+            .when(!(embedded && self.page == Page::List), |el| {
+                el.child(
+                    div()
+                        .id("secrets-back")
+                        .text_size(px(TEXT_SMALL))
+                        .text_color(theme.text_muted)
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(theme.text))
+                        .child(back_label)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if this.page == Page::List {
+                                this.hide(cx);
+                                cx.emit(SecretsEvent::Back);
+                            } else {
+                                this.go(Page::List, cx);
+                            }
+                        })),
+                )
+            })
             .child(
                 div()
                     .flex_1()
@@ -2349,17 +2364,10 @@ impl Render for SecretsPanel {
         let card = div()
             .id("secrets-popover")
             .track_focus(&self.focus_handle)
-            .w(px(460.0))
-            .max_h(px(680.0))
             .flex()
             .flex_col()
             .gap(px(10.0))
             .p(px(12.0))
-            .rounded(px(PANEL_RADIUS))
-            .bg(theme.card())
-            .border_1()
-            .border_color(theme.border_strong)
-            .shadow_lg()
             .child(header)
             .child(
                 div()
@@ -2370,10 +2378,23 @@ impl Render for SecretsPanel {
                     .pr(px(2.0))
                     .child(body),
             );
+        if embedded {
+            // The sheet body scrolls; no height cap of our own.
+            return card.w_full().into_any_element();
+        }
+        let card = card
+            .w(px(460.0))
+            .max_h(px(680.0))
+            .rounded(px(PANEL_RADIUS))
+            .bg(theme.card())
+            .border_1()
+            .border_color(theme.border_strong)
+            .shadow_lg();
         div()
             .absolute()
             .left(px(RAIL_WIDTH + 8.0))
             .bottom(px(14.0))
             .child(frosted(PANEL_RADIUS, MENU_BLUR, card))
+            .into_any_element()
     }
 }

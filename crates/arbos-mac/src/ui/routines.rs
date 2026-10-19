@@ -110,6 +110,9 @@ pub struct RoutinesPanel {
     prompt_input: Entity<ComposerInput>,
     cron_input: Entity<ComposerInput>,
     error: Option<String>,
+    /// Shown as a page inside the Settings sheet (#1086) rather than as the
+    /// bottom-left popover; the sheet's header carries the back button.
+    pub(crate) embedded: bool,
     focus_handle: FocusHandle,
 }
 
@@ -148,6 +151,7 @@ impl RoutinesPanel {
             prompt_input,
             cron_input,
             error: None,
+            embedded: false,
             focus_handle: cx.focus_handle(),
         }
     }
@@ -827,20 +831,25 @@ impl Render for RoutinesPanel {
         let card = div()
             .id("routines-panel")
             .occlude()
-            .w(px(PANEL_WIDTH))
             .flex()
             .flex_col()
             .p(px(12.0))
+            .child(body);
+        if self.embedded {
+            return card.w_full().into_any_element();
+        }
+        let card = card
+            .w(px(PANEL_WIDTH))
             .rounded(px(PANEL_RADIUS))
             .bg(theme.card())
             .border_1()
             .border_color(theme.border_strong)
-            .shadow_lg()
-            .child(body);
+            .shadow_lg();
         div()
             .absolute()
             .left(px(RAIL_WIDTH + 8.0))
             .bottom(px(14.0))
             .child(frosted(PANEL_RADIUS, MENU_BLUR, card))
+            .into_any_element()
     }
 }
