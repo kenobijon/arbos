@@ -144,6 +144,16 @@ impl Shell {
                     this.react_menu = Some((chat_id.clone(), message_id.clone(), *position));
                     cx.notify();
                 }
+                TranscriptEvent::Reply {
+                    chat_id,
+                    message_id,
+                } => {
+                    this.close_popovers(cx);
+                    this.state.update(cx, |s, cx| {
+                        s.set_reply_to(chat_id.clone(), message_id.clone(), cx)
+                    });
+                    cx.notify();
+                }
             },
         )
         .detach();
@@ -176,10 +186,16 @@ impl Shell {
         cx.subscribe(
             &composer,
             |this, _, event: &ComposerEvent, cx| match event {
-                ComposerEvent::Send(text, attachments) => {
+                ComposerEvent::Send {
+                    text,
+                    attachments,
+                    reply_to,
+                } => {
                     let text = text.clone();
                     let attachments = attachments.clone();
-                    this.state.update(cx, |s, cx| s.send(text, attachments, cx));
+                    let reply_to = reply_to.clone();
+                    this.state
+                        .update(cx, |s, cx| s.send(text, attachments, reply_to, cx));
                 }
                 ComposerEvent::Stop => this.state.update(cx, |s, cx| s.stop(cx)),
             },

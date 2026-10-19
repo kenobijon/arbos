@@ -222,6 +222,8 @@ pub struct ChatUi {
     pub composer_dropped: bool,
     /// When the drop animation started (ms since epoch).
     pub drop_started_at: Option<u64>,
+    /// Message the next send replies to (hover reply / people-chat parity).
+    pub reply_to: Option<Id>,
 }
 
 pub struct AppState {
@@ -1855,13 +1857,33 @@ impl AppState {
         true
     }
 
-    pub fn send(&mut self, text: String, attachments: Vec<PathBuf>, cx: &mut Context<Self>) {
-        self.send_with(text, attachments, None, cx);
+    pub fn send(
+        &mut self,
+        text: String,
+        attachments: Vec<PathBuf>,
+        reply_to: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.send_with(text, attachments, None, reply_to, cx);
     }
 
     /// F11: a spoken message; `wav` is kept on the row as an `audio` attachment.
     pub fn send_voice(&mut self, text: String, wav: Arc<Vec<u8>>, cx: &mut Context<Self>) {
-        self.send_with(text, Vec::new(), Some(wav), cx);
+        self.send_with(text, Vec::new(), Some(wav), None, cx);
+    }
+
+    /// Hover reply: the next send in this chat answers `message_id`.
+    pub fn set_reply_to(&mut self, chat_id: Id, message_id: Id, cx: &mut Context<Self>) {
+        self.chat_ui.entry(chat_id).or_default().reply_to = Some(message_id);
+        cx.notify();
+    }
+
+    /// Clear the reply chip above the composer.
+    pub fn clear_reply_to(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        if let Some(ui) = self.chat_ui.get_mut(chat_id) {
+            ui.reply_to = None;
+        }
+        cx.notify();
     }
 
     fn send_with(
@@ -1869,6 +1891,7 @@ impl AppState {
         text: String,
         attachments: Vec<PathBuf>,
         voice_wav: Option<Arc<Vec<u8>>>,
+        reply_to: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let Some(chat_id) = self.active_chat_id() else {
@@ -1882,6 +1905,7 @@ impl AppState {
                 ui.composer_dropped = true;
                 ui.drop_started_at = Some(now_ms());
             }
+            ui.reply_to = None;
         }
         // Title from the first message (§3.4); the source also queues a
         // `retitle` command for the box.
@@ -1957,7 +1981,7 @@ impl AppState {
                 sender_avatar: None,
                 sender_avatar_color: None,
                 mentions: Vec::new(),
-                reply_to: None,
+                reply_to: reply_to.clone(),
                 asked_by_handle: None,
                 owner_handle: None,
                 usage: None,
@@ -2003,6 +2027,7 @@ impl AppState {
                 message_id,
                 text,
                 attachments,
+                reply_to,
             });
         }
         cx.emit(AppEvent::TranscriptChanged { chat_id });
