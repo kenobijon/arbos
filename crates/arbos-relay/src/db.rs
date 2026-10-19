@@ -517,6 +517,7 @@ impl Db {
         Self::migrate_vault_items_per_user(&c)?;
         c.execute_batch(crate::db_secrets::SECRETS_SCHEMA)?;
         crate::db_secrets::migrate_secrets(&c);
+        c.execute_batch(crate::releases::RELEASES_SCHEMA)?;
         Ok(Self(Arc::new(Mutex::new(c))))
     }
 

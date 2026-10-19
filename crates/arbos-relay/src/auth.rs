@@ -169,7 +169,19 @@ impl FromRequestParts<AppState> for Principal {
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
         let tok = token_from_parts(parts).unwrap_or_default();
-        resolve_checked(state, &tok)
-            .map_err(|r| crate::signin::api_error(StatusCode::UNAUTHORIZED, r.kind(), r.message()))
+        let principal = resolve_checked(state, &tok).map_err(|r| {
+            crate::signin::api_error(StatusCode::UNAUTHORIZED, r.kind(), r.message())
+        })?;
+        // What the app runs (`X-Arbos-Client`): the "installed" signal for continuous delivery.
+        if let Principal::Device { id, user_id, .. } = &principal {
+            if let Some(h) = parts
+                .headers
+                .get("x-arbos-client")
+                .and_then(|v| v.to_str().ok())
+            {
+                crate::releases::note_client(state, id, user_id, h);
+            }
+        }
+        Ok(principal)
     }
 }
