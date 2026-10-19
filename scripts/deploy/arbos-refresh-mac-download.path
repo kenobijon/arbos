@@ -1,0 +1,9 @@
+[Unit]
+Description=Refresh /download/mac as soon as the relay records a stable Mac release (POST /admin/release)
+
+[Path]
+PathChanged=/var/lib/arbos-relay/release-published
+Unit=arbos-refresh-mac-download.service
+
+[Install]
+WantedBy=multi-user.target
