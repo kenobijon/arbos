@@ -850,6 +850,7 @@ impl Attachment {
     }
 
     /// A voice memo (`kind: "audio"`, F11).
+    #[allow(dead_code)]
     pub fn is_audio(&self) -> bool {
         self.kind() == AttachmentKind::Audio || self.mime.starts_with("audio/")
     }
