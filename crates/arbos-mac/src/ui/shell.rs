@@ -33,7 +33,7 @@ use crate::ui::profiles;
 use crate::ui::routines::{RoutinesEvent, RoutinesPanel};
 use crate::ui::secrets::{SecretsEvent, SecretsPanel};
 use crate::ui::sidebar;
-use crate::ui::skills::SkillsPanel;
+use crate::ui::skills::{self, SkillsPanel};
 use crate::ui::theme::{
     reapply_window_background, AppearancePref, Surface, Theme, COLUMN_MARGIN, COMPOSER_WIDTH,
     DRAWER_WIDTH, HEADER_HEIGHT, LINE_HEIGHT, PANEL_RADIUS, PLUS_BUTTON, SIDEBAR_WIDTH,
@@ -47,6 +47,54 @@ actions!(shell, [CloseTab, NewTab, ToggleRail, Escape, Quit]);
 
 /// Left inset for the conversation header while the sidebar is hidden: the window's traffic lights.
 const TRAFFIC_LIGHTS_INSET: f32 = 72.0;
+
+/// Width of the Settings sheet on its root page.
+const SETTINGS_WIDTH: f32 = 480.0;
+/// Body height shared by the Settings list and its pushed pages, so the box
+/// does not jump when navigating (shrinks with the window).
+const SETTINGS_BODY_HEIGHT: f32 = 720.0;
+
+/// What the Settings sheet shows (#1086, D80): the root list, or one of the
+/// Apps & tools pages pushed inside the same box with a back button — the
+/// iPhone's `SettingsPage` navigation, not a separate pop-out.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SettingsPage {
+    #[default]
+    Root,
+    Connectors,
+    Routines,
+    Channels,
+    Skills,
+    ThisMac,
+    Secrets,
+}
+
+impl SettingsPage {
+    fn title(self) -> &'static str {
+        match self {
+            SettingsPage::Root => "Settings",
+            SettingsPage::Connectors => "Connectors",
+            SettingsPage::Routines => "Routines",
+            SettingsPage::Channels => "Channels",
+            SettingsPage::Skills => "Skills",
+            SettingsPage::ThisMac => "This Mac",
+            SettingsPage::Secrets => "Secrets",
+        }
+    }
+
+    /// The sheet grows for the two pages laid out wider than the root list.
+    fn sheet_width(self) -> f32 {
+        match self {
+            SettingsPage::Root
+            | SettingsPage::Connectors
+            | SettingsPage::Channels
+            | SettingsPage::ThisMac
+            | SettingsPage::Secrets => SETTINGS_WIDTH,
+            SettingsPage::Routines => crate::ui::routines::PANEL_WIDTH + 32.0,
+            SettingsPage::Skills => skills::CARD_WIDTH + 32.0,
+        }
+    }
+}
 
 pub struct Shell {
     pub(crate) state: Entity<AppState>,
@@ -65,6 +113,8 @@ pub struct Shell {
     local: Entity<LocalPanel>,
     focus_handle: FocusHandle,
     pub(crate) settings_open: bool,
+    /// Which page the Settings sheet shows (#1086).
+    settings_page: SettingsPage,
     /// Emoji react menu over a bubble: (chat, message, where it was clicked).
     react_menu: Option<(
         crate::model::Id,
@@ -321,8 +371,12 @@ impl Shell {
             });
         }
         let connectors = cx.new(|cx| ConnectorsPanel::new(state.clone(), cx));
+        // Rig: `ARBOS_OPEN_SETTINGS=connectors` — the Connectors page inside the sheet.
         if open_settings.as_deref() == Some("connectors") {
-            connectors.update(cx, |p, cx| p.show(cx));
+            connectors.update(cx, |p, cx| {
+                p.show(cx);
+                p.embedded = true;
+            });
         }
         cx.observe(&connectors, |_, _, cx| cx.notify()).detach();
         cx.subscribe(
@@ -362,6 +416,10 @@ impl Shell {
             Some("secrets-vault") => secrets.update(cx, |p, cx| p.show_first_vault(cx)),
             _ => {}
         }
+        // Those rig pages open inside the Settings sheet too (#1086).
+        if secrets.read(cx).is_open() {
+            secrets.update(cx, |p, _| p.embedded = true);
+        }
         cx.observe(&secrets, |_, _, cx| cx.notify()).detach();
         cx.subscribe(&secrets, |this, _, event: &SecretsEvent, cx| match event {
             SecretsEvent::Back => {
@@ -376,6 +434,10 @@ impl Shell {
             |this, _, event: &RoutinesEvent, cx| match event {
                 RoutinesEvent::Close => {
                     this.routines_open = false;
+                    if this.routines.read(cx).embedded {
+                        // "Close" on the Settings › Routines page: back to the list.
+                        this.settings_back(cx);
+                    }
                     cx.notify();
                 }
             },
@@ -411,11 +473,14 @@ impl Shell {
             skills,
             local,
             focus_handle: cx.focus_handle(),
-            // `ARBOS_OPEN_SETTINGS=1|bottom|connectors` opens the sheet at launch
-            // (`bottom` scrolled to its end, `connectors` the Connectors panel) — rig.
-            settings_open: open_settings
-                .as_deref()
-                .is_some_and(|v| v != "connectors" && !v.starts_with("secrets")),
+            // `ARBOS_OPEN_SETTINGS=1|bottom|connectors|secrets…` opens the sheet at
+            // launch (`bottom` scrolled to its end, the others on that page) — rig.
+            settings_open: open_settings.is_some(),
+            settings_page: match open_settings.as_deref() {
+                Some("connectors") => SettingsPage::Connectors,
+                Some(v) if v.starts_with("secrets") => SettingsPage::Secrets,
+                _ => SettingsPage::Root,
+            },
             settings_scroll,
             row_menu: None,
             chat_menu: None,
@@ -451,8 +516,98 @@ impl Shell {
 
     pub(crate) fn open_feedback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.menu_open = false;
-        self.settings_open = false;
+        self.close_settings(cx);
         self.feedback.update(cx, |sheet, cx| sheet.open(window, cx));
+    }
+
+    // ----- settings navigation (#1086) -------------------------------------------
+
+    /// Settings › Apps & tools row: push that page inside the sheet.
+    fn open_settings_page(
+        &mut self,
+        page: SettingsPage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.hide_settings_page(cx);
+        match page {
+            SettingsPage::Root => {}
+            SettingsPage::Connectors => self.connectors.update(cx, |p, cx| {
+                p.show(cx);
+                p.embedded = true;
+            }),
+            SettingsPage::Routines => {
+                self.routines_open = true;
+                self.routines.update(cx, |p, cx| {
+                    p.open(cx);
+                    p.embedded = true;
+                });
+            }
+            SettingsPage::Channels => self.channels.update(cx, |p, cx| {
+                p.show(cx);
+                p.embedded = true;
+            }),
+            SettingsPage::Skills => self.skills.update(cx, |p, cx| {
+                p.open(window, cx);
+                p.embedded = true;
+            }),
+            SettingsPage::ThisMac => self.local.update(cx, |p, cx| {
+                p.show(cx);
+                p.embedded = true;
+            }),
+            SettingsPage::Secrets => self.secrets.update(cx, |p, cx| {
+                p.show(cx);
+                p.embedded = true;
+            }),
+        }
+        self.settings_page = page;
+        self.settings_open = true;
+        cx.notify();
+    }
+
+    /// Close whichever page is embedded in the sheet (its entity stops rendering).
+    fn hide_settings_page(&mut self, cx: &mut Context<Self>) {
+        match self.settings_page {
+            SettingsPage::Root => {}
+            SettingsPage::Connectors => self.connectors.update(cx, |p, cx| p.hide(cx)),
+            SettingsPage::Routines => {
+                self.routines_open = false;
+                self.routines.update(cx, |p, _| p.embedded = false);
+            }
+            SettingsPage::Channels => self.channels.update(cx, |p, cx| p.hide(cx)),
+            SettingsPage::Skills => self.skills.update(cx, |p, cx| p.close(cx)),
+            SettingsPage::ThisMac => self.local.update(cx, |p, cx| p.hide(cx)),
+            SettingsPage::Secrets => self.secrets.update(cx, |p, cx| p.hide(cx)),
+        }
+        self.settings_page = SettingsPage::Root;
+    }
+
+    /// The sheet's back button: return to the Settings list.
+    fn settings_back(&mut self, cx: &mut Context<Self>) {
+        self.hide_settings_page(cx);
+        self.settings_open = true;
+        cx.notify();
+    }
+
+    /// "Done" / Escape / sign out: the whole sheet goes, page included.
+    pub(crate) fn close_settings(&mut self, cx: &mut Context<Self>) {
+        self.hide_settings_page(cx);
+        self.settings_open = false;
+        cx.notify();
+    }
+
+    /// True while the embedded page's panel is still open; a page that closed
+    /// itself (Skills › Close) falls back to the root list.
+    fn settings_page_alive(&self, cx: &App) -> bool {
+        match self.settings_page {
+            SettingsPage::Root => true,
+            SettingsPage::Connectors => self.connectors.read(cx).is_open(),
+            SettingsPage::Routines => self.routines_open,
+            SettingsPage::Channels => self.channels.read(cx).is_open(),
+            SettingsPage::Skills => self.skills.read(cx).open,
+            SettingsPage::ThisMac => self.local.read(cx).is_open(),
+            SettingsPage::Secrets => self.secrets.read(cx).is_open(),
+        }
     }
 
     /// Settings › Credits: the feedback sheet, pre-addressed as a top-up request.
@@ -639,8 +794,13 @@ impl Shell {
         });
     }
 
-    /// Escape closes whatever floats: menus, then sheets.
+    /// Escape stops a recording memo (keeping its transcript), then closes
+    /// whatever floats: menus, then sheets.
     fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        if self.voice.update(cx, |v, cx| v.escape(cx)) {
+            Composer::focus(&self.composer, window, cx);
+            return;
+        }
         let editing_agent = {
             let s = self.state.read(cx);
             s.renaming_project.is_some() || (s.profile.is_some() && s.profile_editing_description)
@@ -680,7 +840,12 @@ impl Shell {
         }
         let mut closed = false;
         if self.settings_open {
-            self.settings_open = false;
+            if self.settings_page != SettingsPage::Root {
+                // Escape on a pushed page goes back first, like the iPhone's swipe.
+                self.settings_back(cx);
+                return;
+            }
+            self.close_settings(cx);
             closed = true;
         }
         self.state.update(cx, |s, cx| {
@@ -1914,7 +2079,7 @@ impl Shell {
                         .hover(|s| s.bg(theme.surface_2))
                         .child("Sign out")
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.settings_open = false;
+                            this.close_settings(cx);
                             this.state.update(cx, |s, cx| s.sign_out(cx));
                         })),
                 ),
@@ -2228,70 +2393,66 @@ impl Shell {
         );
         body = body.child(section("Updates", group, None, &theme));
 
-        // More: the feature panels.
+        // More: the feature pages, pushed inside this sheet (#1086).
+        let page_row = |id: &'static str,
+                        glyph: &'static str,
+                        page: SettingsPage,
+                        detail: Option<String>,
+                        theme: &Theme,
+                        cx: &mut Context<Self>| {
+            glass::nav_row_icon(id, glyph, page.title(), detail, theme).on_click(
+                cx.listener(move |this, _, window, cx| this.open_settings_page(page, window, cx)),
+            )
+        };
         let group = settings_group(&theme)
-            .child(
-                glass::nav_row_icon("settings-connectors", "link", "Connectors", None, &theme)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.settings_open = false;
-                        this.connectors.update(cx, |p, cx| p.show(cx));
-                        cx.notify();
-                    })),
-            )
-            .child(
-                glass::nav_row_icon("settings-routines", "sparkles", "Routines", None, &theme)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.settings_open = false;
-                        this.routines_open = true;
-                        this.routines.update(cx, |p, cx| p.open(cx));
-                        cx.notify();
-                    })),
-            )
-            .child(
-                glass::nav_row_icon("settings-channels", "globe", "Channels", None, &theme)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.settings_open = false;
-                        this.channels.update(cx, |p, cx| p.show(cx));
-                        cx.notify();
-                    })),
-            )
-            .child(
-                glass::nav_row_icon(
-                    "settings-skills",
-                    "cpu",
-                    "Skills",
-                    Some(format!("{skill_count} in library")),
-                    &theme,
-                )
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.settings_open = false;
-                    this.skills.update(cx, |p, cx| p.open(window, cx));
-                    cx.notify();
-                })),
-            )
-            .child(
-                glass::nav_row_icon("settings-local", "window", "This Mac", None, &theme).on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.settings_open = false;
-                        this.local.update(cx, |p, cx| p.show(cx));
-                        cx.notify();
-                    }),
-                ),
-            )
-            .child(
-                glass::nav_row_icon(
-                    "settings-secrets",
-                    "key",
-                    "Secrets",
-                    Some(secrets_value),
-                    &theme,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.settings_open = false;
-                    this.secrets.update(cx, |p, cx| p.show(cx));
-                    cx.notify();
-                })),
-            )
+            .child(page_row(
+                "settings-connectors",
+                "link",
+                SettingsPage::Connectors,
+                None,
+                &theme,
+                cx,
+            ))
+            .child(page_row(
+                "settings-routines",
+                "sparkles",
+                SettingsPage::Routines,
+                None,
+                &theme,
+                cx,
+            ))
+            .child(page_row(
+                "settings-channels",
+                "globe",
+                SettingsPage::Channels,
+                None,
+                &theme,
+                cx,
+            ))
+            .child(page_row(
+                "settings-skills",
+                "cpu",
+                SettingsPage::Skills,
+                Some(format!("{skill_count} in library")),
+                &theme,
+                cx,
+            ))
+            .child(page_row(
+                "settings-local",
+                "window",
+                SettingsPage::ThisMac,
+                None,
+                &theme,
+                cx,
+            ))
+            .child(page_row(
+                "settings-secrets",
+                "key",
+                SettingsPage::Secrets,
+                Some(secrets_value),
+                &theme,
+                cx,
+            ))
             .child(
                 glass::nav_row_icon(
                     "settings-feedback",
@@ -2372,21 +2533,50 @@ impl Shell {
             body = body.child(sign_out);
         }
 
-        let header = glass::sheet_header(
-            "Settings",
-            None,
-            Some(
-                glass::sheet_button("settings-done", "Done", &theme).on_click(cx.listener(
-                    |this, _, window, cx| {
-                        this.settings_open = false;
-                        Composer::focus(&this.composer, window, cx);
-                        cx.notify();
-                    },
-                )),
-            ),
-            &theme,
-        );
-        glass::sheet(480.0, &theme, header, body.max_h(px(720.0)))
+        let done = glass::sheet_button("settings-done", "Done", &theme).on_click(cx.listener(
+            |this, _, window, cx| {
+                this.close_settings(cx);
+                Composer::focus(&this.composer, window, cx);
+            },
+        ));
+        let page = self.settings_page;
+        if page == SettingsPage::Root {
+            let header = glass::sheet_header("Settings", None, Some(done), &theme);
+            return glass::sheet(
+                SETTINGS_WIDTH,
+                &theme,
+                header,
+                body.h(px(SETTINGS_BODY_HEIGHT)),
+            );
+        }
+
+        // A pushed page (#1086): the same box at the same height, `‹` back to
+        // the list, the page's panel rendered inline instead of as the
+        // bottom-left pop-out.
+        let back = glass::circle("settings-back", 34.0, &theme)
+            .child(icon("chevron-left", 15.0, theme.text))
+            .on_click(cx.listener(|this, _, _, cx| this.settings_back(cx)));
+        let header = glass::sheet_header(page.title(), Some(back), Some(done), &theme);
+        let panel: gpui::AnyElement = match page {
+            SettingsPage::Root => unreachable!("handled above"),
+            SettingsPage::Connectors => self.connectors.clone().into_any_element(),
+            SettingsPage::Routines => self.routines.clone().into_any_element(),
+            SettingsPage::Channels => self.channels.clone().into_any_element(),
+            SettingsPage::Skills => self.skills.clone().into_any_element(),
+            SettingsPage::ThisMac => self.local.clone().into_any_element(),
+            SettingsPage::Secrets => self.secrets.clone().into_any_element(),
+        };
+        let page_body = div()
+            .id("settings-page")
+            .flex()
+            .flex_col()
+            .px(px(6.0))
+            .pb(px(12.0))
+            .min_h_0()
+            .overflow_y_scroll()
+            .h(px(SETTINGS_BODY_HEIGHT))
+            .child(panel);
+        glass::sheet(page.sheet_width(), &theme, header, page_body)
     }
 
     // ----- sign-in -------------------------------------------------------------------
@@ -2862,30 +3052,36 @@ impl Render for Shell {
                 )));
             }
         }
-        if let Some(page) = self.state.read(cx).profile.clone() {
+        let profile = self.state.read(cx).profile.clone();
+        if let Some(page) = profile {
             if let Some(sheet) = profiles::sheet(&page, self, cx) {
                 root = root.child(sheet);
             }
         }
-        if self.connectors.read(cx).is_open() {
+        // The feature panels float bottom-left only when opened outside Settings
+        // (agent profile → Secrets); from Settings they render inside the sheet.
+        if self.connectors.read(cx).is_floating() {
             root = root.child(self.connectors.clone());
         }
-        if self.local.read(cx).is_open() {
+        if self.local.read(cx).is_floating() {
             root = root.child(self.local.clone());
         }
-        if self.secrets.read(cx).is_open() {
+        if self.secrets.read(cx).is_floating() {
             root = root.child(self.secrets.clone());
         }
-        if self.routines_open {
+        if self.routines_open && !self.routines.read(cx).embedded {
             root = root.child(self.routines.clone());
         }
-        if self.channels.read(cx).is_open() {
+        if self.channels.read(cx).is_floating() {
             root = root.child(self.channels.clone());
         }
-        if self.skills.read(cx).open {
+        if self.skills.read(cx).is_floating() {
             root = root.child(self.skills.clone());
         }
         if self.settings_open {
+            if !self.settings_page_alive(cx) {
+                self.settings_page = SettingsPage::Root;
+            }
             root = root.child(self.render_settings(cx));
         }
         if self.voice_picker_open {

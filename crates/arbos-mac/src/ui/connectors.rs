@@ -32,6 +32,9 @@ pub struct ConnectorsPanel {
     /// Connected pill clicked: (connector id, provider) awaiting the Disconnect confirmation.
     disconnecting: Option<(String, String)>,
     open: bool,
+    /// Shown as a page inside the Settings sheet (#1086) rather than as the
+    /// bottom-left popover; the sheet's header carries the back button.
+    pub(crate) embedded: bool,
     focus_handle: FocusHandle,
 }
 
@@ -58,12 +61,18 @@ impl ConnectorsPanel {
             menu_for: None,
             disconnecting: None,
             open: false,
+            embedded: false,
             focus_handle: cx.focus_handle(),
         }
     }
 
     pub fn is_open(&self) -> bool {
         self.open
+    }
+
+    /// Open as the bottom-left popover (not inside the Settings sheet).
+    pub fn is_floating(&self) -> bool {
+        self.open && !self.embedded
     }
 
     pub fn show(&mut self, cx: &mut Context<Self>) {
@@ -74,6 +83,7 @@ impl ConnectorsPanel {
 
     pub fn hide(&mut self, cx: &mut Context<Self>) {
         self.open = false;
+        self.embedded = false;
         self.token_for = None;
         self.menu_for = None;
         self.disconnecting = None;
@@ -512,29 +522,32 @@ impl Render for ConnectorsPanel {
         let theme = Theme::of(cx).clone();
         let view = self.state.read(cx).connectors.clone();
 
+        let embedded = self.embedded;
         let mut header = div()
             .flex()
             .items_center()
             .gap(px(8.0))
-            .child(
-                div()
-                    .id("connectors-back")
-                    .text_size(px(11.5))
-                    .text_color(theme.text_muted)
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(theme.text))
-                    .child("‹ Settings")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.hide(cx);
-                        cx.emit(ConnectorsEvent::Back);
-                    })),
-            )
+            .when(!embedded, |el| {
+                el.child(
+                    div()
+                        .id("connectors-back")
+                        .text_size(px(11.5))
+                        .text_color(theme.text_muted)
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(theme.text))
+                        .child("‹ Settings")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.hide(cx);
+                            cx.emit(ConnectorsEvent::Back);
+                        })),
+                )
+            })
             .child(
                 div()
                     .flex_1()
                     .text_size(px(11.0))
                     .text_color(theme.text_faint)
-                    .child("CONNECTORS"),
+                    .when(!embedded, |el| el.child("CONNECTORS")),
             );
         if view.mock {
             header = header.child(Self::chip(&theme, "Mock", theme.warn, theme.surface_2));
@@ -573,16 +586,10 @@ impl Render for ConnectorsPanel {
         let card = div()
             .id("connectors-popover")
             .track_focus(&self.focus_handle)
-            .w(px(360.0))
             .flex()
             .flex_col()
             .gap(px(6.0))
             .p(px(10.0))
-            .rounded(px(PANEL_RADIUS))
-            .bg(theme.card())
-            .border_1()
-            .border_color(theme.border_strong)
-            .shadow_lg()
             .child(header)
             .child(list)
             .child(
@@ -596,10 +603,21 @@ impl Render for ConnectorsPanel {
                         "Tokens stay on the relay; the agent acts through POST /connectors/call and asks before it sends."
                     }),
             );
+        if embedded {
+            return card.w_full().into_any_element();
+        }
+        let card = card
+            .w(px(360.0))
+            .rounded(px(PANEL_RADIUS))
+            .bg(theme.card())
+            .border_1()
+            .border_color(theme.border_strong)
+            .shadow_lg();
         div()
             .absolute()
             .left(px(RAIL_WIDTH + 8.0))
             .bottom(px(14.0))
             .child(frosted(PANEL_RADIUS, MENU_BLUR, card))
+            .into_any_element()
     }
 }
