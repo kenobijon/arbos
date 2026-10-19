@@ -569,9 +569,11 @@ struct SettingsActionRow: View {
 
     var body: some View {
         Button(action: action) {
+            // Apple's Settings tints button rows (blue, red when destructive) so
+            // they read as actions, not values.
             Text(title)
                 .font(theme.font(Theme.body))
-                .foregroundStyle(destructive ? theme.danger : theme.text)
+                .foregroundStyle(destructive ? theme.danger : theme.accent)
                 .frame(maxWidth: .infinity, minHeight: SettingsRow.height, alignment: .leading)
                 .padding(.horizontal, 16)
                 .contentShape(Rectangle())
