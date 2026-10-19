@@ -12,8 +12,6 @@ mod agent;
 mod group;
 mod user;
 
-pub(crate) use agent::AgentPicker;
-
 use std::sync::Arc;
 
 use gpui::{

@@ -143,9 +143,7 @@ pub struct Shell {
     pub(crate) description_input: Entity<ComposerInput>,
     /// Double-click rename: the inline name field for an agent.
     pub(crate) agent_name_input: Entity<ComposerInput>,
-    /// Agent page (#1064): which settings row is unfolded on hover, and the
-    /// search field inside the model dropdown.
-    pub(crate) agent_picker: Option<profiles::AgentPicker>,
+    /// Agent page: the filter field in the Model dropdown (`ui::hoverpick`).
     pub(crate) model_search_input: Entity<ComposerInput>,
     /// Settings header: editing my display name and handle (`PATCH /me`).
     profile_edit_open: bool,
@@ -305,7 +303,15 @@ impl Shell {
         cx.observe(&agent_name_input, |_, _, cx| cx.notify())
             .detach();
         let model_search_input = cx.new(ComposerInput::new);
-        model_search_input.update(cx, |input, _| input.set_placeholder("Search models"));
+        {
+            let weak = cx.weak_entity();
+            model_search_input.update(cx, |input, _| {
+                input.set_placeholder("Search models");
+                input.on_submit = Some(Rc::new(move |window, cx| {
+                    let _ = weak.update(cx, |this, cx| this.pick_first_model(window, cx));
+                }));
+            });
+        }
         cx.observe(&model_search_input, |_, _, cx| cx.notify())
             .detach();
         let name_input = cx.new(ComposerInput::new);
@@ -491,7 +497,6 @@ impl Shell {
             people_input,
             description_input,
             agent_name_input,
-            agent_picker: None,
             model_search_input,
             profile_edit_open: false,
             name_input,
@@ -801,11 +806,7 @@ impl Shell {
             Composer::focus(&self.composer, window, cx);
             return;
         }
-        if self.agent_picker.take().is_some() {
-            // An unfolded agent-settings dropdown folds first (#1064).
-            self.model_search_input.update(cx, |i, cx| i.clear(cx));
-            self.state.update(cx, |s, cx| s.stop_voice_sample(cx));
-            cx.notify();
+        if self.close_agent_pick(Some(window), cx) {
             return;
         }
         let floating = self.menu_open
@@ -891,6 +892,7 @@ impl Shell {
 
     /// Everything that floats closes on a click elsewhere.
     fn close_popovers(&mut self, cx: &mut Context<Self>) {
+        self.close_agent_pick(None, cx);
         if self.menu_open
             || self.members_open
             || self.add_agent_open
@@ -2941,15 +2943,6 @@ impl Render for Shell {
                     if this.routines_open && this.routines.read(cx).has_focus(window, cx) {
                         return;
                     }
-                    if this.agent_picker == Some(profiles::AgentPicker::Model)
-                        && this
-                            .model_search_input
-                            .read(cx)
-                            .focus_handle(cx)
-                            .is_focused(window)
-                    {
-                        return;
-                    }
                     if this.profile_edit_open
                         && (this.name_input.read(cx).focus_handle(cx).is_focused(window)
                             || this
@@ -3057,12 +3050,6 @@ impl Render for Shell {
             }
         }
         let profile = self.state.read(cx).profile.clone();
-        if self.agent_picker.is_some()
-            && !matches!(profile, Some(crate::app::ProfilePage::Agent { .. }))
-        {
-            // The page went away under an unfolded dropdown: fold it (#1064).
-            self.agent_picker = None;
-        }
         if let Some(page) = profile {
             if let Some(sheet) = profiles::sheet(&page, self, cx) {
                 root = root.child(sheet);

@@ -1,27 +1,26 @@
 //! An agent's page: the D79 avatar, name, what it is doing, call / mute /
-//! search / more, the info card (owner, machine, model, description), an
-//! Appearance section holding the avatar colour picker (D79 override, saved
-//! on the relay), then Media / Files / Links from its chats.
+//! search / more, the info card (owner, machine, then — for my own agent —
+//! Model / Reasoning / Voice rows that drop down on hover, secrets, camera
+//! vision, description), an Appearance section holding the avatar colour
+//! picker (D79 override, saved on the relay), then Media / Files / Links
+//! from its chats.
 //!
 //! Only controls that work end to end are shown (#1066): the colour swatches
 //! PATCH `avatar_color_index`; there is no avatar-image picker on the Mac yet,
 //! so none is offered.
 
-use gpui::{
-    div, prelude::*, px, AnyElement, Context, Div, ElementId, Focusable, SharedString, Stateful,
-};
+use gpui::{div, prelude::*, px, Context, Div, ElementId, Focusable, SharedString};
 
-use crate::app::{CallTarget, ProfilePage};
-use crate::model::{Effort, Id, MachineState, Person, Project};
-use crate::sync::fixture::MODELS;
+use crate::app::{AgentPick, CallTarget, ProfilePage};
+use crate::model::{Id, MachineState, Person, Project};
 use crate::ui::avatars::{self, AvatarState};
 use crate::ui::glass;
+use crate::ui::hoverpick;
 use crate::ui::icons::icon;
 use crate::ui::motion::PulseClock;
 use crate::ui::shell::Shell;
 use crate::ui::sidebar::machine_dot;
 use crate::ui::theme::{Theme, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
-use crate::ui::voicepicker;
 
 use super::{
     action_button, action_row, card, chats_of, collect, file_list, frame, hero, hero_name,
@@ -29,15 +28,6 @@ use super::{
 };
 
 const TABS: [&str; 3] = ["Media", "Files", "Links"];
-
-/// Which agent-settings row is expanded into its dropdown (#1064): rows open
-/// as the pointer passes over them and close when it leaves, like a menu bar.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum AgentPicker {
-    Model,
-    Reasoning,
-    Voice,
-}
 
 /// An agent that is only known as a member of a people chat (someone else's
 /// project) is shown from that member entry.
@@ -141,6 +131,7 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
     let tab = state.profile_tab;
     let more_open = state.profile_more_open;
     let picker_open = state.profile_picker_open;
+    let pick = state.agent_pick;
     let editing = state.profile_editing_description && mine;
     let renaming = mine
         && state
@@ -321,32 +312,43 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
     });
 
     // ----- info card -------------------------------------------------------------
-    let picker = shell.agent_picker;
     let mut info = card(&theme)
         .child(info_row("owner", owner_text, &theme))
         .child(info_row("machine", machine_text, &theme));
     if mine {
-        // Model and reasoning: hover the row and its dropdown unfolds (#1064).
-        let model_list = (picker == Some(AgentPicker::Model))
-            .then(|| model_list(shell, &project, &theme, cx).into_any_element());
-        info = info.child(picker_row(
-            AgentPicker::Model,
-            "model",
-            model_text,
-            model_list,
-            &theme,
-            cx,
-        ));
-        let effort_list = (picker == Some(AgentPicker::Reasoning))
-            .then(|| effort_list(&project, &theme, cx).into_any_element());
-        info = info.child(picker_row(
-            AgentPicker::Reasoning,
-            "reasoning",
-            project.effort.label().to_string(),
-            effort_list,
-            &theme,
-            cx,
-        ));
+        // The agent's own settings: Model (searchable), Reasoning and Voice
+        // drop down on hover (or a click) and apply at once.
+        let model_open = pick == Some(AgentPick::Model);
+        let reasoning_open = pick == Some(AgentPick::Reasoning);
+        let voice_open = pick == Some(AgentPick::Voice);
+        info = info
+            .child(hoverpick::row(
+                "model",
+                model_text,
+                AgentPick::Model,
+                model_open,
+                model_open.then(|| hoverpick::model_panel(shell, &project, cx)),
+                &theme,
+                cx,
+            ))
+            .child(hoverpick::row(
+                "reasoning",
+                project.effort.label(),
+                AgentPick::Reasoning,
+                reasoning_open,
+                reasoning_open.then(|| hoverpick::reasoning_panel(&project, cx)),
+                &theme,
+                cx,
+            ))
+            .child(hoverpick::row(
+                "voice",
+                voice_text,
+                AgentPick::Voice,
+                voice_open,
+                voice_open.then(|| hoverpick::voice_panel(shell, &project, cx)),
+                &theme,
+                cx,
+            ));
     } else {
         info = info.child(info_row("model", model_text, &theme));
     }
@@ -415,17 +417,6 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
             })),
     );
     if mine {
-        // Call voice: hover unfolds the voice list (play a sample, pick one).
-        let voice_list = (picker == Some(AgentPicker::Voice))
-            .then(|| voicepicker::inline_list(shell, &project, cx).into_any_element());
-        info = info.child(picker_row(
-            AgentPicker::Voice,
-            "voice",
-            voice_text,
-            voice_list,
-            &theme,
-            cx,
-        ));
         // Camera vision (voice API §11): a switch row, default on.
         let vision_on = project.vision_enabled;
         let p_vision = pid.clone();
@@ -628,231 +619,6 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
             }
         });
     Some(frame(body, edit, &theme, cx))
-}
-
-// ----- hover-expanding pickers (#1064) --------------------------------------------
-
-/// An info row (caption over value, chevron) that unfolds `list` beneath it
-/// while the pointer is over the row or the list. Hovering another picker
-/// row swaps the open one; a pick collapses it (`agent_picker = None`).
-fn picker_row(
-    which: AgentPicker,
-    caption: &'static str,
-    value: String,
-    list: Option<AnyElement>,
-    theme: &Theme,
-    cx: &mut Context<Shell>,
-) -> Stateful<Div> {
-    let open = list.is_some();
-    let id = match which {
-        AgentPicker::Model => "agent-model-row",
-        AgentPicker::Reasoning => "agent-reasoning-row",
-        AgentPicker::Voice => "agent-voice-row",
-    };
-    let row = div()
-        .flex()
-        .items_center()
-        .gap(px(10.0))
-        .px(px(16.0))
-        .py(px(10.0))
-        .cursor_default()
-        .when(open, |el| el.bg(theme.surface_2))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .child(
-                    div()
-                        .text_size(px(TEXT_TINY))
-                        .text_color(theme.text_muted)
-                        .child(caption),
-                )
-                .child(
-                    div()
-                        .text_size(px(TEXT_BODY))
-                        .text_color(theme.text)
-                        .truncate()
-                        .child(value),
-                ),
-        )
-        .child(icon(
-            if open { "chevron-up" } else { "chevron-down" },
-            14.0,
-            theme.text_faint,
-        ));
-    div()
-        .id(id)
-        .flex()
-        .flex_col()
-        .border_b_1()
-        .border_color(theme.border)
-        .child(row)
-        .children(list.map(|list| {
-            div()
-                .mx(px(12.0))
-                .mb(px(10.0))
-                .rounded(px(10.0))
-                .bg(theme.field)
-                .border_1()
-                .border_color(theme.field_border)
-                .overflow_hidden()
-                .child(list)
-        }))
-        .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
-            if *hovered {
-                if this.agent_picker == Some(which) {
-                    return;
-                }
-                this.agent_picker = Some(which);
-                match which {
-                    AgentPicker::Model => {
-                        this.model_search_input.update(cx, |i, cx| i.clear(cx));
-                        let handle = this.model_search_input.read(cx).focus_handle(cx);
-                        window.focus(&handle, cx);
-                    }
-                    AgentPicker::Voice => this.state.update(cx, |s, _| s.fetch_voices()),
-                    AgentPicker::Reasoning => {}
-                }
-                cx.notify();
-            } else if this.agent_picker == Some(which) {
-                // Typing a model filter keeps the list up until a pick or Escape.
-                let typing = which == AgentPicker::Model
-                    && this
-                        .model_search_input
-                        .read(cx)
-                        .focus_handle(cx)
-                        .is_focused(window)
-                    && !this.model_search_input.read(cx).text().trim().is_empty();
-                if typing {
-                    return;
-                }
-                this.agent_picker = None;
-                if which == AgentPicker::Voice {
-                    this.state.update(cx, |s, cx| s.stop_voice_sample(cx));
-                }
-                cx.notify();
-            }
-        }))
-}
-
-fn picker_item(id: ElementId, label: String, on: bool, theme: &Theme) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .gap(px(10.0))
-        .px(px(10.0))
-        .py(px(6.0))
-        .text_size(px(TEXT_SMALL))
-        .text_color(theme.text)
-        .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
-        .child(div().flex_1().min_w_0().truncate().child(label))
-        .when(on, |el| el.child(icon("check", 13.0, theme.accent)))
-}
-
-/// Search field + the relay's model list (fixture list when none arrived yet).
-fn model_list(shell: &Shell, project: &Project, theme: &Theme, cx: &mut Context<Shell>) -> Div {
-    let state = shell.state.read(cx);
-    let current = project.model.clone();
-    let mut names: Vec<String> = if state.models.is_empty() {
-        MODELS.iter().map(|m| m.to_string()).collect()
-    } else {
-        state.models.clone()
-    };
-    if !current.is_empty() && !names.contains(&current) {
-        names.insert(0, current.clone());
-    }
-    let query = shell
-        .model_search_input
-        .read(cx)
-        .text()
-        .trim()
-        .to_lowercase();
-    if !query.is_empty() {
-        names.retain(|n| n.to_lowercase().contains(&query));
-    }
-    let pid = project.id.clone();
-    let mut list = div().flex().flex_col().child(
-        div()
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .px(px(10.0))
-            .py(px(7.0))
-            .border_b_1()
-            .border_color(theme.field_border)
-            .text_size(px(TEXT_SMALL))
-            .child(icon("search", 13.0, theme.text_faint))
-            .child(div().flex_1().child(shell.model_search_input.clone())),
-    );
-    let mut items = div()
-        .id("agent-model-list")
-        .flex()
-        .flex_col()
-        .max_h(px(240.0))
-        .overflow_y_scroll();
-    if names.is_empty() {
-        items = items.child(
-            div()
-                .px(px(10.0))
-                .py(px(8.0))
-                .text_size(px(TEXT_TINY))
-                .text_color(theme.text_muted)
-                .child("No models match."),
-        );
-    }
-    for (i, name) in names.into_iter().enumerate() {
-        let on = name == current;
-        let p = pid.clone();
-        let pick = name.clone();
-        items = items.child(
-            picker_item(
-                ElementId::NamedInteger("agent-model-item".into(), i as u64),
-                name,
-                on,
-                theme,
-            )
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.state
-                    .update(cx, |s, cx| s.set_project_model(p.clone(), pick.clone(), cx));
-                this.agent_picker = None;
-                this.model_search_input.update(cx, |i, cx| i.clear(cx));
-                crate::ui::composer::Composer::focus(&this.composer, window, cx);
-                cx.notify();
-            })),
-        );
-    }
-    list = list.child(items);
-    list
-}
-
-/// Low · Medium · High.
-fn effort_list(project: &Project, theme: &Theme, cx: &mut Context<Shell>) -> Div {
-    let pid = project.id.clone();
-    let mut list = div().flex().flex_col();
-    for (i, level) in Effort::ALL.iter().enumerate() {
-        let level = *level;
-        let p = pid.clone();
-        list = list.child(
-            picker_item(
-                ElementId::NamedInteger("agent-effort-item".into(), i as u64),
-                level.label().to_string(),
-                level == project.effort,
-                theme,
-            )
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.state
-                    .update(cx, |s, cx| s.set_project_effort(p.clone(), level, cx));
-                this.agent_picker = None;
-                cx.notify();
-            })),
-        );
-    }
-    list
 }
 
 fn colour_row(project: &Project, theme: &Theme, cx: &mut Context<Shell>) -> Div {

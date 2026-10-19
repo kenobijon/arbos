@@ -15,6 +15,50 @@ use crate::ui::widgets::CardPalette;
 /// The sheet. `space` is the agent whose voice is being picked.
 pub fn sheet(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
     let theme = Theme::of(cx).clone();
+
+    let done = glass::sheet_button("voice-done", "Done", &theme).on_click(cx.listener(
+        |this, _, window, cx| {
+            this.voice_picker_open = false;
+            this.state.update(cx, |s, cx| s.stop_voice_sample(cx));
+            crate::ui::composer::Composer::focus(&this.composer, window, cx);
+            cx.notify();
+        },
+    ));
+    let header = glass::sheet_header("Voice", None, Some(done), &theme);
+    let list = list(shell, space, "voice", 520.0, cx);
+
+    let body = div()
+        .flex()
+        .flex_col()
+        .gap(px(10.0))
+        .px(px(16.0))
+        .pb(px(18.0))
+        .child(
+            div()
+                .px(px(4.0))
+                .text_size(px(TEXT_SMALL))
+                .text_color(theme.text_muted)
+                .child(format!(
+                    "How {} sounds on calls. Press play to hear a sample.",
+                    space.name
+                )),
+        )
+        .child(list);
+    glass::sheet(440.0, &theme, header, body.max_h(px(620.0)))
+}
+
+/// The voice list on its own: "Default" first, then every voice with its
+/// play button and a checkmark on the selected one; a click saves. Shared by
+/// the sheet and the agent page's Voice dropdown (`ui::hoverpick`). `ids`
+/// prefixes the element ids so two lists may be on screen at once.
+pub fn list(
+    shell: &Shell,
+    space: &Project,
+    ids: &'static str,
+    max_height: f32,
+    cx: &mut Context<Shell>,
+) -> Stateful<Div> {
+    let theme = Theme::of(cx).clone();
     let palette = CardPalette::of(&theme);
     let state = shell.state.read(cx);
     let voices: Vec<Voice> = state.voices.clone();
@@ -40,16 +84,6 @@ pub fn sheet(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
         Appearance::Dark => palette.outer,
     };
 
-    let done = glass::sheet_button("voice-done", "Done", &theme).on_click(cx.listener(
-        |this, _, window, cx| {
-            this.voice_picker_open = false;
-            this.state.update(cx, |s, cx| s.stop_voice_sample(cx));
-            crate::ui::composer::Composer::focus(&this.composer, window, cx);
-            cx.notify();
-        },
-    ));
-    let header = glass::sheet_header("Voice", None, Some(done), &theme);
-
     let row_base = |id: ElementId, theme: &Theme| {
         div()
             .id(id)
@@ -72,13 +106,14 @@ pub fn sheet(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
             .when(on, |el| el.child(icon("check", 16.0, theme.accent)))
     };
 
+    let eid = |suffix: String| ElementId::Name(SharedString::from(format!("{ids}-{suffix}")));
     let mut list = div()
-        .id("voice-list")
+        .id(eid("list".into()))
         .flex()
         .flex_col()
         .rounded(px(14.0))
         .overflow_y_scroll()
-        .max_h(px(520.0))
+        .max_h(px(max_height))
         .bg(list_bg)
         .border_1()
         .border_color(palette.hairline);
@@ -128,11 +163,11 @@ pub fn sheet(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
             .as_deref()
             .is_some_and(|u| state.voice_sample_playing(u));
         list = list.child(
-            row_base(ElementId::Name("voice-default".into()), &theme)
+            row_base(eid("default".into()), &theme)
                 .border_b_1()
                 .border_color(palette.hairline)
                 .child(play_button(
-                    ElementId::Name("voice-play-default".into()),
+                    eid("play-default".into()),
                     url,
                     playing,
                     &theme,
@@ -182,213 +217,49 @@ pub fn sheet(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
         let p = pid.clone();
         let vid = v.id.clone();
         let url = v.sample_url.clone();
-        let mut row = row_base(
-            ElementId::Name(SharedString::from(format!("voice-{}", v.id))),
-            &theme,
-        )
-        .when(i + 1 < n, |el| {
-            el.border_b_1().border_color(palette.hairline)
-        })
-        .child(play_button(
-            ElementId::Name(SharedString::from(format!("voice-play-{}", v.id))),
-            Some(url).filter(|u| !u.is_empty()),
-            playing,
-            &theme,
-        ))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .child(
-                    div()
-                        .text_size(px(TEXT_BODY))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.text)
-                        .truncate()
-                        .child(v.name.clone()),
-                )
-                .when_some(
-                    v.description.clone().filter(|d| !d.trim().is_empty()),
-                    |el, d| {
-                        el.child(
-                            div()
-                                .text_size(px(TEXT_TINY))
-                                .text_color(theme.text_muted)
-                                .child(d),
-                        )
-                    },
-                ),
-        )
-        .child(check(on, &theme));
+        let mut row = row_base(eid(v.id.clone()), &theme)
+            .when(i + 1 < n, |el| {
+                el.border_b_1().border_color(palette.hairline)
+            })
+            .child(play_button(
+                eid(format!("play-{}", v.id)),
+                Some(url).filter(|u| !u.is_empty()),
+                playing,
+                &theme,
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .text_size(px(TEXT_BODY))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .truncate()
+                            .child(v.name.clone()),
+                    )
+                    .when_some(
+                        v.description.clone().filter(|d| !d.trim().is_empty()),
+                        |el, d| {
+                            el.child(
+                                div()
+                                    .text_size(px(TEXT_TINY))
+                                    .text_color(theme.text_muted)
+                                    .child(d),
+                            )
+                        },
+                    ),
+            )
+            .child(check(on, &theme));
         row = row.on_click(cx.listener(move |this, _, _, cx| {
             this.state
                 .update(cx, |s, cx| s.set_voice(p.clone(), Some(vid.clone()), cx));
         }));
         list = list.child(row);
-    }
-
-    let body = div()
-        .flex()
-        .flex_col()
-        .gap(px(10.0))
-        .px(px(16.0))
-        .pb(px(18.0))
-        .child(
-            div()
-                .px(px(4.0))
-                .text_size(px(TEXT_SMALL))
-                .text_color(theme.text_muted)
-                .child(format!(
-                    "How {} sounds on calls. Press play to hear a sample.",
-                    space.name
-                )),
-        )
-        .child(list);
-    glass::sheet(440.0, &theme, header, body.max_h(px(620.0)))
-}
-
-/// The compact list for the agent page's hover-expanding "voice" row (#1064):
-/// Default first, then every voice with its play button and a checkmark on
-/// the selected one. Picking is a click; the parent decides when to collapse.
-pub fn inline_list(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Stateful<Div> {
-    let theme = Theme::of(cx).clone();
-    let state = shell.state.read(cx);
-    let voices: Vec<Voice> = state.voices.clone();
-    let selected = space.voice.clone();
-    let pid = space.id.clone();
-    let default_voice = state
-        .default_voice
-        .as_deref()
-        .and_then(|id| voices.iter().find(|v| v.id == id))
-        .cloned();
-    let default_label = match &default_voice {
-        Some(v) => format!("Default ({})", v.name),
-        None => "Default".to_string(),
-    };
-
-    let play_button = |id: ElementId, url: Option<String>, playing: bool, theme: &Theme| {
-        let has = url.is_some();
-        div()
-            .id(id)
-            .flex_shrink_0()
-            .size(px(26.0))
-            .rounded_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(if playing {
-                theme.text
-            } else {
-                Theme::with_alpha(theme.text, 0.08)
-            })
-            .when(!has, |el| el.opacity(0.35))
-            .hover(|s| s.opacity(0.85))
-            .child(icon(
-                if playing { "stop" } else { "play" },
-                11.0,
-                if playing { theme.bg } else { theme.text },
-            ))
-            .when_some(url, |el, url| {
-                el.on_mouse_down(
-                    gpui::MouseButton::Left,
-                    cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.state
-                            .update(cx, |s, cx| s.toggle_voice_sample(url.clone(), cx));
-                    }),
-                )
-            })
-    };
-    let item = |id: ElementId, label: String, on: bool, theme: &Theme| {
-        div()
-            .id(id)
-            .flex()
-            .items_center()
-            .gap(px(10.0))
-            .px(px(10.0))
-            .py(px(6.0))
-            .text_size(px(TEXT_SMALL))
-            .text_color(theme.text)
-            .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
-            .child(div().flex_1().min_w_0().truncate().child(label))
-            .when(on, |el| el.child(icon("check", 13.0, theme.accent)))
-    };
-
-    let mut list = div()
-        .id("agent-voice-list")
-        .flex()
-        .flex_col()
-        .max_h(px(240.0))
-        .overflow_y_scroll();
-    {
-        let p = pid.clone();
-        let url = default_voice
-            .as_ref()
-            .map(|v| v.sample_url.clone())
-            .filter(|u| !u.is_empty());
-        let playing = url
-            .as_deref()
-            .is_some_and(|u| state.voice_sample_playing(u));
-        list = list.child(
-            item(
-                ElementId::Name("agent-voice-default".into()),
-                default_label,
-                selected.is_none(),
-                &theme,
-            )
-            .child(play_button(
-                ElementId::Name("agent-voice-play-default".into()),
-                url,
-                playing,
-                &theme,
-            ))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.state
-                    .update(cx, |s, cx| s.set_voice(p.clone(), None, cx));
-                this.agent_picker = None;
-                cx.notify();
-            })),
-        );
-    }
-    if voices.is_empty() {
-        list = list.child(
-            div()
-                .px(px(10.0))
-                .py(px(8.0))
-                .text_size(px(TEXT_TINY))
-                .text_color(theme.text_muted)
-                .child("Loading voices…"),
-        );
-    }
-    for v in voices {
-        let on = selected.as_deref() == Some(v.id.as_str());
-        let playing = state.voice_sample_playing(&v.sample_url);
-        let p = pid.clone();
-        let vid = v.id.clone();
-        list = list.child(
-            item(
-                ElementId::Name(SharedString::from(format!("agent-voice-{}", v.id))),
-                v.name.clone(),
-                on,
-                &theme,
-            )
-            .child(play_button(
-                ElementId::Name(SharedString::from(format!("agent-voice-play-{}", v.id))),
-                Some(v.sample_url.clone()).filter(|u| !u.is_empty()),
-                playing,
-                &theme,
-            ))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.state
-                    .update(cx, |s, cx| s.set_voice(p.clone(), Some(vid.clone()), cx));
-                this.agent_picker = None;
-                cx.notify();
-            })),
-        );
     }
     list
 }
