@@ -37,7 +37,7 @@ use crate::ui::skills::SkillsPanel;
 use crate::ui::theme::{
     reapply_window_background, AppearancePref, Surface, Theme, COLUMN_MARGIN, COMPOSER_WIDTH,
     DRAWER_WIDTH, HEADER_HEIGHT, LINE_HEIGHT, PANEL_RADIUS, PLUS_BUTTON, RIGHT_PANEL_WIDTH,
-    TAB_BAR_HEIGHT, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
+    SIDEBAR_WIDTH, TAB_BAR_HEIGHT, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
 };
 use crate::ui::transcript::{Transcript, TranscriptEvent, COLUMN_MAX_WIDTH};
 use crate::ui::voice::Voice;
@@ -452,8 +452,12 @@ impl Shell {
         Composer::focus(&self.composer, window, cx);
     }
 
-    fn toggle_rail(&mut self, _: &ToggleRail, _: &mut Window, cx: &mut Context<Self>) {
-        self.state.update(cx, |s, cx| s.toggle_rail(cx));
+    fn toggle_rail(&mut self, _: &ToggleRail, window: &mut Window, cx: &mut Context<Self>) {
+        let width: f32 = window.viewport_size().width.into();
+        self.state.update(cx, |s, cx| {
+            let narrow = s.window_is_narrow(width);
+            s.toggle_rail(narrow, cx)
+        });
     }
 
     fn toggle_panel(&mut self, _: &TogglePanel, _: &mut Window, cx: &mut Context<Self>) {
@@ -470,6 +474,10 @@ impl Shell {
             || self.react_menu.is_some();
         self.close_popovers(cx);
         if floating {
+            return;
+        }
+        if self.state.read(cx).sidebar_overlay {
+            self.state.update(cx, |s, cx| s.close_sidebar_overlay(cx));
             return;
         }
         let mut closed = false;
@@ -793,6 +801,39 @@ impl Shell {
         }
     }
 
+    // ----- sidebar overlay (narrow window) -------------------------------------
+
+    /// The sidebar floating over the chat when the window is too narrow to
+    /// dock it: a dimmed scrim (click closes) and the usual sidebar at the left.
+    fn render_sidebar_overlay(&self, theme: &Theme, cx: &mut Context<Self>) -> Stateful<Div> {
+        div()
+            .id("sidebar-overlay")
+            .absolute()
+            .inset_0()
+            .bg(Theme::with_alpha(theme.bg, 0.45))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.state.update(cx, |s, cx| s.close_sidebar_overlay(cx));
+                }),
+            )
+            .child(
+                div()
+                    .id("sidebar-overlay-panel")
+                    .absolute()
+                    .left_0()
+                    .top_0()
+                    .h_full()
+                    .w(px(SIDEBAR_WIDTH))
+                    .bg(theme.shell())
+                    .border_r_1()
+                    .border_color(theme.border)
+                    .shadow_lg()
+                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(frosted(0.0, PANEL_BLUR, sidebar::render(self, cx))),
+            )
+    }
+
     // ----- conversation pane ---------------------------------------------------
 
     fn render_center(&self, sidebar_hidden: bool, cx: &mut Context<Self>) -> Div {
@@ -895,7 +936,7 @@ impl Shell {
                 // Without the sidebar the traffic lights sit over this header:
                 // clear them (14 pt in, three 12 pt lights, 8 pt gaps).
                 .when(sidebar_hidden, |el| el.pl(px(TRAFFIC_LIGHTS_INSET)))
-                .child(header::render(self, &space, cx)),
+                .child(header::render(self, &space, sidebar_hidden, cx)),
         );
         if let Some(chips) = header::chips(self, &space, cx) {
             column = column.child(chips);
@@ -2567,6 +2608,7 @@ impl Render for Shell {
         let width: f32 = window.viewport_size().width.into();
         let state = self.state.read(cx);
         let sidebar_hidden = state.rail_collapsed || state.window_is_narrow(width);
+        let sidebar_overlay = sidebar_hidden && state.sidebar_overlay;
         let panel_open = state.right_panel_open;
         let details = state.details_open.clone();
         let pairing = state.pairing.clone();
@@ -2650,10 +2692,17 @@ impl Render for Shell {
 
         if !sidebar_hidden {
             root = root.child(frosted(0.0, PANEL_BLUR, sidebar::render(self, cx)));
+            if self.state.read(cx).sidebar_overlay {
+                // Widened back past the band with the overlay up: it has docked.
+                self.state.update(cx, |s, _| s.sidebar_overlay = false);
+            }
         }
         root = root.child(self.render_center(sidebar_hidden, cx));
         if panel_open {
             root = root.child(self.render_right_panel(cx));
+        }
+        if sidebar_overlay {
+            root = root.child(self.render_sidebar_overlay(&theme, cx));
         }
         if let Some(target) = details {
             root = root.child(self.render_details(&target, cx));

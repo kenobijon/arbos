@@ -289,6 +289,9 @@ pub struct AppState {
     pub archived_chats: HashSet<Id>,
     pub link: Link,
     pub rail_collapsed: bool,
+    /// Below [`NARROW_WINDOW`](crate::ui::theme::NARROW_WINDOW) the sidebar
+    /// auto-hides; the header toggle (or ⌘B) floats it over the chat instead.
+    pub sidebar_overlay: bool,
     pub right_panel_open: bool,
     pub details_open: Option<DetailsTarget>,
     pub new_project_open: bool,
@@ -548,6 +551,7 @@ impl AppState {
             archived_chats: HashSet::new(),
             link: Link::Connecting,
             rail_collapsed: false,
+            sidebar_overlay: false,
             right_panel_open: false,
             details_open: None,
             new_project_open: false,
@@ -1638,6 +1642,7 @@ impl AppState {
 
     pub fn select_project(&mut self, project_id: Id, cx: &mut Context<Self>) {
         self.selected_project = Some(project_id.clone());
+        self.sidebar_overlay = false;
         // Agents: the last chat used here, else the primary (enforce_tab picks).
         if self.enforce_tab(&project_id) {
             self.sync_focus();
@@ -2377,9 +2382,23 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn toggle_rail(&mut self, cx: &mut Context<Self>) {
-        self.rail_collapsed = !self.rail_collapsed;
+    /// ⌘B / the header toggle. In the narrow band the sidebar cannot dock, so
+    /// it floats as an overlay instead; otherwise it collapses or returns.
+    pub fn toggle_rail(&mut self, narrow: bool, cx: &mut Context<Self>) {
+        if narrow {
+            self.sidebar_overlay = !self.sidebar_overlay;
+        } else {
+            self.rail_collapsed = !self.rail_collapsed;
+            self.sidebar_overlay = false;
+        }
         cx.notify();
+    }
+
+    pub fn close_sidebar_overlay(&mut self, cx: &mut Context<Self>) {
+        if self.sidebar_overlay {
+            self.sidebar_overlay = false;
+            cx.notify();
+        }
     }
 
     pub fn machine_start(&mut self, cx: &mut Context<Self>) {

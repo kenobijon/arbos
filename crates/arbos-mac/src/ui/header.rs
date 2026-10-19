@@ -29,7 +29,12 @@ use crate::ui::theme::{
 };
 use crate::ui::voicepicker;
 
-pub fn render(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
+pub fn render(
+    shell: &Shell,
+    space: &Project,
+    sidebar_hidden: bool,
+    cx: &mut Context<Shell>,
+) -> Div {
     let theme = Theme::of(cx).clone();
     let state = shell.state.read(cx);
     let is_people = space.is_people();
@@ -356,6 +361,21 @@ pub fn render(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
     } else {
         agent_tabs(shell, space, cx)
     };
+    // Without the docked sidebar (collapsed, or the window is too narrow for
+    // it) a toggle brings it back: docked when it fits, floating when not.
+    let sidebar_toggle = sidebar_hidden.then(|| {
+        let overlay = shell.state.read(cx).sidebar_overlay;
+        button("header-sidebar", "sidebar-left", overlay, &theme).on_click(cx.listener(
+            |this, _, window, cx| {
+                this.menu_open = false;
+                let width: f32 = window.viewport_size().width.into();
+                this.state.update(cx, |s, cx| {
+                    let narrow = s.window_is_narrow(width);
+                    s.toggle_rail(narrow, cx)
+                });
+            },
+        ))
+    });
     div()
         .h(px(HEADER_HEIGHT))
         .flex_shrink_0()
@@ -369,7 +389,15 @@ pub fn render(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
         .border_b_1()
         .border_color(theme.border)
         .window_control_area(gpui::WindowControlArea::Drag)
-        .child(title.flex_shrink_0().max_w(px(300.0)))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .flex_shrink_0()
+                .children(sidebar_toggle)
+                .child(title.flex_shrink_0().max_w(px(300.0))),
+        )
         .when_some(tabs, |el, t| el.child(t))
         .child(right.flex_shrink_0())
 }

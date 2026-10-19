@@ -33,6 +33,10 @@ const ICONS: &[(&str, &str)] = &[
         "ellipsis",
         "<circle cx=\"5\" cy=\"12\" r=\"1.8\" fill=\"#000\" stroke=\"none\"/><circle cx=\"12\" cy=\"12\" r=\"1.8\" fill=\"#000\" stroke=\"none\"/><circle cx=\"19\" cy=\"12\" r=\"1.8\" fill=\"#000\" stroke=\"none\"/>"
     ),
+    icon!(
+        "sidebar-left",
+        "<rect x=\"3\" y=\"5\" width=\"18\" height=\"14\" rx=\"2.5\"/><path d=\"M9.5 5v14\"/>"
+    ),
     icon!("chevron-left", "<path d=\"M15 5l-7 7 7 7\"/>"),
     icon!("chevron-right", "<path d=\"M9 5l7 7-7 7\"/>"),
     icon!("chevron-down", "<path d=\"M5 9l7 7 7-7\"/>"),
