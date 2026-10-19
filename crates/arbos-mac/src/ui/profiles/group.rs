@@ -388,5 +388,5 @@ pub(super) fn page(space_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> Op
         .children(more)
         .child(tabs)
         .child(body_tab);
-    Some(frame(body, None, &theme, cx))
+    Some(frame(body, None, None, &theme, cx))
 }

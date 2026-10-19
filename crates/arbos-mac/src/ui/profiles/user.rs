@@ -333,5 +333,5 @@ pub(super) fn page(
                     .child("Links appear here as chats load."),
             )
         });
-    Some(frame(body, None, &theme, cx))
+    Some(frame(body, None, None, &theme, cx))
 }
