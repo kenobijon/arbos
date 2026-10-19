@@ -3828,6 +3828,24 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 reply_to,
             ));
         }
+        ClientCommand::Steer {
+            chat_id,
+            message_id,
+            text,
+            reply_to,
+        } => {
+            tokio::spawn(send_message(
+                shared.clone(),
+                chat_id,
+                message_id,
+                text,
+                Vec::new(),
+                None,
+                "steer",
+                None,
+                reply_to,
+            ));
+        }
         ClientCommand::Answer {
             chat_id,
             message_id,

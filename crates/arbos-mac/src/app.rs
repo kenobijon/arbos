@@ -1864,12 +1864,17 @@ impl AppState {
         reply_to: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        self.send_with(text, attachments, None, reply_to, cx);
+        self.send_with(text, attachments, None, reply_to, false, cx);
+    }
+
+    /// Guide: inject `text` into the agent's running turn instead of queuing a follow-up.
+    pub fn guide(&mut self, text: String, reply_to: Option<String>, cx: &mut Context<Self>) {
+        self.send_with(text, Vec::new(), None, reply_to, true, cx);
     }
 
     /// F11: a spoken message; `wav` is kept on the row as an `audio` attachment.
     pub fn send_voice(&mut self, text: String, wav: Arc<Vec<u8>>, cx: &mut Context<Self>) {
-        self.send_with(text, Vec::new(), Some(wav), None, cx);
+        self.send_with(text, Vec::new(), Some(wav), None, false, cx);
     }
 
     /// Hover reply: the next send in this chat answers `message_id`.
@@ -1892,13 +1897,15 @@ impl AppState {
         attachments: Vec<PathBuf>,
         voice_wav: Option<Arc<Vec<u8>>>,
         reply_to: Option<String>,
+        steer: bool,
         cx: &mut Context<Self>,
     ) {
         let Some(chat_id) = self.active_chat_id() else {
             return;
         };
         let message_id = new_id();
-        let answer = self.chat_needs_answer(&chat_id);
+        // Guide never answers a card — it steers the live turn.
+        let answer = !steer && self.chat_needs_answer(&chat_id);
         {
             let ui = self.chat_ui.entry(chat_id.clone()).or_default();
             if !ui.composer_dropped {
@@ -1966,7 +1973,12 @@ impl AppState {
                 chat_id: chat_id.clone(),
                 role: Role::User,
                 sender: "user".into(),
-                status: MessageStatus::Queued,
+                // Guide lands in the live turn (not queued behind it).
+                status: if steer {
+                    MessageStatus::Done
+                } else {
+                    MessageStatus::Queued
+                },
                 turn: None,
                 decision: None,
                 subagent_id: None,
@@ -1991,7 +2003,7 @@ impl AppState {
                 model: None,
                 effort: None,
                 created_at: now_ms(),
-                completed_at: None,
+                completed_at: if steer { Some(now_ms()) } else { None },
                 call_id: None,
                 activity: None,
                 pending: true,
@@ -2013,6 +2025,13 @@ impl AppState {
                 text,
                 question_id,
                 value,
+            });
+        } else if steer {
+            self.command(ClientCommand::Steer {
+                chat_id: chat_id.clone(),
+                message_id,
+                text,
+                reply_to,
             });
         } else if let Some(wav) = voice_wav {
             self.command(ClientCommand::SendVoice {
