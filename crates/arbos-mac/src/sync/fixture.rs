@@ -903,13 +903,6 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             }
         }
-        ClientCommand::WatchBrowser { on: true, .. } => {
-            let _ = shared.events.send(SyncEvent::Notice(
-                "Fixture has no browser stream; the relay source shows the box's JPEG frames here."
-                    .into(),
-            ));
-        }
-        ClientCommand::WatchBrowser { on: false, .. } => {}
         ClientCommand::RefreshConnectors => emit_connectors(shared),
         ClientCommand::ConnectorConnect { provider, token } => {
             // Mock relay: the "OAuth dance" completes by itself after a moment.
