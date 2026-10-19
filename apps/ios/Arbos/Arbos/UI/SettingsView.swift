@@ -35,6 +35,12 @@ struct SettingsView: View {
     @State private var showAppearancePage = DebugHooks.settingsPage == "appearance"
     @State private var showTextSizePage = DebugHooks.settingsPage == "textsize"
     @State private var showConnectorsPage = DebugHooks.settingsPage == "connectors"
+    // Rig: ARBOS_SETTINGS_PAGE=machine | credits | notifications | about | relay (Debug only).
+    @State private var showMachinePage = DebugHooks.settingsPage == "machine"
+    @State private var showCreditsPage = DebugHooks.settingsPage == "credits"
+    @State private var showNotificationsPage = DebugHooks.settingsPage == "notifications"
+    @State private var showAboutPage = DebugHooks.settingsPage == "about"
+    @State private var showRelayPage = DebugHooks.settingsPage == "relay"
     @State private var showSecretsPage = ["secrets", "vault", "connect", "new-secret"].contains(DebugHooks.settingsPage ?? "") || DebugHooks.settingsPage?.hasPrefix("secret:") == true
 
     var body: some View {
@@ -151,6 +157,11 @@ struct SettingsView: View {
             .navigationDestination(isPresented: $showAppearancePage) { AppearancePage() }
             .navigationDestination(isPresented: $showTextSizePage) { TextSizePage() }
             .navigationDestination(isPresented: $showConnectorsPage) { ConnectorsPage(connectorError: $connectorError) }
+            .navigationDestination(isPresented: $showMachinePage) { MachinePage() }
+            .navigationDestination(isPresented: $showCreditsPage) { CreditsPage() }
+            .navigationDestination(isPresented: $showNotificationsPage) { NotificationsPage() }
+            .navigationDestination(isPresented: $showAboutPage) { AboutPage() }
+            .navigationDestination(isPresented: $showRelayPage) { RelayPage() }
             .navigationDestination(isPresented: $showSecretsPage) { SecretsPage() }
             .sheet(isPresented: $showProfileEdit) {
                 NavigationStack {
