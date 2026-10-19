@@ -132,9 +132,8 @@ pub struct Shell {
     /// True while the sign-in screen is up; its clearing focuses the composer.
     signing_in: bool,
     /// Flag of the header's former "…" menu (removed, feedback
-    /// app-01M5ATBWSY9E1HHBKH2QQVDEZX); nothing renders it any more. Kept
-    /// only because the agent profile's "Edit" still sets it — goes with
-    /// that button's rework.
+    /// app-01M5ATBWSY9E1HHBKH2QQVDEZX). Nothing renders it; escapes and
+    /// click-outside still clear it so leftover true never sticks.
     pub(crate) menu_open: bool,
     /// Right-click menu on a sidebar row: the space and where the click landed.
     pub(crate) row_menu: Option<(crate::model::Id, gpui::Point<gpui::Pixels>)>,
@@ -769,9 +768,9 @@ impl Shell {
         cx.notify();
     }
 
-    /// The agent page's "Edit" (`description: true`) or a double-click on its
-    /// name (`false`): the name — and the description — become fields inside
-    /// the sheet (owned agents only); the name field takes the keyboard.
+    /// Double-click the agent page's name (`description: false`): the name
+    /// becomes a field inside the sheet (owned agents only). `description:
+    /// true` also opens the about field (kept for the former Edit button).
     pub(crate) fn start_edit_agent(
         &mut self,
         project_id: crate::model::Id,
