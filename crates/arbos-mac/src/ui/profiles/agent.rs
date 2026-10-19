@@ -6,8 +6,8 @@
 //! from its chats.
 //!
 //! Only controls that work end to end are shown (#1066): the colour swatches
-//! PATCH `avatar_color_index`; there is no avatar-image picker on the Mac yet,
-//! so none is offered.
+//! PATCH `avatar_color_index`. Clicking the big avatar (owned agents) opens
+//! that picker — there is no separate photo upload on the Mac yet.
 
 use gpui::{div, prelude::*, px, Context, Div, ElementId, Focusable, SharedString};
 
@@ -143,9 +143,19 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
     }
 
     // ----- hero ----------------------------------------------------------------
+    // Owned agents: click the picture to open the avatar-colour picker (same
+    // as Appearance → Avatar colour). That replaces the old header "Edit".
     let avatar = div()
+        .id("profile-avatar")
         .relative()
         .size(px(112.0))
+        .when(mine, |el| {
+            el.cursor_pointer()
+                .hover(|s| s.opacity(0.9))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.state.update(cx, |s, cx| s.toggle_profile_picker(cx));
+                }))
+        })
         .child(avatars::project(&project, 112.0, &theme))
         .child(
             div()
@@ -616,20 +626,13 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
         .child(info)
         .child(tabs)
         .child(body_tab);
-    // "Edit" turns the card into its editor, Contacts-style: the name and the
-    // description become fields and the button reads "Done" until they are saved.
-    let edit = mine.then(|| {
-        if renaming || editing {
-            glass::sheet_button("profile-done", "Done", &theme)
-                .on_click(cx.listener(|this, _, window, cx| this.finish_edit_agent(window, cx)))
-        } else {
-            let p = pid.clone();
-            glass::sheet_button("profile-edit", "Edit", &theme).on_click(cx.listener(
-                move |this, _, window, cx| this.start_edit_agent(p.clone(), true, window, cx),
-            ))
-        }
+    // No "Edit" — click the avatar to change its colour; double-click the
+    // name or the about row to edit those. "Done" only while a field is open.
+    let done = (mine && (renaming || editing)).then(|| {
+        glass::sheet_button("profile-done", "Done", &theme)
+            .on_click(cx.listener(|this, _, window, cx| this.finish_edit_agent(window, cx)))
     });
-    Some(frame(body, edit, Some(&shell.profile_scroll), &theme, cx))
+    Some(frame(body, done, Some(&shell.profile_scroll), &theme, cx))
 }
 
 fn colour_row(project: &Project, theme: &Theme, cx: &mut Context<Shell>) -> Div {
