@@ -132,9 +132,8 @@ pub struct Shell {
     /// True while the sign-in screen is up; its clearing focuses the composer.
     signing_in: bool,
     /// Flag of the header's former "…" menu (removed, feedback
-    /// app-01M5ATBWSY9E1HHBKH2QQVDEZX); nothing renders it any more. Kept
-    /// only because the agent profile's "Edit" still sets it — goes with
-    /// that button's rework.
+    /// app-01M5ATBWSY9E1HHBKH2QQVDEZX). Nothing renders it; escapes and
+    /// click-outside still clear it so leftover true never sticks.
     pub(crate) menu_open: bool,
     /// Right-click menu on a sidebar row: the space and where the click landed.
     pub(crate) row_menu: Option<(crate::model::Id, gpui::Point<gpui::Pixels>)>,
@@ -769,9 +768,9 @@ impl Shell {
         cx.notify();
     }
 
-    /// The agent page's "Edit" (`description: true`) or a double-click on its
-    /// name (`false`): the name — and the description — become fields inside
-    /// the sheet (owned agents only); the name field takes the keyboard.
+    /// Double-click the agent page's name (`description: false`): the name
+    /// becomes a field inside the sheet (owned agents only). `description:
+    /// true` also opens the about field (kept for the former Edit button).
     pub(crate) fn start_edit_agent(
         &mut self,
         project_id: crate::model::Id,
@@ -1896,7 +1895,7 @@ impl Shell {
     }
 
     // ----- profile edit ---------------------------------------------------------------
-    /// Settings header pencil: load the current name and handle into the fields.
+    /// Settings header: double-click the name to edit display name and handle.
     fn start_profile_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (name, handle) = {
             let state = self.state.read(cx);
@@ -2115,38 +2114,26 @@ impl Shell {
                             ),
                     );
             } else {
+                // Double-click the name to edit (same as the agent profile page).
                 header = header
                     .child(
                         div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .child(
-                                div()
-                                    .text_size(px(22.0))
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(theme.text)
-                                    .child(if account.name.trim().is_empty() {
-                                        who.clone()
-                                    } else {
-                                        account.name.clone()
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .id("profile-edit")
-                                    .size(px(22.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_full()
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(theme.surface_2))
-                                    .child(icon("square-pencil", 14.0, theme.text_muted))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.start_profile_edit(window, cx)
-                                    })),
-                            ),
+                            .id("profile-edit")
+                            .text_size(px(22.0))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(theme.text)
+                            .cursor_pointer()
+                            .hover(|s| s.opacity(0.85))
+                            .child(if account.name.trim().is_empty() {
+                                who.clone()
+                            } else {
+                                account.name.clone()
+                            })
+                            .on_click(cx.listener(|this, event: &gpui::ClickEvent, window, cx| {
+                                if event.click_count() >= 2 {
+                                    this.start_profile_edit(window, cx);
+                                }
+                            })),
                     )
                     .child(
                         div()

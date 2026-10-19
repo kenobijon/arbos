@@ -2,7 +2,8 @@
 //! search / more, the info card (for my own agent — Model / Reasoning / Voice
 //! rows that drop down on hover, secrets, camera vision, description), then
 //! Media / Files / Links from its chats. Owner and machine stay off this
-//! page. Avatar colour lives behind Edit, like Grok bot.
+//! page. Clicking the big avatar (owned agents) opens the colour picker —
+//! there is no separate photo upload on the Mac yet.
 
 use gpui::{div, prelude::*, px, Context, Div, ElementId, Focusable, SharedString};
 
@@ -100,7 +101,6 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
     let pick = state.agent_pick;
     let editing = state.profile_editing_description && mine;
     let renaming = state.profile_editing_name && mine;
-    let in_edit = renaming || editing;
     let muted = state.is_muted(&project.id);
     let content = collect(state, &chats_of(state, &project.id));
     let pid: Id = project.id.clone();
@@ -110,9 +110,19 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
     }
 
     // ----- hero ----------------------------------------------------------------
+    // Owned agents: click the picture to open the avatar-colour picker. That
+    // replaces the old header "Edit".
     let avatar = div()
+        .id("profile-avatar")
         .relative()
         .size(px(112.0))
+        .when(mine, |el| {
+            el.cursor_pointer()
+                .hover(|s| s.opacity(0.9))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.state.update(cx, |s, cx| s.toggle_profile_picker(cx));
+                }))
+        })
         .child(avatars::project(&project, 112.0, &theme))
         .child(
             div()
@@ -276,8 +286,8 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
 
     // ----- info card -------------------------------------------------------------
     // Essentials only: model / reasoning / voice / secrets (plus camera vision
-    // and about for my agents). Owner and machine are gone; avatar colour is
-    // under Edit.
+    // and about for my agents). Owner and machine are gone; avatar colour opens
+    // from a click on the big avatar, not as a settings row.
     let mut info = card(&theme);
     if mine {
         // The agent's own settings: Model (searchable), Reasoning and Voice
@@ -531,37 +541,31 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
         }
     }
 
-    // ----- appearance (Edit only): Automatic + the seven gradients -------------
-    let appearance = (mine && in_edit).then(|| {
-        let current_index = avatars::index_for(&project.id, project.avatar_color_override);
-        let label = match project.avatar_color_override {
-            None => format!("Automatic · {}", avatars::GRADIENTS[current_index as usize].name),
-            Some(i) => avatars::GRADIENTS[(i as usize) % 7].name.to_string(),
-        };
-        let mut section = card(&theme).child(
-            glass::nav_row(
-                "profile-appearance",
-                "Avatar colour",
-                Some(if picker_open { "pick".into() } else { label }),
-                &theme,
+    // ----- appearance (avatar click): Automatic + the seven gradients ----------
+    // Shown only while the picker is open so Avatar colour is not a permanent
+    // settings row. Owned agents open it by clicking the big avatar.
+    let appearance = (mine && picker_open).then(|| {
+        card(&theme)
+            .child(
+                glass::nav_row(
+                    "profile-appearance",
+                    "Avatar colour",
+                    Some("pick".into()),
+                    &theme,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.state.update(cx, |s, cx| s.toggle_profile_picker(cx));
+                })),
             )
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.state.update(cx, |s, cx| s.toggle_profile_picker(cx));
-            })),
-        );
-        if picker_open {
-            section = section
-                .child(colour_row(&project, &theme, cx))
-                .child(
-                    div()
-                        .px(px(16.0))
-                        .pb(px(12.0))
-                        .text_size(px(TEXT_TINY))
-                        .text_color(theme.text_muted)
-                        .child("Automatic picks the colour from the agent's id, the same on every device; choose one to make it yours."),
-                );
-        }
-        section
+            .child(colour_row(&project, &theme, cx))
+            .child(
+                div()
+                    .px(px(16.0))
+                    .pb(px(12.0))
+                    .text_size(px(TEXT_TINY))
+                    .text_color(theme.text_muted)
+                    .child("Automatic picks the colour from the agent's id, the same on every device; choose one to make it yours."),
+            )
     });
 
     // ----- tabs -----------------------------------------------------------------
@@ -583,21 +587,13 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
         .children(appearance)
         .child(tabs)
         .child(body_tab);
-    // "Edit" turns the card into its editor, Contacts-style: the name and the
-    // description become fields and the button reads "Done" until they are saved.
-    // Avatar colour is only offered while Edit is on (Grok-bot parity).
-    let edit = mine.then(|| {
-        if in_edit {
-            glass::sheet_button("profile-done", "Done", &theme)
-                .on_click(cx.listener(|this, _, window, cx| this.finish_edit_agent(window, cx)))
-        } else {
-            let p = pid.clone();
-            glass::sheet_button("profile-edit", "Edit", &theme).on_click(cx.listener(
-                move |this, _, window, cx| this.start_edit_agent(p.clone(), true, window, cx),
-            ))
-        }
+    // No "Edit" — click the avatar to change its colour; double-click the
+    // name or the about row to edit those. "Done" only while a field is open.
+    let done = (mine && (renaming || editing)).then(|| {
+        glass::sheet_button("profile-done", "Done", &theme)
+            .on_click(cx.listener(|this, _, window, cx| this.finish_edit_agent(window, cx)))
     });
-    Some(frame(body, edit, Some(&shell.profile_scroll), &theme, cx))
+    Some(frame(body, done, Some(&shell.profile_scroll), &theme, cx))
 }
 
 fn colour_row(project: &Project, theme: &Theme, cx: &mut Context<Shell>) -> Div {
