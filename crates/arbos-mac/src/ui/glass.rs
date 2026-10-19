@@ -324,6 +324,11 @@ pub fn frosted_menu(width: f32, theme: &Theme, body: Div) -> impl IntoElement {
 
 /// Centered sheet with a dimmed backdrop: the iPhone's `.sheet`. `header`
 /// is the title row (left control, centred title, right control).
+///
+/// A mouse-down inside the card stays inside it: the root's "click elsewhere"
+/// handler never sees it (so a field in the sheet keeps the keyboard), and
+/// neither does the returned backdrop — a sheet that closes on a click
+/// outside puts its handler on the backdrop.
 pub fn sheet(width: f32, theme: &Theme, header: Div, body: impl IntoElement) -> Div {
     let card = div()
         .w(px(width))
@@ -336,6 +341,7 @@ pub fn sheet(width: f32, theme: &Theme, header: Div, body: impl IntoElement) -> 
         .border_1()
         .border_color(theme.border_strong)
         .shadow_lg()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(header)
         .child(body);
     div()
