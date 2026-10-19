@@ -2350,12 +2350,41 @@ final class AppModel: ObservableObject {
                     PushManager.post(id: p.id, title: "Secrets", body: expired ? "\(name) expired. Agents lost it." : "\(name) expires in 3 days.", chatId: "")
                 }
                 await refreshSecrets()
+            case "feedback_capture":
+                await answerFeedbackCapture(p)
             default:
                 break
             }
         }
         if needChats { await refreshPeople() }
         if notifiedPushIds.count > 2000 { notifiedPushIds.removeAll() }
+    }
+
+    /// `feedback_capture`: the user asked their agent to file feedback; the agent wants a picture
+    /// of the screen they are looking at. Only the app in the foreground answers with an image
+    /// (the same key-window capture as the shake sheet); a stale or background request is skipped.
+    private func answerFeedbackCapture(_ p: PushItem) async {
+        guard let requestId = p.payload["request_id"], !requestId.isEmpty else { return }
+        let expires = Int64(p.payload["expires_at"] ?? "") ?? 0
+        if expires > 0, Int64(Date().timeIntervalSince1970 * 1000) > expires { return }
+        let screen = visibleChatId.map { "chat:\($0)" } ?? "home"
+        var image: Data?
+        var size = (w: 0, h: 0)
+        var skipped: String?
+        if appActive, let shot = FeedbackCenter.captureScreen() {
+            image = shot.jpegData(compressionQuality: 0.85)
+            size = (Int(shot.size.width * shot.scale), Int(shot.size.height * shot.scale))
+        } else {
+            skipped = appActive ? "failed: window capture returned nothing" : "background"
+        }
+        do {
+            try await api.sendFeedbackCapture(requestId: requestId, image: image, mime: "image/jpeg", width: size.w, height: size.h,
+                                              appVersion: FeedbackCenter.appVersion, os: "iOS \(UIDevice.current.systemVersion)",
+                                              device: FeedbackCenter.deviceLine, screen: screen, skipped: skipped)
+            if image != nil { notice = Notice(text: "Screenshot added to your feedback") }
+        } catch {
+            pushLog.notice("feedback capture upload failed: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     // MARK: Lookups
