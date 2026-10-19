@@ -75,13 +75,16 @@ pub struct Shell {
     routines: Entity<RoutinesPanel>,
     routines_open: bool,
     channels: Entity<ChannelsPanel>,
-    /// F6: the "add a project to this chat" picker (from the "…" menu).
+    /// F6: the "add a project to this chat" picker (sidebar row menu).
     group_picker_open: bool,
     pub(crate) secrets: Entity<SecretsPanel>,
     shake_started_at: Option<u64>,
     /// True while the sign-in screen is up; its clearing focuses the composer.
     signing_in: bool,
-    /// The header's "…" menu.
+    /// Flag of the header's former "…" menu (removed, feedback
+    /// app-01M5ATBWSY9E1HHBKH2QQVDEZX); nothing renders it any more. Kept
+    /// only because the agent profile's "Edit" still sets it — goes with
+    /// that button's rework.
     pub(crate) menu_open: bool,
     /// Right-click menu on a sidebar row: the space and where the click landed.
     pub(crate) row_menu: Option<(crate::model::Id, gpui::Point<gpui::Pixels>)>,
@@ -101,9 +104,9 @@ pub struct Shell {
     handle_input: Entity<ComposerInput>,
     pub add_agent_open: bool,
     pub members_open: bool,
-    /// The agent's "Archived" chats list (header strip / "…" menu).
+    /// The agent's "Archived" chats list (header strip).
     pub(crate) archived_open: bool,
-    /// Per-agent call voice picker sheet ("…" menu → Voice, profile → voice).
+    /// Per-agent call voice picker sheet (profile → voice).
     pub(crate) voice_picker_open: bool,
     /// Video picture-in-picture while the call screen is collapsed: offset
     /// from the window's bottom-right (right, bottom), and the drag in flight
@@ -2807,11 +2810,6 @@ impl Render for Shell {
         }
         if let Some(target) = details {
             root = root.child(self.render_details(&target, cx));
-        }
-        if self.menu_open {
-            if let Some(space) = selected.as_ref() {
-                root = root.child(glass::popover(header::menu(self, space, cx)));
-            }
         }
         if self.archived_open {
             if let Some(space) = selected.as_ref() {
