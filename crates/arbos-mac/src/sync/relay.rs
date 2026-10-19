@@ -3541,6 +3541,53 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             });
         }
+        ClientCommand::CreatePeopleGroup { handles, agent_ids } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let members: Vec<String> = handles
+                    .iter()
+                    .map(|h| h.trim().trim_start_matches('@').to_string())
+                    .filter(|h| !h.is_empty())
+                    .collect();
+                match shared
+                    .post_json("/chats", json!({ "kind": "group", "members": members }))
+                    .await
+                {
+                    Ok(v) => {
+                        let chat_id = v
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string();
+                        for project_id in agent_ids {
+                            if chat_id.is_empty() {
+                                break;
+                            }
+                            if let Err(err) = shared
+                                .post_json(
+                                    &format!("/chats/{chat_id}/agents"),
+                                    json!({ "project_id": project_id }),
+                                )
+                                .await
+                            {
+                                shared.notice(format!(
+                                    "Group created, but adding an agent failed: {}",
+                                    people_error(&err)
+                                ));
+                            }
+                        }
+                        if let Err(err) = refresh_registry(&shared).await {
+                            shared.notice(format!("Relay: {err:#}"));
+                        }
+                    }
+                    Err(err) => {
+                        let _ = shared
+                            .events
+                            .send(SyncEvent::PeopleError(people_error(&err)));
+                    }
+                }
+            });
+        }
         ClientCommand::SetTyping { chat_id, active } => {
             if let Some(room) = shared.rooms.lock().unwrap().get(&chat_id) {
                 let _ = room.cmds.send(RoomCmd::Typing(active));

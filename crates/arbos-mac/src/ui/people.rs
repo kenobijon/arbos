@@ -154,9 +154,9 @@ fn new_agent_preview(shell: &Shell, cx: &mut Context<Shell>) -> Div {
 }
 
 /// The "New Message" sheet (iPhone / Telegram layout): Cancel · title, a
-/// "Search people" field, the "New agent" row (expands into the name field),
-/// then everyone on Arbos. A person row starts the DM — or, when the sheet
-/// was opened from a project's "Share", invites them into it.
+/// "Search people" field, New agent / New group rows, then everyone on Arbos.
+/// A person row starts the DM — or, when the sheet was opened from a project's
+/// "Share", invites them into it. New group opens a multi-select picker.
 pub fn new_chat_sheet(
     shell: &Shell,
     state: &Entity<AppState>,
@@ -168,6 +168,9 @@ pub fn new_chat_sheet(
     let query = s.people_query.clone();
     let busy = s.people_busy;
     let error = s.people_error.clone();
+    let group_mode = s.new_group_open;
+    let picked = s.new_group_picked.clone();
+    let picked_agents = s.new_group_agents.clone();
     let results: Vec<(Person, Option<Arc<RenderImage>>)> = s
         .people_results
         .iter()
@@ -180,10 +183,30 @@ pub fn new_chat_sheet(
         .and_then(|id| s.projects.iter().find(|p| &p.id == id))
         .map(|p| p.name.clone());
     let creating = s.new_project_open;
+    let my_agents: Vec<Project> = if group_mode {
+        let q = typed.to_lowercase();
+        s.my_projects()
+            .filter(|p| {
+                q.is_empty()
+                    || p.name.to_lowercase().contains(&q)
+                    || Project::mention_slug(&p.name).contains(&q)
+            })
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let agent_names: std::collections::HashMap<String, String> = s
+        .my_projects()
+        .map(|p| (p.id.clone(), p.name.clone()))
+        .collect();
 
+    // Match the iPhone field (38 px tall, 12 px corners) and centre the
+    // ComposerInput's line inside the row — without items_center on the
+    // flex_1 wrapper the caret and placeholder sit high in the field.
     let search = div()
         .mx(px(16.0))
-        .h(px(40.0))
+        .h(px(38.0))
         .px(px(12.0))
         .flex()
         .items_center()
@@ -193,7 +216,15 @@ pub fn new_chat_sheet(
         .border_1()
         .border_color(theme.field_border)
         .child(icon("search", 15.0, theme.text_muted))
-        .child(div().flex_1().min_w_0().child(input.clone()));
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .flex()
+                .items_center()
+                .child(input.clone()),
+        );
 
     let mut body = div()
         .id("new-chat-body")
@@ -202,122 +233,547 @@ pub fn new_chat_sheet(
         .gap(px(14.0))
         .pb(px(18.0))
         .min_h_0()
-        .overflow_y_scroll()
-        .child(search);
+        .overflow_y_scroll();
 
-    // "New agent" (and, in the Grok layout, "New group" — groups are v2).
-    if invite_into.is_none() {
-        let mut agent_row = div()
-            .id("new-agent")
-            .flex()
-            .items_center()
-            .gap(px(12.0))
-            .px(px(14.0))
-            .py(px(10.0))
-            .cursor_pointer()
-            .hover(|st| st.bg(theme.surface_2))
-            .child(
-                glass::circle("new-agent-glyph", 40.0, &theme)
-                    .child(icon("sparkles", 17.0, theme.text)),
-            )
-            .child(
+    if group_mode {
+        body = new_group_body(
+            body,
+            search,
+            &theme,
+            &picked,
+            &picked_agents,
+            &agent_names,
+            &my_agents,
+            &results,
+            &typed,
+            busy,
+            error,
+            state,
+            cx,
+        );
+    } else {
+        body = body.child(search);
+        // New agent + New group (iPhone / Grok layout).
+        if invite_into.is_none() {
+            let mut agent_row = div()
+                .id("new-agent")
+                .flex()
+                .items_center()
+                .gap(px(12.0))
+                .px(px(14.0))
+                .py(px(10.0))
+                .cursor_pointer()
+                .hover(|st| st.bg(theme.surface_2))
+                .child(
+                    glass::circle("new-agent-glyph", 40.0, &theme)
+                        .child(icon("sparkles", 17.0, theme.text)),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .text_size(px(TEXT_BODY))
+                                .text_color(theme.text)
+                                .child("New agent"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(TEXT_SMALL))
+                                .text_color(theme.text_muted)
+                                .child("Its own workspace on your machine"),
+                        ),
+                )
+                .child(icon(
+                    if creating {
+                        "chevron-down"
+                    } else {
+                        "chevron-right"
+                    },
+                    13.0,
+                    theme.text_faint,
+                ))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    let open = !this.state.read(cx).new_project_open;
+                    this.state.update(cx, |s, cx| {
+                        s.new_project_open = open;
+                        cx.notify();
+                    });
+                    let handle = if open {
+                        this.project_input.read(cx).focus_handle(cx)
+                    } else {
+                        this.people_input.read(cx).focus_handle(cx)
+                    };
+                    window.focus(&handle, cx);
+                }));
+            if creating {
+                agent_row = agent_row.border_b_1().border_color(theme.border);
+            }
+            let group_row = div()
+                .id("new-group")
+                .flex()
+                .items_center()
+                .gap(px(12.0))
+                .px(px(14.0))
+                .py(px(10.0))
+                .cursor_pointer()
+                .hover(|st| st.bg(theme.surface_2))
+                .child(
+                    glass::circle("new-group-glyph", 40.0, &theme)
+                        .child(icon("people", 17.0, theme.text)),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .text_size(px(TEXT_BODY))
+                                .text_color(theme.text)
+                                .child("New group"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(TEXT_SMALL))
+                                .text_color(theme.text_muted)
+                                .child("People and agents in one chat"),
+                        ),
+                )
+                .child(icon("chevron-right", 13.0, theme.text_faint))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.people_input.update(cx, |input, _| {
+                        input.set_placeholder("Add people or agents");
+                    });
+                    this.state.update(cx, |s, cx| s.open_new_group(cx));
+                    let handle = this.people_input.read(cx).focus_handle(cx);
+                    window.focus(&handle, cx);
+                }));
+            // Inside the scrolling body the card must keep its height, or the
+            // expanded form is squeezed and clipped once the list below is long.
+            let mut group = glass::group(&theme)
+                .flex_shrink_0()
+                .mx(px(16.0))
+                .child(agent_row);
+            if creating {
+                group = group.child(new_agent_preview(shell, cx)).child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.0))
+                        .px(px(14.0))
+                        .py(px(10.0))
+                        .child(
+                            div()
+                                .flex_1()
+                                .h(px(38.0))
+                                .px(px(12.0))
+                                .flex()
+                                .items_center()
+                                .rounded(px(10.0))
+                                .bg(theme.field)
+                                .border_1()
+                                .border_color(theme.field_border)
+                                .child(shell.project_input.clone()),
+                        )
+                        .child(
+                            glass::primary_button("new-agent-create", "Create", &theme)
+                                .h(px(34.0))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.submit_project(window, cx)
+                                })),
+                        ),
+                );
+            }
+            group = group
+                .child(div().h(px(0.5)).ml(px(66.0)).bg(theme.border))
+                .child(group_row);
+            body = body.child(group);
+        }
+
+        // People.
+        let mut list = glass::group(&theme).mx(px(16.0));
+        let mut any = false;
+        if let Some(err) = error {
+            any = true;
+            list = list.child(
+                div()
+                    .px(px(14.0))
+                    .py(px(10.0))
+                    .text_size(px(TEXT_SMALL))
+                    .text_color(theme.danger)
+                    .child(err),
+            );
+        }
+        if results.is_empty() && !typed.is_empty() && !busy {
+            any = true;
+            list = list.child(
+                div()
+                    .px(px(14.0))
+                    .py(px(10.0))
+                    .text_size(px(TEXT_SMALL))
+                    .text_color(theme.text_muted)
+                    .child(format!(
+                        "No one on Arbos matches @{typed} yet. Enter sends an invite by GitHub login."
+                    )),
+            );
+        }
+        if busy && results.is_empty() {
+            any = true;
+            list = list.child(
+                div()
+                    .px(px(14.0))
+                    .py(px(10.0))
+                    .text_size(px(TEXT_SMALL))
+                    .text_color(theme.text_faint)
+                    .child("Searching…"),
+            );
+        }
+        let count = results.len();
+        for (i, (person, image)) in results.into_iter().enumerate() {
+            any = true;
+            let handle = person.handle.clone();
+            let invited = person.status == "invited";
+            list = list.child(
+                div()
+                    .id(ElementId::Name(SharedString::from(format!(
+                        "person-{}",
+                        person.id
+                    ))))
+                    .flex()
+                    .items_center()
+                    .gap(px(12.0))
+                    .px(px(14.0))
+                    .py(px(9.0))
+                    .when(i + 1 < count, |el| {
+                        el.border_b_1().border_color(theme.border)
+                    })
+                    .cursor_pointer()
+                    .hover(|st| st.bg(theme.surface_2))
+                    .child(avatar(image, &person, 40.0, &theme))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_size(px(TEXT_BODY))
+                                    .text_color(theme.text)
+                                    .truncate()
+                                    .child(person.display_name()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(TEXT_SMALL))
+                                    .text_color(theme.text_muted)
+                                    .child(format!("@{}", person.handle)),
+                            ),
+                    )
+                    .child(if invited {
+                        glass::chip("Invite by GitHub", theme.text_muted)
+                    } else {
+                        glass::chip("On Arbos", theme.online)
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.state
+                            .update(cx, |s, cx| s.pick_person(handle.clone(), cx));
+                    })),
+            );
+        }
+        if any {
+            body = body.child(
                 div()
                     .flex()
                     .flex_col()
-                    .flex_1()
-                    .min_w_0()
                     .child(
-                        div()
-                            .text_size(px(TEXT_BODY))
-                            .text_color(theme.text)
-                            .child("New agent"),
+                        glass::section_label(
+                            if typed.is_empty() {
+                                "Arbos users"
+                            } else {
+                                "Results"
+                            },
+                            &theme,
+                        )
+                        .px(px(30.0)),
                     )
-                    .child(
-                        div()
-                            .text_size(px(TEXT_SMALL))
-                            .text_color(theme.text_muted)
-                            .child("Its own workspace on your machine"),
-                    ),
-            )
-            .child(icon(
-                if creating {
-                    "chevron-down"
-                } else {
-                    "chevron-right"
-                },
-                13.0,
-                theme.text_faint,
-            ))
-            .on_click(cx.listener(|this, _, window, cx| {
-                let open = !this.state.read(cx).new_project_open;
-                this.state.update(cx, |s, cx| {
-                    s.new_project_open = open;
-                    cx.notify();
-                });
-                let handle = if open {
-                    this.project_input.read(cx).focus_handle(cx)
-                } else {
-                    this.people_input.read(cx).focus_handle(cx)
-                };
-                window.focus(&handle, cx);
-            }));
-        if creating {
-            agent_row = agent_row.border_b_1().border_color(theme.border);
+                    .child(list),
+            );
         }
-        // Inside the scrolling body the card must keep its height, or the
-        // expanded form is squeezed and clipped once the list below is long.
-        let mut group = glass::group(&theme)
-            .flex_shrink_0()
-            .mx(px(16.0))
-            .child(agent_row);
-        if creating {
-            group = group.child(new_agent_preview(shell, cx)).child(
+        if let Some(name) = &invite_into {
+            body = body.child(
                 div()
+                    .px(px(30.0))
+                    .text_size(px(TEXT_TINY))
+                    .text_color(theme.text_faint)
+                    .child(format!(
+                        "They see every chat and the workspace output of {name}; your agent answers them too."
+                    )),
+            );
+        }
+    }
+
+    let title = if group_mode {
+        "New group".to_string()
+    } else {
+        match &invite_into {
+            Some(name) => format!("Invite to {name}"),
+            None => "New Message".to_string(),
+        }
+    };
+    let can_create = !picked.is_empty() && !busy;
+    let left = if group_mode {
+        glass::sheet_button("new-group-back", "Cancel", &theme).on_click(cx.listener(
+            |this, _, window, cx| {
+                this.people_input
+                    .update(cx, |input, _| input.set_placeholder("Search people"));
+                this.state.update(cx, |s, cx| s.close_new_group(cx));
+                let handle = this.people_input.read(cx).focus_handle(cx);
+                window.focus(&handle, cx);
+            },
+        ))
+    } else {
+        glass::sheet_button("new-chat-close", "Cancel", &theme).on_click(cx.listener(
+            |this, _, window, cx| {
+                this.people_input
+                    .update(cx, |input, _| input.set_placeholder("Search people"));
+                this.state.update(cx, |s, cx| {
+                    s.new_project_open = false;
+                    s.close_new_chat(cx)
+                });
+                crate::ui::composer::Composer::focus(&this.composer, window, cx);
+            },
+        ))
+    };
+    let right = if group_mode {
+        Some(
+            glass::primary_button(
+                "new-group-create",
+                if busy { "Creating…" } else { "Create" },
+                &theme,
+            )
+            .h(px(34.0))
+            .when(!can_create, |el| el.opacity(0.45))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if !can_create {
+                    return;
+                }
+                this.state.update(cx, |s, cx| s.create_people_group(cx));
+            })),
+        )
+    } else {
+        None
+    };
+    let header = glass::sheet_header(&title, Some(left), right, &theme);
+    glass::sheet(460.0, &theme, header, body.max_h(px(620.0)))
+}
+
+/// New group picker body: chips, search, your agents, people with checkmarks.
+#[allow(clippy::too_many_arguments)]
+fn new_group_body(
+    mut body: Stateful<Div>,
+    search: Div,
+    theme: &Theme,
+    picked: &[Person],
+    picked_agents: &[String],
+    agent_names: &std::collections::HashMap<String, String>,
+    my_agents: &[Project],
+    results: &[(Person, Option<Arc<RenderImage>>)],
+    typed: &str,
+    busy: bool,
+    error: Option<String>,
+    state: &Entity<AppState>,
+    cx: &mut Context<Shell>,
+) -> Stateful<Div> {
+    if !picked.is_empty() || !picked_agents.is_empty() {
+        let mut chips = div()
+            .id("new-group-chips")
+            .mx(px(16.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .overflow_x_scroll();
+        for pid in picked_agents {
+            let id = pid.clone();
+            let label = agent_names
+                .get(pid)
+                .map(|n| format!("@{}", Project::mention_slug(n)))
+                .unwrap_or_else(|| "@agent".into());
+            chips = chips.child(
+                div()
+                    .id(ElementId::Name(SharedString::from(format!(
+                        "group-chip-agent-{pid}"
+                    ))))
+                    .flex_shrink_0()
                     .flex()
                     .items_center()
-                    .gap(px(10.0))
-                    .px(px(14.0))
-                    .py(px(10.0))
+                    .gap(px(6.0))
+                    .h(px(32.0))
+                    .pl(px(10.0))
+                    .pr(px(8.0))
+                    .rounded_full()
+                    .bg(theme.field)
                     .child(
                         div()
-                            .flex_1()
-                            .h(px(38.0))
-                            .px(px(12.0))
-                            .flex()
-                            .items_center()
-                            .rounded(px(10.0))
-                            .bg(theme.field)
-                            .border_1()
-                            .border_color(theme.field_border)
-                            .child(shell.project_input.clone()),
+                            .text_size(px(TEXT_TINY))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(label),
                     )
                     .child(
-                        glass::primary_button("new-agent-create", "Create", &theme)
-                            .h(px(34.0))
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.submit_project(window, cx)),
-                            ),
+                        div()
+                            .id(ElementId::Name(SharedString::from(format!(
+                                "group-chip-agent-x-{pid}"
+                            ))))
+                            .size(px(16.0))
+                            .rounded_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .child(icon("xmark", 8.0, theme.text_muted))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.state
+                                    .update(cx, |s, cx| s.toggle_group_agent(id.clone(), cx));
+                            })),
                     ),
             );
         }
-        body = body.child(group);
+        for person in picked {
+            let image = state.read(cx).avatar(&person.avatar_url);
+            let handle = person.handle.clone();
+            let person_clone = person.clone();
+            chips = chips.child(
+                div()
+                    .id(ElementId::Name(SharedString::from(format!(
+                        "group-chip-{}",
+                        person.id
+                    ))))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .h(px(32.0))
+                    .pl(px(4.0))
+                    .pr(px(8.0))
+                    .rounded_full()
+                    .bg(theme.field)
+                    .child(avatar(image, person, 22.0, theme))
+                    .child(
+                        div()
+                            .text_size(px(TEXT_TINY))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(format!("@{handle}")),
+                    )
+                    .child(
+                        div()
+                            .id(ElementId::Name(SharedString::from(format!(
+                                "group-chip-x-{}",
+                                person.id
+                            ))))
+                            .size(px(16.0))
+                            .rounded_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .child(icon("xmark", 8.0, theme.text_muted))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.state.update(cx, |s, cx| {
+                                    s.toggle_group_person(person_clone.clone(), cx)
+                                });
+                            })),
+                    ),
+            );
+        }
+        body = body.child(chips);
     }
-
-    // People.
-    let mut list = glass::group(&theme).mx(px(16.0));
-    let mut any = false;
+    body = body.child(search);
     if let Some(err) = error {
-        any = true;
-        list = list.child(
+        body = body.child(
             div()
-                .px(px(14.0))
-                .py(px(10.0))
+                .px(px(30.0))
                 .text_size(px(TEXT_SMALL))
                 .text_color(theme.danger)
+                .text_center()
                 .child(err),
         );
     }
-    if results.is_empty() && !typed.is_empty() && !busy {
+
+    if !my_agents.is_empty() {
+        let count = my_agents.len();
+        let mut list = glass::group(theme).mx(px(16.0));
+        for (i, project) in my_agents.iter().enumerate() {
+            let pid = project.id.clone();
+            let selected = picked_agents.iter().any(|id| id == &project.id);
+            list = list.child(
+                div()
+                    .id(ElementId::Name(SharedString::from(format!(
+                        "group-agent-{}",
+                        project.id
+                    ))))
+                    .flex()
+                    .items_center()
+                    .gap(px(12.0))
+                    .px(px(14.0))
+                    .py(px(9.0))
+                    .when(i + 1 < count, |el| {
+                        el.border_b_1().border_color(theme.border)
+                    })
+                    .cursor_pointer()
+                    .hover(|st| st.bg(theme.surface_2))
+                    .child(avatars::element(
+                        &project.id,
+                        &project.name,
+                        project.avatar_color_index,
+                        40.0,
+                        theme,
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_size(px(TEXT_BODY))
+                                    .text_color(theme.text)
+                                    .truncate()
+                                    .child(project.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(TEXT_SMALL))
+                                    .text_color(theme.text_muted)
+                                    .child(format!("@{}", Project::mention_slug(&project.name))),
+                            ),
+                    )
+                    .child(pick_mark(selected, theme))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.state
+                            .update(cx, |s, cx| s.toggle_group_agent(pid.clone(), cx));
+                    })),
+            );
+        }
+        body = body.child(
+            div()
+                .flex()
+                .flex_col()
+                .child(glass::section_label("Your agents", theme).px(px(30.0)))
+                .child(list),
+        );
+    }
+
+    let mut list = glass::group(theme).mx(px(16.0));
+    let mut any = false;
+    if results.is_empty() && !busy {
         any = true;
         list = list.child(
             div()
@@ -325,9 +781,11 @@ pub fn new_chat_sheet(
                 .py(px(10.0))
                 .text_size(px(TEXT_SMALL))
                 .text_color(theme.text_muted)
-                .child(format!(
-                    "No one on Arbos matches @{typed} yet. Enter sends an invite by GitHub login."
-                )),
+                .child(if typed.is_empty() {
+                    "No one else on Arbos yet. Search a GitHub username.".to_string()
+                } else {
+                    format!("No one matches @{typed}.")
+                }),
         );
     }
     if busy && results.is_empty() {
@@ -342,14 +800,16 @@ pub fn new_chat_sheet(
         );
     }
     let count = results.len();
-    for (i, (person, image)) in results.into_iter().enumerate() {
+    for (i, (person, image)) in results.iter().enumerate() {
         any = true;
-        let handle = person.handle.clone();
-        let invited = person.status == "invited";
+        let selected = picked
+            .iter()
+            .any(|p| p.id == person.id || p.handle == person.handle);
+        let person_clone = person.clone();
         list = list.child(
             div()
                 .id(ElementId::Name(SharedString::from(format!(
-                    "person-{}",
+                    "group-person-{}",
                     person.id
                 ))))
                 .flex()
@@ -362,7 +822,7 @@ pub fn new_chat_sheet(
                 })
                 .cursor_pointer()
                 .hover(|st| st.bg(theme.surface_2))
-                .child(avatar(image, &person, 40.0, &theme))
+                .child(avatar(image.clone(), person, 40.0, theme))
                 .child(
                     div()
                         .flex()
@@ -383,69 +843,51 @@ pub fn new_chat_sheet(
                                 .child(format!("@{}", person.handle)),
                         ),
                 )
-                .child(if invited {
-                    glass::chip("Invite by GitHub", theme.text_muted)
-                } else {
-                    glass::chip("On Arbos", theme.online)
-                })
+                .child(pick_mark(selected, theme))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.state
-                        .update(cx, |s, cx| s.pick_person(handle.clone(), cx));
+                        .update(cx, |s, cx| s.toggle_group_person(person_clone.clone(), cx));
                 })),
         );
     }
     if any {
+        let label = if my_agents.is_empty() {
+            if typed.is_empty() {
+                "Arbos users"
+            } else {
+                "People"
+            }
+        } else {
+            "People"
+        };
         body = body.child(
             div()
                 .flex()
                 .flex_col()
-                .child(
-                    glass::section_label(
-                        if typed.is_empty() {
-                            "Arbos users"
-                        } else {
-                            "Results"
-                        },
-                        &theme,
-                    )
-                    .px(px(30.0)),
-                )
+                .child(glass::section_label(label, theme).px(px(30.0)))
                 .child(list),
         );
     }
-    if let Some(name) = &invite_into {
-        body = body.child(
-            div()
-                .px(px(30.0))
-                .text_size(px(TEXT_TINY))
-                .text_color(theme.text_faint)
-                .child(format!(
-                    "They see every chat and the workspace output of {name}; your agent answers them too."
-                )),
-        );
-    }
+    body
+}
 
-    let title = match &invite_into {
-        Some(name) => format!("Invite to {name}"),
-        None => "New Message".to_string(),
-    };
-    let header = glass::sheet_header(
-        &title,
-        Some(
-            glass::sheet_button("new-chat-close", "Cancel", &theme).on_click(cx.listener(
-                |this, _, window, cx| {
-                    this.state.update(cx, |s, cx| {
-                        s.new_project_open = false;
-                        s.close_new_chat(cx)
-                    });
-                    crate::ui::composer::Composer::focus(&this.composer, window, cx);
-                },
-            )),
-        ),
-        None,
-        &theme,
-    );
-    glass::sheet(460.0, &theme, header, body.max_h(px(620.0)))
+fn pick_mark(selected: bool, theme: &Theme) -> Div {
+    if selected {
+        div()
+            .size(px(22.0))
+            .rounded_full()
+            .bg(theme.text)
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(icon("check", 12.0, theme.bg))
+    } else {
+        div()
+            .size(px(22.0))
+            .rounded_full()
+            .border_1()
+            .border_color(Theme::with_alpha(theme.text_muted, 0.5))
+    }
 }
 
 /// Chips under the header of a people chat: each agent in the room and
