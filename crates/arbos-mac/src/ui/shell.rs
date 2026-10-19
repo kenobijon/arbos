@@ -138,6 +138,9 @@ pub struct Shell {
     pub(crate) menu_open: bool,
     /// Right-click menu on a sidebar row: the space and where the click landed.
     pub(crate) row_menu: Option<(crate::model::Id, gpui::Point<gpui::Pixels>)>,
+    /// The row menu's Delete was clicked once: it now shows "Delete …?" with
+    /// Cancel / Delete instead of the action list (iPhone confirmationDialog).
+    pub(crate) row_delete_armed: bool,
     /// Right-click menu on a chat tab or archived chat: the chat and click point.
     pub(crate) chat_menu: Option<(crate::model::Id, gpui::Point<gpui::Pixels>)>,
     /// People chats (D72): the @search field, the header pickers.
@@ -485,6 +488,7 @@ impl Shell {
             },
             settings_scroll,
             row_menu: None,
+            row_delete_armed: false,
             chat_menu: None,
             react_menu: None,
             group_picker_open: false,
@@ -943,6 +947,7 @@ impl Shell {
             self.group_picker_open = false;
             self.tab_menu_open = false;
             self.row_menu = None;
+            self.row_delete_armed = false;
             self.chat_menu = None;
             self.react_menu = None;
             cx.notify();
