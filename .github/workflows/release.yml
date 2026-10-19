@@ -6,14 +6,23 @@ name: Release
 # (D42 distribution, D43 CI, D44 versioning).
 #
 # ── channels ────────────────────────────────────────────────────────────────
-#   edge    workflow_run after CI succeeded on main. Version = Cargo.toml
-#           version + "." + commit count (0.1.0.212). Release `edge-0.1.0.212`
-#           (pre-release) holds the payloads; the rolling release `edge` holds
-#           appcast.xml, which the app polls:
-#             https://github.com/<repo>/releases/download/edge/appcast.xml
-#   stable  push of a tag v<version>. Release `v<version>` is marked latest and
-#           carries its own appcast.xml:
+#   stable  Continuous delivery (D85): after CI succeeded on main (workflow_run,
+#           plus a 15-minute schedule as backstop) the plan job runs
+#           scripts/release/auto-stable.sh — debounce, newest green commit, and
+#           when the Mac app's sources changed since the last stable tag: bump
+#           commit `release: X.Y.Z — …` on main + tag vX.Y.Z, built and
+#           published in this same run (marked latest, own appcast.xml):
 #             https://github.com/<repo>/releases/latest/download/appcast.xml
+#           A hand-pushed tag v<version> (Cargo.toml already bumped) still works.
+#           Set the repository variable ARBOS_AUTO_STABLE=0 to go back to edge
+#           builds per push.
+#   edge    workflow_dispatch channel=edge (or ARBOS_AUTO_STABLE=0 per push).
+#           Version = Cargo.toml version + "." + commit count (0.1.0.212).
+#           Release `edge-0.1.0.212` (pre-release) holds the payloads; the
+#           rolling release `edge` holds appcast.xml:
+#             https://github.com/<repo>/releases/download/edge/appcast.xml
+#   After publishing, the relay is told (POST /admin/release) so every signed-in
+#   Mac checks the appcast at once instead of on its next poll.
 #
 # ── never a red build ───────────────────────────────────────────────────────
 # The edge trigger is `workflow_run` on the CI workflow; the jobs run only when
@@ -52,13 +61,17 @@ on:
     branches: [main]
   push:
     tags: ["v*"]
+  schedule:
+    # Backstop for continuous delivery: a green commit whose Release run was lost
+    # (cancelled while pending, main moved during the bump) ships within 15 min.
+    - cron: "*/15 * * * *"
   workflow_dispatch:
     inputs:
       channel:
-        description: "Channel to publish to"
+        description: "Channel to publish to (auto = stable release if main changed the Mac app)"
         type: choice
-        options: [edge, stable]
-        default: edge
+        options: [auto, edge, stable]
+        default: auto
       publish:
         description: "Create the GitHub release (off = build, sign, notarize, upload artifacts only)"
         type: boolean
@@ -92,7 +105,7 @@ jobs:
   plan:
     name: What to publish
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     if: >-
       github.event_name != 'workflow_run' ||
       (github.event.workflow_run.conclusion == 'success' &&
@@ -111,6 +124,8 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 0
+      # Only the auto path needs cargo (Cargo.lock of the version bump); cheap on Linux.
+      - uses: dtolnay/rust-toolchain@stable
       - id: plan
         env:
           EVENT: ${{ github.event_name }}
@@ -118,11 +133,15 @@ jobs:
           IN_CHANNEL: ${{ inputs.channel }}
           IN_PUBLISH: ${{ inputs.publish }}
           IN_PROMOTE: ${{ inputs.promote }}
+          AUTO_STABLE: ${{ vars.ARBOS_AUTO_STABLE || '1' }}
+          ARBOS_RELEASE_DEBOUNCE_S: ${{ vars.ARBOS_RELEASE_DEBOUNCE_S || '150' }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           base="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
           build="$(git rev-list --count HEAD)"
           promote=true
+          auto=false
           case "$EVENT" in
             push)
               channel=stable
@@ -134,26 +153,58 @@ jobs:
               publish=true
               ;;
             workflow_dispatch)
-              channel="${IN_CHANNEL:-edge}"
+              channel="${IN_CHANNEL:-auto}"
+              if [[ "$channel" == auto ]]; then auto=true; fi
               if [[ "$channel" == stable ]]; then version="$base"; else version="$base.$build"; fi
               publish="${IN_PUBLISH:-true}"
               promote="${IN_PROMOTE:-true}"
               ;;
+            schedule)
+              if [[ "$AUTO_STABLE" == 0 ]]; then
+                echo "::notice::ARBOS_AUTO_STABLE=0: the schedule does nothing"
+                channel=none; version="$base.$build"; publish=false
+              else
+                auto=true; channel=auto; version="$base.$build"; publish=true
+                # The schedule is a backstop: no debounce needed.
+                export ARBOS_RELEASE_DEBOUNCE_S=0
+              fi
+              ;;
             *)
-              channel=edge
+              if [[ "$AUTO_STABLE" == 0 ]]; then
+                channel=edge
+              else
+                auto=true; channel=auto
+              fi
               version="$base.$build"
               publish=true
               ;;
           esac
+          if $auto; then
+            # Continuous delivery: bump + tag when the Mac app changed; see the script header.
+            plan="$(scripts/release/auto-stable.sh)"
+            echo "$plan"
+            channel="$(sed -n 's/^channel=//p' <<< "$plan")"
+            publish="$(sed -n 's/^publish=//p' <<< "$plan")"
+            version="$(sed -n 's/^version=//p' <<< "$plan")"
+            build="$(sed -n 's/^build=//p' <<< "$plan")"
+            notes="$(sed -n 's/^notes=//p' <<< "$plan")"
+            sha="$(sed -n 's/^sha=//p' <<< "$plan")"
+            if [[ "$channel" == none ]]; then
+              echo "::notice::no release: $notes"
+            fi
+          else
+            sha="$(git rev-parse HEAD)"
+            notes="$(git log -1 --format=%s)"
+          fi
           {
             echo "channel=$channel"
             echo "publish=$publish"
             echo "promote=$promote"
-            echo "sha=$(git rev-parse HEAD)"
+            echo "sha=$sha"
             echo "version=$version"
             echo "build=$build"
             echo "notes<<ARBOS_EOF"
-            git log -1 --format=%s
+            echo "$notes"
             echo "ARBOS_EOF"
           } >> "$GITHUB_OUTPUT"
           echo "Arbos $version ($channel), publish=$publish" >> "$GITHUB_STEP_SUMMARY"
@@ -161,6 +212,7 @@ jobs:
   macos:
     name: Mac app (sign, notarize, dmg)
     needs: plan
+    if: needs.plan.outputs.channel != 'none'
     runs-on: ${{ inputs.runner || vars.ARBOS_MAC_RUNNER || 'macos-15' }}
     timeout-minutes: 150
     outputs:
@@ -277,6 +329,7 @@ jobs:
   linux:
     name: Relay, agentd, arbosctl, image
     needs: plan
+    if: needs.plan.outputs.channel != 'none'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
@@ -342,7 +395,7 @@ jobs:
   publish:
     name: Appcast and release
     needs: [plan, macos, linux]
-    if: needs.plan.outputs.publish == 'true'
+    if: needs.plan.outputs.publish == 'true' && needs.plan.outputs.channel != 'none'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
@@ -374,6 +427,8 @@ jobs:
         env:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
           ARBOS_SPARKLE_PRIVATE_KEY: op://Arbos/kaioxc67zr5cu25fuu3nw5qwdi/credential
+          # Relay admin token: tells the relay the release is out (release_published push).
+          ARBOS_RELAY_ADMIN_TOKEN: op://Arbos/pjwsl7tjrhcbzbqos2masde2u4/credential
       - name: Updater signing key from the repository secret
         if: env.HAVE_OP != 'true' && env.HAVE_KEY_SECRET == 'true'
         run: echo "ARBOS_SPARKLE_PRIVATE_KEY=${{ secrets.ARBOS_SPARKLE_PRIVATE_KEY }}" >> "$GITHUB_ENV"
@@ -415,3 +470,27 @@ jobs:
               echo "| Feed | <https://github.com/$GITHUB_REPOSITORY/releases/latest/download/appcast.xml> |"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+      # Every signed-in Mac gets a `release_published` push and checks the appcast now (the
+      # 5-minute poll is the fallback). Best effort: the release is already out.
+      - name: Tell the relay
+        if: needs.plan.outputs.promote == 'true'
+        env:
+          CHANNEL: ${{ needs.plan.outputs.channel }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          BUILD: ${{ needs.plan.outputs.build }}
+          RELAY_URL: ${{ vars.ARBOS_RELAY_URL || 'https://relay.arbos.life' }}
+        run: |
+          set +x
+          if [[ -z "${ARBOS_RELAY_ADMIN_TOKEN:-}" ]]; then
+            echo "::warning::no relay admin token (1Password item pjwsl7tjrhcbzbqos2masde2u4); the Macs will notice on their next poll"
+            exit 0
+          fi
+          tag="v$VERSION"; [[ "$CHANNEL" == edge ]] && tag="edge-$VERSION"
+          body="$(printf '{"platform":"mac","channel":"%s","version":"%s","build":"%s","url":"%s"}' \
+            "$CHANNEL" "$VERSION" "$BUILD" "https://github.com/$GITHUB_REPOSITORY/releases/tag/$tag")"
+          if curl -fsS --max-time 30 -X POST "$RELAY_URL/admin/release" \
+               -H "Authorization: Bearer $ARBOS_RELAY_ADMIN_TOKEN" -H "content-type: application/json" -d "$body"; then
+            echo; echo "relay told: $CHANNEL $VERSION"
+          else
+            echo "::warning::relay did not accept the release notice (it may run an older relay); the Macs will notice on their next poll"
+          fi
