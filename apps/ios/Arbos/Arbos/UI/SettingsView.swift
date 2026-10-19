@@ -329,7 +329,7 @@ struct SettingsPage<Content: View>: View {
                 Button { (onBack ?? { dismiss() })() } label: {
                     GlassCircle {
                         Image(systemName: "chevron.left")
-                            .font(theme.font(17, weight: .semibold))
+                            .font(.system(size: 17, weight: .semibold))
                             .foregroundStyle(theme.text)
                     }
                 }
@@ -340,8 +340,9 @@ struct SettingsPage<Content: View>: View {
             .padding(.horizontal, 20)
             .padding(.top, 16)
             .overlay {
+                // Navigation chrome stays at the system size (Apple's Text Size does the same).
                 Text(title)
-                    .font(theme.font(Theme.body, weight: .semibold))
+                    .font(.system(size: Theme.body, weight: .semibold))
                     .foregroundStyle(theme.text)
                     .padding(.top, 16)
             }
@@ -818,6 +819,7 @@ struct ConnectorsPage: View {
         .background(Capsule().fill(on ? theme.online.opacity(0.14) : theme.field))
         .overlay(Capsule().strokeBorder(on ? theme.online.opacity(0.35) : theme.fieldBorder, lineWidth: 1))
         .contentShape(Capsule())
+        .fixedSize()
     }
 
     private func connectorSymbol(_ provider: String) -> String {
@@ -1010,6 +1012,20 @@ struct TextSizePage: View {
                     .tint(theme.accent)
                     .accessibilityLabel("Text size")
                     .accessibilityValue(TextScale.label(model.textScale))
+                    // The seven stops as notches on the track (Apple Display → Text Size / Telegram).
+                    .background {
+                        GeometryReader { geo in
+                            let thumb: CGFloat = 13.5
+                            let usable = geo.size.width - thumb * 2
+                            ForEach(0..<TextScale.steps.count, id: \.self) { i in
+                                Rectangle()
+                                    .fill(i <= index ? theme.accent.opacity(0.9) : theme.muted.opacity(0.55))
+                                    .frame(width: 2, height: 10)
+                                    .position(x: thumb + usable * CGFloat(i) / CGFloat(TextScale.steps.count - 1), y: geo.size.height / 2)
+                            }
+                        }
+                        .allowsHitTesting(false)
+                    }
                     Text("A").font(.system(size: 24, weight: .medium)).foregroundStyle(theme.text)
                 }
                 .padding(.horizontal, 16)

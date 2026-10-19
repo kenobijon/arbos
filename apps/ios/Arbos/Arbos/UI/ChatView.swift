@@ -548,16 +548,16 @@ struct ChatView: View {
                                               imageUrl: groupImageURL(people))
                                 VStack(alignment: .leading, spacing: 0) {
                                     Text(people.title)
-                                        .font(theme.font(Theme.body, weight: .semibold))
+                                        .font(.system(size: Theme.body, weight: .semibold))
                                         .foregroundStyle(theme.text)
                                         .lineLimit(1)
-                                    Text(groupSubtitle(people)).font(theme.font(10)).foregroundStyle(theme.muted)
+                                    Text(groupSubtitle(people)).font(.system(size: 10)).foregroundStyle(theme.muted)
                                 }
                             } else {
                                 PersonAvatar(url: counterpart?.avatarUrl, handle: counterpart?.handle ?? "?", size: Theme.avatar, name: counterpart?.name, id: counterpart?.id, colorIndex: counterpart?.avatarColorIndex)
                                 VStack(alignment: .leading, spacing: 0) {
                                     Text(counterpart?.displayName ?? people.title)
-                                        .font(theme.font(Theme.body, weight: .semibold))
+                                        .font(.system(size: Theme.body, weight: .semibold))
                                         .foregroundStyle(theme.text)
                                         .lineLimit(1)
                                     if people.pending {
@@ -578,7 +578,7 @@ struct ChatView: View {
                                 AgentAvatar(project: project, theme: theme, size: Theme.avatar, dot: machineDotColor(model.machine.state, theme: theme), working: streaming)
                             }
                             Text(name)
-                                .font(theme.font(Theme.body, weight: .semibold))
+                                .font(.system(size: Theme.body, weight: .semibold))
                                 .foregroundStyle(theme.text)
                                 .lineLimit(1)
                         }
