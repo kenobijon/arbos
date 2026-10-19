@@ -162,5 +162,12 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-q", shell::Quit, None),
         KeyBinding::new("cmd-shift-f", feedback::SendFeedback, None),
         KeyBinding::new("ctrl-shift-f", feedback::SendFeedback, None),
+        // Sheet open: Enter in the note (ComposerInput → on_submit) or ⌘⏎ / Ctrl⏎ anywhere in it.
+        KeyBinding::new("cmd-enter", feedback::SubmitFeedback, Some("FeedbackSheet")),
+        KeyBinding::new(
+            "ctrl-enter",
+            feedback::SubmitFeedback,
+            Some("FeedbackSheet"),
+        ),
     ]);
 }

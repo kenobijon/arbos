@@ -1,13 +1,15 @@
 //! "Send feedback" (⌘⇧F, the ✎ rail button, Help → Send Feedback…): the Mac twin of
 //! TestFlight's screenshot feedback. Opening the sheet grabs the Arbos window as a PNG;
-//! the user can grab it again, drag a region of the screen, or pick an image file, add a
-//! note, and send. `POST /feedback` on the relay stores it; the feedback loop on the server
+//! the user can grab it again, clear it, drag a region, or pick an image file, add a
+//! note, and send (Enter / ⌘⏎). A note alone is enough when they skip the picture.
+//! `POST /feedback` on the relay stores it; the feedback loop on the server
 //! (`scripts/feedback`) turns it into a GitHub issue and an automatic fix.
 //!
 //! Self-contained: the shell only constructs it, calls `open` on the action, and renders it
 //! while `is_open()`.
 
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context as _, Result};
@@ -24,7 +26,7 @@ use crate::ui::composer::ComposerInput;
 use crate::ui::frost::{frosted, PANEL_BLUR};
 use crate::ui::theme::{Theme, PANEL_RADIUS};
 
-actions!(feedback, [SendFeedback]);
+actions!(feedback, [SendFeedback, SubmitFeedback]);
 
 /// A captured or chosen image, ready to send.
 struct Shot {
@@ -75,8 +77,17 @@ impl FeedbackSheet {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let note = cx.new(ComposerInput::new);
         note.update(cx, |input, _| {
-            input.set_placeholder("What is wrong, or what should change? (optional)");
+            input.set_placeholder("What is wrong, or what should change?");
         });
+        // Enter in the note field submits (same as ⌘⏎ / Send).
+        {
+            let weak = cx.weak_entity();
+            note.update(cx, |input, _| {
+                input.on_submit = Some(Rc::new(move |_window, cx| {
+                    let _ = weak.update(cx, |this, cx| this.send(cx));
+                }));
+            });
+        }
         cx.observe(&note, |_, _, cx| cx.notify()).detach();
         Self {
             state,
@@ -215,34 +226,49 @@ impl FeedbackSheet {
         .detach();
     }
 
+    fn clear_shot(&mut self, cx: &mut Context<Self>) {
+        self.shot = None;
+        self.error = None;
+        cx.notify();
+    }
+
+    fn submit_action(&mut self, _: &SubmitFeedback, _: &mut Window, cx: &mut Context<Self>) {
+        self.send(cx);
+    }
+
     fn send(&mut self, cx: &mut Context<Self>) {
         if self.busy || self.sent.is_some() {
             return;
         }
-        let Some(shot) = self.shot.as_ref() else {
-            self.error = Some("Add a screenshot first.".into());
+        let note = self.note.read(cx).text().trim().to_string();
+        let shot = self.shot.as_ref();
+        if shot.is_none() && note.is_empty() {
+            self.error = Some("Add a note, or keep / attach a screenshot.".into());
             cx.notify();
             return;
-        };
+        }
         let relay_url = crate::sync::configured_relay_url();
         let Some(creds) = credentials::load(&relay_url) else {
             self.error = Some("Sign in first: feedback goes to your relay.".into());
             cx.notify();
             return;
         };
-        let note = self.note.read(cx).text().trim().to_string();
         let project_id = self.state.read(cx).selected().map(|p| p.id.clone());
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "note": note,
-            "image": base64::engine::general_purpose::STANDARD.encode(shot.bytes.as_slice()),
-            "mime": shot.mime,
-            "width": shot.width,
-            "height": shot.height,
             "app_version": crate::update::current_version(),
             "platform": "mac",
             "os": os_version(),
             "project_id": project_id,
         });
+        if let Some(shot) = shot {
+            body["image"] = serde_json::json!(
+                base64::engine::general_purpose::STANDARD.encode(shot.bytes.as_slice())
+            );
+            body["mime"] = serde_json::json!(shot.mime);
+            body["width"] = serde_json::json!(shot.width);
+            body["height"] = serde_json::json!(shot.height);
+        }
         self.busy = true;
         self.error = None;
         cx.notify();
@@ -331,6 +357,8 @@ impl Render for FeedbackSheet {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let has_shot = self.shot.is_some();
+        let has_note = !self.note.read(cx).text().trim().is_empty();
+        let can_send = (has_shot || has_note) && !self.busy;
         let busy = self.busy;
         let sent = self.sent.clone();
         let error = self.error.clone();
@@ -405,6 +433,12 @@ impl Render for FeedbackSheet {
             Self::button("feedback-file", "Choose image…", false, !busy, &theme)
                 .on_click(cx.listener(|this, _, _, cx| this.choose_file(cx))),
         );
+        if has_shot {
+            sources = sources.child(
+                Self::button("feedback-clear", "No screenshot", false, !busy, &theme)
+                    .on_click(cx.listener(|this, _, _, cx| this.clear_shot(cx))),
+            );
+        }
 
         let status: Option<Div> = if let Some(id) = sent.as_ref() {
             Some(
@@ -438,9 +472,9 @@ impl Render for FeedbackSheet {
                 el.child(
                     Self::button(
                         "feedback-send",
-                        if busy { "Sending…" } else { "Send" },
+                        if busy { "Sending…" } else { "Send ⏎" },
                         true,
-                        has_shot && !busy,
+                        can_send,
                         &theme,
                     )
                     .on_click(cx.listener(|this, _, _, cx| this.send(cx))),
@@ -475,14 +509,14 @@ impl Render for FeedbackSheet {
                         div()
                             .text_size(px(11.0))
                             .text_color(theme.text_faint)
-                            .child("⌘⇧F"),
+                            .child("⌘⇧F · ⏎ send"),
                     ),
             )
             .child(
                 div()
                     .text_size(px(12.0))
                     .text_color(theme.text_muted)
-                    .child("A screenshot and a sentence are enough. It goes to your relay and becomes a fix in a coming build."),
+                    .child("The window is captured when you open this. A note alone is enough — clear the picture if you do not want it. It goes to your relay and becomes a fix in a coming build."),
             )
             .child(preview)
             .child(sources)
@@ -494,6 +528,7 @@ impl Render for FeedbackSheet {
             .id("feedback-sheet")
             .key_context("FeedbackSheet")
             .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::submit_action))
             .absolute()
             .inset_0()
             .flex()
