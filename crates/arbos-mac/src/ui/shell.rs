@@ -12,7 +12,7 @@ use gpui::{
 };
 
 use crate::app::SignInMode;
-use crate::app::{AppState, DetailsTarget};
+use crate::app::{AppState, DetailsTarget, ProfilePage};
 use crate::model::{now_ms, CallKind, Link, MachineState};
 use crate::ui::avatars;
 use crate::ui::callview;
@@ -516,6 +516,87 @@ impl Shell {
         cx.notify();
     }
 
+    /// The agent page's "Edit": name and description become fields, inside the
+    /// sheet (owned agents only); the name field takes the keyboard.
+    pub(crate) fn start_edit_agent(
+        &mut self,
+        project_id: crate::model::Id,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (name, description) = {
+            let state = self.state.read(cx);
+            let Some(p) = state.project(&project_id) else {
+                return;
+            };
+            if p.is_guest() || p.is_people() {
+                return;
+            }
+            (p.name.clone(), p.description.clone().unwrap_or_default())
+        };
+        self.menu_open = false;
+        self.row_menu = None;
+        self.agent_name_input
+            .update(cx, |input, cx| input.set_text(name, cx));
+        self.description_input
+            .update(cx, |input, cx| input.set_text(description, cx));
+        self.state.update(cx, |s, cx| {
+            s.start_renaming(project_id, cx);
+            s.set_profile_editing_description(true, cx);
+        });
+        let handle = self.agent_name_input.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    /// Close the profile page (back button, click outside); the composer takes
+    /// the keyboard back.
+    pub(crate) fn close_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, cx| {
+            s.close_profile(cx);
+        });
+        Composer::focus(&self.composer, window, cx);
+    }
+
+    /// The agent page's "Done": save whichever of the name / description
+    /// fields are open (unchanged text is not sent) and leave edit mode.
+    pub(crate) fn finish_edit_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (project_id, renaming, editing, current) = {
+            let state = self.state.read(cx);
+            let Some(ProfilePage::Agent { project_id }) = state.profile.clone() else {
+                return;
+            };
+            let renaming = state.renaming_project.as_ref() == Some(&project_id);
+            let current = state
+                .project(&project_id)
+                .and_then(|p| p.description.clone())
+                .unwrap_or_default();
+            (
+                project_id,
+                renaming,
+                state.profile_editing_description,
+                current,
+            )
+        };
+        if renaming {
+            let name = self.agent_name_input.read(cx).text().to_string();
+            self.state
+                .update(cx, |s, cx| s.set_project_name(project_id.clone(), name, cx));
+        }
+        if editing {
+            let text = self.description_input.read(cx).text().to_string();
+            self.state.update(cx, |s, cx| {
+                if text.trim() == current.trim() {
+                    s.set_profile_editing_description(false, cx);
+                } else {
+                    s.set_description(project_id, text, cx);
+                }
+            });
+        }
+        Composer::focus(&self.composer, window, cx);
+        cx.notify();
+    }
+
     fn close_tab(&mut self, _: &CloseTab, _: &mut Window, cx: &mut Context<Self>) {
         let active = self.state.read(cx).active_chat_id();
         if let Some(chat_id) = active {
@@ -542,8 +623,16 @@ impl Shell {
 
     /// Escape closes whatever floats: menus, then sheets.
     fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
-        if self.state.read(cx).renaming_project.is_some() {
+        let editing_agent = {
+            let s = self.state.read(cx);
+            s.renaming_project.is_some() || (s.profile.is_some() && s.profile_editing_description)
+        };
+        if editing_agent {
+            // The agent page's edit mode (name and/or description fields) ends
+            // without saving; the page itself stays up.
             self.cancel_rename_agent(cx);
+            self.state
+                .update(cx, |s, cx| s.set_profile_editing_description(false, cx));
             Composer::focus(&self.composer, window, cx);
             return;
         }

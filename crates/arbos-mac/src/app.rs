@@ -2624,12 +2624,15 @@ impl AppState {
         cx.notify();
     }
 
-    /// Closes the sheet; `true` when one was open.
+    /// Closes the sheet; `true` when one was open. An edit in progress on the
+    /// agent page (name, description) is dropped with it.
     pub fn close_profile(&mut self, cx: &mut Context<Self>) -> bool {
         self.avatar_picker = None;
         self.profile_more_open = false;
         let was = self.profile.take().is_some();
         if was {
+            self.renaming_project = None;
+            self.profile_editing_description = false;
             cx.notify();
         }
         was
