@@ -143,6 +143,7 @@ pub fn translate_rpc_event(e: &Event) -> Vec<AgentEvent> {
             tool_call_id,
             tool_name,
             args,
+            ..
         } => vec![AgentEvent::ToolCall {
             id: tool_call_id.clone(),
             name: tool_name.clone(),
@@ -586,6 +587,11 @@ impl PiAdapter {
             ("ARBOS_MCP_TOKEN".into(), cfg.mcp_token_for_role(role)),
             ("ARBOS_MCP_URL".into(), cfg.mcp_url()),
             ("ARBOS_BOX_TOKEN".into(), cfg.box_token.clone()),
+            // D86: the extension applies the script guardrails (default deadline) when on.
+            (
+                "ARBOS_CODE_MODE".into(),
+                if cfg.code_mode() { "on" } else { "off" }.into(),
+            ),
         ]);
         // Approved vault grants (F8): placeholders only, usable through the egress tool.
         envs.extend(crate::vault::shell_envs(cfg));
