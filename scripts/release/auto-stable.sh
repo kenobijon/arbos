@@ -134,9 +134,9 @@ fi
 # shellcheck disable=SC2086
 summary="$(git log --format=%s --no-merges "${last_tag:+$last_tag..}$target" -- $MAC_PATHS \
   | sed -E 's/^fix\(feedback\): //; s/^(fix|feat|chore|docs|refactor|test|build|ci)(\([^)]*\))?: //; s/ *\[feedback [^]]*\]//g' \
-  | grep -v -E '^(release:|Merge )' | awk '!seen[$0]++' | head -8 \
+  | grep -v -E '^(release:|Merge )' | awk '!seen[$0]++ && n < 8 { n++; print }' \
   | awk '{ if (length($0) > 72) { s = substr($0, 1, 72); sub(/ [^ ]*$/, "", s); print s "…" } else print }' \
-  | paste -sd ';' - | sed 's/;/; /g')"
+  | paste -sd ';' - | sed 's/;/; /g' || true)"
 [[ -n "$summary" ]] || summary="changes since ${last_tag:-the start}"
 subject="release: $version — $summary"
 subject="${subject:0:480}"
