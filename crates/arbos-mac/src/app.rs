@@ -623,13 +623,21 @@ impl AppState {
                 let available = *available;
                 self.update.last_checked_at = Some(now_ms());
                 if !self.update.busy() {
-                    let fresh = self.update.available() != Some(&available);
-                    self.update.phase = UpdatePhase::Available(available.clone());
-                    if fresh {
-                        self.push_notice(format!(
-                            "Arbos {} is ready to install — press Update in the rail.",
-                            available.item.version
-                        ));
+                    // Never offer a build that is not strictly newer than what is running.
+                    if !arbos_update::version::is_newer(
+                        &available.item.version,
+                        &self.update.current_version,
+                    ) {
+                        self.update.phase = UpdatePhase::UpToDate;
+                    } else {
+                        let fresh = self.update.available() != Some(&available);
+                        self.update.phase = UpdatePhase::Available(available.clone());
+                        if fresh {
+                            self.push_notice(format!(
+                                "Arbos {} is ready to install — press Update in the rail.",
+                                available.item.version
+                            ));
+                        }
                     }
                 }
             }

@@ -549,7 +549,11 @@ fn render_row(row: RowView, theme: &Theme, cx: &mut Context<Shell>) -> impl Into
         pic
     };
 
-    let name = if space.is_people() {
+    // Groups: the chat title (custom or member handles from the relay),
+    // matching iOS PeopleRow. DMs: the other person's display name.
+    let name = if space.is_people_group() {
+        space.name.clone()
+    } else if space.is_people() {
         space
             .person()
             .map(|p| p.display_name())
@@ -557,10 +561,15 @@ fn render_row(row: RowView, theme: &Theme, cx: &mut Context<Shell>) -> impl Into
     } else {
         space.name.clone()
     };
-    let handle = space
-        .person()
-        .filter(|_| space.is_people())
-        .map(|p| format!("@{}", p.handle));
+    let handle = if space.is_people_group() {
+        let n = space.people.len() + 1;
+        Some(format!("{n} member{}", if n == 1 { "" } else { "s" }))
+    } else {
+        space
+            .person()
+            .filter(|_| space.is_people())
+            .map(|p| format!("@{}", p.handle))
+    };
     let preview = if typing {
         "typing…".to_string()
     } else {

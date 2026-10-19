@@ -1263,6 +1263,7 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
             .unwrap_or("");
         match kind {
             "people_chat_created"
+            | "people_chat_updated"
             | "people_member_added"
             | "people_member_removed"
             | "people_agent_added"

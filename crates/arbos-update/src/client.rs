@@ -49,13 +49,17 @@ impl Install {
             Some(path) => PathBuf::from(path),
             None => exe,
         };
+        // Find `*.app` before canonicalize: resolving symlinks can leave a path
+        // whose ancestors no longer end in `.app` (e.g. Arbos.app → a bare folder).
+        if cfg!(target_os = "macos") {
+            if let Some(bundle) = app_bundle_from_exe(&exe) {
+                return Ok(Install::MacBundle(bundle));
+            }
+        }
         let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
         if cfg!(target_os = "macos") {
-            // <bundle>.app/Contents/MacOS/<exe>
-            if let Some(bundle) = exe.ancestors().nth(3) {
-                if bundle.extension().is_some_and(|e| e == "app") {
-                    return Ok(Install::MacBundle(bundle.to_path_buf()));
-                }
+            if let Some(bundle) = app_bundle_from_exe(&exe) {
+                return Ok(Install::MacBundle(bundle));
             }
         }
         Ok(Install::Executable(exe))
@@ -66,6 +70,16 @@ impl Install {
             Install::MacBundle(p) | Install::Executable(p) => p,
         }
     }
+}
+
+/// Walk up from an executable looking for a `*.app` bundle directory.
+///
+/// Handles the normal `Foo.app/Contents/MacOS/<exe>` layout and any deeper
+/// nesting; returns the outermost matching `.app` path.
+pub fn app_bundle_from_exe(exe: &Path) -> Option<PathBuf> {
+    exe.ancestors()
+        .find(|p| p.extension().is_some_and(|e| e == "app"))
+        .map(|p| p.to_path_buf())
 }
 
 fn http() -> anyhow::Result<reqwest::Client> {
@@ -482,4 +496,37 @@ fn run(program: &str, args: &[&str]) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn app_bundle_from_normal_macos_layout() {
+        let exe = PathBuf::from("/Applications/Arbos.app/Contents/MacOS/arbos-mac");
+        assert_eq!(
+            app_bundle_from_exe(&exe).as_deref(),
+            Some(Path::new("/Applications/Arbos.app"))
+        );
+    }
+
+    #[test]
+    fn app_bundle_from_translocated_layout() {
+        let exe = PathBuf::from(
+            "/private/var/folders/xx/yy/T/AppTranslocation/UUID/d/Arbos.app/Contents/MacOS/arbos-mac",
+        );
+        assert_eq!(
+            app_bundle_from_exe(&exe).as_deref(),
+            Some(Path::new(
+                "/private/var/folders/xx/yy/T/AppTranslocation/UUID/d/Arbos.app"
+            ))
+        );
+    }
+
+    #[test]
+    fn app_bundle_none_for_bare_executable() {
+        let exe = PathBuf::from("/home/dev/arbos/target/release/arbos-mac");
+        assert_eq!(app_bundle_from_exe(&exe), None);
+    }
 }

@@ -1,7 +1,10 @@
 fn main() {
-    // The build number is a compile-time constant (see `update::current_version`);
-    // a change in the environment must rebuild the crate.
+    // The build number and default update channel are compile-time constants
+    // (see `update::current_version` / `update::feed_url`); a change in either
+    // environment variable must rebuild the crate so a stable tag build does
+    // not keep an edge feed baked in from a previous compile on the same runner.
     println!("cargo:rerun-if-env-changed=ARBOS_BUILD");
+    println!("cargo:rerun-if-env-changed=ARBOS_DEFAULT_UPDATE_CHANNEL");
     // libwebrtc (calls v1) is a static library full of Objective-C categories
     // (`NSString+StdString`…). Without -ObjC the linker drops them and the app
     // aborts in a static initialiser on launch. webrtc-sys asks for the flag,

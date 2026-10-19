@@ -971,7 +971,9 @@ impl Shell {
         if !dropped {
             // S1/S2: empty chat — the agent's picture and a line, composer centred.
             let is_people = space.is_people();
-            let name = if is_people {
+            let name = if space.is_people_group() {
+                space.name.clone()
+            } else if is_people {
                 space
                     .person()
                     .map(|p| p.display_name())
@@ -2521,10 +2523,12 @@ impl Shell {
             return None;
         }
         PulseClock::request(cx);
+        // Top right, under the header: never over the composer's send / mic
+        // button or an error banner above it (the busy end of the column).
         let mut stack = div()
             .absolute()
             .right(px(16.0))
-            .bottom(px(16.0))
+            .top(px(HEADER_HEIGHT + 12.0))
             .flex()
             .flex_col()
             .gap(px(6.0));

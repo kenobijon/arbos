@@ -22,7 +22,7 @@ use crate::ui::cards;
 use crate::ui::frost::edge_faded;
 use crate::ui::groups;
 use crate::ui::icons::icon;
-use crate::ui::markdown::{inline_spans, split_blocks, Block};
+use crate::ui::markdown::{inline_spans, polish_assistant_prose, split_blocks, Block};
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
 use crate::ui::theme::{
@@ -551,9 +551,11 @@ impl Transcript {
                 bubble = bubble.child(text);
                 if let Some(person) = from {
                     // Someone else: left-aligned, their avatar and handle above.
+                    // Must not early-return: the match arm still needs the
+                    // COLUMN_MARGIN wrapper (same padding as agent bubbles).
                     let image = self.state.read(cx).avatar(&person.avatar_url);
                     let color = groups::sender_color(&person.handle, &theme);
-                    return div()
+                    div()
                         .w_full()
                         .flex()
                         .flex_col()
@@ -610,33 +612,34 @@ impl Transcript {
                                 )
                                 .children(hover_time(time, reveal, &theme).map(|t| t.ml(px(8.0))))
                         })
-                        .into_any_element();
+                        .into_any_element()
+                } else {
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .items_end()
+                        .gap(px(3.0))
+                        .py(px(6.0))
+                        .when_some(sender_label, |el, label| {
+                            el.child(
+                                div()
+                                    .pr(px(6.0))
+                                    .text_size(px(TEXT_TINY))
+                                    .text_color(theme.text_muted)
+                                    .child(label),
+                            )
+                        })
+                        .child({
+                            // My bubble sits right, so its outer edge (and time) is on the left.
+                            let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
+                            row_el
+                                .justify_end()
+                                .children(hover_time(time, reveal, &theme).map(|t| t.mr(px(8.0))))
+                                .child(bubble.when(pending, |el| el.opacity(0.6)))
+                        })
+                        .into_any_element()
                 }
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .items_end()
-                    .gap(px(3.0))
-                    .py(px(6.0))
-                    .when_some(sender_label, |el, label| {
-                        el.child(
-                            div()
-                                .pr(px(6.0))
-                                .text_size(px(TEXT_TINY))
-                                .text_color(theme.text_muted)
-                                .child(label),
-                        )
-                    })
-                    .child({
-                        // My bubble sits right, so its outer edge (and time) is on the left.
-                        let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
-                        row_el
-                            .justify_end()
-                            .children(hover_time(time, reveal, &theme).map(|t| t.mr(px(8.0))))
-                            .child(bubble.when(pending, |el| el.opacity(0.6)))
-                    })
-                    .into_any_element()
             }
             RowKind::Markdown {
                 block,
@@ -1491,17 +1494,23 @@ pub fn build_rows(
                     .iter()
                     .rposition(|p| matches!(p, Part::Text { .. }));
                 // Blocks across every text part form one bubble.
-                let total_blocks: usize = message
+                // Polish assistant prose on display so glued ".Word" and a trailing
+                // tool-narration sentence (already in the doc) still read as chat.
+                let polished: Vec<(String, String)> = message
                     .parts
                     .iter()
                     .filter_map(|p| match p {
-                        Part::Text { text, .. } => Some(
-                            split_blocks(text)
-                                .into_iter()
-                                .filter(|b| !is_json_block(b))
-                                .count(),
-                        ),
+                        Part::Text { id, text } => Some((id.clone(), polish_assistant_prose(text))),
                         _ => None,
+                    })
+                    .collect();
+                let total_blocks: usize = polished
+                    .iter()
+                    .map(|(_, text)| {
+                        split_blocks(text)
+                            .into_iter()
+                            .filter(|b| !is_json_block(b))
+                            .count()
                     })
                     .sum();
                 let fill = total_blocks > 1;
@@ -1509,7 +1518,15 @@ pub fn build_rows(
                 let mut had_prose = false;
                 for (pix, part) in message.parts.iter().enumerate() {
                     match part {
-                        Part::Text { id, text } => {
+                        Part::Text { id, .. } => {
+                            let text = polished
+                                .iter()
+                                .find(|(pid, _)| pid == id)
+                                .map(|(_, t)| t.as_str())
+                                .unwrap_or("");
+                            if text.trim().is_empty() {
+                                continue;
+                            }
                             let blocks: Vec<Block> = split_blocks(text)
                                 .into_iter()
                                 .filter(|b| !is_json_block(b))
