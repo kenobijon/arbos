@@ -129,15 +129,23 @@ impl UpdateState {
         }
     }
 
+    /// True when the feed has a build that is strictly newer than what is running.
+    pub fn has_installable_update(&self) -> bool {
+        self.available().is_some_and(|a| {
+            arbos_update::version::is_newer(&a.item.version, &self.current_version)
+        })
+    }
+
     /// The rail button is visible whenever a newer build is known, through
-    /// download, install, and a failure that can be retried.
+    /// download, install, and a failure that can be retried — or when the
+    /// running copy must be moved to Applications before updates can work.
     pub fn button_visible(&self) -> bool {
-        self.available().is_some() || self.needs_relocation
+        self.has_installable_update() || self.needs_relocation
     }
 
     /// True when the button's click should move the app rather than install an update.
     pub fn button_moves(&self) -> bool {
-        self.needs_relocation && self.available().is_none()
+        self.needs_relocation && !self.has_installable_update()
     }
 
     pub fn busy(&self) -> bool {
@@ -271,6 +279,11 @@ pub async fn run(
                 let _ = events.send(UpdateEvent::Checking);
                 match client::check(&feed, &current, os).await {
                     Ok(Some(available)) => {
+                        if !arbos_update::version::is_newer(&available.item.version, &current) {
+                            known = None;
+                            let _ = events.send(UpdateEvent::UpToDate);
+                            continue;
+                        }
                         if known.as_ref().map(|k| &k.item.version) != Some(&available.item.version)
                         {
                             log(format!(
@@ -372,16 +385,39 @@ fn chrono_like_now() -> String {
 /// Where the update goes. A copy that cannot be swapped in place — App Translocation (opened
 /// from Downloads or the DMG) or an unwritable folder — is installed into Applications instead,
 /// and the app relaunches from there; the stale copy in Downloads can be thrown away.
+///
+/// A bare macOS executable (detection missed the `.app`, or a non-bundle run) also installs
+/// into Applications as `Arbos.app`, so Update still works when the app is installed.
 fn install_target(install: &Install) -> anyhow::Result<(Install, bool)> {
-    if cfg!(target_os = "macos") && matches!(install, Install::Executable(_)) {
-        anyhow::bail!("not running from Arbos.app; install the app to update it");
-    }
+    // Resolve a Mac bundle path first (recovery when detect returned Executable).
+    let (install, forced_relocate) = if cfg!(target_os = "macos") {
+        match install {
+            Install::Executable(exe) => {
+                if let Some(bundle) = client::app_bundle_from_exe(exe) {
+                    (Install::MacBundle(bundle), false)
+                } else {
+                    (
+                        Install::MacBundle(client::applications_dir()?.join("Arbos.app")),
+                        true,
+                    )
+                }
+            }
+            Install::MacBundle(_) => (install.clone(), false),
+        }
+    } else {
+        (install.clone(), false)
+    };
     let path = install.path();
-    if client::is_translocated(path) || !client::parent_writable(path) {
-        let target = client::relocation_target(install)?;
+    if forced_relocate {
+        return Ok((install, true));
+    }
+    if matches!(install, Install::MacBundle(_))
+        && (client::is_translocated(path) || !client::parent_writable(path))
+    {
+        let target = client::relocation_target(&install)?;
         return Ok((Install::MacBundle(target), true));
     }
-    Ok((install.clone(), false))
+    Ok((install, false))
 }
 
 /// Is the running copy somewhere it cannot update itself (so the rail offers "Move to
@@ -440,8 +476,13 @@ async fn install(
     let payload = client::download(available, &key, &dir, Some(progress)).await?;
     log(format!("downloaded and verified {}", payload.display()));
     let _ = events.send(UpdateEvent::Installing);
-    // Staging reads the running bundle's layout (executable name); apply targets `install`.
-    let staged = client::stage(&payload, &available.item.version, &dir, &running)?;
+    // Staging reads a Mac bundle's layout (executable name). When the process was a bare
+    // executable, stage against the install target (Applications/Arbos.app) instead.
+    let layout = match (&running, &install) {
+        (Install::Executable(_), Install::MacBundle(_)) => install.clone(),
+        _ => running.clone(),
+    };
+    let staged = client::stage(&payload, &available.item.version, &dir, &layout)?;
     log(format!("staged {}", staged.display()));
     client::apply(&staged, &install)?;
     if relocated {
