@@ -163,6 +163,8 @@ pub struct AppState {
     pub voice_dispatched: Arc<Mutex<HashMap<String, i64>>>,
     /// What the voice worker last reported about itself (`POST /voice/worker/hello`).
     pub voice_worker: Arc<Mutex<Option<serde_json::Value>>>,
+    /// device_id → the app version it last reported (`X-Arbos-Client`), see `releases.rs`.
+    pub client_seen: Arc<crate::releases::ClientSeen>,
 }
 
 /// The agent's current activity as the box last reported it.
@@ -414,6 +416,7 @@ pub(crate) mod test_support {
             voice_conns: Arc::new(Mutex::new(HashMap::new())),
             voice_dispatched: Arc::new(Mutex::new(HashMap::new())),
             voice_worker: Arc::new(Mutex::new(None)),
+            client_seen: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 }

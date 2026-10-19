@@ -565,6 +565,7 @@ impl Db {
              CREATE INDEX IF NOT EXISTS goals_project ON goals(project_id, status);
              CREATE INDEX IF NOT EXISTS goals_moved ON goals(last_moved_at);",
         )?;
+        c.execute_batch(crate::releases::RELEASES_SCHEMA)?;
         Ok(Self(Arc::new(Mutex::new(c))))
     }
 

@@ -1,11 +1,21 @@
-//! In-app updates (D42). A tokio worker polls the appcast, downloads and
+//! In-app updates (D42, D85). A tokio worker polls the appcast, downloads and
 //! verifies on request, swaps the bundle, and asks the UI to relaunch. The
 //! UI reads [`UpdateState`] off `AppState` and shows one button in the rail.
 //!
+//! Automatic updates (D85, default on; Settings → Updates): a newer build is
+//! downloaded, verified and installed in the background as soon as the poll
+//! (every 5 min) or the relay's `release_published` push sees it; the app then
+//! relaunches at a safe moment — window not focused or no typing for a while —
+//! and otherwise shows "Restart now" in the rail with a one-minute countdown.
+//! Never during a call or while a key was just pressed. The open chat comes
+//! back after the relaunch (on-device store, `RestoreSelection`). The rail
+//! button stays the manual path (and the only path with the toggle off).
+//!
 //! Environment (all optional):
 //!   ARBOS_UPDATE_FEED            feed URL (default: the GitHub release appcast)
-//!   ARBOS_UPDATE_CHANNEL         `edge` (default: every green push to main) or `stable` (tags)
-//!   ARBOS_UPDATE_INTERVAL_SECS   poll interval (default 3600; first poll after 5 s)
+//!   ARBOS_UPDATE_CHANNEL         `edge` (every green push to main) or `stable` (tags; the default of tag builds)
+//!   ARBOS_UPDATE_INTERVAL_SECS   poll interval (default 300; first poll after 5 s)
+//!   ARBOS_UPDATE_AUTO=0|1        override the Settings toggle for this run
 //!   ARBOS_UPDATE_DISABLE=1       never poll (dev runs)
 //!
 //! Every check/install step is also appended to `~/Library/Logs/Arbos/update.log` (or
@@ -71,7 +81,50 @@ fn poll_interval() -> Duration {
         .ok()
         .and_then(|s| s.parse().ok())
         .map(Duration::from_secs)
-        .unwrap_or(Duration::from_secs(3600))
+        .unwrap_or(Duration::from_secs(300))
+}
+
+/// How long "Restart now" counts down before the app relaunches by itself (when it is safe).
+pub const RELAUNCH_COUNTDOWN_MS: u64 = 60_000;
+/// No keystroke for this long counts as "you paused": relaunch before the countdown ends.
+pub const IDLE_RELAUNCH_MS: u64 = 120_000;
+/// A keystroke this recent blocks the relaunch ("never mid-typing").
+pub const TYPING_GUARD_MS: u64 = 4_000;
+
+fn settings_path() -> std::path::PathBuf {
+    crate::sync::credentials::config_dir().join("settings.json")
+}
+
+fn read_settings() -> serde_json::Map<String, serde_json::Value> {
+    std::fs::read_to_string(settings_path())
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default()
+}
+
+/// The Settings → Updates toggle (`auto_update` in `<config>/settings.json`, default on);
+/// `ARBOS_UPDATE_AUTO` overrides it for one run.
+pub fn auto_update_enabled() -> bool {
+    if let Ok(v) = std::env::var("ARBOS_UPDATE_AUTO") {
+        return !matches!(v.trim(), "0" | "false" | "no" | "off");
+    }
+    read_settings()
+        .get("auto_update")
+        .and_then(|b| b.as_bool())
+        .unwrap_or(true)
+}
+
+pub fn save_auto_update(enabled: bool) {
+    let mut settings = read_settings();
+    settings.insert("auto_update".into(), serde_json::Value::Bool(enabled));
+    let path = settings_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(&serde_json::Value::Object(settings)) {
+        let _ = std::fs::write(path, json);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -88,6 +141,12 @@ pub enum UpdatePhase {
         total: Option<u64>,
     },
     Installing(Available),
+    /// Installed by the automatic path; waiting for a safe moment to relaunch. The rail shows
+    /// "Restart now" with the seconds left until it happens by itself.
+    Installed {
+        available: Available,
+        deadline_ms: u64,
+    },
     /// Installed; the app relaunches as soon as the UI calls `relaunch`.
     Restarting(Available),
     Failed {
@@ -104,6 +163,8 @@ pub struct UpdateState {
     pub last_checked_at: Option<u64>,
     /// The running copy is translocated or in an unwritable folder: offer "Move to Applications".
     pub needs_relocation: bool,
+    /// Settings → Updates → Automatic updates.
+    pub auto: bool,
 }
 
 impl UpdateState {
@@ -114,6 +175,7 @@ impl UpdateState {
             phase: UpdatePhase::Idle,
             last_checked_at: None,
             needs_relocation: needs_relocation(),
+            auto: auto_update_enabled(),
         }
     }
 
@@ -123,6 +185,7 @@ impl UpdateState {
             UpdatePhase::Available(a)
             | UpdatePhase::Downloading { available: a, .. }
             | UpdatePhase::Installing(a)
+            | UpdatePhase::Installed { available: a, .. }
             | UpdatePhase::Restarting(a) => Some(a),
             UpdatePhase::Failed { available, .. } => available.as_ref(),
             UpdatePhase::Idle | UpdatePhase::Checking | UpdatePhase::UpToDate => None,
@@ -173,6 +236,14 @@ impl UpdateState {
                 _ => "Downloading".into(),
             },
             UpdatePhase::Installing(_) => "Installing".into(),
+            UpdatePhase::Installed { deadline_ms, .. } => {
+                let left = deadline_ms.saturating_sub(now_ms()).div_ceil(1000);
+                if left > 0 {
+                    format!("Restart now · {left}s")
+                } else {
+                    "Restart now".into()
+                }
+            }
             UpdatePhase::Restarting(_) => "Restarting".into(),
             UpdatePhase::Failed { .. } => "Retry".into(),
             UpdatePhase::Idle | UpdatePhase::Checking | UpdatePhase::UpToDate => String::new(),
@@ -204,6 +275,23 @@ impl UpdateState {
                 format!("Downloading {}…", available.item.version)
             }
             UpdatePhase::Installing(a) => format!("Installing {}…", a.item.version),
+            UpdatePhase::Installed {
+                available,
+                deadline_ms,
+            } => {
+                let left = deadline_ms.saturating_sub(now_ms()).div_ceil(1000);
+                if left > 0 {
+                    format!(
+                        "Arbos {} is installed · restarts in {left}s, or when you pause",
+                        available.item.version
+                    )
+                } else {
+                    format!(
+                        "Arbos {} is installed · restarts as soon as you pause",
+                        available.item.version
+                    )
+                }
+            }
             UpdatePhase::Restarting(a) => format!("Restarting into {}…", a.item.version),
             UpdatePhase::Failed { message, .. } => {
                 // The full text is in ~/Library/Logs/Arbos/update.log; the
@@ -380,6 +468,13 @@ fn chrono_like_now() -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     format!("{secs}")
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Where the update goes. A copy that cannot be swapped in place — App Translocation (opened

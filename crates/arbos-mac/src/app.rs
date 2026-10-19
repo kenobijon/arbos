@@ -366,6 +366,12 @@ pub struct AppState {
     pub channels: ChannelsView,
     /// In-app update (D42): what the rail button and settings show.
     pub update: UpdateState,
+    /// Automatic update installed; where the new app lives, until the safe-moment relaunch.
+    pending_relaunch: Option<arbos_update::client::Install>,
+    /// Last composer keystroke (any chat): the "never mid-typing" guard for the relaunch.
+    last_input_at: u64,
+    /// A version the automatic install already failed on: offer it in the rail, do not loop.
+    auto_update_failed: Option<String>,
     /// Settings → This Mac (F9).
     pub local: LocalView,
     /// F11: replies are spoken and a mic transcript sends at once.
@@ -608,6 +614,9 @@ impl AppState {
             focus_sent: None,
             channels: ChannelsView::default(),
             update: update_state,
+            pending_relaunch: None,
+            last_input_at: 0,
+            auto_update_failed: None,
             local: LocalView::default(),
             voice_mode: false,
             spoken: HashSet::new(),
@@ -647,14 +656,15 @@ impl AppState {
             }
             UpdateEvent::UpToDate => {
                 self.update.last_checked_at = Some(now_ms());
-                if !self.update.busy() {
+                if !self.update.busy() && self.pending_relaunch.is_none() {
                     self.update.phase = UpdatePhase::UpToDate;
                 }
             }
             UpdateEvent::Available(available) => {
                 let available = *available;
                 self.update.last_checked_at = Some(now_ms());
-                if !self.update.busy() {
+                // An installed build waiting for its relaunch outranks whatever the feed says now.
+                if !self.update.busy() && self.pending_relaunch.is_none() {
                     // Never offer a build that is not strictly newer than what is running.
                     if !arbos_update::version::is_newer(
                         &available.item.version,
@@ -663,11 +673,21 @@ impl AppState {
                         self.update.phase = UpdatePhase::UpToDate;
                     } else {
                         let fresh = self.update.available() != Some(&available);
-                        self.update.phase = UpdatePhase::Available(available.clone());
-                        if fresh {
+                        let version = available.item.version.clone();
+                        self.update.phase = UpdatePhase::Available(available);
+                        let auto = self.update.auto
+                            && !self.update.needs_relocation
+                            && self.auto_update_failed.as_deref() != Some(version.as_str());
+                        if auto {
+                            // D85: download, verify and install in the background; the
+                            // relaunch waits for a safe moment.
+                            update::log(format!(
+                                "auto-update: installing {version} in the background"
+                            ));
+                            self.install_update(cx);
+                        } else if fresh {
                             self.push_notice(format!(
-                                "Arbos {} is ready to install — press Update in the rail.",
-                                available.item.version
+                                "Arbos {version} is ready to install — press Update in the rail."
                             ));
                         }
                     }
@@ -688,9 +708,6 @@ impl AppState {
                 }
             }
             UpdateEvent::Installed(installed) => {
-                if let Some(available) = self.update.available().cloned() {
-                    self.update.phase = UpdatePhase::Restarting(available);
-                }
                 if self.update.needs_relocation {
                     self.update.needs_relocation = false;
                     self.push_notice(format!(
@@ -701,30 +718,60 @@ impl AppState {
                             .map(|p| p.display().to_string())
                             .unwrap_or_else(|| "Applications".into())
                     ));
+                    self.relaunch_into(installed, cx);
+                    return;
                 }
-                // One frame shows "Restarting", then the relauncher takes over.
-                cx.spawn(async move |this, cx| {
+                let Some(available) = self.update.available().cloned() else {
+                    self.relaunch_into(installed, cx);
+                    return;
+                };
+                if !self.update.auto {
+                    // Manual path (toggle off): the click on Update meant "now".
+                    self.relaunch_into(installed, cx);
+                    return;
+                }
+                // Automatic path: relaunch when it is safe, at the latest after the countdown
+                // (unless a call or typing is in the way).
+                let version = available.item.version.clone();
+                self.update.phase = UpdatePhase::Installed {
+                    available,
+                    deadline_ms: now_ms() + update::RELAUNCH_COUNTDOWN_MS,
+                };
+                self.pending_relaunch = Some(installed);
+                update::log(format!(
+                    "auto-update: {version} installed; waiting for a safe moment to relaunch"
+                ));
+                if self.try_relaunch(cx) {
+                    return;
+                }
+                self.push_notice(format!(
+                    "Arbos {version} is installed — it restarts in a minute or when you pause. \
+                     Press Restart now in the rail to do it at once."
+                ));
+                cx.spawn(async move |this, cx| loop {
                     cx.background_executor()
-                        .timer(std::time::Duration::from_millis(700))
+                        .timer(std::time::Duration::from_millis(1000))
                         .await;
-                    let _ = this.update(cx, |state, cx| match update::relaunch(&installed) {
-                        Ok(()) => cx.quit(),
-                        Err(err) => {
-                            update::log(format!("relaunch failed: {err:#}"));
-                            state.push_notice(
-                                "Arbos was updated but could not relaunch itself — quit and open Arbos again.",
-                            );
-                            state.update.phase = UpdatePhase::Failed {
-                                message: format!("installed, but could not relaunch: {err:#}"),
-                                available: state.update.available().cloned(),
-                            };
-                            cx.notify();
+                    let done = this.update(cx, |state, cx| {
+                        if state.pending_relaunch.is_none() {
+                            return true;
                         }
+                        let relaunched = state.try_relaunch(cx);
+                        cx.notify();
+                        relaunched
                     });
+                    if done.unwrap_or(true) {
+                        break;
+                    }
                 })
                 .detach();
             }
             UpdateEvent::Failed(message) => {
+                if let Some(a) = self.update.available() {
+                    if self.update.auto {
+                        self.auto_update_failed = Some(a.item.version.clone());
+                    }
+                }
                 // A quiet "Retry" in the rail is not enough: say what went wrong and offer the
                 // download page.
                 self.push_notice(format!(
@@ -735,6 +782,91 @@ impl AppState {
                     available: self.update.available().cloned(),
                     message,
                 };
+            }
+        }
+        cx.notify();
+    }
+
+    /// Is this a moment the app may restart itself? Never in a call or right after a keystroke;
+    /// otherwise when the window is not focused, when nothing was typed for a while, or when the
+    /// countdown is over.
+    fn relaunch_is_safe(&self) -> bool {
+        let now = now_ms();
+        if self.my_call.is_some() || self.incoming_call.is_some() {
+            return false;
+        }
+        if now.saturating_sub(self.last_input_at) < update::TYPING_GUARD_MS {
+            return false;
+        }
+        let countdown_over = match &self.update.phase {
+            UpdatePhase::Installed { deadline_ms, .. } => now >= *deadline_ms,
+            UpdatePhase::Idle
+            | UpdatePhase::Checking
+            | UpdatePhase::UpToDate
+            | UpdatePhase::Available(_)
+            | UpdatePhase::Downloading { .. }
+            | UpdatePhase::Installing(_)
+            | UpdatePhase::Restarting(_)
+            | UpdatePhase::Failed { .. } => true,
+        };
+        !self.window_active
+            || now.saturating_sub(self.last_input_at) >= update::IDLE_RELAUNCH_MS
+            || countdown_over
+    }
+
+    /// Relaunch into the pending install when it is safe; true when the relaunch was started.
+    fn try_relaunch(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.pending_relaunch.is_none() || !self.relaunch_is_safe() {
+            return false;
+        }
+        let Some(installed) = self.pending_relaunch.take() else {
+            return false;
+        };
+        update::log("auto-update: safe moment — relaunching");
+        self.relaunch_into(installed, cx);
+        true
+    }
+
+    /// One frame shows "Restarting", then the relauncher takes over.
+    fn relaunch_into(&mut self, installed: arbos_update::client::Install, cx: &mut Context<Self>) {
+        if let Some(available) = self.update.available().cloned() {
+            self.update.phase = UpdatePhase::Restarting(available);
+        }
+        self.pending_relaunch = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(700))
+                .await;
+            let _ = this.update(cx, |state, cx| match update::relaunch(&installed) {
+                Ok(()) => cx.quit(),
+                Err(err) => {
+                    update::log(format!("relaunch failed: {err:#}"));
+                    state.push_notice(
+                        "Arbos was updated but could not relaunch itself — quit and open Arbos again.",
+                    );
+                    state.update.phase = UpdatePhase::Failed {
+                        message: format!("installed, but could not relaunch: {err:#}"),
+                        available: state.update.available().cloned(),
+                    };
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Settings → Updates → Automatic updates.
+    pub fn set_auto_update(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.update.auto != enabled {
+            self.update.auto = enabled;
+            update::save_auto_update(enabled);
+            update::log(format!(
+                "auto-update: {}",
+                if enabled { "on" } else { "off" }
+            ));
+            if enabled && matches!(self.update.phase, UpdatePhase::Available(_)) {
+                self.install_update(cx);
             }
         }
         cx.notify();
@@ -767,6 +899,14 @@ impl AppState {
     /// read-only copy the new version is installed into Applications instead.
     pub fn install_update(&mut self, cx: &mut Context<Self>) {
         if self.update.busy() {
+            return;
+        }
+        if matches!(self.update.phase, UpdatePhase::Installed { .. }) {
+            // "Restart now": the automatic install is done; skip the wait.
+            if let Some(installed) = self.pending_relaunch.take() {
+                update::log("auto-update: Restart now pressed");
+                self.relaunch_into(installed, cx);
+            }
             return;
         }
         if self.update.button_moves() {
@@ -1130,6 +1270,15 @@ impl AppState {
             SyncEvent::StoreUsage { bytes, chats } => {
                 self.store_usage = (bytes, chats);
                 cx.notify();
+            }
+            SyncEvent::ReleasePublished { platform, version } => {
+                // The relay says a build is out: check the appcast now instead of at the next poll.
+                if platform == "mac" {
+                    update::log(format!(
+                        "release_published push: {version}; checking the feed"
+                    ));
+                    self.check_for_updates(cx);
+                }
             }
             SyncEvent::ProjectStatus {
                 project_id,
@@ -3557,6 +3706,7 @@ impl AppState {
 
     /// Composer keystroke in a people chat: at most one presence ping per 3 s.
     pub fn typed_in(&mut self, chat_id: &Id) {
+        self.last_input_at = now_ms();
         let Some(space) = self.project_of_chat(chat_id) else {
             return;
         };

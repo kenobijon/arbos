@@ -1061,6 +1061,7 @@ struct TextSizePage: View {
 }
 
 struct AboutPage: View {
+    @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
 
     var body: some View {
@@ -1069,7 +1070,23 @@ struct AboutPage: View {
                 SettingsValueRow("Version", value: SettingsView.versionLine)
                 SettingsValueRow("Protocol", value: "room proto \(protoVersion) · Loro")
             }
+            // Continuous delivery (D85): every fix ships as a TestFlight build; the newest one is
+            // one tap away, and TestFlight can install it by itself.
+            SettingsGroup(footer: "New builds arrive through TestFlight within minutes of a fix. To install them without a tap, open TestFlight → Arbos and turn on Automatic Updates.") {
+                if let update = model.availableUpdate {
+                    Button { model.openTestFlight() } label: {
+                        SettingsValueRow("Update available") {
+                            Text("Build \(update.build) · Update").foregroundStyle(theme.primary)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("about-update-row")
+                } else {
+                    SettingsValueRow("Updates", value: "Up to date")
+                }
+            }
         }
+        .task { await model.checkForUpdate() }
     }
 }
 

@@ -908,6 +908,7 @@ mod tests {
             voice_conns: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             voice_dispatched: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             voice_worker: Arc::new(tokio::sync::Mutex::new(None)),
+            client_seen: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 

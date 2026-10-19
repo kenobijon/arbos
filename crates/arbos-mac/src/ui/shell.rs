@@ -1946,11 +1946,15 @@ impl Shell {
         let store_usage = state.store_usage;
         let update = state.update.clone();
         let update_failed = matches!(update.phase, crate::update::UpdatePhase::Failed { .. });
+        let auto_update = update.auto;
         let update_action: Option<(&'static str, &'static str, bool)> = match &update.phase {
             crate::update::UpdatePhase::Available(_)
             | crate::update::UpdatePhase::Failed {
                 available: Some(_), ..
             } => Some(("update-install", "Install and relaunch", true)),
+            crate::update::UpdatePhase::Installed { .. } => {
+                Some(("update-restart", "Restart now", true))
+            }
             crate::update::UpdatePhase::Idle
             | crate::update::UpdatePhase::UpToDate
             | crate::update::UpdatePhase::Failed {
@@ -2470,29 +2474,66 @@ impl Shell {
                 ),
             );
         }
-        let group = settings_group(&theme).child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(10.0))
-                .min_h(px(44.0))
-                .px(px(16.0))
-                .py(px(10.0))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_size(px(TEXT_BODY))
-                        .text_color(if update_failed {
-                            theme.danger
-                        } else {
-                            theme.text
-                        })
-                        .child(update.status_line()),
-                )
-                .child(actions),
-        );
-        body = body.child(section("Updates", group, None, &theme));
+        let group = settings_group(&theme)
+            .child(seg_row(
+                "Automatic updates",
+                div()
+                    .flex()
+                    .gap(px(2.0))
+                    .child(
+                        glass::segment("auto-update-on", "On", auto_update, &theme).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.state.update(cx, |s, cx| s.set_auto_update(true, cx));
+                            }),
+                        ),
+                    )
+                    .child(
+                        glass::segment("auto-update-off", "Off", !auto_update, &theme).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.state.update(cx, |s, cx| s.set_auto_update(false, cx));
+                            }),
+                        ),
+                    ),
+                &theme,
+            ))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .min_h(px(44.0))
+                    .px(px(16.0))
+                    .py(px(10.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(TEXT_BODY))
+                            .text_color(if update_failed {
+                                theme.danger
+                            } else {
+                                theme.text
+                            })
+                            .child(update.status_line()),
+                    )
+                    .child(actions),
+            );
+        body = body.child(section(
+            "Updates",
+            group,
+            Some(footnote(
+                if auto_update {
+                    "New versions install in the background and Arbos restarts when you pause — \
+                     never during a call or while you type. The open chat comes back."
+                        .into()
+                } else {
+                    "Arbos only tells you about new versions; press Update in the rail to install."
+                        .into()
+                },
+                &theme,
+            )),
+            &theme,
+        ));
 
         // More: the feature pages, pushed inside this sheet (#1086).
         let page_row = |id: &'static str,

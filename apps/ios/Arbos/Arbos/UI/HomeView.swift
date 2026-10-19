@@ -84,6 +84,12 @@ struct HomeView: View {
                             .accessibilityIdentifier("home-search-empty")
                     } else {
                         if searchQuery.isEmpty {
+                            if let update = model.availableUpdate {
+                                UpdateCard(update: update)
+                                    .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
+                                    .listRowSeparator(.hidden)
+                                    .listRowBackground(theme.bg)
+                            }
                             ForEach(model.approvals) { device in
                                 ApprovalCard(device: device)
                                     .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
@@ -758,6 +764,48 @@ struct HomeView: View {
             return date.formatted(.dateTime.weekday(.wide))
         }
         return date.formatted(.dateTime.month(.abbreviated).day())
+    }
+}
+
+/// "Update available" — a newer TestFlight build is out (continuous delivery, D85). One tap opens
+/// TestFlight on Arbos; "Later" hides the card for this build.
+struct UpdateCard: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    let update: AvailableBuild
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                GlassCircle(size: 36) {
+                    Image(systemName: "arrow.down.circle.fill").font(.system(size: 17)).foregroundStyle(theme.text)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Arbos update available").font(theme.font(Theme.body, weight: .semibold)).foregroundStyle(theme.text)
+                    Text("TestFlight build \(update.build) · you run \(AppModel.runningBuild)").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+                }
+                Spacer()
+            }
+            HStack(spacing: 10) {
+                Button { model.dismissUpdate() } label: {
+                    Text("Later").font(theme.font(Theme.small, weight: .semibold)).foregroundStyle(theme.text)
+                        .frame(maxWidth: .infinity).frame(height: 38)
+                        .background(Capsule().fill(theme.field)).overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                Button { model.openTestFlight() } label: {
+                    Text("Update").font(theme.font(Theme.small, weight: .semibold)).foregroundStyle(theme.onPrimary)
+                        .frame(maxWidth: .infinity).frame(height: 38)
+                        .background(Capsule().fill(theme.primary))
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("home-update-button")
+            }
+        }
+        .padding(14)
+        .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
+        .padding(.top, 10)
+        .accessibilityIdentifier("home-update-card")
     }
 }
 

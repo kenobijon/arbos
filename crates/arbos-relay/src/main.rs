@@ -28,6 +28,7 @@ mod migrate;
 mod notify;
 mod people;
 mod proxy;
+mod releases;
 mod rooms;
 mod routines;
 mod secrets;
@@ -297,6 +298,7 @@ async fn main() -> anyhow::Result<()> {
         voice_conns: Arc::new(Mutex::new(HashMap::new())),
         voice_dispatched: Arc::new(Mutex::new(HashMap::new())),
         voice_worker: Arc::new(Mutex::new(None)),
+        client_seen: Arc::new(std::sync::Mutex::new(HashMap::new())),
     };
     tracing::info!(auth_mode = auth_mode.as_str(), public_url = %state.cfg.public_url, "sign-in");
     if state.cfg.connectors_mock {
@@ -375,6 +377,9 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/livekit/webhook", post(calls::livekit_webhook))
         .route("/admin/calls", get(calls::admin_calls))
+        .route("/admin/release", post(releases::admin_release))
+        .route("/admin/installs", get(releases::admin_installs))
+        .route("/releases/current", get(releases::current))
         .route("/box/voice", get(voice::ws_box_voice))
         .route("/voice/calls/{id}", get(voice::call_info))
         .route("/voice/calls/{id}/tool", post(voice::call_tool))

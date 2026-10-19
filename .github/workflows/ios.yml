@@ -57,6 +57,7 @@ jobs:
     timeout-minutes: 45
     env:
       APP_DIR: apps/ios/Arbos
+      HAVE_OP: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN != '' }}
       UPLOAD: >-
         ${{ (github.event_name == 'workflow_dispatch' && inputs.upload) ||
             (github.event_name == 'push' && github.ref_name == 'main') }}
@@ -157,6 +158,37 @@ jobs:
           # What to test = the first line of the commit message.
           CHANGELOG="$(printf '%s' "$CHANGELOG" | head -1)" AC_API_KEY_P8="" AC_API_KEY_PATH="$key_path" fastlane distribute
           echo "Build $BUILD_NUMBER added to TestFlight group(s) $TESTFLIGHT_GROUPS and submitted for Beta App Review." >> "$GITHUB_STEP_SUMMARY"
+      # Continuous delivery (D85): the build is processed and in the tester group, so the relay
+      # learns about it (GET /releases/current → the app's "Update available" card; push
+      # `release_published`). Best effort — TestFlight already has the build.
+      - name: Relay admin token from 1Password
+        if: env.UPLOAD == 'true' && env.HAVE_OP == 'true'
+        uses: 1password/load-secrets-action@v2
+        with:
+          export-env: true
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          ARBOS_RELAY_ADMIN_TOKEN: op://Arbos/pjwsl7tjrhcbzbqos2masde2u4/credential
+      - name: Tell the relay
+        if: env.UPLOAD == 'true'
+        env:
+          BUILD_NUMBER: ${{ steps.build.outputs.number }}
+          RELAY_URL: ${{ vars.ARBOS_RELAY_URL || 'https://relay.arbos.life' }}
+        run: |
+          set +x
+          if [[ -z "${ARBOS_RELAY_ADMIN_TOKEN:-}" ]]; then
+            echo "::warning::no relay admin token; the phones will not see the Update card until the next build that reports it"
+            exit 0
+          fi
+          version="$(sed -n 's/.*MARKETING_VERSION = \([0-9.]*\);.*/\1/p' "$APP_DIR/Arbos.xcodeproj/project.pbxproj" | head -1)"
+          body="$(printf '{"platform":"ios","channel":"testflight","version":"%s","build":"%s","url":"%s"}' \
+            "${version:-1.0.0}" "$BUILD_NUMBER" "https://testflight.apple.com/join/ec5fWCuJ")"
+          if curl -fsS --max-time 30 -X POST "$RELAY_URL/admin/release" \
+               -H "Authorization: Bearer $ARBOS_RELAY_ADMIN_TOKEN" -H "content-type: application/json" -d "$body"; then
+            echo; echo "relay told: TestFlight $BUILD_NUMBER"
+          else
+            echo "::warning::relay did not accept the release notice (older relay?); the Update card waits for the next build"
+          fi
       - name: Keep the xcodebuild logs
         if: always()
         uses: actions/upload-artifact@v4
