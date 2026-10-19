@@ -454,6 +454,10 @@ class GitHub:
                     return a["browser_download_url"]
             raise
 
+    def comments_since(self, number: int, since_iso: str) -> list[dict]:
+        q = urllib.parse.urlencode({"since": since_iso, "per_page": 50})
+        return self.repo_api("GET", f"/issues/{number}/comments?{q}")
+
     def commits_since(self, since_iso: str) -> list[dict]:
         q = urllib.parse.urlencode({"sha": "main", "since": since_iso, "per_page": 100})
         return self.repo_api("GET", f"/commits?{q}")
@@ -1186,32 +1190,9 @@ class Loop:
             summary = summary[:67].rstrip() + "…"
         return f"[feedback {fid}] {summary}"
 
-    def launch(self, fid: str, st: dict) -> None:
-        info = self.store.submission(fid)
-        st.setdefault("tester_key", self.tester_key(info))
-        if not st.get("tier"):
-            # Items queued before tiers existed.
-            st["tier"] = self.tier(info)
-            st["tester"] = self.tester_label(info, st["tier"])
-            self.store.save_state(fid, st)
-        deferral = self.deferral_for(info, st.get("target") or self.pick_target(info))
-        reason = None if deferral else self.rate_limit_reason(st)
-        if reason:
-            if st.get("deferred_reason") != reason.split(" (")[0]:
-                st["deferred_reason"] = reason.split(" (")[0]
-                self.store.save_state(fid, st)
-                log(f"[{fid}] deferred: {reason}")
-            return
-        shots = self.store.screenshots(fid)
-        # TestFlight lets a tester send words without a screenshot; the comment is the evidence then
-        # (same as a relayed chat report). Only an item with neither image nor words cannot run.
-        if not shots and not (info.get("comment") or "").strip():
-            st.update(status="failed", error="no screenshot and no comment")
-            self.store.save_state(fid, st)
-            self.store.event(fid, "failed", error="no screenshot and no comment")
-            return
-
-        # 1. screenshot assets + issue
+    def open_issue(self, fid: str, st: dict, info: dict, deferral: str | None, shots: list[Path]) -> bool:
+        """Screenshots to the release assets, intent screen, GitHub issue (labels, agent evidence). False = the
+        item stops here (screened as malicious, or deferred by rule); True = ready for an agent."""
         asset_urls = []
         for n, p in enumerate(shots, start=1):
             asset_urls.append(self.gh.upload_asset(p, f"{fid}-{n}{p.suffix.lower()}", mime_for(p)))
@@ -1271,14 +1252,47 @@ class Loop:
             self.store.event(fid, "rejected", reason=why, tester=st.get("tester"))
             self.gh.comment(issue["number"], f"Not built: the intent screen flagged this as obviously malicious ({why}). "
                             "Jacob, if this is a false positive, say so here and I will run it by hand.")
-            return
+            return False
         if deferral:
             st.update(status="deferred", error=deferral)
             self.store.save_state(fid, st)
             self.store.event(fid, "deferred", reason=deferral, tester=st.get("tester"))
             self.gh.comment(issue["number"], deferral)
             self.gh.set_labels(issue["number"], ["deferred"], [])
+            return False
+        return True
+
+    def launch(self, fid: str, st: dict) -> None:
+        info = self.store.submission(fid)
+        st.setdefault("tester_key", self.tester_key(info))
+        if not st.get("tier"):
+            # Items queued before tiers existed.
+            st["tier"] = self.tier(info)
+            st["tester"] = self.tester_label(info, st["tier"])
+            self.store.save_state(fid, st)
+        deferral = self.deferral_for(info, st.get("target") or self.pick_target(info))
+        shots = self.store.screenshots(fid)
+        # TestFlight lets a tester send words without a screenshot; the comment is the evidence then
+        # (same as a relayed chat report). Only an item with neither image nor words cannot run.
+        if not shots and not (info.get("comment") or "").strip():
+            st.update(status="failed", error="no screenshot and no comment")
+            self.store.save_state(fid, st)
+            self.store.event(fid, "failed", error="no screenshot and no comment")
             return
+        # 1. The issue is opened as soon as the item is admitted (dedupe already happened), so every report is
+        # visible and claimable at once; only the agent launch waits for the launch rate limits.
+        if not st.get("issue") or (st.get("screen_override") and "operator override" not in (st.get("screen") or "")):
+            if not self.open_issue(fid, st, info, deferral, shots):
+                return
+        reason = None if deferral else self.rate_limit_reason(st)
+        if reason:
+            if st.get("deferred_reason") != reason.split(" (")[0]:
+                st["deferred_reason"] = reason.split(" (")[0]
+                self.store.save_state(fid, st)
+                log(f"[{fid}] deferred: {reason}")
+            return
+        issue = {"number": st["issue"], "html_url": st["issue_url"]}
+        t = self.target_info(st["target"])
 
         # 2. Cursor agent
         images = []
@@ -1445,6 +1459,14 @@ class Loop:
         st["gated_head"] = head
         retries = st.get("gate_retries", 0)
         label = {"ios": "iOS build", "rust": "Rust gate (fmt, clippy -D warnings, test, arbos-mac release build)"}[which]
+        if st.get("handed_off_to"):
+            # Not the loop's agent: the owner reads the issue and pushes a new commit, which re-gates.
+            st["status"] = "handed_off"
+            self.store.save_state(fid, st)
+            self.gh.comment(st["issue"], f"{label.split(' (')[0]} gate: `{st['branch']}`@{head[:8]} is red — not merged. "
+                            f"{st['handed_off_to']}: fix and push a new commit to the same branch (no force-push) to re-gate.\n\n```\n"
+                            + "\n".join(output.splitlines()[-40:]) + "\n```")
+            return
         if retries >= 2:
             self.fail(fid, st, f"the {label} of `{st['branch']}` failed {retries + 1} times on the gate Mac; not merged", extra=output)
             return
@@ -1481,6 +1503,13 @@ class Loop:
         head = st["branch_head"]
         st["gated_head"] = head
         retries = st.get("gate_retries", 0)
+        if st.get("handed_off_to"):
+            st["status"] = "handed_off"
+            self.store.save_state(fid, st)
+            self.gh.comment(st["issue"], f"`{st['branch']}`@{head[:8]} conflicts with `main` — not merged. {st['handed_off_to']}: "
+                            "merge `origin/main` into the branch (a merge, never a rebase), resolve, push; the loop re-gates."
+                            + (f"\n\n```\n{detail[-2000:]}\n```" if detail else ""))
+            return
         if retries >= 2:
             self.fail(fid, st, f"`{st['branch']}` conflicts with main and the agent could not resolve it", extra=detail)
             return
@@ -1678,6 +1707,13 @@ class Loop:
                                 "Waiting for Apple to finish processing.")
             else:
                 errors = self.gh.run_error_lines(ios["id"])
+                if st.get("handed_off_to") and not st.get("ios_failed_noted"):
+                    st["ios_failed_noted"] = True
+                    self.store.save_state(fid, st)
+                    self.gh.comment(st["issue"], f"The iOS build on `main` failed after the merge ({ios['html_url']}). {st['handed_off_to']}: "
+                                    f"push the repair as a new commit on `feedback/{fid}` from `origin/main` (the loop gates and merges it).\n\n```\n"
+                                    + "\n".join(errors or ["(no error lines captured; open the run)"]) + "\n```")
+                    return
                 if st.get("retries", 0) < 1:
                     st["retries"] = st.get("retries", 0) + 1
                     reason = self.rate_limit_reason()
@@ -1766,7 +1802,13 @@ class Loop:
                 self.gh.comment(st["issue"], f"Release workflow failed: {rel['html_url']} (the iOS build is unaffected).")
         if st.get("expects_ci") and ci and ci["status"] == "completed" and ci["conclusion"] != "success" and not st.get("ci_failed_noted"):
             errors = self.gh.run_error_lines(ci["id"])
-            if st.get("retries", 0) < 1 and not (self.rate_limit_reason() or "").endswith("already today"):
+            if st.get("handed_off_to"):
+                st["ci_failed_noted"] = True
+                self.store.save_state(fid, st)
+                self.gh.comment(st["issue"], f"CI on `main` failed after the merge ({ci['html_url']}). {st['handed_off_to']}: push the repair as a "
+                                f"new commit on `feedback/{fid}` from `origin/main` (the loop gates and merges it).\n\n```\n"
+                                + "\n".join(errors or ["(no error lines captured; open the run)"]) + "\n```")
+            elif st.get("retries", 0) < 1 and not (self.rate_limit_reason() or "").endswith("already today"):
                 followup = (f"CI on `main` failed after your push ({ci['html_url']}): fmt, clippy (-D warnings) or tests. "
                             "Fix it with the smallest change, run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings` "
                             f"and `cargo test --workspace --locked` before pushing, keep the commit message shape (`fix(feedback): <summary> [feedback {fid}]`), "
@@ -1899,6 +1941,10 @@ class Loop:
         except Exception as e:  # noqa: BLE001
             log(f"TestFlight reconciliation failed: {e}")
         try:
+            self.watch_claims()
+        except Exception as e:  # noqa: BLE001
+            log(f"claim watch failed: {e}")
+        try:
             self.watch_deploys()
         except Exception as e:  # noqa: BLE001
             log(f"deploy watch failed: {e}")
@@ -1910,14 +1956,99 @@ class Loop:
 
     # ---- handed-off items: a dedicated worker fixes them; the loop still tracks the landing -------
 
+    CLAIM_RE = re.compile(r"\b(claim(ed|ing|s)?|taking( over)?|take over|handoff|hand-off|owned by)\b.*?\b(bc-[0-9a-f]{8}[0-9a-f-]*)", re.I | re.S)
+
+    def watch_claims(self) -> None:
+        """A dedicated worker claims an item by commenting on its issue — any sentence with "claim"/"taking"/
+        "take over" and its agent id (`bc-…`). Queued, failed, no-change or deferred items hand off at once;
+        an item the loop's own agent is mid-fix on (running/gating) hands off only when the comment says
+        "take over" (the run is cancelled), otherwise the loop answers and keeps its agent. The worker then
+        pushes `feedback/<id>` (gated and merged by the loop, see watch_handoffs) or lands a commit tagged
+        `[feedback <id>]` on main."""
+        cur = self.store.cursor()
+        since = cur.get("claims_checked") or iso()
+        now = iso()
+        for fid in self.store.items():
+            st = self.store.state(fid)
+            if not st.get("issue") or st.get("status") not in ("queued", "running", "gating", "failed", "no_change", "deferred", "rejected"):
+                continue
+            try:
+                comments = self.gh.comments_since(st["issue"], since)
+            except HttpError as e:
+                log(f"[{fid}] claims: comments fetch failed HTTP {e.status}")
+                continue
+            for c in comments:
+                body = c.get("body") or ""
+                if "scripts/feedback/feedback_poller.py" in body or body.startswith(("Cursor agent started", "Merged to", "Handed off", "Pushed to")):
+                    continue
+                m = self.CLAIM_RE.search(body)
+                if not m:
+                    continue
+                owner = m.group(4)
+                mid_fix = st.get("status") in ("running", "gating")
+                if mid_fix and not re.search(r"\btak(e|ing) ?over\b", body, re.I):
+                    self.gh.comment(st["issue"], f"The loop's own agent is mid-fix on this one ({st.get('agent_url') or 'running'}, state `{st['status']}`); "
+                                    f"it keeps it. Comment `take over bc-…` if {owner} should have it instead — the run is cancelled and the item handed off.")
+                    log(f"[{fid}] claim by {owner} declined: loop agent mid-fix ({st['status']})")
+                    break
+                self.hand_off(fid, st, owner, label="handed-off", by="claim comment")
+                break
+        cur["claims_checked"] = now
+        self.store.save_cursor(cur)
+
+    def hand_off(self, fid: str, st: dict, owner: str, label: str = "handed-off", by: str = "operator") -> None:
+        """A dedicated worker owns this item: cancel the loop's agent run, track the branch/commit, label the issue."""
+        if st.get("status") in ("running", "gating") and st.get("agent_id") and st.get("run_id"):
+            self.cursor.cancel(st["agent_id"], st["run_id"])
+        if st.get("status") == "gating" and (self.store.cursor().get("rust_gate") or {}).get("fid") == fid:
+            # Its Rust gate run, if any, finishes on its own; the result is simply not consumed.
+            cur = self.store.cursor(); cur.pop("rust_gate", None); self.store.save_cursor(cur)
+        st.update(status="handed_off", handed_off_to=owner, handed_off_at=iso(), track_commit=True)
+        for k in ("branch_head", "gated_head", "gate", "rust_gate"):
+            st.pop(k, None)
+        self.store.save_state(fid, st)
+        self.store.event(fid, "handed_off", label=owner, by=by, previous_status=st.get("run_status"))
+        if st.get("issue"):
+            self.gh.ensure_label(label, "5319E7", "Owned by a dedicated workstream; the loop does not patch it")
+            self.gh.ensure_label("in-progress", "FBCA04", "Being built by a planned workstream")
+            self.gh.comment(st["issue"], f"Handed off to {owner}: the loop's agent stops here. To land the fix push a branch `feedback/{fid}` "
+                            f"(commit message `fix(feedback): <summary> [feedback {fid}]`, no force-push): the loop runs the Rust gate "
+                            "(fmt, clippy -D warnings, test, arbos-mac release build; branch merged with current main) and the iOS gate on it, "
+                            "merges it into `main` when green and tracks it to the builds — a red gate is posted here with the diagnostics, "
+                            "push a new commit to re-gate. A commit tagged `[feedback <id>]` that reaches `main` directly is tracked too.")
+            self.gh.set_labels(st["issue"], [label, "in-progress"], ["shipped", "needs-human", "no-change"])
+
     def watch_handoffs(self) -> None:
-        """A handed-off item whose owner tags the commit `[feedback <id>]` is picked up when that commit
-        reaches main: the item becomes shipped-or-landed like a loop fix (iOS/Mac parts through the
-        builds, voice/agentd/relay parts through watch_deploys), so the audit follows it to the fleet."""
+        """A handed-off item is picked up two ways: its owner pushes `feedback/<id>` (the loop gates and merges it
+        like one of its own, diagnostics go to the issue instead of an agent), or tags a commit `[feedback <id>]`
+        that reaches main. Either way the item becomes shipped-or-landed like a loop fix (iOS/Mac parts
+        through the builds, voice/agentd/relay parts through watch_deploys), so the audit follows it."""
         for fid in self.store.items():
             st = self.store.state(fid)
             if st.get("status") != "handed_off" or st.get("commit") or not st.get("track_commit"):
                 continue
+            head = self.gh.branch_head(f"feedback/{fid}")
+            if head and head != st.get("gated_head"):
+                cmp = self.gh.compare("main", head)
+                tagged = any(f"[feedback {fid}]" in c["commit"]["message"] for c in cmp.get("commits", []))
+                if cmp.get("status") in ("ahead", "diverged") and tagged:
+                    files = [f["filename"] for f in cmp.get("files", [])]
+                    if not files:
+                        seen: list[str] = []
+                        for c in cmp.get("commits", []):
+                            if f"[feedback {fid}]" in c["commit"]["message"]:
+                                for f in self.gh.commit(c["sha"]).get("files", []):
+                                    if f["filename"] not in seen:
+                                        seen.append(f["filename"])
+                        files = seen
+                    st.update(status="gating", branch=f"feedback/{fid}", branch_head=head, files=files,
+                              expects_ios=any(f.startswith("apps/ios/") or f == ".github/workflows/ios.yml" for f in files),
+                              expects_rust=bool(self.rust_crates(files)),
+                              expects_ci=any(not f.startswith("apps/ios/") for f in files),
+                              agent_summary=f"handed-off fix by {st.get('handed_off_to')}")
+                    self.store.save_state(fid, st)
+                    self.store.event(fid, "branch_pushed", branch=st["branch"], head=head, files=files, by=st.get("handed_off_to"))
+                    continue
             commit = self.find_commit(fid, st.get("created") or iso())
             if not commit:
                 continue
@@ -2275,16 +2406,7 @@ def main(argv: list[str]) -> int:
         if not st:
             print(f"{fid}: unknown")
             return 2
-        if st.get("status") == "running" and st.get("agent_id") and st.get("run_id"):
-            loop.cursor.cancel(st["agent_id"], st["run_id"])
-        st.update(status="handed_off", handed_off_to=label)
-        store.save_state(fid, st)
-        store.event(fid, "handed_off", label=label, previous_status=st.get("run_status"))
-        if st.get("issue"):
-            loop.gh.ensure_label(label, "5319E7", "Owned by a dedicated workstream; the loop does not patch it")
-            loop.gh.ensure_label("in-progress", "FBCA04", "Being built by a planned workstream")
-            loop.gh.comment(st["issue"], f"Handed off: a dedicated worker owns this ({label}); the automatic loop stops here.")
-            loop.gh.set_labels(st["issue"], [label, "in-progress"], ["shipped", "needs-human"])
+        loop.hand_off(fid, st, label, label="handed-off" if label.startswith("bc-") else label, by="operator")
         print(f"{fid}: handed off ({label})")
         return 0
     if cmd == "prioritize":
