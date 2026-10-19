@@ -613,23 +613,20 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
         .child(info)
         .child(tabs)
         .child(body_tab);
-    // "Edit" opens the agent editor: the header menu (model, effort, members, avatar).
-    let edit = mine.then(|| {
-        let p = pid.clone();
-        glass::sheet_button("profile-edit", "Edit", &theme).on_click(cx.listener(
-            move |this, _, _, cx| {
-                let p = p.clone();
-                this.state.update(cx, |s, cx| {
-                    s.close_profile(cx);
-                    s.select_project(p, cx);
-                });
-                this.members_open = false;
-                this.add_agent_open = false;
-                this.menu_open = true;
-                cx.notify();
-            },
-        ))
-    });
+    // "Edit" turns the card into its editor, Contacts-style: the name and the
+    // description become fields and the button reads "Done" until they are saved.
+    let edit =
+        mine.then(|| {
+            if renaming || editing {
+                glass::sheet_button("profile-done", "Done", &theme)
+                    .on_click(cx.listener(|this, _, window, cx| this.finish_edit_agent(window, cx)))
+            } else {
+                let p = pid.clone();
+                glass::sheet_button("profile-edit", "Edit", &theme).on_click(cx.listener(
+                    move |this, _, window, cx| this.start_edit_agent(p.clone(), window, cx),
+                ))
+            }
+        });
     Some(frame(body, edit, &theme, cx))
 }
 
