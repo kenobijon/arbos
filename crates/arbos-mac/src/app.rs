@@ -1902,29 +1902,51 @@ impl AppState {
             chat.title = title_from(&text);
         }
         // Optimistic echo: the row shows at once; the source's frame with the
-        // same id replaces it (§3.6).
-        let mut parts: Vec<Part> = attachments
-            .iter()
-            .map(|path| {
-                let name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("attachment")
-                    .to_string();
-                let mime = mime_for_path(path).to_string();
-                Part::Attachment {
-                    id: new_id(),
-                    attachment: crate::model::Attachment {
-                        name,
-                        mime,
-                        blob_ref: None,
-                        bytes: std::fs::metadata(path).ok().map(|m| m.len()),
-                        kind: None,
-                        title: None,
-                    },
+        // same id replaces it (§3.6). Image files get a local thumbnail so the
+        // card shows a picture immediately, not "No preview".
+        let mut parts: Vec<Part> = Vec::new();
+        for path in &attachments {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("attachment")
+                .to_string();
+            let mime = mime_for_path(path).to_string();
+            let att_id = new_id();
+            let mut blob_ref = None;
+            let bytes = if let Ok(data) = std::fs::read(path) {
+                let probe = crate::model::Attachment {
+                    name: name.clone(),
+                    mime: mime.clone(),
+                    blob_ref: None,
+                    bytes: Some(data.len() as u64),
+                    kind: None,
+                    title: None,
+                };
+                if probe.is_image() {
+                    if let Some(image) = decode_image(&data) {
+                        let key = format!("local:{att_id}");
+                        self.thumbnails.insert(key.clone(), Arc::new(image));
+                        self.thumbnails_requested.insert(key.clone());
+                        blob_ref = Some(key);
+                    }
                 }
-            })
-            .collect();
+                Some(data.len() as u64)
+            } else {
+                std::fs::metadata(path).ok().map(|m| m.len())
+            };
+            parts.push(Part::Attachment {
+                id: att_id,
+                attachment: crate::model::Attachment {
+                    name,
+                    mime,
+                    blob_ref,
+                    bytes,
+                    kind: None,
+                    title: None,
+                },
+            });
+        }
         if voice_wav.is_some() {
             parts.push(Part::Attachment {
                 id: new_id(),
@@ -3477,6 +3499,10 @@ impl AppState {
                 let Some(key) = attachment.blob_ref.clone() else {
                     continue;
                 };
+                // Optimistic send stores a decoded preview under `local:…`.
+                if key.starts_with("local:") {
+                    continue;
+                }
                 if !self.thumbnails_requested.insert(key.clone()) {
                     continue;
                 }
