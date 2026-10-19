@@ -95,6 +95,7 @@ CURSOR_API = "https://api.cursor.com/v1"
 GITHUB_API = "https://api.github.com"
 ASSET_RELEASE_TAG = "feedback-screenshots"
 RELAY_DEPLOYED_SHA_FILE = "/etc/arbos/relay.deployed-sha"  # written by scripts/deploy/relay-server.sh
+DEPLOY_HOOK = "/usr/local/bin/arbos-deploy-hook"  # CD worker's hook: `<relay|agentd|voice> <sha>`, idempotent, debounced; sudoers for arbos-feedback
 USER_AGENT = "arbos-feedback-poller/1 (+https://github.com/unarbos/arbos)"
 
 TERMINAL = {"shipped", "failed", "ignored", "rejected", "duplicate", "no_change", "handed_off", "deferred"}
@@ -2272,6 +2273,7 @@ class Loop:
                             f"{where}; it is live for users only after that deploy. The loop flips this to shipped when the relay reports "
                             f"a deployed sha that contains {str(st.get('commit'))[:8]}.\n\nCommit {st.get('commit_url')} · agent {st.get('agent_url')}")
             self.gh.set_labels(st["issue"], ["landed-not-shipped"], ["needs-human"])
+            self.request_deploys(fid, kinds, st.get("commit") or "")
             return
         self.store.save_state(fid, st)
         self.gh.comment(st["issue"], ("Shipped" if not partial else "Shipped (partially)") + ": " + (", ".join(parts) or "see runs above")
@@ -2284,6 +2286,81 @@ class Loop:
         self.gh.ensure_label("shipped-unverified", "C2E0C6", "Built and in TestFlight/edge; needs device-level confirmation (audio/call/haptic/notification)")
         self.gh.set_labels(st["issue"], ["shipped-unverified"] if unverified else ["shipped"], ["needs-human", "landed-not-shipped"])
         self.close_fixed(fid, st)
+
+    def request_deploys(self, fid: str, kinds: list[str], sha: str) -> None:
+        """Ask the CD hook to deploy the relay / roll the image / redeploy voice for a landed fix. Only speeds the
+        hook's own 1-min main watcher up; "live" is still judged from the reported shas (watch_deploys)."""
+        if not os.path.exists(DEPLOY_HOOK) or not sha:
+            return
+        for kind in kinds:
+            try:
+                r = subprocess.run(["sudo", "-n", DEPLOY_HOOK, kind, sha], capture_output=True, text=True, timeout=60)
+                log(f"[{fid}] deploy hook {kind} {sha[:8]}: exit {r.returncode} {(r.stdout or r.stderr).strip()[:120]}")
+                self.store.event(fid, "deploy_requested", deploy=kind, commit=sha, exit=r.returncode)
+            except (OSError, subprocess.TimeoutExpired) as e:
+                log(f"[{fid}] deploy hook {kind} failed: {e}")
+
+    # ---- installed signal: when did a device first run a build that carries the fix -----------------
+
+    @staticmethod
+    def _ver(v: str) -> tuple[int, ...]:
+        nums = re.findall(r"\d+", (v or "").split("+")[0].split("-")[0])
+        return tuple(int(n) for n in nums[:3]) if nums else ()
+
+    def watch_installs(self) -> None:
+        """GET /admin/installs → first time a device ran a version that carries each shipped fix (Mac: app_version ≥
+        the stable tag or build ≥ the edge build number; iOS: build ≥ the TestFlight number). Stores installed_at
+        (any user) and installed_jacob_at (login unconst); the audit reports the median lead times."""
+        if not (self.cfg.relay_url and self.cfg.relay_admin_token):
+            return
+        todo = []
+        for fid in self.store.items():
+            st = self.store.state(fid)
+            if st.get("status") == "shipped" and not st.get("pending_deploy") and not st.get("installed_at") and st.get("commit"):
+                todo.append((fid, st))
+        if not todo:
+            return
+        hdrs = {"Authorization": f"Bearer {self.cfg.relay_admin_token}"}
+        try:
+            doc = http_json("GET", f"{self.cfg.relay_url}/admin/installs", headers=hdrs)
+        except HttpError as e:
+            if e.status != 404:
+                log(f"installs: HTTP {e.status}")
+            return
+        rows = doc if isinstance(doc, list) else doc.get("installs") or doc.get("rows") or []
+        for fid, st in todo:
+            files = st.get("files") or []
+            mac = any(f.startswith("crates/arbos-mac/") for f in files)
+            ios = any(f.startswith("apps/ios/") for f in files)
+            if not (mac or ios):
+                continue
+            tag = (st.get("closed") or {}).get("where") or ""
+            m = re.search(r"Mac v(\d+\.\d+\.\d+)", tag)
+            stable = self._ver(m.group(1)) if m else ()
+            edge_no = int(re.search(r"\.(\d+)$", st["edge_release"]).group(1)) if st.get("edge_release") and re.search(r"\.(\d+)$", st["edge_release"]) else None
+            tf = int(st["testflight_build"]) if str(st.get("testflight_build") or "").isdigit() else None
+            hits = []
+            for r in rows:
+                plat = (r.get("platform") or "").lower()
+                build = r.get("build")
+                build_no = int(build) if str(build or "").isdigit() else None
+                ok = False
+                if mac and plat == "mac":
+                    ok = (stable and self._ver(r.get("app_version")) >= stable) or (edge_no is not None and build_no is not None and build_no >= edge_no)
+                if ios and plat == "ios" and tf is not None and build_no is not None:
+                    ok = ok or build_no >= tf
+                if ok and r.get("installed_at"):
+                    hits.append(r)
+            if not hits:
+                continue
+            first = min(hits, key=lambda r: r["installed_at"])
+            st["installed_at"] = dt.datetime.fromtimestamp(first["installed_at"] / 1000, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            st["installed_by"] = first.get("login") or first.get("user_id")
+            jacob = [r for r in hits if (r.get("login") or "").lower() == "unconst"]
+            if jacob:
+                st["installed_jacob_at"] = dt.datetime.fromtimestamp(min(r["installed_at"] for r in jacob) / 1000, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            self.store.save_state(fid, st)
+            self.store.event(fid, "installed", at=st["installed_at"], by=st["installed_by"], jacob=st.get("installed_jacob_at"))
 
     def fail(self, fid: str, st: dict, error: str, extra: str = "") -> None:
         st.update(status="failed", error=error, failed_at=iso())
@@ -2322,6 +2399,10 @@ class Loop:
             self.watch_deploys()
         except Exception as e:  # noqa: BLE001
             log(f"deploy watch failed: {e}")
+        try:
+            self.watch_installs()
+        except Exception as e:  # noqa: BLE001
+            log(f"install watch failed: {e}")
         try:
             self.watch_handoffs()
         except Exception as e:  # noqa: BLE001
@@ -2778,6 +2859,43 @@ def main(argv: list[str]) -> int:
         store.save_state(fid, st)
         store.event(fid, "tracked", issue=number, owner=owner)
         print(f"{fid}: tracking #{number} (handed off to {owner}); lands when a main commit carries [feedback {fid}]")
+        return 0
+    if cmd == "leadtime":
+        # Median lead times over shipped items (optionally since a date): feedback→issue, issue→merge,
+        # merge→release (first installable build), release→installed (first device, and Jacob's).
+        store = Store(cfg)
+        since = argv[2] if len(argv) > 2 else ""
+        spans: dict[str, list[float]] = {"feedback→issue": [], "issue→merge": [], "merge→release": [], "release→installed": [], "release→installed (Jacob)": [], "feedback→installed": []}
+        issue_at: dict[str, str] = {}
+        with contextlib.suppress(OSError):
+            for line in (cfg.state_dir / "log.jsonl").read_text().splitlines():
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                if ev.get("event") == "agent_started" and ev["id"] not in issue_at:
+                    issue_at[ev["id"]] = ev["time"]
+        n = 0
+        for fid in store.items():
+            st = store.state(fid)
+            if st.get("status") != "shipped" or (st.get("created") or "") < since:
+                continue
+            n += 1
+            rel = st.get("testflight_ready_at") or st.get("release_at") or st.get("shipped_at")
+            pairs = [("feedback→issue", st.get("created"), issue_at.get(fid)), ("issue→merge", issue_at.get(fid), st.get("pushed_at")),
+                     ("merge→release", st.get("pushed_at"), rel), ("release→installed", rel, st.get("installed_at")),
+                     ("release→installed (Jacob)", rel, st.get("installed_jacob_at")), ("feedback→installed", st.get("created"), st.get("installed_at"))]
+            for k, a, b in pairs:
+                if a and b:
+                    with contextlib.suppress(ValueError):
+                        spans[k].append(minutes_between(a, b))
+        print(f"shipped items considered: {n}")
+        for k, v in spans.items():
+            if v:
+                v.sort(); med = v[len(v) // 2]
+                print(f"  {k}: median {med:.0f} min (n={len(v)}, p90 {v[int(len(v) * 0.9) - 1 if len(v) > 1 else 0]:.0f} min)")
+            else:
+                print(f"  {k}: no data yet")
         return 0
     if cmd == "backfill-close":
         # Jacob's rule applied to everything already in the store: shipped → closed completed; merged-unreleased →
