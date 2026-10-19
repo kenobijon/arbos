@@ -146,8 +146,9 @@ fn rollout(a: &Agent, chat_id: &str) -> String {
     clip(&scrub(&out), ROLLOUT_CHARS)
 }
 
-/// The device whose message started this turn (its `deviceId` on the user row), so its screen is
-/// the one asked for first.
+/// The device whose message started this turn, so its screen is the one asked for first: the
+/// `deviceId` on the user row (iPhone), else the `issuedBy` of the `send` command that named the
+/// message (Mac).
 async fn preferred_device(a: &Agent, chat_id: &str) -> Option<String> {
     let user_msg_id = a
         .turn
@@ -157,11 +158,28 @@ async fn preferred_device(a: &Agent, chat_id: &str) -> Option<String> {
         .map(|t| t.user_msg_id.clone())?;
     let host = a.sync.host(chat_id).await?;
     let h = host.lock().await;
-    h.doc.message(&user_msg_id).and_then(|m| {
+    let on_row = h.doc.message(&user_msg_id).and_then(|m| {
         m.rest
             .get("deviceId")
             .and_then(Value::as_str)
+            .filter(|d| !d.is_empty())
             .map(str::to_owned)
+    });
+    on_row.or_else(|| {
+        h.doc
+            .commands()
+            .into_iter()
+            .rev()
+            .find(|c| {
+                c.kind == "send"
+                    && c.payload
+                        .get("messageId")
+                        .or_else(|| c.payload.get("message_id"))
+                        .and_then(Value::as_str)
+                        == Some(user_msg_id.as_str())
+            })
+            .map(|c| c.issued_by)
+            .filter(|d| !d.is_empty())
     })
 }
 
@@ -523,13 +541,17 @@ pub async fn on_issue_push(agent: &Arc<Agent>, payload: &Value) {
     } else {
         format!("Your feedback is now tracked as #{number}: {url}")
     };
+    // A `system` row with a text part: both apps draw it as one centred muted line (the
+    // `note` status part of `append_system_note` is not shown by either transcript).
     if let Some(host) = agent.sync.host(&chat_id).await {
         let h = host.lock().await;
-        h.doc.append_system_note(
+        h.doc.append_voice_line(
+            "system",
             &ulid(),
-            &format!("agent:{}", agent.cfg.project_id),
             &text,
             &agent.cfg.device_id,
+            &format!("agent:{}", agent.cfg.project_id),
+            &[("feedbackIssue", json!(number))],
         );
     }
     agent.append_audit(
