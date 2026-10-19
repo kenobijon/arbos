@@ -256,7 +256,9 @@ pub fn render(
         }
         // A group chat or a project with other people: the group page; my
         // own solo agent: its profile (with the tree + colour picker).
-        // Double-click the name to rename (owned agents only).
+        // Double-click the name to rename (owned agents only) — so for those
+        // a single click opens the page only after the double-click window,
+        // or the page's backdrop would swallow the second click (#1068).
         let groupish = space.is_groupish();
         title = title
             .cursor_pointer()
@@ -266,17 +268,13 @@ pub fn render(
                     this.members_open = false;
                     this.add_agent_open = false;
                     let p = pid.clone();
-                    if can_rename && event.click_count() >= 2 {
+                    if !can_rename {
+                        this.open_from_name(p, groupish, cx);
+                    } else if event.click_count() >= 2 {
                         this.start_rename_agent(p, window, cx);
-                        return;
+                    } else {
+                        this.name_clicked(p, groupish, cx);
                     }
-                    this.state.update(cx, |s, cx| {
-                        if groupish {
-                            s.open_profile(ProfilePage::Group { space_id: p }, cx);
-                        } else {
-                            s.toggle_avatar_picker(p, cx);
-                        }
-                    });
                 }),
             );
     }

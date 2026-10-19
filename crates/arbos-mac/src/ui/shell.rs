@@ -48,6 +48,13 @@ actions!(shell, [CloseTab, NewTab, ToggleRail, Escape, Quit]);
 /// Left inset for the conversation header while the sidebar is hidden: the window's traffic lights.
 const TRAFFIC_LIGHTS_INSET: f32 = 72.0;
 
+/// How long a single click on the header name waits for a second one before
+/// it opens the profile (#1068). Shorter than the system double-click
+/// interval (500 ms by default) so the page does not feel late; a slower
+/// double-click still renames — its second click lands on the page's
+/// backdrop, which hands it to the rename (`rename_from_backdrop`).
+const NAME_CLICK_DELAY: Duration = Duration::from_millis(250);
+
 /// Width of the Settings sheet on its root page.
 const SETTINGS_WIDTH: f32 = 480.0;
 /// Body height shared by the Settings list and its pushed pages, so the box
@@ -149,6 +156,10 @@ pub struct Shell {
     pub(crate) description_input: Entity<ComposerInput>,
     /// Double-click rename: the inline name field for an agent.
     pub(crate) agent_name_input: Entity<ComposerInput>,
+    /// Header name (#1068): a single click opens the profile only after
+    /// `NAME_CLICK_DELAY`; every later click and a rename bump this, and the
+    /// deferred open fires only if still current.
+    name_click_serial: u64,
     /// Agent page: the filter field in the Model dropdown (`ui::hoverpick`).
     pub(crate) model_search_input: Entity<ComposerInput>,
     /// Agent page: the sheet body's scroll, so a dropped-down row can be
@@ -528,6 +539,7 @@ impl Shell {
             people_input,
             description_input,
             agent_name_input,
+            name_click_serial: 0,
             model_search_input,
             profile_scroll: ScrollHandle::new(),
             agent_pick_reveal: false,
@@ -736,6 +748,9 @@ impl Shell {
         };
         self.menu_open = false;
         self.row_menu = None;
+        // A pending single-click open of the header name must not land on
+        // top of the rename.
+        self.name_click_serial = self.name_click_serial.wrapping_add(1);
         self.agent_name_input
             .update(cx, |input, cx| input.set_text(name, cx));
         self.state
@@ -743,6 +758,86 @@ impl Shell {
         let handle = self.agent_name_input.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
         cx.notify();
+    }
+
+    /// A single click on the header name of an agent that can be renamed:
+    /// the profile opens once the double-click window has passed without a
+    /// second click (#1068). Opening it at once put the page's backdrop under
+    /// the second click, which closed the page instead of renaming.
+    pub(crate) fn name_clicked(
+        &mut self,
+        project_id: crate::model::Id,
+        groupish: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.name_click_serial = self.name_click_serial.wrapping_add(1);
+        let serial = self.name_click_serial;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(NAME_CLICK_DELAY).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.name_click_serial != serial {
+                    return;
+                }
+                this.open_from_name(project_id, groupish, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// The header name's page: the group page for a shared project, else the
+    /// agent's own profile (a second click on the name folds it away).
+    pub(crate) fn open_from_name(
+        &mut self,
+        project_id: crate::model::Id,
+        groupish: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |s, cx| {
+            if groupish {
+                s.open_profile(
+                    ProfilePage::Group {
+                        space_id: project_id,
+                    },
+                    cx,
+                );
+            } else {
+                s.toggle_avatar_picker(project_id, cx);
+            }
+            s.profile_from_name = s.profile.is_some();
+        });
+    }
+
+    /// The second click of a slow double-click on the header name arrives
+    /// after the page it opened is up, on the page's backdrop: close the page
+    /// and rename, as a fast double-click would have. `false` when the click
+    /// is an ordinary click outside (the caller closes the page).
+    pub(crate) fn rename_from_backdrop(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let project_id = {
+            let state = self.state.read(cx);
+            if !state.profile_from_name {
+                return false;
+            }
+            match state.profile.clone() {
+                Some(ProfilePage::Agent { project_id }) => project_id,
+                Some(ProfilePage::Group { space_id }) => space_id,
+                _ => return false,
+            }
+        };
+        let can_rename = self
+            .state
+            .read(cx)
+            .project(&project_id)
+            .is_some_and(|p| !p.is_guest() && !p.is_people());
+        if !can_rename {
+            return false;
+        }
+        self.close_profile(window, cx);
+        self.start_rename_agent(project_id, window, cx);
+        true
     }
 
     pub(crate) fn commit_rename_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3072,6 +3167,8 @@ impl Render for Shell {
                 gpui::MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
                     this.close_popovers(cx);
+                    // A click anywhere else drops a pending header-name open.
+                    this.name_click_serial = this.name_click_serial.wrapping_add(1);
                     if this.feedback.read(cx).is_open() {
                         return;
                     }
