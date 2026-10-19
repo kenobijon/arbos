@@ -760,6 +760,10 @@ class Loop:
                 "build_id": None, "locale": None, "screen_points": None,
                 "screenshots": shots,
                 "project_id": item.get("project_id"), "raw": item,
+                # Agent-submitted (the agent's submit_feedback tool, D-pending): `submitted_by: "agent"` plus the
+                # agent's name. Counted under the user it acted for; the issue says an agent sent it.
+                "submitted_by": (item.get("submitted_by") or "user").lower(),
+                "agent_name": item.get("agent_name") or item.get("agent"),
             }
             (d / "submission.json").write_text(json.dumps(info, indent=2, ensure_ascii=False) + "\n")
             self.admit(info)
@@ -1095,6 +1099,9 @@ class Loop:
         src = {"testflight": "TestFlight screenshot feedback", "mac": "the Mac app's Send feedback sheet",
                "app": f"the {info.get('device') or 'app'} app's in-app Send feedback sheet"}.get(
             info["source"], info.get("origin") or "synthetic item placed in the poller inbox")
+        if info.get("submitted_by") == "agent":
+            src = (f"the user's agent `{info.get('agent_name') or 'agent'}` (submit_feedback tool) on the user's behalf — "
+                   "the words are the agent's summary of what the user reported in chat")
         if info.get("screenshots"):
             shot_line = f"{dims or 'unknown size'} (attached)"
         else:
@@ -1161,6 +1168,9 @@ class Loop:
         else:
             verdict, why = self.screen_intent(info, st.get("tier", "tester"))
         in_app = f"{info.get('device') or 'app'} app (Send feedback)"
+        agent_sent = info.get("submitted_by") == "agent"
+        if agent_sent:
+            in_app = f"agent `{info.get('agent_name') or 'agent'}` via submit_feedback, on behalf of the user ({info.get('device') or 'app'})"
         source_label = {"testflight": "TestFlight", "mac": in_app, "app": in_app,
                         "inbox": info.get("origin") or "synthetic (poller inbox)"}.get(info["source"], info["source"])
         body_lines = [
@@ -1182,6 +1192,9 @@ class Loop:
             "Progress is posted as comments; the fix lands on `main` as `fix(feedback): … [feedback " + fid + "]`._",
         ]
         labels = ["feedback"] + (["flagged"] if verdict == "malicious" else []) + (["deferred"] if deferral else [])
+        if agent_sent:
+            self.gh.ensure_label("agent-submitted", "0075CA", "Filed by the user's agent through submit_feedback, on the user's behalf")
+            labels.append("agent-submitted")
         if deferral:
             self.gh.ensure_label("deferred", "BFD4F2", "Product area intentionally disabled for now; no automatic fix")
         if st.get("issue"):
@@ -1929,7 +1942,7 @@ def tester_summary(store: Store) -> list[dict]:
         if len(st.get("tester") or "") > len(row["tester"]):
             row["tester"] = st["tester"]
         row["ingested"] += 1
-        row["sources"].add("relayed chat" if info.get("origin") else info.get("source") or "?")
+        row["sources"].add("agent-submitted" if info.get("submitted_by") == "agent" else "relayed chat" if info.get("origin") else info.get("source") or "?")
         if st.get("issue"):
             row["issues"] += 1
         status = st.get("status", "?")
