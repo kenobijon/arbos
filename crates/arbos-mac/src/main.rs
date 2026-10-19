@@ -77,7 +77,11 @@ fn main() {
                             appears_transparent: cfg!(target_os = "macos"),
                             traffic_light_position: Some(point(px(14.0), px(14.0))),
                         }),
-                        app_owns_titlebar_drag: cfg!(target_os = "macos"),
+                        // AppKit moves the window from the transparent titlebar.
+                        // (When true, GPUI requires `start_window_move` on drag
+                        // regions; macOS hit-testing for those is a stub, so
+                        // the window would not drag.)
+                        app_owns_titlebar_drag: false,
                         window_background: theme.window_background_appearance(),
                         window_decorations: Some(WindowDecorations::Server),
                         app_id: Some("sh.arbos.mac".into()),
@@ -156,8 +160,6 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-t", shell::NewTab, None),
         KeyBinding::new("cmd-b", shell::ToggleRail, None),
         KeyBinding::new("ctrl-b", shell::ToggleRail, None),
-        KeyBinding::new("cmd-shift-b", shell::TogglePanel, None),
-        KeyBinding::new("ctrl-shift-b", shell::TogglePanel, None),
         KeyBinding::new("escape", shell::Escape, None),
         KeyBinding::new("cmd-q", shell::Quit, None),
         KeyBinding::new("cmd-shift-f", feedback::SendFeedback, None),
