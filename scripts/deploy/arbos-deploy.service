@@ -1,0 +1,10 @@
+[Unit]
+Description=Arbos continuous delivery: deploy relay / voice / sandbox image for merged commits (one tick)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=!/etc/arbos/deploy.disabled
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/arbos-deploy-worker tick
+TimeoutStartSec=40min
