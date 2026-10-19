@@ -519,6 +519,16 @@ class GitHub:
         except HttpError:
             return False
 
+    def dispatch_ci(self, branch: str) -> bool:
+        """workflow_dispatch ci.yml on `branch`; False when the ref's workflow file has no dispatch trigger (422)."""
+        try:
+            self.repo_api("POST", "/actions/workflows/ci.yml/dispatches", json_body={"ref": branch})
+            return True
+        except HttpError as e:
+            if e.status in (404, 422):
+                return False
+            raise
+
     def create_branch(self, branch: str, sha: str) -> None:
         self.repo_api("POST", "/git/refs", json_body={"ref": f"refs/heads/{branch}", "sha": sha})
 
@@ -1710,6 +1720,13 @@ class Loop:
         if active["linux"] == "pending":
             runs = [r for r in self.gh.runs_for_sha(active["tree"]) if r.get("name") == "CI"]
             run = runs[0] if runs else None
+            if not run and not active.get("ci_dispatched") and minutes_between(active["started"], iso()) >= 1.5:
+                # A branch made through the API without a new commit raises no push event (an integration tree
+                # that already contained main): start CI by hand.
+                active["ci_dispatched"] = iso()
+                ok = self.gh.dispatch_ci(active["branch"])
+                self.store.save_cursor(cur)
+                log(f"Rust gate {active['id']}: no CI run for {active['tree'][:8]} yet; workflow_dispatch on {active['branch']} → {'ok' if ok else 'not accepted (workflow file on that ref has no dispatch trigger)'}")
             if run and run["status"] == "completed":
                 active["linux"] = "ok" if run["conclusion"] == "success" else "fail"
                 active["linux_run"] = run["html_url"]
