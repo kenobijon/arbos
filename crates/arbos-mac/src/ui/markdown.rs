@@ -29,7 +29,9 @@ pub fn split_blocks(source: &str) -> Vec<Block> {
 
     fn flush(paragraph: &mut Vec<&str>, blocks: &mut Vec<Block>) {
         if !paragraph.is_empty() {
-            blocks.push(Block::Paragraph(paragraph.join(" ")));
+            // Keep soft newlines (chat-style): a single Enter is a line break,
+            // not a space. Blank lines still split paragraphs above.
+            blocks.push(Block::Paragraph(paragraph.join("\n")));
             paragraph.clear();
         }
     }

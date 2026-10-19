@@ -1334,7 +1334,9 @@ impl Render for Composer {
         let name = space
             .as_ref()
             .map(|p| {
-                if p.is_people() {
+                if p.is_people_group() {
+                    p.name.clone()
+                } else if p.is_people() {
                     p.person()
                         .map(|x| format!("@{}", x.handle))
                         .unwrap_or_else(|| p.name.clone())

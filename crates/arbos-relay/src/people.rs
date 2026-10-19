@@ -833,6 +833,12 @@ pub async fn chat_patch(
     {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
     }
+    // Other members, and this user's other devices (e.g. Mac), refresh the list.
+    let payload = json!({ "chat_id": id });
+    notify_members(&state, &cm, &me, "people_chat_updated", payload.clone());
+    let _ = state
+        .db
+        .push_user_except(&me, &device_of(&principal), "people_chat_updated", &payload);
     match member_chat(&state, &principal, &id) {
         Ok((me, cm)) => Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response(),
         Err(r) => *r,

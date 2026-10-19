@@ -745,7 +745,9 @@ pub fn menu(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
     let voice_mode = state.voice_mode;
     let in_call = shell.voice.read(cx).in_call();
     let projects_count = state.projects.iter().filter(|p| !p.is_people()).count();
-    let name = if is_people {
+    let name = if space.is_people_group() {
+        space.name.clone()
+    } else if is_people {
         space
             .person()
             .map(|p| format!("@{}", p.handle))
