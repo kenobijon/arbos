@@ -74,10 +74,11 @@ if (( DEBOUNCE > 0 )) && ! $DRY_RUN; then
 fi
 git fetch -q --tags --force origin "+refs/heads/main:refs/remotes/origin/main"
 
-# 2. newest green commit on main
+# 2. newest green commit on main — first-parent line only: a merged branch's own tip is reachable
+#    from main too, but lacks everything main had before the merge.
 target=""
 pending_seen=false
-for sha in $(git rev-list origin/main -n 25); do
+for sha in $(git rev-list --first-parent origin/main -n 25); do
   state="$(ci_state "$sha")"
   case "$state" in
     success) target="$sha"; break ;;
