@@ -733,14 +733,20 @@ class Loop:
                 continue
             d = self.store.item_dir(fid)
             d.mkdir(parents=True, exist_ok=True)
+            note = (item.get("note") or "").strip()
+            shots = []
+            # Note-only Mac sheet items have no image file (404); words alone are enough,
+            # same as a relayed chat report / TestFlight without a screenshot.
             try:
-                status, h, body = http("GET", f"{self.cfg.relay_url}/admin/feedback/{item['id']}/image", headers=hdrs, timeout=120)
+                _status, _h, body = http("GET", f"{self.cfg.relay_url}/admin/feedback/{item['id']}/image", headers=hdrs, timeout=120)
+                ext = "png" if body[:8] == b"\x89PNG\r\n\x1a\n" else "jpg"
+                (d / f"screenshot-1.{ext}").write_bytes(body)
+                shots = [{"file": f"screenshot-1.{ext}", "width": item.get("width"), "height": item.get("height")}]
             except HttpError as e:
-                log(f"[{fid}] image download failed: {e}")
-                shutil.rmtree(d, ignore_errors=True)
-                continue
-            ext = "png" if body[:8] == b"\x89PNG\r\n\x1a\n" else "jpg"
-            (d / f"screenshot-1.{ext}").write_bytes(body)
+                if e.status != 404 or not note:
+                    log(f"[{fid}] image download failed: {e}")
+                    shutil.rmtree(d, ignore_errors=True)
+                    continue
             created = dt.datetime.fromtimestamp(int(item["created_at"]) / 1000, dt.timezone.utc)
             handle = (item.get("user_login") or "").strip().lower()
             on_iphone = (item.get("platform") or "mac").lower() in ("ios", "iphone")
@@ -752,7 +758,7 @@ class Loop:
                 "app_platform": item.get("platform"), "bundle": "com.unarbos.arbos.ios" if on_iphone else "sh.arbos.mac",
                 "build": item.get("app_version"),
                 "build_id": None, "locale": None, "screen_points": None,
-                "screenshots": [{"file": f"screenshot-1.{ext}", "width": item.get("width"), "height": item.get("height")}],
+                "screenshots": shots,
                 "project_id": item.get("project_id"), "raw": item,
             }
             (d / "submission.json").write_text(json.dumps(info, indent=2, ensure_ascii=False) + "\n")

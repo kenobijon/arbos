@@ -476,6 +476,12 @@ impl Shell {
         if floating {
             return;
         }
+        if self.feedback.read(cx).is_open() {
+            self.feedback.update(cx, |sheet, cx| sheet.close(cx));
+            Composer::focus(&self.composer, window, cx);
+            cx.notify();
+            return;
+        }
         if self.state.read(cx).sidebar_overlay {
             self.state.update(cx, |s, cx| s.close_sidebar_overlay(cx));
             return;

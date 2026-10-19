@@ -1,8 +1,9 @@
 //! Screenshot feedback from the Mac app ("Send feedback", ⌘⇧F), the desktop twin of
-//! TestFlight's screenshot feedback. `POST /feedback` stores the image, the note, the app
-//! version and the sender under `<data>/feedback/<id>/`; the feedback loop on the server
-//! (`scripts/feedback`) lists new items with `GET /admin/feedback?since=<ms>` and fetches each
-//! image with `GET /admin/feedback/{id}/image` (admin token). Nothing here reaches a box.
+//! TestFlight's screenshot feedback. `POST /feedback` stores the optional image, the note, the
+//! app version and the sender under `<data>/feedback/<id>/`; a note alone is enough. The
+//! feedback loop on the server (`scripts/feedback`) lists new items with
+//! `GET /admin/feedback?since=<ms>` and fetches each image with
+//! `GET /admin/feedback/{id}/image` (admin token; 404 when none). Nothing here reaches a box.
 
 use std::path::PathBuf;
 
@@ -27,7 +28,8 @@ const MAX_IMAGE_BYTES: usize = 15 * 1024 * 1024;
 pub struct Submit {
     #[serde(default)]
     pub note: String,
-    /// Base64 (standard alphabet) of the PNG/JPEG bytes.
+    /// Base64 (standard alphabet) of the PNG/JPEG bytes. Empty = note-only feedback.
+    #[serde(default)]
     pub image: String,
     #[serde(default = "default_mime")]
     pub mime: String,
@@ -53,13 +55,14 @@ fn default_platform() -> String {
     "mac".to_owned()
 }
 
-/// `meta.json` beside the image; also what the admin list returns.
+/// `meta.json` beside the image (when present); also what the admin list returns.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Item {
     pub id: String,
     pub created_at: i64,
     pub note: String,
     pub mime: String,
+    /// Empty when the tester sent a note with no screenshot.
     pub file: String,
     pub bytes: usize,
     pub app_version: String,
@@ -85,7 +88,7 @@ fn safe_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
-/// `POST /feedback` (signed-in device): keep the screenshot and the note.
+/// `POST /feedback` (signed-in device): keep the optional screenshot and the note.
 pub async fn submit(
     State(state): State<AppState>,
     principal: Principal,
@@ -101,53 +104,78 @@ pub async fn submit(
             )
         }
     };
-    let image = match base64::engine::general_purpose::STANDARD.decode(body.image.trim()) {
-        Ok(b) if !b.is_empty() && b.len() <= MAX_IMAGE_BYTES => b,
-        Ok(_) => {
-            return api_error(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "image",
-                "image must be 1 byte to 15 MB",
-            )
-        }
-        Err(_) => return api_error(StatusCode::BAD_REQUEST, "image", "image is not base64"),
-    };
-    let ext = match body.mime.as_str() {
-        "image/jpeg" => "jpg",
-        "image/png" => "png",
-        "image/webp" => "webp",
-        "image/gif" => "gif",
-        other => {
+    let note: String = body.note.chars().take(4000).collect();
+    let image_raw = body.image.trim();
+    let image = if image_raw.is_empty() {
+        if note.trim().is_empty() {
             return api_error(
                 StatusCode::BAD_REQUEST,
-                "mime",
-                format!("unsupported image type {other}"),
-            )
+                "empty",
+                "send a note, a screenshot, or both",
+            );
         }
+        None
+    } else {
+        match base64::engine::general_purpose::STANDARD.decode(image_raw) {
+            Ok(b) if !b.is_empty() && b.len() <= MAX_IMAGE_BYTES => Some(b),
+            Ok(_) => {
+                return api_error(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "image",
+                    "image must be 1 byte to 15 MB",
+                )
+            }
+            Err(_) => return api_error(StatusCode::BAD_REQUEST, "image", "image is not base64"),
+        }
+    };
+    let (file, mime, bytes, width, height) = if let Some(image) = image.as_ref() {
+        let ext = match body.mime.as_str() {
+            "image/jpeg" => "jpg",
+            "image/png" => "png",
+            "image/webp" => "webp",
+            "image/gif" => "gif",
+            other => {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "mime",
+                    format!("unsupported image type {other}"),
+                )
+            }
+        };
+        (
+            format!("image.{ext}"),
+            body.mime,
+            image.len(),
+            body.width,
+            body.height,
+        )
+    } else {
+        (String::new(), String::new(), 0, None, None)
     };
     let id = ulid();
     let dir = root(&state).join(&id);
     if let Err(e) = tokio::fs::create_dir_all(&dir).await {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "io", e.to_string());
     }
-    let file = format!("image.{ext}");
-    if let Err(e) = tokio::fs::write(dir.join(&file), &image).await {
-        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "io", e.to_string());
+    if let Some(image) = image {
+        if let Err(e) = tokio::fs::write(dir.join(&file), &image).await {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "io", e.to_string());
+        }
     }
     let user_login = state.db.user(&user_id).ok().flatten().and_then(|u| u.login);
     let item = Item {
         id: id.clone(),
         created_at: now_ms(),
-        note: body.note.chars().take(4000).collect(),
-        mime: body.mime,
+        note,
+        mime,
         file,
-        bytes: image.len(),
+        bytes,
         app_version: body.app_version.chars().take(80).collect(),
         platform: body.platform.chars().take(20).collect(),
         os: body.os.chars().take(80).collect(),
         project_id: body.project_id,
-        width: body.width,
-        height: body.height,
+        width,
+        height,
         user_id,
         user_login,
         device_id,
@@ -226,6 +254,13 @@ pub async fn admin_image(
     let Ok(item) = serde_json::from_slice::<Item>(&meta) else {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "json", "bad meta.json");
     };
+    if item.file.is_empty() {
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no screenshot on this item",
+        );
+    }
     match tokio::fs::read(dir.join(&item.file)).await {
         Ok(bytes) => ([(header::CONTENT_TYPE, item.mime)], bytes).into_response(),
         Err(e) => api_error(StatusCode::NOT_FOUND, "not_found", e.to_string()),
