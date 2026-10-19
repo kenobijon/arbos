@@ -14,8 +14,8 @@ use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, TEXT_SMALL};
 
 use super::{
-    action_button, action_row, card, chats_of, collect, empty, frame, hero, info_action, info_row,
-    link_list, list_row, more_menu, tab_bar, Action,
+    action_button, action_row, card, chats_of, collect, empty, frame, hero, hero_name, info_action,
+    info_row, link_list, list_row, more_menu, tab_bar, Action,
 };
 
 const TABS: [&str; 2] = ["Links", "Groups"];
@@ -114,7 +114,7 @@ pub(super) fn page(
         .into_any_element();
     let hero = hero(
         avatar,
-        &person.display_name(),
+        hero_name(&person.display_name(), &theme).into_any_element(),
         &status,
         if online {
             super::presence_blue()

@@ -92,6 +92,8 @@ pub struct Shell {
     pub people_input: Entity<ComposerInput>,
     /// Agent profile page: inline description editor.
     pub(crate) description_input: Entity<ComposerInput>,
+    /// Double-click rename: the inline name field for an agent.
+    pub(crate) agent_name_input: Entity<ComposerInput>,
     /// Settings header: editing my display name and handle (`PATCH /me`).
     profile_edit_open: bool,
     name_input: Entity<ComposerInput>,
@@ -215,6 +217,18 @@ impl Shell {
             input.set_placeholder("What does this agent do?")
         });
         cx.observe(&description_input, |_, _, cx| cx.notify())
+            .detach();
+        let agent_name_input = cx.new(ComposerInput::new);
+        {
+            let weak = cx.weak_entity();
+            agent_name_input.update(cx, |input, _| {
+                input.set_placeholder("Agent name");
+                input.on_submit = Some(Rc::new(move |window, cx| {
+                    let _ = weak.update(cx, |this, cx| this.commit_rename_agent(window, cx));
+                }));
+            });
+        }
+        cx.observe(&agent_name_input, |_, _, cx| cx.notify())
             .detach();
         let name_input = cx.new(ComposerInput::new);
         name_input.update(cx, |input, _| input.set_placeholder("Display name"));
@@ -382,6 +396,7 @@ impl Shell {
             menu_open: false,
             people_input,
             description_input,
+            agent_name_input,
             profile_edit_open: false,
             name_input,
             handle_input,
@@ -436,6 +451,50 @@ impl Shell {
         Composer::focus(&self.composer, window, cx);
     }
 
+    /// Double-click an agent's name: load it into the rename field and focus.
+    pub(crate) fn start_rename_agent(
+        &mut self,
+        project_id: crate::model::Id,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = {
+            let state = self.state.read(cx);
+            let Some(p) = state.project(&project_id) else {
+                return;
+            };
+            if p.is_guest() || p.is_people() {
+                return;
+            }
+            p.name.clone()
+        };
+        self.menu_open = false;
+        self.row_menu = None;
+        self.agent_name_input
+            .update(cx, |input, cx| input.set_text(name, cx));
+        self.state
+            .update(cx, |s, cx| s.start_renaming(project_id, cx));
+        let handle = self.agent_name_input.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn commit_rename_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project_id) = self.state.read(cx).renaming_project.clone() else {
+            return;
+        };
+        let name = self.agent_name_input.read(cx).text().to_string();
+        self.state
+            .update(cx, |s, cx| s.set_project_name(project_id, name, cx));
+        Composer::focus(&self.composer, window, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_rename_agent(&mut self, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, cx| s.cancel_renaming(cx));
+        cx.notify();
+    }
+
     fn close_tab(&mut self, _: &CloseTab, _: &mut Window, cx: &mut Context<Self>) {
         let active = self.state.read(cx).active_chat_id();
         if let Some(chat_id) = active {
@@ -466,6 +525,11 @@ impl Shell {
 
     /// Escape closes whatever floats: menus, then sheets.
     fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        if self.state.read(cx).renaming_project.is_some() {
+            self.cancel_rename_agent(cx);
+            Composer::focus(&self.composer, window, cx);
+            return;
+        }
         let floating = self.menu_open
             || self.members_open
             || self.add_agent_open

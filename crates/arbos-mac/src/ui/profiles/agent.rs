@@ -16,8 +16,8 @@ use crate::ui::sidebar::machine_dot;
 use crate::ui::theme::{Theme, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
 use super::{
-    action_button, action_row, card, chats_of, collect, file_list, frame, hero, info_row,
-    link_list, media_grid, more_menu, tab_bar, Action,
+    action_button, action_row, card, chats_of, collect, file_list, frame, hero, hero_name,
+    info_row, link_list, media_grid, more_menu, tab_bar, Action,
 };
 
 const TABS: [&str; 3] = ["Media", "Files", "Links"];
@@ -125,6 +125,11 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
     let more_open = state.profile_more_open;
     let picker_open = state.profile_picker_open;
     let editing = state.profile_editing_description && mine;
+    let renaming = mine
+        && state
+            .renaming_project
+            .as_ref()
+            .is_some_and(|p| p == &project.id);
     let muted = state.is_muted(&project.id);
     let content = collect(state, &chats_of(state, &project.id));
     let pid: Id = project.id.clone();
@@ -157,7 +162,39 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
                 ),
         )
         .into_any_element();
-    let hero = hero(avatar, &project.name, &status, status_color, &theme).child(
+    let name_el = if renaming {
+        div()
+            .id("profile-rename")
+            .w(px(220.0))
+            .h(px(36.0))
+            .px(px(10.0))
+            .rounded(px(10.0))
+            .bg(theme.field)
+            .border_1()
+            .border_color(theme.field_border)
+            .text_size(px(TEXT_BODY + 8.0))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(theme.text)
+            .child(shell.agent_name_input.clone())
+            .into_any_element()
+    } else if mine {
+        let p_rename = pid.clone();
+        hero_name(&project.name, &theme)
+            .id("profile-name")
+            .cursor_pointer()
+            .hover(|s| s.opacity(0.85))
+            .on_click(
+                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                    if event.click_count() >= 2 {
+                        this.start_rename_agent(p_rename.clone(), window, cx);
+                    }
+                }),
+            )
+            .into_any_element()
+    } else {
+        hero_name(&project.name, &theme).into_any_element()
+    };
+    let hero = hero(avatar, name_el, &status, status_color, &theme).child(
         div()
             .text_size(px(TEXT_SMALL))
             .text_color(theme.text_faint)

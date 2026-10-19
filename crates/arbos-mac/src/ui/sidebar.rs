@@ -364,7 +364,7 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         );
     }
     for (_, row) in rows {
-        list = list.child(render_row(row, &theme, cx));
+        list = list.child(render_row(row, shell, &theme, cx));
     }
 
     // ----- bottom: Update pill (only when a newer build exists) and the account row --
@@ -489,7 +489,12 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
     column.child(account_row)
 }
 
-fn render_row(row: RowView, theme: &Theme, cx: &mut Context<Shell>) -> impl IntoElement {
+fn render_row(
+    row: RowView,
+    shell: &Shell,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> impl IntoElement {
     let RowView {
         space,
         selected,
@@ -505,6 +510,13 @@ fn render_row(row: RowView, theme: &Theme, cx: &mut Context<Shell>) -> impl Into
     let id: Id = space.id.clone();
     let menu_id: Id = space.id.clone();
     let ctrl_menu_id: Id = space.id.clone();
+    let can_rename = !space.is_guest() && !space.is_people();
+    let renaming = shell
+        .state
+        .read(cx)
+        .renaming_project
+        .as_ref()
+        .is_some_and(|p| p == &space.id);
     if streaming || typing || avatar_state != avatars::AvatarState::Idle {
         PulseClock::request(cx);
     }
@@ -602,13 +614,22 @@ fn render_row(row: RowView, theme: &Theme, cx: &mut Context<Shell>) -> impl Into
             })
         })
         .cursor_pointer()
-        .on_click(cx.listener(move |this, _, window, cx| {
-            this.menu_open = false;
-            this.row_menu = None;
-            this.state
-                .update(cx, |s, cx| s.select_project(id.clone(), cx));
-            Composer::focus(&this.composer, window, cx);
-        }))
+        .on_click({
+            let id = id.clone();
+            cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                this.menu_open = false;
+                this.row_menu = None;
+                if can_rename && event.click_count() >= 2 {
+                    this.state
+                        .update(cx, |s, cx| s.select_project(id.clone(), cx));
+                    this.start_rename_agent(id.clone(), window, cx);
+                    return;
+                }
+                this.state
+                    .update(cx, |s, cx| s.select_project(id.clone(), cx));
+                Composer::focus(&this.composer, window, cx);
+            })
+        })
         // Grok Mac: right-click (or control-click) a row for its menu (ref 48).
         .on_mouse_down(
             gpui::MouseButton::Right,
@@ -644,7 +665,23 @@ fn render_row(row: RowView, theme: &Theme, cx: &mut Context<Shell>) -> impl Into
                         .flex()
                         .items_baseline()
                         .gap(px(6.0))
-                        .child(
+                        .child(if renaming {
+                            div()
+                                .id("sidebar-rename")
+                                .min_w_0()
+                                .flex_1()
+                                .h(px(22.0))
+                                .px(px(6.0))
+                                .rounded(px(6.0))
+                                .bg(theme.field)
+                                .border_1()
+                                .border_color(theme.field_border)
+                                .text_size(px(TEXT_BODY))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child(shell.agent_name_input.clone())
+                                .into_any_element()
+                        } else {
                             div()
                                 .min_w_0()
                                 .truncate()
@@ -659,8 +696,9 @@ fn render_row(row: RowView, theme: &Theme, cx: &mut Context<Shell>) -> impl Into
                                 } else {
                                     theme.text
                                 })
-                                .child(name),
-                        )
+                                .child(name)
+                                .into_any_element()
+                        })
                         .when_some(handle, |el, h| {
                             el.child(
                                 div()
