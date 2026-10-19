@@ -1030,6 +1030,18 @@ pub async fn call_usage(
             "voice: call usage final"
         );
         let _ = state.db.call_agent_leave(&call.id, &project.id);
+        // Tell the box to drop any still-running voice turn so typed chat after hang-up works.
+        let _ = box_notify(
+            &state,
+            &project.user_id,
+            json!({
+                "type": "voice_cancel",
+                "call_id": call.id,
+                "chat_id": call.chat_id,
+                "project_id": project.id,
+            }),
+        )
+        .await;
     }
     Json(json!({
         "caps": caps_json(&state, &payer, &call.id, &project.id),

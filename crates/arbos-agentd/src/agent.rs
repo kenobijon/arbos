@@ -676,6 +676,9 @@ pub struct TurnState {
     pub text_part_dirty: bool,
     /// Set by an out-of-band `stop`: the turn ends as it is and no hand-off follows.
     pub stopped: bool,
+    /// This turn was started by a voice-call `ask_agent` / `look` (user row `voice: true`).
+    /// A later typed `send` preempts it so text chat is not stuck behind a hung call turn.
+    pub from_voice: bool,
     /// The text pi was prompted with; the skills selector matches against it (F5).
     pub prompt_text: String,
     /// Skills injected into this turn's working set (recorded once, in the Details drawer).
@@ -1217,9 +1220,37 @@ impl Agent {
         res
     }
 
-    /// Abort the turn running in `chat_id` (people chat removal).
+    /// Abort the turn running in `chat_id` (people chat removal, voice-call cancel).
     pub(crate) async fn stop_turn(&self, chat_id: &str) -> Result<()> {
         self.handle_stop(chat_id).await
+    }
+
+    /// Take `turn_lock`. For typed (non-voice) sends: while another turn holds the lock, abort
+    /// an in-flight voice-call turn for this chat so the owner is not stuck after hanging up.
+    async fn acquire_turn_lock(
+        &self,
+        chat_id: &str,
+        this_is_voice: bool,
+    ) -> tokio::sync::MutexGuard<'_, ()> {
+        if this_is_voice {
+            return self.turn_lock.lock().await;
+        }
+        loop {
+            let should_stop = self
+                .turn
+                .lock()
+                .await
+                .as_ref()
+                .is_some_and(|t| t.chat_id == chat_id && t.from_voice && !t.stopped);
+            if should_stop {
+                tracing::info!(chat_id, "preempting voice turn so a typed send can run");
+                let _ = self.handle_stop(chat_id).await;
+            }
+            if let Ok(g) = self.turn_lock.try_lock() {
+                return g;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     /// Re-run the turn for a failed assistant message (`retry { messageId }`). The payload is the
@@ -1420,13 +1451,23 @@ impl Agent {
         host: &SharedHost,
         cmd: &CommandView,
     ) -> Result<()> {
-        let _guard = self.turn_lock.lock().await;
         let user_msg_id = cmd
             .payload
             .get("messageId")
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_owned();
+        // Peek before taking the turn lock: a typed send must not wait forever behind a
+        // voice-call turn that is still running after the call ended (approval wait, long
+        // tool, deferred ask_agent). Preempt that turn so the owner's text is answered.
+        let this_is_voice = {
+            let h = host.lock().await;
+            h.doc
+                .message(&user_msg_id)
+                .as_ref()
+                .is_some_and(message_from_voice)
+        };
+        let _guard = self.acquire_turn_lock(chat_id, this_is_voice).await;
         // A structured answer (`answer { questionId, value }`): render the value to text with the
         // widget the question was asked with, and mark the part answered before the turn runs.
         let structured = self.resolve_structured_answer(host, cmd).await;
@@ -1960,6 +2001,13 @@ impl Agent {
             route_call_id: None,
             text_part_dirty: false,
             stopped: false,
+            from_voice: {
+                let h = host.lock().await;
+                h.doc
+                    .message(user_msg_id)
+                    .as_ref()
+                    .is_some_and(message_from_voice)
+            },
             prompt_text: match &kind {
                 TurnKind::User => prompt_text.to_owned(),
                 TurnKind::SubagentResult { .. } | TurnKind::ApprovalOutcome { .. } => String::new(),
@@ -2363,6 +2411,11 @@ impl Agent {
             let ev = tokio::select! {
                 e = events.recv() => e,
                 _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                    // `stop` / a typed send preempting a voice turn: leave the approval wait
+                    // so the turn lock is released and later sends can run.
+                    if self.turn.lock().await.as_ref().is_some_and(|t| t.stopped) {
+                        break;
+                    }
                     let waiting = self.approval_pending_for(chat_id).await;
                     match (waiting, approval_pause_started) {
                         (true, None) => approval_pause_started = Some(Instant::now()),
@@ -3980,6 +4033,12 @@ pub fn route_name(r: &ValidRoute) -> &'static str {
 }
 
 /// Main-turn wall-clock deadline in seconds. `ARBOS_TURN_DEADLINE_SECS` (default 900).
+/// A user row from a voice-call tool (`ask_agent` / `look`): `voice: true` and/or `source: "voice"`.
+fn message_from_voice(m: &arbos_core::doc::MessageView) -> bool {
+    m.rest.get("voice").and_then(Value::as_bool) == Some(true)
+        || m.rest.get("source").and_then(Value::as_str) == Some("voice")
+}
+
 fn turn_deadline_secs() -> u64 {
     std::env::var("ARBOS_TURN_DEADLINE_SECS")
         .ok()
