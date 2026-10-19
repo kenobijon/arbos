@@ -794,8 +794,13 @@ impl Shell {
         });
     }
 
-    /// Escape closes whatever floats: menus, then sheets.
+    /// Escape stops a recording memo (keeping its transcript), then closes
+    /// whatever floats: menus, then sheets.
     fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        if self.voice.update(cx, |v, cx| v.escape(cx)) {
+            Composer::focus(&self.composer, window, cx);
+            return;
+        }
         let editing_agent = {
             let s = self.state.read(cx);
             s.renaming_project.is_some() || (s.profile.is_some() && s.profile_editing_description)
