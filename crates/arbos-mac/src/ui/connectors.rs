@@ -547,7 +547,7 @@ impl Render for ConnectorsPanel {
                     .flex_1()
                     .text_size(px(11.0))
                     .text_color(theme.text_faint)
-                    .child("CONNECTORS"),
+                    .when(!embedded, |el| el.child("CONNECTORS")),
             );
         if view.mock {
             header = header.child(Self::chip(&theme, "Mock", theme.warn, theme.surface_2));

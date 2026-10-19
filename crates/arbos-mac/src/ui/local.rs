@@ -391,7 +391,7 @@ impl Render for LocalPanel {
                     .flex_1()
                     .text_size(px(11.0))
                     .text_color(theme.text_faint)
-                    .child("THIS MAC"),
+                    .when(!embedded, |el| el.child("THIS MAC")),
             )
             .child(
                 div()

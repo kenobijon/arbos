@@ -2325,7 +2325,7 @@ impl Render for SecretsPanel {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
-                    .child(title),
+                    .when(!(embedded && self.page == Page::List), |el| el.child(title)),
             )
             .child(
                 div()

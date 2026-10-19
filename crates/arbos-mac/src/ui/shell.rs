@@ -50,6 +50,9 @@ const TRAFFIC_LIGHTS_INSET: f32 = 72.0;
 
 /// Width of the Settings sheet on its root page.
 const SETTINGS_WIDTH: f32 = 480.0;
+/// Body height shared by the Settings list and its pushed pages, so the box
+/// does not jump when navigating (shrinks with the window).
+const SETTINGS_BODY_HEIGHT: f32 = 720.0;
 
 /// What the Settings sheet shows (#1086, D80): the root list, or one of the
 /// Apps & tools pages pushed inside the same box with a back button — the
@@ -2434,11 +2437,17 @@ impl Shell {
         let page = self.settings_page;
         if page == SettingsPage::Root {
             let header = glass::sheet_header("Settings", None, Some(done), &theme);
-            return glass::sheet(SETTINGS_WIDTH, &theme, header, body.max_h(px(720.0)));
+            return glass::sheet(
+                SETTINGS_WIDTH,
+                &theme,
+                header,
+                body.h(px(SETTINGS_BODY_HEIGHT)),
+            );
         }
 
-        // A pushed page (#1086): same box, `‹` back to the list, the page's
-        // panel rendered inline instead of as the bottom-left pop-out.
+        // A pushed page (#1086): the same box at the same height, `‹` back to
+        // the list, the page's panel rendered inline instead of as the
+        // bottom-left pop-out.
         let back = glass::circle("settings-back", 34.0, &theme)
             .child(icon("chevron-left", 15.0, theme.text))
             .on_click(cx.listener(|this, _, _, cx| this.settings_back(cx)));
@@ -2460,7 +2469,7 @@ impl Shell {
             .pb(px(12.0))
             .min_h_0()
             .overflow_y_scroll()
-            .max_h(px(720.0))
+            .h(px(SETTINGS_BODY_HEIGHT))
             .child(panel);
         glass::sheet(page.sheet_width(), &theme, header, page_body)
     }

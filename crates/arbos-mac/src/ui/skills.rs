@@ -524,13 +524,15 @@ impl Render for SkillsPanel {
                     .flex()
                     .items_baseline()
                     .gap(px(8.0))
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.text)
-                            .child("Skills"),
-                    )
+                    .when(!self.embedded, |el| {
+                        el.child(
+                            div()
+                                .text_size(px(13.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme.text)
+                                .child("Skills"),
+                        )
+                    })
                     .child(
                         div()
                             .text_size(px(11.0))

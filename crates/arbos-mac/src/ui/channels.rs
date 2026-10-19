@@ -390,7 +390,7 @@ impl Render for ChannelsPanel {
                     .flex_1()
                     .text_size(px(11.0))
                     .text_color(theme.text_faint)
-                    .child("CHANNELS"),
+                    .when(!embedded, |el| el.child("CHANNELS")),
             );
         if view.mock {
             header = header.child(Self::chip(&theme, "Mock", theme.warn, theme.surface_2));
