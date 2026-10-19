@@ -7,6 +7,7 @@
 //! feedback loop turns the item into a tracked issue; when it exists, the relay pushes
 //! `feedback_issue` back and the agent leaves one line in the chat with the number.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -20,8 +21,12 @@ use crate::mcp::{err_result, text_result};
 /// How long the tool waits for a device to answer the capture request. The apps poll
 /// `/me/pushes` every 10–15 s, then capture and upload.
 const CAPTURE_WAIT: Duration = Duration::from_secs(32);
-/// Once some device answered, how much longer to wait for the preferred one.
-const PREFERRED_GRACE: Duration = Duration::from_secs(8);
+/// Once some other device answered, how much longer to wait for the preferred one (the apps
+/// poll every 10–15 s, so the device the request came from needs up to ~20 s to answer).
+const PREFERRED_GRACE: Duration = Duration::from_secs(16);
+/// A capture taken for this chat is reused by further `submit_feedback` calls within this long
+/// (a list of nine complaints becomes nine reports with one screenshot, not nine 30 s waits).
+const CAPTURE_REUSE: Duration = Duration::from_secs(150);
 const POLL_EVERY: Duration = Duration::from_secs(1);
 /// T3 rows of the chat that go into the rollout.
 const ROLLOUT_ROWS: i64 = 60;
@@ -183,6 +188,13 @@ async fn preferred_device(a: &Agent, chat_id: &str) -> Option<String> {
     })
 }
 
+/// chat id → the last capture and when it was taken (see `CAPTURE_REUSE`).
+fn recent_captures() -> &'static std::sync::Mutex<HashMap<String, (Capture, Instant)>> {
+    static RECENT: std::sync::OnceLock<std::sync::Mutex<HashMap<String, (Capture, Instant)>>> =
+        std::sync::OnceLock::new();
+    RECENT.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
 #[derive(Clone)]
 struct Capture {
     request_id: String,
@@ -340,16 +352,35 @@ pub async fn submit_feedback(a: &Arc<Agent>, args: &Value, chat_id: &str) -> Val
 
     a.post_activity(chat_id, Some("Capturing your screen".into()));
     let preferred = preferred_device(a, chat_id).await;
-    let capture = if want_shot {
+    let reused = if want_shot {
+        recent_captures()
+            .lock()
+            .ok()
+            .and_then(|m| m.get(chat_id).cloned())
+            .filter(|(c, at)| c.has_image && at.elapsed() < CAPTURE_REUSE)
+            .map(|(c, _)| c)
+    } else {
+        None
+    };
+    let capture = if !want_shot {
+        None
+    } else if reused.is_some() {
+        reused
+    } else {
         match request_capture(a, chat_id, preferred.as_deref()).await {
-            Ok(c) => c,
+            Ok(c) => {
+                if let Some(cap) = c.as_ref().filter(|c| c.has_image) {
+                    if let Ok(mut m) = recent_captures().lock() {
+                        m.insert(chat_id.to_owned(), (cap.clone(), Instant::now()));
+                    }
+                }
+                c
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "feedback: capture request failed");
                 None
             }
         }
-    } else {
-        None
     };
     a.post_activity(chat_id, Some("Filing your feedback".into()));
 

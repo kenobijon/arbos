@@ -564,20 +564,20 @@ pub fn answer_capture(
     let Some(creds) = credentials::load(&relay_url) else {
         return false;
     };
-    let shot = if app_is_active() {
-        capture_key_window().map(Some)
-    } else {
-        Ok(None)
-    };
+    // Our own window renders even when another app is frontmost (CGWindowListCreateImage reads
+    // the window's backing store), so a Mac that is open but not active still answers with its
+    // picture; `screen` says so and the box prefers the device the request came from anyway.
+    let active = app_is_active();
+    let shot = capture_key_window();
     let mut body = serde_json::json!({
         "platform": "mac",
         "app_version": crate::update::current_version(),
         "os": format!("macOS {}", os_version()).trim().to_string(),
         "device": hardware_model(),
-        "screen": screen,
+        "screen": if active { screen } else { format!("{screen} (app in background)") },
     });
     let taken = match &shot {
-        Ok(Some(s)) => {
+        Ok(s) => {
             body["image"] = serde_json::json!(
                 base64::engine::general_purpose::STANDARD.encode(s.bytes.as_slice())
             );
@@ -585,10 +585,6 @@ pub fn answer_capture(
             body["width"] = serde_json::json!(s.width);
             body["height"] = serde_json::json!(s.height);
             true
-        }
-        Ok(None) => {
-            body["skipped"] = serde_json::json!("background");
-            false
         }
         Err(e) => {
             body["skipped"] = serde_json::json!(format!("failed: {e:#}"));
@@ -624,30 +620,81 @@ pub fn answer_capture(
     taken
 }
 
-/// The Arbos window as a PNG by window number (no `Window` needed; used by the push responder).
+/// The Arbos window as a PNG, read in-process from the window's own backing store
+/// (`CGWindowListCreateImage` on our key window). Unlike the `screencapture` CLI this needs no
+/// Screen Recording permission, because an app may always image its own windows; it also works
+/// while another app is frontmost. Used by the push responder and as the sheet's first choice.
+#[cfg(target_os = "macos")]
 fn capture_key_window() -> Result<Shot> {
-    if !cfg!(target_os = "macos") {
-        return Err(anyhow!("window capture is macOS only"));
-    }
-    let Some(n) = key_window_number() else {
-        return Err(anyhow!("no key window"));
+    use core_graphics::geometry::{CGPoint, CGRect, CGSize};
+    use core_graphics::window::{
+        create_image, kCGWindowImageBestResolution, kCGWindowImageBoundsIgnoreFraming,
+        kCGWindowListOptionIncludingWindow,
     };
-    let path =
-        std::env::temp_dir().join(format!("arbos-feedback-capture-{}.png", std::process::id()));
-    let status = std::process::Command::new("screencapture")
-        .args(["-x", "-o"])
-        .arg(format!("-l{n}"))
-        .arg(&path)
-        .status()
-        .context("run screencapture")?;
-    if !status.success() {
+    use foreign_types::ForeignType as _;
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGImageGetBitmapInfo(image: *const std::ffi::c_void) -> u32;
+    }
+
+    let n = key_window_number().ok_or_else(|| anyhow!("no key window"))?;
+    // CGRectNull = "the window's own bounds".
+    let null_rect = CGRect::new(
+        &CGPoint::new(f64::INFINITY, f64::INFINITY),
+        &CGSize::new(0.0, 0.0),
+    );
+    let img = create_image(
+        null_rect,
+        kCGWindowListOptionIncludingWindow,
+        n as u32,
+        kCGWindowImageBoundsIgnoreFraming | kCGWindowImageBestResolution,
+    )
+    .ok_or_else(|| anyhow!("CGWindowListCreateImage returned no image"))?;
+    let (w, h) = (img.width(), img.height());
+    if w == 0 || h == 0 {
+        return Err(anyhow!("window image is empty"));
+    }
+    if img.bits_per_pixel() != 32 {
         return Err(anyhow!(
-            "screencapture exited with {status} (Screen Recording permission?)"
+            "unexpected pixel format ({} bpp)",
+            img.bits_per_pixel()
         ));
     }
-    let bytes = std::fs::read(&path).context("read the capture")?;
-    let _ = std::fs::remove_file(&path);
-    Shot::from_bytes(bytes, "Arbos window".into())
+    let bpr = img.bytes_per_row();
+    let data = img.data();
+    let bytes = data.bytes();
+    // SAFETY: `img` is a live CGImageRef owned by this scope.
+    let info = unsafe { CGImageGetBitmapInfo(img.as_ptr() as *const std::ffi::c_void) };
+    let little = info & 0x7000 == 0x2000;
+    let alpha_first = matches!(info & 0x1F, 2 | 4 | 6);
+    let mut rgba = Vec::with_capacity(w * h * 4);
+    for y in 0..h {
+        let row = bytes
+            .get(y * bpr..y * bpr + w * 4)
+            .ok_or_else(|| anyhow!("window image rows are short"))?;
+        for px in row.chunks_exact(4) {
+            let (r, g, b) = match (little, alpha_first) {
+                (true, true) => (px[2], px[1], px[0]),
+                (true, false) => (px[3], px[2], px[1]),
+                (false, true) => (px[1], px[2], px[3]),
+                (false, false) => (px[0], px[1], px[2]),
+            };
+            rgba.extend_from_slice(&[r, g, b, 255]);
+        }
+    }
+    let image = image::RgbaImage::from_raw(w as u32, h as u32, rgba)
+        .ok_or_else(|| anyhow!("window image buffer mismatch"))?;
+    let mut png = std::io::Cursor::new(Vec::new());
+    image
+        .write_to(&mut png, image::ImageFormat::Png)
+        .context("encode the window image")?;
+    Shot::from_bytes(png.into_inner(), "Arbos window".into())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn capture_key_window() -> Result<Shot> {
+    Err(anyhow!("window capture is macOS only"))
 }
 
 /// `sysctl -n hw.model` → "MacBookPro18,3"; empty when unknown.
@@ -707,6 +754,11 @@ fn os_version() -> String {
 fn capture_window(window: &mut Window) -> Result<Shot> {
     if !cfg!(target_os = "macos") {
         return Err(anyhow!("window capture is macOS only"));
+    }
+    // Our own window needs no Screen Recording permission this way; `screencapture` below is
+    // the fallback when the window number is unknown or the image call fails.
+    if let Ok(shot) = capture_key_window() {
+        return Ok(shot);
     }
     let path = std::env::temp_dir().join(format!("arbos-feedback-{}.png", std::process::id()));
     let mut cmd = std::process::Command::new("screencapture");
