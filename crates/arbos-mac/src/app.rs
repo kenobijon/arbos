@@ -2630,7 +2630,8 @@ impl AppState {
         cx.notify();
     }
 
-    /// ⌘B / the header sidebar button. In the narrow band the sidebar cannot
+    /// ⌘B / the sidebar collapse control (next to "+") / the header expand
+    /// button when the rail is hidden. In the narrow band the sidebar cannot
     /// dock, so it floats as an overlay instead; otherwise it collapses or returns.
     pub fn toggle_rail(&mut self, narrow: bool, cx: &mut Context<Self>) {
         if narrow {
