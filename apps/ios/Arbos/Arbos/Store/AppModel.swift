@@ -95,6 +95,9 @@ final class AppModel: ObservableObject {
     #endif
     @Published private(set) var credits: Credits?
     @Published private(set) var approvals: [PendingDevice] = []
+    /// A newer TestFlight build than the one running (continuous delivery, D85): the Home card
+    /// and Settings → About offer one tap into TestFlight. `nil` when up to date or dismissed.
+    @Published private(set) var availableUpdate: AvailableBuild?
     /// People chats (D72): DMs I am a member of, newest activity first.
     @Published var peopleChats: [PeopleChat] = []
     /// Chat ids with unread rows (per device, from head_seq > read_seq and pushes).
@@ -2352,6 +2355,9 @@ final class AppModel: ObservableObject {
                 await refreshSecrets()
             case "feedback_capture":
                 await answerFeedbackCapture(p)
+            case "release_published":
+                // A build is installable (TestFlight processed it): refresh the Update card now.
+                if p.payload["platform"] == "ios" { await checkForUpdate() }
             default:
                 break
             }
@@ -3142,5 +3148,69 @@ final class AppModel: ObservableObject {
             if !owned.contains(candidate) { return candidate }
         }
         return "\(name) copy \(String(UUID().uuidString.prefix(4)))"
+    }
+}
+
+// MARK: - App updates (continuous delivery, D85)
+
+/// A TestFlight build newer than the one running, as the relay reports it (`GET /releases/current`,
+/// fed by ios.yml after the build is distributed to the tester group).
+struct AvailableBuild: Equatable {
+    let version: String
+    let build: String
+    let url: String
+
+    /// TestFlight's own page for Arbos; the public invite link is the fallback when TestFlight
+    /// is not installed.
+    static let testFlightAppURL = URL(string: "itms-beta://beta.itunes.apple.com/v1/app/6812503407")!
+    static let testFlightInviteURL = URL(string: "https://testflight.apple.com/join/ec5fWCuJ")!
+}
+
+extension AppModel {
+    /// The build number this app runs (`CFBundleVersion`, UTC `YYYYMMDDHHMM…` from ios.yml).
+    static var runningBuild: String {
+        Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0"
+    }
+
+    private static let dismissedBuildKey = "update.dismissedBuild"
+
+    /// Numeric build comparison; a non-numeric build (Xcode's "1") never counts as newer.
+    static func isNewerBuild(_ candidate: String, than running: String) -> Bool {
+        guard let c = UInt64(candidate), let r = UInt64(running) else { return false }
+        return c > r
+    }
+
+    /// `GET /releases/current` → the iOS row; sets `availableUpdate` when its build is newer than
+    /// ours and the user did not dismiss that build. Called when the app becomes active and on
+    /// the relay's `release_published` push.
+    func checkForUpdate() async {
+        guard credentials != nil, !isFixture else { return }
+        guard let obj = (try? await api.json("GET", "/releases/current")) as? [String: Any],
+              let list = obj["releases"] as? [[String: Any]] else { return }
+        let ios = list.first { ($0["platform"] as? String) == "ios" }
+        guard let ios, let build = ios["build"] as? String, !build.isEmpty else { return }
+        let dismissed = UserDefaults.standard.string(forKey: Self.dismissedBuildKey)
+        if Self.isNewerBuild(build, than: Self.runningBuild), dismissed != build {
+            let next = AvailableBuild(version: ios["version"] as? String ?? "",
+                                      build: build,
+                                      url: ios["url"] as? String ?? "")
+            if availableUpdate != next { availableUpdate = next }
+        } else if availableUpdate != nil {
+            availableUpdate = nil
+        }
+    }
+
+    /// "Update": open TestFlight on Arbos (the invite link when TestFlight is missing).
+    func openTestFlight() {
+        Task { @MainActor in
+            let opened = await UIApplication.shared.open(AvailableBuild.testFlightAppURL)
+            if !opened { _ = await UIApplication.shared.open(AvailableBuild.testFlightInviteURL) }
+        }
+    }
+
+    /// "Later": hide the card for this build; the next build shows it again.
+    func dismissUpdate() {
+        if let b = availableUpdate?.build { UserDefaults.standard.set(b, forKey: Self.dismissedBuildKey) }
+        availableUpdate = nil
     }
 }

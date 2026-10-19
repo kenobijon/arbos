@@ -99,6 +99,9 @@ final class RelayAPI {
         if auth {
             req.setValue("Bearer \(token())", forHTTPHeaderField: "Authorization")
         }
+        // What runs here (`ios/1.0.0 (202610192230)`): the relay's "installed version" signal for
+        // continuous delivery (GET /admin/installs), on every call.
+        req.setValue(Self.clientHeader, forHTTPHeaderField: "X-Arbos-Client")
         for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
         if let body {
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
