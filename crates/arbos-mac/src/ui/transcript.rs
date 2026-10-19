@@ -22,7 +22,7 @@ use crate::ui::cards;
 use crate::ui::frost::edge_faded;
 use crate::ui::groups;
 use crate::ui::icons::icon;
-use crate::ui::markdown::{inline_spans, split_blocks, Block};
+use crate::ui::markdown::{inline_spans, polish_assistant_prose, split_blocks, Block};
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
 use crate::ui::theme::{
@@ -1491,17 +1491,23 @@ pub fn build_rows(
                     .iter()
                     .rposition(|p| matches!(p, Part::Text { .. }));
                 // Blocks across every text part form one bubble.
-                let total_blocks: usize = message
+                // Polish assistant prose on display so glued ".Word" and a trailing
+                // tool-narration sentence (already in the doc) still read as chat.
+                let polished: Vec<(String, String)> = message
                     .parts
                     .iter()
                     .filter_map(|p| match p {
-                        Part::Text { text, .. } => Some(
-                            split_blocks(text)
-                                .into_iter()
-                                .filter(|b| !is_json_block(b))
-                                .count(),
-                        ),
+                        Part::Text { id, text } => Some((id.clone(), polish_assistant_prose(text))),
                         _ => None,
+                    })
+                    .collect();
+                let total_blocks: usize = polished
+                    .iter()
+                    .map(|(_, text)| {
+                        split_blocks(text)
+                            .into_iter()
+                            .filter(|b| !is_json_block(b))
+                            .count()
                     })
                     .sum();
                 let fill = total_blocks > 1;
@@ -1509,7 +1515,15 @@ pub fn build_rows(
                 let mut had_prose = false;
                 for (pix, part) in message.parts.iter().enumerate() {
                     match part {
-                        Part::Text { id, text } => {
+                        Part::Text { id, .. } => {
+                            let text = polished
+                                .iter()
+                                .find(|(pid, _)| pid == id)
+                                .map(|(_, t)| t.as_str())
+                                .unwrap_or("");
+                            if text.trim().is_empty() {
+                                continue;
+                            }
                             let blocks: Vec<Block> = split_blocks(text)
                                 .into_iter()
                                 .filter(|b| !is_json_block(b))

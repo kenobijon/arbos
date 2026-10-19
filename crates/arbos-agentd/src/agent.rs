@@ -165,7 +165,8 @@ impl ReplyExtractor {
 
 /// Cheap post-check on main-agent prose as it streams into the doc (demo review v2): drops
 /// leading boilerplate lines ("Called 3 tools", "Running the tests…", "Route accepted: …"),
-/// leading thought-aloud sentences ("The user is asking…", "I should reply…"), and whole
+/// leading thought-aloud sentences ("The user is asking…", "I should reply…"), trailing
+/// tool-narration ("Checking the latest…"), glued ".Word" → ". Word", and whole
 /// ```json fences. Text is held back only until a line boundary, so streaming stays live.
 #[derive(Default)]
 pub struct ProseFilter {
@@ -334,6 +335,150 @@ impl ProseFilter {
         format!("{rest}{nl}")
     }
 
+    /// Drop trailing tool-narration / boilerplate sentences ("Checking the latest…").
+    fn strip_trailing_narration(text: &str) -> String {
+        let (body, nl) = match text.strip_suffix('\n') {
+            Some(b) => match b.strip_suffix('\r') {
+                Some(b2) => (b2, "\r\n"),
+                None => (b, "\n"),
+            },
+            None => (text, ""),
+        };
+        if body.trim().is_empty() {
+            return String::new();
+        }
+        let mut sentences: Vec<String> = Vec::new();
+        let mut rest = body.trim_start();
+        while let Some((sentence, after)) = Self::split_first_sentence(rest) {
+            sentences.push(sentence.trim().to_string());
+            rest = after.trim_start();
+        }
+        if !rest.is_empty() {
+            sentences.push(rest.trim().to_string());
+        }
+        while sentences
+            .last()
+            .is_some_and(|s| Self::is_boilerplate(s) || Self::is_thought_sentence(s))
+        {
+            sentences.pop();
+        }
+        if sentences.is_empty() {
+            return String::new();
+        }
+        let mut out = String::new();
+        for s in sentences {
+            if !out.is_empty() && !out.ends_with([' ', '\n', '\r']) {
+                out.push(' ');
+            }
+            out.push_str(&s);
+        }
+        format!("{out}{nl}")
+    }
+
+    /// True when `s` is (or is still typing toward) a short tool-narration sentence.
+    fn could_be_narration_prefix(s: &str) -> bool {
+        let l = s
+            .trim()
+            .trim_start_matches(['*', '_', '#', '>', '-', ' '])
+            .to_ascii_lowercase();
+        if l.is_empty() {
+            return false;
+        }
+        if Self::is_boilerplate(s) {
+            return true;
+        }
+        const STARTERS: &[&str] = &[
+            "running ",
+            "executing ",
+            "calling ",
+            "invoking ",
+            "let me check",
+            "let me run",
+            "let me look",
+            "i'll check",
+            "i will check",
+            "i'll run",
+            "i will run",
+            "checking ",
+            "reading the file",
+            "first, i",
+            "first i",
+            "now i'll",
+            "now i will",
+        ];
+        STARTERS
+            .iter()
+            .any(|st| st.starts_with(&l) || l.starts_with(st))
+    }
+
+    /// Split after the last sentence-ending punctuation (including glued ".Word").
+    /// `None` when no sentence has finished yet.
+    fn split_at_last_sentence_end(s: &str) -> Option<(&str, &str)> {
+        let bytes = s.as_bytes();
+        let mut last: Option<usize> = None;
+        let mut i = 0;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if b == b'.' || b == b'!' || b == b'?' {
+                if b == b'.' && i >= 2 && bytes[i - 1].is_ascii_lowercase() && bytes[i - 2] == b'.'
+                {
+                    i += 1;
+                    continue;
+                }
+                let after = &s[i + 1..];
+                if after.is_empty()
+                    || after.starts_with(' ')
+                    || after.starts_with('\n')
+                    || after.starts_with('\r')
+                    || after.chars().next().is_some_and(|c| c.is_uppercase())
+                {
+                    last = Some(i + 1);
+                }
+            }
+            i += utf8_len(bytes[i]);
+        }
+        let end = last?;
+        Some((&s[..end], &s[end..]))
+    }
+
+    /// Insert a space after `.` / `!` / `?` when the next character is an uppercase letter
+    /// ("have.Checking" → "have. Checking"). Skips `e.g.` / `i.e.`-style abbreviations.
+    fn fix_glued_spaces(text: &str) -> String {
+        let chars: Vec<char> = text.chars().collect();
+        let mut out = String::with_capacity(text.len() + 8);
+        let mut i = 0;
+        while i < chars.len() {
+            let c = chars[i];
+            out.push(c);
+            if matches!(c, '.' | '!' | '?') {
+                let abbrev =
+                    c == '.' && i >= 2 && chars[i - 1].is_ascii_lowercase() && chars[i - 2] == '.';
+                if !abbrev {
+                    if let Some(next) = chars.get(i + 1) {
+                        if next.is_uppercase() {
+                            out.push(' ');
+                        }
+                    }
+                }
+            }
+            i += 1;
+        }
+        out
+    }
+
+    /// Strip thought-aloud and trailing tool-narration; fix glued sentence spacing.
+    pub fn clean_prose(text: &str) -> String {
+        let stripped = Self::strip_thought_prefix(text);
+        if stripped.trim().is_empty() {
+            return String::new();
+        }
+        let without_tail = Self::strip_trailing_narration(&stripped);
+        if without_tail.trim().is_empty() {
+            return String::new();
+        }
+        Self::fix_glued_spaces(&without_tail)
+    }
+
     fn take_line(&mut self, line: &str) -> Option<String> {
         let t = line.trim_start();
         if self.in_fence {
@@ -359,18 +504,15 @@ impl ProseFilter {
                 Some(line.to_owned())
             };
         }
-        if !self.started {
-            if Self::is_boilerplate(line) {
-                return None;
-            }
-            let cleaned = Self::strip_thought_prefix(line);
-            if cleaned.trim().is_empty() {
-                return None;
-            }
-            self.started = true;
-            return Some(cleaned);
+        if Self::is_boilerplate(line) {
+            return None;
         }
-        Some(line.to_owned())
+        let cleaned = Self::clean_prose(line);
+        if cleaned.trim().is_empty() {
+            return None;
+        }
+        self.started = true;
+        Some(cleaned)
     }
 
     /// Feed a delta; returns the text that may enter the doc now.
@@ -387,16 +529,40 @@ impl ProseFilter {
         let p = self.pending.trim_start();
         let could_be_fence = p.is_empty() || "```".starts_with(p) || p.starts_with("```");
         if self.started && !self.in_fence && !could_be_fence {
-            out.push_str(&std::mem::take(&mut self.pending));
+            // Emit through the last finished sentence (cleaned); hold a trailing fragment
+            // that still looks like tool-narration so "Checking…" never lands mid-stream.
+            let raw = std::mem::take(&mut self.pending);
+            if let Some((complete, rest)) = Self::split_at_last_sentence_end(&raw) {
+                out.push_str(&Self::clean_prose(complete));
+                if !rest.is_empty() && Self::could_be_narration_prefix(rest) {
+                    self.pending = rest.to_string();
+                } else if !rest.is_empty() {
+                    let rest = Self::fix_glued_spaces(rest.trim_start());
+                    if !rest.is_empty() {
+                        if !out.is_empty()
+                            && !out.ends_with([' ', '\n', '\r'])
+                            && out.ends_with(['.', '!', '?'])
+                            && rest.chars().next().is_some_and(|c| c.is_uppercase())
+                        {
+                            out.push(' ');
+                        }
+                        out.push_str(&rest);
+                    }
+                }
+            } else if Self::could_be_narration_prefix(&raw) {
+                self.pending = raw;
+            } else {
+                out.push_str(&Self::fix_glued_spaces(&raw));
+            }
         } else if !self.started && !self.in_fence && self.pending.len() > 160 {
             // Long first line: real prose. Judge it once and let it through.
             if Self::is_boilerplate(&self.pending) {
                 self.pending.clear();
             } else {
-                let cleaned = Self::strip_thought_prefix(&self.pending);
+                let cleaned = Self::clean_prose(&self.pending);
                 self.pending.clear();
                 if cleaned.trim().is_empty() {
-                    // Entire buffer was thought-aloud; keep waiting for real prose.
+                    // Entire buffer was thought-aloud / narration; keep waiting for real prose.
                 } else {
                     self.started = true;
                     out.push_str(&cleaned);
@@ -2448,8 +2614,9 @@ impl Agent {
             (None, true) => "act".to_owned(),
             (None, false) => return,
         };
-        // Drop planning / routing thoughts; keep only the user-facing sentence.
-        let cleaned = ProseFilter::strip_thought_prefix(t.ack_text.trim());
+        // Drop planning / routing thoughts and trailing tool-narration; keep only the
+        // user-facing sentence(s), with glued ".Word" spacing fixed.
+        let cleaned = ProseFilter::clean_prose(t.ack_text.trim());
         let cleaned = cleaned.trim().to_owned();
         if cleaned.is_empty() {
             t.ack_text.clear();
@@ -2562,6 +2729,7 @@ impl Agent {
         text: &str,
         activity: Option<&str>,
     ) -> Result<(), String> {
+        let text = ProseFilter::clean_prose(text.trim());
         let text = text.trim();
         if text.is_empty() && activity.is_none() {
             return Err("nothing to send".into());
@@ -3806,6 +3974,62 @@ mod tests {
         assert_eq!(
             cleaned.trim(),
             "Cloning RaoFoundation/subtensor into this project now."
+        );
+    }
+
+    /// Status prose with a glued tool-narration tail drops the narration and keeps spacing.
+    #[test]
+    fn clean_prose_strips_glued_checking_tail() {
+        let raw = "I have good data on the research loop from the retrieved memory. The baseline is done at val_loss 6.2568 with a 124M model, and the accum sweep (bs4/bs2/bs1) is running—no improvement yet. I'll report status from what I already have.Checking the latest experiment results.";
+        let cleaned = ProseFilter::clean_prose(raw);
+        assert_eq!(
+            cleaned.trim(),
+            "I have good data on the research loop from the retrieved memory. The baseline is done at val_loss 6.2568 with a 124M model, and the accum sweep (bs4/bs2/bs1) is running—no improvement yet. I'll report status from what I already have."
+        );
+        assert!(!cleaned.contains("Checking"));
+        assert!(!cleaned.contains("have.Checking"));
+    }
+
+    /// A lone glued answer after thought-aloud still becomes just the answer.
+    #[test]
+    fn clean_prose_keeps_glued_austin_answer() {
+        let raw = "The user is asking a simple factual question. I should reply directly.Austin.";
+        assert_eq!(ProseFilter::clean_prose(raw).trim(), "Austin.");
+    }
+
+    /// Two real sentences glued without a space get a space, not a drop.
+    #[test]
+    fn clean_prose_fixes_glued_real_sentences() {
+        let raw = "Baseline is done.Accum sweep is still running.";
+        assert_eq!(
+            ProseFilter::clean_prose(raw).trim(),
+            "Baseline is done. Accum sweep is still running."
+        );
+    }
+
+    /// Streaming: after real prose has started, a glued Checking-tail is held and dropped.
+    #[test]
+    fn feed_holds_then_drops_glued_checking_tail() {
+        let mut f = ProseFilter::default();
+        let first = f.feed("I'll report status from what I already have.\n");
+        assert!(
+            first.contains("already have."),
+            "prose should stream: {first:?}"
+        );
+        let mid = f.feed("Checking the latest experiment results");
+        assert!(
+            !mid.contains("Checking"),
+            "incomplete narration must not land: {mid:?}"
+        );
+        let end = f.feed(".");
+        assert!(
+            !end.contains("Checking"),
+            "finished narration must stay out: {end:?}"
+        );
+        let flushed = f.flush();
+        assert!(
+            !flushed.contains("Checking"),
+            "flush must not revive narration: {flushed:?}"
         );
     }
 }
