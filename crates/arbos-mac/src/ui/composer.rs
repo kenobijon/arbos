@@ -539,60 +539,20 @@ impl ComposerInput {
             .unwrap_or(self.content.len())
     }
 
-    /// Start of the previous word (macOS Control/Option+Left).
     fn previous_word_boundary(&self, offset: usize) -> usize {
-        let offset = offset.min(self.content.len());
-        let mut chars: Vec<(usize, char)> = self.content[..offset].char_indices().collect();
-        while chars.last().is_some_and(|(_, c)| c.is_whitespace()) {
-            chars.pop();
-        }
-        if chars.is_empty() {
-            return 0;
-        }
-        let class = is_word_char(chars[chars.len() - 1].1);
-        while chars
-            .last()
-            .is_some_and(|(_, c)| !c.is_whitespace() && is_word_char(*c) == class)
-        {
-            chars.pop();
-        }
-        chars.last().map(|(i, c)| i + c.len_utf8()).unwrap_or(0)
+        previous_word_boundary(&self.content, offset)
     }
 
-    /// End of the next word (macOS Control/Option+Right).
     fn next_word_boundary(&self, offset: usize) -> usize {
-        let offset = offset.min(self.content.len());
-        let slice = &self.content[offset..];
-        let mut iter = slice.char_indices().peekable();
-        while iter.peek().is_some_and(|(_, c)| c.is_whitespace()) {
-            iter.next();
-        }
-        let Some(&(_, first)) = iter.peek() else {
-            return self.content.len();
-        };
-        let class = is_word_char(first);
-        let mut end = offset;
-        for (i, c) in iter {
-            if c.is_whitespace() || is_word_char(c) != class {
-                return offset + i;
-            }
-            end = offset + i + c.len_utf8();
-        }
-        end
+        next_word_boundary(&self.content, offset)
     }
 
     fn line_start(&self, offset: usize) -> usize {
-        self.content[..offset]
-            .rfind('\n')
-            .map(|i| i + 1)
-            .unwrap_or(0)
+        line_start(&self.content, offset)
     }
 
     fn line_end(&self, offset: usize) -> usize {
-        self.content[offset..]
-            .find('\n')
-            .map(|i| offset + i)
-            .unwrap_or(self.content.len())
+        line_end(&self.content, offset)
     }
 
     /// Byte offset one wrapped line above/below the caret, keeping column when
@@ -644,6 +604,63 @@ impl ComposerInput {
 
 fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
+}
+
+/// Start of the previous word (Option+Left / Option+Backspace; Control+Left
+/// where macOS does not claim it for Spaces). Skips whitespace, then one run of
+/// word or punctuation characters.
+fn previous_word_boundary(text: &str, offset: usize) -> usize {
+    let offset = offset.min(text.len());
+    let mut chars: Vec<(usize, char)> = text[..offset].char_indices().collect();
+    while chars.last().is_some_and(|(_, c)| c.is_whitespace()) {
+        chars.pop();
+    }
+    if chars.is_empty() {
+        return 0;
+    }
+    let class = is_word_char(chars[chars.len() - 1].1);
+    while chars
+        .last()
+        .is_some_and(|(_, c)| !c.is_whitespace() && is_word_char(*c) == class)
+    {
+        chars.pop();
+    }
+    chars.last().map(|(i, c)| i + c.len_utf8()).unwrap_or(0)
+}
+
+/// End of the next word (Option+Right / Option+Forward-Delete).
+fn next_word_boundary(text: &str, offset: usize) -> usize {
+    let offset = offset.min(text.len());
+    let slice = &text[offset..];
+    let mut iter = slice.char_indices().peekable();
+    while iter.peek().is_some_and(|(_, c)| c.is_whitespace()) {
+        iter.next();
+    }
+    let Some(&(_, first)) = iter.peek() else {
+        return text.len();
+    };
+    let class = is_word_char(first);
+    let mut end = offset;
+    for (i, c) in iter {
+        if c.is_whitespace() || is_word_char(c) != class {
+            return offset + i;
+        }
+        end = offset + i + c.len_utf8();
+    }
+    end
+}
+
+/// Start of the hard line holding `offset` (Cmd+Left / Home).
+fn line_start(text: &str, offset: usize) -> usize {
+    text[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0)
+}
+
+/// End of the hard line holding `offset` (Cmd+Right / End).
+fn line_end(text: &str, offset: usize) -> usize {
+    text[offset..]
+        .find('\n')
+        .map(|i| offset + i)
+        .unwrap_or(text.len())
 }
 
 /// Pixel position (relative to the text origin) of a byte index.
@@ -2116,5 +2133,86 @@ mod tests {
         );
         assert_eq!(primary_action(true, true, false, false), ButtonAction::Send);
         assert_eq!(primary_action(true, true, false, true), ButtonAction::Guide);
+    }
+
+    const SENTENCE: &str = "the quick brown fox";
+
+    #[test]
+    fn option_left_steps_one_word_not_one_line() {
+        let end = SENTENCE.len();
+        let before_fox = previous_word_boundary(SENTENCE, end);
+        assert_eq!(&SENTENCE[before_fox..], "fox");
+        assert_eq!(
+            &SENTENCE[previous_word_boundary(SENTENCE, before_fox)..],
+            "brown fox"
+        );
+        assert_eq!(
+            &SENTENCE[previous_word_boundary(SENTENCE, 10)..],
+            "quick brown fox"
+        );
+        assert_eq!(previous_word_boundary(SENTENCE, 4), 0);
+        assert_eq!(previous_word_boundary(SENTENCE, 0), 0);
+        assert_eq!(previous_word_boundary("fox   ", 6), 0);
+        assert_eq!(previous_word_boundary(SENTENCE, end + 10), before_fox);
+    }
+
+    #[test]
+    fn option_right_steps_one_word_not_one_line() {
+        assert_eq!(&SENTENCE[..next_word_boundary(SENTENCE, 0)], "the");
+        assert_eq!(&SENTENCE[..next_word_boundary(SENTENCE, 3)], "the quick");
+        assert_eq!(&SENTENCE[..next_word_boundary(SENTENCE, 5)], "the quick");
+        assert_eq!(next_word_boundary(SENTENCE, 16), SENTENCE.len());
+        assert_eq!(next_word_boundary(SENTENCE, SENTENCE.len()), SENTENCE.len());
+        assert_eq!(next_word_boundary("   fox", 0), 6);
+    }
+
+    #[test]
+    fn word_steps_stop_at_punctuation_and_cross_newlines() {
+        let text = "hello, world\nsecond line";
+        assert_eq!(&text[previous_word_boundary(text, 6)..6], ",");
+        assert_eq!(&text[previous_word_boundary(text, 5)..5], "hello");
+        assert_eq!(&text[..next_word_boundary(text, 5)], "hello,");
+        let second = text.find("second").unwrap();
+        assert_eq!(
+            &text[previous_word_boundary(text, second)..second],
+            "world\n"
+        );
+        assert_eq!(&text[12..next_word_boundary(text, 12)], "\nsecond");
+    }
+
+    #[test]
+    fn word_steps_respect_multibyte_characters() {
+        let text = "naïve café résumé";
+        let end = text.len();
+        let last = previous_word_boundary(text, end);
+        assert_eq!(&text[last..], "résumé");
+        assert_eq!(&text[previous_word_boundary(text, last)..last], "café ");
+        assert_eq!(&text[..next_word_boundary(text, 0)], "naïve");
+    }
+
+    #[test]
+    fn option_backspace_removes_exactly_one_word() {
+        let mut text = SENTENCE.to_string();
+        let cursor = text.len();
+        let prev = previous_word_boundary(&text, cursor);
+        text.replace_range(prev..cursor, "");
+        assert_eq!(text, "the quick brown ");
+        let cursor = text.len();
+        let prev = previous_word_boundary(&text, cursor);
+        text.replace_range(prev..cursor, "");
+        assert_eq!(text, "the quick ");
+    }
+
+    #[test]
+    fn cmd_left_right_use_hard_lines() {
+        let text = "first line\nsecond line";
+        assert_eq!(line_start(text, 0), 0);
+        assert_eq!(line_start(text, 5), 0);
+        assert_eq!(line_end(text, 5), 10);
+        assert_eq!(line_start(text, 11), 11);
+        assert_eq!(line_start(text, text.len()), 11);
+        assert_eq!(line_end(text, 11), text.len());
+        assert_eq!(line_start(SENTENCE, SENTENCE.len()), 0);
+        assert_eq!(line_end(SENTENCE, 0), SENTENCE.len());
     }
 }
