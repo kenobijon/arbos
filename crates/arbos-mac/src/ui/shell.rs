@@ -260,6 +260,15 @@ impl Shell {
             cx.notify();
         })
         .detach();
+        // Rig: `ARBOS_OPEN_NEW_AGENT=1` opens the New Message sheet with the
+        // "New agent" form expanded.
+        if std::env::var("ARBOS_OPEN_NEW_AGENT").is_ok_and(|v| v == "1") {
+            state.update(cx, |s, cx| {
+                s.open_new_chat(cx);
+                s.new_project_open = true;
+                cx.notify();
+            });
+        }
         let connectors = cx.new(|cx| ConnectorsPanel::new(state.clone(), cx));
         if open_settings.as_deref() == Some("connectors") {
             connectors.update(cx, |p, cx| p.show(cx));
