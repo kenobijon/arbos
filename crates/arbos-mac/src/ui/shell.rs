@@ -1895,7 +1895,7 @@ impl Shell {
     }
 
     // ----- profile edit ---------------------------------------------------------------
-    /// Settings header pencil: load the current name and handle into the fields.
+    /// Settings header: double-click the name to edit display name and handle.
     fn start_profile_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (name, handle) = {
             let state = self.state.read(cx);
@@ -2114,38 +2114,26 @@ impl Shell {
                             ),
                     );
             } else {
+                // Double-click the name to edit (same as the agent profile page).
                 header = header
                     .child(
                         div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .child(
-                                div()
-                                    .text_size(px(22.0))
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(theme.text)
-                                    .child(if account.name.trim().is_empty() {
-                                        who.clone()
-                                    } else {
-                                        account.name.clone()
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .id("profile-edit")
-                                    .size(px(22.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_full()
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(theme.surface_2))
-                                    .child(icon("square-pencil", 14.0, theme.text_muted))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.start_profile_edit(window, cx)
-                                    })),
-                            ),
+                            .id("profile-edit")
+                            .text_size(px(22.0))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(theme.text)
+                            .cursor_pointer()
+                            .hover(|s| s.opacity(0.85))
+                            .child(if account.name.trim().is_empty() {
+                                who.clone()
+                            } else {
+                                account.name.clone()
+                            })
+                            .on_click(cx.listener(|this, event: &gpui::ClickEvent, window, cx| {
+                                if event.click_count() >= 2 {
+                                    this.start_profile_edit(window, cx);
+                                }
+                            })),
                     )
                     .child(
                         div()
