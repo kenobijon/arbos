@@ -1177,22 +1177,6 @@ fn escape_action(recording: bool, transcribing: bool) -> Option<EscapeAction> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn escape_stops_a_recording_before_anything_else() {
-        assert_eq!(escape_action(true, false), Some(EscapeAction::StopMemo));
-        assert_eq!(escape_action(true, true), Some(EscapeAction::StopMemo));
-        assert_eq!(
-            escape_action(false, true),
-            Some(EscapeAction::CancelTranscription)
-        );
-        assert_eq!(escape_action(false, false), None);
-    }
-}
-
 /// Thin recording/level row for the composer while a memo records (the voice
 /// tick re-renders it every 50 ms).
 pub fn render_recording_row(voice: &Voice, theme: &Theme) -> impl IntoElement {
@@ -1355,5 +1339,21 @@ impl Render for Voice {
                     .child(frosted(14.0, PANEL_BLUR, strip)),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escape_stops_a_recording_before_anything_else() {
+        assert_eq!(escape_action(true, false), Some(EscapeAction::StopMemo));
+        assert_eq!(escape_action(true, true), Some(EscapeAction::StopMemo));
+        assert_eq!(
+            escape_action(false, true),
+            Some(EscapeAction::CancelTranscription)
+        );
+        assert_eq!(escape_action(false, false), None);
     }
 }
