@@ -1070,6 +1070,10 @@ class Loop:
         owner (priority tier) gets the pattern screen only: his intent is not in question, and the model
         misreads security *requests* ("scrub the leaked key from context") as attacks."""
         text = (info.get("comment") or "").strip()
+        # The submit_feedback tool appends "— filed by the user's agent <name> …": boilerplate, not the user's
+        # words, and "the user" in it sits within 30 chars of any trailing "delete" (#1085 was flagged for a
+        # "fork or delete" context menu).
+        text = re.sub(r"\s*[—-]+\s*filed by the user'?s agent\b.*$", "", text, flags=re.I | re.S).strip()
         for pat in MALICE_PATTERNS:
             if re.search(pat, text, re.I | re.S):
                 return "malicious", f"matches pattern `{pat}`"
@@ -1281,7 +1285,7 @@ class Loop:
             return
         # 1. The issue is opened as soon as the item is admitted (dedupe already happened), so every report is
         # visible and claimable at once; only the agent launch waits for the launch rate limits.
-        if not st.get("issue") or (st.get("screen_override") and "operator override" not in (st.get("screen") or "")):
+        if not st.get("issue") or not st.get("screen") or (st.get("screen_override") and "operator override" not in (st.get("screen") or "")):
             if not self.open_issue(fid, st, info, deferral, shots):
                 return
         reason = None if deferral else self.rate_limit_reason(st)
