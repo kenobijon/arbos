@@ -1,6 +1,7 @@
 //! The composer, Grok Bot layout: a "+" circle for attachments, the pill
-//! field ("Message <name>") with the hold-to-talk mic, and the round white button
-//! that sends text, stops a running turn, or starts a voice call when empty.
+//! field ("Message <name>") with the hold-to-talk mic (transcribe), and the
+//! round white button that sends text, stops a running turn, or starts a call
+//! when empty — same as the iPhone (mic + phone; calls start audio-only).
 //! Hand-rolled multi-line text input with IME (`EntityInputHandler`,
 //! zeron-study §4.6). Enter sends, Shift+Enter inserts a newline. The model
 //! and reasoning pickers open from the header's "…" menu.
@@ -19,8 +20,9 @@ use gpui::{
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::app::{AppState, ComposerMode};
-use crate::model::Effort;
+use crate::model::{CallKind, Effort};
 use crate::sync::fixture::MODELS;
+use crate::ui::callview;
 use crate::ui::frost::{frosted, MENU_BLUR, PANEL_BLUR};
 use crate::ui::glass;
 use crate::ui::icons::icon;
@@ -1354,6 +1356,7 @@ impl Render for Composer {
                 v.notice().map(str::to_owned),
             )
         };
+        let in_livekit = state.my_call.is_some();
         let has_text = !self.input.read(cx).text().trim().is_empty();
 
         self.input.update(cx, |input, _| {
@@ -1387,22 +1390,22 @@ impl Render for Composer {
         };
 
         // The round primary button: send text, stop a running turn when the
-        // field is empty, or start / end a voice call when idle and empty.
+        // field is empty, or start / end a call when idle and empty (iPhone:
+        // phone next to the mic; calls start audio-only).
+        let hanging_up = in_call || in_livekit;
         let (glyph, action): (&str, ButtonAction) = if has_text {
             ("arrow-up", ButtonAction::Send)
         } else if running {
             ("stop", ButtonAction::Stop)
-        } else if in_call {
-            ("phone", ButtonAction::Call)
         } else {
-            ("waveform", ButtonAction::Call)
+            ("phone", ButtonAction::Call)
         };
         let primary_button = div()
             .id("composer-send")
             .size(px(SEND_BUTTON))
             .flex_shrink_0()
             .rounded_full()
-            .bg(if action == ButtonAction::Call && in_call {
+            .bg(if action == ButtonAction::Call && hanging_up {
                 theme.danger
             } else {
                 theme.primary
@@ -1415,7 +1418,7 @@ impl Render for Composer {
             .child(icon(
                 glyph,
                 if glyph == "stop" { 14.0 } else { 16.0 },
-                if action == ButtonAction::Call && in_call {
+                if action == ButtonAction::Call && hanging_up {
                     theme.text
                 } else {
                     theme.on_primary
@@ -1424,7 +1427,24 @@ impl Render for Composer {
             .on_click(cx.listener(move |this, _, window, cx| match action {
                 ButtonAction::Send => this.submit(window, cx),
                 ButtonAction::Stop => cx.emit(ComposerEvent::Stop),
-                ButtonAction::Call => this.voice.update(cx, |v, cx| v.toggle_call(cx)),
+                ButtonAction::Call => {
+                    let live = this.state.read(cx).my_call.is_some();
+                    let voice_on = this.voice.read(cx).in_call();
+                    if live {
+                        this.state.update(cx, |s, cx| s.leave_call(cx));
+                    } else if voice_on {
+                        this.voice.update(cx, |v, cx| v.toggle_call(cx));
+                    } else if this
+                        .state
+                        .read(cx)
+                        .selected()
+                        .is_some_and(callview::callable)
+                    {
+                        // Audio-only; camera is toggled on the call screen.
+                        this.state
+                            .update(cx, |s, cx| s.start_call_in_chat(CallKind::Voice, cx));
+                    }
+                }
             }));
 
         // Hold to record a voice memo, or click to toggle recording. Idle it is
@@ -1532,8 +1552,8 @@ impl Render for Composer {
                     .child(plus),
             )
             .child(field_body);
-        // Grok Mac: the mic alone while the field is idle; the round button
-        // appears for text (send), a running turn (stop) or a call (hang up).
+        // Match the iPhone: mic (transcribe) + phone (call) while the field is
+        // idle and empty; send / stop / hang-up replace the phone as needed.
         let mut trailing = div()
             .flex()
             .items_center()
@@ -1543,9 +1563,9 @@ impl Render for Composer {
         if !has_text && !recording {
             trailing = trailing.child(mic_button);
         }
-        if has_text || running || in_call || voice_mode || recording {
-            trailing = trailing.child(primary_button);
-        }
+        // Always show the round button: phone when idle (like the iPhone), else
+        // send / stop / hang-up.
+        trailing = trailing.child(primary_button);
         field = field.child(trailing);
 
         let mut column = div().relative().w_full().flex().flex_col().gap(px(8.0));
