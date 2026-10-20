@@ -128,46 +128,18 @@ pub fn render(
                     }),
             );
     } else if space.is_people_group() {
-        // A people group: stacked avatars, name, member count → group page.
-        let stack: Vec<(
-            crate::model::Person,
-            Option<std::sync::Arc<gpui::RenderImage>>,
-        )> = space
-            .people
-            .iter()
-            .take(3)
-            .map(|p| (p.clone(), state.avatar(&p.avatar_url)))
-            .collect();
+        // A group is one pill like an agent chat: its disc and its name → group page
+        // (redesign 2026-10-20: no stacked heads, no member count).
         let sid = space.id.clone();
-        let members = space.people.len() + 1;
         title = title
-            .child(people::avatar_stack(&stack, AVATAR_HEADER * 0.8, 3, &theme))
+            .child(avatars::project(space, AVATAR_HEADER, &theme))
             .child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .min_w_0()
-                    .child(
-                        div()
-                            .text_size(px(TEXT_BODY))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.text)
-                            .truncate()
-                            .child(space.name.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(TEXT_TINY - 1.0))
-                            .text_color(theme.text_muted)
-                            .truncate()
-                            .child(format!(
-                                "{members} members{}",
-                                match space.agents.len() {
-                                    0 => String::new(),
-                                    n => format!(" · {n} agent{}", if n == 1 { "" } else { "s" }),
-                                }
-                            )),
-                    ),
+                    .text_size(px(TEXT_BODY))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.text)
+                    .truncate()
+                    .child(space.name.clone()),
             )
             .cursor_pointer()
             .hover(|s| s.bg(theme.surface_2))
@@ -319,9 +291,10 @@ pub fn render(
     };
     // An agent chat has nothing here: calls (and hanging up) live on the
     // composer's phone button, everything else on the profile page or the
-    // sidebar row's control-click menu. A people chat keeps "add people".
+    // sidebar row's control-click menu. A DM keeps "add people"; a group adds
+    // members from its page.
     let mut right = div().flex().items_center().gap(px(2.0));
-    if is_people {
+    if is_people && !space.is_people_group() {
         right = right.child(
             button("header-members", "person-plus", shell.members_open, &theme).on_mouse_down(
                 gpui::MouseButton::Left,
@@ -783,10 +756,11 @@ fn tab_menu(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl Int
     glass::frosted_menu(260.0, &theme, body)
 }
 
-/// Chips under the header: agents + "Add agent" for a people chat. `None` for
-/// an agent — its chat tabs live in the header (`agent_tabs`).
+/// Chips under the header: agents + "Add agent" for a DM. `None` for an agent
+/// (its chat tabs live in the header, `agent_tabs`) and for a group — its
+/// agents are members, added through the page's "Add members" row.
 pub fn chips(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option<AnyElement> {
-    if !space.is_people() {
+    if !space.is_people() || space.is_people_group() {
         return None;
     }
     let theme = Theme::of(cx).clone();
