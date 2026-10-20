@@ -1,5 +1,5 @@
 // One conversation, Grok Bot layout: floating glass header (back circle,
-// avatar + name pill, "…" circle), messages scrolling underneath with a top
+// avatar + name pill), messages scrolling underneath with a top
 // fade, "<Project> is working" while a turn runs, and the composer ("+",
 // "Ask <Project>" field with mic, white call button) floating above the
 // keyboard.
@@ -545,7 +545,7 @@ struct ChatView: View {
                             if people.isGroup {
                                 // Compact widths (SE, 375 pt): two faces instead of three and a title
                                 // that shrinks a little before it truncates — the pill shares the
-                                // row with Back and two trailing buttons.
+                                // row with Back and the members button when present.
                                 AvatarCluster(members: groupHeaderMembers(people), size: Theme.avatar,
                                               maxVisible: compactWidth ? 2 : 3, imageUrl: groupImageURL(people))
                                 VStack(alignment: .leading, spacing: 0) {
@@ -611,50 +611,6 @@ struct ChatView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Members and agents")
             }
-            Menu {
-                if isPeople {
-                    // Calls always start audio-only; turn the camera on from the call screen.
-                    Button { startCall(.voice) } label: { Label("Call", systemImage: "phone") }
-                    Button { openHeaderProfile() } label: { Label(people?.isGroup == true ? "Group info" : "Profile", systemImage: "person.crop.circle") }
-                    Button { showSearch = true; DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { searchFocused = true } } label: { Label("Search in chat", systemImage: "magnifyingglass") }
-                    Button { showMembers = true } label: { Label("Members & agents", systemImage: "person.2") }
-                    if let c = counterpart {
-                        Button(role: .destructive) { model.block(c) } label: { Label("Block @\(c.handle)", systemImage: "hand.raised") }
-                    }
-                } else {
-                    // One chat per agent (D78); its "projects" system chat and its groups stay reachable here.
-                    if let sys = model.chats(of: projectId).first(where: { $0.isSystem }), sys.id != chatId {
-                        Button { model.open(chat: sys) } label: { Label("Projects", systemImage: "square.grid.2x2") }
-                    }
-                    if chat?.isGroup == true || chat?.isSystem == true, let single = model.singleChat(of: projectId), single.id != chatId {
-                        Button { model.open(chat: single) } label: { Label("Chat with \(project?.name ?? "agent")", systemImage: "bubble.left") }
-                    }
-                    ForEach(model.chats(of: projectId).filter { $0.isGroup && $0.id != chatId }) { g in
-                        Button { model.open(chat: g) } label: { Label(g.title.isEmpty ? "Group" : g.title, systemImage: "person.2") }
-                    }
-                    Button { showModelPicker = true } label: { Label("Model · \(project?.shortModel ?? "")", systemImage: "cpu") }
-                    // Calls Phase 2: every project chat is callable; the agent joins the room
-                    // through the voice worker (1:1 = a call with the agent; shared
-                    // projects = people plus the agent). Always start audio-only.
-                    Button { startCall(.voice) } label: { Label(project?.shared == true ? "Call" : "Call \(project?.name ?? "agent")", systemImage: "phone") }
-                    Button { showShare = true } label: { Label(project?.shared == true ? "Members" : "Share project…", systemImage: "person.2.badge.plus") }
-                    if streaming {
-                        Button(role: .destructive) { stop() } label: { Label("Stop \(name)", systemImage: "stop.circle") }
-                    }
-                }
-                Divider()
-                Button { FeedbackCenter.shared.open(screen: "chat", chatId: chatId, projectId: isPeople ? nil : projectId) } label: {
-                    Label("Send feedback", systemImage: "exclamationmark.bubble")
-                }
-                Button { showSettings = true } label: { Label("Settings", systemImage: "gearshape") }
-            } label: {
-                GlassCircle {
-                    Image(systemName: "ellipsis")
-                        .font(theme.font(17, weight: .semibold))
-                        .foregroundStyle(theme.text)
-                }
-            }
-            .buttonStyle(.plain)
         }
         .padding(.horizontal, 16)
         .padding(.top, 6)
@@ -1283,7 +1239,6 @@ struct ChatView: View {
             // While recording: tap send also finishes (same as release). Otherwise
             // Grok keeps the composer usable while the bot works: text sends, an
             // empty field starts a voice call with the agent (phone icon next to mic).
-            // Stop lives in the … menu.
             Button(action: {
                 if recorder.recording {
                     memoHoldActive = false

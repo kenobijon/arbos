@@ -1,7 +1,7 @@
 // In-app feedback (the TestFlight "Share Beta Feedback" fallback): a
 // screenshot of the current screen plus a note, sent to the relay's feedback
 // endpoint, which feeds the same automatic fix loop as the Mac sheet.
-// Opened by a shake, a system screenshot, Settings → Send feedback, or the chat "…" menu.
+// Opened by a shake, a system screenshot, or Settings → Send feedback.
 //
 // Endpoint: POST /feedback (device token) JSON {note, image: base64 PNG/JPEG
 // ≤15 MB, mime, app_version, platform: "ios", os, project_id?, width,
