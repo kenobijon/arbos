@@ -100,6 +100,8 @@ impl AuthMode {
 pub struct RoomBroadcast {
     pub from_conn: u64,
     pub bytes: Bytes,
+    /// Row seq for `ROW` frames; 0 for presence/status/error frames, which pass straight through.
+    pub seq: i64,
 }
 
 pub struct Room {
@@ -316,6 +318,7 @@ impl AppState {
                 let _ = room.tx.send(RoomBroadcast {
                     from_conn: 0,
                     bytes: frame.clone(),
+                    seq: 0,
                 });
             }
         }

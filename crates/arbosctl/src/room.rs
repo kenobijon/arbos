@@ -371,14 +371,13 @@ async fn run(
             }
             FrameType::Row => {
                 let rh: wire::RowHeader = serde_json::from_value(f.header)?;
-                if rh.seq <= s.cursor {
-                    eprintln!("[dup row seq={} ignored]", rh.seq);
-                    continue;
-                }
+                // Import every row, whatever its seq: a Loro update is idempotent, and a row
+                // below the cursor may be one the socket had not delivered yet (the relay now
+                // orders them, but a replica must never drop data on an ordering assumption).
                 if rh.device != s.device {
                     s.doc.import(&f.payload)?;
                 }
-                s.cursor = rh.seq;
+                s.cursor = s.cursor.max(rh.seq);
                 rows_seen += 1;
                 s.persist()?;
                 if caught_up || matches!(mode, Mode::Stream { .. }) {

@@ -21,6 +21,42 @@ use crate::people;
 use crate::state::{AppState, RoomBroadcast};
 
 const ROWS_BATCH: i64 = 256;
+/// How long live rows are held for a socket that has not finished (or started) its catch-up.
+const CATCHUP_HOLD: Duration = Duration::from_secs(10);
+
+/// Per-socket row ordering (see `run`).
+struct Delivery {
+    /// True from connect / HELLO until this socket's ROWS_REQ reply ended with ROWS_DONE.
+    catching_up: bool,
+    /// Highest row seq written to this socket, by either path.
+    last_sent_seq: i64,
+    /// Live rows that arrived while catching up, in arrival (= seq) order.
+    held: Vec<RoomBroadcast>,
+}
+
+impl Default for Delivery {
+    fn default() -> Self {
+        Self {
+            catching_up: true,
+            last_sent_seq: 0,
+            held: Vec::new(),
+        }
+    }
+}
+
+async fn flush_held(
+    d: &mut Delivery,
+    sink: &mut futures::stream::SplitSink<WebSocket, Message>,
+) -> Result<(), axum::Error> {
+    let held = std::mem::take(&mut d.held);
+    for b in held {
+        if b.seq > d.last_sent_seq {
+            d.last_sent_seq = b.seq;
+            sink.send(Message::Binary(b.bytes)).await?;
+        }
+    }
+    Ok(())
+}
 
 pub async fn ws_room(
     ws: WebSocketUpgrade,
@@ -100,6 +136,15 @@ async fn run(
     }
     tracing::debug!(%room_name, %device, conn_id, "room join");
 
+    // In-order delivery per socket (the lost-first-turn bug): a live ROW must never reach a
+    // client before the rows below it that the client is still fetching with ROWS_REQ. Until the
+    // client's catch-up reply is complete, live rows are held; afterwards they are flushed in seq
+    // order and anything at or below the last seq already sent is dropped as a duplicate. A
+    // client that never asks for rows gets the held ones after `CATCHUP_HOLD`.
+    let mut delivery = Delivery::default();
+    let hold_deadline = tokio::time::sleep(CATCHUP_HOLD);
+    tokio::pin!(hold_deadline);
+
     loop {
         tokio::select! {
             incoming = stream.next() => {
@@ -117,22 +162,58 @@ async fn run(
                         continue;
                     }
                 };
-                if let Err(e) = handle_frame(&state, &room, &project_id, &room_name, conn_id, &mut device, &principal, f, &mut sink).await {
-                    tracing::warn!(%room_name, error = %e, "room frame error");
-                    let _ = sink.send(error_frame("internal", &e.to_string())).await;
+                let was_hello = f.ty == FrameType::Hello;
+                match handle_frame(&state, &room, &project_id, &room_name, conn_id, &mut device, &principal, f, &mut sink, &mut delivery).await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        tracing::warn!(%room_name, error = %e, "room frame error");
+                        let _ = sink.send(error_frame("internal", &e.to_string())).await;
+                    }
+                }
+                if was_hello {
+                    hold_deadline.as_mut().reset(tokio::time::Instant::now() + CATCHUP_HOLD);
+                }
+                if !delivery.catching_up
+                    && !delivery.held.is_empty()
+                    && flush_held(&mut delivery, &mut sink).await.is_err()
+                {
+                    break;
                 }
             }
             out = rx.recv() => {
                 match out {
                     Ok(b) => {
-                        if b.from_conn != conn_id && sink.send(Message::Binary(b.bytes)).await.is_err() {
-                            break;
+                        if b.from_conn == conn_id {
+                            continue;
+                        }
+                        if b.seq == 0 {
+                            if sink.send(Message::Binary(b.bytes)).await.is_err() {
+                                break;
+                            }
+                        } else if delivery.catching_up {
+                            delivery.held.push(b);
+                        } else if b.seq > delivery.last_sent_seq {
+                            delivery.last_sent_seq = b.seq;
+                            if sink.send(Message::Binary(b.bytes)).await.is_err() {
+                                break;
+                            }
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
+                        // Rows were missed on the channel: the client re-syncs from the store,
+                        // and until it does, nothing live may jump ahead of that re-sync.
+                        delivery.catching_up = true;
+                        delivery.held.clear();
                         let _ = sink.send(error_frame("lagging", "re-sync with ROWS_REQ")).await;
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            _ = &mut hold_deadline, if delivery.catching_up => {
+                // No ROWS_REQ came: release held rows rather than starving the socket.
+                delivery.catching_up = false;
+                if flush_held(&mut delivery, &mut sink).await.is_err() {
+                    break;
                 }
             }
         }
@@ -159,10 +240,12 @@ async fn handle_frame(
     principal: &Principal,
     f: Frame,
     sink: &mut futures::stream::SplitSink<WebSocket, Message>,
+    delivery: &mut Delivery,
 ) -> anyhow::Result<()> {
     let is_box = principal.is_box();
     match f.ty {
         FrameType::Hello => {
+            delivery.catching_up = true;
             let h: wire::Hello = serde_json::from_value(f.header)?;
             if h.proto != arbos_core::PROTO_VERSION {
                 sink.send(error_frame("proto", "unsupported protocol version"))
@@ -182,11 +265,13 @@ async fn handle_frame(
                 None
             };
             let mut after = r.after;
+            delivery.catching_up = true;
             loop {
                 let rows = state.db.rows_after(room_name, after, exclude, ROWS_BATCH)?;
                 let n = rows.len() as i64;
                 for row in rows {
                     after = row.seq;
+                    delivery.last_sent_seq = delivery.last_sent_seq.max(row.seq);
                     sink.send(frame(
                         FrameType::Row,
                         json!({ "seq": row.seq, "device": row.device, "batchId": row.batch_id }),
@@ -198,10 +283,13 @@ async fn handle_frame(
                     break;
                 }
             }
-            let st = state.db.room_state(room_name)?;
+            // `headSeq` is the last row this socket was actually walked past, not the room head:
+            // a row appended between the store read and now is broadcast live and arrives next,
+            // and a client must not move its cursor beyond what it has been sent.
+            delivery.catching_up = false;
             sink.send(frame(
                 FrameType::RowsDone,
-                json!({ "headSeq": st.head }),
+                json!({ "headSeq": after }),
                 Bytes::new(),
             ))
             .await?;
@@ -242,6 +330,7 @@ async fn handle_frame(
                 let _ = room.tx.send(RoomBroadcast {
                     from_conn: conn_id,
                     bytes: row,
+                    seq,
                 });
                 if !is_box {
                     // A person wrote without announcing a message (older apps): the fallback
@@ -301,6 +390,7 @@ async fn handle_frame(
             let _ = room.tx.send(RoomBroadcast {
                 from_conn: conn_id,
                 bytes: out,
+                seq: 0,
             });
         }
         FrameType::Probe => {
@@ -446,4 +536,217 @@ pub async fn spawn_sweeper(state: AppState) {
             boxes::sweep_box_liveness(&state).await;
         }
     });
+}
+
+#[cfg(test)]
+mod ordering_tests {
+    //! The lost-first-turn bug (2026-10-19): a socket that connects while another peer is
+    //! pushing could receive a live ROW before the lower rows its ROWS_REQ was still fetching;
+    //! clients that treat "seq ≤ cursor" as a duplicate, or that reconnect with that cursor,
+    //! then never see the lower rows and the chat looks empty / stuck streaming. Invariant: on
+    //! any one socket, row seqs arrive strictly increasing with no gaps from `after + 1` to the
+    //! last one the writer produced.
+
+    use std::net::SocketAddr;
+
+    use axum::routing::get;
+    use axum::Router;
+    use futures::{SinkExt, StreamExt};
+    use serde_json::json;
+    use tokio_tungstenite::tungstenite::Message as TMsg;
+
+    use arbos_core::ids::{now_ms, ulid};
+    use arbos_core::wire::{Frame, FrameType};
+
+    use crate::people::tests_support::{person, project_of};
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+    use crate::{auth::Principal, db::Chat, state::AppState};
+
+    async fn serve(state: AppState) -> SocketAddr {
+        let app = Router::new()
+            .route("/room/{project}/{chat}", get(super::ws_room))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        addr
+    }
+
+    /// A device whose raw token we know (legacy `adv_` shape: the relay stores its hash).
+    fn device_with_token(state: &AppState, user: &str) -> (Principal, String) {
+        let id = ulid();
+        let token = format!("adv_{}", ulid().to_ascii_lowercase());
+        state
+            .db
+            .insert_device(&id, "t", &arbos_core::auth::hash(&token), user, "paircode")
+            .unwrap();
+        (
+            Principal::Device {
+                id,
+                token: token.clone(),
+                user_id: user.to_owned(),
+            },
+            token,
+        )
+    }
+
+    fn decode(m: TMsg) -> Option<Frame> {
+        match m {
+            TMsg::Binary(b) => Frame::decode(b).ok().flatten(),
+            _ => None,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn rows_reach_a_catching_up_socket_in_order_without_gaps() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let project = project_of(&state, &alice, "Order");
+        let (_, writer_token) = device_with_token(&state, &alice);
+        let (_, reader_token) = device_with_token(&state, &alice);
+        let addr = serve(state.clone()).await;
+        const ROWS: i64 = 40;
+        const ITERATIONS: usize = 40;
+
+        for it in 0..ITERATIONS {
+            let chat = ulid();
+            state
+                .db
+                .insert_chat(&Chat {
+                    id: chat.clone(),
+                    project_id: project.clone(),
+                    title: "t".into(),
+                    is_pinned: false,
+                    position: 0,
+                    created_at: now_ms(),
+                    doc_epoch: 1,
+                    kind: "chat".into(),
+                    participants: Vec::new(),
+                })
+                .unwrap();
+            let url = |tok: &str| format!("ws://{addr}/room/{project}/{chat}?token={tok}");
+
+            // Writer: connects, catches up, then pushes ROWS rows as fast as the relay acks.
+            let (wsw, _) = tokio_tungstenite::connect_async(url(&writer_token))
+                .await
+                .unwrap();
+            let (mut wsink, mut wstream) = wsw.split();
+            wsink
+                .send(TMsg::Binary(
+                    Frame::new(
+                        FrameType::Hello,
+                        json!({ "cursor": 0, "device": "dev:w", "room": format!("{project}/{chat}"), "proto": arbos_core::PROTO_VERSION }),
+                        bytes::Bytes::new(),
+                    )
+                    .encode(),
+                ))
+                .await
+                .unwrap();
+            // A few rows exist before the reader arrives; the rest race its catch-up.
+            let head_before_reader = 3 + (it as i64 % 5);
+            let (reader_go_tx, reader_go) = tokio::sync::oneshot::channel::<()>();
+            let writer = tokio::spawn(async move {
+                let mut pushed = 0i64;
+                let mut reader_go = Some(reader_go_tx);
+                fn push_frame(n: i64) -> TMsg {
+                    let payload = format!("row-{n}").into_bytes();
+                    TMsg::Binary(
+                        Frame::new(
+                            FrameType::Push,
+                            json!({ "batchId": format!("b{n}") }),
+                            bytes::Bytes::from(payload),
+                        )
+                        .encode(),
+                    )
+                }
+                // Push one row, wait for its ack, push the next (keeps the stream realistic).
+                while let Some(Ok(m)) = wstream.next().await {
+                    let Some(f) = decode(m) else { continue };
+                    match f.ty {
+                        FrameType::State => {
+                            let req = Frame::new(
+                                FrameType::RowsReq,
+                                json!({ "after": 0, "excludeOwn": true }),
+                                bytes::Bytes::new(),
+                            )
+                            .encode();
+                            wsink.send(TMsg::Binary(req)).await.unwrap();
+                        }
+                        FrameType::RowsDone => {
+                            pushed += 1;
+                            wsink.send(push_frame(pushed)).await.unwrap();
+                        }
+                        FrameType::Ack => {
+                            if pushed == head_before_reader {
+                                if let Some(go) = reader_go.take() {
+                                    let _ = go.send(());
+                                }
+                            }
+                            if pushed < ROWS {
+                                pushed += 1;
+                                wsink.send(push_frame(pushed)).await.unwrap();
+                            } else {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                pushed
+            });
+            // The reader arrives once a few rows exist and the writer is still pushing.
+            let _ = reader_go.await;
+            let (wsr, _) = tokio_tungstenite::connect_async(url(&reader_token))
+                .await
+                .unwrap();
+            let (mut rsink, mut rstream) = wsr.split();
+            rsink
+                .send(TMsg::Binary(
+                    Frame::new(
+                        FrameType::Hello,
+                        json!({ "cursor": 0, "device": "dev:r", "room": format!("{project}/{chat}"), "proto": arbos_core::PROTO_VERSION }),
+                        bytes::Bytes::new(),
+                    )
+                    .encode(),
+                ))
+                .await
+                .unwrap();
+            let mut seqs: Vec<i64> = Vec::new();
+            let mut rows_done = false;
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+            while seqs.last().copied() != Some(ROWS) {
+                let m = tokio::time::timeout_at(deadline, rstream.next()).await;
+                let Ok(Some(Ok(m))) = m else {
+                    panic!("iteration {it}: reader timed out with {seqs:?}");
+                };
+                let Some(f) = decode(m) else { continue };
+                match f.ty {
+                    FrameType::State => {
+                        let req = Frame::new(
+                            FrameType::RowsReq,
+                            json!({ "after": 0, "excludeOwn": true }),
+                            bytes::Bytes::new(),
+                        )
+                        .encode();
+                        rsink.send(TMsg::Binary(req)).await.unwrap();
+                    }
+                    FrameType::Row => {
+                        let seq = f.header["seq"].as_i64().unwrap();
+                        seqs.push(seq);
+                    }
+                    FrameType::RowsDone => rows_done = true,
+                    _ => {}
+                }
+            }
+            let pushed = writer.await.unwrap();
+            assert_eq!(pushed, ROWS);
+            assert!(rows_done, "iteration {it}: no ROWS_DONE");
+            let expected: Vec<i64> = (1..=ROWS).collect();
+            assert_eq!(
+                seqs, expected,
+                "iteration {it}: rows must arrive strictly in order with no gaps and no duplicates"
+            );
+        }
+    }
 }
