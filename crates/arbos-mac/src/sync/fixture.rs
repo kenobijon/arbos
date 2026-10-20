@@ -4389,6 +4389,8 @@ pub const DM_SAM: &str = "01J9DMSAM00000000000000000";
 /// A project @sam shares with me (I am a guest).
 pub const SHARED_STUDIO: &str = "01J9STUDIO0000000000000000";
 const SHARED_STUDIO_CHAT: &str = "01J9STUDIOCHAT000000000000";
+/// The seeded people group (redesign mockups): one id for the space and its chat.
+pub const GROUP_LAUNCH: &str = "01J9GROUPLAUNCH00000000000";
 
 fn person(id: &str, handle: &str, name: Option<&str>, status: &str) -> Person {
     Person {
@@ -4461,11 +4463,44 @@ fn people_space(id: &str, other: Person, agents: Vec<AgentMember>) -> Project {
     }
 }
 
+/// The seeded people group: Sam, Samir and Sara with my Arbos agent in it.
+fn launch_week() -> Project {
+    let members = vec![
+        sam(),
+        person("gh_457", "samir", Some("Samir Haddad"), "member"),
+        person("gh_458", "sara", Some("Sara Lind"), "member"),
+    ];
+    let agent = AgentMember {
+        project_id: PROJECT_ARBOS.into(),
+        name: "Arbos".into(),
+        icon: "✳".into(),
+        color: "#1084fe".into(),
+        handle: "arbos".into(),
+        owner_id: ME_ID.into(),
+        owner_handle: ME_HANDLE.into(),
+        reply_policy: Default::default(),
+        avatar: None,
+        avatar_color: None,
+        avatar_color_index: None,
+        description: None,
+        model: None,
+        owner: None,
+    };
+    let mut space = people_space(GROUP_LAUNCH, members[0].clone(), vec![agent]);
+    space.kind = SpaceKind::Group;
+    space.name = "Launch week".into();
+    space.icon = "L".into();
+    space.people = members;
+    space.owner_handle = Some(ME_HANDLE.into());
+    space
+}
+
 fn seed_people_projects() -> Vec<Project> {
     let mut owner = sam();
     owner.role = "owner".into();
     vec![
         people_space(DM_SAM, sam(), Vec::new()),
+        launch_week(),
         Project {
             id: SHARED_STUDIO.into(),
             name: "Studio".into(),
@@ -4511,6 +4546,18 @@ fn seed_people_chats() -> Vec<Chat> {
             participants: Vec::new(),
             unread: true,
             last_message_at: now_ms().saturating_sub(12 * 60_000),
+            archived_at: None,
+        },
+        Chat {
+            id: GROUP_LAUNCH.into(),
+            project_id: GROUP_LAUNCH.into(),
+            title: "Launch week".into(),
+            is_pinned: true,
+            is_system: false,
+            kind: ChatKind::Chat,
+            participants: Vec::new(),
+            unread: false,
+            last_message_at: now_ms().saturating_sub(25 * 60_000),
             archived_at: None,
         },
         Chat {
@@ -4629,6 +4676,43 @@ fn seed_people_docs(shared: &Arc<Shared>) {
     let _ = studio.insert_message(&reply);
     studio.commit();
     add_doc(shared, studio);
+
+    // The Launch week group: three people and my agent, as in the redesign mockups.
+    let group = ChatDoc::new(GROUP_LAUNCH, GROUP_LAUNCH);
+    let samir = person("gh_457", "samir", Some("Samir Haddad"), "member");
+    let sara = person("gh_458", "sara", Some("Sara Lind"), "member");
+    let _ = group.insert_message(&human_message(
+        GROUP_LAUNCH,
+        &samir,
+        "Deck v3 is in the shared folder. Sam, can you check the pricing slide before the run-through?",
+        base + 300_000,
+    ));
+    let _ = group.insert_message(&human_message(
+        GROUP_LAUNCH,
+        &sam(),
+        "On it. @arbos pull the latest signup numbers into slide 4 while I read.",
+        base + 330_000,
+    ));
+    let mut agent = human_message(GROUP_LAUNCH, &sam(), "", base + 360_000);
+    agent.role = Role::Assistant;
+    agent.sender = format!("agent:{PROJECT_ARBOS}");
+    agent.sender_name = Some("Arbos".into());
+    agent.sender_handle = Some("arbos".into());
+    agent.sender_avatar = None;
+    agent.asked_by_handle = Some("sam".into());
+    agent.owner_handle = Some(ME_HANDLE.into());
+    agent.parts = vec![text_part(
+        "Done. Slide 4 now reads 1,284 signups this week (+18 %). The chart is in `deck/v3/slide-04.png`.",
+    )];
+    let _ = group.insert_message(&agent);
+    let _ = group.insert_message(&human_message(
+        GROUP_LAUNCH,
+        &sara,
+        "Thanks both. I will do the run-through at 3 and post notes here.",
+        base + 400_000,
+    ));
+    group.commit();
+    add_doc(shared, group);
 }
 
 /// `@slug` / `@handle` tokens in the text, resolved to member ids.
