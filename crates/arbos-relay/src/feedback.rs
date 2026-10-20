@@ -15,6 +15,12 @@
 //! Issue link back to the chat: the loop posts `POST /admin/feedback/{id}/issue` once the
 //! GitHub issue exists; the relay records it on the item and pushes `feedback_issue` to the
 //! project's box so the agent can tell the user the number.
+//!
+//! Silent app diagnostics (`submitted_by: "app"`, a `signature`): an app that hit an error nobody
+//! asked for (a thumbnail that did not load, a list that did not refresh) files it here without
+//! showing the user anything. One item per distinct signature per week across every device and
+//! user: a repeat answers 200 with the existing id and bumps `occurrences` / `last_seen_at` on it,
+//! so the loop sees each bug once — not once per launch — with a count of how often it fires.
 
 use std::path::PathBuf;
 
@@ -38,6 +44,12 @@ const MAX_IMAGE_BYTES: usize = 15 * 1024 * 1024;
 const MAX_ROLLOUT_CHARS: usize = 48_000;
 /// A capture request the devices never answered is dropped after this.
 const CAPTURE_TTL_MS: i64 = 60 * 60 * 1000;
+/// A repeat of a signature inside this window folds into the earlier item.
+const SIGNATURE_WINDOW_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+const SIGNATURE_MAX_LEN: usize = 200;
+/// The `signature → item` ledger (`<data>/feedback/signatures.json`) is read-modify-written
+/// under this lock; the feedback store is files, not SQLite.
+static SIGNATURES_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Deserialize)]
 pub struct Submit {
@@ -79,6 +91,10 @@ pub struct Submit {
     pub capture_id: Option<String>,
     #[serde(default)]
     pub capture_device_id: Option<String>,
+    /// Stable identity of an automatic report (`mac:thumbnail:http 403 forbidden`); repeats
+    /// within a week fold into the first item. Only meaningful with `submitted_by: "app"`.
+    #[serde(default)]
+    pub signature: Option<String>,
 }
 
 fn default_mime() -> String {
@@ -125,6 +141,83 @@ pub struct Item {
     /// `{ "number", "url" }` once the loop opened the GitHub issue.
     #[serde(default)]
     pub issue: Option<Value>,
+    /// Automatic reports only: the error signature this item stands for.
+    #[serde(default)]
+    pub signature: Option<String>,
+    /// How many times the signature was reported into this item (1 = once).
+    #[serde(default = "default_occurrences")]
+    pub occurrences: u32,
+    /// The most recent report folded into this item (ms); equals `created_at` for a new one.
+    #[serde(default)]
+    pub last_seen_at: Option<i64>,
+}
+
+fn default_occurrences() -> u32 {
+    1
+}
+
+/// `submitted_by` of an automatic app report (no human wrote it).
+const SUBMITTED_BY_APP: &str = "app";
+
+/// Printable, single-line, bounded: anything else is not a signature.
+fn clean_signature(raw: Option<&str>) -> Option<String> {
+    let s = raw?.trim();
+    if s.is_empty()
+        || s.len() > SIGNATURE_MAX_LEN
+        || s.chars().any(|c| c.is_control() || !c.is_ascii())
+    {
+        return None;
+    }
+    Some(s.to_owned())
+}
+
+fn signatures_path(state: &AppState) -> PathBuf {
+    root(state).join("signatures.json")
+}
+
+/// `signature → { "id", "created_at" }` for every automatic item still inside the window.
+async fn read_signatures(state: &AppState) -> serde_json::Map<String, Value> {
+    let bytes = tokio::fs::read(signatures_path(state)).await.ok();
+    bytes
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default()
+}
+
+async fn write_signatures(state: &AppState, map: &serde_json::Map<String, Value>) {
+    let _ = tokio::fs::create_dir_all(root(state)).await;
+    if let Ok(bytes) = serde_json::to_vec_pretty(&Value::Object(map.clone())) {
+        let _ = tokio::fs::write(signatures_path(state), bytes).await;
+    }
+}
+
+/// A repeat inside the window: bump the existing item and answer with it. `None` = file a new one
+/// (the caller registers it with [`register_signature`] under the same lock).
+async fn fold_repeat(state: &AppState, signature: &str, now: i64) -> Option<Item> {
+    let map = read_signatures(state).await;
+    let entry = map.get(signature)?;
+    let id = entry.get("id")?.as_str()?;
+    let created = entry.get("created_at")?.as_i64()?;
+    if !safe_id(id) || now - created > SIGNATURE_WINDOW_MS {
+        return None;
+    }
+    let dir = root(state).join(id);
+    let mut item = read_meta(&dir).await?;
+    item.occurrences = item.occurrences.saturating_add(1);
+    item.last_seen_at = Some(now);
+    write_meta(&dir, &item).await.ok()?;
+    Some(item)
+}
+
+async fn register_signature(state: &AppState, signature: &str, id: &str, now: i64) {
+    let mut map = read_signatures(state).await;
+    map.retain(|_, v| {
+        v.get("created_at")
+            .and_then(Value::as_i64)
+            .is_some_and(|c| now - c <= SIGNATURE_WINDOW_MS)
+    });
+    map.insert(signature.to_owned(), json!({ "id": id, "created_at": now }));
+    write_signatures(state, &map).await;
 }
 
 fn root(state: &AppState) -> PathBuf {
@@ -315,6 +408,42 @@ pub async fn submit(
         width = None;
         height = None;
     }
+    let user_login = state.db.user(&user_id).ok().flatten().and_then(|u| u.login);
+    let submitted_by = if from_box {
+        "agent".to_owned()
+    } else {
+        match body.submitted_by.as_deref().map(str::trim) {
+            Some("agent") => "agent".to_owned(),
+            Some(SUBMITTED_BY_APP) => SUBMITTED_BY_APP.to_owned(),
+            _ => "user".to_owned(),
+        }
+    };
+    // Automatic reports carry a signature; a repeat inside the window folds into the first item
+    // instead of becoming a new one (the lock covers the read-check-write of the ledger).
+    let signature = (submitted_by == SUBMITTED_BY_APP)
+        .then(|| clean_signature(body.signature.as_deref()))
+        .flatten();
+    let signatures_guard = if signature.is_some() {
+        Some(SIGNATURES_LOCK.lock().await)
+    } else {
+        None
+    };
+    let now = now_ms();
+    if let Some(sig) = signature.as_deref() {
+        if let Some(existing) = fold_repeat(&state, sig, now).await {
+            return (
+                StatusCode::OK,
+                Json(json!({
+                    "id": existing.id,
+                    "created_at": existing.created_at,
+                    "has_image": !existing.file.is_empty(),
+                    "duplicate": true,
+                    "occurrences": existing.occurrences,
+                })),
+            )
+                .into_response();
+        }
+    }
     let id = ulid();
     let dir = root(&state).join(&id);
     if let Err(e) = tokio::fs::create_dir_all(&dir).await {
@@ -325,15 +454,6 @@ pub async fn submit(
             return api_error(StatusCode::INTERNAL_SERVER_ERROR, "io", e.to_string());
         }
     }
-    let user_login = state.db.user(&user_id).ok().flatten().and_then(|u| u.login);
-    let submitted_by = if from_box {
-        "agent".to_owned()
-    } else {
-        match body.submitted_by.as_deref().map(str::trim) {
-            Some("agent") => "agent".to_owned(),
-            _ => "user".to_owned(),
-        }
-    };
     let agent_name = body
         .agent_name
         .as_deref()
@@ -350,7 +470,7 @@ pub async fn submit(
     }
     let item = Item {
         id: id.clone(),
-        created_at: now_ms(),
+        created_at: now,
         note,
         mime,
         file,
@@ -376,10 +496,17 @@ pub async fn submit(
             .filter(|r| !r.trim().is_empty()),
         context,
         issue: None,
+        signature: signature.clone(),
+        occurrences: 1,
+        last_seen_at: Some(now),
     };
     if let Err(resp) = write_meta(&dir, &item).await {
         return *resp;
     }
+    if let Some(sig) = signature.as_deref() {
+        register_signature(&state, sig, &item.id, now).await;
+    }
+    drop(signatures_guard);
     (
         StatusCode::CREATED,
         Json(json!({ "id": item.id, "created_at": item.created_at, "has_image": !item.file.is_empty() })),
