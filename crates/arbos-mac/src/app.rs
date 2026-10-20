@@ -1735,15 +1735,53 @@ impl AppState {
     }
 
     /// The agent's archived chats (the "+" dropdown's previous chats).
+    /// Never-used empty "New chat" rows are omitted — they are discarded on
+    /// close, and older piles must not keep showing up in Previous chats.
     pub fn archived_tabs(&self, project_id: &str) -> Vec<&Chat> {
         self.tabs(project_id)
             .iter()
-            .filter(|c| !c.is_pinned && self.archived_chats.contains(&c.id))
+            .filter(|c| {
+                !c.is_pinned && self.archived_chats.contains(&c.id) && !self.is_unused_new_chat(c)
+            })
             .collect()
+    }
+
+    /// A plain chat that still has the default title and no local messages —
+    /// opened with "+" / ⌘T and never used. Title alone is enough when the
+    /// transcript has not been loaded yet (archived empties); a loaded
+    /// non-empty transcript means the title failed to update and is kept.
+    fn is_unused_new_chat(&self, chat: &Chat) -> bool {
+        if chat.is_pinned || chat.is_system || chat.is_group() || chat.kind != ChatKind::Chat {
+            return false;
+        }
+        if chat.title != "New chat" {
+            return false;
+        }
+        match self.messages.get(&chat.id) {
+            None => true,
+            Some(msgs) => msgs.is_empty(),
+        }
+    }
+
+    /// An unused "New chat" to reopen instead of minting another: prefer a
+    /// visible empty tab, else an archived one.
+    fn reusable_new_chat(&self, project_id: &str) -> Option<Id> {
+        let tabs = self.tabs(project_id);
+        let visible = tabs
+            .iter()
+            .find(|c| !self.archived_chats.contains(&c.id) && self.is_unused_new_chat(c));
+        if let Some(c) = visible {
+            return Some(c.id.clone());
+        }
+        tabs.iter()
+            .find(|c| self.archived_chats.contains(&c.id) && self.is_unused_new_chat(c))
+            .map(|c| c.id.clone())
     }
 
     /// Archive a chat on this Mac (the tab's "×", ⌘W): it leaves the strip and
     /// waits in the "+" dropdown; nothing is deleted or closed on the relay.
+    /// Never-used empty chats are closed instead — they must not pile up in
+    /// Previous chats.
     pub fn archive_chat(&mut self, chat_id: Id, cx: &mut Context<Self>) {
         let Some(project_id) = self.project_of_chat(&chat_id).map(|p| p.id.clone()) else {
             return;
@@ -1753,6 +1791,14 @@ impl AppState {
             .iter()
             .any(|c| c.id == chat_id && c.is_pinned)
         {
+            return;
+        }
+        if self
+            .tabs(&project_id)
+            .iter()
+            .any(|c| c.id == chat_id && self.is_unused_new_chat(c))
+        {
+            self.delete_chat_tab(chat_id, cx);
             return;
         }
         self.archived_chats.insert(chat_id.clone());
@@ -2170,6 +2216,16 @@ impl AppState {
         let Some(project_id) = self.selected_project.clone() else {
             return;
         };
+        // Reuse a never-used empty "New chat" (open or archived) so ⌘T / "+"
+        // cannot pile identical empties in Previous chats.
+        if let Some(existing) = self.reusable_new_chat(&project_id) {
+            if self.archived_chats.contains(&existing) {
+                self.unarchive_chat(existing, cx);
+            } else {
+                self.select_tab(existing, cx);
+            }
+            return;
+        }
         let chat_id = new_id();
         // After the last tab, where the strip's "+" sits (the shell scrolls it
         // into view).
