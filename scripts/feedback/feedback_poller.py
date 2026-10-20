@@ -95,6 +95,7 @@ CURSOR_API = "https://api.cursor.com/v1"
 GITHUB_API = "https://api.github.com"
 ASSET_RELEASE_TAG = "feedback-screenshots"
 RELAY_DEPLOYED_SHA_FILE = "/etc/arbos/relay.deployed-sha"  # written by scripts/deploy/relay-server.sh
+INSTALL_SIGNAL_SINCE = "2026-10-19T22:00:00Z"  # relay records X-Arbos-Client versions since then (D85)
 DEPLOY_HOOK = "/usr/local/bin/arbos-deploy-hook"  # CD worker's hook: `<relay|agentd|voice> <sha>`, idempotent, debounced; called directly (no sudo)
 USER_AGENT = "arbos-feedback-poller/1 (+https://github.com/unarbos/arbos)"
 
@@ -2398,7 +2399,7 @@ class Loop:
             first = min(hits, key=lambda r: r["installed_at"])
             st["installed_at"] = dt.datetime.fromtimestamp(first["installed_at"] / 1000, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             st["installed_by"] = first.get("login") or first.get("user_id")
-            jacob = [r for r in hits if (r.get("login") or "").lower() == "unconst"]
+            jacob = [r for r in hits if (r.get("login") or "").lower() in ("unconst", "unarbos")]  # Jacob's two accounts
             if jacob:
                 st["installed_jacob_at"] = dt.datetime.fromtimestamp(min(r["installed_at"] for r in jacob) / 1000, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             self.store.save_state(fid, st)
@@ -2924,6 +2925,10 @@ def main(argv: list[str]) -> int:
                 continue
             n += 1
             rel = st.get("testflight_ready_at") or st.get("release_at") or st.get("shipped_at")
+            if (rel or "") < INSTALL_SIGNAL_SINCE:
+                # Devices only report versions since the installed signal went live: an older release's
+                # "installed" is the first contact after that, not an install time.
+                st = {**st, "installed_at": None, "installed_jacob_at": None}
             pairs = [("feedback→issue", st.get("created"), issue_at.get(fid)), ("issue→merge", issue_at.get(fid), st.get("pushed_at")),
                      ("merge→release", st.get("pushed_at"), rel), ("release→installed", rel, st.get("installed_at")),
                      ("release→installed (Jacob)", rel, st.get("installed_jacob_at")), ("feedback→installed", st.get("created"), st.get("installed_at"))]
