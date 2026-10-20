@@ -118,6 +118,8 @@ pub struct ComposerInput {
     pub enter_inserts_newline: bool,
     /// Password fields: paint `*` per byte so caret offsets still line up with `content`.
     masked: bool,
+    /// Profile hero rename: paint and hit-test the name centered under the avatar.
+    text_center: bool,
 }
 
 impl ComposerInput {
@@ -136,11 +138,16 @@ impl ComposerInput {
             on_tab: None,
             enter_inserts_newline: false,
             masked: false,
+            text_center: false,
         }
     }
 
     pub fn set_masked(&mut self, masked: bool) {
         self.masked = masked;
+    }
+
+    pub fn set_text_center(&mut self, center: bool) {
+        self.text_center = center;
     }
 
     pub fn text(&self) -> &str {
@@ -482,7 +489,13 @@ impl ComposerInput {
         let Some(layout) = self.layout.as_ref() else {
             return 0;
         };
-        index_for_position(&layout.lines, layout.bounds, position, self.content.len())
+        index_for_position(
+            &layout.lines,
+            layout.bounds,
+            position,
+            self.content.len(),
+            self.text_center,
+        )
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -573,13 +586,24 @@ impl ComposerInput {
         if layout.lines.is_empty() {
             return cursor;
         }
-        let Some(pos) = position_for_index(&layout.lines, cursor) else {
+        let Some(pos) = position_for_index(
+            &layout.lines,
+            cursor,
+            layout.bounds.size.width,
+            self.text_center,
+        ) else {
             return self.offset_for_hard_line_move(up);
         };
         let lh = px(INPUT_LINE_HEIGHT);
         let target_y = if up { pos.y - lh } else { pos.y + lh };
         let window_pos = point(layout.bounds.left() + pos.x, layout.bounds.top() + target_y);
-        index_for_position(&layout.lines, layout.bounds, window_pos, self.content.len())
+        index_for_position(
+            &layout.lines,
+            layout.bounds,
+            window_pos,
+            self.content.len(),
+            self.text_center,
+        )
     }
 
     fn offset_for_hard_line_move(&self, up: bool) -> usize {
@@ -606,8 +630,23 @@ impl ComposerInput {
 
     fn position_for_index(&self, index: usize) -> Option<Point<Pixels>> {
         let layout = self.layout.as_ref()?;
-        position_for_index(&layout.lines, index)
+        position_for_index(
+            &layout.lines,
+            index,
+            layout.bounds.size.width,
+            self.text_center,
+        )
     }
+}
+
+/// Horizontal shift so a short line sits in the middle of `bounds_width`.
+fn line_center_offset(line: &WrappedLine, bounds_width: Pixels, text_center: bool) -> Pixels {
+    if !text_center {
+        return px(0.0);
+    }
+    let lh = px(INPUT_LINE_HEIGHT);
+    let text_w = line.size(lh).width;
+    ((bounds_width - text_w) / 2.).max(px(0.0))
 }
 
 fn is_word_char(c: char) -> bool {
@@ -672,14 +711,20 @@ fn line_end(text: &str, offset: usize) -> usize {
 }
 
 /// Pixel position (relative to the text origin) of a byte index.
-fn position_for_index(lines: &[(usize, WrappedLine)], index: usize) -> Option<Point<Pixels>> {
+fn position_for_index(
+    lines: &[(usize, WrappedLine)],
+    index: usize,
+    bounds_width: Pixels,
+    text_center: bool,
+) -> Option<Point<Pixels>> {
     let lh = px(INPUT_LINE_HEIGHT);
     let mut y = px(0.0);
     for (start, line) in lines {
         let end = start + line.len();
         if index >= *start && index <= end {
             let p = line.position_for_index(index - start, lh)?;
-            return Some(point(p.x, p.y + y));
+            let ox = line_center_offset(line, bounds_width, text_center);
+            return Some(point(p.x + ox, p.y + y));
         }
         y += line.size(lh).height;
     }
@@ -692,6 +737,7 @@ fn index_for_position(
     bounds: Bounds<Pixels>,
     position: Point<Pixels>,
     content_len: usize,
+    text_center: bool,
 ) -> usize {
     let lh = px(INPUT_LINE_HEIGHT);
     if position.y < bounds.top() {
@@ -702,7 +748,11 @@ fn index_for_position(
     for (i, (start, line)) in lines.iter().enumerate() {
         let h = line.size(lh).height;
         if position.y < y + h || i + 1 == count {
-            let local = point(position.x - bounds.left(), (position.y - y).max(px(0.0)));
+            let ox = line_center_offset(line, bounds.size.width, text_center);
+            let local = point(
+                position.x - bounds.left() - ox,
+                (position.y - y).max(px(0.0)),
+            );
             let ix = match line.closest_index_for_position(local, lh) {
                 Ok(ix) | Err(ix) => ix,
             };
@@ -889,6 +939,7 @@ impl Element for InputElement {
         let selected_range = input.selected_range.clone();
         let cursor = input.cursor_offset();
         let marked = input.marked_range.clone();
+        let text_center = input.text_center;
         let style = window.text_style();
         let lh = px(INPUT_LINE_HEIGHT);
 
@@ -945,9 +996,19 @@ impl Element for InputElement {
         let visible_h = f32::from(bounds.size.height);
         let mut scroll_y = input.scroll_y;
         let cursor_pos = if content.is_empty() {
-            Some(point(px(0.0), px(0.0)))
+            let ox = lines
+                .first()
+                .map(|(_, line)| line_center_offset(line, bounds.size.width, text_center))
+                .unwrap_or_else(|| {
+                    if text_center {
+                        bounds.size.width / 2.
+                    } else {
+                        px(0.0)
+                    }
+                });
+            Some(point(ox, px(0.0)))
         } else {
-            position_for_index(&lines, cursor)
+            position_for_index(&lines, cursor, bounds.size.width, text_center)
         };
         if let Some(p) = cursor_pos {
             let cy = f32::from(p.y);
@@ -973,8 +1034,9 @@ impl Element for InputElement {
                 ));
             }
         } else {
-            let a = position_for_index(&lines, selected_range.start);
-            let b = position_for_index(&lines, selected_range.end);
+            let a =
+                position_for_index(&lines, selected_range.start, bounds.size.width, text_center);
+            let b = position_for_index(&lines, selected_range.end, bounds.size.width, text_center);
             if let (Some(a), Some(b)) = (a, b) {
                 if a.y == b.y {
                     selections.push(fill(
@@ -1043,18 +1105,19 @@ impl Element for InputElement {
             for sel in prepaint.selections.drain(..) {
                 window.paint_quad(sel);
             }
+            let text_center = self.input.read(cx).text_center;
+            let align = if text_center {
+                TextAlign::Center
+            } else {
+                TextAlign::Left
+            };
+            let align_bounds = text_center.then_some(bounds);
             let mut y = bounds.top() - px(scroll_y);
             for (_, line) in &prepaint.lines {
                 let h = line.size(lh).height;
                 if y + h >= bounds.top() && y <= bounds.bottom() {
-                    let _ = line.paint(
-                        point(bounds.left(), y),
-                        lh,
-                        TextAlign::Left,
-                        None,
-                        window,
-                        cx,
-                    );
+                    let _ =
+                        line.paint(point(bounds.left(), y), lh, align, align_bounds, window, cx);
                 }
                 y += h;
             }
