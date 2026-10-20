@@ -19,6 +19,7 @@ mod mcp;
 mod media;
 mod memory;
 mod people;
+mod reply;
 mod responders;
 mod routines;
 mod rpc_child;
