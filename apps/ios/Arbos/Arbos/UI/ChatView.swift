@@ -45,7 +45,6 @@ struct ChatView: View {
     @State private var memoPressStartedAt: Date?
     @FocusState private var composerFocused: Bool
 
-    @State private var showMembers = false
     @State private var showShare = false
     @State private var showProfile = false
     @State private var showSearch = false
@@ -338,9 +337,6 @@ struct ChatView: View {
         .sheet(isPresented: $showSettings) {
             SettingsView().environmentObject(model).environment(\.theme, theme)
         }
-        .sheet(isPresented: $showMembers) {
-            MembersSheet(chatId: chatId).environmentObject(model).environment(\.theme, theme)
-        }
         .sheet(isPresented: $showShare) {
             if let project {
                 ProjectMembersSheet(project: project).environmentObject(model).environment(\.theme, theme)
@@ -600,17 +596,8 @@ struct ChatView: View {
                 .contentShape(Capsule())
             }
             Spacer()
-            if isPeople || project?.shared == true {
-                Button { showMembers = true } label: {
-                    GlassCircle {
-                        Image(systemName: "person.badge.plus")
-                            .font(theme.font(15, weight: .semibold))
-                            .foregroundStyle(theme.text)
-                    }
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Members and agents")
-            }
+            // The add-person button is gone (Jacob, 2026-10-20): adding people
+            // and agents lives in the profile page's Members / Add members.
         }
         .padding(.horizontal, 16)
         .padding(.top, 6)
@@ -976,17 +963,8 @@ struct ChatView: View {
                     }
                     .accessibilityLabel(selected ? "Talking to \(m.displayName)" : "Talk to \(m.displayName)")
                 }
-                Button { showMembers = true } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "plus").font(.system(size: 11, weight: .bold))
-                        Text("Agent").font(theme.font(Theme.tiny, weight: .medium))
-                    }
-                    .foregroundStyle(theme.text)
-                    .padding(.horizontal, 10).padding(.vertical, 6)
-                    .background(Capsule().fill(theme.field))
-                    .overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1))
-                }
-                .buttonStyle(.plain)
+                // "+ Agent" chip removed (2026-10-20): agents are added from
+                // the profile page's Add members.
             }
             // Room for avatar + padding so a horizontal ScrollView does not clip chips.
             .padding(.vertical, 4)

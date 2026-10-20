@@ -410,6 +410,9 @@ struct UserProfileView: View {
     @State private var muted = false
     @State private var sharedProjects: [Project] = []
     @State private var confirmBlock = false
+    /// "Add members" on a DM: the Members sheet (people and agents), which
+    /// turns the DM into a group. The chat header's add button is gone.
+    @State private var showAddMembers = false
 
     /// Stable user id: prefer a fresh card, then a handle lookup (agent-owner rows
     /// sometimes open this page with `id == handle`), then the value we were given.
@@ -461,6 +464,10 @@ struct UserProfileView: View {
                         if !isMe {
                             ProfileRowDivider()
                             ProfileLinkRow(title: dm == nil ? "Start a chat" : "Open chat") { openDM(search: false) }
+                            if dm != nil {
+                                ProfileRowDivider()
+                                ProfileLinkRow(title: "Add members") { showAddMembers = true }
+                            }
                             ProfileRowDivider()
                             ProfileLinkRow(title: "Block User", destructive: true) { confirmBlock = true }
                         }
@@ -475,6 +482,11 @@ struct UserProfileView: View {
                 }
             }
             ProfileTopBar { EmptyView() }
+        }
+        .sheet(isPresented: $showAddMembers) {
+            if let dm {
+                MembersSheet(chatId: dm.id).environmentObject(model).environment(\.theme, theme)
+            }
         }
         .confirmationDialog("Block @\(person.handle)?", isPresented: $confirmBlock, titleVisibility: .visible) {
             Button("Block", role: .destructive) {
