@@ -681,13 +681,9 @@ fn tab_menu(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl Int
                 .text_color(theme.text_faint)
                 .child("Previous chats"),
         );
-        let mut list = div()
-            .id("tab-menu-previous")
-            .flex()
-            .flex_col()
+        let mut list = glass::contained_y_scroll("tab-menu-previous")
             .gap(px(1.0))
-            .max_h(px(320.0))
-            .overflow_y_scroll();
+            .max_h(px(320.0));
         for chat in previous {
             let id = chat.id.clone();
             let menu_chat_id = chat.id.clone();

@@ -209,9 +209,9 @@ impl SyncHub {
         let room = room.to_owned();
         let (cursor, snapshot, acked) = self.store.room_doc(&room)?.unwrap_or((0, None, None));
         let doc = match &snapshot {
-            Some(s) if !s.is_empty() => ChatDoc::from_snapshot(self.peer_id, true, s)?,
+            Some(s) if !s.is_empty() => ChatDoc::from_snapshot(Some(self.peer_id), true, s)?,
             _ => {
-                let d = ChatDoc::new(self.peer_id, true);
+                let d = ChatDoc::new(Some(self.peer_id), true);
                 if chat_id != PROJECT_DOC_CHAT_ID {
                     d.init_meta(chat_id, doc_project, 1);
                 }
