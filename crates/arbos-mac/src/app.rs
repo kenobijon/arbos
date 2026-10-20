@@ -312,7 +312,8 @@ pub struct AppState {
     /// Feature flag: several chats per agent. Off → one chat per agent, the
     /// primary one (`primary_chat()`); extra chats stay in the data, unseen.
     pub multi_chat: bool,
-    /// The chat last opened per agent on this Mac (on-device store).
+    /// Last tab opened per agent on this Mac (within a session). Opening an
+    /// agent from the rail prefers `primary_chat` so history matches iPhone.
     pub last_chats: HashMap<Id, Id>,
     /// Chats archived for me (§9c, synced through the relay; the store keeps an
     /// offline copy): off the tab strip, listed in the "+" dropdown, still open on
@@ -1274,11 +1275,23 @@ impl AppState {
                 project_id,
                 chat_id,
             } => {
-                // Cold launch from the on-device store: back to the chat that
-                // was open, instead of the default pick.
+                // Cold launch: open the agent's primary chat (same conversation
+                // the iPhone shows — D78) so history matches across devices.
+                // Multi-chat tabs stay available; last_chats only resumes a tab
+                // within a session after the user picks one.
                 if self.projects.iter().any(|p| p.id == project_id) {
-                    if self.tabs(&project_id).iter().any(|c| c.id == chat_id) {
-                        self.active_tab.insert(project_id.clone(), chat_id);
+                    let open = self
+                        .primary_chat(&project_id)
+                        .map(|c| c.id.clone())
+                        .filter(|id| self.tabs(&project_id).iter().any(|c| &c.id == id))
+                        .or_else(|| {
+                            self.tabs(&project_id)
+                                .iter()
+                                .any(|c| c.id == chat_id)
+                                .then_some(chat_id)
+                        });
+                    if let Some(id) = open {
+                        self.active_tab.insert(project_id.clone(), id);
                     }
                     // select_project() keeps the tab within the visible chats.
                     self.select_project(project_id.clone(), cx);
@@ -1732,8 +1745,10 @@ impl AppState {
 
     /// The active tab of an agent is always one of its visible chats. When it
     /// is not (nothing picked yet, archived, hidden by single-chat mode) fall
-    /// back to: the chat last used on this Mac, the primary chat, the first
-    /// visible one. Returns true when the active tab changed (and was opened).
+    /// back to: the primary chat (same one the iPhone opens — D78), then the
+    /// chat last used on this Mac, then the first visible one. Primary first
+    /// keeps history in sync across devices; last_chats only matters when the
+    /// relay has no primary yet. Returns true when the active tab changed.
     fn enforce_tab(&mut self, project_id: &str) -> bool {
         if self.project(project_id).is_none_or(|p| p.is_people()) {
             return false;
@@ -1756,14 +1771,14 @@ impl AppState {
             return false;
         }
         let pick = self
-            .last_chats
-            .get(project_id)
+            .primary_chat(project_id)
+            .map(|c| c.id.clone())
             .filter(|c| visible.contains(c))
-            .cloned()
             .or_else(|| {
-                self.primary_chat(project_id)
-                    .map(|c| c.id.clone())
+                self.last_chats
+                    .get(project_id)
                     .filter(|c| visible.contains(c))
+                    .cloned()
             })
             .unwrap_or_else(|| visible[0].clone());
         self.active_tab.insert(project_id.to_string(), pick.clone());
@@ -1889,7 +1904,8 @@ impl AppState {
     }
 
     pub fn select_project(&mut self, project_id: Id, cx: &mut Context<Self>) {
-        if self.selected_project.as_deref() != Some(project_id.as_str()) {
+        let switching = self.selected_project.as_deref() != Some(project_id.as_str());
+        if switching {
             self.search_chat = None;
         }
         self.reveal_message = None;
@@ -1903,7 +1919,16 @@ impl AppState {
         }
         self.selected_project = Some(project_id.clone());
         self.sidebar_overlay = false;
-        // Agents: the last chat used here, else the primary (enforce_tab picks).
+        // Switching to an agent: open its primary chat so Mac shows the same
+        // conversation as the iPhone (D78). Re-clicking the already-selected
+        // agent keeps the tab the user is on (multi-chat tabs still work).
+        if switching && self.project(&project_id).is_some_and(|p| !p.is_people()) {
+            if let Some(primary) = self.primary_chat(&project_id).map(|c| c.id.clone()) {
+                self.active_tab.insert(project_id.clone(), primary.clone());
+                self.last_chats.insert(project_id.clone(), primary);
+            }
+        }
+        // Agents: primary (above), else last used, else first visible.
         if self.enforce_tab(&project_id) {
             self.sync_focus();
             cx.notify();
