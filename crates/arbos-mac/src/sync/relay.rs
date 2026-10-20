@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context as _, Result};
+use arbos_core::doc::{UserAttachment, UserMessageOpts};
 use arbos_core::wire::{
     Ack, BoxState as WireBox, ErrorHeader, Frame, FrameType, Hello, RowHeader, RowsReq,
     State as WireState, StatusHeader, WakeHeader, PROJECT_DOC_CHAT_ID,
@@ -36,9 +37,9 @@ use crate::model::{
     new_id, now_ms, AccountView, AgentMember, Attachment, AttachmentKind, BoxState, Call,
     CallEnded, CallLeft, CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView,
     Chat, ChatKind, Connector, ConnectorProvider, ConnectorsView, Effort, Id, Link, LocalDevice,
-    LocalView, Machine, MachineState, Message, MessageStatus, Part, Person, Project,
-    ProjectDocView, ProjectSecrets, Reachable, ReplyPolicy, Role, Routine, RoutineRun, Secret,
-    SecretActivity, SecretRequest, SecretsView, Sender, Skill, SpaceKind, ThreadInfo, Voice,
+    LocalView, Machine, MachineState, Message, Part, Person, Project, ProjectDocView,
+    ProjectSecrets, Reachable, ReplyPolicy, Role, Routine, RoutineRun, Secret, SecretActivity,
+    SecretRequest, SecretsView, Sender, Skill, SpaceKind, ThreadInfo, Voice,
 };
 use crate::update;
 
@@ -945,7 +946,7 @@ fn load_store(shared: &Arc<Shared>) {
     let mut restored = 0usize;
     for saved in docs {
         let doc = ChatDoc::empty(&saved.key);
-        if let Err(err) = doc.doc.import(&saved.snapshot) {
+        if let Err(err) = doc.core.doc.import(&saved.snapshot) {
             eprintln!("store: snapshot for {} unreadable: {err}", saved.key);
             shared.with_store(|s| s.delete_doc(&saved.key));
             continue;
@@ -1070,10 +1071,10 @@ fn start_store_flusher(shared: &Arc<Shared>) {
                 let snapshot = {
                     let docs = shared.docs.lock().unwrap();
                     let Some(doc) = docs.get(&key) else { continue };
-                    if doc.doc.oplog_frontiers().is_empty() {
+                    if doc.core.doc.oplog_frontiers().is_empty() {
                         continue;
                     }
-                    doc.doc.export(loro::ExportMode::Snapshot)
+                    doc.core.doc.export(loro::ExportMode::Snapshot)
                 };
                 match snapshot {
                     Ok(bytes) => {
@@ -1599,52 +1600,16 @@ fn call_error(err: &anyhow::Error) -> String {
 }
 
 /// Calls v1 (contract §1): the client writes the system lines. One Loro row,
-/// role `system`, text, `call_id`; the room syncs it like any message.
+/// role `system`, text, `callId`; the room syncs it like any message.
 fn write_system_line(shared: &Arc<Shared>, chat_id: &str, text: String, call_id: Option<String>) {
     let docs = shared.docs.lock().unwrap();
     let Some(doc) = docs.get(chat_id) else {
         return;
     };
-    let msg = Message {
-        id: new_id(),
-        chat_id: chat_id.to_string(),
-        role: Role::System,
-        sender: "system".into(),
-        sender_handle: None,
-        sender_name: None,
-        sender_avatar: None,
-        sender_avatar_color: None,
-        mentions: Vec::new(),
-        status: MessageStatus::Done,
-        turn: None,
-        decision: None,
-        subagent_id: None,
-        subagent_name: None,
-        handoff_messages: None,
-        reactions: Default::default(),
-        in_reply_to: None,
-        routine_name: None,
-        sender_icon: None,
-        reply_to: None,
-        asked_by_handle: None,
-        owner_handle: None,
-        usage: None,
-        return_contract: None,
-        waiting_user: false,
-        waiting_approval: false,
-        model: None,
-        effort: None,
-        created_at: now_ms(),
-        completed_at: Some(now_ms()),
-        call_id,
-        activity: None,
-        pending: false,
-        parts: vec![Part::Text { id: new_id(), text }],
-        hidden_parts: Vec::new(),
-        greeting: false,
-    };
-    let _ = doc.insert_message(&msg);
-    doc.commit();
+    let device = shared.device_id();
+    doc.core.transact(|d| {
+        let _ = d.append_system_line(&new_id(), &text, &device, call_id.as_deref());
+    });
 }
 
 /// D82: the agent's first line in a brand-new project's chat, written by the
@@ -1655,54 +1620,15 @@ fn write_greeting(shared: &Arc<Shared>, chat_id: &str, project_id: &str, agent_n
     let Some(doc) = docs.get(chat_id) else {
         return false;
     };
-    if doc.read_all().iter().any(|m| m.greeting) {
+    if doc.core.has_greeting() {
         return true;
     }
-    let msg = Message {
-        id: new_id(),
-        chat_id: chat_id.to_string(),
-        role: Role::Assistant,
-        sender: format!("agent:{project_id}"),
-        sender_handle: None,
-        sender_name: Some(agent_name.to_string()),
-        sender_avatar: None,
-        sender_avatar_color: None,
-        mentions: Vec::new(),
-        status: MessageStatus::Done,
-        turn: None,
-        decision: None,
-        subagent_id: None,
-        subagent_name: None,
-        handoff_messages: None,
-        in_reply_to: None,
-        routine_name: None,
-        sender_icon: None,
-        reply_to: None,
-        asked_by_handle: None,
-        owner_handle: None,
-        usage: None,
-        return_contract: None,
-        waiting_user: false,
-        waiting_approval: false,
-        model: None,
-        effort: None,
-        created_at: now_ms(),
-        completed_at: Some(now_ms()),
-        call_id: None,
-        activity: None,
-        pending: false,
-        reactions: Default::default(),
-        parts: vec![Part::Text {
-            id: new_id(),
-            text: format!(
-                "Hi, I’m {agent_name}. Your computer is ready — what should we build first?"
-            ),
-        }],
-        hidden_parts: Vec::new(),
-        greeting: true,
-    };
-    let _ = doc.insert_message(&msg);
-    doc.commit();
+    let text =
+        format!("Hi, I’m {agent_name}. Your computer is ready — what should we build first?");
+    let device = shared.device_id();
+    doc.core.transact(|d| {
+        let _ = d.append_greeting(&new_id(), &text, &device, project_id, agent_name);
+    });
     true
 }
 
@@ -2176,7 +2102,7 @@ fn emit_project_doc(shared: &Shared, project_id: &str) {
         return;
     };
     let to_json = |v: loro::LoroValue| serde_json::to_value(v).unwrap_or(Value::Null);
-    let threads_v = to_json(doc.doc.get_map("threads").get_deep_value());
+    let threads_v = to_json(doc.core.doc.get_map("threads").get_deep_value());
     let mut threads: Vec<ThreadInfo> = threads_v
         .as_object()
         .map(|m| {
@@ -2190,17 +2116,17 @@ fn emit_project_doc(shared: &Shared, project_id: &str) {
         })
         .unwrap_or_default();
     threads.sort_by_key(|t| std::cmp::Reverse(t.last_turn_at.unwrap_or(0)));
-    let memory = to_json(doc.doc.get_map("memory").get_deep_value());
+    let memory = to_json(doc.core.doc.get_map("memory").get_deep_value());
     let view = ProjectDocView {
         threads,
-        status: to_json(doc.doc.get_map("status").get_deep_value()),
-        settings: to_json(doc.doc.get_map("settings").get_deep_value()),
+        status: to_json(doc.core.doc.get_map("status").get_deep_value()),
+        settings: to_json(doc.core.doc.get_map("settings").get_deep_value()),
         memory_t1: memory
             .get("t1")
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string(),
-        model_note: view_settings_note(&doc.doc),
+        model_note: view_settings_note(&doc.core.doc),
     };
     let _ = shared.events.send(SyncEvent::ProjectDoc {
         project_id: project_id.to_string(),
@@ -2248,13 +2174,14 @@ fn ensure_room_with(
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<RoomCmd>();
     let is_project_doc = room_chat == PROJECT_DOC_CHAT_ID;
 
-    let sub = doc.doc.subscribe_root(Arc::new(move |event| {
+    let sub = doc.core.doc.subscribe_root(Arc::new(move |event| {
         let touched = ChatDoc::touched(&event);
         if is_project_doc || touched.list_changed || !touched.messages.is_empty() {
             let _ = change_tx.send(touched);
         }
     }));
     let local_sub = doc
+        .core
         .doc
         .subscribe_local_update(Box::new(move |bytes| local_tx.send(bytes.clone()).is_ok()));
     {
@@ -2399,7 +2326,7 @@ fn apply_project_doc_status(shared: &Shared, project_id: &str) {
         let Some(doc) = docs.get(&project_doc_key(project_id)) else {
             return;
         };
-        serde_json::to_value(doc.doc.get_map("status").get_deep_value()).unwrap_or(Value::Null)
+        serde_json::to_value(doc.core.doc.get_map("status").get_deep_value()).unwrap_or(Value::Null)
     };
     match status.get("box") {
         Some(Value::Object(b)) => {
@@ -2670,7 +2597,7 @@ async fn run_session(
     let contained = {
         let docs = shared.docs.lock().unwrap();
         match (docs.get(key), arbos_core::doc::decode_vv(&frontier)) {
-            (Some(doc), Some(vv)) => doc.doc.oplog_vv().includes_vv(&vv),
+            (Some(doc), Some(vv)) => doc.core.doc.oplog_vv().includes_vv(&vv),
             (Some(_), None) | (None, _) => false,
         }
     };
@@ -2685,7 +2612,7 @@ async fn run_session(
                 Ok((seq, bytes)) => {
                     let docs = shared.docs.lock().unwrap();
                     if let Some(doc) = docs.get(key) {
-                        match doc.doc.import(&bytes) {
+                        match doc.core.doc.import(&bytes) {
                             Ok(_) => *cursor = (*cursor).max(seq.max(state.checkpoint_seq)),
                             Err(err) => {
                                 eprintln!("relay room {room}: checkpoint import failed: {err}")
@@ -2737,7 +2664,7 @@ async fn run_session(
                         let header: RowHeader = serde_json::from_value(frame.header)?;
                         let docs = shared.docs.lock().unwrap();
                         if let Some(doc) = docs.get(key) {
-                            if let Err(err) = doc.doc.import(&frame.payload) {
+                            if let Err(err) = doc.core.doc.import(&frame.payload) {
                                 eprintln!("relay room {room}: import seq {} failed: {err}", header.seq);
                             }
                         }
@@ -3067,6 +2994,29 @@ fn safe_name(name: &str) -> String {
 /// Upload attachments as blobs, then write the user row and its `send`
 /// command in one commit (crdt-sync §6.2).
 #[allow(clippy::too_many_arguments)]
+fn attachment_kind_str(kind: AttachmentKind) -> String {
+    match kind {
+        AttachmentKind::Image => "image".into(),
+        AttachmentKind::Video => "video".into(),
+        AttachmentKind::Slides => "slides".into(),
+        AttachmentKind::Doc => "doc".into(),
+        AttachmentKind::Sheet => "sheet".into(),
+        AttachmentKind::Pdf => "pdf".into(),
+        AttachmentKind::Audio => "audio".into(),
+        AttachmentKind::File => "file".into(),
+    }
+}
+
+fn user_attachment_from_part(att: Attachment) -> UserAttachment {
+    UserAttachment {
+        name: att.name,
+        mime: att.mime,
+        kind: att.kind.map(attachment_kind_str),
+        blob_ref: att.blob_ref,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn send_message(
     shared: Arc<Shared>,
     chat_id: Id,
@@ -3081,7 +3031,7 @@ async fn send_message(
     let project_id = project_of(&shared, &chat_id).unwrap_or_default();
     // People chats keep their blobs under `people:<chat_id>` and have no box to wake.
     let blob_slot = shared.blob_slot(&chat_id);
-    let mut parts: Vec<Part> = Vec::new();
+    let mut user_attachments: Vec<UserAttachment> = Vec::new();
     for path in attachments {
         let name = path
             .file_name()
@@ -3117,25 +3067,20 @@ async fn send_message(
                 None
             }
         };
-        parts.push(Part::Attachment {
-            id: new_id(),
-            attachment: Attachment {
-                name,
-                mime: mime.into(),
-                blob_ref,
-                bytes: None,
-                kind: None,
-                title: None,
-            },
+        user_attachments.push(UserAttachment {
+            name,
+            mime: mime.into(),
+            kind: None,
+            blob_ref,
         });
     }
     if let Some(wav) = voice_wav {
-        parts.push(upload_voice_memo(&shared, &blob_slot, wav).await);
+        if let Part::Attachment { attachment, .. } =
+            upload_voice_memo(&shared, &blob_slot, wav).await
+        {
+            user_attachments.push(user_attachment_from_part(attachment));
+        }
     }
-    parts.push(Part::Text {
-        id: new_id(),
-        text: text.clone(),
-    });
     shared.unacked.lock().unwrap().insert(message_id.clone());
     // People chats, and projects with more than one human, carry who wrote
     // (API §3/§7); a solo project keeps the plain `user` the box expects.
@@ -3158,14 +3103,14 @@ async fn send_message(
         } else {
             Vec::new()
         };
-        let msg = Message {
-            id: message_id.clone(),
-            chat_id: chat_id.clone(),
-            role: Role::User,
+        let opts = UserMessageOpts {
+            attachments: user_attachments,
+            mentions,
+            reply_to,
             sender: if in_people {
-                format!("user:{}", shared.me_id())
+                Some(format!("user:{}", shared.me_id()))
             } else {
-                "user".into()
+                None
             },
             // Always attach the author's display name so agents address them by name, not @handle.
             sender_handle: me.as_ref().map(|u| u.login.clone()),
@@ -3178,53 +3123,34 @@ async fn send_message(
             } else {
                 None
             },
-            sender_avatar_color: None,
-            mentions,
-            status: MessageStatus::Done,
-            turn: None,
-            decision: None,
-            subagent_id: None,
-            subagent_name: None,
-            handoff_messages: None,
-            reactions: Default::default(),
-            in_reply_to: None,
-            routine_name: None,
-            sender_icon: None,
-            reply_to,
-            asked_by_handle: None,
-            owner_handle: None,
-            usage: None,
-            return_contract: None,
-            waiting_user: false,
-            waiting_approval: false,
-            model: None,
-            effort: None,
-            created_at: now_ms(),
-            completed_at: None,
-            call_id: None,
-            activity: None,
-            pending: false,
-            parts,
-            hidden_parts: Vec::new(),
-            greeting: false,
+            answers_question_id: answer.as_ref().map(|(qid, _)| qid.clone()),
         };
-        let _ = doc.insert_message(&msg);
         let payload = match &answer {
             Some((qid, value)) => {
                 json!({ "messageId": message_id, "questionId": qid, "value": value, "text": text })
             }
             None => json!({ "messageId": message_id }),
         };
-        let _ = doc.push_command(command, payload, &shared.device_id());
         let untitled = shared
             .chats
             .lock()
             .unwrap()
             .iter()
             .any(|c| c.id == chat_id && !c.is_pinned && c.title == "New chat");
-        if untitled {
-            let title = crate::app::title_from(&text);
-            let _ = doc.push_command("retitle", json!({ "title": title }), &shared.device_id());
+        let title = if untitled {
+            Some(crate::app::title_from(&text))
+        } else {
+            None
+        };
+        let device = shared.device_id();
+        doc.core.transact(|d| {
+            let _ = d.append_user_message(&message_id, &text, &device, &opts);
+            d.push_command(command, payload, &device);
+            if let Some(ref title) = title {
+                d.push_command("retitle", json!({ "title": title }), &device);
+            }
+        });
+        if let Some(title) = title {
             if let Some(c) = shared
                 .chats
                 .lock()
@@ -3235,7 +3161,6 @@ async fn send_message(
                 c.title = title;
             }
         }
-        doc.commit();
     }
     mark_activity(&shared, &chat_id);
     // Other people in the chat get a notification with the text (API §7c); the relay never
@@ -4087,8 +4012,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         ClientCommand::Stop { chat_id } => {
             let docs = shared.docs.lock().unwrap();
             if let Some(doc) = docs.get(&chat_id) {
-                let _ = doc.push_command("stop", json!({}), &shared.device_id());
-                doc.commit();
+                let device = shared.device_id();
+                doc.core.transact(|d| {
+                    d.push_command("stop", json!({}), &device);
+                });
             }
         }
         ClientCommand::React {
@@ -4099,10 +4026,24 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             let me = format!("user:{}", shared.me_id());
             let docs = shared.docs.lock().unwrap();
             if let Some(doc) = docs.get(&chat_id) {
-                if let Err(e) = doc.toggle_reaction(&message_id, &emoji, &me) {
+                let already = doc
+                    .index_of(&message_id)
+                    .and_then(|ix| doc.read_message(ix))
+                    .map(|m| {
+                        m.reactions
+                            .get(&emoji)
+                            .and_then(|bucket| bucket.get(&me))
+                            .copied()
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
+                let on = !already;
+                if let Err(e) = doc
+                    .core
+                    .transact(|d| d.set_reaction(&message_id, &emoji, &me, on))
+                {
                     eprintln!("relay: reaction: {e:#}");
                 }
-                doc.commit();
             }
         }
         ClientCommand::Approve {
@@ -4111,12 +4052,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         } => {
             let docs = shared.docs.lock().unwrap();
             if let Some(doc) = docs.get(&chat_id) {
-                let _ = doc.push_command(
-                    "approve",
-                    json!({ "approvalId": approval_id }),
-                    &shared.device_id(),
-                );
-                doc.commit();
+                let device = shared.device_id();
+                doc.core.transact(|d| {
+                    d.push_command("approve", json!({ "approvalId": approval_id }), &device);
+                });
             }
         }
         ClientCommand::Reject {
@@ -4130,8 +4069,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 if let Some(r) = reason.filter(|r| !r.trim().is_empty()) {
                     payload["reason"] = json!(r);
                 }
-                let _ = doc.push_command("reject", payload, &shared.device_id());
-                doc.commit();
+                let device = shared.device_id();
+                doc.core.transact(|d| {
+                    d.push_command("reject", payload, &device);
+                });
             }
         }
         ClientCommand::Retry {
@@ -4140,12 +4081,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         } => {
             let docs = shared.docs.lock().unwrap();
             if let Some(doc) = docs.get(&chat_id) {
-                let _ = doc.push_command(
-                    "retry",
-                    json!({ "messageId": message_id }),
-                    &shared.device_id(),
-                );
-                doc.commit();
+                let device = shared.device_id();
+                doc.core.transact(|d| {
+                    d.push_command("retry", json!({ "messageId": message_id }), &device);
+                });
             }
         }
         ClientCommand::RenameGroup { chat_id, title } => {
@@ -4252,9 +4191,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             {
                 let docs = shared.docs.lock().unwrap();
                 if let Some(doc) = docs.get(&chat_id) {
-                    let _ =
-                        doc.push_command("retitle", json!({ "title": title }), &shared.device_id());
-                    doc.commit();
+                    let device = shared.device_id();
+                    doc.core.transact(|d| {
+                        d.push_command("retitle", json!({ "title": title }), &device);
+                    });
                 }
             }
             let shared = shared.clone();
@@ -4658,15 +4598,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             {
                 let docs = shared.docs.lock().unwrap();
                 if let Some(doc) = docs.get(&project_doc_key(&project_id)) {
-                    let settings = doc.doc.get_map("settings");
-                    let _ = settings.insert("agentModel", model.as_str());
-                    let _ = settings.insert("agentEffort", effort_to(effort));
-                    let models: loro::LoroValue = serde_json::from_value(json!({
-                        "talking_model": { "id": model, "effort": effort_to(effort) }
-                    }))
-                    .unwrap_or(loro::LoroValue::Null);
-                    let _ = settings.insert("models", models);
-                    doc.commit();
+                    let effort_s = effort_to(effort);
+                    doc.core.transact(|d| {
+                        let _ = d.set_model_settings(&model, effort_s);
+                    });
                 }
             }
             {
