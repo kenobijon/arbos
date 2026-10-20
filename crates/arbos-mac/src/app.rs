@@ -3946,7 +3946,19 @@ impl AppState {
         self.projects.retain(|p| p.id != chat_id);
         self.muted.remove(&chat_id);
         self.command(ClientCommand::LeaveChat { chat_id });
+        self.select_next_if_none(cx);
         cx.notify();
+    }
+
+    /// The centre is always a chat (three-pane rule): when the open one goes,
+    /// the first remaining row takes its place.
+    fn select_next_if_none(&mut self, cx: &mut Context<Self>) {
+        if self.selected_project.is_some() {
+            return;
+        }
+        if let Some(id) = self.projects.first().map(|p| p.id.clone()) {
+            self.select_project(id, cx);
+        }
     }
 
     pub fn block_user(&mut self, handle: String, cx: &mut Context<Self>) {
@@ -4088,6 +4100,7 @@ impl AppState {
         self.projects.retain(|p| p.id != chat_id);
         self.muted.remove(&chat_id);
         self.command(ClientCommand::DeletePeopleChat { chat_id });
+        self.select_next_if_none(cx);
         cx.notify();
     }
 
