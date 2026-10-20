@@ -20,7 +20,7 @@ use crate::ui::theme::{Theme, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
 use super::{
     action_button, action_row, card, chats_of, collect, file_list, frame, hero, hero_name,
-    info_row, link_list, media_grid, more_menu, tab_bar, Action,
+    info_row, link_list, media_grid, more_menu, tab_bar, Action, SHEET_WIDTH,
 };
 
 const TABS: [&str; 3] = ["Media", "Files", "Links"];
@@ -144,11 +144,16 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
         )
         .into_any_element();
     let name_el = if renaming {
+        // Full-width under the avatar (same padding as iOS), name text centered
+        // so short names like "Home" line up with the working status below.
         div()
             .id("profile-rename")
-            .w(px(220.0))
+            .w(px(SHEET_WIDTH - 96.0))
             .h(px(36.0))
             .px(px(10.0))
+            .flex()
+            .items_center()
+            .justify_center()
             .rounded(px(10.0))
             .bg(theme.field)
             .border_1()
