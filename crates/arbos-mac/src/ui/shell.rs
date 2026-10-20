@@ -987,6 +987,29 @@ impl Shell {
         cx.notify();
     }
 
+    /// The crayon on my own picture: pick an image file, `PUT /me/avatar`.
+    pub(crate) fn pick_my_avatar(&mut self, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Choose".into()),
+        });
+        let state = self.state.clone();
+        cx.spawn(async move |_, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            cx.update(|cx| {
+                state.update(cx, |s, cx| s.set_my_avatar(path, cx));
+            });
+        })
+        .detach();
+    }
+
     /// The crayon on a group's picture: pick an image file, upload it.
     pub(crate) fn pick_group_image(&mut self, space_id: crate::model::Id, cx: &mut Context<Self>) {
         let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
@@ -2176,6 +2199,7 @@ impl Shell {
         let account = state.account.clone();
         let account_image = account.as_ref().and_then(|a| state.avatar(&a.avatar_url));
         let profile_tab = state.profile_tab;
+        let custom_avatar = state.has_custom_avatar();
         let notify_on = state.notifier.enabled;
         let skill_count = state.skills.len();
         let secrets_value = if state.secrets.loaded {
@@ -2834,8 +2858,12 @@ impl Shell {
                 .bg(theme.surface_2),
         }
         .into_any_element();
-        // The picture follows GitHub until the Arbos override lands (#1135).
-        let avatar = profiles::editable_picture("me-avatar", picture, None).into_any_element();
+        // The crayon: pick a picture, it replaces the GitHub one everywhere.
+        let pic_click = account.is_some().then(|| {
+            let f = cx.listener(|this, _: &gpui::ClickEvent, _, cx| this.pick_my_avatar(cx));
+            Box::new(f) as profiles::HeroClick
+        });
+        let avatar = profiles::editable_picture("me-avatar", picture, pic_click).into_any_element();
         let name_click = account.is_some().then(|| {
             let f = cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
                 this.start_profile_edit(window, cx);
@@ -2930,15 +2958,24 @@ impl Shell {
                 .child(
                     glass::row("Handle", &theme)
                         .id("me-handle-row")
-                        .border_b_0()
+                        .when(!custom_avatar, |el| el.border_b_0())
                         .child(value(who.clone(), &theme))
                         .cursor_pointer()
                         .on_click(
                             cx.listener(|this, _, window, cx| this.start_profile_edit(window, cx)),
                         ),
                 );
+            if custom_avatar {
+                card = card.child(glass::row("", &theme).border_b_0().child(
+                    link_button("me-remove-picture", "Remove picture", true, &theme).on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.state.update(cx, |s, cx| s.remove_my_avatar(cx));
+                        }),
+                    ),
+                ));
+            }
             body = body.child(card).child(footnote(
-                "Your name and handle are what other people and their agents see. Signed in with GitHub.".into(),
+                "Your name, handle and picture are what other people and their agents see. Signed in with GitHub.".into(),
                 &theme,
             ));
             return profiles::pane_frame(

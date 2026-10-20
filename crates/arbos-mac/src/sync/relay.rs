@@ -1412,13 +1412,20 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
 }
 
 async fn fetch_avatar(shared: Arc<Shared>, url: String) {
-    if url.is_empty() || !url.starts_with("http") {
+    // `/avatars/<user>.jpg?v=…` is the relay's own picture store (an Arbos
+    // override of the GitHub avatar); everything else is absolute.
+    let full = if url.starts_with('/') {
+        format!("{}{}", shared.http_url, url)
+    } else {
+        url.clone()
+    };
+    if url.is_empty() || !full.starts_with("http") {
         return;
     }
     if !shared.avatars_done.lock().unwrap().insert(url.clone()) {
         return;
     }
-    let Ok(resp) = shared.http.get(&url).send().await else {
+    let Ok(resp) = shared.http.get(&full).send().await else {
         return;
     };
     if !resp.status().is_success() {
@@ -2861,6 +2868,21 @@ fn send_wake(shared: &Arc<Shared>, project_id: &str, reason: &'static str) {
             );
         }
     });
+}
+
+/// Any picked image → a JPEG the relay accepts (`PUT /me/avatar`, ≤ 2 MB):
+/// scaled to fit 512 × 512, quality 85.
+fn avatar_jpeg(bytes: &[u8]) -> Result<Vec<u8>> {
+    let img = image::load_from_memory(bytes).context("not an image")?;
+    let img = img.resize(512, 512, image::imageops::FilterType::Triangle);
+    let rgb = image::DynamicImage::ImageRgb8(img.to_rgb8());
+    let mut out = Vec::new();
+    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85);
+    enc.encode_image(&rgb).context("encode")?;
+    if out.len() > 2_000_000 {
+        anyhow::bail!("the picture is too large even at 512 px");
+    }
+    Ok(out)
 }
 
 pub(crate) fn mime_for(path: &Path) -> &'static str {
@@ -4310,6 +4332,55 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                             shared
                                 .notice(format!("Avatar colour not saved: {}", people_error(&err)));
                         }
+                    }
+                }
+            });
+        }
+        ClientCommand::SetMyAvatar { path } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let bytes = match tokio::fs::read(&path).await {
+                    Ok(b) => b,
+                    Err(err) => {
+                        shared.notice(format!("Picture: {err}"));
+                        return;
+                    }
+                };
+                // The relay takes a JPEG of at most 2 MB: re-encode whatever
+                // was picked, scaled to 512 pt.
+                let jpeg = match tokio::task::spawn_blocking(move || avatar_jpeg(&bytes)).await {
+                    Ok(Ok(j)) => j,
+                    Ok(Err(err)) => {
+                        shared.notice(format!("Picture: {err}"));
+                        return;
+                    }
+                    Err(err) => {
+                        shared.notice(format!("Picture: {err}"));
+                        return;
+                    }
+                };
+                let put = shared
+                    .http
+                    .put(format!("{}/me/avatar", shared.http_url))
+                    .bearer_auth(shared.token())
+                    .header("content-type", "image/jpeg")
+                    .body(jpeg)
+                    .send()
+                    .await;
+                match put {
+                    Ok(r) if r.status().is_success() => refresh_me(&shared).await,
+                    Ok(r) => shared.notice(format!("Picture not saved: HTTP {}", r.status())),
+                    Err(err) => shared.notice(format!("Picture not saved: {err}")),
+                }
+            });
+        }
+        ClientCommand::RemoveMyAvatar => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                match shared.delete("/me/avatar").await {
+                    Ok(()) => refresh_me(&shared).await,
+                    Err(err) => {
+                        shared.notice(format!("Picture not removed: {}", people_error(&err)))
                     }
                 }
             });
