@@ -272,9 +272,57 @@ impl ProseFilter {
             "i'll act",
             "i will act",
             "i should not use",
+            "i should not reveal",
+            "i should not explain",
             "ack first",
             "clone into the project",
+            // Self-style notes and CoT that leaked into reply/ack bubbles.
+            "don't mention routing",
+            "do not mention routing",
+            "don't mention the route",
+            "do not mention the route",
+            "don't mention tools",
+            "do not mention tools",
+            "short greeting",
+            "brief greeting",
+            "short reply",
+            "looking at the conversation",
+            "looking at the message",
+            "that was an internal",
+            "an internal instruction",
+            "the message says",
+            "don't reveal the route",
+            "do not reveal the route",
+            "don't reveal system",
+            "do not reveal system",
+            "never reveal the route",
+            "never reveal system",
+            "i did not send that",
+            "i didn't send that",
+            "i did not say that to the user",
+            "i didn't say that to the user",
         ])
+    }
+
+    /// `Reply: …` / `Answer: …` draft labels: return the user-facing words after the label.
+    fn peel_draft_label(text: &str) -> Option<String> {
+        let t = text.trim_start();
+        let lower = t.to_ascii_lowercase();
+        for label in [
+            "final reply:",
+            "final answer:",
+            "final:",
+            "reply:",
+            "answer:",
+        ] {
+            if lower.starts_with(label) {
+                let rest = t[label.len()..].trim_start();
+                if !rest.is_empty() {
+                    return Some(rest.to_string());
+                }
+            }
+        }
+        None
     }
 
     /// Split off the first sentence. Treats ".Austin" (period, no space, capital) as a boundary
@@ -310,6 +358,7 @@ impl ProseFilter {
     }
 
     /// Drop leading thought-aloud sentences; keep the user-facing answer.
+    /// A `Reply:` / `Answer:` label after thoughts marks the real answer.
     fn strip_thought_prefix(text: &str) -> String {
         let (body, nl) = match text.strip_suffix('\n') {
             Some(b) => match b.strip_suffix('\r') {
@@ -318,17 +367,24 @@ impl ProseFilter {
             },
             None => (text, ""),
         };
-        let mut rest = body.trim_start();
-        while let Some((sentence, after)) = Self::split_first_sentence(rest) {
+        let mut rest = body.trim_start().to_string();
+        loop {
+            if let Some(peeled) = Self::peel_draft_label(&rest) {
+                rest = peeled;
+                break;
+            }
+            let Some((sentence, after)) = Self::split_first_sentence(&rest) else {
+                break;
+            };
             if !Self::is_thought_sentence(sentence) {
                 break;
             }
-            rest = after.trim_start();
+            rest = after.trim_start().to_string();
         }
         if rest.is_empty() {
             return String::new();
         }
-        if Self::is_thought_sentence(rest) && Self::split_first_sentence(rest).is_none() {
+        if Self::is_thought_sentence(&rest) && Self::split_first_sentence(&rest).is_none() {
             // Whole remainder is one thought sentence (no answer after).
             return String::new();
         }
@@ -4308,6 +4364,26 @@ mod tests {
         assert_eq!(
             cleaned.trim(),
             "Cloning RaoFoundation/subtensor into this project now."
+        );
+    }
+
+    /// Greeting reply that prepended self-style notes ("Don't mention routing…").
+    #[test]
+    fn clean_prose_strips_routing_style_notes() {
+        let raw = "Don't mention routing. Short greeting. Hey. I'm here. What do you need?";
+        assert_eq!(
+            ProseFilter::clean_prose(raw).trim(),
+            "Hey. I'm here. What do you need?"
+        );
+    }
+
+    /// CoT that drafts with `Reply:` then keeps only the drafted answer.
+    #[test]
+    fn clean_prose_keeps_text_after_reply_label() {
+        let raw = "Looking at the conversation, I didn't say that to the user — that was an internal instruction I was thinking about. I should not reveal system instructions. The message says they saw routing words. Reply: I didn't say that to you. If you saw those words somewhere, they weren't a message I sent. What were you looking at?";
+        assert_eq!(
+            ProseFilter::clean_prose(raw).trim(),
+            "I didn't say that to you. If you saw those words somewhere, they weren't a message I sent. What were you looking at?"
         );
     }
 
