@@ -676,6 +676,10 @@ fn context_window_tokens() -> u64 {
         .unwrap_or(1_000_000)
 }
 
+/// Seed files are the image's: a file is copied when missing **or when its bytes differ** from the
+/// seed, so an image roll updates `arbos-pi-ext` (and every other seed file) in a workspace that
+/// already exists. Before this, an existing workspace kept the extension of the image it was first
+/// created on — a copy-if-missing rule — and never saw later deny rules, hooks or guardrails.
 fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
     std::fs::create_dir_all(dst)?;
     for e in std::fs::read_dir(src)? {
@@ -684,9 +688,62 @@ fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
         let target = dst.join(e.file_name());
         if p.is_dir() {
             copy_dir(&p, &target)?;
-        } else if !target.exists() {
+        } else if seed_file_differs(&p, &target) {
             std::fs::copy(&p, &target)?;
         }
     }
     Ok(())
+}
+
+/// `true` when `target` is missing or does not hold the bytes of `seed` (sizes first, then contents).
+fn seed_file_differs(seed: &std::path::Path, target: &std::path::Path) -> bool {
+    let (Ok(sm), Ok(tm)) = (std::fs::metadata(seed), std::fs::metadata(target)) else {
+        return true;
+    };
+    if sm.len() != tm.len() {
+        return true;
+    }
+    match (std::fs::read(seed), std::fs::read(target)) {
+        (Ok(a), Ok(b)) => a != b,
+        _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An image roll must reach existing workspaces: a seed file whose bytes changed is copied
+    /// again, an unchanged one is left alone, a missing one is created.
+    #[test]
+    fn seed_copy_refreshes_changed_files() {
+        let root = std::env::temp_dir().join(format!("arbos-seed-{}", std::process::id()));
+        let (seed, dst) = (root.join("seed").join("ext"), root.join("dst").join("ext"));
+        std::fs::create_dir_all(&seed).unwrap();
+        std::fs::write(seed.join("index.ts"), "v1").unwrap();
+        std::fs::write(seed.join("deny.ts"), "rules").unwrap();
+        copy_dir(&root.join("seed"), &root.join("dst")).unwrap();
+        assert_eq!(std::fs::read_to_string(dst.join("index.ts")).unwrap(), "v1");
+        // The image rolls: index.ts changes, deny.ts does not, a new file appears.
+        std::fs::write(seed.join("index.ts"), "v2 with the new guardrails").unwrap();
+        std::fs::write(seed.join("route-schema.ts"), "new").unwrap();
+        copy_dir(&root.join("seed"), &root.join("dst")).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dst.join("index.ts")).unwrap(),
+            "v2 with the new guardrails"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dst.join("deny.ts")).unwrap(),
+            "rules"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dst.join("route-schema.ts")).unwrap(),
+            "new"
+        );
+        assert!(!seed_file_differs(
+            &seed.join("deny.ts"),
+            &dst.join("deny.ts")
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
