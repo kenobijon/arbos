@@ -2293,7 +2293,8 @@ class Loop:
         what = re.sub(r"^fix\(feedback\):\s*", "", what)
         what = re.sub(r"\s*\[feedback [^\]]+\]\s*$", "", what).strip()
         unverified = st.get("device_evidence") == "pending"
-        body = f"Fixed in {self.fixed_in(st)}: {what or 'see the commit above'}." + (" Unverified on device (audio / call / notification path); say so here if it does not work for you." if unverified else "")
+        where = self.fixed_in(st)
+        body = (f"Fixed — {where}" if where.startswith("live") else f"Fixed in {where}") + f": {what or 'see the commit above'}." + (" Unverified on device (audio / call / notification path); say so here if it does not work for you." if unverified else "")
         with contextlib.suppress(HttpError):
             self.gh.close_issue(st["issue"], "completed", body)
             self.gh.set_labels(st["issue"], [], ["fixed-on-main", "in-progress", "landed-not-shipped"])
