@@ -4,6 +4,7 @@
 //! opaque bytes.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use loro::{
     Container, ExportMode, LoroDoc, LoroList, LoroMap, LoroText, LoroValue, ValueOrContainer,
@@ -100,6 +101,8 @@ impl MessageView {
 pub struct ChatDoc {
     pub doc: LoroDoc,
     live_text: HashMap<(String, String), LoroText>,
+    /// Nesting depth of [`Self::transact`]. Only the outermost call commits.
+    txn_depth: AtomicU32,
 }
 
 /// Optional fields for a client user-message write (crdt-sync §6.2).
@@ -135,6 +138,85 @@ fn json_to_lv(v: &Value) -> LoroValue {
     serde_json::from_value(v.clone()).unwrap_or(LoroValue::Null)
 }
 
+fn number_lv(n: &serde_json::Number) -> LoroValue {
+    if let Some(i) = n.as_i64() {
+        LoroValue::I64(i)
+    } else if let Some(u) = n.as_u64() {
+        LoroValue::I64(u as i64)
+    } else {
+        LoroValue::Double(n.as_f64().unwrap_or(0.0))
+    }
+}
+
+/// Write `value` under `key` as nested Loro containers (objects → maps, arrays →
+/// lists), matching Mac `insert_json` / iOS `LoroJSON.insert`. Used for command
+/// `payload` so concurrent key edits merge like the existing clients.
+fn insert_nested(map: &LoroMap, key: &str, value: &Value) {
+    match value {
+        Value::Null => {
+            map.insert(key, LoroValue::Null).ok();
+        }
+        Value::Bool(b) => {
+            map.insert(key, *b).ok();
+        }
+        Value::Number(n) => {
+            map.insert(key, number_lv(n)).ok();
+        }
+        Value::String(s) => {
+            map.insert(key, s.as_str()).ok();
+        }
+        Value::Array(items) => {
+            let list = map.insert_container(key, LoroList::new()).expect("list");
+            for (i, item) in items.iter().enumerate() {
+                insert_nested_list(&list, i, item);
+            }
+        }
+        Value::Object(fields) => {
+            let child = map.insert_container(key, LoroMap::new()).expect("map");
+            for (k, v) in fields {
+                insert_nested(&child, k, v);
+            }
+        }
+    }
+}
+
+fn insert_nested_list(list: &LoroList, pos: usize, value: &Value) {
+    match value {
+        Value::Null => {
+            list.insert(pos, LoroValue::Null).ok();
+        }
+        Value::Bool(b) => {
+            list.insert(pos, *b).ok();
+        }
+        Value::Number(n) => {
+            list.insert(pos, number_lv(n)).ok();
+        }
+        Value::String(s) => {
+            list.insert(pos, s.as_str()).ok();
+        }
+        Value::Array(items) => {
+            let child = list.insert_container(pos, LoroList::new()).expect("list");
+            for (i, item) in items.iter().enumerate() {
+                insert_nested_list(&child, i, item);
+            }
+        }
+        Value::Object(fields) => {
+            let child = list.insert_container(pos, LoroMap::new()).expect("map");
+            for (k, v) in fields {
+                insert_nested(&child, k, v);
+            }
+        }
+    }
+}
+
+/// Seed an empty `reactions` map on a new message row so later concurrent
+/// `set_reaction` calls share one container (crdt-sync §6.2). Creating the map
+/// only on first react races: each peer mints its own map and one reaction is lost.
+fn seed_reactions(m: &LoroMap) {
+    m.insert_container("reactions", LoroMap::new())
+        .expect("reactions");
+}
+
 impl ChatDoc {
     /// A new empty chat doc (crdt-sync R7).
     ///
@@ -150,15 +232,32 @@ impl ChatDoc {
         Self {
             doc,
             live_text: HashMap::new(),
+            txn_depth: AtomicU32::new(0),
         }
     }
 
-    /// Run `f`, then commit once. One commit = one PUSH batch of local edits.
+    /// Run `f`, then commit once at the outermost nesting level. One commit =
+    /// one PUSH batch of local edits. Nested `transact` calls share that commit.
+    ///
     /// New client writers do not commit themselves; call them inside `transact`.
+    /// Box helpers that commit (`append_user_message_from`, `append_command`,
+    /// `append_system_note`, …) defer to the outermost `transact` when one is
+    /// open — prefer not nesting them inside `transact` unless you intend a
+    /// single shared commit.
     pub fn transact<R>(&self, f: impl FnOnce(&Self) -> R) -> R {
+        self.txn_depth.fetch_add(1, Ordering::Relaxed);
         let out = f(self);
-        self.doc.commit();
+        if self.txn_depth.fetch_sub(1, Ordering::Relaxed) == 1 {
+            self.doc.commit();
+        }
         out
+    }
+
+    /// Commit unless an outer [`Self::transact`] is open.
+    fn commit_if_idle(&self) {
+        if self.txn_depth.load(Ordering::Relaxed) == 0 {
+            self.doc.commit();
+        }
     }
 
     /// Write `meta` on a brand-new doc (box side).
@@ -168,7 +267,7 @@ impl ChatDoc {
         meta.insert("projectId", project_id).ok();
         meta.insert("schemaVersion", SCHEMA_VERSION).ok();
         meta.insert("epoch", epoch).ok();
-        self.doc.commit();
+        self.commit_if_idle();
     }
 
     pub fn from_snapshot(
@@ -307,10 +406,14 @@ impl ChatDoc {
             .insert_container("text", LoroText::new())
             .expect("text");
         t.insert(0, text).ok();
+        seed_reactions(&m);
     }
 
     /// Client write: a system line (`role: system`, one text part). Optional
     /// `callId` only — never `call_id`. Does not commit.
+    ///
+    /// Today's Swift client ignores `callId` when rendering (it shows the text
+    /// only); the field is still written for Mac fold/call UI.
     pub fn append_system_line(
         &self,
         msg_id: &str,
@@ -339,6 +442,7 @@ impl ChatDoc {
             .insert_container("text", LoroText::new())
             .expect("text");
         t.insert(0, text).ok();
+        seed_reactions(&m);
     }
 
     /// Client write (D82): the agent's canned first line in a brand-new project
@@ -373,10 +477,39 @@ impl ChatDoc {
             .insert_container("text", LoroText::new())
             .expect("text");
         t.insert(0, text).ok();
+        seed_reactions(&m);
+    }
+
+    /// True when any message has `greeting: true` (D82). Callers can skip a
+    /// duplicate greeting write.
+    pub fn has_greeting(&self) -> bool {
+        let msgs = self.messages_list();
+        for i in 0..msgs.len() {
+            let Some(ValueOrContainer::Container(Container::Map(m))) = msgs.get(i) else {
+                continue;
+            };
+            if matches!(
+                m.get("greeting"),
+                Some(ValueOrContainer::Value(LoroValue::Bool(true)))
+            ) {
+                return true;
+            }
+        }
+        false
     }
 
     /// Client write: set whether `sender` holds `emoji` on a message.
     /// Shape: `reactions: Map { emoji: Map { sender: true } }`. Does not commit.
+    ///
+    /// When `on` is false and the reactions map or emoji bucket is missing, this
+    /// returns without writing (no empty containers for a no-op clear).
+    ///
+    /// Core message writers seed an empty `reactions` map so two peers reacting
+    /// first (different emojis) share one container and both reactions survive.
+    /// A remaining race: two peers that each create the **same** emoji bucket
+    /// concurrently on a row that lacks that bucket can still lose one sender;
+    /// today's app readers still render whatever map wins. Fix that when reaction
+    /// reads move into core (e.g. a shared get-or-create for buckets).
     pub fn set_reaction(&self, msg_id: &str, emoji: &str, sender: &str, on: bool) {
         if emoji.is_empty() || sender.is_empty() {
             return;
@@ -386,12 +519,14 @@ impl ChatDoc {
         };
         let reactions = match map.get("reactions") {
             Some(ValueOrContainer::Container(Container::Map(m))) => m,
+            _ if !on => return,
             _ => map
                 .insert_container("reactions", LoroMap::new())
                 .expect("reactions"),
         };
         let bucket = match reactions.get(emoji) {
             Some(ValueOrContainer::Container(Container::Map(m))) => m,
+            _ if !on => return,
             _ => reactions
                 .insert_container(emoji, LoroMap::new())
                 .expect("emoji bucket"),
@@ -404,13 +539,16 @@ impl ChatDoc {
     }
 
     /// Client write: append a `commands` row. Does not commit. Returns the command id.
+    ///
+    /// `payload` is stored as a nested `LoroMap` (same as Mac / iOS), not a
+    /// JSON value blob.
     pub fn push_command(&self, kind: &str, payload: Value, device_id: &str) -> String {
         let cmds = self.commands_list();
         let c = cmds.push_container(LoroMap::new()).expect("push command");
         let id = ulid();
         c.insert("id", id.as_str()).ok();
         c.insert("kind", kind).ok();
-        c.insert("payload", json_to_lv(&payload)).ok();
+        insert_nested(&c, "payload", &payload);
         c.insert("issuedBy", device_id).ok();
         c.insert("issuedAt", now_ms()).ok();
         c.insert("status", CommandStatus::Pending.as_str()).ok();
@@ -442,12 +580,12 @@ impl ChatDoc {
         extra: &[(&str, Value)],
     ) -> String {
         self.append_done_message("user", msg_id, text, device_id, sender, extra);
-        let cmd_id = self.append_command(
+        let cmd_id = self.push_command(
             "send",
             serde_json::json!({ "messageId": msg_id }),
             device_id,
         );
-        self.doc.commit();
+        self.commit_if_idle();
         cmd_id
     }
 
@@ -466,13 +604,13 @@ impl ChatDoc {
     ) -> Option<String> {
         self.append_done_message("project", msg_id, text, device_id, sender, extra);
         let cmd = with_send.then(|| {
-            self.append_command(
+            self.push_command(
                 "send",
                 serde_json::json!({ "messageId": msg_id }),
                 device_id,
             )
         });
-        self.doc.commit();
+        self.commit_if_idle();
         cmd
     }
 
@@ -506,6 +644,7 @@ impl ChatDoc {
             .insert_container("text", LoroText::new())
             .expect("text");
         t.insert(0, text).ok();
+        seed_reactions(&m);
     }
 
     /// Box write (Calls Phase 2): one finished line of a voice call — what a human said
@@ -521,7 +660,7 @@ impl ChatDoc {
         extra: &[(&str, Value)],
     ) {
         self.append_done_message(role, msg_id, text, device_id, sender, extra);
-        self.doc.commit();
+        self.commit_if_idle();
     }
 
     /// Box write: a one-line `system` message with a `note` status part (`code: "note"`).
@@ -543,7 +682,8 @@ impl ChatDoc {
         part.insert("kind", "status").ok();
         part.insert("code", "note").ok();
         part.insert("message", text).ok();
-        self.doc.commit();
+        seed_reactions(&m);
+        self.commit_if_idle();
     }
 
     /// Client write: the user's answer to a `question` part as a user message (rendered text)
@@ -573,26 +713,21 @@ impl ChatDoc {
             .insert_container("text", LoroText::new())
             .expect("text");
         t.insert(0, text).ok();
-        let cmd_id = self.append_command(
+        seed_reactions(&m);
+        let cmd_id = self.push_command(
             "answer",
             serde_json::json!({ "messageId": msg_id, "questionId": question_id, "value": value, "text": text }),
             device_id,
         );
-        self.doc.commit();
+        self.commit_if_idle();
         cmd_id
     }
 
+    /// Box / CLI write: append a `commands` row and commit (unless inside
+    /// [`Self::transact`]). Thin committing wrapper over [`Self::push_command`].
     pub fn append_command(&self, kind: &str, payload: Value, device_id: &str) -> String {
-        let cmds = self.commands_list();
-        let c = cmds.push_container(LoroMap::new()).expect("push command");
-        let id = ulid();
-        c.insert("id", id.as_str()).ok();
-        c.insert("kind", kind).ok();
-        c.insert("payload", json_to_lv(&payload)).ok();
-        c.insert("issuedBy", device_id).ok();
-        c.insert("issuedAt", now_ms()).ok();
-        c.insert("status", CommandStatus::Pending.as_str()).ok();
-        self.doc.commit();
+        let id = self.push_command(kind, payload, device_id);
+        self.commit_if_idle();
         id
     }
 
@@ -626,7 +761,7 @@ impl ChatDoc {
             if let Some(r) = resolution {
                 c.insert("resolution", json_to_lv(&r)).ok();
             }
-            self.doc.commit();
+            self.commit_if_idle();
         }
     }
 
@@ -648,7 +783,8 @@ impl ChatDoc {
         m.insert("status", MessageStatus::Streaming.as_str()).ok();
         let parts = m.insert_container("parts", LoroList::new()).expect("parts");
         let part_id = self.add_text_part_inner(&parts, msg_id, "text");
-        self.doc.commit();
+        seed_reactions(&m);
+        self.commit_if_idle();
         part_id
     }
 
@@ -676,7 +812,7 @@ impl ChatDoc {
             _ => return None,
         };
         let id = self.add_text_part_inner(&parts, msg_id, kind);
-        self.doc.commit();
+        self.commit_if_idle();
         Some(id)
     }
 
@@ -750,7 +886,7 @@ impl ChatDoc {
         part.insert("isError", is_error).ok();
         // Tool details belong to the Details drawer, not the transcript (demo review item 1).
         part.insert("hidden", true).ok();
-        self.doc.commit();
+        self.commit_if_idle();
         Some(part_id)
     }
 
@@ -779,7 +915,7 @@ impl ChatDoc {
                 part.insert(k, json_to_lv(v)).ok();
             }
         }
-        self.doc.commit();
+        self.commit_if_idle();
         Some(part_id)
     }
 
@@ -796,7 +932,7 @@ impl ChatDoc {
         part.insert("id", part_id.as_str()).ok();
         part.insert("kind", "attachment").ok();
         part.insert("attachment", json_to_lv(attachment)).ok();
-        self.doc.commit();
+        self.commit_if_idle();
         Some(part_id)
     }
 
@@ -815,7 +951,7 @@ impl ChatDoc {
         part.insert("kind", "status").ok();
         part.insert("code", kind).ok();
         part.insert("message", text).ok();
-        self.doc.commit();
+        self.commit_if_idle();
         Some(part_id)
     }
 
@@ -845,7 +981,7 @@ impl ChatDoc {
         part.insert("state", ApprovalState::Pending.as_str()).ok();
         part.insert("requestedAt", now_ms()).ok();
         part.insert("expiresAt", expires_at).ok();
-        self.doc.commit();
+        self.commit_if_idle();
         Some(part_id)
     }
 
@@ -895,7 +1031,7 @@ impl ChatDoc {
         if let Some(r) = reason {
             p.insert("reason", r).ok();
         }
-        self.doc.commit();
+        self.commit_if_idle();
         Some(msg_id)
     }
 
@@ -957,7 +1093,7 @@ impl ChatDoc {
             part.insert("widget", json_to_lv(w)).ok();
         }
         part.insert("state", QuestionState::Open.as_str()).ok();
-        self.doc.commit();
+        self.commit_if_idle();
         Some(part_id)
     }
 
@@ -984,7 +1120,7 @@ impl ChatDoc {
                 part.insert("state", QuestionState::Answered.as_str()).ok();
                 part.insert("answeredAt", now_ms()).ok();
                 m.insert("waitingUser", false).ok();
-                self.doc.commit();
+                self.commit_if_idle();
                 return true;
             }
         }
@@ -1027,7 +1163,7 @@ impl ChatDoc {
         part.insert("kind", "error").ok();
         part.insert("code", code).ok();
         part.insert("message", text).ok();
-        self.doc.commit();
+        self.commit_if_idle();
         Some(part_id)
     }
 
@@ -1037,7 +1173,7 @@ impl ChatDoc {
             for (k, v) in fields {
                 m.insert(k, json_to_lv(v)).ok();
             }
-            self.doc.commit();
+            self.commit_if_idle();
         }
     }
 
@@ -1133,7 +1269,7 @@ impl ChatDoc {
             }
         }
         if hits > 0 {
-            self.doc.commit();
+            self.commit_if_idle();
         }
         hits
     }
@@ -1247,14 +1383,52 @@ mod tests {
         assert!(!msgs[1].text().contains("sk-live-"));
     }
 
+    /// Optional extras for the iOS `insertUserMessage` mirror.
+    #[derive(Default)]
+    struct IosUserExtras<'a> {
+        attachments: &'a [(&'a str, &'a str, Option<&'a str>, Option<&'a str>)],
+        mentions: &'a [&'a str],
+        reply_to: Option<&'a str>,
+        sender: Option<&'a str>,
+        sender_handle: Option<&'a str>,
+        sender_name: Option<&'a str>,
+        sender_avatar: Option<&'a str>,
+    }
+
     /// Rust mirror of today's iOS `insertUserMessage` (placeholders and all).
-    fn ios_mirror_insert_user_message(doc: &ChatDoc, msg_id: &str, text: &str, device_id: &str) {
+    fn ios_mirror_insert_user_message(
+        doc: &ChatDoc,
+        msg_id: &str,
+        text: &str,
+        device_id: &str,
+        extras: &IosUserExtras<'_>,
+    ) {
         let msgs = doc.messages_list();
         let m = msgs.push_container(LoroMap::new()).expect("push");
         m.insert("id", msg_id).ok();
         m.insert("chatId", "chat1").ok();
         m.insert("role", "user").ok();
-        m.insert("sender", "user").ok();
+        m.insert("sender", extras.sender.unwrap_or("user")).ok();
+        if let Some(h) = extras.sender_handle {
+            m.insert("senderHandle", h).ok();
+        }
+        if let Some(n) = extras.sender_name {
+            m.insert("senderName", n).ok();
+        }
+        if let Some(a) = extras.sender_avatar {
+            m.insert("senderAvatar", a).ok();
+        }
+        if !extras.mentions.is_empty() {
+            let ml = m
+                .insert_container("mentions", LoroList::new())
+                .expect("mentions");
+            for mention in extras.mentions {
+                ml.push(*mention).ok();
+            }
+        }
+        if let Some(r) = extras.reply_to {
+            m.insert("replyTo", r).ok();
+        }
         m.insert("status", "done").ok();
         m.insert("deviceId", device_id).ok();
         m.insert("createdAt", now_ms()).ok();
@@ -1275,6 +1449,28 @@ mod tests {
             m.insert(k, LoroValue::Null).ok();
         }
         let parts = m.insert_container("parts", LoroList::new()).expect("parts");
+        for (name, mime, kind, blob_ref) in extras.attachments {
+            let part = parts.push_container(LoroMap::new()).expect("part");
+            part.insert("id", ulid()).ok();
+            part.insert("kind", "attachment").ok();
+            let a = part
+                .insert_container("attachment", LoroMap::new())
+                .expect("attachment");
+            a.insert("name", *name).ok();
+            a.insert("mime", *mime).ok();
+            if let Some(k) = kind {
+                a.insert("kind", *k).ok();
+            }
+            // iOS always writes `ref` — null when there is no blob yet.
+            match blob_ref {
+                Some(r) => {
+                    a.insert("ref", *r).ok();
+                }
+                None => {
+                    a.insert("ref", LoroValue::Null).ok();
+                }
+            }
+        }
         let part = parts.push_container(LoroMap::new()).expect("part");
         part.insert("id", ulid()).ok();
         part.insert("kind", "text").ok();
@@ -1333,24 +1529,123 @@ mod tests {
             .expect("hiddenParts");
     }
 
+    /// Rust mirror of today's iOS `insertAssistantGreeting`.
+    fn ios_mirror_insert_greeting(
+        doc: &ChatDoc,
+        msg_id: &str,
+        text: &str,
+        device_id: &str,
+        project_id: &str,
+        agent_name: &str,
+    ) {
+        let msgs = doc.messages_list();
+        let m = msgs.push_container(LoroMap::new()).expect("push");
+        m.insert("id", msg_id).ok();
+        m.insert("chatId", "chat1").ok();
+        m.insert("role", "assistant").ok();
+        let sender = format!("agent:{project_id}");
+        m.insert("sender", sender.as_str()).ok();
+        m.insert("senderName", agent_name).ok();
+        m.insert("greeting", true).ok();
+        m.insert("status", "done").ok();
+        m.insert("deviceId", device_id).ok();
+        m.insert("createdAt", now_ms()).ok();
+        m.insert("completedAt", now_ms()).ok();
+        m.insert("waitingUser", false).ok();
+        m.insert("pending", false).ok();
+        for k in [
+            "turn",
+            "decision",
+            "subagentId",
+            "subagentName",
+            "inReplyTo",
+            "usage",
+            "returnContract",
+            "model",
+            "effort",
+        ] {
+            m.insert(k, LoroValue::Null).ok();
+        }
+        let parts = m.insert_container("parts", LoroList::new()).expect("parts");
+        let part = parts.push_container(LoroMap::new()).expect("part");
+        part.insert("id", ulid()).ok();
+        part.insert("kind", "text").ok();
+        let t = part
+            .insert_container("text", LoroText::new())
+            .expect("text");
+        t.insert(0, text).ok();
+        m.insert_container("hiddenParts", LoroList::new())
+            .expect("hiddenParts");
+    }
+
+    /// Minimal Mac `insert_message` mirror: JSON object fields via nested containers
+    /// (same as `arbos-mac` `insert_json`), including null placeholders serde emits.
+    fn mac_mirror_insert_message(doc: &ChatDoc, fields: &Value) {
+        let msgs = doc.messages_list();
+        let m = msgs.push_container(LoroMap::new()).expect("push");
+        let Value::Object(obj) = fields else {
+            panic!("mac message must be an object");
+        };
+        for (key, value) in obj {
+            insert_nested(&m, key, value);
+        }
+    }
+
+    fn keys_without_nulls(row: &Value) -> std::collections::BTreeSet<String> {
+        row.as_object()
+            .expect("row object")
+            .iter()
+            .filter(|(_, v)| !v.is_null())
+            .map(|(k, _)| k.clone())
+            .collect()
+    }
+
     #[test]
     fn ios_mirror_rows_decode_through_core() {
         let doc = ChatDoc::new(None, false);
         doc.transact(|d| {
-            ios_mirror_insert_user_message(d, "m1", "hello from ios", "dev:ios");
+            ios_mirror_insert_user_message(
+                d,
+                "m1",
+                "hello from ios",
+                "dev:ios",
+                &IosUserExtras {
+                    attachments: &[("note.txt", "text/plain", None, None)],
+                    mentions: &["agent:p1"],
+                    reply_to: Some("prev"),
+                    sender: Some("user:sam"),
+                    sender_handle: Some("sam"),
+                    sender_name: Some("Sam"),
+                    sender_avatar: Some("https://example/a.png"),
+                },
+            );
             ios_mirror_insert_system_line(d, "m2", "Call ended", "dev:ios", "call-1");
+            ios_mirror_insert_greeting(d, "m3", "Hi, I'm Arbos.", "dev:ios", "proj1", "Arbos");
         });
         let msgs = doc.messages();
-        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[0].role, "user");
         assert_eq!(msgs[0].text(), "hello from ios");
         assert_eq!(msgs[1].role, "system");
         assert_eq!(msgs[1].text(), "Call ended");
+        assert_eq!(msgs[2].role, "assistant");
+        assert_eq!(msgs[2].text(), "Hi, I'm Arbos.");
         let raw = doc.to_json();
+        let user = &raw["messages"][0];
+        assert_eq!(user["replyTo"], "prev");
+        assert_eq!(user["senderHandle"], "sam");
+        assert_eq!(user["mentions"][0], "agent:p1");
+        let att = &user["parts"][0]["attachment"];
+        assert_eq!(att["name"], "note.txt");
+        assert!(att.get("ref").is_some());
+        assert!(att["ref"].is_null());
         let row = &raw["messages"][1];
         assert_eq!(row["callId"], "call-1");
         assert_eq!(row["call_id"], "call-1");
         assert!(row.get("hiddenParts").is_some());
+        let greet = &raw["messages"][2];
+        assert_eq!(greet["greeting"], true);
+        assert_eq!(greet["sender"], "agent:proj1");
     }
 
     #[test]
@@ -1393,14 +1688,18 @@ mod tests {
         assert!(row.get("waitingUser").is_none());
         assert_eq!(row["replyTo"], "prev");
         assert_eq!(row["senderHandle"], "ken");
+        assert!(row.get("reactions").is_some());
         let sys = &a.to_json()["messages"][1];
         assert_eq!(sys["callId"], "c1");
         assert!(sys.get("call_id").is_none());
         let greet = &a.to_json()["messages"][2];
         assert_eq!(greet["greeting"], true);
         assert_eq!(greet["sender"], "agent:proj1");
+        assert!(a.has_greeting());
         assert_eq!(a.to_json()["settings"]["agentModel"], "gpt-test");
         assert_eq!(a.to_json()["settings"]["agentEffort"], "high");
+        // Command payload is a nested map (deep value still looks like JSON).
+        assert_eq!(a.to_json()["commands"][0]["payload"]["messageId"], "m1");
 
         b.import(&a.export_updates_since(&base_a)).unwrap();
         assert_eq!(b.messages().len(), 3);
@@ -1417,11 +1716,205 @@ mod tests {
     }
 
     #[test]
+    fn set_reaction_off_is_noop_without_bucket() {
+        let doc = ChatDoc::new(Some(1), false);
+        doc.transact(|d| {
+            d.append_user_message("m1", "hi", "dev", &UserMessageOpts::default());
+            d.set_reaction("m1", "👍", "user:a", false);
+        });
+        let reactions = &doc.to_json()["messages"][0]["reactions"];
+        assert!(reactions.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn nested_transact_commits_once() {
+        let doc = ChatDoc::new(Some(1), false);
+        let before = doc.oplog_vv();
+        doc.transact(|outer| {
+            outer.append_user_message("m1", "a", "dev", &UserMessageOpts::default());
+            outer.transact(|inner| {
+                inner.append_user_message("m2", "b", "dev", &UserMessageOpts::default());
+                // Committing helpers defer to the outermost transact.
+                let _ = inner.append_command("stop", serde_json::json!({}), "dev");
+            });
+        });
+        assert_eq!(doc.messages().len(), 2);
+        assert_eq!(doc.commands().len(), 1);
+        // One export covers the whole nested transaction.
+        let upd = doc.export_updates_since(&before);
+        let mut other = ChatDoc::new(Some(2), false);
+        other.import(&upd).unwrap();
+        assert_eq!(other.messages().len(), 2);
+        assert_eq!(other.commands().len(), 1);
+    }
+
+    #[test]
+    fn concurrent_reactions_from_two_peers_both_survive() {
+        // Shared message with seeded empty reactions, then both peers react before sync.
+        let seed = ChatDoc::new(Some(1), false);
+        seed.transact(|d| {
+            d.append_user_message("m1", "hi", "dev:seed", &UserMessageOpts::default());
+        });
+        let snap = seed.snapshot();
+
+        let mut a = ChatDoc::from_snapshot(Some(2), false, &snap).unwrap();
+        let mut b = ChatDoc::from_snapshot(Some(3), false, &snap).unwrap();
+        let base_a = a.oplog_vv();
+        let base_b = b.oplog_vv();
+
+        a.transact(|d| d.set_reaction("m1", "👍", "user:a", true));
+        b.transact(|d| d.set_reaction("m1", "❤️", "user:b", true));
+
+        let upd_a = a.export_updates_since(&base_a);
+        let upd_b = b.export_updates_since(&base_b);
+        a.import(&upd_b).unwrap();
+        b.import(&upd_a).unwrap();
+
+        for peer in [&a, &b] {
+            let r = &peer.to_json()["messages"][0]["reactions"];
+            assert_eq!(r["👍"]["user:a"], true);
+            assert_eq!(r["❤️"]["user:b"], true);
+        }
+    }
+
+    #[test]
+    fn concurrent_messages_from_two_peers_both_survive() {
+        let snap = ChatDoc::new(Some(1), false).snapshot();
+        let mut a = ChatDoc::from_snapshot(Some(2), false, &snap).unwrap();
+        let mut b = ChatDoc::from_snapshot(Some(3), false, &snap).unwrap();
+        let base_a = a.oplog_vv();
+        let base_b = b.oplog_vv();
+
+        a.transact(|d| {
+            d.append_user_message("m-a", "from a", "dev:a", &UserMessageOpts::default());
+        });
+        b.transact(|d| {
+            d.append_user_message("m-b", "from b", "dev:b", &UserMessageOpts::default());
+        });
+
+        let upd_a = a.export_updates_since(&base_a);
+        let upd_b = b.export_updates_since(&base_b);
+        a.import(&upd_b).unwrap();
+        b.import(&upd_a).unwrap();
+
+        for peer in [&a, &b] {
+            let ids: std::collections::BTreeSet<_> =
+                peer.messages().into_iter().map(|m| m.id).collect();
+            assert_eq!(ids, ["m-a".into(), "m-b".into()].into_iter().collect());
+        }
+    }
+
+    #[test]
+    fn core_user_row_keys_match_mac_insert_after_dropping_nulls() {
+        // Mac `insert_message` serializes a Message and writes every field (nulls
+        // included). After dropping nulls, compare the remaining key set to core's
+        // lean writer — ignoring Mac-only placeholders and core's seeded reactions.
+        let mac_doc = ChatDoc::new(Some(10), false);
+        let created = now_ms();
+        mac_mirror_insert_message(
+            &mac_doc,
+            &serde_json::json!({
+                "id": "m1",
+                "chatId": "chat1",
+                "role": "user",
+                "sender": "user",
+                "status": "done",
+                "turn": null,
+                "decision": null,
+                "subagentId": null,
+                "subagentName": null,
+                "handoffMessages": null,
+                "inReplyTo": null,
+                "routineName": null,
+                "senderName": null,
+                "senderIcon": null,
+                "senderHandle": null,
+                "senderAvatar": null,
+                "senderAvatarColor": null,
+                "mentions": [],
+                "replyTo": null,
+                "askedByHandle": null,
+                "ownerHandle": null,
+                "usage": null,
+                "returnContract": null,
+                "waitingUser": false,
+                "waitingApproval": false,
+                "model": null,
+                "effort": null,
+                "createdAt": created,
+                "completedAt": null,
+                "pending": false,
+                "parts": [{ "id": "p1", "kind": "text", "text": "hello" }],
+                "hiddenParts": []
+            }),
+        );
+        mac_doc.doc.commit();
+
+        let core_doc = ChatDoc::new(Some(11), false);
+        core_doc.transact(|d| {
+            d.append_user_message("m1", "hello", "dev:mac", &UserMessageOpts::default());
+        });
+
+        let mac_keys = keys_without_nulls(&mac_doc.to_json()["messages"][0]);
+        let core_keys = keys_without_nulls(&core_doc.to_json()["messages"][0]);
+
+        let mac_only: std::collections::BTreeSet<&str> = [
+            "chatId",
+            "waitingUser",
+            "waitingApproval",
+            "pending",
+            "hiddenParts",
+            "mentions",
+        ]
+        .into_iter()
+        .collect();
+        let core_only: std::collections::BTreeSet<&str> =
+            ["deviceId", "reactions"].into_iter().collect();
+
+        let mac_shared: std::collections::BTreeSet<_> = mac_keys
+            .iter()
+            .filter(|k| !mac_only.contains(k.as_str()))
+            .cloned()
+            .collect();
+        let core_shared: std::collections::BTreeSet<_> = core_keys
+            .iter()
+            .filter(|k| !core_only.contains(k.as_str()))
+            .cloned()
+            .collect();
+        assert_eq!(mac_shared, core_shared);
+    }
+
+    #[test]
     fn none_peer_uses_loro_random_and_some_sets_explicit() {
-        let random = ChatDoc::new(None, false);
+        let a = ChatDoc::new(None, false);
+        let b = ChatDoc::new(None, false);
         let explicit = ChatDoc::new(Some(42), false);
         assert_eq!(explicit.doc.peer_id(), 42);
-        // Random peer is non-zero in practice; just ensure construction works.
-        let _ = random.doc.peer_id();
+        assert_ne!(
+            a.doc.peer_id(),
+            b.doc.peer_id(),
+            "two ChatDoc::new(None, ..) must get different Loro peers"
+        );
+    }
+
+    #[test]
+    fn has_greeting_detects_existing_row() {
+        let doc = ChatDoc::new(Some(1), false);
+        assert!(!doc.has_greeting());
+        doc.transact(|d| {
+            d.append_greeting("g1", "Hi", "dev", "proj", "Arbos");
+        });
+        assert!(doc.has_greeting());
+    }
+
+    #[test]
+    fn append_command_wraps_push_command() {
+        let doc = ChatDoc::new(Some(1), false);
+        let id = doc.append_command("stop", serde_json::json!({}), "dev");
+        assert!(!id.is_empty());
+        assert_eq!(doc.commands().len(), 1);
+        assert_eq!(doc.commands()[0].kind, "stop");
+        // Nested empty payload map.
+        assert!(doc.to_json()["commands"][0]["payload"].is_object());
     }
 }

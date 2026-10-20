@@ -66,7 +66,7 @@ messages:  List<Map { id, role, sender, status, parts, … }>
 commands:  List<Map { id, kind, payload, issuedBy, issuedAt, status }>
 ```
 
-**`meta`** — written only by the box via `ChatDoc::init_meta` in `arbos-core`. Fields: `chatId`, `projectId`, `schemaVersion` (i64 `1`), `epoch` (i64). In relay mode Mac uses `ChatDoc::empty` and does not write `meta` locally (it arrives by sync); the fixture helper `ChatDoc::new` still seeds `meta` for offline demos. iOS never writes `meta` on the client.
+**`meta`** — written only by the box via `ChatDoc::init_meta` in `arbos-core`. Fields: `chatId`, `projectId`, `schemaVersion` (i64 `1`), `epoch` (i64). In relay mode Mac uses `ChatDoc::empty` and does not write `meta` locally (it arrives by sync). The Mac fixture helper `ChatDoc::new(chat_id, project_id)` still seeds `meta` for offline demos (not the core `ChatDoc::new`). iOS never writes `meta` on the client.
 
 **`messages[]`** — each entry is a map. Common fields:
 
@@ -84,7 +84,7 @@ commands:  List<Map { id, kind, payload, issuedBy, issuedAt, status }>
 | `waitingUser` | bool? | open question |
 | `answersQuestionId` | string? | user answer row |
 | `reactions` | Map? | `emoji → Map { senderId → true }` (Mac + iOS clients) |
-| `voice` / `callId` / `greeting` | various | voice lines, call system lines, D82 greeting |
+| `voice` / `callId` / `greeting` | various | voice lines, call system lines, D82 greeting. Today's Swift client **ignores `callId` on system lines** (it renders the text only); Mac may still use `callId` to fold call UI. |
 
 **Client write rule:** a user message and its `send` command land in **one commit** (core: `transact` around `append_user_message` + `push_command("send", …)`; today's Mac/iOS still commit message + `pushCommand("send", …)` together in the app). Streaming text is `LoroText` append-only; the box batches commits on a ~120 ms tick (`STREAM_COMMIT_MS`).
 
@@ -122,9 +122,9 @@ Unknown `kind` values decode to “unknown” and render as nothing (additive ru
 `arbos-core::doc` is the single canonical chat-doc writer API. Callers (Mac / iPhone / box / `arbosctl`) migrate onto it over subsequent parts; until then app-local writers remain.
 
 1. **Hidden parts** are inline `hidden: true` on entries in `parts`. `hiddenParts` is a **reader projection** only (Mac splits hidden parts out when decoding for the UI). Writers never create a `hiddenParts` list.
-2. **Only the box writes `meta`.** Clients read it from sync (Mac relay mode and iOS). Additive schema changes never bump `schemaVersion`; readers ignore unknown fields and unknown part kinds.
-3. **Client writers** (`append_user_message`, `append_system_line`, `append_greeting`, `set_reaction`, `push_command`, `set_model_settings`) do not commit themselves — wrap them in `ChatDoc::transact` (one commit = one PUSH). They write no null placeholders, `chatId`, `pending`, `hiddenParts`, or `call_id`. System lines use a `text` part and optional `callId` only (Mac and iOS already decode that shape).
-4. **Box helpers** (`append_user_message_from`, `append_system_note`, streaming/tool/question/approval writers, …) keep committing inside the helper as today. `append_system_note` (`status` + `code: "note"`) is unchanged; neither app renders it in the transcript.
+2. **Only the box writes `meta`.** Clients read it from sync (Mac relay mode and iOS). Additive schema changes never bump `schemaVersion`; readers ignore unknown fields and unknown part kinds. The Mac fixture `ChatDoc::new` still seeds `meta` for offline demos.
+3. **Client writers** (`append_user_message`, `append_system_line`, `append_greeting`, `set_reaction`, `push_command`, `set_model_settings`) do not commit themselves — wrap them in `ChatDoc::transact` (one commit = one PUSH). Nested `transact` calls commit only once (outermost). They write no null placeholders, `chatId`, `pending`, `hiddenParts`, or `call_id`. System lines use a `text` part and optional `callId` only (Mac and iOS already decode that shape; Swift ignores `callId` when rendering and shows the text). Core message writers seed an empty `reactions` map so concurrent first-reacts from two peers share one container. `set_reaction(on: false)` is a no-op when the reactions map or emoji bucket is missing. Remaining race (document for when readers move into core): two peers that concurrently create the **same** emoji bucket on a row that lacks it can still lose one sender. `has_greeting()` lets callers skip a duplicate D82 greeting. `push_command` stores `payload` as a nested map (matching Mac/iOS); `append_command` is the committing wrapper over it.
+4. **Box helpers** (`append_user_message_from`, `append_system_note`, streaming/tool/question/approval writers, …) commit inside the helper unless an outer `transact` is open (then they defer to that commit). Prefer not calling them inside `transact` unless you intend one shared commit. `append_system_note` (`status` + `code: "note"`) is unchanged; neither app renders it in the transcript.
 5. **Mac facts.** Relay-mode Mac does not write `meta` (`ChatDoc::empty`). Mac already uses Loro's random peer, which satisfies R7. Mac system lines are text parts (same as iOS / core `append_system_line`).
 
 ### 6.3 Project document
