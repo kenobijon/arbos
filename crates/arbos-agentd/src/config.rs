@@ -40,8 +40,8 @@ pub const STABLE_PREFIX_FILE: &str = "stable-prefix";
 
 /// A box-wide experiment switch: the box-local `override_file` wins when it holds a valid value (so one
 /// test box can run the other arm), else the environment variable `env` (the relay passes its own
-/// through, so one relay setting switches the fleet), else `false`.
-pub fn switch_on(env: &str, override_file: &std::path::Path) -> bool {
+/// through, so one relay setting switches the fleet), else `default`.
+pub fn switch_on(env: &str, override_file: &std::path::Path, default: bool) -> bool {
     if let Some(v) = std::fs::read_to_string(override_file)
         .ok()
         .and_then(|s| parse_switch(&s))
@@ -51,21 +51,23 @@ pub fn switch_on(env: &str, override_file: &std::path::Path) -> bool {
     std::env::var(env)
         .ok()
         .and_then(|s| parse_switch(&s))
-        .unwrap_or(false)
+        .unwrap_or(default)
 }
 
 /// Code mode (D86): the main agent is told to batch and filter tool work in `codemode` scripts, with
 /// the script guardrails on. `ARBOS_CODE_MODE=on|off`. Default **off** (the eval showed no win).
 pub fn code_mode_on(override_file: &std::path::Path) -> bool {
-    switch_on("ARBOS_CODE_MODE", override_file)
+    switch_on("ARBOS_CODE_MODE", override_file, false)
 }
 
-/// Stable prefix (D87): the system prompt holds only what never changes between turns; project
-/// memory, the working set and the per-turn skills ride at the tail, inside the user turn, so the
-/// cached prefix (tools + system prompt + earlier turns) is reused instead of rewritten.
-/// `ARBOS_STABLE_PREFIX=on|off`. Default **off** until the eval passes.
+/// Stable prefix (D87): the project-memory block of the system prompt is refreshed at most every
+/// 30 min, and the working set / per-turn skills ride inside the user turn (only when they changed)
+/// instead of as system-prompt sections, so the cached prefix (tools + system prompt + earlier
+/// turns) is reused instead of rewritten. `ARBOS_STABLE_PREFIX=on|off`. Default **on** since the
+/// eval of 2026-10-20 (multi-turn chats: −23 % cost, −25 % wall time, 0 prefix rewrites; single-turn
+/// chats: tie; quality held).
 pub fn stable_prefix_on(override_file: &std::path::Path) -> bool {
-    switch_on("ARBOS_STABLE_PREFIX", override_file)
+    switch_on("ARBOS_STABLE_PREFIX", override_file, true)
 }
 
 /// Box-level settings: what every workspace shares.
@@ -405,8 +407,10 @@ mod tests {
         }
         let sp = dir.join(STABLE_PREFIX_FILE);
         if std::env::var("ARBOS_STABLE_PREFIX").is_err() {
-            assert!(!stable_prefix_on(&sp));
+            assert!(stable_prefix_on(&sp), "stable prefix is on by default");
         }
+        std::fs::write(&sp, "off").unwrap();
+        assert!(!stable_prefix_on(&sp), "the box file turns it off");
         std::fs::write(&sp, "on").unwrap();
         assert!(stable_prefix_on(&sp));
         let _ = std::fs::remove_dir_all(&dir);
