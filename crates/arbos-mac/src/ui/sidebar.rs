@@ -835,6 +835,12 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     let fork_id = space.id.clone();
     let delete_id = space.id.clone();
     let delete_people = is_people;
+    // A group (redesign 2026-10-20): one item, "Delete group". The owner
+    // deletes it for everyone; a member leaves and the group stays.
+    let is_group = space.is_people_group();
+    let me_handle = state.me_handle();
+    let owns_group = is_group && space.owner_handle.as_deref().is_none_or(|o| o == me_handle);
+    let leave_instead = is_group && !owns_group;
 
     // Delete is destructive: the first click swaps the menu for an iPhone-style
     // "Delete “Name”?" with Cancel / Delete; Esc or a click elsewhere cancels.
@@ -848,7 +854,11 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
         } else {
             space.name.clone()
         };
-        let note = if is_people {
+        let note = if leave_instead {
+            "You leave the group. It stays for everyone else."
+        } else if is_group {
+            "Deletes the group for everyone in it."
+        } else if is_people {
             "Removes this chat from your list."
         } else {
             "Removes this agent and its chats from your list."
@@ -892,7 +902,9 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
                                 this.row_delete_armed = false;
                                 let id = delete_id.clone();
                                 this.state.update(cx, |s, cx| {
-                                    if delete_people {
+                                    if leave_instead {
+                                        s.leave_group(id, cx);
+                                    } else if delete_people {
                                         s.delete_people_chat(id, cx);
                                     } else {
                                         s.delete_project(id, cx);
@@ -913,6 +925,25 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     }
 
     let mut body = div().flex().flex_col().gap(px(1.0));
+    if is_group {
+        // Mockup f: the group row's menu is "Delete group" and nothing else.
+        body = body.child(
+            glass::menu_row("row-menu-delete", "trash", "Delete group", true, &theme).on_click(
+                cx.listener(|this, _, _, cx| {
+                    this.row_delete_armed = true;
+                    cx.notify();
+                }),
+            ),
+        );
+        return Some(
+            div()
+                .absolute()
+                .left(at.x)
+                .top(at.y)
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(glass::frosted_menu(200.0, &theme, body)),
+        );
+    }
     body = body.child(
         glass::menu_row(
             "row-menu-profile",

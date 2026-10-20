@@ -3930,6 +3930,25 @@ impl AppState {
         cx.notify();
     }
 
+    /// "Delete group" as a member: leave, and the row goes at once (the relay
+    /// drops me from the chat; it stays for everyone else).
+    pub fn leave_group(&mut self, chat_id: Id, cx: &mut Context<Self>) {
+        if !self.project(&chat_id).is_some_and(|p| p.is_people_group()) {
+            return;
+        }
+        if self.selected_project.as_deref() == Some(chat_id.as_str()) {
+            self.selected_project = None;
+        }
+        self.messages.remove(&chat_id);
+        self.chat_ui.remove(&chat_id);
+        self.chats.remove(&chat_id);
+        self.archived_chats.remove(&chat_id);
+        self.projects.retain(|p| p.id != chat_id);
+        self.muted.remove(&chat_id);
+        self.command(ClientCommand::LeaveChat { chat_id });
+        cx.notify();
+    }
+
     pub fn block_user(&mut self, handle: String, cx: &mut Context<Self>) {
         self.command(ClientCommand::BlockUser { handle });
         cx.notify();

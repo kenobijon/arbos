@@ -1059,6 +1059,9 @@ fn people_space_from(shared: &Shared, v: &Value) -> Option<(Project, Chat)> {
     let me = shared.me_id();
     let mut people: Vec<Person> = Vec::new();
     let mut agents: Vec<AgentMember> = Vec::new();
+    // My own member row says whether I own the chat (`DELETE /chats/{id}` is
+    // owner-only; a member leaves instead).
+    let mut i_own = false;
     for m in v
         .get("members")
         .and_then(Value::as_array)
@@ -1068,6 +1071,7 @@ fn people_space_from(shared: &Shared, v: &Value) -> Option<(Project, Chat)> {
         let member = m.get("member").and_then(Value::as_str).unwrap_or("");
         if let Some(uid) = member.strip_prefix("user:") {
             if uid == me {
+                i_own = m.get("role").and_then(Value::as_str).unwrap_or("owner") == "owner";
                 continue;
             }
             people.push(Person {
@@ -1176,6 +1180,10 @@ fn people_space_from(shared: &Shared, v: &Value) -> Option<(Project, Chat)> {
             });
         }
     }
+    let people_owner: Option<String> = people
+        .iter()
+        .find(|p| p.role == "owner")
+        .map(|p| p.handle.clone());
     let kind = match v.get("kind").and_then(Value::as_str) {
         Some("group") => SpaceKind::Group,
         _ => SpaceKind::Dm,
@@ -1214,7 +1222,12 @@ fn people_space_from(shared: &Shared, v: &Value) -> Option<(Project, Chat)> {
         agents,
         pending,
         shared: false,
-        owner_handle: None,
+        // People chats: my handle when I own it, else the first owner's.
+        owner_handle: if i_own {
+            Some(shared.me_handle())
+        } else {
+            people_owner.clone()
+        },
         avatar: None,
         avatar_color: None,
         description: None,
