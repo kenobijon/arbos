@@ -4893,7 +4893,26 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         ClientCommand::FetchThumbnail { project_id, key } => {
             let shared = shared.clone();
             tokio::spawn(async move {
-                match fetch_blob_bytes(&shared, &project_id, &key).await {
+                // A brief send/timeout on an image preview is common on flaky Wi-Fi; retry
+                // twice before "No preview". Transient errors only log (see is_transient).
+                let result = {
+                    let mut attempt = 0u32;
+                    loop {
+                        match fetch_blob_bytes(&shared, &project_id, &key).await {
+                            Ok(ok) => break Ok(ok),
+                            Err(err) => {
+                                let text = format!("{err:#}");
+                                if diagnostics::is_transient(&text) && attempt < 2 {
+                                    attempt += 1;
+                                    sleep(Duration::from_millis(400 * u64::from(attempt))).await;
+                                    continue;
+                                }
+                                break Err(err);
+                            }
+                        }
+                    }
+                };
+                match result {
                     Ok((_, bytes)) => {
                         let _ = shared.events.send(SyncEvent::Thumbnail {
                             key,
@@ -4903,7 +4922,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     Err(err) => {
                         // Nobody asked for this fetch: no toast, no bubble. The card shows
                         // "No preview"; the error goes to the log and the silent report.
-                        shared.diagnostic("thumbnail", format!("{key}: {err}"));
+                        shared.diagnostic("thumbnail", format!("{key}: {err:#}"));
                         let _ = shared.events.send(SyncEvent::ThumbnailFailed { key });
                     }
                 }
