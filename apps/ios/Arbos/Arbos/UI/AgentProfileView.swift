@@ -218,35 +218,15 @@ struct AgentEditSheet: View {
     }
 
     private func row(icon: String, title: String, value: String, chevron: Bool = true) -> some View {
-        HStack(spacing: 14) {
-            Image(systemName: icon)
-                .font(theme.font(16, weight: .medium))
-                .foregroundStyle(theme.text)
-                .frame(width: 28)
-            Text(title).font(theme.font(Theme.body)).foregroundStyle(theme.text)
-            Spacer()
-            Text(value)
-                .font(theme.font(Theme.small))
-                .foregroundStyle(theme.muted)
-                .lineLimit(1)
-                .truncationMode(.middle)
-            if chevron {
-                Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.muted.opacity(0.7))
-            }
-        }
-        .padding(.horizontal, 14)
-        .frame(height: 50)
-        .contentShape(Rectangle())
+        PaneRow(leading: .tile(icon), title: title, value: value, chevron: chevron)
     }
 
     private func card<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
-        VStack(spacing: 0) { content() }
-            .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(theme.card))
+        PaneCard(separatorInset: PaneKit.separatorInset(.tile(""))) { content() }
     }
 
-    private var divider: some View {
-        Rectangle().fill(theme.separator).frame(height: 0.5).padding(.leading, 56)
-    }
+    /// Cards draw their own hairlines now; kept as an empty spacer for call sites.
+    private var divider: some View { EmptyView() }
 
     private func workspaceLabel(_ project: Project) -> String {
         switch model.machine.workspaces[project.id] ?? project.workspace {
@@ -304,20 +284,14 @@ struct AgentProfileView: View {
                         ProfileCard {
                             ProfileInfoRow(label: "agent", value: "@\(mentionSlug(project.name))", tint: Color(hex: "#1084FE")!)
                                 .onTapGesture { UIPasteboard.general.string = "@\(mentionSlug(project.name))" }
-                            ProfileRowDivider()
                             ownerRow(project)
-                            ProfileRowDivider()
                             ProfileInfoRow(label: "machine", value: machineLine(project))
-                            ProfileRowDivider()
                             ProfileInfoRow(label: "model", value: "\(project.shortModel) · \(project.effort.label)")
                                 .onTapGesture { if isMine { showModel = true } }
-                            ProfileRowDivider()
                             ProfileInfoRow(label: "voice", value: voiceLine(project))
                                 .onTapGesture { if isMine { showVoice = true } }
-                            ProfileRowDivider()
                             ProfileInfoRow(label: "secrets", value: secretsLine(project), trailingIcon: "chevron.right")
                                 .onTapGesture { showSecrets = true }
-                            ProfileRowDivider()
                             if project.description.isEmpty {
                                 if isMine {
                                     ProfileLinkRow(title: "Add a description") { descriptionDraft = ""; showDescription = true }

@@ -68,30 +68,6 @@ struct ProfileTopBar<Trailing: View>: View {
     }
 }
 
-struct ProfileHeader<Avatar: View>: View {
-    @Environment(\.theme) private var theme
-    let name: String
-    let status: String
-    var statusOnline = false
-    @ViewBuilder var avatar: () -> Avatar
-
-    var body: some View {
-        VStack(spacing: 10) {
-            avatar().frame(width: 112, height: 112)
-            Text(name)
-                .font(theme.font(28, weight: .semibold))
-                .foregroundStyle(theme.text)
-                .lineLimit(1)
-                .padding(.horizontal, 24)
-            Text(status)
-                .font(theme.font(Theme.small))
-                .foregroundStyle(statusOnline ? Color(hex: "#1084FE")! : theme.muted)
-        }
-        .padding(.top, -24)
-        .frame(maxWidth: .infinity)
-    }
-}
-
 struct ProfileAction: Identifiable {
     var id: String { label }
     let icon: String
@@ -138,21 +114,293 @@ struct ProfileActionRow: View {
     }
 }
 
-struct ProfileCard<Content: View>: View {
-    @Environment(\.theme) private var theme
-    @ViewBuilder var content: () -> Content
-
-    var body: some View {
-        VStack(spacing: 0) { content() }
-            .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(theme.card))
-            .padding(.horizontal, 16)
+/// The one row/card kit every pane page draws with (Jacob, 2026-10-20:
+/// "make the settings, user and group panels consistent"). Settings groups,
+/// profile cards and the agent editor all build on these, so a metric lives
+/// in exactly one place:
+///
+/// * card: 16 pt continuous radius, `bubbleAssistant` fill (D80), hairline
+///   between rows inset under the label;
+/// * row: 48 pt minimum, 16 pt side padding, 14 pt gap; leading = a 30 pt
+///   icon tile, a 36 pt picture, or nothing; trailing value in body size,
+///   muted, tail-truncated; chevron 14 pt semibold placeholder-coloured;
+/// * danger row: centred red label, same height;
+/// * tabs: one capsule pill, `field` fill on the selected tab.
+enum PaneKit {
+    static let rowHeight: CGFloat = 48
+    static let inset: CGFloat = 16
+    static let gap: CGFloat = 14
+    static let tile: CGFloat = 30
+    static let avatar: CGFloat = 36
+    static let radius: CGFloat = 16
+    /// Where a row's hairline starts for a given leading element.
+    static func separatorInset(_ leading: PaneLeading) -> CGFloat {
+        switch leading {
+        case .none: return inset
+        case .tile: return inset + tile + gap
+        case .avatar, .glyph: return inset + avatar + gap
+        }
     }
 }
 
-struct ProfileRowDivider: View {
+/// What sits at a row's leading edge.
+enum PaneLeading {
+    case none
+    /// Apple-style 30 pt icon tile (settings rows); `dot` = machine state.
+    case tile(String, dot: Color? = nil)
+    /// A 36 pt picture (people, agents, groups).
+    case avatar(AnyView)
+    /// A 36 pt box with a glyph in it (Add members, files).
+    case glyph(String)
+}
+
+/// The grouped card: one fill, one radius, hairlines inset under the label.
+struct PaneCard<Rows: View>: View {
     @Environment(\.theme) private var theme
-    var inset: CGFloat = 16
-    var body: some View { Rectangle().fill(theme.separator).frame(height: 0.5).padding(.leading, inset) }
+    var header: String? = nil
+    var footer: String? = nil
+    /// Where the hairlines start; a card of tile rows passes `.tile`.
+    var separatorInset: CGFloat = PaneKit.inset
+    @ViewBuilder var rows: () -> Rows
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let header {
+                Text(header.uppercased())
+                    .font(theme.font(Theme.tiny, weight: .medium))
+                    .foregroundStyle(theme.muted)
+                    .padding(.leading, PaneKit.inset)
+            }
+            _VariadicView.Tree(PaneCardLayout(separator: theme.separator, inset: separatorInset)) { rows() }
+                .background(RoundedRectangle(cornerRadius: PaneKit.radius, style: .continuous).fill(theme.bubbleAssistant))
+            if let footer {
+                Text(footer)
+                    .font(theme.font(Theme.tiny))
+                    .foregroundStyle(theme.muted)
+                    .padding(.horizontal, PaneKit.inset)
+            }
+        }
+    }
+}
+
+private struct PaneCardLayout: _VariadicView_UnaryViewRoot {
+    let separator: Color
+    let inset: CGFloat
+
+    @ViewBuilder
+    func body(children: _VariadicView.Children) -> some View {
+        let last = children.last?.id
+        VStack(spacing: 0) {
+            ForEach(children) { child in
+                child
+                if child.id != last {
+                    Rectangle()
+                        .fill(separator)
+                        .frame(height: 1 / UIScreen.main.scale)
+                        .padding(.leading, inset)
+                }
+            }
+        }
+    }
+}
+
+/// One row: leading, title (+ optional subtitle), optional trailing value,
+/// chevron when it pushes a page.
+struct PaneRow: View {
+    @Environment(\.theme) private var theme
+    var leading: PaneLeading = .none
+    let title: String
+    var subtitle: String? = nil
+    var value: String? = nil
+    var valueTint: Color? = nil
+    var chevron: Bool = false
+    var titleTint: Color? = nil
+    /// A control at the trailing edge (a Toggle, a ✕); drawn after the value.
+    var trailing: AnyView? = nil
+
+    var body: some View {
+        HStack(spacing: PaneKit.gap) {
+            leadingView
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(theme.font(Theme.body))
+                    .foregroundStyle(titleTint ?? theme.text)
+                    .lineLimit(1)
+                if let subtitle, !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(theme.font(Theme.small))
+                        .foregroundStyle(theme.muted)
+                        .lineLimit(1)
+                }
+            }
+            .layoutPriority(1)
+            Spacer(minLength: 8)
+            if let value, !value.isEmpty {
+                // The value takes what the title leaves and clips at its end
+                // (Apple's Settings), not in the middle.
+                Text(value)
+                    .font(theme.font(Theme.body))
+                    .foregroundStyle(valueTint ?? theme.muted)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            if let trailing { trailing }
+            if chevron {
+                Image(systemName: "chevron.right")
+                    .font(theme.font(14, weight: .semibold))
+                    .foregroundStyle(theme.placeholder)
+            }
+        }
+        .padding(.horizontal, PaneKit.inset)
+        .padding(.vertical, 6)
+        .frame(minHeight: PaneKit.rowHeight)
+        .contentShape(Rectangle())
+    }
+
+    @ViewBuilder private var leadingView: some View {
+        switch leading {
+        case .none:
+            EmptyView()
+        case .tile(let icon, let dot):
+            ZStack(alignment: .bottomTrailing) {
+                RoundedRectangle(cornerRadius: 7.5, style: .continuous)
+                    .fill(theme.isDark ? Color(hex: "#5C5C60")! : Color(hex: "#6E6E73")!)
+                    .frame(width: PaneKit.tile, height: PaneKit.tile)
+                    .overlay(
+                        Image(systemName: icon)
+                            .font(theme.font(15, weight: .semibold))
+                            .foregroundStyle(.white)
+                    )
+                if let dot {
+                    Circle().fill(dot).frame(width: 9, height: 9)
+                        .overlay(Circle().strokeBorder(theme.bubbleAssistant, lineWidth: 1.5))
+                        .offset(x: 3, y: 3)
+                }
+            }
+        case .avatar(let view):
+            view.frame(width: PaneKit.avatar, height: PaneKit.avatar)
+        case .glyph(let icon):
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(theme.field)
+                .frame(width: PaneKit.avatar, height: PaneKit.avatar)
+                .overlay(Image(systemName: icon).font(theme.font(17, weight: .medium)).foregroundStyle(theme.muted))
+        }
+    }
+}
+
+/// The destructive action at the end of a pane: a centred red label.
+struct PaneDangerRow: View {
+    @Environment(\.theme) private var theme
+    let title: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(theme.font(Theme.body))
+                .foregroundStyle(theme.danger)
+                .frame(maxWidth: .infinity)
+                .frame(minHeight: PaneKit.rowHeight)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// A small caps title over a section of a pane ("Images · 3", "Files · 1").
+struct PaneSectionTitle: View {
+    @Environment(\.theme) private var theme
+    let title: String
+    init(_ title: String) { self.title = title }
+    var body: some View {
+        Text(title.uppercased())
+            .font(theme.font(Theme.tiny, weight: .medium))
+            .foregroundStyle(theme.muted)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, PaneKit.inset * 2)
+    }
+}
+
+/// The one capsule tab pill (Profile | Settings, Links | Groups, Members | Library).
+struct PaneTabs: View {
+    @Environment(\.theme) private var theme
+    let tabs: [String]
+    @Binding var selected: String
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(tabs, id: \.self) { t in
+                Button { withAnimation(.snappy(duration: 0.2)) { selected = t } } label: {
+                    Text(t)
+                        .font(theme.font(Theme.small, weight: selected == t ? .semibold : .medium))
+                        .foregroundStyle(selected == t ? theme.text : theme.muted)
+                        .padding(.horizontal, 16).frame(height: 32)
+                        .frame(maxWidth: .infinity)
+                        .background(Capsule().fill(selected == t ? theme.field : .clear))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(3)
+        .background(Capsule().fill(theme.bubbleAssistant))
+        .overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1))
+        .padding(.horizontal, PaneKit.inset)
+    }
+}
+
+/// The hero: 112 pt picture, name, subtitle (@handle, member count, …).
+struct PaneHeader<Avatar: View>: View {
+    @Environment(\.theme) private var theme
+    let name: String
+    let subtitle: String
+    @ViewBuilder var avatar: () -> Avatar
+
+    var body: some View {
+        VStack(spacing: 10) {
+            avatar().frame(width: 112, height: 112)
+            Text(name)
+                .font(theme.font(28, weight: .semibold))
+                .foregroundStyle(theme.text)
+                .lineLimit(1)
+                .padding(.horizontal, 24)
+            Text(subtitle)
+                .font(theme.font(Theme.small))
+                .foregroundStyle(theme.muted)
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
+// ----- the shared pane kit (PaneKit) and the names the pages use ------------
+
+/// Hero: picture, name, subtitle. `statusOnline` is kept for the agent page's
+/// "working" tint; the kit draws the subtitle muted.
+struct ProfileHeader<Avatar: View>: View {
+    @Environment(\.theme) private var theme
+    let name: String
+    let status: String
+    var statusOnline = false
+    @ViewBuilder var avatar: () -> Avatar
+
+    var body: some View {
+        PaneHeader(name: name, subtitle: status, avatar: avatar)
+            .overlay(alignment: .bottom) {
+                if statusOnline {
+                    Text(status).font(theme.font(Theme.small)).foregroundStyle(Color(hex: "#1084FE")!)
+                        .background(theme.bg)
+                }
+            }
+    }
+}
+
+/// A grouped card of rows (the kit's card; hairlines inset to the label).
+struct ProfileCard<Content: View>: View {
+    var separatorInset: CGFloat = PaneKit.inset
+    @ViewBuilder var content: () -> Content
+    var body: some View {
+        PaneCard(separatorInset: separatorInset) { content() }
+            .padding(.horizontal, PaneKit.inset)
+    }
 }
 
 /// Label-over-value row ("username" / "@handle"), optional trailing glyph.
@@ -172,54 +420,30 @@ struct ProfileInfoRow: View {
             Spacer()
             if let trailingIcon { Image(systemName: trailingIcon).font(.system(size: 18)).foregroundStyle(Color(hex: "#1084FE")!) }
         }
-        .padding(.horizontal, 16).padding(.vertical, 12)
+        .padding(.horizontal, PaneKit.inset).frame(minHeight: PaneKit.rowHeight)
     }
 }
 
-/// Blue (or red) one-line action row inside a card.
+/// One-line action row inside a card: the kit's row (red = the danger row).
 struct ProfileLinkRow: View {
-    @Environment(\.theme) private var theme
     let title: String
     var destructive = false
     let action: () -> Void
 
     var body: some View {
-        Button(action: action) {
-            HStack {
-                Text(title).font(theme.font(Theme.body)).foregroundStyle(destructive ? theme.danger : Color(hex: "#1084FE")!)
-                Spacer()
-            }
-            .padding(.horizontal, 16).frame(height: 48)
-            .contentShape(Rectangle())
+        if destructive {
+            PaneDangerRow(title: title, action: action)
+        } else {
+            Button(action: action) { PaneRow(title: title, chevron: true) }.buttonStyle(.plain)
         }
-        .buttonStyle(.plain)
     }
 }
 
-/// Telegram's pill of tabs (dark capsule, light capsule on the selected one).
+/// The tab pill: the kit's.
 struct ProfileTabs: View {
-    @Environment(\.theme) private var theme
     let tabs: [String]
     @Binding var selected: String
-
-    var body: some View {
-        HStack(spacing: 2) {
-            ForEach(tabs, id: \.self) { t in
-                Button { withAnimation(.snappy(duration: 0.2)) { selected = t } } label: {
-                    Text(t)
-                        .font(theme.font(Theme.small, weight: .medium))
-                        .foregroundStyle(theme.text)
-                        .padding(.horizontal, 16).frame(height: 36)
-                        .background(Capsule().fill(selected == t ? theme.field : .clear))
-                        .overlay(Capsule().strokeBorder(selected == t ? theme.fieldBorder : .clear, lineWidth: 1))
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(4)
-        .background(Capsule().fill(theme.card))
-        .overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1))
-    }
+    var body: some View { PaneTabs(tabs: tabs, selected: $selected) }
 }
 
 /// Last-seen text: the relay's `online`/`last_seen_at` (§9) merged with the
@@ -325,10 +549,9 @@ struct ChatItemsList: View {
             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             .padding(.horizontal, 16)
         } else {
-            ProfileCard {
-                ForEach(Array(filtered.enumerated()), id: \.element.id) { i, item in
+            ProfileCard(separatorInset: PaneKit.separatorInset(.glyph(""))) {
+                ForEach(filtered) { item in
                     rowView(item)
-                    if i < filtered.count - 1 { ProfileRowDivider(inset: 68) }
                 }
             }
         }
@@ -346,56 +569,12 @@ struct ChatItemsList: View {
     }
 
     private func rowLabel(_ item: ChatItem) -> some View {
-        HStack(spacing: 12) {
-            GlassCircle(size: 40) {
-                Image(systemName: item.kind == .voice ? "waveform" : item.kind == .link ? "link" : "doc.fill")
-                    .font(theme.font(16, weight: .medium)).foregroundStyle(theme.text)
-            }
-            VStack(alignment: .leading, spacing: 3) {
-                Text(item.title).font(theme.font(Theme.body)).foregroundStyle(theme.text).lineLimit(1)
-                Text(item.kind == .link ? item.subtitle : "\(item.fromHandle.map { "@\($0) · " } ?? "")\(Date(timeIntervalSince1970: Double(item.at) / 1000).formatted(date: .abbreviated, time: .omitted))")
-                    .font(theme.font(Theme.tiny)).foregroundStyle(item.kind == .link ? Color(hex: "#1084FE")! : theme.muted).lineLimit(1)
-            }
-            Spacer()
-        }
-        .padding(.horizontal, 14).padding(.vertical, 10)
-        .contentShape(Rectangle())
-    }
-}
-
-/// A member row: avatar, name, online/last seen, owner/admin badge.
-struct MemberStatusRow: View {
-    @Environment(\.theme) private var theme
-    let person: ProfilePerson
-    let status: (text: String, online: Bool)
-    var badge: String? = nil
-    var isMe = false
-    var agent: Project? = nil
-
-    var body: some View {
-        HStack(spacing: 12) {
-            if let agent {
-                AgentAvatar(project: agent, theme: theme, size: 40, still: true)
-            } else {
-                PersonAvatar(url: person.avatarUrl, handle: person.handle, size: 40, name: person.name, id: person.id, colorIndex: person.avatarColorIndex)
-            }
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(agent?.name ?? person.displayName).font(theme.font(Theme.body)).foregroundStyle(theme.text).lineLimit(1)
-                    if isMe { Text("you").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted) }
-                }
-                Text(status.text).font(theme.font(Theme.tiny)).foregroundStyle(status.online ? Color(hex: "#1084FE")! : theme.muted)
-            }
-            Spacer()
-            if let badge {
-                Text(badge).font(theme.font(12, weight: .medium))
-                    .foregroundStyle(badge == "owner" ? Color(hex: "#8B5CF6")! : theme.online)
-                    .padding(.horizontal, 8).padding(.vertical, 3)
-                    .background(Capsule().fill((badge == "owner" ? Color(hex: "#8B5CF6")! : theme.online).opacity(0.15)))
-            }
-        }
-        .padding(.horizontal, 14).padding(.vertical, 9)
-        .contentShape(Rectangle())
+        let when = Date(timeIntervalSince1970: Double(item.at) / 1000).formatted(date: .abbreviated, time: .omitted)
+        return PaneRow(
+            leading: .glyph(item.kind == .voice ? "waveform" : item.kind == .link ? "link" : "doc.fill"),
+            title: item.title,
+            subtitle: item.kind == .link ? item.subtitle : "\(item.fromHandle.map { "@\($0) · " } ?? "")\(when)"
+        )
     }
 }
 
@@ -491,33 +670,21 @@ struct UserProfileView: View {
             if groups.isEmpty && sharedProjects.isEmpty {
                 Text("No groups in common yet.").font(theme.font(Theme.small)).foregroundStyle(theme.muted).padding(.top, 36)
             } else {
-                ProfileCard {
+                ProfileCard(separatorInset: PaneKit.separatorInset(.glyph(""))) {
                     ForEach(groups) { g in
                         Button { dismiss(); model.open(peopleChat: g) } label: {
-                            HStack(spacing: 12) {
-                                GlassCircle(size: 40) { Image(systemName: "person.2.fill").font(.system(size: 15)).foregroundStyle(theme.text) }
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(g.title).font(theme.font(Theme.body)).foregroundStyle(theme.text)
-                                    Text("\(g.humans.count) members").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
-                                }
-                                Spacer()
-                            }
-                            .padding(.horizontal, 14).padding(.vertical, 9).contentShape(Rectangle())
+                            PaneRow(leading: .glyph("person.2.fill"), title: g.title, subtitle: "\(g.humans.count) members", chevron: true)
                         }
                         .buttonStyle(.plain)
-                        ProfileRowDivider(inset: 68)
                     }
                     ForEach(sharedProjects) { p in
                         Button { dismiss(); model.open(project: p) } label: {
-                            HStack(spacing: 12) {
-                                AgentAvatar(project: p, theme: theme, size: 40, still: true)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(p.name).font(theme.font(Theme.body)).foregroundStyle(theme.text)
-                                    Text("shared project · @\(p.ownerHandle ?? model.user?.login ?? "")").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
-                                }
-                                Spacer()
-                            }
-                            .padding(.horizontal, 14).padding(.vertical, 9).contentShape(Rectangle())
+                            PaneRow(
+                                leading: .avatar(AnyView(AgentAvatar(project: p, theme: theme, size: PaneKit.avatar, still: true))),
+                                title: p.name,
+                                subtitle: "shared project · @\(p.ownerHandle ?? model.user?.login ?? "")",
+                                chevron: true
+                            )
                         }
                         .buttonStyle(.plain)
                     }
@@ -610,55 +777,58 @@ struct GroupProfileView: View {
             ScrollView {
                 VStack(spacing: 18) {
                     Color.clear.frame(height: 80)
-                    ProfileHeader(name: title, status: "\(memberCount) member\(memberCount == 1 ? "" : "s")") {
+                    // The shared pane layout (panels-unify, 2026-10-21): picture
+                    // (crayon when a people group — it opens the edit sheet), name,
+                    // member count, Members | Library, one leave row at the end.
+                    PaneHeader(name: title, subtitle: "\(memberCount) member\(memberCount == 1 ? "" : "s")") {
                         if let project {
                             AgentAvatar(project: project, theme: theme, size: 112)
                         } else {
-                            AvatarCluster(members: clusterMembers, size: 72, imageUrl: groupImageURL)
-                                .frame(width: 112, height: 112)
-                                .contentShape(Rectangle())
-                                .onTapGesture { showEdit = true }
+                            Button { showEdit = true } label: {
+                                AvatarCluster(members: clusterMembers, size: 72, imageUrl: groupImageURL)
+                                    .frame(width: 112, height: 112)
+                                    .overlay(alignment: .bottomTrailing) {
+                                        Image(systemName: "pencil")
+                                            .font(theme.font(13, weight: .semibold))
+                                            .foregroundStyle(theme.text)
+                                            .frame(width: 30, height: 30)
+                                            .background(Circle().fill(theme.field))
+                                            .overlay(Circle().strokeBorder(theme.bg, lineWidth: 2))
+                                    }
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Edit group name and picture")
                         }
                     }
-                    ProfileActionRow(actions: [
-                        ProfileAction(icon: muted ? "bell.slash.fill" : "bell.fill", label: muted ? "unmute" : "mute") { toggleMute() },
-                        ProfileAction(icon: "magnifyingglass", label: "search") {
-                            model.pendingSearchChat = chatId
-                            dismiss()
-                        },
-                        ProfileAction(icon: "rectangle.portrait.and.arrow.right", label: "leave", enabled: people != nil || project?.shared == true) { confirmLeave = true },
-                        ProfileAction(icon: "ellipsis", label: "more") {
+                    PaneTabs(tabs: ["Members", "Library"], selected: $tab)
+                    if tab == "Members" {
+                        membersList
+                    } else {
+                        library
+                    }
+                    if people != nil || project?.shared == true {
+                        ProfileCard(separatorInset: PaneKit.separatorInset(.tile(""))) {
                             if people != nil {
-                                showEdit = true
-                            } else if let projectId {
-                                model.showProfile(.agent(projectId: projectId))
+                                // Mute is a relay chat setting (`chatSettings`); this
+                                // pane is the only place it lives on iPhone, so it stays.
+                                PaneRow(
+                                    leading: .tile(muted ? "bell.slash.fill" : "bell.fill"),
+                                    title: "Mute notifications",
+                                    trailing: AnyView(
+                                        Toggle("", isOn: Binding(get: { muted }, set: { _ in toggleMute() }))
+                                            .labelsHidden()
+                                            .tint(Color(hex: "#1084FE")!)
+                                    )
+                                )
                             }
-                        },
-                    ])
-                    ProfileTabs(tabs: ["Members", "Media", "Files", "Voice", "Links"], selected: $tab)
-                    switch tab {
-                    case "Members": membersList
-                    case "Media": ChatItemsList(items: items, kind: .media, empty: "No photos or videos shared yet.")
-                    case "Files": ChatItemsList(items: items, kind: .file, empty: "No files shared yet.")
-                    case "Voice": ChatItemsList(items: items, kind: .voice, empty: "No voice messages yet.")
-                    default: ChatItemsList(items: items, kind: .link, empty: "No links shared yet.")
+                            PaneDangerRow(title: "Leave group") { confirmLeave = true }
+                        }
                     }
                     Color.clear.frame(height: 40)
                 }
             }
-            ProfileTopBar {
-                if people != nil {
-                    Button("Edit") { showEdit = true }
-                        .font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text)
-                        .padding(.horizontal, 14).frame(height: Theme.control)
-                        .background(Capsule().fill(theme.field))
-                } else if project != nil, project?.shared != true {
-                    Button("Edit") { model.showProfile(.agent(projectId: projectId!)) }
-                        .font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text)
-                        .padding(.horizontal, 14).frame(height: Theme.control)
-                        .background(Capsule().fill(theme.field))
-                }
-            }
+            ProfileTopBar { EmptyView() }
         }
         .confirmationDialog("Leave \(title)?", isPresented: $confirmLeave, titleVisibility: .visible) {
             Button("Leave", role: .destructive) {
@@ -706,57 +876,96 @@ struct GroupProfileView: View {
         }
     }
 
+    /// Members: Add members, then every person (name, @handle) and agent
+    /// ("Agent · run by …") as kit rows — the Mac group pane's list.
     private var membersList: some View {
-        ProfileCard {
+        ProfileCard(separatorInset: PaneKit.separatorInset(.glyph(""))) {
             Button { showAdd = true } label: {
-                HStack(spacing: 12) {
-                    GlassCircle(size: 40) { Image(systemName: "person.badge.plus").font(.system(size: 16, weight: .medium)).foregroundStyle(Color(hex: "#1084FE")!) }
-                    Text("Add Members").font(theme.font(Theme.body)).foregroundStyle(Color(hex: "#1084FE")!)
-                    Spacer()
-                }
-                .padding(.horizontal, 14).padding(.vertical, 9).contentShape(Rectangle())
+                PaneRow(leading: .glyph("person.badge.plus"), title: "Add members")
             }
             .buttonStyle(.plain)
             ForEach(rows) { r in
-                ProfileRowDivider(inset: 68)
-                // borderless (not .plain): .plain steals long-press on recent iOS,
-                // so the remove context menu never appears (same as HomeView rows).
-                HStack(spacing: 0) {
-                    Button {
-                        if let a = r.agent { model.showProfile(.agent(projectId: a.id)) } else { model.showProfile(.user(r.person)) }
-                    } label: {
-                        MemberStatusRow(person: r.person,
-                                        status: r.agent != nil ? (model.isStreaming(project: r.agent!.id) ? "working" : "idle", false)
-                                            : (r.person.id == model.user?.id ? ("online", true)
-                                               : lastSeenLine(max(r.person.lastSeenAt ?? 0, model.lastSeen[r.person.id] ?? 0), online: r.person.online)),
-                                        badge: r.role == "owner" ? "owner" : (r.role == "admin" ? "admin" : nil),
-                                        isMe: r.person.id == model.user?.id, agent: r.agent)
+                memberRow(r)
+            }
+        }
+    }
+
+    private func memberSubtitle(_ r: Row) -> String {
+        if let a = r.agent {
+            let member = people?.agents.first { $0.id == a.id }
+            let ownerId = member?.ownerId ?? a.ownerId
+            if ownerId == nil || ownerId == model.user?.id { return "Agent · run by you" }
+            if let h = member?.ownerHandle ?? a.ownerHandle { return "Agent · run by @\(h)" }
+            return "Agent"
+        }
+        return "@\(r.person.handle)"
+    }
+
+    private func memberRow(_ r: Row) -> some View {
+        let isMe = r.agent == nil && r.person.id == model.user?.id
+        let title = r.agent?.name ?? (isMe ? "\(r.person.displayName) (you)" : r.person.displayName)
+        let avatar: AnyView = r.agent.map { AnyView(AgentAvatar(project: $0, theme: theme, size: PaneKit.avatar, still: true)) }
+            ?? AnyView(PersonAvatar(url: r.person.avatarUrl, handle: r.person.handle, size: PaneKit.avatar, name: r.person.name, id: r.person.id, colorIndex: r.person.avatarColorIndex))
+        // Jacob (2026-10-20): a small ✕ at the trailing edge removes a member in
+        // one tap plus the confirmation; owners only.
+        let remove: AnyView? = canRemove(r) ? AnyView(
+            Button {
+                pendingRemoveId = r.person.id
+                pendingRemoveName = "@\(r.person.handle)"
+            } label: {
+                Image(systemName: "xmark")
+                    .font(theme.font(12, weight: .semibold))
+                    .foregroundStyle(theme.muted)
+                    .frame(width: 32, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Remove @\(r.person.handle)")
+        ) : nil
+        // borderless (not .plain): .plain steals long-press on recent iOS,
+        // so the remove context menu never appears (same as HomeView rows).
+        return Button {
+            if let a = r.agent { model.showProfile(.agent(projectId: a.id)) } else { model.showProfile(.user(r.person)) }
+        } label: {
+            PaneRow(leading: .avatar(avatar), title: title, subtitle: memberSubtitle(r), trailing: remove)
+        }
+        .buttonStyle(.borderless)
+        .contextMenu {
+            if canRemove(r) {
+                Button("Remove from chat", role: .destructive) {
+                    pendingRemoveId = r.person.id
+                    pendingRemoveName = "@\(r.person.handle)"
+                }
+            }
+        }
+    }
+
+    /// Library: every image, then every file shared in the chat — one place.
+    private var library: some View {
+        let media = items.filter { $0.kind == .media }
+        let files = items.filter { $0.kind == .file }
+        let voice = items.filter { $0.kind == .voice }
+        return Group {
+            if media.isEmpty && files.isEmpty && voice.isEmpty {
+                Text("Nothing shared here yet.").font(theme.font(Theme.small)).foregroundStyle(theme.muted)
+                    .frame(maxWidth: .infinity).padding(.top, 36)
+            } else {
+                if !media.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        PaneSectionTitle("Images · \(media.count)")
+                        ChatItemsList(items: media, kind: .media, empty: "")
                     }
-                    .buttonStyle(.borderless)
-                    .contextMenu {
-                        if canRemove(r) {
-                            Button("Remove from chat", role: .destructive) {
-                                pendingRemoveId = r.person.id
-                                pendingRemoveName = "@\(r.person.handle)"
-                            }
-                        }
+                }
+                if !files.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        PaneSectionTitle("Files · \(files.count)")
+                        ChatItemsList(items: files, kind: .file, empty: "")
                     }
-                    // Jacob (2026-10-20): a small ✕ at the trailing edge removes a
-                    // member in one tap plus the confirmation; owners only.
-                    if canRemove(r) {
-                        Button {
-                            pendingRemoveId = r.person.id
-                            pendingRemoveName = "@\(r.person.handle)"
-                        } label: {
-                            Image(systemName: "xmark")
-                                .font(theme.font(12, weight: .semibold))
-                                .foregroundStyle(theme.muted)
-                                .frame(width: 32, height: 44)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.borderless)
-                        .accessibilityLabel("Remove @\(r.person.handle)")
-                        .padding(.trailing, 8)
+                }
+                if !voice.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        PaneSectionTitle("Voice · \(voice.count)")
+                        ChatItemsList(items: voice, kind: .voice, empty: "")
                     }
                 }
             }

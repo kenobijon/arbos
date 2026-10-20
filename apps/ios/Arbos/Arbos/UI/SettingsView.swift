@@ -404,57 +404,19 @@ struct SettingsPage<Content: View>: View {
     }
 }
 
-/// One rounded inset card holding rows, with hairlines inset past the icon tiles and an optional footer.
+/// One rounded inset card holding rows: the pane kit's card, hairlines inset past the icon tiles.
 struct SettingsGroup<Rows: View>: View {
-    @Environment(\.theme) private var theme
     var header: String? = nil
     var footer: String? = nil
     @ViewBuilder var rows: () -> Rows
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if let header {
-                Text(header.uppercased())
-                    .font(theme.font(Theme.tiny, weight: .medium))
-                    .foregroundStyle(theme.muted)
-                    .padding(.leading, 16)
-            }
-            _VariadicView.Tree(SettingsGroupLayout(separator: theme.separator)) { rows() }
-                .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(theme.bubbleAssistant))
-            if let footer {
-                Text(footer)
-                    .font(theme.font(Theme.tiny))
-                    .foregroundStyle(theme.muted)
-                    .padding(.horizontal, 16)
-            }
-        }
+        PaneCard(header: header, footer: footer, separatorInset: SettingsRow.separatorInset, rows: rows)
     }
 }
 
-/// Lays the group's children out vertically with a hairline between them, inset to the label.
-private struct SettingsGroupLayout: _VariadicView_UnaryViewRoot {
-    let separator: Color
-
-    @ViewBuilder
-    func body(children: _VariadicView.Children) -> some View {
-        let last = children.last?.id
-        VStack(spacing: 0) {
-            ForEach(children) { child in
-                child
-                if child.id != last {
-                    Rectangle()
-                        .fill(separator)
-                        .frame(height: 1 / UIScreen.main.scale)
-                        .padding(.leading, SettingsRow.separatorInset)
-                }
-            }
-        }
-    }
-}
-
-/// Icon tile · title · optional trailing value · chevron. 48 pt tall.
+/// Icon tile · title · optional trailing value · chevron: the pane kit's row.
 struct SettingsRow: View {
-    @Environment(\.theme) private var theme
     let icon: String
     let title: String
     var value: String? = nil
@@ -464,52 +426,12 @@ struct SettingsRow: View {
     /// Colour for the trailing value (red `Paused`).
     var valueTint: Color? = nil
 
-    static let height: CGFloat = 48
-    static let tile: CGFloat = 30
-    /// 16 pt padding + 30 pt tile + 14 pt gap: separators start under the label.
-    static let separatorInset: CGFloat = 60
+    static let height: CGFloat = PaneKit.rowHeight
+    static let tile: CGFloat = PaneKit.tile
+    static let separatorInset: CGFloat = PaneKit.separatorInset(.tile(""))
 
     var body: some View {
-        HStack(spacing: 14) {
-            ZStack(alignment: .bottomTrailing) {
-                RoundedRectangle(cornerRadius: 7.5, style: .continuous)
-                    .fill(theme.isDark ? Color(hex: "#5C5C60")! : Color(hex: "#6E6E73")!)
-                    .frame(width: Self.tile, height: Self.tile)
-                    .overlay(
-                        Image(systemName: icon)
-                            .font(theme.font(15, weight: .semibold))
-                            .foregroundStyle(.white)
-                    )
-                if let dot {
-                    Circle().fill(dot).frame(width: 9, height: 9)
-                        .overlay(Circle().strokeBorder(theme.bubbleAssistant, lineWidth: 1.5))
-                        .offset(x: 3, y: 3)
-                }
-            }
-            Text(title)
-                .font(theme.font(Theme.body))
-                .foregroundStyle(theme.text)
-                .lineLimit(1)
-                .layoutPriority(1)
-            Spacer(minLength: 8)
-            if let value, !value.isEmpty {
-                // The value takes what the title leaves and clips at its end
-                // (Apple's Settings), not in the middle ("3 secret…assword").
-                Text(value)
-                    .font(theme.font(Theme.body))
-                    .foregroundStyle(valueTint ?? theme.muted)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
-            if chevron {
-                Image(systemName: "chevron.right")
-                    .font(theme.font(14, weight: .semibold))
-                    .foregroundStyle(theme.placeholder)
-            }
-        }
-        .padding(.horizontal, 16)
-        .frame(minHeight: Self.height)
-        .contentShape(Rectangle())
+        PaneRow(leading: .tile(icon, dot: dot), title: title, value: value, valueTint: valueTint, chevron: chevron)
     }
 }
 
