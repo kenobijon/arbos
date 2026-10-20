@@ -4027,6 +4027,9 @@ impl AppState {
     }
 
     pub fn remove_agent(&mut self, chat_id: Id, project_id: Id, cx: &mut Context<Self>) {
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == chat_id) {
+            p.agents.retain(|a| a.project_id != project_id);
+        }
         self.command(ClientCommand::RemoveAgent {
             chat_id,
             project_id,
@@ -4035,6 +4038,10 @@ impl AppState {
     }
 
     pub fn remove_member(&mut self, chat_id: Id, user_id: String, cx: &mut Context<Self>) {
+        // The pane shows the result at once; the relay's list confirms it.
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == chat_id) {
+            p.people.retain(|x| x.id != user_id);
+        }
         self.command(ClientCommand::RemoveMember { chat_id, user_id });
         cx.notify();
     }

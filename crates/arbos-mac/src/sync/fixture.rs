@@ -5058,7 +5058,17 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             emit_projects(shared);
             true
         }
-        ClientCommand::RemoveMember { chat_id, .. } | ClientCommand::LeaveChat { chat_id } => {
+        ClientCommand::RemoveMember { chat_id, user_id } => {
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == *chat_id) {
+                    p.people.retain(|x| x.id != *user_id);
+                }
+            }
+            emit_projects(shared);
+            true
+        }
+        ClientCommand::LeaveChat { chat_id } => {
             shared.projects.lock().unwrap().retain(|p| p.id != *chat_id);
             shared
                 .chats

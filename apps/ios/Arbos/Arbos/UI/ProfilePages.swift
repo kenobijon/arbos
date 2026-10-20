@@ -410,6 +410,9 @@ struct UserProfileView: View {
     @State private var muted = false
     @State private var sharedProjects: [Project] = []
     @State private var confirmBlock = false
+    /// "Add members" on a DM: the Members sheet (people and agents), which
+    /// turns the DM into a group. The chat header's add button is gone.
+    @State private var showAddMembers = false
 
     /// Stable user id: prefer a fresh card, then a handle lookup (agent-owner rows
     /// sometimes open this page with `id == handle`), then the value we were given.
@@ -461,6 +464,10 @@ struct UserProfileView: View {
                         if !isMe {
                             ProfileRowDivider()
                             ProfileLinkRow(title: dm == nil ? "Start a chat" : "Open chat") { openDM(search: false) }
+                            if dm != nil {
+                                ProfileRowDivider()
+                                ProfileLinkRow(title: "Add members") { showAddMembers = true }
+                            }
                             ProfileRowDivider()
                             ProfileLinkRow(title: "Block User", destructive: true) { confirmBlock = true }
                         }
@@ -475,6 +482,11 @@ struct UserProfileView: View {
                 }
             }
             ProfileTopBar { EmptyView() }
+        }
+        .sheet(isPresented: $showAddMembers) {
+            if let dm {
+                MembersSheet(chatId: dm.id).environmentObject(model).environment(\.theme, theme)
+            }
         }
         .confirmationDialog("Block @\(person.handle)?", isPresented: $confirmBlock, titleVisibility: .visible) {
             Button("Block", role: .destructive) {
@@ -623,8 +635,16 @@ struct GroupProfileView: View {
         return rowRole == "owner" || rowRole == "admin"
     }
 
+    /// People: owners/admins remove anyone but themselves and other owners.
+    /// Agents: only the agent's own owner (the relay's rule for
+    /// `DELETE /chats/{id}/agents/{project}`), and only in people chats.
     private func canRemove(_ r: Row) -> Bool {
-        canManageMembers && r.agent == nil && r.person.id != model.user?.id && r.role != "owner"
+        if let agent = r.agent {
+            guard people != nil, let me = model.user?.id else { return false }
+            let member = people?.agents.first { $0.id == agent.id }
+            return (member?.ownerId ?? agent.ownerId) == me
+        }
+        return canManageMembers && r.person.id != model.user?.id && r.role != "owner"
     }
 
     private var groupImageURL: String? {
@@ -709,7 +729,13 @@ struct GroupProfileView: View {
             titleVisibility: .visible
         ) {
             Button("Remove", role: .destructive) {
-                if let id = pendingRemoveId { model.removeMember(chatId: chatId, userId: id) }
+                if let id = pendingRemoveId {
+                    if rows.first(where: { $0.id == id })?.agent != nil {
+                        model.removeAgent(chatId: chatId, projectId: id)
+                    } else {
+                        model.removeMember(chatId: chatId, userId: id)
+                    }
+                }
                 pendingRemoveId = nil
                 pendingRemoveName = nil
             }
@@ -765,23 +791,25 @@ struct GroupProfileView: View {
                         if canRemove(r) {
                             Button("Remove from chat", role: .destructive) {
                                 pendingRemoveId = r.person.id
-                                pendingRemoveName = r.person.displayName
+                                pendingRemoveName = "@\(r.person.handle)"
                             }
                         }
                     }
+                    // Jacob (2026-10-20): a small ✕ at the trailing edge removes a
+                    // member in one tap plus the confirmation; owners only.
                     if canRemove(r) {
-                        Menu {
-                            Button("Remove from chat", role: .destructive) {
-                                pendingRemoveId = r.person.id
-                                pendingRemoveName = r.person.displayName
-                            }
+                        Button {
+                            pendingRemoveId = r.person.id
+                            pendingRemoveName = "@\(r.person.handle)"
                         } label: {
-                            Image(systemName: "ellipsis")
-                                .font(theme.font(16, weight: .medium))
+                            Image(systemName: "xmark")
+                                .font(theme.font(12, weight: .semibold))
                                 .foregroundStyle(theme.muted)
-                                .frame(width: 36, height: 44)
+                                .frame(width: 32, height: 44)
                                 .contentShape(Rectangle())
                         }
+                        .buttonStyle(.borderless)
+                        .accessibilityLabel("Remove @\(r.person.handle)")
                         .padding(.trailing, 8)
                     }
                 }
