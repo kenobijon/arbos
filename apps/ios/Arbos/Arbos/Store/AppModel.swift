@@ -2058,12 +2058,21 @@ final class AppModel: ObservableObject {
     }
 
     /// Owner/admin removes a person from a people chat (`DELETE /chats/{id}/members/{userId}`).
+    /// Writes a centred "@handle left" system line (same shape as "@handle joined") so the
+    /// transcript keeps a chat event after the member is gone from the roster.
     func removeMember(chatId: String, userId: String) {
         Task {
             do {
+                let handle = peopleChat(chatId)?.members.first { !$0.isAgent && $0.id == userId }?.handle
                 try await api.removeMember(chatId: chatId, userId: userId)
                 if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
                     peopleChats[i].members.removeAll { !$0.isAgent && $0.id == userId }
+                }
+                if let handle, !handle.isEmpty {
+                    // Remover writes once; other members see it via room sync (they get the
+                    // people_member_removed push but are not told to write — avoids duplicates).
+                    writeSystemLine(chatId: chatId, projectId: peopleSlot,
+                                    text: "@\(handle) left", callId: "member-left-\(chatId)-\(userId)")
                 }
             } catch {
                 let e = error as? RelayError
