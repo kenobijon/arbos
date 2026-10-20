@@ -1041,6 +1041,7 @@ struct ChatView: View {
                 HStack(spacing: 8) {
                     Image(systemName: "arrowshape.turn.up.left").font(.system(size: 12)).foregroundStyle(theme.muted)
                     Text("Replying to \(replyLabel(for: r))").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+                        .lineLimit(1).fixedSize()
                     Text(Quote.text(of: r)).font(theme.font(Theme.tiny)).foregroundStyle(theme.text).lineLimit(1)
                     Spacer()
                     Button { replyTo = nil } label: { Image(systemName: "xmark").font(.system(size: 11, weight: .bold)).foregroundStyle(theme.muted) }
