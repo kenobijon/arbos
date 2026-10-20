@@ -608,7 +608,8 @@ struct MembersSheet: View {
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
     let chatId: String
-    @State private var showAddPerson = false
+    /// Rig: `ARBOS_SHOW=addperson` lands on the Add person picker.
+    @State private var showAddPerson = DebugHooks.show == "addperson"
     @State private var showAddAgent = false
     @State private var confirmDelete = false
     @State private var confirmLeave = false
@@ -756,46 +757,51 @@ struct PersonPicker: View {
     }
 
     var body: some View {
-        List {
-            Section {
-                HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass").foregroundStyle(theme.muted)
-                    TextField("", text: $query, prompt: Text("Search people").foregroundStyle(theme.placeholder))
-                        .textInputAutocapitalization(.never).autocorrectionDisabled()
-                        .foregroundStyle(theme.text)
-                    if searching { ProgressView().controlSize(.small).tint(theme.muted) }
-                }
+        VStack(spacing: 0) {
+            // The same field as New Message / New group — not a bare list row,
+            // which drew a thin line hugging the card's left edge.
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass").font(.system(size: 15, weight: .medium)).foregroundStyle(theme.muted)
+                TextField("", text: $query, prompt: Text("Search people").foregroundStyle(theme.placeholder))
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    .font(theme.font(Theme.body)).foregroundStyle(theme.text)
+                if searching { ProgressView().controlSize(.small).tint(theme.muted) }
             }
-            .listRowBackground(theme.card)
+            .padding(.horizontal, 12).frame(height: 38)
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+            .padding(.horizontal, 16).padding(.vertical, 10)
 
-            Section {
-                ForEach(people) { p in
-                    Button {
-                        onPick(p)
-                    } label: {
-                        PersonRow(person: p)
-                    }
-                    .buttonStyle(.plain)
-                }
-                if people.isEmpty {
-                    Text(trimmed.isEmpty
-                         ? "No one else on Arbos yet. Search a GitHub username."
-                         : "No one matches @\(trimmed).")
-                        .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
-                    if trimmed.count >= 2, !searching {
+            List {
+                Section {
+                    ForEach(people) { p in
                         Button {
-                            onPick(Person(id: "github:\(trimmed.lowercased())", handle: trimmed, avatarUrl: nil, name: nil, status: "github"))
+                            onPick(p)
                         } label: {
-                            Text("Invite @\(trimmed)")
-                                .font(theme.font(Theme.small, weight: .semibold))
-                                .foregroundStyle(theme.text)
+                            PersonRow(person: p)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    if people.isEmpty {
+                        Text(trimmed.isEmpty
+                             ? "No one else on Arbos yet. Search a GitHub username."
+                             : "No one matches @\(trimmed).")
+                            .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
+                        if trimmed.count >= 2, !searching {
+                            Button {
+                                onPick(Person(id: "github:\(trimmed.lowercased())", handle: trimmed, avatarUrl: nil, name: nil, status: "github"))
+                            } label: {
+                                Text("Invite @\(trimmed)")
+                                    .font(theme.font(Theme.small, weight: .semibold))
+                                    .foregroundStyle(theme.text)
+                            }
                         }
                     }
                 }
+                .listRowBackground(theme.card)
             }
-            .listRowBackground(theme.card)
+            .scrollContentBackground(.hidden)
         }
-        .scrollContentBackground(.hidden)
         .background(theme.bg)
         .navigationTitle("Add person")
         .navigationBarTitleDisplayMode(.inline)
