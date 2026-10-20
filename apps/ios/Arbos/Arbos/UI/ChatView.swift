@@ -73,14 +73,6 @@ struct ChatView: View {
         return project?.name ?? people?.title ?? name
     }
 
-    /// Attach-sheet "Voice chat" subtitle target: the group in a group chat, else the peer/agent.
-    private var attachVoiceName: String {
-        if let people, people.isGroup {
-            return people.title.isEmpty ? "the group" : people.title
-        }
-        return name
-    }
-
     /// Header tap: DM → the other person; group / shared project → the group page; own agent → its page.
     private func openHeaderProfile() {
         if let people {
@@ -1134,15 +1126,12 @@ struct ChatView: View {
                 }
                 .buttonStyle(.plain)
                 .sheet(isPresented: $showAttach, onDismiss: demoDismissed) {
-                    AttachSheet(name: attachVoiceName) {
+                    AttachSheet {
                         showAttach = false
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showPhotos = true }
                     } onFile: {
                         showAttach = false
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showFiles = true }
-                    } onVoice: {
-                        showAttach = false
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { startCall(.voice) }
                     }
                     .environment(\.theme, theme)
                 }
@@ -1637,26 +1626,22 @@ struct InteractivePopGestureEnabler: UIViewControllerRepresentable {
     }
 }
 
-/// "+" sheet: Photo or video, File, Voice chat — Grok's attach options as a
-/// short bottom sheet.
+/// "+" sheet: Photo or video, File — Grok's attach options as a short bottom sheet.
 struct AttachSheet: View {
     @Environment(\.theme) private var theme
-    let name: String
     let onPhoto: () -> Void
     let onFile: () -> Void
-    let onVoice: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
             Capsule().fill(theme.muted.opacity(0.4)).frame(width: 36, height: 5).padding(.top, 8).padding(.bottom, 14)
             row(icon: "photo", title: "Photo or video", subtitle: "From your library", action: onPhoto)
             row(icon: "doc", title: "File", subtitle: "From Files or iCloud Drive", action: onFile)
-            row(icon: "waveform", title: "Voice chat", subtitle: "Talk with \(name) live", action: onVoice)
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 16)
         .background(theme.bg)
-        .presentationDetents([.height(250)])
+        .presentationDetents([.height(190)])
         .presentationDragIndicator(.hidden)
         .presentationBackground(theme.bg)
     }
