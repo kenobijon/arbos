@@ -76,10 +76,10 @@ impl AgentPick {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Kept for the relay path; the person pane (2026-10-20) and the agent pane
+/// (2026-10-21) no longer offer a call button — calls start from the chat.
+#[allow(dead_code)]
 pub enum CallTarget {
-    /// Kept for the relay path; the person pane no longer offers a call
-    /// button (2026-10-20), so nothing constructs it today.
-    #[allow(dead_code)]
     User(String),
     Agent(Id),
 }
@@ -333,8 +333,6 @@ pub struct AppState {
     pub profile_tab: usize,
     /// Agent page: the Appearance (tree + colour) section is unfolded.
     pub profile_picker_open: bool,
-    /// Agent page / user page "more" menu is open.
-    pub profile_more_open: bool,
     /// Agent page: which settings row (model / reasoning / voice) is dropped down.
     pub agent_pick: Option<AgentPick>,
     /// Agent page: the owner is editing the description inline.
@@ -604,7 +602,6 @@ impl AppState {
             profile: None,
             profile_tab: 0,
             profile_picker_open: false,
-            profile_more_open: false,
             agent_pick: None,
             profile_editing_description: false,
             profile_editing_name: false,
@@ -3039,7 +3036,6 @@ impl AppState {
         self.profile_from_name = false;
         self.profile_tab = 0;
         self.profile_picker_open = false;
-        self.profile_more_open = false;
         self.agent_pick = None;
         self.profile_editing_description = false;
         self.profile_editing_name = false;
@@ -3180,7 +3176,6 @@ impl AppState {
     pub fn close_profile(&mut self, cx: &mut Context<Self>) -> bool {
         self.avatar_picker = None;
         self.profile_from_name = false;
-        self.profile_more_open = false;
         self.agent_pick = None;
         let was = self.profile.take().is_some();
         if was {
@@ -3198,11 +3193,6 @@ impl AppState {
 
     pub fn toggle_profile_picker(&mut self, cx: &mut Context<Self>) {
         self.profile_picker_open = !self.profile_picker_open;
-        cx.notify();
-    }
-
-    pub fn toggle_profile_more(&mut self, cx: &mut Context<Self>) {
-        self.profile_more_open = !self.profile_more_open;
         cx.notify();
     }
 
@@ -3241,7 +3231,9 @@ impl AppState {
         cx.notify();
     }
 
-    /// Profile pages: call a person (their DM) or an agent (its chat; Calls Phase 2).
+    /// Call a person (their DM) or an agent (its chat; Calls Phase 2). The
+    /// panes no longer offer it (2026-10-21); the composer's call button does.
+    #[allow(dead_code)]
     pub fn start_call(&mut self, target: CallTarget, video: bool, cx: &mut Context<Self>) {
         let kind = if video {
             CallKind::Video

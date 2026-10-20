@@ -14,8 +14,9 @@ use crate::model::{Effort, Id, Project};
 use crate::sync::fixture::MODELS;
 use crate::ui::composer::Composer;
 use crate::ui::icons::icon;
+use crate::ui::profiles::kit::{self, Leading};
 use crate::ui::shell::Shell;
-use crate::ui::theme::{Theme, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
+use crate::ui::theme::{Theme, TEXT_SMALL, TEXT_TINY};
 use crate::ui::voicepicker;
 
 /// How tall the model / voice lists may grow before they scroll.
@@ -37,53 +38,28 @@ pub fn row(
         AgentPick::Reasoning => "agent-reasoning-row",
         AgentPick::Voice => "agent-voice-row",
     };
-    let header = div()
-        .id(ElementId::Name(SharedString::from(format!("{id}-head"))))
-        .flex()
-        .items_center()
-        .gap(px(10.0))
-        .px(px(16.0))
-        .py(px(10.0))
-        .cursor_pointer()
-        .bg(if open {
-            theme.surface_2
+    // The pane kit's row: label left, the current value right, a chevron that
+    // turns up while the list is open.
+    let header = kit::row(
+        ElementId::Name(SharedString::from(format!("{id}-head"))),
+        Leading::None,
+        caption.to_string(),
+        None,
+        Some(value.into()),
+        open.then(|| icon("chevron-up", 13.0, theme.text_faint).into_any_element()),
+        !open,
+        theme,
+    )
+    .cursor_pointer()
+    .when(open, |el| el.bg(theme.surface_2))
+    .hover(|s| s.bg(theme.surface_2))
+    .on_click(cx.listener(move |this, _, window, cx| {
+        if this.state.read(cx).agent_pick == Some(which) {
+            this.close_agent_pick(Some(window), cx);
         } else {
-            gpui::transparent_black()
-        })
-        .hover(|s| s.bg(theme.surface_2))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .child(
-                    div()
-                        .text_size(px(TEXT_TINY))
-                        .text_color(theme.text_muted)
-                        .child(caption.to_string()),
-                )
-                .child(
-                    div()
-                        .text_size(px(TEXT_BODY))
-                        .text_color(theme.text)
-                        .truncate()
-                        .child(value.into()),
-                ),
-        )
-        .child(icon(
-            if open { "chevron-up" } else { "chevron-right" },
-            14.0,
-            theme.text_faint,
-        ))
-        .on_click(cx.listener(move |this, _, window, cx| {
-            if this.state.read(cx).agent_pick == Some(which) {
-                this.close_agent_pick(Some(window), cx);
-            } else {
-                this.open_agent_pick(which, window, cx);
-            }
-        }));
+            this.open_agent_pick(which, window, cx);
+        }
+    }));
     // Clicks inside stay inside: the window's "click elsewhere" handlers
     // (popovers, the profile pop-up) must not see them. No hover listener —
     // the list opens only on a click, so moving the pointer across rows does
@@ -92,8 +68,6 @@ pub fn row(
         .id(id)
         .flex()
         .flex_col()
-        .border_b_1()
-        .border_color(theme.border)
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(header)
         .children(panel)

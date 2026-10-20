@@ -1,15 +1,15 @@
-//! An agent's page: the D79 avatar, name, what it is doing, call / mute /
-//! search / more (quick actions), and the info card (for my own agent —
-//! Model / Reasoning / Voice rows that open a choice list on click). Matches
-//! the Grok bot page: no about, camera vision, secrets, or Media / Files /
-//! Links tabs. Owner and machine stay off this page. Clicking the big
-//! avatar (owned agents) opens the colour picker — there is no separate
-//! photo upload on the Mac yet.
+//! An agent's page on the shared pane kit: the D79 avatar (crayon = the
+//! colour picker for owned agents), name, what it is doing, @slug, and the
+//! info card (for my own agent — Model / Reasoning / Voice rows that open a
+//! choice list on click). No quick-action row (panels-unify, 2026-10-21):
+//! call and search live in the chat, mute in the sidebar row's menu. Matches
+//! the Grok bot page otherwise: no about, camera vision, secrets, or Media /
+//! Files / Links tabs. Owner and machine stay off this page.
 
-use gpui::{div, prelude::*, px, Context, Div, ElementId, Focusable, SharedString, Stateful};
+use gpui::{div, prelude::*, px, Context, Div, ElementId, SharedString, Stateful};
 
-use crate::app::{AgentPick, CallTarget, ProfilePage};
-use crate::model::{Id, MachineState, Person, Project};
+use crate::app::AgentPick;
+use crate::model::{Id, MachineState, Project};
 use crate::ui::avatars::{self, AvatarState};
 use crate::ui::glass;
 use crate::ui::hoverpick;
@@ -18,10 +18,8 @@ use crate::ui::shell::Shell;
 use crate::ui::sidebar::machine_dot;
 use crate::ui::theme::{Theme, TEXT_SMALL, TEXT_TINY};
 
-use super::{
-    action_button, action_row, card, editable_name, editable_picture, frame, hero, info_row,
-    more_menu, Action, HeroClick, HERO_AVATAR,
-};
+use super::kit::{self, Leading};
+use super::{card, editable_name, editable_picture, frame, hero, HeroClick, HERO_AVATAR};
 
 /// An agent that is only known as a member of a people chat (someone else's
 /// project) is shown from that member entry.
@@ -87,20 +85,14 @@ pub(super) fn page(
     } else {
         theme.text_muted
     };
-    let owner: Option<Person> = project
-        .owner_person
-        .clone()
-        .or_else(|| project.owner().cloned());
     let model_text = if project.model.is_empty() {
         "default".to_string()
     } else {
         project.model.clone()
     };
-    let more_open = state.profile_more_open;
     let picker_open = state.profile_picker_open;
     let pick = state.agent_pick;
     let renaming = state.profile_editing_name && mine;
-    let muted = state.is_muted(&project.id);
     let pid: Id = project.id.clone();
 
     if avatar_state != AvatarState::Idle {
@@ -163,108 +155,6 @@ pub(super) fn page(
             .child(format!("@{}", Project::mention_slug(&project.name))),
     );
 
-    // ----- actions --------------------------------------------------------------
-    let p_call = pid.clone();
-    let p_mute = pid.clone();
-    let name_q = project.name.clone();
-    // No separate "voice" tile: calls always start audio-only, so it was the
-    // same action as "call" under a second name (#1066).
-    let actions = action_row(vec![
-        action_button(&Action::new("profile-call", "phone", "call"), &theme).on_click(cx.listener(
-            move |this, _, _, cx| {
-                let p = p_call.clone();
-                this.state
-                    .update(cx, |s, cx| s.start_call(CallTarget::Agent(p), false, cx));
-            },
-        )),
-        action_button(
-            &Action::new(
-                "profile-mute",
-                if muted { "bell-slash" } else { "bell" },
-                if muted { "unmute" } else { "mute" },
-            ),
-            &theme,
-        )
-        .on_click(cx.listener(move |this, _, _, cx| {
-            let p = p_mute.clone();
-            this.state.update(cx, |s, cx| s.toggle_mute(p, cx));
-        })),
-        action_button(&Action::new("profile-search", "search", "search"), &theme).on_click(
-            cx.listener(move |this, _, window, cx| {
-                let q = name_q.clone();
-                this.state.update(cx, |s, cx| {
-                    s.close_profile(cx);
-                });
-                this.search_input
-                    .update(cx, |input, cx| input.set_text(q, cx));
-                let handle = this.search_input.read(cx).focus_handle(cx);
-                window.focus(&handle, cx);
-            }),
-        ),
-        action_button(&Action::new("profile-more", "ellipsis", "more"), &theme).on_click(
-            cx.listener(|this, _, _, cx| {
-                this.state.update(cx, |s, cx| s.toggle_profile_more(cx));
-            }),
-        ),
-    ]);
-
-    let more = more_open.then(|| {
-        let p_open = pid.clone();
-        let mut rows = vec![glass::menu_row(
-            "profile-more-open",
-            "chevron-right",
-            "Open chat",
-            false,
-            &theme,
-        )
-        .on_click(cx.listener(move |this, _, window, cx| {
-            let p = p_open.clone();
-            this.state.update(cx, |s, cx| {
-                s.close_profile(cx);
-                s.select_project(p, cx);
-            });
-            crate::ui::composer::Composer::focus(&this.composer, window, cx);
-        }))];
-        if project.is_groupish() {
-            let p_group = pid.clone();
-            rows.push(
-                glass::menu_row("profile-more-group", "people", "Members", false, &theme).on_click(
-                    cx.listener(move |this, _, _, cx| {
-                        let p = p_group.clone();
-                        this.state.update(cx, |s, cx| {
-                            s.open_profile(ProfilePage::Group { space_id: p }, cx)
-                        });
-                    }),
-                ),
-            );
-        }
-        if let Some(o) = owner.as_ref().filter(|_| !mine) {
-            let h = o.handle.clone();
-            rows.push(
-                glass::menu_row(
-                    "profile-more-owner",
-                    "person",
-                    "Owner's profile",
-                    false,
-                    &theme,
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let h = h.clone();
-                    this.state.update(cx, |s, cx| {
-                        s.open_profile(
-                            ProfilePage::User {
-                                handle: h,
-                                space_id: None,
-                            },
-                            cx,
-                        )
-                    });
-                })),
-            );
-        }
-        more_menu(rows, &theme)
-    });
-
     // ----- info card -------------------------------------------------------------
     // Grok-bot parity: model / reasoning / voice only. About, camera vision,
     // secrets, and Media / Files / Links stay off this page. Avatar colour
@@ -278,7 +168,7 @@ pub(super) fn page(
         let voice_open = pick == Some(AgentPick::Voice);
         info = info
             .child(hoverpick::row(
-                "model",
+                "Model",
                 model_text,
                 AgentPick::Model,
                 model_open,
@@ -287,7 +177,7 @@ pub(super) fn page(
                 cx,
             ))
             .child(hoverpick::row(
-                "reasoning",
+                "Reasoning",
                 project.effort.label(),
                 AgentPick::Reasoning,
                 reasoning_open,
@@ -296,7 +186,7 @@ pub(super) fn page(
                 cx,
             ))
             .child(hoverpick::row(
-                "voice",
+                "Voice",
                 voice_text,
                 AgentPick::Voice,
                 voice_open,
@@ -321,7 +211,12 @@ pub(super) fn page(
                 info.on_children_prepainted(move |bounds, window, cx| reveal(&bounds, window, cx));
         }
     } else {
-        info = info.child(info_row("model", model_text, &theme));
+        info = info.child(kit::value_row(
+            "agent-model-row",
+            "Model",
+            model_text,
+            &theme,
+        ));
     }
 
     // ----- appearance (avatar click): Automatic + the seven gradients ----------
@@ -330,20 +225,26 @@ pub(super) fn page(
     let appearance = (mine && picker_open).then(|| {
         card(&theme)
             .child(
-                glass::nav_row(
+                kit::row(
                     "profile-appearance",
+                    Leading::None,
                     "Avatar colour",
+                    None,
                     Some("pick".into()),
+                    None,
+                    true,
                     &theme,
                 )
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.surface_2))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.state.update(cx, |s, cx| s.toggle_profile_picker(cx));
                 })),
             )
-            .child(colour_row(&project, &theme, cx))
+            .child(colour_row(&project, &theme, cx).pt(px(14.0)))
             .child(
                 div()
-                    .px(px(16.0))
+                    .px(px(kit::INSET))
                     .pb(px(12.0))
                     .text_size(px(TEXT_TINY))
                     .text_color(theme.text_muted)
@@ -356,8 +257,6 @@ pub(super) fn page(
         .flex_col()
         .pb(px(16.0))
         .child(hero)
-        .child(actions)
-        .children(more)
         .child(info)
         .children(appearance);
     // No "Edit" — click the avatar to change its colour; double-click the
