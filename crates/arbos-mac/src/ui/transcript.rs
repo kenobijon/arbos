@@ -42,6 +42,18 @@ pub const COLUMN_MAX_WIDTH: f32 = 820.0;
 pub const ASSISTANT_MAX_WIDTH: f32 = 620.0;
 /// A new time stamp line whenever messages are this far apart.
 const STAMP_GAP_MS: u64 = 60 * 60 * 1000;
+/// Vertical rhythm measured from Grok Bot's Mac app (parity it.36, 2 px/pt):
+/// consecutive bubbles of one sender sit 6 pt apart, a change of sender opens
+/// 20 pt, a time stamp has 20 pt above and 24 below, and the last message keeps
+/// 54 pt clear of the composer.
+const ROW_GAP_HALF: f32 = 3.0;
+const TURN_GAP_EXTRA: f32 = 20.0 - 2.0 * ROW_GAP_HALF;
+/// Measured glyph-to-bubble, like the reference: the stamp's 13 pt line box
+/// carries ~4 pt of its own above and ~7 below the glyphs (measured).
+const STAMP_PAD_TOP: f32 = 20.0 - ROW_GAP_HALF - 4.0;
+const STAMP_PAD_BOTTOM: f32 = 24.0 - ROW_GAP_HALF - 7.0;
+/// The composer row above adds 6 pt of its own and the last row 3.
+const BOTTOM_INSET: f32 = 54.0 - ROW_GAP_HALF - 6.0;
 /// Messages for Mac fades a row's hover-only affordances (time, react glyph)
 /// in and out rather than snapping them.
 const HOVER_FADE_MS: f32 = 150.0;
@@ -332,6 +344,9 @@ pub struct Transcript {
     hover: HoverFade,
     /// Text selected in a bubble (drag / double-click / triple-click); ⌘C copies it.
     selection: Entity<TextSelection>,
+    /// Messages whose sender differs from the one before: their first row opens
+    /// the wider turn gap.
+    turn_starts: HashSet<Id>,
 }
 
 impl Transcript {
@@ -370,6 +385,7 @@ impl Transcript {
             activity_shown: None,
             hover: HoverFade::default(),
             selection,
+            turn_starts: HashSet::new(),
         }
     }
 
@@ -495,6 +511,11 @@ impl Transcript {
         let me_id = state.me_id();
         let thumb_keys: HashSet<&str> = state.thumbnails.keys().map(|k| k.as_str()).collect();
         let new_rows = build_rows(&messages, show_details, speech, &me_id, &thumb_keys);
+        self.turn_starts = messages
+            .windows(2)
+            .filter(|w| (w[0].role, &w[0].sender) != (w[1].role, &w[1].sender))
+            .map(|w| w[1].id.clone())
+            .collect();
 
         // Veils: observe text growth of live markdown rows.
         for row in &new_rows {
@@ -797,7 +818,7 @@ impl Transcript {
                         .flex_col()
                         .items_start()
                         .gap(px(3.0))
-                        .py(px(6.0))
+                        .py(px(ROW_GAP_HALF))
                         .child({
                             // Click the caption → the person's profile page.
                             let open_state = self.state.clone();
@@ -859,7 +880,7 @@ impl Transcript {
                         .flex_col()
                         .items_end()
                         .gap(px(3.0))
-                        .py(px(6.0))
+                        .py(px(ROW_GAP_HALF))
                         .when_some(sender_label, |el, label| {
                             el.child(
                                 div()
@@ -972,8 +993,8 @@ impl Transcript {
                     .flatten();
                 row_el
                     .justify_start()
-                    .when(first, |el| el.pt(px(6.0)))
-                    .when(last, |el| el.pb(px(6.0)))
+                    .when(first, |el| el.pt(px(ROW_GAP_HALF)))
+                    .when(last, |el| el.pb(px(ROW_GAP_HALF)))
                     .child(bubble)
                     .children(hover_actions)
                     .children(hover_time)
@@ -983,8 +1004,8 @@ impl Transcript {
                 .w_full()
                 .flex()
                 .justify_center()
-                .pt(px(14.0))
-                .pb(px(8.0))
+                .pt(px(STAMP_PAD_TOP))
+                .pb(px(STAMP_PAD_BOTTOM))
                 .text_size(px(TEXT_SMALL))
                 .text_color(theme.text_muted)
                 .child(label)
@@ -1053,7 +1074,7 @@ impl Transcript {
                     .when(!mine, |el| el.justify_start())
                     .when(indent, |el| el.pl(px(2.0)))
                     .mt(px(-2.0))
-                    .pb(px(6.0))
+                    .pb(px(ROW_GAP_HALF))
                     .child(chips)
                     .into_any_element()
             }
@@ -1402,7 +1423,7 @@ impl Transcript {
                     .items_center()
                     .gap(px(6.0))
                     .w(px(96.0))
-                    .pb(px(6.0))
+                    .pb(px(ROW_GAP_HALF))
                     .text_size(px(11.0))
                     .text_color(theme.text_faint)
                     .cursor_pointer()
@@ -1417,11 +1438,22 @@ impl Transcript {
         };
         let highlighted =
             self.state.read(cx).highlight_message.as_deref() == Some(row.message_id.as_str());
+        // The first row of a message from a new sender opens the turn gap; a
+        // stamp between them already carries its own spacing.
+        let turn_start = ix
+            .checked_sub(1)
+            .and_then(|i| self.rows.get(i))
+            .is_some_and(|prev| {
+                prev.message_id != row.message_id
+                    && !matches!(prev.kind, RowKind::Stamp { .. })
+                    && self.turn_starts.contains(&row.message_id)
+            });
         div()
             .w_full()
             .flex()
             .justify_center()
             .px(px(COLUMN_MARGIN))
+            .when(turn_start, |el| el.pt(px(TURN_GAP_EXTRA)))
             .when(highlighted, |el| {
                 el.bg(Theme::with_alpha(theme.accent, 0.14))
             })
@@ -1461,12 +1493,12 @@ impl Render for Transcript {
             .track_focus(&focus)
             .on_action(cx.listener(Self::copy_selection))
             .on_scroll_wheel(cx.listener(|this, event, _, cx| this.on_wheel(event, cx)))
-            .child(edge_faded(
+            .child(div().size_full().pb(px(BOTTOM_INSET)).child(edge_faded(
                 24.0,
                 true,
                 false,
                 list(self.list.clone(), cx.processor(Self::render_row)).size_full(),
-            ))
+            )))
             .when(show_jump, |el| {
                 el.child(
                     div()
