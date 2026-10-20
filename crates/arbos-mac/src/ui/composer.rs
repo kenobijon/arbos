@@ -1529,7 +1529,8 @@ impl Composer {
                     .items_center()
                     .gap(px(10.0))
                     .pl(px(10.0))
-                    .pr(px(14.0))
+                    // Room for the hover × at the top right.
+                    .pr(px(28.0))
                     .max_w(px(320.0))
                     .child(
                         div()
