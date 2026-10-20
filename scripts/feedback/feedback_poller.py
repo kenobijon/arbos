@@ -59,7 +59,8 @@ origin.txt (where it came from, shown as the issue's Source). `inject` writes on
 CLI:  feedback_poller.py [run] | status | testers | set-cursor <ISO-8601>
       | inject <image|-> "<comment>" [ios|mac] [--handle <login>] [--origin "<text>"] [--email <tester email, grouping only>]
       | requeue <id>… [--allow "<who confirmed>"] | prioritize <id>… | confirm <id> [note] | handoff <id> [label] | deployed <id> [note]
-      | track <id> <issue> "<comment>" [--handle <login>] [--owner <label>]   (a hand-filed, handed-off item)
+      | track <id> <issue> "<comment>" [--handle <login>] [--owner <label>] [--target ios|mac]   (a hand-filed, handed-off item;
+        workers can do the same without root by commenting `track <id> bc-<owner>` on the issue)
       | leadtime [since-ISO] | memtree-cost [YYYY-MM-DD]   (audit numbers; memtree-cost asks GET /admin/usage/memory-tree, else relay.db as root)
 """
 
@@ -2440,6 +2441,10 @@ class Loop:
         except Exception as e:  # noqa: BLE001
             log(f"claim watch failed: {e}")
         try:
+            self.watch_track_comments()
+        except Exception as e:  # noqa: BLE001
+            log(f"track-comment watch failed: {e}")
+        try:
             self.watch_deploys()
         except Exception as e:  # noqa: BLE001
             log(f"deploy watch failed: {e}")
@@ -2454,6 +2459,71 @@ class Loop:
         return 0
 
     # ---- handed-off items: a dedicated worker fixes them; the loop still tracks the landing -------
+
+    TRACK_RE = re.compile(r"^\s*track\s+([A-Za-z0-9][A-Za-z0-9._-]{3,80})\s+(bc-[0-9a-f]{8}[0-9a-f-]*)", re.I | re.M)
+
+    def register_tracked(self, fid: str, number: int, comment: str, owner: str, handle: str = "", target: str | None = None) -> dict | None:
+        """A hand-filed issue becomes a handed-off loop item: the owner's commit tagged `[feedback <fid>]` (or a
+        `feedback/<fid>` branch) is followed through the gates / builds / deploys and the issue auto-closes with the
+        version. None when the item already exists."""
+        d = self.store.item_dir(fid)
+        if d.exists():
+            return None
+        d.mkdir(parents=True)
+        info = {"id": fid, "source": "inbox", "created": iso(), "comment": comment, "email": "", "handle": handle or None,
+                "origin": "filed by hand (handed off)", "device": "relayed report", "os": None, "device_platform": None,
+                "device_family": None, "app_platform": None, "bundle": None, "build": None, "build_id": None,
+                "locale": None, "screen_points": None, "screenshots": [], "forced_target": target, "raw": {}}
+        (d / "submission.json").write_text(json.dumps(info, indent=2, ensure_ascii=False) + "\n")
+        tier = "priority" if handle.lower() in ("unconst", "jake") or not handle else self.tier(info)
+        st = {"id": fid, "created": info["created"], "status": "handed_off", "handed_off_to": owner, "handed_off_at": info["created"],
+              "track_commit": True, "tier": tier, "tester": "Jacob (owner)" if tier == "priority" and not handle else self.tester_label(info, tier),
+              "tester_key": self.tester_key(info) if handle else "jake@bittensor.com", "target": target or self.pick_target(info),
+              "issue": number, "issue_url": f"https://github.com/{self.cfg.github_repo}/issues/{number}"}
+        self.store.save_state(fid, st)
+        self.store.event(fid, "tracked", issue=number, owner=owner)
+        return st
+
+    def watch_track_comments(self) -> None:
+        """Non-root registration for workers: a comment `track <feedback-id> bc-<owner>` on any issue (new since the
+        last tick) registers that issue as a handed-off item with that id — same as `arbos-feedback track`."""
+        cur = self.store.cursor()
+        since = cur.get("track_checked") or iso()
+        now = iso()
+        q = urllib.parse.urlencode({"since": since, "sort": "created", "direction": "asc", "per_page": 100})
+        try:
+            comments = self.gh.repo_api("GET", f"/issues/comments?{q}")
+        except HttpError as e:
+            log(f"track comments: HTTP {e.status}")
+            return
+        for c in comments:
+            m = self.TRACK_RE.search(c.get("body") or "")
+            if not m:
+                continue
+            fid, owner = m.group(1), m.group(2)
+            number = int((c.get("issue_url") or "/0").rsplit("/", 1)[1])
+            if not number:
+                continue
+            try:
+                issue = self.gh.issue(number)
+            except HttpError:
+                continue
+            labels = {lb["name"] for lb in issue.get("labels", [])}
+            target = "ios" if "ios" in labels else ("mac" if "mac" in labels else None)
+            title = re.sub(r"^\[feedback [^\]]+\]\s*", "", issue.get("title") or "")
+            st = self.register_tracked(fid, number, title or issue.get("title") or fid, owner, target=target)
+            if st is None:
+                log(f"track comment on #{number}: {fid} already registered")
+                continue
+            self.gh.ensure_label("handed-off", "5319E7", "Owned by a dedicated workstream; the loop does not patch it")
+            self.gh.ensure_label("in-progress", "FBCA04", "Being built by a planned workstream")
+            self.gh.set_labels(number, ["feedback", "handed-off", "in-progress"], [])
+            self.gh.comment(number, f"Tracked by the feedback loop as `{fid}` (owner {owner}). Tag the fix `[feedback {fid}]` on main — or push "
+                            f"`feedback/{fid}` to go through the gates — and the loop follows it to the builds / deploys and closes this issue "
+                            "with the version it shipped in.")
+            log(f"track comment on #{number}: registered {fid} for {owner}")
+        cur["track_checked"] = now
+        self.store.save_cursor(cur)
 
     CLAIM_RE = re.compile(r"\b(claim(ed|ing|s)?|taking( over)?|take over|handoff|hand-off|owned by)\b.*?\b(bc-[0-9a-f]{8}[0-9a-f-]*)", re.I | re.S)
 
@@ -2879,29 +2949,15 @@ def main(argv: list[str]) -> int:
         if len(argv) < 5:
             print("track <id> <issue-number> \"<comment>\" [--handle <login>] [--owner <label>]")
             return 2
-        store = Store(cfg)
         fid, number, comment = argv[2], int(argv[3]), argv[4]
         rest = argv[5:]
         handle = rest[rest.index("--handle") + 1] if "--handle" in rest else ""
         owner = rest[rest.index("--owner") + 1] if "--owner" in rest else "handed-off"
-        d = store.item_dir(fid)
-        if d.exists():
+        target = rest[rest.index("--target") + 1] if "--target" in rest else None
+        loop = Loop(cfg)
+        if loop.register_tracked(fid, number, comment, owner, handle=handle, target=target) is None:
             print(f"{fid}: exists")
             return 2
-        d.mkdir(parents=True)
-        info = {"id": fid, "source": "inbox", "created": iso(), "comment": comment, "email": "", "handle": handle or None,
-                "origin": "filed by hand (handed off)", "device": "relayed report", "os": None, "device_platform": None,
-                "device_family": None, "app_platform": None, "bundle": None, "build": None, "build_id": None,
-                "locale": None, "screen_points": None, "screenshots": [], "forced_target": None, "raw": {}}
-        (d / "submission.json").write_text(json.dumps(info, indent=2, ensure_ascii=False) + "\n")
-        loop = Loop(cfg)
-        tier = "priority" if handle.lower() in ("unconst", "jake") or not handle else loop.tier(info)
-        st = {"id": fid, "created": info["created"], "status": "handed_off", "handed_off_to": owner, "track_commit": True,
-              "tier": tier, "tester": "Jacob (owner)" if tier == "priority" and not handle else loop.tester_label(info, tier),
-              "tester_key": loop.tester_key(info) if handle else "jake@bittensor.com", "target": "ios",
-              "issue": number, "issue_url": f"https://github.com/{cfg.github_repo}/issues/{number}"}
-        store.save_state(fid, st)
-        store.event(fid, "tracked", issue=number, owner=owner)
         print(f"{fid}: tracking #{number} (handed off to {owner}); lands when a main commit carries [feedback {fid}]")
         return 0
     if cmd == "memtree-cost":
