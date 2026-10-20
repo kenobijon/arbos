@@ -1160,7 +1160,7 @@ impl Shell {
     }
 
     /// Everything that floats closes on a click elsewhere.
-    fn close_popovers(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn close_popovers(&mut self, cx: &mut Context<Self>) {
         self.close_agent_pick(None, cx);
         if self.menu_open
             || self.members_open

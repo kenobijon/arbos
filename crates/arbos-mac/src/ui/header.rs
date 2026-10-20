@@ -50,7 +50,22 @@ pub fn render(
         .pl(px(4.0))
         .pr(px(10.0))
         .rounded(px(9.0))
-        .min_w_0();
+        .min_w_0()
+        // The header is a window_drag region: a mouse-down that bubbles to it
+        // arms a window move, and the slightest pointer jitter before the
+        // mouse-up turns the click into a drag that never completes — the
+        // second click of a double-click most of all (#1068, as the chat
+        // tabs). Stop it here and do what the root would have on the way.
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            cx.listener(|this, _, window, cx| {
+                cx.stop_propagation();
+                this.close_popovers(cx);
+                if this.renaming_tab.is_some() {
+                    this.commit_tab_rename(window, cx);
+                }
+            }),
+        );
     if let Some(person) = space
         .person()
         .filter(|_| is_people && !space.is_people_group())
