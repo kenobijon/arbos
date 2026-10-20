@@ -852,6 +852,46 @@ pub struct TurnState {
     pub skills_used: Vec<String>,
 }
 
+impl TurnState {
+    /// Placeholder installed as soon as `handle_send` takes `turn_lock`, before attachments /
+    /// `tree_pack` / `drive_turn`. `voice_cancel` and typed-send preempt need a real `TurnState`
+    /// in that window — without it they no-op and the lock is held forever
+    /// (feedback app-01M5CT92B0NPK1X09YW5RHNRN8, follow-up to app-01M5B5ZZNJP3W8770YVMGXPBKY).
+    fn claim(chat_id: &str, user_msg_id: &str, from_voice: bool) -> Self {
+        Self {
+            chat_id: chat_id.to_owned(),
+            user_msg_id: user_msg_id.to_owned(),
+            assistant_msg_id: String::new(),
+            text_part_id: String::new(),
+            started: Instant::now(),
+            route: None,
+            route_attempts: 0,
+            route_failed: false,
+            escalate: false,
+            asked: None,
+            metrics: TurnMetrics::default(),
+            streamed_text: String::new(),
+            act_transcript: Vec::new(),
+            tool_inputs: HashMap::new(),
+            reply_extractor: ReplyExtractor::default(),
+            ack_extractor: ReplyExtractor::for_key("ack"),
+            ack_text: String::new(),
+            ack_split: false,
+            row_closed: false,
+            progress_texts: Vec::new(),
+            activity: None,
+            prose: ProseFilter::default(),
+            act_buffer: String::new(),
+            route_call_id: None,
+            text_part_dirty: false,
+            stopped: false,
+            from_voice,
+            prompt_text: String::new(),
+            skills_used: Vec::new(),
+        }
+    }
+}
+
 pub struct Agent {
     pub cfg: Arc<Config>,
     pub store: Store,
@@ -1673,6 +1713,9 @@ impl Agent {
                 .is_some_and(message_from_voice)
         };
         let _guard = self.acquire_turn_lock(chat_id, this_is_voice).await;
+        // Claim before attachments / tree_pack so hang-up `voice_cancel` and a later typed send
+        // can preempt this turn while setup still holds the lock.
+        *self.turn.lock().await = Some(TurnState::claim(chat_id, &user_msg_id, this_is_voice));
         // A structured answer (`answer { questionId, value }`): render the value to text with the
         // widget the question was asked with, and mark the part answered before the turn runs.
         let structured = self.resolve_structured_answer(host, cmd).await;
@@ -1702,7 +1745,12 @@ impl Agent {
             user_text = "(attachment)".to_owned();
         }
         if user_text.trim().is_empty() {
+            let _ = self.turn.lock().await.take();
             return Err(anyhow!("send: message {user_msg_id} not found or empty"));
+        }
+        if self.turn.lock().await.as_ref().is_some_and(|t| t.stopped) {
+            let _ = self.turn.lock().await.take();
+            return Ok(());
         }
         let _ = self.store.touch_chat(chat_id);
         let _ = self.store.t3_append(
@@ -1778,6 +1826,7 @@ impl Agent {
             }
         }
         if skip_host_group_turn {
+            let _ = self.turn.lock().await.take();
             self.people.set_current(None);
             return Ok(());
         }
@@ -1812,6 +1861,12 @@ impl Agent {
             .await
         {
             prompt_text = format!("{memory_block}\n\n{prompt_text}");
+        }
+        // Hang-up / typed preempt during setup: drop the claim and leave without opening a row.
+        if self.turn.lock().await.as_ref().is_some_and(|t| t.stopped) {
+            let _ = self.turn.lock().await.take();
+            self.people.set_current(None);
+            return Ok(());
         }
 
         let outcome = self
@@ -2132,6 +2187,11 @@ impl Agent {
         prompt_text: &str,
         kind: TurnKind,
     ) -> Result<TurnOutcome> {
+        // Early claim may already be stopped (hang-up during attachments / tree_pack).
+        if self.turn.lock().await.as_ref().is_some_and(|t| t.stopped) {
+            let _ = self.turn.lock().await.take();
+            return Err(anyhow!("turn stopped before prompt"));
+        }
         let assistant_msg_id = ulid();
         let text_part_id = {
             let mut h = host.lock().await;
@@ -2181,9 +2241,29 @@ impl Agent {
                 h.doc
                     .finish_message(&assistant_msg_id, MessageStatus::Error);
             }
+            let _ = self.turn.lock().await.take();
             return Err(e);
         }
 
+        // Stop raced with session switch: settle the Working row and leave.
+        if self.turn.lock().await.as_ref().is_some_and(|t| t.stopped) {
+            {
+                let mut h = host.lock().await;
+                h.doc
+                    .add_status_part(&assistant_msg_id, "stopped", "Stopped by the user");
+                h.doc
+                    .finish_message(&assistant_msg_id, MessageStatus::Cancelled);
+            }
+            let _ = self.turn.lock().await.take();
+            return Err(anyhow!("turn stopped before prompt"));
+        }
+        let from_voice = {
+            let h = host.lock().await;
+            h.doc
+                .message(user_msg_id)
+                .as_ref()
+                .is_some_and(message_from_voice)
+        };
         *self.turn.lock().await = Some(TurnState {
             chat_id: chat_id.to_owned(),
             user_msg_id: user_msg_id.to_owned(),
@@ -2211,13 +2291,7 @@ impl Agent {
             route_call_id: None,
             text_part_dirty: false,
             stopped: false,
-            from_voice: {
-                let h = host.lock().await;
-                h.doc
-                    .message(user_msg_id)
-                    .as_ref()
-                    .is_some_and(message_from_voice)
-            },
+            from_voice,
             prompt_text: match &kind {
                 TurnKind::User => prompt_text.to_owned(),
                 TurnKind::SubagentResult { .. } | TurnKind::ApprovalOutcome { .. } => String::new(),
@@ -2672,6 +2746,11 @@ impl Agent {
                     return Err(anyhow!("pi event stream closed"))
                 }
             };
+            // Do not wait for the 1s timer: under a busy event stream `stop` / preempt must
+            // release the turn lock without relying on the select timeout arm.
+            if self.turn.lock().await.as_ref().is_some_and(|t| t.stopped) {
+                break;
+            }
             if self.fold_main_event(chat_id, host, &ev, started).await? {
                 break;
             }

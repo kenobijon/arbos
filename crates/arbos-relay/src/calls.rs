@@ -459,7 +459,17 @@ pub async fn end_call(
     announce_ended(state, &call, reason, writer.as_deref()).await;
     announce_missed(state, &call).await;
     // Drop any voice turn still running on the box (typed chat after hang-up).
-    for pid in state.db.call_agents_live(&call.id).unwrap_or_default() {
+    // Prefer agents still marked live on the call; also notify every agent that belongs
+    // to the chat — the voice worker may already have left (`call_agent_leave`) before
+    // `end_call`, which used to leave `call_agents_live` empty and skip cancel
+    // (feedback app-01M5CT92B0NPK1X09YW5RHNRN8).
+    let mut cancel_pids = state.db.call_agents_live(&call.id).unwrap_or_default();
+    for p in crate::voice::agents_in_chat(state, &chat_ref_of(&call)) {
+        if !cancel_pids.iter().any(|id| id == &p.id) {
+            cancel_pids.push(p.id.clone());
+        }
+    }
+    for pid in cancel_pids {
         if let Ok(Some(p)) = state.db.project(&pid) {
             let _ = crate::voice::box_notify(
                 state,
