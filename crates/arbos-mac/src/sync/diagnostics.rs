@@ -77,6 +77,25 @@ impl Diagnostics {
     }
 }
 
+/// Brief network failures (timeout, reset, DNS) are not product bugs — log them, do not file a
+/// weekly feedback item. Real HTTP answers (4xx/5xx) and unexpected client errors still report.
+pub fn is_transient(detail: &str) -> bool {
+    let d = detail.to_ascii_lowercase();
+    d.contains("timed out")
+        || d.contains("timeout")
+        || d.contains("connection reset")
+        || d.contains("connection refused")
+        || d.contains("broken pipe")
+        || d.contains("network is unreachable")
+        || d.contains("host is down")
+        || d.contains("temporarily unavailable")
+        || d.contains("dns error")
+        || d.contains("failed to lookup address")
+        || d.contains("name or service not known")
+        || d.contains("nodename nor servname")
+        || d.contains("no address associated")
+}
+
 /// `mac:<kind>:<normalized error>` — stable across launches, files and users: ids, hashes,
 /// file names, URLs and long numbers collapse to `*`, so "Thumbnail att-01m5…-Photo.jpg: HTTP 403
 /// Forbidden" and the same failure for another picture share one signature.
