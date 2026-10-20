@@ -37,6 +37,8 @@ pub fn parse_switch(s: &str) -> Option<bool> {
 
 /// Box-local override of the stable-prefix flag: `<work_root>/.arbos/stable-prefix` holding `on` or `off`.
 pub const STABLE_PREFIX_FILE: &str = "stable-prefix";
+/// Box-local override of the compact memory pack: `<work_root>/.arbos/memory-pack-compact`, `on` or `off`.
+pub const MEMORY_PACK_COMPACT_FILE: &str = "memory-pack-compact";
 
 /// A box-wide experiment switch: the box-local `override_file` wins when it holds a valid value (so one
 /// test box can run the other arm), else the environment variable `env` (the relay passes its own
@@ -68,6 +70,14 @@ pub fn code_mode_on(override_file: &std::path::Path) -> bool {
 /// chats: tie; quality held).
 pub fn stable_prefix_on(override_file: &std::path::Path) -> bool {
     switch_on("ARBOS_STABLE_PREFIX", override_file, true)
+}
+
+/// Compact memory pack (D77 follow-up to D87): the per-turn `[Memory retrieved …]` block gets
+/// per-kind budgets and a cap, page-carded tool outputs are packed as card + facts, repeats and
+/// leaves already in the prompt's project-memory block are dropped. `ARBOS_MEMORY_PACK_COMPACT=on|off`.
+/// Default **off** until the eval decides.
+pub fn memory_pack_compact_on(override_file: &std::path::Path) -> bool {
+    switch_on("ARBOS_MEMORY_PACK_COMPACT", override_file, false)
 }
 
 /// Box-level settings: what every workspace shares.
@@ -344,6 +354,11 @@ impl Config {
     /// Stable prefix for this workspace's main agent (D87); read at every pi (re)spawn.
     pub fn stable_prefix(&self) -> bool {
         stable_prefix_on(&self.box_flag_file(STABLE_PREFIX_FILE))
+    }
+
+    /// Compact per-turn memory pack; read at every walk, so a toggle needs no restart.
+    pub fn memory_pack_compact(&self) -> bool {
+        memory_pack_compact_on(&self.box_flag_file(MEMORY_PACK_COMPACT_FILE))
     }
 
     /// `<work_root>/.arbos/<name>`: a box-wide flag file an operator can set for one box.

@@ -2076,6 +2076,9 @@ impl Agent {
             .t3_thread_before(chat_id, None, 12)
             .map(|rows| json!({ "n": rows.len(), "ids": rows.iter().map(|r| r.id.clone()).collect::<Vec<_>>() }))
             .unwrap_or(Value::Null);
+        // The pack skips leaves the prompt's project-memory block already states; pass the text
+        // the prompt actually holds (with the stable prefix on, up to 30 min old), not the live one.
+        let prompt_memory = self.memory_for_prompt();
         self.tree
             .pack_for_turn(
                 mode,
@@ -2087,6 +2090,8 @@ impl Agent {
                 query_text,
                 &asker,
                 &recent,
+                &prompt_memory,
+                self.cfg.memory_pack_compact(),
             )
             .await
     }

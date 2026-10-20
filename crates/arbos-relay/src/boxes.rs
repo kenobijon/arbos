@@ -73,6 +73,10 @@ pub(crate) fn box_env(
     if let Ok(m) = std::env::var("ARBOS_STABLE_PREFIX") {
         env.insert("ARBOS_STABLE_PREFIX".into(), m);
     }
+    // Compact memory pack (D77 follow-up): same shape.
+    if let Ok(m) = std::env::var("ARBOS_MEMORY_PACK_COMPACT") {
+        env.insert("ARBOS_MEMORY_PACK_COMPACT".into(), m);
+    }
     let _ = state;
     env
 }
