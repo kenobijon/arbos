@@ -215,6 +215,18 @@ fn text_names_people(msg: &MessageView, info: &PeopleChatInfo) -> bool {
     let Some(token) = leading_address_token(&msg.text()) else {
         return false;
     };
+    text_token_names_people(&token, info, true)
+}
+
+/// True when the leading token is a human's `@handle` (not merely their display name).
+fn text_names_people_by_handle(msg: &MessageView, info: &PeopleChatInfo) -> bool {
+    let Some(token) = leading_address_token(&msg.text()) else {
+        return false;
+    };
+    text_token_names_people(&token, info, false)
+}
+
+fn text_token_names_people(token: &str, info: &PeopleChatInfo, allow_display_name: bool) -> bool {
     for m in &info.members {
         let Some(member) = m["member"].as_str() else {
             continue;
@@ -223,8 +235,11 @@ fn text_names_people(msg: &MessageView, info: &PeopleChatInfo) -> bool {
             continue;
         }
         let handle = m["handle"].as_str().unwrap_or("").to_lowercase();
-        if handle == token {
+        if !handle.is_empty() && handle == token {
             return true;
+        }
+        if !allow_display_name {
+            continue;
         }
         if let Some(name) = m["name"].as_str() {
             let name = name.trim().to_lowercase();
@@ -243,11 +258,57 @@ fn text_names_people(msg: &MessageView, info: &PeopleChatInfo) -> bool {
     false
 }
 
+/// True when the leading token matches any agent in the chat by handle or mention slug
+/// (project name lower-cased, spaces → "-"). Used so a human's display name that collides
+/// with an agent's `@slug` ("Arbos" when @unarbos is named Arbos and the agent is @arbos)
+/// does not silence the agent.
+fn text_names_any_agent_handle(msg: &MessageView, info: &PeopleChatInfo) -> bool {
+    let Some(token) = leading_address_token(&msg.text()) else {
+        return false;
+    };
+    for m in &info.members {
+        let Some(member) = m["member"].as_str() else {
+            continue;
+        };
+        if !member.starts_with("agent:") {
+            continue;
+        }
+        let handle = m["handle"].as_str().unwrap_or("").to_lowercase();
+        if !handle.is_empty() && handle == token {
+            return true;
+        }
+        let name = m["project"]["name"]
+            .as_str()
+            .or_else(|| m["name"].as_str())
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
+        if name.is_empty() {
+            continue;
+        }
+        if name == token || name.replace(' ', "-") == token {
+            return true;
+        }
+        if name
+            .split_whitespace()
+            .next()
+            .is_some_and(|first| first == token)
+        {
+            return true;
+        }
+    }
+    // Sole-agent `@arbos` alias also applies to bare "Arbos" / "arbos".
+    info.agents() == 1 && token == "arbos"
+}
+
 /// True when the prose addresses this agent at the start by handle, slug, or display/first name
-/// ("Bob", "Bob?", "hey Bob what do you think?") without needing `@`. A leading person name
-/// wins when the same token could match a human in the chat.
+/// ("Bob", "Bob?", "hey Bob what do you think?") without needing `@`. A leading person
+/// `@handle` wins when the same token could match a human; a person's display name alone does
+/// not beat this agent's handle/slug (so "Arbos what is your name" wakes @arbos even when a
+/// human in the chat is also named Arbos).
 fn text_names_this_agent(msg: &MessageView, info: &PeopleChatInfo, project_id: &str) -> bool {
-    if text_names_people(msg, info) {
+    // Person @handle still wins ("catoneone …" when that is their handle).
+    if text_names_people_by_handle(msg, info) {
         return false;
     }
     let Some(token) = leading_address_token(&msg.text()) else {
@@ -292,7 +353,8 @@ fn text_names_this_agent(msg: &MessageView, info: &PeopleChatInfo, project_id: &
             return true;
         }
     }
-    false
+    // Sole-agent bare "arbos" — same alias as `@arbos` in `addressed`.
+    info.agents() == 1 && token == "arbos"
 }
 
 /// Agent project ids named by `mentions` (`agent:<id>`), in order, deduped.
@@ -373,8 +435,13 @@ fn text_addresses_agents_collectively(msg: &MessageView) -> bool {
 /// Leading person ping in the prose (or a people chip / leading `@handle`) and no agent `@`
 /// in the text. Sticky chip / reply-to agent mentions must not wake an agent for "Allan?".
 /// Mid-line `@person` alone is not a people ping — see `addressed_only_to_people`.
+/// A leading token that is an agent's handle/slug is for the agent — even when a human's
+/// display name collides ("Arbos" with @unarbos named Arbos and agent @arbos).
 fn people_ping_not_for_agents(msg: &MessageView, info: &PeopleChatInfo) -> bool {
     if text_mentions_agent(msg, info) {
+        return false;
+    }
+    if text_names_any_agent_handle(msg, info) {
         return false;
     }
     addressed_only_to_people(msg) || text_names_people(msg, info)
@@ -1294,7 +1361,8 @@ mod tests {
             &info
         ));
 
-        // Bare agent name — same as @bob (DM + group). Person name still wins on collision.
+        // Bare agent name — same as @bob (DM + group). Person @handle still wins on collision;
+        // a person's display name alone does not beat the agent handle/slug.
         assert!(text_names_this_agent(&msg("Bob?", json!({})), &info, P));
         assert!(text_names_this_agent(
             &msg("hey Bob what do you think?", json!({})),
@@ -1324,6 +1392,72 @@ mod tests {
             "Allan?",
             json!({})
         )));
+
+        // Display-name collision: human @unarbos named "Arbos", agent @arbos — bare "Arbos"
+        // is a clear agent reference (and `@arbos` already works via the sole-agent alias).
+        let arbos_chat = PeopleChatInfo {
+            members: vec![
+                json!({ "member": "user:unarbos", "handle": "unarbos", "name": "Arbos" }),
+                json!({ "member": "user:const", "handle": "const", "name": "Const" }),
+                json!({
+                    "member": "agent:01HPROJ",
+                    "handle": "arbos",
+                    "project": { "name": "Arbos" }
+                }),
+            ],
+            slug: "arbos".into(),
+            kind: "group".into(),
+            ..Default::default()
+        };
+        assert!(text_names_people(
+            &msg("Arbos what is your name", json!({})),
+            &arbos_chat
+        ));
+        assert!(!text_names_people_by_handle(
+            &msg("Arbos what is your name", json!({})),
+            &arbos_chat
+        ));
+        assert!(text_names_any_agent_handle(
+            &msg("Arbos what is your name", json!({})),
+            &arbos_chat
+        ));
+        assert!(!people_ping_not_for_agents(
+            &msg("Arbos what is your name", json!({})),
+            &arbos_chat
+        ));
+        assert!(!people_ping_not_for_agents(
+            &msg("Arbos", json!({})),
+            &arbos_chat
+        ));
+        assert!(!people_ping_not_for_agents(
+            &msg("Hey Arbos", json!({})),
+            &arbos_chat
+        ));
+        assert!(text_names_this_agent(
+            &msg("Arbos what is your name", json!({})),
+            &arbos_chat,
+            P
+        ));
+        assert!(text_names_this_agent(
+            &msg("Arbos", json!({})),
+            &arbos_chat,
+            P
+        ));
+        assert!(text_names_this_agent(
+            &msg("Hey Arbos", json!({})),
+            &arbos_chat,
+            P
+        ));
+        // Person @handle still silences the agent.
+        assert!(people_ping_not_for_agents(
+            &msg("unarbos?", json!({})),
+            &arbos_chat
+        ));
+        assert!(!text_names_this_agent(
+            &msg("unarbos?", json!({})),
+            &arbos_chat,
+            P
+        ));
 
         // Shared address: collective phrase → every agent; two @mentions → those two.
         let group = PeopleChatInfo {
