@@ -14,6 +14,26 @@ use crate::ui::theme::{Theme, PANEL_RADIUS};
 const MAX_GLYPHS: usize = 4;
 const GLYPH: f32 = 16.0;
 
+/// A space's picture everywhere it shows (row, pill, pane): a group's custom
+/// image when it has one, else the D79 initials disc.
+pub fn picture(space: &Project, state: &AppState, size: f32, theme: &Theme) -> Div {
+    let image = space.image_url.as_deref().and_then(|url| state.avatar(url));
+    match image {
+        Some(image) => div()
+            .size(px(size))
+            .flex_shrink_0()
+            .rounded_full()
+            .overflow_hidden()
+            .child(
+                gpui::img(image)
+                    .size(px(size))
+                    .rounded_full()
+                    .object_fit(gpui::ObjectFit::Cover),
+            ),
+        None => crate::ui::avatars::project(space, size, theme),
+    }
+}
+
 /// `#rrggbb` → colour; anything else falls back.
 pub fn project_color(hex: &str, fallback: Hsla) -> Hsla {
     let h = hex.trim().trim_start_matches('#');

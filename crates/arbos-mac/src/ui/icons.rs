@@ -34,6 +34,10 @@ const ICONS: &[(&str, &str)] = &[
         "<circle cx=\"5\" cy=\"12\" r=\"1.8\" fill=\"#000\" stroke=\"none\"/><circle cx=\"12\" cy=\"12\" r=\"1.8\" fill=\"#000\" stroke=\"none\"/><circle cx=\"19\" cy=\"12\" r=\"1.8\" fill=\"#000\" stroke=\"none\"/>"
     ),
     icon!(
+        "pencil",
+        "<path d=\"M4 20l4.2-1 10.3-10.3a2.3 2.3 0 0 0-3.2-3.2L5 15.8z\"/><path d=\"M13.5 7.3l3.2 3.2\"/>"
+    ),
+    icon!(
         "sidebar-left",
         "<rect x=\"3\" y=\"5\" width=\"18\" height=\"14\" rx=\"2.5\"/><path d=\"M9.5 5v14\"/>"
     ),

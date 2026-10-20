@@ -100,6 +100,10 @@ pub struct Project {
     /// D79: the owner's explicit pick (`avatar_color_index`), `None` = automatic.
     #[serde(default)]
     pub avatar_color_override: Option<u8>,
+    /// A group's custom picture (`PATCH /chats/{id} {image_key}`), as a URL
+    /// the avatar loader can fetch; `None` = the initials disc.
+    #[serde(default)]
+    pub image_url: Option<String>,
 }
 
 /// One entry of `GET /voices`: a voice the agent can speak with on calls.

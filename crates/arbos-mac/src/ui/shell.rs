@@ -859,47 +859,17 @@ impl Shell {
         });
     }
 
-    /// The second click of a slow double-click on the header name arrives
-    /// after the page it opened is up, on the page's backdrop: close the page
-    /// and rename, as a fast double-click would have. `false` when the click
-    /// is an ordinary click outside (the caller closes the page).
-    pub(crate) fn rename_from_backdrop(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let project_id = {
-            let state = self.state.read(cx);
-            if !state.profile_from_name {
-                return false;
-            }
-            match state.profile.clone() {
-                Some(ProfilePage::Agent { project_id }) => project_id,
-                Some(ProfilePage::Group { space_id }) => space_id,
-                _ => return false,
-            }
-        };
-        let can_rename = self
-            .state
-            .read(cx)
-            .project(&project_id)
-            .is_some_and(|p| !p.is_guest() && !p.is_people());
-        if !can_rename {
-            return false;
-        }
-        self.close_profile(window, cx);
-        self.start_rename_agent(project_id, window, cx);
-        true
-    }
-
     /// Enter in the name field: sidebar / header rename, or the agent page's.
     pub(crate) fn commit_rename_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let project_id = {
+        let (project_id, group) = {
             let state = self.state.read(cx);
             match (&state.renaming_project, &state.profile) {
-                (Some(id), _) => id.clone(),
+                (Some(id), _) => (id.clone(), false),
                 (None, Some(ProfilePage::Agent { project_id })) if state.profile_editing_name => {
-                    project_id.clone()
+                    (project_id.clone(), false)
+                }
+                (None, Some(ProfilePage::Group { space_id })) if state.profile_editing_name => {
+                    (space_id.clone(), true)
                 }
                 _ => return,
             }
@@ -907,8 +877,13 @@ impl Shell {
         let name = self.agent_name_input.read(cx).text().to_string();
         self.agent_name_input
             .update(cx, |input, _| input.set_text_center(false));
-        self.state
-            .update(cx, |s, cx| s.set_project_name(project_id, name, cx));
+        self.state.update(cx, |s, cx| {
+            if group {
+                s.set_group_title(project_id, name, cx)
+            } else {
+                s.set_project_name(project_id, name, cx)
+            }
+        });
         Composer::focus(&self.composer, window, cx);
         cx.notify();
     }
@@ -960,6 +935,59 @@ impl Shell {
         let handle = self.agent_name_input.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
         cx.notify();
+    }
+
+    /// The group pane's name, clicked: an inline field in its place (Return
+    /// commits, Escape cancels).
+    pub(crate) fn start_rename_group(
+        &mut self,
+        space_id: crate::model::Id,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(name) = self
+            .state
+            .read(cx)
+            .project(&space_id)
+            .filter(|p| p.is_people_group())
+            .map(|p| p.name.clone())
+        else {
+            return;
+        };
+        self.agent_name_input.update(cx, |input, cx| {
+            input.set_text_center(true);
+            input.set_text(name, cx);
+        });
+        self.state.update(cx, |s, cx| {
+            s.profile_editing_name = true;
+            cx.notify();
+        });
+        let handle = self.agent_name_input.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    /// The crayon on a group's picture: pick an image file, upload it.
+    pub(crate) fn pick_group_image(&mut self, space_id: crate::model::Id, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Choose".into()),
+        });
+        let state = self.state.clone();
+        cx.spawn(async move |_, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            cx.update(|cx| {
+                state.update(cx, |s, cx| s.set_group_image(space_id, path, cx));
+            });
+        })
+        .detach();
     }
 
     /// Close the profile page (back button, click outside); the composer takes
@@ -3529,6 +3557,14 @@ impl Render for Shell {
         if let Some(target) = details {
             root = root.child(self.render_details(&target, cx));
         }
+        // The right pane (three-pane rule): a flex sibling beside the chat, so
+        // it never covers it; the floating menus below paint over both.
+        let profile = self.state.read(cx).profile.clone();
+        if let Some(page) = profile {
+            if let Some(pane) = profiles::pane(&page, self, cx) {
+                root = root.child(pane);
+            }
+        }
         if let Some(menu) = sidebar::row_menu(self, cx) {
             root = root.child(menu);
         }
@@ -3573,12 +3609,6 @@ impl Render for Shell {
                     right,
                     cx,
                 )));
-            }
-        }
-        let profile = self.state.read(cx).profile.clone();
-        if let Some(page) = profile {
-            if let Some(sheet) = profiles::sheet(&page, self, cx) {
-                root = root.child(sheet);
             }
         }
         // The feature panels float bottom-left only when opened outside Settings

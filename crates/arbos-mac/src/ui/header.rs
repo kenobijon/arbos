@@ -132,7 +132,7 @@ pub fn render(
         // (redesign 2026-10-20: no stacked heads, no member count).
         let sid = space.id.clone();
         title = title
-            .child(avatars::project(space, AVATAR_HEADER, &theme))
+            .child(groups::picture(space, state, AVATAR_HEADER, &theme))
             .child(
                 div()
                     .text_size(px(TEXT_BODY))
