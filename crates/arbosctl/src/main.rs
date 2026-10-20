@@ -349,6 +349,9 @@ enum ChatCmd {
         /// Give up waiting for the reply after N seconds.
         #[arg(long, default_value_t = 600)]
         timeout: u64,
+        /// Reply to this message id (`replyTo` on the row, as the apps' reply arrow sets it).
+        #[arg(long = "reply-to")]
+        reply_to: Option<String>,
     },
     /// Answer the agent's open question with a structured value (question widgets).
     Answer {
@@ -625,9 +628,19 @@ async fn main() -> Result<()> {
                 text,
                 stream,
                 timeout,
+                reply_to,
             } => {
                 let project = resolve_project(&relay, &project).await?;
-                room::send(&mut cfg, &project, &chat, &text, stream, timeout).await?;
+                room::send(
+                    &mut cfg,
+                    &project,
+                    &chat,
+                    &text,
+                    reply_to.as_deref(),
+                    stream,
+                    timeout,
+                )
+                .await?;
             }
             ChatCmd::Answer {
                 project,
@@ -1238,7 +1251,7 @@ async fn groups(cfg: &mut Config, relay: &Relay, cmd: GroupCmd, as_json: bool) -
             wait,
         } => {
             let host = resolve_project(relay, &host).await?;
-            room::send(cfg, &host, &chat, &text, stream, 600).await?;
+            room::send(cfg, &host, &chat, &text, None, stream, 600).await?;
             if stream && wait > 0 {
                 // The other Projects answer after the host's own reply; keep the room open.
                 room::stream(cfg, &host, &chat, false, wait).await?;
