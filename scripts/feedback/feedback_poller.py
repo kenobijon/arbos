@@ -1056,8 +1056,12 @@ class Loop:
             # ("same design as the iPhone" in a Mac report is Mac work — #1058 went to the iOS target).
             words = re.sub(r"\b(like|as|than|match(es|ing)?|same as|mirror(s|ing)?|copy(ing)?)( (it is |it's )?on)?( the| my)? "
                            r"(iphone|ios|phone|mac|macos|desktop)( app)?\b", " ", info.get("comment") or "", flags=re.I)
+            both = re.search(r"\b(mac|macos|desktop)\b.{0,12}(\band\b|&|\+|\/)\s*(the )?(iphone|ios)\b|\b(iphone|ios)\b.{0,12}(\band\b|&|\+|\/)\s*(the )?(mac|macos|desktop)\b", words, re.I)
+            rust_only = re.search(r"\b(rust-only|no app(s)? code changes?|no apps/ios)\b", words, re.I)
             if (info.get("device_platform") or "") == "IOS":
-                return "mac" if re.search(r"\b(mac|macos|desktop)\b", words, re.I) else "ios"
+                return "mac" if re.search(r"\b(mac|macos|desktop)\b", words, re.I) and not both else "ios"
+            if both or rust_only:
+                return "mac"  # shared / server work from the Mac: the Mac target has cargo and the gate builds both apps
             return "ios" if re.search(r"\b(iphone|ios|phone app)\b", words, re.I) else "mac"
         if (info.get("device_platform") or "").upper() == "MAC_OS" or (info.get("app_platform") or "").upper() == "MAC_OS":
             return "mac"
@@ -2136,6 +2140,24 @@ class Loop:
                 self.store.event(fid, "testflight_ready", build=st["testflight_build"])
             elif b:
                 st["testflight_state"] = b.get("processingState")
+            elif minutes_between(st.get("ios_uploaded_at") or iso(), iso()) > 20:
+                # Apple never listed this build (two uploads minutes apart: the earlier one is sometimes dropped —
+                # 2026-10-20 20:02 / 19:16). A later VALID TestFlight build whose commit contains the fix is just as
+                # installable: ship with that one instead of waiting forever.
+                later = self.gh.later_ios_build(sha, st.get("pushed_at") or since)
+                if later and later["head_sha"] != (st.get("ios_superseded_by") or ""):
+                    prefix = next((m.group(1) for a in self.gh.run_artifacts(later["id"])
+                                   for m in [re.match(r"xcodebuild-logs-(\d{12,18})", a["name"])] if m), None)
+                    number = self.resolve_build_number(prefix, later["id"]) if prefix else None
+                    lb = self.asc.build_state(number) if number else None
+                    if lb and lb.get("processingState") == "VALID":
+                        old = st["testflight_build"]
+                        st.update(testflight_build=number, ios_run=later["html_url"], ios_uploaded_at=later["updated_at"],
+                                  testflight_ready_at=iso(), ios_superseded_by=later["head_sha"])
+                        self.store.save_state(fid, st)
+                        self.store.event(fid, "testflight_ready", build=number, instead_of=old, run=later["html_url"])
+                        self.gh.comment(st["issue"], f"Apple never listed TestFlight build {old}; a later build that contains this fix is "
+                                        f"processed: **{number}** ({later['html_url']}).")
 
         if st.get("expects_ci") and ci and ci["status"] == "completed" and ci["conclusion"] in ("cancelled", "skipped") and not st.get("release_done"):
             later = self.gh.later_run("ci.yml", "push", sha, since)
