@@ -4,7 +4,7 @@
 //! remain (turn deadline, context window, spend, tool timeouts) are announced
 //! in the chat — never a silent stop.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -15,7 +15,7 @@ use tokio::sync::{broadcast, Mutex, Semaphore};
 
 use arbos_core::approval::ApprovalOutcome;
 use arbos_core::doc::{CommandStatus, CommandView, MessageStatus};
-use arbos_core::ids::ulid;
+use arbos_core::ids::{now_ms, ulid};
 use arbos_core::route::{pick_harness, validate, Harness, ValidRoute};
 use arbos_core::rpc::{AssistantEvent, Command as RpcCommand, Event};
 use arbos_core::widget::Widget;
@@ -2053,6 +2053,46 @@ impl Agent {
                 } else {
                     name.clone()
                 };
+                // Clear leftover `running`/`queued` and any streaming progress row
+                // so a failed start cannot pin the working indicator or working set.
+                let sub_id = existing
+                    .clone()
+                    .or_else(|| {
+                        me.store
+                            .subagent_by_name(&name)
+                            .ok()
+                            .flatten()
+                            .map(|r| r.id)
+                    })
+                    .unwrap_or_default();
+                if !sub_id.is_empty() {
+                    me.subagent_msgs.lock().await.remove(&sub_id);
+                    let _ = me.store.set_subagent_status(&sub_id, "idle");
+                    let _ = me.store.set_subagent_last_status(&sub_id, "failed");
+                    {
+                        let mut h = host2.lock().await;
+                        let stale: Vec<String> = h
+                            .doc
+                            .messages()
+                            .into_iter()
+                            .filter(|m| {
+                                m.role == "assistant"
+                                    && m.status == "streaming"
+                                    && m.rest.get("subagentId").and_then(|v| v.as_str())
+                                        == Some(sub_id.as_str())
+                            })
+                            .map(|m| m.id)
+                            .collect();
+                        for id in stale {
+                            h.doc.add_status_part(&id, "failed", "Failed");
+                            h.doc.add_error_part(&id, "subagent_failed", &e.to_string());
+                            h.doc.finish_message(&id, MessageStatus::Error);
+                            h.doc
+                                .set_message_fields(&id, &[("handoffMessages", json!(2))]);
+                        }
+                    }
+                    me.write_threads_index().await;
+                }
                 {
                     let mut h = host2.lock().await;
                     let id = ulid();
@@ -3504,16 +3544,104 @@ impl Agent {
         self.write_text(host, t, text).await;
     }
 
+    /// Mark subagents whose work ended without cleanup as finished: store status
+    /// `running`/`queued` with no live task, and close any leftover streaming
+    /// progress rows so clients stop showing "is working".
+    ///
+    /// `on_boot`: every leftover row is an orphan (no tasks survived the restart).
+    /// Otherwise only rows older than the freshness window are reclaimed, so a
+    /// subagent waiting on a slot (queued, not yet in `subagent_msgs`) is safe.
+    pub async fn reclaim_orphan_subagents(&self, on_boot: bool) {
+        /// Same 15-minute window as the Mac/iOS working indicator: a status left
+        /// `running` after the task died must not linger forever.
+        const ORPHAN_FRESH_MS: i64 = 15 * 60 * 1000;
+        let live: HashSet<String> = self.subagent_msgs.lock().await.keys().cloned().collect();
+        let now = now_ms();
+        let mut healed: Vec<(String, Option<String>)> = Vec::new();
+        for s in self.store.subagents().unwrap_or_default() {
+            if s.status != "running" && s.status != "queued" {
+                continue;
+            }
+            if live.contains(&s.id) {
+                continue;
+            }
+            if !on_boot {
+                let last = s.last_seen_at.or(s.last_turn_at).unwrap_or(s.created_at);
+                // Queued waiters that just enrolled are not in `subagent_msgs` yet;
+                // only reclaim after the freshness window so a brief race is safe.
+                if now.saturating_sub(last) < ORPHAN_FRESH_MS {
+                    continue;
+                }
+            }
+            let _ = self.store.set_subagent_status(&s.id, "idle");
+            let _ = self.store.set_subagent_last_status(&s.id, "interrupted");
+            healed.push((s.id, s.chat_id));
+        }
+        for (sub_id, chat_id) in &healed {
+            let Some(chat_id) = chat_id.as_deref() else {
+                continue;
+            };
+            let Some(host) = self.sync.host(chat_id).await else {
+                continue;
+            };
+            let mut h = host.lock().await;
+            let stale: Vec<String> = h
+                .doc
+                .messages()
+                .into_iter()
+                .filter(|m| {
+                    m.role == "assistant"
+                        && m.status == "streaming"
+                        && m.rest.get("subagentId").and_then(|v| v.as_str())
+                            == Some(sub_id.as_str())
+                })
+                .map(|m| m.id)
+                .collect();
+            for id in stale {
+                h.doc.add_status_part(&id, "stopped", "Stopped");
+                h.doc.finish_message(&id, MessageStatus::Cancelled);
+                h.doc
+                    .set_message_fields(&id, &[("handoffMessages", json!(2))]);
+            }
+        }
+        if !healed.is_empty() {
+            tracing::info!(
+                count = healed.len(),
+                "reclaimed orphan subagents left running after their work ended"
+            );
+            self.write_threads_index().await;
+        }
+    }
+
     /// Working-set section (design §6.6 item 2b): running subagents + compaction summary +
     /// handles + notes, ≤ 40 lines.
     pub fn working_set_text(&self, chat_id: &str) -> String {
         let mut lines = Vec::new();
+        // Prefer the live task map when available so a zombie `running` row
+        // (task gone, status never cleared) does not keep the agent thinking
+        // work is still in flight. Queued waiters are not in the map yet.
+        let live = self
+            .subagent_msgs
+            .try_lock()
+            .ok()
+            .map(|m| m.keys().cloned().collect::<HashSet<_>>());
         let running: Vec<_> = self
             .store
             .subagents()
             .unwrap_or_default()
             .into_iter()
-            .filter(|s| s.status == "running" || s.status == "queued")
+            .filter(|s| {
+                if s.status == "queued" {
+                    return true;
+                }
+                if s.status != "running" {
+                    return false;
+                }
+                match &live {
+                    Some(ids) => ids.contains(&s.id),
+                    None => true,
+                }
+            })
             .collect();
         if !running.is_empty() {
             lines.push(format!(

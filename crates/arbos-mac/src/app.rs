@@ -1915,7 +1915,7 @@ impl AppState {
     }
 
     pub fn chat_is_streaming(&self, chat_id: &str) -> bool {
-        self.messages_of(chat_id).iter().any(|m| m.is_streaming())
+        Message::chat_is_actively_working(self.messages_of(chat_id), now_ms())
     }
 
     pub fn project_is_streaming(&self, project_id: &str) -> bool {

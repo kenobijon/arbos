@@ -14,7 +14,7 @@ use gpui::{
 
 use crate::app::{AppEvent, AppState, DetailsTarget};
 use crate::model::{
-    Attachment, AttachmentKind, Id, Message, MessageStatus, Part, Person, Role, StatusKind,
+    now_ms, Attachment, AttachmentKind, Id, Message, MessageStatus, Part, Person, Role, StatusKind,
     TurnKind,
 };
 use crate::ui::approve::{approval_card, ApprovalView};
@@ -1216,6 +1216,21 @@ impl Transcript {
                 .into_any_element(),
             RowKind::Indicator { queued, activity } => {
                 PulseClock::request(cx);
+                // Freshness is time-capped (stale streams / open hand-offs). Re-check
+                // on each pulse so a leftover `streaming` row cannot pin forever;
+                // when it expires, rebuild rows without the indicator.
+                let chat_id = self.chat_id.clone().unwrap_or_default();
+                let still = {
+                    let state = self.state.read(cx);
+                    Message::chat_is_actively_working(state.messages_of(&chat_id), now_ms())
+                };
+                if !still {
+                    cx.spawn(async move |this, cx| {
+                        let _ = this.update(cx, |this, cx| this.sync(cx));
+                    })
+                    .detach();
+                    return div().into_any_element();
+                }
                 // A new activity fades in over 260 ms.
                 let key = activity.clone().unwrap_or_default();
                 let since = match &self.activity_shown {
@@ -1230,12 +1245,19 @@ impl Transcript {
                 let state = self.state.read(cx);
                 let (name, picture): (String, Option<gpui::Div>) = match state.selected() {
                     Some(space) if space.is_people() => {
-                        let chat_id = self.chat_id.clone().unwrap_or_default();
-                        let agent = state
-                            .messages_of(&chat_id)
+                        let msgs = state.messages_of(&chat_id);
+                        let recent = now_ms().saturating_sub(Message::STREAM_FRESH_MS);
+                        let agent = msgs
                             .iter()
                             .rev()
-                            .find(|m| m.role == Role::Assistant && m.is_streaming())
+                            .find(|m| {
+                                m.role == Role::Assistant
+                                    && (m.is_streaming() && m.created_at >= recent
+                                        || Message::chat_has_open_subagent(
+                                            std::slice::from_ref(*m),
+                                            now_ms(),
+                                        ))
+                            })
                             .and_then(|m| m.sender_handle.clone().or_else(|| m.sender_name.clone()))
                             .unwrap_or_else(|| "Agent".into());
                         let glyph = space
@@ -1590,7 +1612,10 @@ pub fn build_rows(
         m.sender == "user" || m.sender.is_empty() || m.sender == format!("user:{me_id}")
     };
     let mut rows = Vec::new();
-    let mut running = false;
+    let now = now_ms();
+    // One indicator while a recent stream or open hand-off is live; stale
+    // `streaming` rows (dead box / leftover under a later user line) do not count.
+    let running = Message::chat_is_actively_working(messages, now);
     let mut queued = false;
     let last_reply = messages
         .iter()
@@ -1725,9 +1750,6 @@ pub fn build_rows(
                 }
             }
             Role::Assistant | Role::Project => {
-                if streaming {
-                    running = true;
-                }
                 if matches!(
                     message.turn,
                     Some(TurnKind::New | TurnKind::Spawn | TurnKind::Wake)
@@ -2085,7 +2107,9 @@ pub fn build_rows(
         let activity = messages
             .iter()
             .rev()
-            .find(|m| m.is_streaming())
+            .find(|m| {
+                m.is_streaming() && m.created_at >= now.saturating_sub(Message::STREAM_FRESH_MS)
+            })
             .and_then(Message::current_activity);
         rows.push(Row {
             version: hash_version(&(queued, &activity), true),
