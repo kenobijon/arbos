@@ -111,6 +111,7 @@ export default function arbosPiExt(pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     sessionId = ctx.sessionManager.getSessionId?.() ?? "";
+    lastContextSent = "";
     for (const entry of ctx.sessionManager.getBranch()) {
       if (entry.type === "custom" && entry.customType === "arbos-handle") {
         const h = entry.data as Handle;
@@ -158,7 +159,12 @@ export default function arbosPiExt(pi: ExtensionAPI) {
     }
   });
 
-  /** D87: the per-turn context as one block placed before the user's words in the user turn. */
+  /**
+   * D87: the per-turn context as one block placed before the user's words in the user turn — and
+   * only when it changed since the last turn of this session (append-only: an unchanged working set
+   * is already in the cached history; a new handle or note re-sends the small block once).
+   */
+  let lastContextSent = "";
   async function turnContextBlock(): Promise<string> {
     const ws = await workingSet();
     const parts: string[] = [];
@@ -167,8 +173,10 @@ export default function arbosPiExt(pi: ExtensionAPI) {
     }
     if (ws.skills) parts.push(ws.skills);
     if (ws.memory) parts.push(`Project memory:\n${ws.memory}`);
-    if (parts.length === 0) return "";
-    return `${CONTEXT_OPEN}\n${parts.join("\n\n")}\n${CONTEXT_CLOSE}\n\n`;
+    const block = parts.length === 0 ? "" : `${CONTEXT_OPEN}\n${parts.join("\n\n")}\n${CONTEXT_CLOSE}\n\n`;
+    if (block === lastContextSent) return "";
+    lastContextSent = block;
+    return block;
   }
 
   // ---- 1. deny-list veto + audit before execution ----------------------------------------

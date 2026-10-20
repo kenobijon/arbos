@@ -893,6 +893,8 @@ pub struct Agent {
     pub turn_images: std::sync::Mutex<Vec<Value>>,
     /// Cached active-goals blurb for the working set (Goals, feedback #1091).
     pub goals_cache: std::sync::Mutex<String>,
+    /// D87: the project-memory text last written into the system prompt and when (debounce).
+    pub prompt_memory: std::sync::Mutex<Option<(String, Instant)>>,
 }
 
 impl Agent {
@@ -965,6 +967,7 @@ impl Agent {
             people: crate::people::PeopleState::default(),
             turn_images: std::sync::Mutex::new(Vec::new()),
             goals_cache: std::sync::Mutex::new(String::new()),
+            prompt_memory: std::sync::Mutex::new(None),
         })
     }
 
@@ -1049,19 +1052,43 @@ impl Agent {
             s.push_str(self.cfg.instructions.trim());
             s.push('\n');
         }
-        // D87 stable prefix: project memory changes after every memory pass; inside the system
-        // prompt that rewrites the whole cached prefix (and every later message) on the next turn.
-        // With the flag on it rides in the turn instead (`/hook/working-set` → the extension).
-        if !self.cfg.stable_prefix() {
-            let core = self.memory.core_memory_text();
-            if !core.trim().is_empty() {
-                s.push_str("\n\n## Project memory\n\n");
-                s.push_str(&core);
-            }
+        // D87 stable prefix: project memory changes after most memory passes; inside the system
+        // prompt every change rewrites the whole cached prefix on the next new chat. Measured on the
+        // eval set: moving it into every turn cost more than the rewrites (Haiku writes cost 12.5×
+        // reads), so with the flag on the block stays here but is refreshed at most every
+        // `ARBOS_MEMORY_PROMPT_REFRESH_SECS` (default 30 min): chats opened in between share the prefix.
+        // Off: rewritten at every memory change, as before.
+        let core = self.memory_for_prompt();
+        if !core.trim().is_empty() {
+            s.push_str("\n\n## Project memory\n\n");
+            s.push_str(&core);
         }
         std::fs::create_dir_all(self.system_prompt_path().parent().unwrap())?;
         std::fs::write(self.system_prompt_path(), s)?;
         Ok(())
+    }
+
+    /// The project-memory block of the system prompt. Stable prefix on: the live text replaces the
+    /// remembered one only when it changed and the remembered one is older than the refresh window.
+    fn memory_for_prompt(&self) -> String {
+        let live = self.memory.core_memory_text();
+        if !self.cfg.stable_prefix() {
+            return live;
+        }
+        let refresh = Duration::from_secs(
+            std::env::var("ARBOS_MEMORY_PROMPT_REFRESH_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1800),
+        );
+        let mut held = self.prompt_memory.lock().expect("prompt memory");
+        match held.as_ref() {
+            Some((text, at)) if *text == live || at.elapsed() < refresh => text.clone(),
+            _ => {
+                *held = Some((live.clone(), Instant::now()));
+                live
+            }
+        }
     }
 
     /// Deterministic pi session file for a chat: `<sessions>/<ts>_<chatId>.jsonl` (one session per chat).
