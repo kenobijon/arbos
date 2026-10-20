@@ -49,7 +49,8 @@ pub fn render(
     let is_people = space.is_people();
 
     // ----- the pill: avatar + name (click → the right pane) --------------------
-    // The pill wears a blue ring while its right pane is open (mockups b, f).
+    // The pill wears a blue ring while its right pane is open (mockups b, f;
+    // parity review 2026-10-20).
     let pane_open = match state.profile.as_ref() {
         Some(ProfilePage::User { space_id, .. }) => space_id.as_deref() == Some(space.id.as_str()),
         Some(ProfilePage::Group { space_id }) => space_id == &space.id,
