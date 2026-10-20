@@ -49,6 +49,13 @@ pub fn render(
     let is_people = space.is_people();
 
     // ----- the pill: avatar + name (click → the right pane) --------------------
+    // The pill wears a blue ring while its right pane is open (mockups b, f).
+    let pane_open = match state.profile.as_ref() {
+        Some(ProfilePage::User { space_id, .. }) => space_id.as_deref() == Some(space.id.as_str()),
+        Some(ProfilePage::Group { space_id }) => space_id == &space.id,
+        Some(ProfilePage::Agent { project_id }) => project_id == &space.id,
+        Some(ProfilePage::Me) | None => false,
+    };
     let mut pill = div()
         .id("header-title")
         .flex()
@@ -58,6 +65,12 @@ pub fn render(
         .pr(px(10.0))
         .rounded_full()
         .bg(theme.bubble_assistant)
+        .border_2()
+        .border_color(if pane_open {
+            theme.accent
+        } else {
+            gpui::transparent_black()
+        })
         .min_w_0()
         // The header is a window_drag region: a mouse-down that bubbles to it
         // arms a window move, and the slightest pointer jitter before the
