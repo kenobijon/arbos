@@ -296,18 +296,27 @@ struct ChatItemsList: View {
             Text(empty).font(theme.font(Theme.small)).foregroundStyle(theme.muted)
                 .frame(maxWidth: .infinity).padding(.top, 36).padding(.horizontal, 32).multilineTextAlignment(.center)
         } else if kind == .media {
+            // Square cells sized by the column (`.fit`), image drawn in an overlay and
+            // clipped — `.fill` + `scaledToFill` let large photos blow past the grid
+            // and overlap (and freeze the sheet when tapped).
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 2), count: 3), spacing: 2) {
                 ForEach(filtered) { item in
-                    ZStack {
-                        Rectangle().fill(theme.card)
-                        if let url = item.url, item.mime.hasPrefix("image/") {
-                            AsyncImage(url: url) { img in img.resizable().scaledToFill() } placeholder: { ProgressView().tint(theme.muted) }
-                        } else {
-                            Image(systemName: "film").font(.system(size: 22)).foregroundStyle(theme.muted)
+                    Color.clear
+                        .aspectRatio(1, contentMode: .fit)
+                        .background(theme.card)
+                        .overlay {
+                            if let url = item.url, item.mime.hasPrefix("image/") {
+                                AsyncImage(url: url) { img in
+                                    img.resizable().scaledToFill()
+                                } placeholder: {
+                                    ProgressView().tint(theme.muted)
+                                }
+                            } else {
+                                Image(systemName: "film").font(.system(size: 22)).foregroundStyle(theme.muted)
+                            }
                         }
-                    }
-                    .aspectRatio(1, contentMode: .fill)
-                    .clipped()
+                        .clipped()
+                        .contentShape(Rectangle())
                 }
             }
             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
