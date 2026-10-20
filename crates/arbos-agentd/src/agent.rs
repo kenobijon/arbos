@@ -608,6 +608,12 @@ pub const SUBAGENT_MAX_CONCURRENT: usize = 4;
 /// at and not handed back to the user. Mirrors the main agent's rule in `prompts/router.md`.
 const RESEARCH_SECTION: &str = "## Unknown services, APIs and tools\n\nWhen the task involves a service, API, CLI or library you do not know, or a call fails (not found, unknown endpoint, auth error, unexpected shape), find the answer yourself; guessing more than one or two URLs is not research. Until one path works: `web_search` for the service's API reference or developer docs and `web_fetch` them (the docs site, its OpenAPI/Swagger spec at `/openapi.json`, `/swagger.json`, `/docs`, `/redoc`, `/llms.txt`, the README); find the official SDK or CLI, install it (`uv tool install`, `pip install`, `npm i -g`, a release binary) and read its `--help` and, when needed, its source for the real base URL, routes and auth header; read the service's GitHub repositories and examples; read the error body. Read what you fetched before the next call. Authenticated calls go through `egress` with the secret's placeholder in a header or the body.\n\nReport `blocked` or `needs_input` only for a real blocker: a credential or account that does not exist, a choice only the user can make between real options you found, a spend decision, or a service that is down after you checked it against its docs. Never ask for docs, an API reference, an endpoint, or for the user to install something. Money: anything that charges the user beyond what the brief states (renting, buying, subscribing, paying) needs their go-ahead first: show the chosen option with its price (and a cheaper alternative when one exists) and ask with `ask_user`; listing options and quoting prices is free.\n\nSecret notes: each secret the owner stored comes with their note (`use_notes` in `secrets_list`, comments in your shell's secrets.env); the note is the policy for that key — for `egress` and for any CLI, SDK or script that reads the real `$NAME`. Spending guidance in it binds you: a limit (\"may spend up to $X without asking\") lets you proceed within it and no further; \"confirm before charging\" or \"read-only\" means ask first or never charge, whatever the brief says. A note without spending guidance leaves the money rule above in force. Never pass a confirmation-skipping flag (`--yes`, `-y`, `--force`, `--no-confirm` and the like) to a command that charges unless the note allows that spend.\n\n";
 
+/// Code mode (D86), appended to the byte-stable router prompt when `Config::code_mode()` is on: the
+/// main agent batches and filters tool work in one `codemode` program per step instead of a chain of
+/// single calls. Exact script names are given so the model does not spend a round trip guessing them
+/// (observed: `tools.arbos_submit_feedback` TypeErrors). Off: the prompt is unchanged byte for byte.
+pub const CODE_MODE_SECTION: &str = "## Code mode\n\n`codemode` runs a JavaScript program that calls your tools as async functions; only what the program prints or returns reaches you. Use one program instead of a chain of separate calls whenever the next step does not depend on your reading the previous result: read several files at once (`Promise.all`), run a search and the reads it points to, run the tests and keep only the failures, call several `arbos` tools together. Filter in code and return only what you need (counts, matching lines, the first rows, a short summary), never the raw output. Direct `read`/`bash`/`edit`/`write` calls remain right for a single step, and for an edit you must see first.\n\nNames inside a program: `tools.read({path})`, `tools.bash({command})` (resolves to `{output, exit_code}`), `tools.edit({path, edits: [{oldText, newText}]})`, `tools.write({path, content})`; every `arbos` project tool is `tools.mcp__arbos__<name>(args)`, for example `tools.mcp__arbos__web_search({query})`, `tools.mcp__arbos__web_fetch({url})`, `tools.mcp__arbos__context_search({query})`, `tools.mcp__arbos__history_search({query})`, `tools.mcp__arbos__secrets_list({})`, `tools.mcp__arbos__egress({url, method, headers, body})`, `tools.mcp__arbos__deliver_file({path, title})`, `tools.mcp__arbos__routines_create({...})`, `tools.mcp__arbos__remember({name, value})`, `tools.mcp__arbos__recall({name})`, `tools.mcp__arbos__submit_feedback({description})`. `await describeTool(\"mcp__arbos__<name>\")` shows a tool's arguments; `await searchTools(\"...\")` finds the rest. Never call `route`, `ask_user` or `send_message` from a program: those are direct calls only, and a program that tries is refused. A program has exactly your permissions: the deny-list, approval cards, secret placeholders and spending rules apply to every call it makes, and a refused call rejects with the reason. A program stops after 15 minutes; when one does, say so in one sentence and continue in smaller steps.\n";
+
 /// Why the main pi session is being prompted.
 #[derive(Debug, Clone)]
 pub enum TurnKind {
@@ -632,10 +638,66 @@ pub struct TurnOutcome {
 pub struct TurnMetrics {
     pub ttft_ms: Option<i64>,
     pub route_ms: Option<i64>,
+    /// Tool calls the model issued itself (a `codemode` script counts once).
     pub tool_calls: i64,
+    /// Calls made from inside `codemode` scripts (D86); logged like direct calls, counted apart.
+    pub nested_calls: i64,
+    /// Assistant messages = model round trips of this turn.
+    pub model_calls: i64,
+    /// Usage of the last model call (what the clients show today).
     pub usage: Option<Value>,
+    /// Summed usage of every model call of the turn (`input`, `output`, `cacheRead`, `cacheWrite`, `cost`).
+    pub usage_total: Option<Value>,
     pub route_missing: bool,
     pub route_corrected: bool,
+}
+
+impl TurnMetrics {
+    /// Fold one finished assistant message's `usage` into the per-turn totals.
+    pub fn add_model_call(&mut self, usage: Option<&Value>) {
+        self.model_calls += 1;
+        let Some(u) = usage else {
+            return;
+        };
+        let mut tot = self.usage_total.take().unwrap_or_else(
+            || json!({ "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "cost": 0.0 }),
+        );
+        for k in ["input", "output", "cacheRead", "cacheWrite"] {
+            let add = u.get(k).and_then(Value::as_i64).unwrap_or(0);
+            let cur = tot.get(k).and_then(Value::as_i64).unwrap_or(0);
+            tot[k] = json!(cur + add);
+        }
+        let add_cost = u
+            .get("cost")
+            .and_then(|c| {
+                c.get("total")
+                    .and_then(Value::as_f64)
+                    .or_else(|| c.as_f64())
+            })
+            .unwrap_or(0.0);
+        let cur_cost = tot.get("cost").and_then(Value::as_f64).unwrap_or(0.0);
+        tot["cost"] = json!(cur_cost + add_cost);
+        self.usage_total = Some(tot);
+    }
+
+    /// The `usage` field of the result row and of `turn_metrics`: the last model call's usage as
+    /// before (clients read it today), plus the per-turn totals and call counts.
+    pub fn usage_for_doc(&self) -> Value {
+        let mut v = match &self.usage {
+            Some(u) => u.clone(),
+            None => match &self.usage_total {
+                Some(_) => json!({}),
+                None => return Value::Null,
+            },
+        };
+        if let Some(t) = &self.usage_total {
+            v["total"] = t.clone();
+        }
+        v["modelCalls"] = json!(self.model_calls);
+        v["toolCalls"] = json!(self.tool_calls);
+        v["nestedCalls"] = json!(self.nested_calls);
+        v
+    }
 }
 
 pub struct TurnState {
@@ -858,6 +920,10 @@ impl Agent {
     /// Router prompt (byte-stable, first) + project instructions + T0/T1 (design §6.9 layout).
     pub fn write_system_prompt(&self) -> Result<()> {
         let mut s = String::from(include_str!("../prompts/router.md"));
+        if self.cfg.code_mode() {
+            s.push_str("\n\n");
+            s.push_str(CODE_MODE_SECTION);
+        }
         let talking = self
             .settings
             .models
@@ -1014,6 +1080,8 @@ impl Agent {
         if let Some(old) = self.pi.lock().await.take() {
             old.shutdown().await;
         }
+        // The code-mode flag is read again here (D86): toggling it needs a pi respawn, not a box restart.
+        self.write_system_prompt()?;
         let session = self.session_file_for(chat_id)?;
         let (talking_model, _) = self.live_models().await;
         let mut args = PiAdapter::common_args(
@@ -2072,7 +2140,7 @@ impl Agent {
                     ("decision", json!(route_name)),
                     ("turn", json!({ "kind": turn_kind })),
                     ("model", json!(talking_model)),
-                    ("usage", turn.metrics.usage.clone().unwrap_or(Value::Null)),
+                    ("usage", turn.metrics.usage_for_doc()),
                 ],
             );
             if turn.ack_split && !turn.row_closed {
@@ -2116,7 +2184,10 @@ impl Agent {
                 Some(&json!({ "message_id": assistant_msg_id, "route": route_name, "turn": turn_kind })),
             );
         }
-        let mut usage_rec = turn.metrics.usage.clone().unwrap_or(json!({}));
+        let mut usage_rec = turn.metrics.usage_for_doc();
+        if usage_rec.is_null() {
+            usage_rec = json!({});
+        }
         if turn.metrics.route_missing {
             usage_rec["route_missing"] = json!(true);
         }
@@ -2142,7 +2213,7 @@ impl Agent {
         let _ = self
             .post_timing("main_turn_total_ms", total_ms, Some(turn_kind))
             .await;
-        tracing::info!(chat_id, route = route_name, turn = turn_kind, ttft_ms = ?turn.metrics.ttft_ms, route_ms = ?turn.metrics.route_ms, total_ms, tool_calls = turn.metrics.tool_calls, "turn done");
+        tracing::info!(chat_id, route = route_name, turn = turn_kind, ttft_ms = ?turn.metrics.ttft_ms, route_ms = ?turn.metrics.route_ms, total_ms, tool_calls = turn.metrics.tool_calls, nested_calls = turn.metrics.nested_calls, model_calls = turn.metrics.model_calls, "turn done");
         Ok(TurnOutcome {
             assistant_msg_id,
             route_name,
@@ -2568,6 +2639,7 @@ impl Agent {
                 tool_call_id,
                 tool_name,
                 args,
+                parent_tool_call_id,
             } => {
                 // Talking to the user is not a tool step: no tool part, no count, no activity.
                 if tool_name == "route" || tool_name == "send_message" {
@@ -2578,9 +2650,18 @@ impl Agent {
                 self.set_activity(host, t, crate::activity::label(tool_name, args))
                     .await;
                 t.tool_inputs.insert(tool_call_id.clone(), args.clone());
-                t.metrics.tool_calls += 1;
+                // A call a `codemode` script made (D86) is logged exactly like a direct call —
+                // T3, the hidden tool part, the audit line the extension writes — but counted apart.
+                let nested = parent_tool_call_id.is_some();
+                if nested {
+                    t.metrics.nested_calls += 1;
+                } else {
+                    t.metrics.tool_calls += 1;
+                }
                 let one_line = args.to_string().chars().take(120).collect::<String>();
-                t.act_transcript.push(format!("→ {tool_name} {one_line}"));
+                let arrow = if nested { "  ↳" } else { "→" };
+                t.act_transcript
+                    .push(format!("{arrow} {tool_name} {one_line}"));
                 // No `step` event in the doc (one working indicator only); the hidden tool part
                 // and T3 keep the detail for the drawer.
                 let _ = self.store.t3_append(
@@ -2590,7 +2671,7 @@ impl Agent {
                     "tool_call",
                     Some("assistant"),
                     &step_label(tool_name, args),
-                    Some(&json!({ "call_id": tool_call_id, "input": args })),
+                    Some(&json!({ "call_id": tool_call_id, "input": args, "parent_call_id": parent_tool_call_id })),
                 );
                 let held = t.prose.flush();
                 if !held.is_empty() {
@@ -2615,6 +2696,7 @@ impl Agent {
                 tool_name,
                 result,
                 is_error,
+                parent_tool_call_id,
                 ..
             } => {
                 if tool_name == "route" {
@@ -2652,7 +2734,9 @@ impl Agent {
                     "tool_output",
                     Some("tool"),
                     &format!("{tool_name}: {output}"),
-                    Some(&json!({ "call_id": tool_call_id })),
+                    Some(
+                        &json!({ "call_id": tool_call_id, "parent_call_id": parent_tool_call_id }),
+                    ),
                 );
                 let summary: String = output.chars().take(TOOL_OUTPUT_SUMMARY_MAX).collect();
                 let output_ref = if output.len() > TOOL_OUTPUT_SUMMARY_MAX {
@@ -2676,12 +2760,24 @@ impl Agent {
                 }
                 t.text_part_dirty = true;
                 if *is_error {
-                    if let Some((notice, escalate)) = classify_hard_limit(&output) {
+                    // A script that hit a sandbox limit is announced in the chat (D86: limits are
+                    // never silent); an ordinary script error stays quiet, the model handles it.
+                    let limit = if tool_name == "codemode" {
+                        classify_script_limit(&output)
+                    } else {
+                        classify_hard_limit(&output)
+                    };
+                    if let Some((notice, escalate)) = limit {
                         if escalate {
                             t.escalate = true;
                         }
                         self.write_text(host, t, notice).await;
                     }
+                }
+            }
+            Event::MessageEnd { message } => {
+                if message.get("role").and_then(Value::as_str) == Some("assistant") {
+                    t.metrics.add_model_call(message.get("usage"));
                 }
             }
             Event::AgentSettled { .. } => return Ok(true),
@@ -2703,7 +2799,6 @@ impl Agent {
             | Event::TurnStart
             | Event::TurnEnd { .. }
             | Event::MessageStart { .. }
-            | Event::MessageEnd { .. }
             | Event::ToolExecutionUpdate { .. }
             | Event::QueueUpdate { .. }
             | Event::EntryAppended { .. }
@@ -4047,6 +4142,32 @@ fn turn_deadline_secs() -> u64 {
         .unwrap_or(TURN_DEADLINE_SECS)
 }
 
+/// A failed `codemode` script (D86): the sandbox's own limits — the script deadline, the 256 MB VM
+/// heap, the output-item cap — get a chat line; a plain script error (a thrown `Error`, a bad tool
+/// name) returns `None` and stays between the model and its tools.
+fn classify_script_limit(result: &str) -> Option<(&'static str, bool)> {
+    let lower = result.to_ascii_lowercase();
+    if lower.contains("script timed out") {
+        return Some((
+            "A script I was running hit its time limit; I'm continuing in smaller steps.",
+            false,
+        ));
+    }
+    if lower.contains("out of memory") {
+        return Some((
+            "A script I was running hit its memory limit; I'm continuing with smaller data.",
+            false,
+        ));
+    }
+    if lower.contains("script sandbox failed") || lower.contains("too many output items") {
+        return Some((
+            "A script I was running hit a sandbox limit; I'm continuing with smaller steps.",
+            false,
+        ));
+    }
+    classify_hard_limit(result)
+}
+
 /// Map a provider / tool error to a short chat announcement and whether to escalate to a subagent.
 /// Returns `None` when the error is not a known hard limit (ordinary tool failures stay quiet).
 fn classify_hard_limit(err: &str) -> Option<(&'static str, bool)> {
@@ -4094,6 +4215,64 @@ fn classify_hard_limit(err: &str) -> Option<(&'static str, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// D86: per-turn totals sum every model call; the doc keeps the last call's usage and gains the
+    /// totals and the three call counts.
+    #[test]
+    fn turn_metrics_sum_model_calls() {
+        let mut m = TurnMetrics::default();
+        assert!(m.usage_for_doc().is_null());
+        m.add_model_call(Some(&json!({ "input": 4, "output": 70, "cacheRead": 0, "cacheWrite": 11000, "cost": { "total": 0.0014 } })));
+        m.add_model_call(Some(&json!({ "input": 2, "output": 30, "cacheRead": 11000, "cacheWrite": 300, "cost": { "total": 0.0002 } })));
+        m.add_model_call(None);
+        m.usage = Some(json!({ "input": 2, "output": 30 }));
+        m.tool_calls = 2;
+        m.nested_calls = 5;
+        let v = m.usage_for_doc();
+        assert_eq!(v["modelCalls"], 3);
+        assert_eq!(v["toolCalls"], 2);
+        assert_eq!(v["nestedCalls"], 5);
+        assert_eq!(
+            v["input"], 2,
+            "last call's usage stays where clients read it"
+        );
+        assert_eq!(v["total"]["input"], 6);
+        assert_eq!(v["total"]["cacheRead"], 11000);
+        assert_eq!(v["total"]["cacheWrite"], 11300);
+        assert!((v["total"]["cost"].as_f64().unwrap() - 0.0016).abs() < 1e-9);
+    }
+
+    /// D86: sandbox limits of a script are announced; a plain script error is not.
+    #[test]
+    fn script_limits_are_announced_plain_errors_are_not() {
+        assert!(classify_script_limit("Script failed\nWall time 900.1 seconds\nOutput:\nScript error:\nScript timed out: deadline of 900000 ms passed").is_some());
+        assert!(classify_script_limit(
+            "Script failed\nScript error:\nInternalError: out of memory"
+        )
+        .is_some());
+        assert!(classify_script_limit("Script failed\nScript error:\nTypeError: tools.arbos_submit_feedback is not a function").is_none());
+        assert!(classify_script_limit(
+            "Script failed\nScript error:\nError: not executed: approval rejected"
+        )
+        .is_none());
+    }
+
+    /// The code-mode prompt names the exact script identifiers of the project tools, so the model
+    /// does not spend a round trip (or a TypeError) discovering them.
+    #[test]
+    fn code_mode_section_names_script_identifiers() {
+        for id in [
+            "tools.mcp__arbos__web_search",
+            "tools.mcp__arbos__egress",
+            "tools.mcp__arbos__secrets_list",
+            "tools.read(",
+            "tools.bash(",
+        ] {
+            assert!(CODE_MODE_SECTION.contains(id), "missing {id}");
+        }
+        assert!(CODE_MODE_SECTION
+            .contains("Never call `route`, `ask_user` or `send_message` from a program"));
+    }
 
     /// Routing rule: the inline `reply` streams out of partial JSON exactly as written.
     #[test]

@@ -23,6 +23,35 @@ fn env_or(k: &str, d: &str) -> String {
         .unwrap_or_else(|| d.to_owned())
 }
 
+/// Box-local override of the code-mode flag: `<work_root>/.arbos/code-mode` holding `on` or `off`.
+pub const CODE_MODE_FILE: &str = "code-mode";
+
+/// `on` / `off` / `1` / `0` / `true` / `false` / `yes` / `no` → `Some(bool)`; anything else → `None`.
+pub fn parse_switch(s: &str) -> Option<bool> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "on" | "1" | "true" | "yes" => Some(true),
+        "off" | "0" | "false" | "no" => Some(false),
+        _ => None,
+    }
+}
+
+/// Code mode (D86): the main agent is told to batch and filter tool work in `codemode` scripts, with
+/// the script guardrails on. `ARBOS_CODE_MODE=on|off` from the box environment (the relay passes it
+/// through, so one relay setting switches the fleet); a box-local file (`override`) wins when it holds a
+/// valid value, so one test box can run the other arm. Default **off** until the eval passes.
+pub fn code_mode_on(override_file: &std::path::Path) -> bool {
+    if let Some(v) = std::fs::read_to_string(override_file)
+        .ok()
+        .and_then(|s| parse_switch(&s))
+    {
+        return v;
+    }
+    std::env::var("ARBOS_CODE_MODE")
+        .ok()
+        .and_then(|s| parse_switch(&s))
+        .unwrap_or(false)
+}
+
 /// Box-level settings: what every workspace shares.
 #[derive(Debug, Clone)]
 pub struct BoxConfig {
@@ -288,6 +317,13 @@ impl Config {
         self.state_dir.join("audit.jsonl")
     }
 
+    /// Code mode for this workspace's main agent (D86). Read at every pi (re)spawn, so a toggle
+    /// needs a pi respawn, not a box restart.
+    pub fn code_mode(&self) -> bool {
+        let root = self.work_dir.parent().unwrap_or(&self.work_dir);
+        code_mode_on(&root.join(".arbos").join(CODE_MODE_FILE))
+    }
+
     /// Browser settings per workspace: own profile, screenshots, stream port (the image's
     /// box-wide defaults would collide between workspaces and are unwritable to their users).
     pub fn browser_env(&self) -> Vec<(String, String)> {
@@ -305,5 +341,42 @@ impl Config {
                 self.browser_stream_port.to_string(),
             ),
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn switch_words() {
+        assert_eq!(parse_switch(" ON\n"), Some(true));
+        assert_eq!(parse_switch("off"), Some(false));
+        assert_eq!(parse_switch("1"), Some(true));
+        assert_eq!(parse_switch("maybe"), None);
+        assert_eq!(parse_switch(""), None);
+    }
+
+    /// The box-local file wins over the environment; a garbage file falls back to the env; the
+    /// default is off.
+    #[test]
+    fn code_mode_file_overrides_env() {
+        let dir = std::env::temp_dir().join(format!("arbos-cm-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join(CODE_MODE_FILE);
+        let _ = std::fs::remove_file(&f);
+        // No env in the test process unless the runner set one: the default is off.
+        if std::env::var("ARBOS_CODE_MODE").is_err() {
+            assert!(!code_mode_on(&f));
+        }
+        std::fs::write(&f, "on\n").unwrap();
+        assert!(code_mode_on(&f));
+        std::fs::write(&f, "off").unwrap();
+        assert!(!code_mode_on(&f));
+        std::fs::write(&f, "banana").unwrap();
+        if std::env::var("ARBOS_CODE_MODE").is_err() {
+            assert!(!code_mode_on(&f));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

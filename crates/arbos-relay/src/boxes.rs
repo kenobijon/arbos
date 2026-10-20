@@ -65,6 +65,10 @@ pub(crate) fn box_env(
     if let Ok(h) = std::env::var("ARBOS_DEFAULT_HARNESS") {
         env.insert("ARBOS_DEFAULT_HARNESS".into(), h);
     }
+    // Code mode (D86): one relay setting switches every new box; agentd defaults to off without it.
+    if let Ok(m) = std::env::var("ARBOS_CODE_MODE") {
+        env.insert("ARBOS_CODE_MODE".into(), m);
+    }
     let _ = state;
     env
 }
