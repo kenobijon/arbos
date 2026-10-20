@@ -282,6 +282,48 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
             let handle = this.people_input.read(cx).focus_handle(cx);
             window.focus(&handle, cx);
         }));
+    // The magnifier shows the search field below (and keeps it while a query
+    // is typed); Escape or the clear dot fold it (three-pane rule: the strip
+    // holds exactly +, search, minimize).
+    let search_shown = shell.search_open || !query.is_empty();
+    let search_toggle = div()
+        .id("sidebar-search-toggle")
+        .size(px(28.0))
+        .flex_shrink_0()
+        .rounded(px(7.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .bg(if search_shown {
+            theme.surface_2
+        } else {
+            gpui::transparent_black()
+        })
+        .hover(|s| s.bg(theme.surface_2))
+        .child(icon(
+            "search",
+            16.0,
+            if search_shown {
+                theme.text
+            } else {
+                theme.text_muted
+            },
+        ))
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(cx.listener(|this, _, window, cx| {
+            this.menu_open = false;
+            if this.search_open {
+                this.search_open = false;
+                this.search_input.update(cx, |i, cx| i.clear(cx));
+                Composer::focus(&this.composer, window, cx);
+            } else {
+                this.search_open = true;
+                let handle = this.search_input.read(cx).focus_handle(cx);
+                window.focus(&handle, cx);
+            }
+            cx.notify();
+        }));
     let strip = div()
         .h(px(top_strip()))
         .flex_shrink_0()
@@ -291,8 +333,9 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         .gap(px(2.0))
         .px(px(12.0))
         .pb(px(2.0))
-        .child(collapse)
         .child(plus)
+        .child(search_toggle)
+        .child(collapse)
         .window_drag();
     let search = div()
         .id("sidebar-search")
@@ -324,6 +367,7 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
                     .child(icon("xmark", 8.0, theme.bg))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.search_input.update(cx, |i, cx| i.clear(cx));
+                        this.search_open = false;
                         Composer::focus(&this.composer, window, cx);
                         cx.notify();
                     })),
@@ -517,12 +561,239 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         .border_r_1()
         .border_color(theme.border)
         .child(strip)
-        .child(search)
-        .child(edge_faded(14.0, true, true, list));
+        .when(search_shown && shell.server_pane.is_none(), |el| {
+            el.child(search)
+        })
+        .child(match shell.server_pane.as_ref() {
+            // Inside a server the left pane shows its channels (mockup h).
+            Some(server) => edge_faded(14.0, true, true, server_channels(server, &theme, cx)),
+            None => edge_faded(14.0, true, true, list),
+        });
     if let Some(update) = shell.render_update_button(cx) {
         column = column.child(div().px(px(12.0)).pb(px(8.0)).child(update));
     }
     column.child(account_row)
+}
+
+/// A server as the left pane shows it: the layout hook for servers (which do
+/// not exist yet) — `‹` back to chats, the server's disc and name, then its
+/// channels. `Shell::server_pane` holds the one being shown.
+#[derive(Clone, Debug)]
+pub struct ServerPane {
+    pub id: String,
+    pub name: String,
+    pub channels: Vec<ChannelRow>,
+    /// The channel the centre shows (by `ChannelRow::name`).
+    pub selected: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ChannelRow {
+    pub name: String,
+    /// `announcements`-style read-mostly channel (speaker glyph) vs `#`.
+    pub announcement: bool,
+    pub locked: bool,
+    pub unread: bool,
+    pub preview: String,
+}
+
+impl ServerPane {
+    /// Rig (`ARBOS_SHOW_SERVER=1`): the mockup's sample so the layout can be seen.
+    pub fn demo() -> Self {
+        let ch = |name: &str, announcement: bool, locked: bool, unread: bool, preview: &str| {
+            ChannelRow {
+                name: name.into(),
+                announcement,
+                locked,
+                unread,
+                preview: preview.into(),
+            }
+        };
+        Self {
+            id: "demo".into(),
+            name: "Launch Crew".into(),
+            channels: vec![
+                ch(
+                    "announcements",
+                    true,
+                    false,
+                    false,
+                    "Mira K.: Rules are pinned here.",
+                ),
+                ch(
+                    "general",
+                    false,
+                    false,
+                    false,
+                    "Sam: Hi! Joined from the blog link.",
+                ),
+                ch("design", false, false, true, "Mira K. pinned the roadmap."),
+                ch(
+                    "release-train",
+                    false,
+                    true,
+                    false,
+                    "Tomas: 1.90 cut is tagged",
+                ),
+                ch(
+                    "support",
+                    false,
+                    false,
+                    false,
+                    "Arbos: Fixed. The invite link works again.",
+                ),
+            ],
+            selected: Some("general".into()),
+        }
+    }
+}
+
+/// The server's channel list: back row, then one row per channel.
+fn server_channels(
+    server: &ServerPane,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> gpui::Stateful<Div> {
+    let back = div()
+        .id("server-back")
+        .flex()
+        .items_center()
+        .gap(px(10.0))
+        .px(px(8.0))
+        .pt(px(4.0))
+        .pb(px(10.0))
+        .child(
+            glass::circle("server-back-circle", 30.0, theme)
+                .child(icon("chevron-left", 14.0, theme.text))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.server_pane = None;
+                    cx.notify();
+                })),
+        )
+        .child(avatars::element(
+            &server.id,
+            &server.name,
+            None,
+            26.0,
+            theme,
+        ))
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_size(px(TEXT_BODY))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.text)
+                .child(server.name.clone()),
+        );
+    let mut list = div()
+        .id("channel-list")
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .px(px(8.0))
+        .pt(px(6.0))
+        .pb(px(12.0))
+        .overflow_y_scroll()
+        .child(back);
+    if server.channels.is_empty() {
+        list = list.child(
+            div()
+                .pt(px(40.0))
+                .text_center()
+                .text_size(px(TEXT_SMALL))
+                .text_color(theme.text_muted)
+                .child("No channels yet."),
+        );
+    }
+    for ch in &server.channels {
+        let selected = server.selected.as_deref() == Some(ch.name.as_str());
+        let name = ch.name.clone();
+        list = list.child(
+            div()
+                .id(ElementId::Name(SharedString::from(format!(
+                    "channel-{}",
+                    ch.name
+                ))))
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .px(px(12.0))
+                .py(px(9.0))
+                .rounded(px(PANEL_RADIUS - 4.0))
+                .bg(if selected {
+                    theme.surface_2
+                } else {
+                    gpui::transparent_black()
+                })
+                .hover(|s| s.bg(Theme::with_alpha(theme.surface_2, 0.55)))
+                .cursor_pointer()
+                .child(
+                    div()
+                        .size(px(AVATAR_ROW))
+                        .flex_shrink_0()
+                        .rounded(px(10.0))
+                        .bg(theme.surface_2)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(icon(
+                            if ch.announcement { "waveform" } else { "hash" },
+                            18.0,
+                            theme.text_muted,
+                        )),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(px(2.0))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_size(px(TEXT_BODY))
+                                        .font_weight(if ch.unread {
+                                            FontWeight::SEMIBOLD
+                                        } else {
+                                            FontWeight::MEDIUM
+                                        })
+                                        .text_color(theme.text)
+                                        .child(ch.name.clone()),
+                                )
+                                .when(ch.locked, |el| {
+                                    el.child(icon("lock", 11.0, theme.text_faint))
+                                }),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(TEXT_SMALL))
+                                .text_color(theme.text_muted)
+                                .child(ch.preview.clone()),
+                        ),
+                )
+                .when(ch.unread, |el| {
+                    el.child(div().size(px(8.0)).rounded_full().bg(theme.accent))
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(server) = this.server_pane.as_mut() {
+                        server.selected = Some(name.clone());
+                    }
+                    cx.notify();
+                })),
+        );
+    }
+    list
 }
 
 fn render_row(
