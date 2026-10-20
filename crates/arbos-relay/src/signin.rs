@@ -819,6 +819,36 @@ pub async fn put_avatar(
     Json(json!({ "avatar_url": avatar_url, "user": user_json(&state, &user_id) })).into_response()
 }
 
+/// `DELETE /me/avatar`: drop the uploaded picture; the GitHub avatar (by github_id, GitHub's
+/// stable URL) shows again, or the D79 coloured initials when there is none.
+pub async fn delete_avatar(State(state): State<AppState>, principal: Principal) -> Response {
+    let user_id = match &principal {
+        Principal::Device { user_id, .. } => user_id.clone(),
+        Principal::Box { .. } | Principal::Admin => {
+            return api_error(StatusCode::FORBIDDEN, "forbidden", "device token required")
+        }
+    };
+    if !safe_avatar_user_id(&user_id) {
+        return api_error(StatusCode::BAD_REQUEST, "bad_user", "bad user id");
+    }
+    let _ = tokio::fs::remove_file(avatar_file(&state, &user_id)).await;
+    let github = state
+        .db
+        .user(&user_id)
+        .ok()
+        .flatten()
+        .and_then(|u| u.github_id)
+        .map(|id| format!("https://avatars.githubusercontent.com/u/{id}?v=4"));
+    match state.db.clear_user_avatar_url(&user_id, github.as_deref()) {
+        Ok(()) => Json(json!({ "avatar_url": github, "user": user_json(&state, &user_id) }))
+            .into_response(),
+        Err(e) if e.to_string() == "no such user" => {
+            api_error(StatusCode::NOT_FOUND, "not_found", "no such user")
+        }
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    }
+}
+
 /// `GET /avatars/{user_id}.jpg` — public (same role as a GitHub CDN avatar URL).
 pub async fn get_avatar(State(state): State<AppState>, Path(file): Path<String>) -> Response {
     let user_id = file.strip_suffix(".jpg").unwrap_or(file.as_str());

@@ -359,7 +359,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/auth/devices", get(signin::devices_list))
         .route("/auth/devices/{id}", delete(signin::device_revoke))
         .route("/me", get(signin::me).patch(signin::patch_me))
-        .route("/me/avatar", put(signin::put_avatar))
+        .route(
+            "/me/avatar",
+            put(signin::put_avatar).delete(signin::delete_avatar),
+        )
         .route("/avatars/{file}", get(signin::get_avatar))
         .route("/me/pushes", get(people::me_pushes))
         .route("/me/unread", get(notify::me_unread))

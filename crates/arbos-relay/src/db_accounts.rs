@@ -385,6 +385,24 @@ impl Db {
         Ok(())
     }
 
+    /// Back to the GitHub picture (or none): `DELETE /me/avatar`.
+    pub fn clear_user_avatar_url(
+        &self,
+        user_id: &str,
+        github_fallback: Option<&str>,
+    ) -> Result<()> {
+        let n = self.with(|c| {
+            c.execute(
+                "UPDATE users SET avatar_url = ?2 WHERE id = ?1",
+                params![user_id, github_fallback],
+            )
+        })?;
+        if n == 0 {
+            return Err(anyhow!("no such user"));
+        }
+        Ok(())
+    }
+
     /// Display name and/or handle (`PATCH /me`). `login` must already be validated and unique.
     /// `None` for a field leaves it unchanged; empty `name` stores NULL (clients show `@handle`).
     pub fn set_user_profile(
