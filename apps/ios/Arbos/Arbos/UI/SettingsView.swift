@@ -60,9 +60,6 @@ struct SettingsView: View {
                             SettingsRow(icon: "key.fill", title: "Secrets", value: model.secretsRowValue,
                                         valueTint: model.secrets?.paused == true ? theme.danger : nil)
                         }
-                        NavigationLink { GoalsPage() } label: {
-                            SettingsRow(icon: "flag.fill", title: "Goals", value: model.goalsRowValue)
-                        }
                     }
                     if !model.isFixture {
                         SettingsRow(icon: "iphone", title: "On this iPhone", value: storageLine, chevron: false)
