@@ -200,6 +200,11 @@ async fn main() -> anyhow::Result<()> {
         anthropic_key,
         openai_key,
         openai_base: args.openai_base.clone(),
+        openai_direct_base: env_nonempty("ARBOS_OPENAI_DIRECT_BASE")
+            .unwrap_or_else(|| "https://api.openai.com/v1".to_owned()),
+        openai_route: state::OpenAiRoute::parse(
+            &std::env::var("ARBOS_OPENAI_ROUTE").unwrap_or_default(),
+        ),
         openai_images_base: args.openai_images_base.clone(),
         anthropic_base,
         daytona_snapshot: args.daytona_snapshot.clone(),

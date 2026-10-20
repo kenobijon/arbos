@@ -71,6 +71,38 @@ fn model_leaf(model: &str) -> &str {
     model.rsplit('/').next().unwrap_or(model)
 }
 
+/// An OpenAI model id as the apps send it: `openai/<leaf>` (OpenRouter style) or a bare
+/// `gpt-*` / `o*` / `chatgpt-*` leaf.
+fn is_openai_model(model: &str) -> bool {
+    let m = model.trim();
+    if let Some(leaf) = m.strip_prefix("openai/") {
+        return !leaf.is_empty();
+    }
+    if m.contains('/') {
+        return false;
+    }
+    let l = m.to_ascii_lowercase();
+    l.starts_with("gpt-")
+        || l.starts_with("chatgpt-")
+        || l.starts_with("o1")
+        || l.starts_with("o3")
+        || l.starts_with("o4")
+}
+
+/// Send this OpenAI model straight to OpenAI (first-party key) instead of through OpenRouter?
+/// Yes when the relay has an `OPENAI_API_KEY` and the route is `direct` or `auto`; the model id
+/// then loses its `openai/` prefix. OpenRouter's OpenAI route refuses our account.
+fn openai_goes_direct(cfg: &crate::state::Config, model: &str) -> bool {
+    use crate::state::OpenAiRoute;
+    if !is_openai_model(model) || cfg.openai_key.is_none() {
+        return false;
+    }
+    match cfg.openai_route {
+        OpenAiRoute::Direct | OpenAiRoute::Auto => true,
+        OpenAiRoute::OpenRouter => false,
+    }
+}
+
 /// GPT-5 / GPT-6 (and o-series) OpenAI reasoning models: OpenRouter lists no `temperature`,
 /// and OpenAI itself rejects `max_tokens` in favour of `max_completion_tokens`.
 fn is_openai_reasoning_model(model: &str) -> bool {
@@ -318,8 +350,29 @@ async fn forward(
 
     let (url, key, key_header): (String, String, &str) = match api {
         Api::OpenAi => {
-            let base = state.cfg.openai_base.trim_end_matches('/').to_owned();
-            let key = if base.contains("openrouter") {
+            let direct = openai_goes_direct(&state.cfg, &model);
+            let base = if direct {
+                state
+                    .cfg
+                    .openai_direct_base
+                    .trim_end_matches('/')
+                    .to_owned()
+            } else {
+                state.cfg.openai_base.trim_end_matches('/').to_owned()
+            };
+            if direct {
+                // OpenAI wants the bare id; OpenRouter wanted `openai/<id>`.
+                let leaf = model_leaf(&model).to_owned();
+                if leaf != model {
+                    model = leaf;
+                    if let Some(v) = req_json.as_mut() {
+                        v["model"] = json!(model);
+                    }
+                }
+            }
+            let key = if direct {
+                state.cfg.openai_key.clone()
+            } else if base.contains("openrouter") {
                 state.cfg.openrouter_key.clone()
             } else {
                 state
@@ -1009,6 +1062,33 @@ pub async fn openai_models(State(state): State<AppState>, _principal: Principal)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn openai_models_go_direct_when_a_key_exists() {
+        use crate::state::test_support::test_state;
+        use crate::state::{AuthMode, OpenAiRoute};
+        let mut cfg = (*test_state(AuthMode::Github).cfg).clone();
+        assert!(is_openai_model("openai/gpt-6-luna"));
+        assert!(is_openai_model("gpt-5-mini"));
+        assert!(is_openai_model("o3-mini"));
+        assert!(!is_openai_model("anthropic/claude-haiku-5.5"));
+        assert!(!is_openai_model("google/gemini-4-argon"));
+        // No OpenAI key: everything stays on the configured (OpenRouter) base.
+        cfg.openai_key = None;
+        cfg.openai_route = OpenAiRoute::Auto;
+        assert!(!openai_goes_direct(&cfg, "openai/gpt-6-luna"));
+        // Key present, auto: OpenAI models go first-party; other vendors do not.
+        cfg.openai_key = Some("sk-test".into());
+        assert!(openai_goes_direct(&cfg, "openai/gpt-6-luna"));
+        assert!(openai_goes_direct(&cfg, "gpt-5-mini"));
+        assert!(!openai_goes_direct(&cfg, "anthropic/claude-haiku-5.5"));
+        // Explicit OpenRouter keeps the old path even with a key.
+        cfg.openai_route = OpenAiRoute::OpenRouter;
+        assert!(!openai_goes_direct(&cfg, "openai/gpt-6-luna"));
+        cfg.openai_route = OpenAiRoute::Direct;
+        assert!(openai_goes_direct(&cfg, "openai/gpt-6-luna"));
+        assert_eq!(model_leaf("openai/gpt-6-luna"), "gpt-6-luna");
+    }
 
     #[test]
     fn astra_is_openai_reasoning_and_needs_min_effort() {

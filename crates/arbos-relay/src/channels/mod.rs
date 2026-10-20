@@ -750,6 +750,8 @@ mod tests {
                 .map(|s| (*s).to_owned())
                 .collect(),
             multi_chat: false,
+            openai_direct_base: String::new(),
+            openai_route: crate::state::OpenAiRoute::Auto,
         };
         AppState {
             db,

@@ -23,6 +23,13 @@ pub struct Config {
     pub openai_base: String,
     /// Upstream for `/proxy/v1/images/generations` (OpenAI's own API; OpenRouter has no images endpoint).
     pub openai_images_base: String,
+    /// Where `openai/*` chat models go when `OPENAI_API_KEY` exists (`ARBOS_OPENAI_DIRECT_BASE`,
+    /// default `https://api.openai.com/v1`). OpenRouter's OpenAI route refuses our account
+    /// ("blocked for a previous policy violation", 2026-10-20); the direct route is first-party.
+    pub openai_direct_base: String,
+    /// `ARBOS_OPENAI_ROUTE`: `direct` (default when a key exists), `openrouter`, or `auto`
+    /// (= direct when `OPENAI_API_KEY` is set, else OpenRouter).
+    pub openai_route: OpenAiRoute,
     pub anthropic_base: String,
     pub daytona_snapshot: String,
     /// Inline Dockerfile for Daytona's declarative builder when the snapshot is not registered.
@@ -78,6 +85,24 @@ pub struct Config {
     /// `ARBOS_MULTI_CHAT=1`: agents may open extra chats/tabs (the "Projects ⇄" tab, box-created
     /// chats). Off by default: one chat per agent; a box asking for a new chat gets the primary one.
     pub multi_chat: bool,
+}
+
+/// How `openai/*` models reach OpenAI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenAiRoute {
+    Auto,
+    Direct,
+    OpenRouter,
+}
+
+impl OpenAiRoute {
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "direct" | "openai" => OpenAiRoute::Direct,
+            "openrouter" => OpenAiRoute::OpenRouter,
+            _ => OpenAiRoute::Auto,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -362,6 +387,8 @@ pub(crate) mod test_support {
             connectors_mock: true,
             channels_mock: true,
             openai_images_base: String::new(),
+            openai_direct_base: "https://api.openai.com/v1".into(),
+            openai_route: super::OpenAiRoute::Auto,
             image_mock: false,
             voice_mock: true,
             openai_audio_base: String::new(),
