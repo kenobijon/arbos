@@ -289,24 +289,10 @@ pub fn render(
                 if on { theme.text } else { theme.text_muted },
             ))
     };
-    // An agent chat has nothing here: calls (and hanging up) live on the
-    // composer's phone button, everything else on the profile page or the
-    // sidebar row's control-click menu. A DM keeps "add people"; a group adds
-    // members from its page.
-    let mut right = div().flex().items_center().gap(px(2.0));
-    if is_people && !space.is_people_group() {
-        right = right.child(
-            button("header-members", "person-plus", shell.members_open, &theme).on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.members_open = !this.members_open;
-                    this.add_agent_open = false;
-                    cx.notify();
-                }),
-            ),
-        );
-    }
+    // Nothing here (2026-10-20): calls live on the composer's phone button;
+    // adding people or agents to a chat lives in the right pane's Members
+    // list. The DM's "add person" button and agent chips are gone.
+    let right = div().flex().items_center().gap(px(2.0));
 
     let tabs = if is_people {
         None
@@ -780,13 +766,8 @@ fn tab_menu(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl Int
     glass::frosted_menu(260.0, &theme, body)
 }
 
-/// Chips under the header: agents + "Add agent" for a DM. `None` for an agent
-/// (its chat tabs live in the header, `agent_tabs`) and for a group — its
-/// agents are members, added through the page's "Add members" row.
-pub fn chips(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option<AnyElement> {
-    if !space.is_people() || space.is_people_group() {
-        return None;
-    }
-    let theme = Theme::of(cx).clone();
-    Some(people::member_chips(space, shell.add_agent_open, &theme, cx).into_any_element())
+/// Chips under the header: none (2026-10-20). A DM's agents sit in the right
+/// pane's Members list, where "Add members" adds people and agents alike.
+pub fn chips(_shell: &Shell, _space: &Project, _cx: &mut Context<Shell>) -> Option<AnyElement> {
+    None
 }
