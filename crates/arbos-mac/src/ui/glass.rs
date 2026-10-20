@@ -154,13 +154,14 @@ pub fn group(theme: &Theme) -> Div {
 
 /// One row in a grouped card: label left, value right. Not interactive.
 pub fn row(label: impl Into<SharedString>, theme: &Theme) -> Div {
+    // The pane kit's metrics (profiles::kit): 48 pt rows, 16 pt inset.
     div()
         .flex()
         .items_center()
-        .gap(px(10.0))
-        .min_h(px(44.0))
+        .gap(px(12.0))
+        .min_h(px(48.0))
         .px(px(16.0))
-        .py(px(10.0))
+        .py(px(6.0))
         .border_b_1()
         .border_color(theme.border)
         .text_size(px(TEXT_BODY))
@@ -193,17 +194,6 @@ pub fn nav_row(
     theme: &Theme,
 ) -> Stateful<Div> {
     nav_row_with(id, None, label, detail, theme)
-}
-
-/// `nav_row` with an Apple-style icon tile in front of the label (D80 settings).
-pub fn nav_row_icon(
-    id: impl Into<ElementId>,
-    glyph: &str,
-    label: impl Into<SharedString>,
-    detail: Option<String>,
-    theme: &Theme,
-) -> Stateful<Div> {
-    nav_row_with(id, Some(glyph), label, detail, theme)
 }
 
 fn nav_row_with(
