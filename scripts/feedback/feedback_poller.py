@@ -2118,14 +2118,16 @@ class Loop:
         if st.get("expects_ci") and rel and rel["status"] == "completed" and not st.get("release_done"):
             if rel["conclusion"] == "success":
                 built = st.get("release_superseded_by") or sha
-                edge = next((r["tag_name"] for r in self.gh.releases()
-                             if r["tag_name"].startswith("edge-") and r.get("target_commitish", "").startswith(built[:7])), None)
+                rels = [r for r in self.gh.releases() if not r.get("draft")]
+                # Auto-stable (D85): one vX.Y.Z per green batch, the bump commit sits on top of main (maybe only under the
+                # tag) — so match by "the release's commit contains the fix", stable first; edge-per-push is the fallback.
+                edge = next((r["tag_name"] for r in rels if re.fullmatch(r"v\d+\.\d+\.\d+", r["tag_name"]) and self.gh.contains(r["tag_name"], sha)), None) \
+                    or next((r["tag_name"] for r in rels if r["tag_name"].startswith("edge-") and r.get("target_commitish", "").startswith(built[:7])), None)
                 if not edge and any(f.startswith(("crates/arbos-mac/", "crates/arbos-update/")) for f in st.get("files") or []):
                     # A green Release run is not a release: with per-fix auto-stable tags the published release
                     # may lag or fail to publish. Find any release (stable or edge, newest first) whose commit
                     # contains the fix; until one exists the item stays `pushed` / fixed-on-main (#1079, 23:07).
-                    edge = next((r["tag_name"] for r in self.gh.releases()
-                                 if r.get("target_commitish") and not r.get("draft") and self.gh.contains(r["tag_name"], sha)), None)
+                    edge = next((r["tag_name"] for r in rels if r["tag_name"].startswith("edge-") and self.gh.contains(r["tag_name"], sha)), None)
                     if not edge:
                         if st.get("release_wait_noted") != rel["html_url"]:
                             st["release_wait_noted"] = rel["html_url"]
@@ -2230,10 +2232,10 @@ class Loop:
                         tag = r["tag_name"]  # newest stable release that carries the fix
                         break
             edge = st.get("edge_release")
-            if tag and edge:
+            if tag and edge and edge != tag and edge.startswith("edge-"):
                 parts.append(f"Mac {tag} ({edge})")
-            elif tag:
-                parts.append(f"Mac {tag}")
+            elif tag or (edge and not edge.startswith("edge-")):
+                parts.append(f"Mac {tag or edge}")
             elif edge:
                 parts.append(f"Mac {edge} (stable follows)")
         if st.get("deployed_note"):
@@ -2373,7 +2375,11 @@ class Loop:
             tag = (st.get("closed") or {}).get("where") or ""
             m = re.search(r"Mac v(\d+\.\d+\.\d+)", tag)
             stable = self._ver(m.group(1)) if m else ()
-            edge_no = int(re.search(r"\.(\d+)$", st["edge_release"]).group(1)) if st.get("edge_release") and re.search(r"\.(\d+)$", st["edge_release"]) else None
+            # Only an edge-* tag carries a build number; a stable vX.Y.Z (auto-stable releases) is matched by app_version.
+            m_edge = re.search(r"^edge-.*\.(\d+)$", st.get("edge_release") or "")
+            edge_no = int(m_edge.group(1)) if m_edge else None
+            if not stable and re.fullmatch(r"v\d+\.\d+\.\d+", st.get("edge_release") or ""):
+                stable = self._ver(st["edge_release"])
             tf = int(st["testflight_build"]) if str(st.get("testflight_build") or "").isdigit() else None
             hits = []
             for r in rows:

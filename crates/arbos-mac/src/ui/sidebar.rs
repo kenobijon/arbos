@@ -270,7 +270,10 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         .on_click(cx.listener(|this, _, window, cx| {
             this.menu_open = false;
             this.settings_open = false;
-            this.people_input.update(cx, |i, cx| i.clear(cx));
+            this.people_input.update(cx, |i, cx| {
+                i.clear(cx);
+                i.set_placeholder("Search people");
+            });
             this.state.update(cx, |s, cx| s.open_new_chat(cx));
             let handle = this.people_input.read(cx).focus_handle(cx);
             window.focus(&handle, cx);

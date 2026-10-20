@@ -257,6 +257,10 @@ pub struct AppState {
     pub mark: Option<Arc<RenderImage>>,
     /// People chats (D72): the new-chat sheet, directory results, typing, avatars.
     pub new_chat_open: bool,
+    /// New Message → New group: multi-select people (and optional agents).
+    pub new_group_open: bool,
+    pub new_group_picked: Vec<Person>,
+    pub new_group_agents: Vec<Id>,
     pub people_query: String,
     pub people_results: Vec<Person>,
     pub people_busy: bool,
@@ -267,6 +271,8 @@ pub struct AppState {
     pub avatars: HashMap<String, Option<Arc<RenderImage>>>,
     /// A DM just started from the sheet: select it when it arrives.
     awaiting_dm: Option<String>,
+    /// A people group just created: select it when those handles appear.
+    awaiting_group: Option<Vec<String>>,
     /// The sheet invites into this project instead of starting a DM (step 3).
     pub invite_target: Option<Id>,
     /// Avatar reply reaction window per project (ms): plays once after a turn.
@@ -563,6 +569,9 @@ impl AppState {
                     )
                 }),
             new_chat_open: false,
+            new_group_open: false,
+            new_group_picked: Vec::new(),
+            new_group_agents: Vec::new(),
             people_query: String::new(),
             people_results: Vec::new(),
             people_busy: false,
@@ -570,6 +579,7 @@ impl AppState {
             typing: HashMap::new(),
             avatars: HashMap::new(),
             awaiting_dm: None,
+            awaiting_group: None,
             invite_target: None,
             avatar_reply_until: HashMap::new(),
             avatar_picker: None,
@@ -1032,6 +1042,7 @@ impl AppState {
                 self.people_busy = false;
                 self.people_error = Some(err);
                 self.awaiting_dm = None;
+                self.awaiting_group = None;
                 cx.notify();
             }
             SyncEvent::Presence { handle } => {
@@ -1177,6 +1188,24 @@ impl AppState {
                     {
                         self.awaiting_dm = None;
                         self.new_chat_open = false;
+                        let id = space.id.clone();
+                        self.projects = projects.clone();
+                        self.select_project(id, cx);
+                    }
+                }
+                if let Some(handles) = self.awaiting_group.clone() {
+                    if let Some(space) = projects.iter().find(|p| {
+                        p.is_people_group()
+                            && p.people.len() == handles.len()
+                            && handles
+                                .iter()
+                                .all(|h| p.people.iter().any(|x| x.handle == *h))
+                    }) {
+                        self.awaiting_group = None;
+                        self.new_chat_open = false;
+                        self.new_group_open = false;
+                        self.new_group_picked.clear();
+                        self.new_group_agents.clear();
                         let id = space.id.clone();
                         self.projects = projects.clone();
                         self.select_project(id, cx);
@@ -3660,6 +3689,9 @@ impl AppState {
     pub fn open_new_chat(&mut self, cx: &mut Context<Self>) {
         self.new_chat_open = true;
         self.new_project_open = false;
+        self.new_group_open = false;
+        self.new_group_picked.clear();
+        self.new_group_agents.clear();
         self.invite_target = None;
         self.people_query.clear();
         self.people_results.clear();
@@ -3676,13 +3708,99 @@ impl AppState {
 
     pub fn close_new_chat(&mut self, cx: &mut Context<Self>) {
         self.new_chat_open = false;
+        self.new_group_open = false;
+        self.new_group_picked.clear();
+        self.new_group_agents.clear();
         self.awaiting_dm = None;
+        self.awaiting_group = None;
         self.invite_target = None;
+        cx.notify();
+    }
+
+    /// New Message → New group: multi-select people and optional agents.
+    pub fn open_new_group(&mut self, cx: &mut Context<Self>) {
+        self.new_group_open = true;
+        self.new_project_open = false;
+        self.new_group_picked.clear();
+        self.new_group_agents.clear();
+        self.people_error = None;
+        self.people_query.clear();
+        self.search_people(String::new(), cx);
+        cx.notify();
+    }
+
+    /// Leave New group and return to the New Message sheet.
+    pub fn close_new_group(&mut self, cx: &mut Context<Self>) {
+        self.new_group_open = false;
+        self.new_group_picked.clear();
+        self.new_group_agents.clear();
+        self.people_error = None;
+        self.people_query.clear();
+        self.search_people(String::new(), cx);
+        cx.notify();
+    }
+
+    pub fn toggle_group_person(&mut self, person: Person, cx: &mut Context<Self>) {
+        if let Some(i) = self
+            .new_group_picked
+            .iter()
+            .position(|p| p.id == person.id || p.handle == person.handle)
+        {
+            self.new_group_picked.remove(i);
+        } else {
+            self.new_group_picked.push(person);
+        }
+        self.people_error = None;
+        cx.notify();
+    }
+
+    pub fn toggle_group_agent(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        if let Some(i) = self
+            .new_group_agents
+            .iter()
+            .position(|id| id == &project_id)
+        {
+            self.new_group_agents.remove(i);
+        } else {
+            self.new_group_agents.push(project_id);
+        }
+        self.people_error = None;
+        cx.notify();
+    }
+
+    /// Create the people group (at least one other person), then add any agents.
+    pub fn create_people_group(&mut self, cx: &mut Context<Self>) {
+        let handles: Vec<String> = self
+            .new_group_picked
+            .iter()
+            .map(|p| p.handle.clone())
+            .collect();
+        if handles.is_empty() {
+            self.people_error = Some("Add at least one other person".into());
+            cx.notify();
+            return;
+        }
+        let agent_ids = self.new_group_agents.clone();
+        self.people_busy = true;
+        self.people_error = None;
+        self.awaiting_group = Some(handles.clone());
+        self.command(ClientCommand::CreatePeopleGroup { handles, agent_ids });
         cx.notify();
     }
 
     /// The sheet's pick: invite into the target project or start a DM.
     pub fn pick_person(&mut self, handle: String, cx: &mut Context<Self>) {
+        if self.new_group_open {
+            if let Some(person) = self
+                .people_results
+                .iter()
+                .find(|p| p.handle == handle)
+                .cloned()
+            {
+                self.toggle_group_person(person, cx);
+            }
+            return;
+        }
         match self.invite_target.clone() {
             Some(project_id) => {
                 self.new_chat_open = false;

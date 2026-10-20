@@ -61,13 +61,21 @@ const SETTINGS_WIDTH: f32 = 480.0;
 /// does not jump when navigating (shrinks with the window).
 const SETTINGS_BODY_HEIGHT: f32 = 720.0;
 
-/// What the Settings sheet shows (#1086, D80): the root list, or one of the
-/// Apps & tools pages pushed inside the same box with a back button — the
-/// iPhone's `SettingsPage` navigation, not a separate pop-out.
+/// What the Settings sheet shows (#1086, D80): the root list, or a pushed
+/// page inside the same box with a back button — the iPhone's `SettingsPage`
+/// navigation, not a separate pop-out. Credits / Machine / Appearance /
+/// Notifications / Updates / About are the former inline sections; the rest
+/// are the Apps & tools panels.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum SettingsPage {
     #[default]
     Root,
+    Credits,
+    Machine,
+    Appearance,
+    Notifications,
+    Updates,
+    About,
     Connectors,
     Routines,
     Channels,
@@ -80,7 +88,13 @@ impl SettingsPage {
     fn title(self) -> &'static str {
         match self {
             SettingsPage::Root => "Settings",
-            SettingsPage::Connectors => "Connectors",
+            SettingsPage::Credits => "Credits",
+            SettingsPage::Machine => "Machine",
+            SettingsPage::Appearance => "Appearance",
+            SettingsPage::Notifications => "Notifications",
+            SettingsPage::Updates => "Updates",
+            SettingsPage::About => "About",
+            SettingsPage::Connectors => "Connected apps",
             SettingsPage::Routines => "Routines",
             SettingsPage::Channels => "Channels",
             SettingsPage::Skills => "Skills",
@@ -89,10 +103,29 @@ impl SettingsPage {
         }
     }
 
+    /// True for pages drawn as content inside the sheet (not a panel entity).
+    fn is_content(self) -> bool {
+        matches!(
+            self,
+            SettingsPage::Credits
+                | SettingsPage::Machine
+                | SettingsPage::Appearance
+                | SettingsPage::Notifications
+                | SettingsPage::Updates
+                | SettingsPage::About
+        )
+    }
+
     /// The sheet grows for the two pages laid out wider than the root list.
     fn sheet_width(self) -> f32 {
         match self {
             SettingsPage::Root
+            | SettingsPage::Credits
+            | SettingsPage::Machine
+            | SettingsPage::Appearance
+            | SettingsPage::Notifications
+            | SettingsPage::Updates
+            | SettingsPage::About
             | SettingsPage::Connectors
             | SettingsPage::Channels
             | SettingsPage::ThisMac
@@ -614,7 +647,13 @@ impl Shell {
     ) {
         self.hide_settings_page(cx);
         match page {
-            SettingsPage::Root => {}
+            SettingsPage::Root
+            | SettingsPage::Credits
+            | SettingsPage::Machine
+            | SettingsPage::Appearance
+            | SettingsPage::Notifications
+            | SettingsPage::Updates
+            | SettingsPage::About => {}
             SettingsPage::Connectors => self.connectors.update(cx, |p, cx| {
                 p.show(cx);
                 p.embedded = true;
@@ -651,7 +690,13 @@ impl Shell {
     /// Close whichever page is embedded in the sheet (its entity stops rendering).
     fn hide_settings_page(&mut self, cx: &mut Context<Self>) {
         match self.settings_page {
-            SettingsPage::Root => {}
+            SettingsPage::Root
+            | SettingsPage::Credits
+            | SettingsPage::Machine
+            | SettingsPage::Appearance
+            | SettingsPage::Notifications
+            | SettingsPage::Updates
+            | SettingsPage::About => {}
             SettingsPage::Connectors => self.connectors.update(cx, |p, cx| p.hide(cx)),
             SettingsPage::Routines => {
                 self.routines_open = false;
@@ -683,7 +728,13 @@ impl Shell {
     /// itself (Skills › Close) falls back to the root list.
     fn settings_page_alive(&self, cx: &App) -> bool {
         match self.settings_page {
-            SettingsPage::Root => true,
+            SettingsPage::Root
+            | SettingsPage::Credits
+            | SettingsPage::Machine
+            | SettingsPage::Appearance
+            | SettingsPage::Notifications
+            | SettingsPage::Updates
+            | SettingsPage::About => true,
             SettingsPage::Connectors => self.connectors.read(cx).is_open(),
             SettingsPage::Routines => self.routines_open,
             SettingsPage::Channels => self.channels.read(cx).is_open(),
@@ -2053,6 +2104,12 @@ impl Shell {
         } else {
             String::new()
         };
+        let connectors_connected = state
+            .connectors
+            .items
+            .iter()
+            .filter(|c| c.status == crate::model::ConnectorStatus::Connected)
+            .count();
         let store_usage = state.store_usage;
         let update = state.update.clone();
         let update_failed = matches!(update.phase, crate::update::UpdatePhase::Failed { .. });
@@ -2107,323 +2164,7 @@ impl Shell {
                 .text_color(theme.text_muted)
                 .child(text)
         };
-        let section = |label: &str, group: Div, note: Option<Div>, theme: &Theme| {
-            div()
-                .flex()
-                .flex_col()
-                .child(glass::section_label(label, theme))
-                .child(group)
-                .children(note)
-        };
-
-        let mut body = div()
-            .id("settings-body")
-            .flex()
-            .flex_col()
-            .gap(px(22.0))
-            .px(px(16.0))
-            .pb(px(20.0))
-            .min_h_0()
-            .overflow_y_scroll()
-            .track_scroll(&self.settings_scroll);
-
-        // Profile header (D80, Apple's account screen): big avatar, bold name, grey handle.
         let settings_group = |theme: &Theme| glass::group(theme).bg(theme.bubble_assistant);
-        let mut sign_out: Option<Div> = None;
-        if let Some(account) = account.clone() {
-            let who = if account.login.is_empty() {
-                "Signed in".to_string()
-            } else {
-                format!("@{}", account.login)
-            };
-            let person = crate::model::Person {
-                id: account.id.clone(),
-                handle: account.login.clone(),
-                name: Some(account.name.clone()),
-                avatar_url: account.avatar_url.clone(),
-                status: String::new(),
-                role: String::new(),
-                last_seen_at: None,
-                online: false,
-                avatar_color_index: None,
-            };
-            let mut header = div()
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap(px(4.0))
-                .pt(px(6.0))
-                .pb(px(2.0))
-                .child(div().pb(px(8.0)).child(people::avatar(
-                    account_image,
-                    &person,
-                    88.0,
-                    &theme,
-                )));
-            if self.profile_edit_open {
-                // iPhone parity: name and handle are editable (`PATCH /me`).
-                let field = |input: Entity<ComposerInput>, theme: &Theme| {
-                    div()
-                        .w(px(260.0))
-                        .px(px(10.0))
-                        .py(px(7.0))
-                        .rounded(px(10.0))
-                        .bg(theme.field)
-                        .border_1()
-                        .border_color(theme.field_border)
-                        .text_size(px(TEXT_BODY))
-                        .child(input)
-                };
-                header = header
-                    .child(field(self.name_input.clone(), &theme))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .child(
-                                div()
-                                    .text_size(px(TEXT_BODY))
-                                    .text_color(theme.text_muted)
-                                    .child("@"),
-                            )
-                            .child(field(self.handle_input.clone(), &theme)),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(8.0))
-                            .pt(px(6.0))
-                            .child(
-                                glass::quiet_button("profile-edit-cancel", "Cancel", &theme)
-                                    .h(px(32.0))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.profile_edit_open = false;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                glass::primary_button("profile-edit-save", "Save", &theme)
-                                    .h(px(32.0))
-                                    .on_click(cx.listener(|this, _, _, cx| this.save_profile(cx))),
-                            ),
-                    );
-            } else {
-                // Double-click the name to edit (same as the agent profile page).
-                header = header
-                    .child(
-                        div()
-                            .id("profile-edit")
-                            .text_size(px(22.0))
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(theme.text)
-                            .cursor_pointer()
-                            .hover(|s| s.opacity(0.85))
-                            .child(if account.name.trim().is_empty() {
-                                who.clone()
-                            } else {
-                                account.name.clone()
-                            })
-                            .on_click(cx.listener(|this, event: &gpui::ClickEvent, window, cx| {
-                                if event.click_count() >= 2 {
-                                    this.start_profile_edit(window, cx);
-                                }
-                            })),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(TEXT_BODY))
-                            .text_color(theme.text_muted)
-                            .child(who.clone()),
-                    );
-            }
-            body = body.child(header);
-            if account.balance_usd > 0.0 || account.daily_cap_usd.is_some() {
-                let mut group = settings_group(&theme).child(
-                    glass::row("Credits", &theme)
-                        .child(value(format!("${:.2} left", account.balance_usd), &theme)),
-                );
-                group = group.child(glass::row("Today", &theme).child(value(
-                    match account.daily_cap_usd {
-                        Some(cap) => {
-                            format!("${:.2} of ${cap:.0} cap", account.spent_today_usd)
-                        }
-                        None => format!("${:.2}", account.spent_today_usd),
-                    },
-                    &theme,
-                )));
-                // iPhone parity: during the beta a top-up is a note to the relay.
-                group = group.child(glass::row("", &theme).border_b_0().child(
-                    link_button("credits-top-up", "Request a top-up", false, &theme).on_click(
-                        cx.listener(|this, _, window, cx| this.request_top_up(window, cx)),
-                    ),
-                ));
-                body = body.child(section(
-                    "Account",
-                    group,
-                    Some(footnote(
-                        "Credits pay for your agents' model use. Machine time is billed separately. During the beta, usage credit is included — request a top-up when you run low.".into(),
-                        &theme,
-                    )),
-                    &theme,
-                ));
-            }
-            sign_out = Some(
-                settings_group(&theme).child(
-                    div()
-                        .id("sign-out")
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .min_h(px(44.0))
-                        .text_size(px(TEXT_BODY))
-                        .text_color(theme.danger)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme.surface_2))
-                        .child("Sign out")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.close_settings(cx);
-                            this.state.update(cx, |s, cx| s.sign_out(cx));
-                        })),
-                ),
-            );
-        }
-
-        // Machine.
-        let dot = sidebar::machine_dot(shown, &theme);
-        let uptime = machine
-            .since
-            .filter(|_| shown == MachineState::Awake)
-            .map(|since| fmt_uptime(now_ms().saturating_sub(since)))
-            .unwrap_or_else(|| "—".into());
-        let mut group = settings_group(&theme)
-            .child(
-                glass::row("State", &theme).child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(7.0))
-                        .child(div().size(px(8.0)).rounded_full().bg(Theme::with_alpha(
-                            dot,
-                            if shown == MachineState::Waking {
-                                0.4 + 0.6 * PulseClock::phase(cx, 1100)
-                            } else {
-                                1.0
-                            },
-                        )))
-                        .child(value(shown.label().to_string(), &theme)),
-                ),
-            )
-            .child(glass::row("Since", &theme).child(value(uptime, &theme)))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .px(px(16.0))
-                    .py(px(10.0))
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .child(
-                        div()
-                            .text_size(px(TEXT_BODY))
-                            .text_color(theme.text)
-                            .child("Spec"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(TEXT_SMALL))
-                            .text_color(theme.text_muted)
-                            .child(format!(
-                                "{}{}",
-                                machine
-                                    .spec
-                                    .clone()
-                                    .unwrap_or_else(|| "spec unknown".into()),
-                                machine
-                                    .class
-                                    .as_deref()
-                                    .map(|c| format!(" · {c}"))
-                                    .unwrap_or_default()
-                            )),
-                    ),
-            )
-            .child(
-                glass::row(
-                    if machine.always_on {
-                        "Machine time today"
-                    } else {
-                        "Spend today"
-                    },
-                    &theme,
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .items_end()
-                        .child(value(
-                            if machine.always_on {
-                                format!("${:.2}", machine.spend_today_usd)
-                            } else {
-                                format!(
-                                    "${:.2} of ${:.0}",
-                                    machine.spend_today_usd, machine.spend_cap_usd
-                                )
-                            },
-                            &theme,
-                        ))
-                        .when(machine.always_on, |el| {
-                            el.child(
-                                div()
-                                    .text_size(px(TEXT_TINY))
-                                    .text_color(theme.text_muted)
-                                    .child("Not taken from credits"),
-                            )
-                        }),
-                ),
-            );
-        if let Some(detail) = machine.detail.clone() {
-            group = group.child(footnote(detail, &theme).pb(px(8.0)));
-        }
-        if machine.always_on {
-            group = group.child(glass::row("", &theme).border_b_0().child(
-                link_button("machine-restart", "Restart machine", false, &theme).on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.state.update(cx, |s, cx| s.machine_restart(cx));
-                    }),
-                ),
-            ));
-        } else if machine.state.is_down() {
-            group = group.child(glass::row("", &theme).border_b_0().child(
-                link_button("machine-start", "Start machine", false, &theme).on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.state.update(cx, |s, cx| s.machine_start(cx));
-                    },
-                )),
-            ));
-        } else {
-            group = group.child(glass::row("", &theme).border_b_0().child(
-                link_button("machine-stop", "Stop machine", true, &theme).on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.state.update(cx, |s, cx| s.machine_stop(cx));
-                    },
-                )),
-            ));
-        }
-        body = body.child(section(
-            "Machine",
-            group,
-            Some(footnote(
-                "Your one cloud computer, always on. Agents are workspaces on it. Machine time \
-                 is billed separately from your credits."
-                    .into(),
-                &theme,
-            )),
-            &theme,
-        ));
-
-        // Appearance.
         let seg_row = |label: &str, segs: Div, theme: &Theme| {
             glass::row(label.to_string(), theme).child(
                 div()
@@ -2438,340 +2179,485 @@ impl Shell {
                     .child(segs),
             )
         };
-        let group = settings_group(&theme)
-            .child(seg_row(
-                "Theme",
-                div().flex().gap(px(2.0)).children(
-                    [
-                        (AppearancePref::System, "mode-system"),
-                        (AppearancePref::Light, "mode-light"),
-                        (AppearancePref::Dark, "mode-dark"),
-                    ]
-                    .into_iter()
-                    .map(|(pref, id)| {
-                        glass::segment(id, pref.label(), theme.pref == pref, &theme).on_click(
-                            cx.listener(move |this, _, _, cx| {
-                                let s = Theme::of(cx).surface;
-                                this.set_theme(pref, s, cx);
-                            }),
-                        )
-                    }),
+        let page_row = |id: &'static str,
+                        glyph: &'static str,
+                        page: SettingsPage,
+                        detail: Option<String>,
+                        last: bool,
+                        theme: &Theme,
+                        cx: &mut Context<Self>| {
+            let row = glass::nav_row_icon(id, glyph, page.title(), detail, theme);
+            let row = if last { row.border_b_0() } else { row };
+            row.on_click(
+                cx.listener(move |this, _, window, cx| this.open_settings_page(page, window, cx)),
+            )
+        };
+        let surface_label = match theme.surface {
+            Surface::Matte => "Matte",
+            Surface::Glass => "Glass",
+        };
+        let appearance_summary = format!("{} · {surface_label}", theme.pref.label());
+        let credits_summary = account
+            .as_ref()
+            .filter(|a| a.balance_usd > 0.0 || a.daily_cap_usd.is_some())
+            .map(|a| format!("${:.0} left", a.balance_usd));
+        let connectors_summary = if connectors_connected == 0 {
+            None
+        } else {
+            Some(format!("{connectors_connected} connected"))
+        };
+        let on_this_mac = if store_usage.1 == 0 {
+            "Nothing saved yet".to_string()
+        } else {
+            format!(
+                "{} · {} chat{}",
+                human_bytes(store_usage.0),
+                store_usage.1,
+                if store_usage.1 == 1 { "" } else { "s" }
+            )
+        };
+        let machine_footer = if machine.always_on {
+            "Your one cloud computer, always on. Agents are workspaces on it."
+        } else {
+            "Your one cloud computer. A message to any agent wakes it."
+        };
+
+        // ----- Credits page body -------------------------------------------------
+        let credits_body = {
+            let mut body = div().flex().flex_col().gap(px(22.0));
+            if let Some(account) = account.as_ref() {
+                let mut group = settings_group(&theme).child(
+                    glass::row("Credits", &theme)
+                        .child(value(format!("${:.2} left", account.balance_usd), &theme)),
+                );
+                group = group.child(glass::row("Today", &theme).child(value(
+                    match account.daily_cap_usd {
+                        Some(cap) => {
+                            format!("${:.2} of ${cap:.0} cap", account.spent_today_usd)
+                        }
+                        None => format!("${:.2}", account.spent_today_usd),
+                    },
+                    &theme,
+                )));
+                body = body.child(group).child(footnote(
+                    "Credits pay for your agents' model use. Machine time is billed separately. During the beta, usage credit is included — request a top-up when you run low.".into(),
+                    &theme,
+                ));
+            } else {
+                body = body.child(
+                    settings_group(&theme).child(
+                        glass::row("Balance", &theme)
+                            .border_b_0()
+                            .child(value("Not available yet".into(), &theme)),
+                    ),
+                );
+            }
+            body = body.child(settings_group(&theme).child(
+                glass::row("", &theme).border_b_0().child(
+                    link_button("credits-top-up", "Request a top-up", false, &theme).on_click(
+                        cx.listener(|this, _, window, cx| this.request_top_up(window, cx)),
+                    ),
                 ),
+            ));
+            body
+        };
+
+        // ----- Machine page body -------------------------------------------------
+        let machine_body = {
+            let dot = sidebar::machine_dot(shown, &theme);
+            let uptime = machine
+                .since
+                .filter(|_| shown == MachineState::Awake)
+                .map(|since| fmt_uptime(now_ms().saturating_sub(since)))
+                .unwrap_or_else(|| "—".into());
+            let mut group = settings_group(&theme)
+                .child(
+                    glass::row("State", &theme).child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(7.0))
+                            .child(div().size(px(8.0)).rounded_full().bg(Theme::with_alpha(
+                                dot,
+                                if shown == MachineState::Waking {
+                                    0.4 + 0.6 * PulseClock::phase(cx, 1100)
+                                } else {
+                                    1.0
+                                },
+                            )))
+                            .child(value(shown.label().to_string(), &theme)),
+                    ),
+                )
+                .child(glass::row("Since", &theme).child(value(uptime, &theme)))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .px(px(16.0))
+                        .py(px(10.0))
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .child(
+                            div()
+                                .text_size(px(TEXT_BODY))
+                                .text_color(theme.text)
+                                .child("Spec"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(TEXT_SMALL))
+                                .text_color(theme.text_muted)
+                                .child(format!(
+                                    "{}{}",
+                                    machine
+                                        .spec
+                                        .clone()
+                                        .unwrap_or_else(|| "spec unknown".into()),
+                                    machine
+                                        .class
+                                        .as_deref()
+                                        .map(|c| format!(" · {c}"))
+                                        .unwrap_or_default()
+                                )),
+                        ),
+                )
+                .child(
+                    glass::row(
+                        if machine.always_on {
+                            "Machine time today"
+                        } else {
+                            "Spend today"
+                        },
+                        &theme,
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .items_end()
+                            .child(value(
+                                if machine.always_on {
+                                    format!("${:.2}", machine.spend_today_usd)
+                                } else {
+                                    format!(
+                                        "${:.2} of ${:.0}",
+                                        machine.spend_today_usd, machine.spend_cap_usd
+                                    )
+                                },
+                                &theme,
+                            ))
+                            .when(machine.always_on, |el| {
+                                el.child(
+                                    div()
+                                        .text_size(px(TEXT_TINY))
+                                        .text_color(theme.text_muted)
+                                        .child("Not taken from credits"),
+                                )
+                            }),
+                    ),
+                );
+            if let Some(detail) = machine.detail.clone() {
+                group = group.child(footnote(detail, &theme).pb(px(8.0)));
+            }
+            let mut body = div().flex().flex_col().gap(px(22.0)).child(group);
+            let mut actions = settings_group(&theme);
+            if machine.always_on {
+                actions = actions.child(glass::row("", &theme).border_b_0().child(
+                    link_button("machine-restart", "Restart machine", false, &theme).on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.state.update(cx, |s, cx| s.machine_restart(cx));
+                        }),
+                    ),
+                ));
+            } else if machine.state.is_down() {
+                actions = actions.child(glass::row("", &theme).border_b_0().child(
+                    link_button("machine-start", "Start machine", false, &theme).on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.state.update(cx, |s, cx| s.machine_start(cx));
+                        }),
+                    ),
+                ));
+            } else {
+                actions = actions.child(glass::row("", &theme).border_b_0().child(
+                    link_button("machine-stop", "Stop machine", true, &theme).on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.state.update(cx, |s, cx| s.machine_stop(cx));
+                        }),
+                    ),
+                ));
+            }
+            body = body.child(actions).child(footnote(
+                if machine.always_on {
+                    "Your one cloud computer, always on. Agents are workspaces on it. Machine time \
+                     is billed separately from your credits."
+                        .into()
+                } else {
+                    "Your one cloud computer. Agents are workspaces on it; a message to any agent \
+                     wakes it."
+                        .into()
+                },
                 &theme,
-            ))
-            .child(
+            ));
+            body
+        };
+
+        // ----- Appearance page body ----------------------------------------------
+        let appearance_body = {
+            let group = settings_group(&theme)
+                .child(seg_row(
+                    "Theme",
+                    div().flex().gap(px(2.0)).children(
+                        [
+                            (AppearancePref::System, "mode-system"),
+                            (AppearancePref::Light, "mode-light"),
+                            (AppearancePref::Dark, "mode-dark"),
+                        ]
+                        .into_iter()
+                        .map(|(pref, id)| {
+                            glass::segment(id, pref.label(), theme.pref == pref, &theme).on_click(
+                                cx.listener(move |this, _, _, cx| {
+                                    let s = Theme::of(cx).surface;
+                                    this.set_theme(pref, s, cx);
+                                }),
+                            )
+                        }),
+                    ),
+                    &theme,
+                ))
+                .child(
+                    seg_row(
+                        "Surface",
+                        div()
+                            .flex()
+                            .gap(px(2.0))
+                            .child(
+                                glass::segment(
+                                    "surface-matte",
+                                    "Matte",
+                                    theme.surface == Surface::Matte,
+                                    &theme,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        let a = Theme::of(cx).pref;
+                                        this.set_theme(a, Surface::Matte, cx);
+                                    },
+                                )),
+                            )
+                            .child(
+                                glass::segment(
+                                    "surface-glass",
+                                    "Glass",
+                                    theme.surface == Surface::Glass,
+                                    &theme,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        let a = Theme::of(cx).pref;
+                                        this.set_theme(a, Surface::Glass, cx);
+                                    },
+                                )),
+                            ),
+                        &theme,
+                    )
+                    .border_b_0(),
+                );
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(22.0))
+                .child(group)
+                .child(footnote(
+                    if glass_ok {
+                        "Glass: window vibrancy and frosted panels.".into()
+                    } else {
+                        "Glass here: frosted panels only; window vibrancy needs macOS.".into()
+                    },
+                    &theme,
+                ))
+        };
+
+        // ----- Notifications page body -------------------------------------------
+        let notifications_body = {
+            let group = settings_group(&theme).child(
                 seg_row(
-                    "Surface",
+                    "Notifications",
                     div()
                         .flex()
                         .gap(px(2.0))
                         .child(
-                            glass::segment(
-                                "surface-matte",
-                                "Matte",
-                                theme.surface == Surface::Matte,
-                                &theme,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let a = Theme::of(cx).pref;
-                                this.set_theme(a, Surface::Matte, cx);
-                            })),
+                            glass::segment("notify-on", "On", notify_on, &theme).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.state
+                                        .update(cx, |s, cx| s.set_notifications_enabled(true, cx));
+                                }),
+                            ),
                         )
                         .child(
-                            glass::segment(
-                                "surface-glass",
-                                "Glass",
-                                theme.surface == Surface::Glass,
-                                &theme,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let a = Theme::of(cx).pref;
-                                this.set_theme(a, Surface::Glass, cx);
-                            })),
+                            glass::segment("notify-off", "Off", !notify_on, &theme).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.state
+                                        .update(cx, |s, cx| s.set_notifications_enabled(false, cx));
+                                }),
+                            ),
                         ),
                     &theme,
                 )
                 .border_b_0(),
             );
-        body = body.child(section(
-            "Appearance",
-            group,
-            Some(footnote(
-                if glass_ok {
-                    "Glass: window vibrancy and frosted panels.".into()
-                } else {
-                    "Glass here: frosted panels only; window vibrancy needs macOS.".into()
-                },
-                &theme,
-            )),
-            &theme,
-        ));
-
-        // Notifications.
-        let group = settings_group(&theme).child(
-            seg_row(
-                "Notifications",
-                div()
-                    .flex()
-                    .gap(px(2.0))
-                    .child(
-                        glass::segment("notify-on", "On", notify_on, &theme).on_click(cx.listener(
-                            |this, _, _, cx| {
-                                this.state
-                                    .update(cx, |s, cx| s.set_notifications_enabled(true, cx));
-                            },
-                        )),
-                    )
-                    .child(
-                        glass::segment("notify-off", "Off", !notify_on, &theme).on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.state
-                                    .update(cx, |s, cx| s.set_notifications_enabled(false, cx));
-                            }),
-                        ),
-                    ),
-                &theme,
-            )
-            .border_b_0(),
-        );
-        body = body.child(section(
-            "Notifications",
-            group,
-            Some(footnote(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(22.0))
+                .child(group)
+                .child(footnote(
                 "A banner with the sender's picture when an agent finishes or a person writes, \
-                 only while you are not looking."
+                     only while you are not looking."
                     .into(),
                 &theme,
-            )),
-            &theme,
-        ));
-
-        // Updates — status, Check now / Install, and Download when self-update failed.
-        let mut actions = div().flex().items_center().gap(px(14.0));
-        if let Some((id, label, installs)) = update_action {
-            actions = actions.child(link_button(id, label, false, &theme).on_click(cx.listener(
-                move |this, _, _, cx| {
-                    this.state.update(cx, |s, cx| {
-                        if installs {
-                            s.install_update(cx);
-                        } else {
-                            s.check_for_updates(cx);
-                        }
-                    });
-                },
-            )));
-        }
-        if update_failed {
-            // Self-update could not finish here (read-only copy, unwritable
-            // folder…): the newest build is one click away in the browser.
-            actions = actions.child(
-                link_button("settings-update-download", "Download", false, &theme).on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.state.update(cx, |s, cx| s.open_download_page(cx));
-                    }),
-                ),
-            );
-        }
-        let group = settings_group(&theme)
-            .child(seg_row(
-                "Automatic updates",
-                div()
-                    .flex()
-                    .gap(px(2.0))
-                    .child(
-                        glass::segment("auto-update-on", "On", auto_update, &theme).on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.state.update(cx, |s, cx| s.set_auto_update(true, cx));
-                            }),
-                        ),
-                    )
-                    .child(
-                        glass::segment("auto-update-off", "Off", !auto_update, &theme).on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.state.update(cx, |s, cx| s.set_auto_update(false, cx));
-                            }),
-                        ),
-                    ),
-                &theme,
             ))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .min_h(px(44.0))
-                    .px(px(16.0))
-                    .py(px(10.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_size(px(TEXT_BODY))
-                            .text_color(if update_failed {
-                                theme.danger
-                            } else {
-                                theme.text
-                            })
-                            .child(update.status_line()),
-                    )
-                    .child(actions),
-            );
-        body = body.child(section(
-            "Updates",
-            group,
-            Some(footnote(
-                if auto_update {
-                    "New versions install in the background and Arbos restarts when you pause — \
-                     never during a call or while you type. The open chat comes back."
-                        .into()
-                } else {
-                    "Arbos only tells you about new versions; press Update in the rail to install."
-                        .into()
-                },
-                &theme,
-            )),
-            &theme,
-        ));
-
-        // More: the feature pages, pushed inside this sheet (#1086).
-        let page_row = |id: &'static str,
-                        glyph: &'static str,
-                        page: SettingsPage,
-                        detail: Option<String>,
-                        theme: &Theme,
-                        cx: &mut Context<Self>| {
-            glass::nav_row_icon(id, glyph, page.title(), detail, theme).on_click(
-                cx.listener(move |this, _, window, cx| this.open_settings_page(page, window, cx)),
-            )
         };
-        let group = settings_group(&theme)
-            .child(page_row(
-                "settings-connectors",
-                "link",
-                SettingsPage::Connectors,
-                None,
-                &theme,
-                cx,
-            ))
-            .child(page_row(
-                "settings-routines",
-                "sparkles",
-                SettingsPage::Routines,
-                None,
-                &theme,
-                cx,
-            ))
-            .child(page_row(
-                "settings-channels",
-                "globe",
-                SettingsPage::Channels,
-                None,
-                &theme,
-                cx,
-            ))
-            .child(page_row(
-                "settings-skills",
-                "cpu",
-                SettingsPage::Skills,
-                Some(format!("{skill_count} in library")),
-                &theme,
-                cx,
-            ))
-            .child(page_row(
-                "settings-local",
-                "window",
-                SettingsPage::ThisMac,
-                None,
-                &theme,
-                cx,
-            ))
-            .child(page_row(
-                "settings-secrets",
-                "key",
-                SettingsPage::Secrets,
-                Some(secrets_value),
-                &theme,
-                cx,
-            ))
-            .child(
-                glass::nav_row_icon(
-                    "settings-feedback",
-                    "square-pencil",
-                    "Send feedback",
-                    Some("⌘⇧F".into()),
-                    &theme,
-                )
-                .border_b_0()
-                .on_click(cx.listener(|this, _, window, cx| this.open_feedback(window, cx))),
-            );
-        body = body.child(section("Apps & tools", group, None, &theme));
 
-        // Debug + about.
-        let group = settings_group(&theme)
-            .child(seg_row(
-                "Turn details",
-                div()
-                    .flex()
-                    .gap(px(2.0))
-                    .child(
-                        glass::segment("details-off", "Off", !show_details, &theme).on_click(
-                            cx.listener(|this, _, _, cx| {
-                                if this.state.read(cx).show_details {
-                                    this.state.update(cx, |s, cx| s.toggle_show_details(cx));
-                                }
-                            }),
-                        ),
-                    )
-                    .child(
-                        glass::segment("details-on", "On", show_details, &theme).on_click(
-                            cx.listener(|this, _, _, cx| {
-                                if !this.state.read(cx).show_details {
-                                    this.state.update(cx, |s, cx| s.toggle_show_details(cx));
-                                }
-                            }),
-                        ),
+        // ----- Updates page body -------------------------------------------------
+        let updates_body = {
+            let mut actions = div().flex().items_center().gap(px(14.0));
+            if let Some((id, label, installs)) = update_action {
+                actions = actions.child(link_button(id, label, false, &theme).on_click(
+                    cx.listener(move |this, _, _, cx| {
+                        this.state.update(cx, |s, cx| {
+                            if installs {
+                                s.install_update(cx);
+                            } else {
+                                s.check_for_updates(cx);
+                            }
+                        });
+                    }),
+                ));
+            }
+            if update_failed {
+                actions = actions.child(
+                    link_button("settings-update-download", "Download", false, &theme).on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.state.update(cx, |s, cx| s.open_download_page(cx));
+                        }),
                     ),
-                &theme,
-            ))
-            .child(
-                glass::row("Version", &theme)
-                    .child(value(update.current_version.to_string(), &theme)),
-            )
-            .child(glass::row("On this Mac", &theme).child(value(
-                if store_usage.1 == 0 {
-                    "Nothing saved yet".to_string()
-                } else {
+                );
+            }
+            let group = settings_group(&theme)
+                .child(seg_row(
+                    "Automatic updates",
+                    div()
+                        .flex()
+                        .gap(px(2.0))
+                        .child(
+                            glass::segment("auto-update-on", "On", auto_update, &theme).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.state.update(cx, |s, cx| s.set_auto_update(true, cx));
+                                }),
+                            ),
+                        )
+                        .child(
+                            glass::segment("auto-update-off", "Off", !auto_update, &theme)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.state.update(cx, |s, cx| s.set_auto_update(false, cx));
+                                })),
+                        ),
+                    &theme,
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.0))
+                        .min_h(px(44.0))
+                        .px(px(16.0))
+                        .py(px(10.0))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(px(TEXT_BODY))
+                                .text_color(if update_failed {
+                                    theme.danger
+                                } else {
+                                    theme.text
+                                })
+                                .child(update.status_line()),
+                        )
+                        .child(actions),
+                );
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(22.0))
+                .child(group)
+                .child(footnote(
+                    if auto_update {
+                        "New versions install in the background and Arbos restarts when you pause — \
+                         never during a call or while you type. The open chat comes back."
+                            .into()
+                    } else {
+                        "Arbos only tells you about new versions; press Update in the rail to install."
+                            .into()
+                    },
+                    &theme,
+                ))
+        };
+
+        // ----- About page body ---------------------------------------------------
+        let about_body = {
+            let group = settings_group(&theme)
+                .child(seg_row(
+                    "Turn details",
+                    div()
+                        .flex()
+                        .gap(px(2.0))
+                        .child(
+                            glass::segment("details-off", "Off", !show_details, &theme).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    if this.state.read(cx).show_details {
+                                        this.state.update(cx, |s, cx| s.toggle_show_details(cx));
+                                    }
+                                }),
+                            ),
+                        )
+                        .child(
+                            glass::segment("details-on", "On", show_details, &theme).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    if !this.state.read(cx).show_details {
+                                        this.state.update(cx, |s, cx| s.toggle_show_details(cx));
+                                    }
+                                }),
+                            ),
+                        ),
+                    &theme,
+                ))
+                .child(
+                    glass::row("Version", &theme)
+                        .child(value(update.current_version.to_string(), &theme)),
+                )
+                .child(glass::row("On this Mac", &theme).child(value(on_this_mac.clone(), &theme)))
+                .child(glass::row("Relay", &theme).border_b_0().child(value(
                     format!(
-                        "{} · {} chat{}",
-                        human_bytes(store_usage.0),
-                        store_usage.1,
-                        if store_usage.1 == 1 { "" } else { "s" }
-                    )
-                },
-                &theme,
-            )))
-            .child(glass::row("Relay", &theme).border_b_0().child(value(
-                format!(
-                    "{source} · {}{}",
-                    format!("{link:?}").to_lowercase(),
-                    device.map(|d| format!(" · {d}")).unwrap_or_default()
-                ),
-                &theme,
-            )));
-        body = body.child(section(
-            "Help & about",
-            group,
-            Some(footnote(
-                "Turn details adds a \"Show details\" line under each reply with the model, \
-                 tools and tokens."
-                    .into(),
-                &theme,
-            )),
-            &theme,
-        ));
-        if let Some(sign_out) = sign_out {
-            body = body.child(sign_out);
-        }
+                        "{source} · {}{}",
+                        format!("{link:?}").to_lowercase(),
+                        device.map(|d| format!(" · {d}")).unwrap_or_default()
+                    ),
+                    &theme,
+                )));
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(22.0))
+                .child(group)
+                .child(footnote(
+                    "Turn details adds a \"Show details\" line under each reply with the model, \
+                     tools and tokens."
+                        .into(),
+                    &theme,
+                ))
+        };
 
         let done = glass::sheet_button("settings-done", "Done", &theme).on_click(cx.listener(
             |this, _, window, cx| {
@@ -2780,7 +2666,319 @@ impl Shell {
             },
         ));
         let page = self.settings_page;
+
+        // ----- Root list (iPhone D80): profile + nav rows into each page ---------
         if page == SettingsPage::Root {
+            let mut body = div()
+                .id("settings-body")
+                .flex()
+                .flex_col()
+                .gap(px(22.0))
+                .px(px(16.0))
+                .pb(px(20.0))
+                .min_h_0()
+                .overflow_y_scroll()
+                .track_scroll(&self.settings_scroll);
+
+            let mut sign_out: Option<Div> = None;
+            if let Some(account) = account.clone() {
+                let who = if account.login.is_empty() {
+                    "Signed in".to_string()
+                } else {
+                    format!("@{}", account.login)
+                };
+                let person = crate::model::Person {
+                    id: account.id.clone(),
+                    handle: account.login.clone(),
+                    name: Some(account.name.clone()),
+                    avatar_url: account.avatar_url.clone(),
+                    status: String::new(),
+                    role: String::new(),
+                    last_seen_at: None,
+                    online: false,
+                    avatar_color_index: None,
+                };
+                let mut header = div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(4.0))
+                    .pt(px(6.0))
+                    .pb(px(2.0))
+                    .child(div().pb(px(8.0)).child(people::avatar(
+                        account_image,
+                        &person,
+                        88.0,
+                        &theme,
+                    )));
+                if self.profile_edit_open {
+                    let field = |input: Entity<ComposerInput>, theme: &Theme| {
+                        div()
+                            .w(px(260.0))
+                            .px(px(10.0))
+                            .py(px(7.0))
+                            .rounded(px(10.0))
+                            .bg(theme.field)
+                            .border_1()
+                            .border_color(theme.field_border)
+                            .text_size(px(TEXT_BODY))
+                            .child(input)
+                    };
+                    header = header
+                        .child(field(self.name_input.clone(), &theme))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .child(
+                                    div()
+                                        .text_size(px(TEXT_BODY))
+                                        .text_color(theme.text_muted)
+                                        .child("@"),
+                                )
+                                .child(field(self.handle_input.clone(), &theme)),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(8.0))
+                                .pt(px(6.0))
+                                .child(
+                                    glass::quiet_button("profile-edit-cancel", "Cancel", &theme)
+                                        .h(px(32.0))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.profile_edit_open = false;
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    glass::primary_button("profile-edit-save", "Save", &theme)
+                                        .h(px(32.0))
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| this.save_profile(cx)),
+                                        ),
+                                ),
+                        );
+                } else {
+                    // Double-click the name to edit (same as the agent profile page).
+                    header = header
+                        .child(
+                            div()
+                                .id("profile-edit")
+                                .text_size(px(22.0))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(theme.text)
+                                .cursor_pointer()
+                                .hover(|s| s.opacity(0.85))
+                                .child(if account.name.trim().is_empty() {
+                                    who.clone()
+                                } else {
+                                    account.name.clone()
+                                })
+                                .on_click(cx.listener(
+                                    |this, event: &gpui::ClickEvent, window, cx| {
+                                        if event.click_count() >= 2 {
+                                            this.start_profile_edit(window, cx);
+                                        }
+                                    },
+                                )),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(TEXT_BODY))
+                                .text_color(theme.text_muted)
+                                .child(who.clone()),
+                        );
+                }
+                body = body.child(header);
+                sign_out = Some(
+                    settings_group(&theme).child(
+                        div()
+                            .id("sign-out")
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .min_h(px(44.0))
+                            .text_size(px(TEXT_BODY))
+                            .text_color(theme.danger)
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme.surface_2))
+                            .child("Sign out")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.close_settings(cx);
+                                this.state.update(cx, |s, cx| s.sign_out(cx));
+                            })),
+                    ),
+                );
+            }
+
+            // Account group: Credits · Connected apps · Secrets · This Mac.
+            let mut account_group = settings_group(&theme);
+            if account.is_some() {
+                account_group = account_group.child(page_row(
+                    "settings-credits",
+                    "creditcard",
+                    SettingsPage::Credits,
+                    credits_summary.clone(),
+                    false,
+                    &theme,
+                    cx,
+                ));
+            }
+            account_group = account_group
+                .child(page_row(
+                    "settings-connectors",
+                    "link",
+                    SettingsPage::Connectors,
+                    connectors_summary,
+                    false,
+                    &theme,
+                    cx,
+                ))
+                .child(page_row(
+                    "settings-secrets",
+                    "key",
+                    SettingsPage::Secrets,
+                    Some(secrets_value),
+                    false,
+                    &theme,
+                    cx,
+                ))
+                .child(
+                    glass::nav_row_icon(
+                        "settings-local",
+                        "window",
+                        "On this Mac",
+                        Some(on_this_mac),
+                        &theme,
+                    )
+                    .border_b_0()
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_settings_page(SettingsPage::ThisMac, window, cx)
+                    })),
+                );
+            body = body.child(account_group);
+
+            // Machine group.
+            body = body.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        settings_group(&theme).child(
+                            glass::nav_row_icon(
+                                "settings-machine",
+                                "desktop",
+                                "Machine",
+                                Some(shown.label().to_string()),
+                                &theme,
+                            )
+                            .border_b_0()
+                            .on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    this.open_settings_page(SettingsPage::Machine, window, cx)
+                                },
+                            )),
+                        ),
+                    )
+                    .child(footnote(machine_footer.into(), &theme)),
+            );
+
+            // Appearance · Notifications · Updates.
+            body = body.child(
+                settings_group(&theme)
+                    .child(page_row(
+                        "settings-notifications",
+                        "bell",
+                        SettingsPage::Notifications,
+                        Some(if notify_on { "On" } else { "Off" }.into()),
+                        false,
+                        &theme,
+                        cx,
+                    ))
+                    .child(page_row(
+                        "settings-appearance",
+                        "circle-half",
+                        SettingsPage::Appearance,
+                        Some(appearance_summary),
+                        false,
+                        &theme,
+                        cx,
+                    ))
+                    .child(page_row(
+                        "settings-updates",
+                        "arrow-down",
+                        SettingsPage::Updates,
+                        Some(if auto_update { "On" } else { "Off" }.into()),
+                        true,
+                        &theme,
+                        cx,
+                    )),
+            );
+
+            // Apps & tools (Mac-only extras).
+            body = body.child(
+                settings_group(&theme)
+                    .child(page_row(
+                        "settings-routines",
+                        "sparkles",
+                        SettingsPage::Routines,
+                        None,
+                        false,
+                        &theme,
+                        cx,
+                    ))
+                    .child(page_row(
+                        "settings-channels",
+                        "globe",
+                        SettingsPage::Channels,
+                        None,
+                        false,
+                        &theme,
+                        cx,
+                    ))
+                    .child(page_row(
+                        "settings-skills",
+                        "cpu",
+                        SettingsPage::Skills,
+                        Some(format!("{skill_count} in library")),
+                        true,
+                        &theme,
+                        cx,
+                    )),
+            );
+
+            // Help: Send feedback · About.
+            body = body.child(
+                settings_group(&theme)
+                    .child(
+                        glass::nav_row_icon(
+                            "settings-feedback",
+                            "square-pencil",
+                            "Send feedback",
+                            Some("⌘⇧F".into()),
+                            &theme,
+                        )
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.open_feedback(window, cx)),
+                        ),
+                    )
+                    .child(page_row(
+                        "settings-about",
+                        "info",
+                        SettingsPage::About,
+                        Some(update.current_version.to_string()),
+                        true,
+                        &theme,
+                        cx,
+                    )),
+            );
+
+            if let Some(sign_out) = sign_out {
+                body = body.child(sign_out);
+            }
+
             let header = glass::sheet_header("Settings", None, Some(done), &theme);
             return glass::sheet(
                 SETTINGS_WIDTH,
@@ -2791,32 +2989,68 @@ impl Shell {
         }
 
         // A pushed page (#1086): the same box at the same height, `‹` back to
-        // the list, the page's panel rendered inline instead of as the
-        // bottom-left pop-out.
+        // the list, content or panel rendered inline instead of a pop-out.
         let back = glass::circle("settings-back", 34.0, &theme)
             .child(icon("chevron-left", 15.0, theme.text))
             .on_click(cx.listener(|this, _, _, cx| this.settings_back(cx)));
         let header = glass::sheet_header(page.title(), Some(back), Some(done), &theme);
-        let panel: gpui::AnyElement = match page {
-            SettingsPage::Root => unreachable!("handled above"),
-            SettingsPage::Connectors => self.connectors.clone().into_any_element(),
-            SettingsPage::Routines => self.routines.clone().into_any_element(),
-            SettingsPage::Channels => self.channels.clone().into_any_element(),
-            SettingsPage::Skills => self.skills.clone().into_any_element(),
-            SettingsPage::ThisMac => self.local.clone().into_any_element(),
-            SettingsPage::Secrets => self.secrets.clone().into_any_element(),
+        let page_inner: gpui::AnyElement = if page.is_content() {
+            let content = match page {
+                SettingsPage::Credits => credits_body,
+                SettingsPage::Machine => machine_body,
+                SettingsPage::Appearance => appearance_body,
+                SettingsPage::Notifications => notifications_body,
+                SettingsPage::Updates => updates_body,
+                SettingsPage::About => about_body,
+                SettingsPage::Root
+                | SettingsPage::Connectors
+                | SettingsPage::Routines
+                | SettingsPage::Channels
+                | SettingsPage::Skills
+                | SettingsPage::ThisMac
+                | SettingsPage::Secrets => unreachable!("content pages only"),
+            };
+            div()
+                .id("settings-page")
+                .flex()
+                .flex_col()
+                .gap(px(22.0))
+                .px(px(16.0))
+                .pb(px(20.0))
+                .min_h_0()
+                .overflow_y_scroll()
+                .h(px(SETTINGS_BODY_HEIGHT))
+                .child(content)
+                .into_any_element()
+        } else {
+            let panel: gpui::AnyElement = match page {
+                SettingsPage::Root
+                | SettingsPage::Credits
+                | SettingsPage::Machine
+                | SettingsPage::Appearance
+                | SettingsPage::Notifications
+                | SettingsPage::Updates
+                | SettingsPage::About => unreachable!("handled above"),
+                SettingsPage::Connectors => self.connectors.clone().into_any_element(),
+                SettingsPage::Routines => self.routines.clone().into_any_element(),
+                SettingsPage::Channels => self.channels.clone().into_any_element(),
+                SettingsPage::Skills => self.skills.clone().into_any_element(),
+                SettingsPage::ThisMac => self.local.clone().into_any_element(),
+                SettingsPage::Secrets => self.secrets.clone().into_any_element(),
+            };
+            div()
+                .id("settings-page")
+                .flex()
+                .flex_col()
+                .px(px(6.0))
+                .pb(px(12.0))
+                .min_h_0()
+                .overflow_y_scroll()
+                .h(px(SETTINGS_BODY_HEIGHT))
+                .child(panel)
+                .into_any_element()
         };
-        let page_body = div()
-            .id("settings-page")
-            .flex()
-            .flex_col()
-            .px(px(6.0))
-            .pb(px(12.0))
-            .min_h_0()
-            .overflow_y_scroll()
-            .h(px(SETTINGS_BODY_HEIGHT))
-            .child(panel);
-        glass::sheet(page.sheet_width(), &theme, header, page_body)
+        glass::sheet(page.sheet_width(), &theme, header, page_inner)
     }
 
     // ----- sign-in -------------------------------------------------------------------
