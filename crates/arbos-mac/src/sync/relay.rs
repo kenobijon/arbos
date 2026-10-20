@@ -4900,7 +4900,12 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                             Err(err) => shared.notice(format!("Could not save {name}: {err}")),
                         }
                     }
-                    Err(err) => shared.notice(format!("Download {name}: {err}")),
+                    Err(err) => {
+                        // Raw "Download …: HTTP 403" sat in the chat like a message. Keep a
+                        // short dismissible toast; the status detail goes to diagnostics.
+                        shared.diagnostic("download", format!("{name}: {err}"));
+                        shared.notice(format!("Couldn't download {name}"));
+                    }
                 }
             });
         }
