@@ -3453,6 +3453,7 @@ impl Shell {
         PulseClock::request(cx);
         // Top right, under the header: never over the composer's send / mic
         // button or an error banner above it (the busy end of the column).
+        // Click dismisses — download status / HTTP errors must not stick around.
         let mut stack = div()
             .absolute()
             .right(px(16.0))
@@ -3461,8 +3462,10 @@ impl Shell {
             .flex_col()
             .gap(px(6.0));
         for n in notices {
+            let at = n.at;
             stack = stack.child(
                 div()
+                    .id(SharedString::from(format!("notice-{at}")))
                     .max_w(px(380.0))
                     .px(px(14.0))
                     .py(px(10.0))
@@ -3473,7 +3476,14 @@ impl Shell {
                     .shadow_md()
                     .text_size(px(TEXT_SMALL))
                     .text_color(theme.text)
-                    .child(n.text),
+                    .cursor_pointer()
+                    .child(n.text)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.state.update(cx, |s, cx| {
+                            s.dismiss_notice(at);
+                            cx.notify();
+                        });
+                    })),
             );
         }
         Some(stack)

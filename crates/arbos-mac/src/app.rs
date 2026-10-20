@@ -3782,6 +3782,11 @@ impl AppState {
         });
     }
 
+    /// Click on a notice bubble removes it (download status / errors must not sit forever).
+    pub fn dismiss_notice(&mut self, at: u64) {
+        self.notices.retain(|n| n.at != at);
+    }
+
     pub fn live_notices(&self) -> Vec<Notice> {
         let now = now_ms();
         self.notices
@@ -4400,12 +4405,12 @@ impl AppState {
         }
     }
 
-    /// Download an attachment to `~/Downloads/<name>`; the source answers with `AttachmentSaved`.
+    /// Download an attachment to `~/Downloads/<name>`; the source answers with `AttachmentSaved`
+    /// (or a dismissible failure notice). No progress bubble — those sat in the chat like messages.
     pub fn download_attachment(&mut self, key: String, name: String, cx: &mut Context<Self>) {
         let Some(project_id) = self.selected_project.clone() else {
             return;
         };
-        self.push_notice(format!("Downloading {name}…"));
         self.command(ClientCommand::DownloadAttachment {
             project_id,
             key,
