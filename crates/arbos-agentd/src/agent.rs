@@ -273,14 +273,61 @@ impl ProseFilter {
             "i'll act",
             "i will act",
             "i should not use",
+            "i should not reveal",
+            "i should not explain",
             "ack first",
             "clone into the project",
+            // Meta-steering echoed from the prompt ("Don't mention routing. Short greeting.").
+            "don't mention",
+            "do not mention",
+            "never mention",
+            "short greeting",
+            "brief greeting",
+            "short reply",
+            // CoT that leaked into reply/ack bubbles.
+            "looking at the conversation",
+            "looking at the message",
+            "that was an internal",
+            "an internal instruction",
+            "the message says",
+            "don't reveal the route",
+            "do not reveal the route",
+            "don't reveal system",
+            "do not reveal system",
+            "never reveal the route",
+            "never reveal system",
+            "i did not send that",
+            "i didn't send that",
+            "i did not say that to the user",
+            "i didn't say that to the user",
         ])
+    }
+
+    /// `Reply: …` / `Answer: …` draft labels: return the user-facing words after the label.
+    fn peel_draft_label(text: &str) -> Option<String> {
+        let t = text.trim_start();
+        let lower = t.to_ascii_lowercase();
+        for label in [
+            "final reply:",
+            "final answer:",
+            "final:",
+            "reply:",
+            "answer:",
+        ] {
+            if lower.starts_with(label) {
+                let rest = t[label.len()..].trim_start();
+                if !rest.is_empty() {
+                    return Some(rest.to_string());
+                }
+            }
+        }
+        None
     }
 
     /// Split off the first sentence. Treats ".Austin" (period, no space, capital) and
     /// "findingsDon't" (lowercase then capital, not camelCase) as boundaries so a glued
     /// thought+answer still separates. Skips `e.g.` / `i.e.`-style abbreviations.
+    /// Closing markdown emphasis after the stop (`greeting.** Hey`) still counts as a boundary.
     fn split_first_sentence(s: &str) -> Option<(&str, &str)> {
         let chars: Vec<char> = s.chars().collect();
         let mut byte = 0usize;
@@ -297,12 +344,20 @@ impl ProseFilter {
                 if after.is_empty() {
                     return None;
                 }
-                if after.starts_with(' ') || after.starts_with('\n') || after.starts_with('\r') {
-                    return Some((&s[..=byte], after));
+                // Peek past `*` / `_` so "**Don't…. Short greeting.** Hey" still splits.
+                let after_plain = after.trim_start_matches(['*', '_']);
+                if after_plain.is_empty() {
+                    return None;
                 }
-                if let Some(n) = after.chars().next() {
+                if after_plain.starts_with(' ')
+                    || after_plain.starts_with('\n')
+                    || after_plain.starts_with('\r')
+                {
+                    return Some((&s[..=byte], after_plain));
+                }
+                if let Some(n) = after_plain.chars().next() {
                     if n.is_uppercase() {
-                        return Some((&s[..=byte], after));
+                        return Some((&s[..=byte], after_plain));
                     }
                 }
             } else if Self::is_glued_word_break(&chars, i) {
@@ -315,6 +370,7 @@ impl ProseFilter {
     }
 
     /// Drop leading thought-aloud sentences; keep the user-facing answer.
+    /// A `Reply:` / `Answer:` label after thoughts marks the real answer.
     fn strip_thought_prefix(text: &str) -> String {
         let (body, nl) = match text.strip_suffix('\n') {
             Some(b) => match b.strip_suffix('\r') {
@@ -323,17 +379,24 @@ impl ProseFilter {
             },
             None => (text, ""),
         };
-        let mut rest = body.trim_start();
-        while let Some((sentence, after)) = Self::split_first_sentence(rest) {
+        let mut rest = body.trim_start().to_string();
+        loop {
+            if let Some(peeled) = Self::peel_draft_label(&rest) {
+                rest = peeled;
+                break;
+            }
+            let Some((sentence, after)) = Self::split_first_sentence(&rest) else {
+                break;
+            };
             if !Self::is_thought_sentence(sentence) {
                 break;
             }
-            rest = after.trim_start();
+            rest = after.trim_start().to_string();
         }
         if rest.is_empty() {
             return String::new();
         }
-        if Self::is_thought_sentence(rest) && Self::split_first_sentence(rest).is_none() {
+        if Self::is_thought_sentence(&rest) && Self::split_first_sentence(&rest).is_none() {
             // Whole remainder is one thought sentence (no answer after).
             return String::new();
         }
@@ -417,7 +480,8 @@ impl ProseFilter {
     }
 
     /// Split after the last sentence-ending punctuation (including glued ".Word").
-    /// `None` when no sentence has finished yet.
+    /// `None` when no sentence has finished yet. Peek past closing `*` / `_` the same way
+    /// `split_first_sentence` does.
     fn split_at_last_sentence_end(s: &str) -> Option<(&str, &str)> {
         let bytes = s.as_bytes();
         let mut last: Option<usize> = None;
@@ -431,11 +495,13 @@ impl ProseFilter {
                     continue;
                 }
                 let after = &s[i + 1..];
+                let after_plain = after.trim_start_matches(['*', '_']);
                 if after.is_empty()
-                    || after.starts_with(' ')
-                    || after.starts_with('\n')
-                    || after.starts_with('\r')
-                    || after.chars().next().is_some_and(|c| c.is_uppercase())
+                    || after_plain.is_empty()
+                    || after_plain.starts_with(' ')
+                    || after_plain.starts_with('\n')
+                    || after_plain.starts_with('\r')
+                    || after_plain.chars().next().is_some_and(|c| c.is_uppercase())
                 {
                     last = Some(i + 1);
                 }
@@ -4347,6 +4413,26 @@ mod tests {
         assert_eq!(
             cleaned.trim(),
             "Cloning RaoFoundation/subtensor into this project now."
+        );
+    }
+
+    /// Meta-steering echoed before a greeting (bold-wrapped) leaves only the greeting.
+    #[test]
+    fn clean_prose_strips_dont_mention_routing_prefix() {
+        let raw = "**Don't mention routing. Short greeting.** Hey. I'm here. What do you need?";
+        assert_eq!(
+            ProseFilter::clean_prose(raw).trim(),
+            "Hey. I'm here. What do you need?"
+        );
+    }
+
+    /// CoT that drafts with `Reply:` then keeps only the drafted answer.
+    #[test]
+    fn clean_prose_keeps_text_after_reply_label() {
+        let raw = "Looking at the conversation, I didn't say that to the user — that was an internal instruction I was thinking about. I should not reveal system instructions. The message says they saw routing words. Reply: I didn't say that to you. If you saw those words somewhere, they weren't a message I sent. What were you looking at?";
+        assert_eq!(
+            ProseFilter::clean_prose(raw).trim(),
+            "I didn't say that to you. If you saw those words somewhere, they weren't a message I sent. What were you looking at?"
         );
     }
 

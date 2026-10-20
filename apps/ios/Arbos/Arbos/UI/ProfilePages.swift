@@ -783,6 +783,74 @@ struct GroupProfileView: View {
     }
 }
 
+/// Finds the SwiftUI-hosted `UITextField` and makes a double-tap select the
+/// whole string. The system default only selects one word, which is awkward for
+/// comma-separated / hyphenated auto names like "a, b-c, d".
+private struct SelectAllOnDoubleTap: UIViewRepresentable {
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> UIView {
+        let view = ProbeView()
+        view.coordinator = context.coordinator
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        context.coordinator.install(from: uiView)
+    }
+
+    final class ProbeView: UIView {
+        weak var coordinator: Coordinator?
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            coordinator?.install(from: self)
+        }
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        private weak var textField: UITextField?
+
+        func install(from probe: UIView) {
+            guard textField == nil, probe.window != nil else { return }
+            guard let tf = Self.nearestTextField(from: probe) else { return }
+            let gr = UITapGestureRecognizer(target: self, action: #selector(doubleTapped(_:)))
+            gr.numberOfTapsRequired = 2
+            gr.delegate = self
+            tf.addGestureRecognizer(gr)
+            textField = tf
+        }
+
+        @objc private func doubleTapped(_ gr: UITapGestureRecognizer) {
+            guard let tf = gr.view as? UITextField else { return }
+            if !tf.isFirstResponder { tf.becomeFirstResponder() }
+            // After UIKit's word-select runs, expand to the full string.
+            DispatchQueue.main.async { tf.selectAll(nil) }
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+            true
+        }
+
+        private static func nearestTextField(from view: UIView) -> UITextField? {
+            var node: UIView? = view.superview
+            while let current = node {
+                if let tf = current as? UITextField { return tf }
+                if let tf = findTextField(in: current, skipping: view) { return tf }
+                node = current.superview
+            }
+            return nil
+        }
+
+        private static func findTextField(in root: UIView, skipping: UIView) -> UITextField? {
+            for sub in root.subviews where sub !== skipping {
+                if let tf = sub as? UITextField { return tf }
+                if let tf = findTextField(in: sub, skipping: skipping) { return tf }
+            }
+            return nil
+        }
+    }
+}
+
 /// Name the group and optionally pick a picture. Saves with `PATCH /chats/{id}`.
 struct GroupEditSheet: View {
     @EnvironmentObject private var model: AppModel
@@ -842,6 +910,7 @@ struct GroupEditSheet: View {
                             .foregroundStyle(theme.text)
                             .autocorrectionDisabled()
                             .focused($nameFocused)
+                            .background(SelectAllOnDoubleTap())
                             .padding(.horizontal, 14).frame(height: Theme.fieldHeight)
                             .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
                             .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
