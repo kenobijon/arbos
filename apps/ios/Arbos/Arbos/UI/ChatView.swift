@@ -397,7 +397,7 @@ struct ChatView: View {
                     case "edit": showProfile = true
                     case "userprofile": if let c = counterpart { model.showProfile(.user(ProfilePerson(c))) }
                     case "groupprofile": model.showProfile(.group(chatId: chatId, projectId: isPeople ? nil : projectId))
-                    case "members", "addperson": showMembers = true
+                    case "members", "addperson": openHeaderProfile()
                     case "feedback": FeedbackCenter.shared.open(screen: "chat", chatId: chatId, projectId: isPeople ? nil : projectId)
                     case "call":
                         #if DEBUG
