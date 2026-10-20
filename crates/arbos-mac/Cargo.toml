@@ -29,6 +29,7 @@ ulid.workspace = true
 base64.workspace = true
 sha2.workspace = true
 chrono.workspace = true
+log = "0.4"
 
 gpui = { git = "https://github.com/zeronsh/zui", rev = "361ff20b919fdfb80199ee6d9aed725300cb7d54" }
 gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "361ff20b919fdfb80199ee6d9aed725300cb7d54", features = ["wayland", "x11", "font-kit", "runtime_shaders"] }

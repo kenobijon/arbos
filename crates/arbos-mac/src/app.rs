@@ -306,6 +306,8 @@ pub struct AppState {
     pub thumbnails: HashMap<String, Arc<RenderImage>>,
     /// Thumbnail fetches in flight or failed (never asked twice).
     thumbnails_requested: HashSet<String>,
+    /// Blob keys whose thumbnail fetch failed: the card says "No preview" instead of loading.
+    pub thumbnails_failed: HashSet<String>,
     pub notices: Vec<Notice>,
     pub selected_project: Option<Id>,
     /// Bytes and chats kept on this Mac by the on-device store (Settings → About).
@@ -599,6 +601,7 @@ impl AppState {
             blobs: HashMap::new(),
             thumbnails: HashMap::new(),
             thumbnails_requested: HashSet::new(),
+            thumbnails_failed: HashSet::new(),
             notices: Vec::new(),
             selected_project: None,
             store_usage: (0, 0),
@@ -1142,6 +1145,13 @@ impl AppState {
                     }
                     cx.notify();
                 }
+            }
+            SyncEvent::ThumbnailFailed { key } => {
+                self.thumbnails_failed.insert(key);
+                if let Some(chat_id) = self.active_chat_id() {
+                    cx.emit(AppEvent::TranscriptChanged { chat_id });
+                }
+                cx.notify();
             }
             SyncEvent::AttachmentSaved { path } => {
                 self.push_notice(format!("Saved to {}", path.display()));

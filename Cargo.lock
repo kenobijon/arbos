@@ -393,6 +393,7 @@ dependencies = [
  "hound",
  "image",
  "livekit",
+ "log",
  "loro",
  "nokhwa",
  "objc2 0.6.5",

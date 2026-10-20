@@ -8,6 +8,7 @@
 //! the sources are candidates to move there later (`arbos-design.md` §7.2).
 
 pub mod credentials;
+pub mod diagnostics;
 pub mod doc;
 pub mod fixture;
 pub mod relay;
@@ -200,6 +201,11 @@ pub enum SyncEvent {
     Thumbnail {
         key: String,
         bytes: Arc<Vec<u8>>,
+    },
+    /// The thumbnail bytes could not be fetched; the card shows "No preview" instead of
+    /// loading forever. The failure itself went to the log and the silent diagnostics path.
+    ThumbnailFailed {
+        key: String,
     },
     /// An attachment landed in ~/Downloads (F10); the app reveals it.
     AttachmentSaved {
