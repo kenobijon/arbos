@@ -142,7 +142,10 @@ enum Transcript {
                 for (pix, part) in message.parts.enumerated() {
                     switch part {
                     case .text(let id, let text):
-                        let body = people ? Self.stripAskedPrefix(text) : text
+                        // Polish on display (Mac parity): glued "findingsDon't" / "have.Checking"
+                        // and a trailing tool-narration sentence still read as chat.
+                        let raw = people ? Self.stripAskedPrefix(text) : text
+                        let body = Markdown.polishAssistantProse(raw)
                         let blocks = Markdown.blocks(body).filter { !Markdown.isJSON($0) }
                         if blocks.isEmpty { continue }
                         let live = streaming && pix == lastTextPart
@@ -326,6 +329,111 @@ enum Transcript {
 
 /// Minimal block splitter: fences, headings, bullets, numbered lists, tables, paragraphs.
 enum Markdown {
+    /// Display polish for assistant bubbles already in the doc: insert a missing space
+    /// after `.`/`!`/`?` when the next character is uppercase ("have.Checking" →
+    /// "have. Checking"), between a lowercase run and an uppercase sentence start
+    /// ("findingsDon't" → "findings Don't"), and drop a trailing short tool-narration
+    /// sentence ("Checking the latest…") so the bubble stays prose-only.
+    static func polishAssistantProse(_ text: String) -> String {
+        fixGluedSentenceSpaces(stripTrailingToolNarration(text))
+    }
+
+    /// True when `chars[i]` (lowercase) is glued to an uppercase letter that starts a new
+    /// sentence/word ("findingsDon't"), not mid-camelCase ("GitHub", "iPhone").
+    private static func isGluedWordBreak(_ chars: [Character], _ i: Int) -> Bool {
+        guard i + 1 < chars.count else { return false }
+        let c = chars[i], next = chars[i + 1]
+        guard c.isLowercase, next.isUppercase else { return false }
+        let continues: Bool = {
+            guard i + 2 < chars.count else { return true }
+            let n = chars[i + 2]
+            return n.isLowercase || n == "'"
+        }()
+        guard continues else { return false }
+        var runStart = i
+        while runStart > 0 && chars[runStart - 1].isLowercase { runStart -= 1 }
+        if runStart > 0, chars[runStart - 1].isLetter { return false }
+        return (i + 1 - runStart) >= 2
+    }
+
+    private static func fixGluedSentenceSpaces(_ text: String) -> String {
+        let chars = Array(text)
+        var out = String()
+        out.reserveCapacity(text.count + 8)
+        var i = 0
+        while i < chars.count {
+            let c = chars[i]
+            out.append(c)
+            if c == "." || c == "!" || c == "?" {
+                let abbrev = c == "." && i >= 2 && chars[i - 1].isLowercase && chars[i - 2] == "."
+                if !abbrev, i + 1 < chars.count, chars[i + 1].isUppercase {
+                    out.append(" ")
+                }
+            } else if isGluedWordBreak(chars, i) {
+                out.append(" ")
+            }
+            i += 1
+        }
+        return out
+    }
+
+    private static func stripTrailingToolNarration(_ text: String) -> String {
+        let nl: String
+        let body: String
+        if text.hasSuffix("\r\n") {
+            body = String(text.dropLast(2)); nl = "\r\n"
+        } else if text.hasSuffix("\n") {
+            body = String(text.dropLast()); nl = "\n"
+        } else {
+            body = text; nl = ""
+        }
+        var trimmed = body
+        while trimmed.last?.isWhitespace == true { trimmed = String(trimmed.dropLast()) }
+        if trimmed.isEmpty { return "" }
+        let chars = Array(trimmed)
+        var splitAt: Int? = nil
+        var i = 0
+        while i < chars.count {
+            let c = chars[i]
+            if c == "." || c == "!" || c == "?" {
+                let abbrev = c == "." && i >= 2 && chars[i - 1].isLowercase && chars[i - 2] == "."
+                if !abbrev {
+                    let after = String(chars[(i + 1)...])
+                    if after.isEmpty { break }
+                    if after.hasPrefix(" ") || after.hasPrefix("\n") || after.hasPrefix("\r")
+                        || after.first?.isUppercase == true {
+                        splitAt = i + 1
+                    }
+                }
+            }
+            i += 1
+        }
+        guard let at = splitAt else {
+            return isShortToolNarration(trimmed) ? "" : trimmed + nl
+        }
+        let head = String(chars[..<at]).trimmingCharacters(in: .whitespaces)
+        let tail = String(chars[at...]).trimmingCharacters(in: .whitespaces)
+        if isShortToolNarration(tail) {
+            return head + nl
+        }
+        return trimmed + nl
+    }
+
+    private static func isShortToolNarration(_ sentence: String) -> Bool {
+        var l = sentence.trimmingCharacters(in: .whitespacesAndNewlines)
+        while let first = l.first, "*_#>- ".contains(first) { l = String(l.dropFirst()) }
+        l = l.lowercased()
+        if l.isEmpty || l.count > 90 { return false }
+        let starters = [
+            "running ", "executing ", "calling ", "invoking ",
+            "let me check", "let me run", "let me look",
+            "i'll check", "i will check", "i'll run", "i will run",
+            "checking ", "reading the file",
+            "first, i", "first i", "now i'll", "now i will",
+        ]
+        return starters.contains { l.hasPrefix($0) }
+    }
+
     static func blocks(_ text: String) -> [Block] {
         var out: [Block] = []
         var paragraph: [String] = []

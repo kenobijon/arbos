@@ -317,11 +317,38 @@ fn merge(a: InlineStyle, b: InlineStyle) -> InlineStyle {
 
 /// Display polish for assistant bubbles already in the doc: insert a missing space
 /// after `.`/`!`/`?` when the next character is uppercase ("have.Checking" →
-/// "have. Checking"), and drop a trailing short tool-narration sentence
-/// ("Checking the latest…") so the bubble stays prose-only.
+/// "have. Checking"), between a lowercase run and an uppercase sentence start
+/// ("findingsDon't" → "findings Don't"), and drop a trailing short tool-narration
+/// sentence ("Checking the latest…") so the bubble stays prose-only.
 pub fn polish_assistant_prose(text: &str) -> String {
     let without_tail = strip_trailing_tool_narration(text);
     fix_glued_sentence_spaces(&without_tail)
+}
+
+/// True when `chars[i]` (lowercase) is glued to an uppercase letter that starts a new
+/// sentence/word ("findingsDon't"), not mid-camelCase ("GitHub", "iPhone").
+fn is_glued_word_break(chars: &[char], i: usize) -> bool {
+    let Some(next) = chars.get(i + 1) else {
+        return false;
+    };
+    if !chars[i].is_lowercase() || !next.is_uppercase() {
+        return false;
+    }
+    let continues = match chars.get(i + 2) {
+        None => true,
+        Some(n) => n.is_lowercase() || *n == '\'',
+    };
+    if !continues {
+        return false;
+    }
+    let mut run_start = i;
+    while run_start > 0 && chars[run_start - 1].is_lowercase() {
+        run_start -= 1;
+    }
+    if run_start > 0 && chars[run_start - 1].is_ascii_alphabetic() {
+        return false;
+    }
+    (i + 1 - run_start) >= 2
 }
 
 fn fix_glued_sentence_spaces(text: &str) -> String {
@@ -341,6 +368,8 @@ fn fix_glued_sentence_spaces(text: &str) -> String {
                     }
                 }
             }
+        } else if is_glued_word_break(&chars, i) {
+            out.push(' ');
         }
         i += 1;
     }

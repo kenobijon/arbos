@@ -166,7 +166,8 @@ impl ReplyExtractor {
 /// Cheap post-check on main-agent prose as it streams into the doc (demo review v2): drops
 /// leading boilerplate lines ("Called 3 tools", "Running the tests…", "Route accepted: …"),
 /// leading thought-aloud sentences ("The user is asking…", "I should reply…"), trailing
-/// tool-narration ("Checking the latest…"), glued ".Word" → ". Word", and whole
+/// tool-narration ("Checking the latest…"), glued ".Word" → ". Word" / "findingsDon't" →
+/// "findings Don't", and whole
 /// ```json fences. Text is held back only until a line boundary, so streaming stays live.
 #[derive(Default)]
 pub struct ProseFilter {
@@ -323,22 +324,23 @@ impl ProseFilter {
         None
     }
 
-    /// Split off the first sentence. Treats ".Austin" (period, no space, capital) as a boundary
-    /// so a glued thought+answer still separates. Skips `e.g.` / `i.e.`-style abbreviations.
+    /// Split off the first sentence. Treats ".Austin" (period, no space, capital) and
+    /// "findingsDon't" (lowercase then capital, not camelCase) as boundaries so a glued
+    /// thought+answer still separates. Skips `e.g.` / `i.e.`-style abbreviations.
     /// Closing markdown emphasis after the stop (`greeting.** Hey`) still counts as a boundary.
     fn split_first_sentence(s: &str) -> Option<(&str, &str)> {
-        let bytes = s.as_bytes();
-        let mut i = 0;
-        while i < bytes.len() {
-            let b = bytes[i];
-            if b == b'.' || b == b'!' || b == b'?' {
+        let chars: Vec<char> = s.chars().collect();
+        let mut byte = 0usize;
+        for i in 0..chars.len() {
+            let c = chars[i];
+            let c_len = c.len_utf8();
+            if c == '.' || c == '!' || c == '?' {
                 // "e.g." / "i.e.": period after a lowercase letter that itself follows a period.
-                if b == b'.' && i >= 2 && bytes[i - 1].is_ascii_lowercase() && bytes[i - 2] == b'.'
-                {
-                    i += 1;
+                if c == '.' && i >= 2 && chars[i - 1].is_ascii_lowercase() && chars[i - 2] == '.' {
+                    byte += c_len;
                     continue;
                 }
-                let after = &s[i + 1..];
+                let after = &s[byte + c_len..];
                 if after.is_empty() {
                     return None;
                 }
@@ -351,15 +353,18 @@ impl ProseFilter {
                     || after_plain.starts_with('\n')
                     || after_plain.starts_with('\r')
                 {
-                    return Some((&s[..=i], after_plain));
+                    return Some((&s[..=byte], after_plain));
                 }
-                if let Some(c) = after_plain.chars().next() {
-                    if c.is_uppercase() {
-                        return Some((&s[..=i], after_plain));
+                if let Some(n) = after_plain.chars().next() {
+                    if n.is_uppercase() {
+                        return Some((&s[..=byte], after_plain));
                     }
                 }
+            } else if Self::is_glued_word_break(&chars, i) {
+                let after = &s[byte + c_len..];
+                return Some((&s[..=byte], after));
             }
-            i += utf8_len(bytes[i]);
+            byte += c_len;
         }
         None
     }
@@ -507,8 +512,39 @@ impl ProseFilter {
         Some((&s[..end], &s[end..]))
     }
 
+    /// True when `chars[i]` (lowercase) is glued to an uppercase letter that starts a new
+    /// sentence/word ("findingsDon't"), not mid-camelCase ("GitHub", "iPhone").
+    fn is_glued_word_break(chars: &[char], i: usize) -> bool {
+        let Some(next) = chars.get(i + 1) else {
+            return false;
+        };
+        if !chars[i].is_lowercase() || !next.is_uppercase() {
+            return false;
+        }
+        // Next must continue as a word ("Don't", "Auditing"), not an acronym ("USA").
+        let continues = match chars.get(i + 2) {
+            None => true,
+            Some(n) => n.is_lowercase() || *n == '\'',
+        };
+        if !continues {
+            return false;
+        }
+        // Lowercase run ending at i; skip when preceded by a letter (camelCase).
+        let mut run_start = i;
+        while run_start > 0 && chars[run_start - 1].is_lowercase() {
+            run_start -= 1;
+        }
+        if run_start > 0 && chars[run_start - 1].is_ascii_alphabetic() {
+            return false;
+        }
+        // "iPhone": single leading lowercase after a boundary — leave it.
+        (i + 1 - run_start) >= 2
+    }
+
     /// Insert a space after `.` / `!` / `?` when the next character is an uppercase letter
-    /// ("have.Checking" → "have. Checking"). Skips `e.g.` / `i.e.`-style abbreviations.
+    /// ("have.Checking" → "have. Checking"), and between a lowercase run and an uppercase
+    /// sentence start ("findingsDon't" → "findings Don't"). Skips `e.g.` / `i.e.` and
+    /// camelCase like `GitHub`.
     fn fix_glued_spaces(text: &str) -> String {
         let chars: Vec<char> = text.chars().collect();
         let mut out = String::with_capacity(text.len() + 8);
@@ -526,6 +562,8 @@ impl ProseFilter {
                         }
                     }
                 }
+            } else if Self::is_glued_word_break(&chars, i) {
+                out.push(' ');
             }
             i += 1;
         }
@@ -607,8 +645,9 @@ impl ProseFilter {
                     if !rest.is_empty() {
                         if !out.is_empty()
                             && !out.ends_with([' ', '\n', '\r'])
-                            && out.ends_with(['.', '!', '?'])
                             && rest.chars().next().is_some_and(|c| c.is_uppercase())
+                            && (out.ends_with(['.', '!', '?'])
+                                || out.chars().last().is_some_and(|c| c.is_lowercase()))
                         {
                             out.push(' ');
                         }
