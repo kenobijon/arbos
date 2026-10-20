@@ -60,6 +60,7 @@ CLI:  feedback_poller.py [run] | status | testers | set-cursor <ISO-8601>
       | inject <image|-> "<comment>" [ios|mac] [--handle <login>] [--origin "<text>"] [--email <tester email, grouping only>]
       | requeue <id>… [--allow "<who confirmed>"] | prioritize <id>… | confirm <id> [note] | handoff <id> [label] | deployed <id> [note]
       | track <id> <issue> "<comment>" [--handle <login>] [--owner <label>]   (a hand-filed, handed-off item)
+      | leadtime [since-ISO] | memtree-cost [YYYY-MM-DD]   (audit numbers; memtree-cost reads relay.db, root)
 """
 
 from __future__ import annotations
@@ -2902,6 +2903,35 @@ def main(argv: list[str]) -> int:
         store.save_state(fid, st)
         store.event(fid, "tracked", issue=number, owner=owner)
         print(f"{fid}: tracking #{number} (handed off to {owner}); lands when a main commit carries [feedback {fid}]")
+        return 0
+    if cmd == "memtree-cost":
+        # Memory-tree spend for the audit, real vs test users — the canonical query (docs/memory-tree-production.md §7):
+        # usage rows carry project_id only; the user is the project's owner (projects.user_id) and a test user is
+        # users.test = 1. The $5/day rule is judged on the `real` rows. Reads /var/lib/arbos-relay/relay.db only.
+        day = argv[2] if len(argv) > 2 else utcnow().strftime("%Y-%m-%d")
+        midnight = int(dt.datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=dt.timezone.utc).timestamp() * 1000)
+        end = midnight + 86_400_000
+        sql = ("SELECT CASE WHEN us.test = 1 THEN 'test' ELSE 'real' END AS who, u.api, COUNT(*), ROUND(SUM(u.usd), 4) "
+               "FROM usage u JOIN projects p ON p.id = u.project_id LEFT JOIN users us ON us.id = p.user_id "
+               f"WHERE u.api LIKE '%:memory-tree' AND u.at >= {midnight} AND u.at < {end} GROUP BY who, u.api ORDER BY who, u.api;")
+        db = "/var/lib/arbos-relay/relay.db"
+        try:
+            import sqlite3
+            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            rows = con.execute(sql).fetchall()
+        except Exception:  # noqa: BLE001 — the relay's db is root-only; sudo when the caller may
+            r = subprocess.run(["sudo", "-n", "sqlite3", "-separator", "|", db, sql], capture_output=True, text=True)
+            if r.returncode != 0:
+                print(f"cannot read {db} ({r.stderr.strip()[:120]}); run as root: sudo sqlite3 {db} \"{sql}\"")
+                return 2
+            rows = [tuple(line.split("|")) for line in r.stdout.splitlines() if line]
+        totals: dict[str, float] = {"real": 0.0, "test": 0.0}
+        print(f"memory-tree {day} UTC (real = projects owned by non-test users; the $5/day rule is judged on real):")
+        for who, api, calls, usd in rows:
+            print(f"  {who:4} {api:22} {int(calls):5} calls  ${float(usd):.4f}")
+            totals[who] = totals.get(who, 0.0) + float(usd)
+        print(f"  real ${totals.get('real', 0.0):.4f} · test ${totals.get('test', 0.0):.4f} · total ${sum(totals.values()):.4f}"
+              + ("  ⚠ real spend above the $5/day rule" if totals.get("real", 0.0) > 5 else ""))
         return 0
     if cmd == "leadtime":
         # Median lead times over shipped items (optionally since a date): feedback→issue, issue→merge,
