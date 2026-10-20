@@ -262,8 +262,10 @@ enum ChatMedia {
             for part in m.parts {
                 switch part {
                 case .attachment(let id, let a):
+                    // Same rules as the transcript (`Attachment.isImage`) so a photo
+                    // lands under Media, not Files.
                     let kind: ChatItem.Kind = a.mime.hasPrefix("audio/") || a.kind == "audio" ? .voice
-                        : (a.mime.hasPrefix("image/") || a.mime.hasPrefix("video/") || a.kind == "image") ? .media : .file
+                        : (a.isImage || a.mime.hasPrefix("video/") || a.kind == "video") ? .media : .file
                     let url = a.blobRef.flatMap { model.blobURL(projectId: slot, key: $0) }
                     out.append(ChatItem(id: "\(m.id)#\(id)", kind: kind, title: a.name,
                                         subtitle: a.mime, url: url, at: m.createdAt, fromHandle: m.senderHandle, mime: a.mime))
@@ -298,16 +300,26 @@ struct ChatItemsList: View {
         } else if kind == .media {
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 2), count: 3), spacing: 2) {
                 ForEach(filtered) { item in
-                    ZStack {
-                        Rectangle().fill(theme.card)
-                        if let url = item.url, item.mime.hasPrefix("image/") {
-                            AsyncImage(url: url) { img in img.resizable().scaledToFill() } placeholder: { ProgressView().tint(theme.muted) }
-                        } else {
-                            Image(systemName: "film").font(.system(size: 22)).foregroundStyle(theme.muted)
+                    // Size from the grid column (fit), then paint the image in an
+                    // overlay. `aspectRatio(..., .fill)` + AsyncImage used the
+                    // image's intrinsic size and blew the ScrollView (white sheet).
+                    Color.clear
+                        .aspectRatio(1, contentMode: .fit)
+                        .overlay {
+                            ZStack {
+                                Rectangle().fill(theme.card)
+                                if let url = item.url, !item.mime.hasPrefix("video/") {
+                                    AsyncImage(url: url) { img in
+                                        img.resizable().scaledToFill()
+                                    } placeholder: {
+                                        ProgressView().tint(theme.muted)
+                                    }
+                                } else {
+                                    Image(systemName: "film").font(.system(size: 22)).foregroundStyle(theme.muted)
+                                }
+                            }
                         }
-                    }
-                    .aspectRatio(1, contentMode: .fill)
-                    .clipped()
+                        .clipped()
                 }
             }
             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
