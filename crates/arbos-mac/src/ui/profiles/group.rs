@@ -208,7 +208,8 @@ pub(super) fn page(
                         removable.then(|| remove_x(key.clone(), &theme, cx).into_any_element()),
                         &theme,
                     )
-                    .group("member-row")
+                    // One group per row: `group_hover` looks a group up by name.
+                    .group(SharedString::from(format!("member-row-{key}")))
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.surface_2))
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -263,7 +264,7 @@ pub(super) fn page(
                             mine.then(|| remove_x(key.clone(), &theme, cx).into_any_element()),
                             &theme,
                         )
-                        .group("member-row")
+                        .group(SharedString::from(format!("member-row-{key}")))
                         .cursor_pointer()
                         .hover(|s| s.bg(theme.surface_2))
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -366,7 +367,9 @@ fn remove_x(key: String, theme: &Theme, cx: &mut Context<Shell>) -> Stateful<Div
         .items_center()
         .justify_center()
         .opacity(0.0)
-        .group_hover("member-row", |s| s.opacity(1.0))
+        .group_hover(SharedString::from(format!("member-row-{key}")), |s| {
+            s.opacity(1.0)
+        })
         .hover(|s| s.bg(theme.surface_2))
         .child(icon("xmark", 11.0, theme.text_muted))
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
