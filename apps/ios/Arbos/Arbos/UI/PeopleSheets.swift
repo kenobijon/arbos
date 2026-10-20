@@ -623,6 +623,15 @@ struct MembersSheet: View {
             List {
                 if let chat {
                     Section {
+                        // Push via navigationDestination (not NavigationLink / nested sheet):
+                        // List NavigationLinks are flaky in a medium detent sheet, and dismiss()
+                        // from a pushed picker can close Members instead of popping.
+                        Button {
+                            detent = .large
+                            showAddPerson = true
+                        } label: {
+                            Label("Add person", systemImage: "plus.circle").foregroundStyle(theme.text)
+                        }
                         ForEach(chat.humans) { m in
                             HStack(spacing: 12) {
                                 Button { model.showProfile(.user(ProfilePerson(m))) } label: { PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 40, name: m.name, id: m.id, colorIndex: m.avatarColorIndex) }.buttonStyle(.plain)
@@ -644,19 +653,14 @@ struct MembersSheet: View {
                                 }
                             }
                         }
-                        // Push via navigationDestination (not NavigationLink / nested sheet):
-                        // List NavigationLinks are flaky in a medium detent sheet, and dismiss()
-                        // from a pushed picker can close Members instead of popping.
-                        Button {
-                            detent = .large
-                            showAddPerson = true
-                        } label: {
-                            Label("Add person", systemImage: "plus.circle").foregroundStyle(theme.text)
-                        }
                     } header: { Text("People") } footer: { Text(chat.lockLabel) }
                     .listRowBackground(theme.card)
 
                     Section {
+                        Button { showAddAgent = true } label: {
+                            Label("Add agent", systemImage: "plus.circle").foregroundStyle(theme.text)
+                        }
+                        .disabled(myProjects.isEmpty)
                         ForEach(chat.agents) { a in
                             HStack(spacing: 12) {
                                 if let p = a.project {
@@ -680,10 +684,6 @@ struct MembersSheet: View {
                                 }
                             }
                         }
-                        Button { showAddAgent = true } label: {
-                            Label("Add agent", systemImage: "plus.circle").foregroundStyle(theme.text)
-                        }
-                        .disabled(myProjects.isEmpty)
                     } header: { Text("Agents") } footer: {
                         Text(chat.agents.isEmpty ? "Add one of your agents so both of you can talk to it. Mention it with @ to get a reply." : "Guests can ask a shared agent to do anything its owner can. The owner pays and can remove it any time.")
                     }
