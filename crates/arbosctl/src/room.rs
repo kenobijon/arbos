@@ -282,6 +282,8 @@ enum Mode {
         stream: bool,
         /// `answer` instead of `send`: `(question id or "" for the newest open one, value)`.
         answer: Option<(String, serde_json::Value)>,
+        /// The message this one replies to (`replyTo` on the row).
+        reply_to: Option<String>,
     },
     /// Append one out-of-band command (`stop`, `approve`, `reject`) and exit on its ack.
     Command {
@@ -446,6 +448,7 @@ async fn run(
                         text,
                         stream: _,
                         answer,
+                        reply_to,
                     } => {
                         s.print_new();
                         let msg_id = ulid();
@@ -475,6 +478,10 @@ async fn run(
                             None => {
                                 s.doc.append_user_message(&msg_id, text, &s.device);
                             }
+                        }
+                        if let Some(reply_to) = reply_to {
+                            s.doc
+                                .set_message_fields(&msg_id, &[("replyTo", json!(reply_to))]);
                         }
                         let bytes = s.doc.export_updates_since(&s.acked_vv);
                         let batch = ulid();
@@ -591,6 +598,7 @@ pub async fn send(
     project: &str,
     chat: &str,
     text: &str,
+    reply_to: Option<&str>,
     stream: bool,
     timeout_s: u64,
 ) -> Result<()> {
@@ -602,6 +610,7 @@ pub async fn send(
             text: text.to_owned(),
             stream,
             answer: None,
+            reply_to: reply_to.map(str::to_owned),
         },
         Duration::from_secs(timeout_s),
     )
@@ -627,6 +636,7 @@ pub async fn answer(
             text: String::new(),
             stream,
             answer: Some((question_id.unwrap_or("").to_owned(), value)),
+            reply_to: None,
         },
         Duration::from_secs(timeout_s),
     )
