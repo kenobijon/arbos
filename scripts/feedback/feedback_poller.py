@@ -2020,6 +2020,31 @@ class Loop:
                 return c
         return None
 
+    def adopt_later_testflight(self, fid: str, st: dict, sha: str, since: str) -> bool:
+        """Apple never listed the item's own build (two uploads minutes apart: the earlier one is sometimes dropped —
+        2026-10-20 19:16 / 20:02). A later VALID TestFlight build whose commit contains the fix is just as
+        installable: adopt it instead of waiting forever. True when adopted."""
+        # The merge commit's own run starts before the loop records pushed_at (a hand-off is noticed a tick later):
+        # look from a quarter hour before the push.
+        start = (parse_iso(st.get("pushed_at") or since) - dt.timedelta(minutes=15)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        later = self.gh.later_ios_build(sha, start)
+        if not later or later["head_sha"] == (st.get("ios_superseded_by") or ""):
+            return False
+        prefix = next((m.group(1) for a in self.gh.run_artifacts(later["id"])
+                       for m in [re.match(r"xcodebuild-logs-(\d{12,18})", a["name"])] if m), None)
+        number = self.resolve_build_number(prefix, later["id"]) if prefix else None
+        lb = self.asc.build_state(number) if number else None
+        if not (lb and lb.get("processingState") == "VALID"):
+            return False
+        old = st.get("testflight_build")
+        st.update(testflight_build=number, ios_run=later["html_url"], ios_uploaded_at=later["updated_at"],
+                  testflight_ready_at=iso(), ios_superseded_by=later["head_sha"], ios_done=True)
+        self.store.save_state(fid, st)
+        self.store.event(fid, "testflight_ready", build=number, instead_of=old, run=later["html_url"])
+        self.gh.comment(st["issue"], f"Apple never listed TestFlight build {old}; a later build that contains this fix is "
+                        f"processed: **{number}** ({later['html_url']}).")
+        return True
+
     def check_ship(self, fid: str, st: dict) -> None:
         sha = st["commit"]
         if not st.get("expects_ios") and not st.get("expects_ci"):
@@ -2141,23 +2166,7 @@ class Loop:
             elif b:
                 st["testflight_state"] = b.get("processingState")
             elif minutes_between(st.get("ios_uploaded_at") or iso(), iso()) > 20:
-                # Apple never listed this build (two uploads minutes apart: the earlier one is sometimes dropped —
-                # 2026-10-20 20:02 / 19:16). A later VALID TestFlight build whose commit contains the fix is just as
-                # installable: ship with that one instead of waiting forever.
-                later = self.gh.later_ios_build(sha, st.get("pushed_at") or since)
-                if later and later["head_sha"] != (st.get("ios_superseded_by") or ""):
-                    prefix = next((m.group(1) for a in self.gh.run_artifacts(later["id"])
-                                   for m in [re.match(r"xcodebuild-logs-(\d{12,18})", a["name"])] if m), None)
-                    number = self.resolve_build_number(prefix, later["id"]) if prefix else None
-                    lb = self.asc.build_state(number) if number else None
-                    if lb and lb.get("processingState") == "VALID":
-                        old = st["testflight_build"]
-                        st.update(testflight_build=number, ios_run=later["html_url"], ios_uploaded_at=later["updated_at"],
-                                  testflight_ready_at=iso(), ios_superseded_by=later["head_sha"])
-                        self.store.save_state(fid, st)
-                        self.store.event(fid, "testflight_ready", build=number, instead_of=old, run=later["html_url"])
-                        self.gh.comment(st["issue"], f"Apple never listed TestFlight build {old}; a later build that contains this fix is "
-                                        f"processed: **{number}** ({later['html_url']}).")
+                self.adopt_later_testflight(fid, st, sha, since)
 
         if st.get("expects_ci") and ci and ci["status"] == "completed" and ci["conclusion"] in ("cancelled", "skipped") and not st.get("release_done"):
             later = self.gh.later_run("ci.yml", "push", sha, since)
@@ -2246,6 +2255,10 @@ class Loop:
             self.ship(fid, st)
             return
         if waited > self.cfg.ship_timeout_min:
+            if st.get("expects_ios") and st.get("ios_done") and not st.get("testflight_ready_at") and self.adopt_later_testflight(fid, st, sha, since):
+                if mac_ok:
+                    self.ship(fid, st)
+                    return
             if st.get("ios_done") or st.get("release_done"):
                 self.ship(fid, st, partial=True)
             else:
@@ -2384,6 +2397,13 @@ class Loop:
                            if unverified else ""))
         self.gh.ensure_label("shipped-unverified", "C2E0C6", "Built and in TestFlight/edge; needs device-level confirmation (audio/call/haptic/notification)")
         self.gh.set_labels(st["issue"], ["shipped-unverified"] if unverified else ["shipped"], ["needs-human", "landed-not-shipped"])
+        if partial and st.get("expects_ios") and not st.get("testflight_ready_at"):
+            # The iPhone half is not installable yet (Apple has not processed / listed the build): stay open,
+            # fixed-on-main; the next ticks keep looking for a processed build and close then.
+            st["status"] = "pushed"
+            self.store.save_state(fid, st)
+            self.note_fixed_on_main(st)
+            return
         self.close_fixed(fid, st)
 
     def request_deploys(self, fid: str, kinds: list[str], sha: str) -> None:

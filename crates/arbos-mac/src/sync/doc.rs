@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 
 use anyhow::{Context as _, Result};
 use loro::event::DiffEvent;
-use loro::{Container, Index, LoroDoc, LoroList, LoroMap, LoroText, LoroValue, ValueOrContainer};
+use loro::{Container, LoroList, LoroMap, LoroText, LoroValue, ValueOrContainer};
 use serde_json::Value;
 
 use crate::model::{now_ms, Id, Message, MessageStatus, Part};
@@ -30,21 +30,21 @@ pub struct Touched {
 
 pub struct ChatDoc {
     pub chat_id: Id,
-    pub doc: LoroDoc,
+    pub core: arbos_core::doc::ChatDoc,
 }
 
 impl ChatDoc {
     pub fn new(chat_id: &str, project_id: &str) -> Self {
-        let doc = LoroDoc::new();
-        let meta = doc.get_map("meta");
+        let core = arbos_core::doc::ChatDoc::new(None, false);
+        let meta = core.doc.get_map("meta");
         let _ = meta.insert("chatId", chat_id);
         let _ = meta.insert("projectId", project_id);
         let _ = meta.insert("schemaVersion", SCHEMA_VERSION);
         let _ = meta.insert("epoch", 1i64);
-        doc.commit();
+        core.doc.commit();
         Self {
             chat_id: chat_id.to_string(),
-            doc,
+            core,
         }
     }
 
@@ -52,16 +52,12 @@ impl ChatDoc {
     pub fn empty(chat_id: &str) -> Self {
         Self {
             chat_id: chat_id.to_string(),
-            doc: LoroDoc::new(),
+            core: arbos_core::doc::ChatDoc::new(None, false),
         }
     }
 
     pub fn messages(&self) -> LoroList {
-        self.doc.get_list("messages")
-    }
-
-    pub fn commands(&self) -> LoroList {
-        self.doc.get_list("commands")
+        self.core.doc.get_list("messages")
     }
 
     pub fn len(&self) -> usize {
@@ -69,7 +65,7 @@ impl ChatDoc {
     }
 
     pub fn commit(&self) {
-        self.doc.commit();
+        self.core.doc.commit();
     }
 
     pub fn index_of(&self, message_id: &str) -> Option<usize> {
@@ -88,7 +84,7 @@ impl ChatDoc {
     pub fn read_message(&self, ix: usize) -> Option<Message> {
         let map = message_map(&self.messages(), ix)?;
         let mut json = serde_json::to_value(map.get_deep_value()).ok()?;
-        split_hidden_parts(&mut json);
+        arbos_core::doc::project_hidden_parts(&mut json);
         serde_json::from_value(json).ok()
     }
 
@@ -113,43 +109,10 @@ impl ChatDoc {
         Ok(ix)
     }
 
-    /// Toggle one emoji reaction for `sender` on a message — the iPhone's shape,
-    /// `reactions: Map { emoji: Map { sender: true } }`, several emojis per
-    /// message. Does not commit.
-    pub fn toggle_reaction(&self, message_id: &str, emoji: &str, sender: &str) -> Result<()> {
-        if emoji.is_empty() || sender.is_empty() {
-            return Ok(());
-        }
-        let list = self.messages();
-        let Some(ix) = self.index_of(message_id) else {
-            return Ok(());
-        };
-        let map = message_map(&list, ix).context("message row is not a map")?;
-        let reactions = match map.get("reactions") {
-            Some(ValueOrContainer::Container(Container::Map(m))) => m,
-            _ => map.insert_container("reactions", LoroMap::new())?,
-        };
-        let bucket = match reactions.get(emoji) {
-            Some(ValueOrContainer::Container(Container::Map(m))) => m,
-            _ => reactions.insert_container(emoji, LoroMap::new())?,
-        };
-        match bucket.get(sender) {
-            Some(ValueOrContainer::Value(LoroValue::Bool(true))) => bucket.delete(sender)?,
-            _ => bucket.insert(sender, true)?,
-        }
-        Ok(())
-    }
-
-    /// Append a `commands` row (`send`, `stop`, `answer`, `retry`, `retitle`).
+    /// Fixture helper: append a `commands` row. Does not commit.
+    /// Production relay calls `core.push_command` inside `core.transact`.
     pub fn push_command(&self, kind: &str, payload: Value, device: &str) -> Result<()> {
-        let list = self.commands();
-        let map = list.insert_container(list.len(), LoroMap::new())?;
-        map.insert("id", crate::model::new_id())?;
-        map.insert("kind", kind)?;
-        insert_json(&map, "payload", payload, false)?;
-        map.insert("issuedBy", device)?;
-        map.insert("issuedAt", now_ms() as i64)?;
-        map.insert("status", "pending")?;
+        let _ = self.core.push_command(kind, payload, device);
         Ok(())
     }
 
@@ -246,62 +209,13 @@ impl ChatDoc {
         Ok(())
     }
 
-    /// Map a root diff to message indexes. Paths look like
-    /// `[(messages, Key("messages")), (msg, Seq(i)), (parts, Key("parts")), ...]`.
+    /// Map a root diff to message indexes (delegates to `arbos_core::doc::touched`).
     pub fn touched(event: &DiffEvent<'_>) -> Touched {
-        let mut out = Touched::default();
-        for diff in &event.events {
-            let mut saw_messages = false;
-            let mut found = None;
-            for (_, index) in diff.path.iter() {
-                match index {
-                    Index::Key(k) if !saw_messages => {
-                        if k.as_str() == "messages" {
-                            saw_messages = true;
-                        } else {
-                            break;
-                        }
-                    }
-                    Index::Seq(i) if saw_messages => {
-                        found = Some(*i);
-                        break;
-                    }
-                    Index::Key(_) | Index::Seq(_) | Index::Node(_) => {}
-                }
-            }
-            if !saw_messages {
-                continue;
-            }
-            match found {
-                Some(i) => {
-                    out.messages.insert(i);
-                }
-                None => out.list_changed = true,
-            }
+        let t = arbos_core::doc::touched(event);
+        Touched {
+            list_changed: t.list_changed,
+            messages: t.messages,
         }
-        out
-    }
-}
-
-/// Move `parts[*]` with `hidden: true` into `hiddenParts` so the transcript
-/// never sees them while the Details drawer still can.
-fn split_hidden_parts(json: &mut Value) {
-    let Some(obj) = json.as_object_mut() else {
-        return;
-    };
-    let Some(Value::Array(parts)) = obj.get_mut("parts") else {
-        return;
-    };
-    let mut hidden = Vec::new();
-    parts.retain(|p| {
-        let is_hidden = p.get("hidden").and_then(Value::as_bool).unwrap_or(false);
-        if is_hidden {
-            hidden.push(p.clone());
-        }
-        !is_hidden
-    });
-    if !hidden.is_empty() {
-        obj.insert("hiddenParts".into(), Value::Array(hidden));
     }
 }
 
@@ -406,12 +320,40 @@ fn number_value(n: &serde_json::Number) -> LoroValue {
 mod core_writer_tests {
     use super::*;
     use crate::model::{Part, Role};
-    use arbos_core::doc::{ChatDoc as CoreDoc, UserAttachment, UserMessageOpts};
+    use arbos_core::doc::{UserAttachment, UserMessageOpts};
+    use std::collections::BTreeSet;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     fn message_from_core_row(row: &serde_json::Value) -> Message {
         let mut json = row.clone();
-        split_hidden_parts(&mut json);
+        arbos_core::doc::project_hidden_parts(&mut json);
         serde_json::from_value(json).expect("core row deserializes as Message")
+    }
+
+    /// Drop nulls and Mac-only placeholders core never writes (chatId, pending,
+    /// hiddenParts, false/empty defaults that serde still emits on Message).
+    fn client_row_keys(row: &Value) -> BTreeSet<String> {
+        let Some(obj) = row.as_object() else {
+            return BTreeSet::new();
+        };
+        obj.iter()
+            .filter(|(k, v)| {
+                if v.is_null() {
+                    return false;
+                }
+                match k.as_str() {
+                    "chatId" | "pending" | "hiddenParts" => false,
+                    "waitingUser" | "waitingApproval" | "greeting" => v.as_bool() != Some(false),
+                    "mentions" | "reactions" => !v
+                        .as_array()
+                        .map(|a| a.is_empty())
+                        .unwrap_or(v.as_object().map(|o| o.is_empty()).unwrap_or(false)),
+                    _ => true,
+                }
+            })
+            .map(|(k, _)| k.clone())
+            .collect()
     }
 
     #[test]
@@ -462,8 +404,8 @@ mod core_writer_tests {
         mac.insert_message(&msg).unwrap();
         mac.commit();
 
-        let mut core = CoreDoc::new(None, false);
-        core.import(&mac.doc.export(loro::ExportMode::Snapshot).unwrap())
+        let mut core = arbos_core::doc::ChatDoc::new(None, false);
+        core.import(&mac.core.doc.export(loro::ExportMode::Snapshot).unwrap())
             .unwrap();
         let msgs = core.messages();
         assert_eq!(msgs.len(), 1);
@@ -473,7 +415,7 @@ mod core_writer_tests {
 
     #[test]
     fn core_client_writers_deserialize_as_mac_message() {
-        let core = CoreDoc::new(None, false);
+        let core = arbos_core::doc::ChatDoc::new(None, false);
         let plain = "plain text for mac";
         core.transact(|d| {
             d.append_user_message(
@@ -481,19 +423,22 @@ mod core_writer_tests {
                 plain,
                 "dev:mac",
                 &UserMessageOpts {
-                    attachments: &[UserAttachment {
-                        name: "a.png",
-                        mime: "image/png",
-                        kind: Some("image"),
-                        blob_ref: Some("ref1"),
+                    attachments: vec![UserAttachment {
+                        name: "a.png".into(),
+                        mime: "image/png".into(),
+                        kind: Some("image".into()),
+                        blob_ref: Some("ref1".into()),
                     }],
-                    reply_to: Some("other"),
+                    reply_to: Some("other".into()),
                     ..UserMessageOpts::default()
                 },
-            );
-            d.append_system_line("m2", "Call ended · 1 min", "dev:mac", Some("call-9"));
-            d.append_greeting("m3", "Hi, I'm Arbos.", "dev:mac", "proj", "Arbos");
-            d.set_reaction("m1", "heart", "user:1", true);
+            )
+            .unwrap();
+            d.append_system_line("m2", "Call ended · 1 min", "dev:mac", Some("call-9"))
+                .unwrap();
+            d.append_greeting("m3", "Hi, I'm Arbos.", "dev:mac", "proj", "Arbos")
+                .unwrap();
+            d.set_reaction("m1", "heart", "user:1", true).unwrap();
         });
 
         let rows = core.to_json()["messages"].as_array().cloned().unwrap();
@@ -521,5 +466,114 @@ mod core_writer_tests {
         assert_eq!(greet.plain_text(), "Hi, I'm Arbos.");
         assert!(greet.greeting);
         assert_eq!(greet.sender, "agent:proj");
+    }
+
+    #[test]
+    fn core_user_row_keys_omit_mac_placeholders() {
+        // Core omits chatId / pending / hiddenParts / false defaults that
+        // insert_message still serializes from a full Message struct.
+        let mac = ChatDoc::empty("chat1");
+        let legacy = Message {
+            id: "legacy".into(),
+            chat_id: "chat1".into(),
+            role: Role::User,
+            sender: "user".into(),
+            status: MessageStatus::Done,
+            turn: None,
+            decision: None,
+            subagent_id: None,
+            subagent_name: None,
+            handoff_messages: None,
+            reactions: Default::default(),
+            in_reply_to: None,
+            routine_name: None,
+            sender_name: None,
+            sender_icon: None,
+            sender_handle: None,
+            sender_avatar: None,
+            sender_avatar_color: None,
+            mentions: Vec::new(),
+            reply_to: None,
+            asked_by_handle: None,
+            owner_handle: None,
+            usage: None,
+            return_contract: None,
+            waiting_user: false,
+            waiting_approval: false,
+            model: None,
+            effort: None,
+            created_at: now_ms(),
+            completed_at: None,
+            call_id: None,
+            activity: None,
+            pending: false,
+            parts: vec![Part::Text {
+                id: "p1".into(),
+                text: "hi".into(),
+            }],
+            hidden_parts: Vec::new(),
+            greeting: false,
+        };
+        mac.insert_message(&legacy).unwrap();
+        mac.commit();
+        let legacy_row =
+            serde_json::to_value(message_map(&mac.messages(), 0).unwrap().get_deep_value())
+                .unwrap();
+
+        mac.core.transact(|d| {
+            d.append_user_message("core1", "hi", "dev:mac", &UserMessageOpts::default())
+                .unwrap();
+        });
+        let core_row =
+            serde_json::to_value(message_map(&mac.messages(), 1).unwrap().get_deep_value())
+                .unwrap();
+
+        let legacy_keys = client_row_keys(&legacy_row);
+        let core_keys = client_row_keys(&core_row);
+        // Shared essentials after dropping Mac placeholders.
+        for key in ["id", "role", "sender", "status", "createdAt", "parts"] {
+            assert!(core_keys.contains(key), "core missing {key}");
+            assert!(legacy_keys.contains(key), "legacy missing {key}");
+        }
+        assert!(
+            core_keys.contains("deviceId"),
+            "core always writes deviceId"
+        );
+        assert!(
+            !core_row.as_object().unwrap().contains_key("chatId"),
+            "core omits chatId placeholder"
+        );
+        assert!(
+            !core_row.as_object().unwrap().contains_key("pending"),
+            "core omits pending placeholder"
+        );
+        assert!(
+            !core_row.as_object().unwrap().contains_key("hiddenParts"),
+            "core omits hiddenParts placeholder"
+        );
+    }
+
+    #[test]
+    fn mac_style_send_via_core_transact_is_one_commit() {
+        let mac = ChatDoc::empty("chat1");
+        let commits = Arc::new(AtomicUsize::new(0));
+        let commits_cb = commits.clone();
+        let _sub = mac.core.doc.subscribe_local_update(Box::new(move |_| {
+            commits_cb.fetch_add(1, Ordering::SeqCst);
+            true
+        }));
+        mac.core.transact(|d| {
+            d.append_user_message("m1", "hello", "dev:mac", &UserMessageOpts::default())
+                .unwrap();
+            d.push_command("send", serde_json::json!({ "messageId": "m1" }), "dev:mac");
+            d.push_command(
+                "retitle",
+                serde_json::json!({ "title": "hello" }),
+                "dev:mac",
+            );
+        });
+        assert_eq!(commits.load(Ordering::SeqCst), 1);
+        assert_eq!(mac.len(), 1);
+        assert_eq!(mac.core.doc.get_list("commands").len(), 2);
     }
 }
