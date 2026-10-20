@@ -165,6 +165,10 @@ final class AppModel: ObservableObject {
     @Published var messages: [Id: [Message]] = [:]
     @Published var caughtUp: Set<Id> = []
     @Published var link: Link = .connecting
+    /// Per-room link. The chat banner must not use the global `link`: any other
+    /// room's brief reconnect was painting "Reconnecting…" on a live chat (an
+    /// agent that just messaged looked broken on an empty transcript).
+    @Published private(set) var roomLinks: [Id: Link] = [:]
     @Published private(set) var models: [String] = []
     @Published var machine: Machine = .unknown
     @Published private(set) var machineBusy = false
@@ -449,17 +453,26 @@ final class AppModel: ObservableObject {
     /// or remembered until the lists arrive.
     func openFromNotification(chatId: String, projectId: String) {
         if peopleChat(chatId) != nil || projectId == peopleSlot && peopleChats.contains(where: { $0.id == chatId }) {
+            ensureRoom(projectId: peopleSlot, key: chatId, roomChat: chatId)
             path = [.chat(chatId: chatId, projectId: peopleSlot)]
             pendingOpen = nil
         } else if let c = chat(chatId) {
+            ensureRoom(projectId: c.projectId, key: c.id, roomChat: c.id)
             path = [.chat(chatId: c.id, projectId: c.projectId)]
             pendingOpen = nil
         } else if projectId != peopleSlot, project(projectId) != nil {
+            ensureRoom(projectId: projectId, key: chatId, roomChat: chatId)
             path = [.chat(chatId: chatId, projectId: projectId)]
             pendingOpen = nil
         } else {
             pendingOpen = (chatId, projectId)
         }
+    }
+
+    /// Link state for one chat's room (banner / empty-state). Unknown →
+    /// `.connecting` so a sibling room's reconnect does not paint this chat.
+    func roomLink(for chatId: Id) -> Link {
+        roomLinks[chatId] ?? .connecting
     }
 
     private func retryPendingOpen() {
@@ -899,6 +912,7 @@ final class AppModel: ObservableObject {
         }
         credentials = nil
         link = .connecting
+        roomLinks = [:]
         connectors = ConnectorsView()
         connectorsBusy = false
         endFirstLogin()
@@ -906,6 +920,7 @@ final class AppModel: ObservableObject {
 
     private func startAfterPairing() {
         link = .connecting
+        roomLinks = [:]
         openStore()
         // Paint the last home list and every saved transcript before any network.
         if let store, projects.isEmpty, peopleChats.isEmpty {
@@ -1172,6 +1187,7 @@ final class AppModel: ObservableObject {
         room.onPendingChanged = { [weak self] batches in self?.store?.savePending(key: key, batches: batches) }
         room.onLink = { [weak self] l in
             guard let self else { return }
+            self.roomLinks[key] = l
             self.link = l
             // Backfill rows after a reconnect must not light unread; only live
             // rows after the next catch-up do (Loro is ahead of /me/unread).
@@ -2125,6 +2141,7 @@ final class AppModel: ObservableObject {
     func leavePeopleChat(_ chatId: String) {
         peopleChats.removeAll { $0.id == chatId }
         rooms[chatId]?.stop(); rooms[chatId] = nil; docs[chatId] = nil; messages[chatId] = nil
+        roomLinks[chatId] = nil
         unacked[chatId] = nil
         forgetDoc(chatId)
         path = []
@@ -2178,6 +2195,7 @@ final class AppModel: ObservableObject {
     func deletePeopleChat(_ chatId: String) {
         peopleChats.removeAll { $0.id == chatId }
         rooms[chatId]?.stop(); rooms[chatId] = nil; docs[chatId] = nil; messages[chatId] = nil
+        roomLinks[chatId] = nil
         unacked[chatId] = nil
         forgetDoc(chatId)
         if archivedPeopleChatIds.contains(chatId) {
@@ -2330,23 +2348,28 @@ final class AppModel: ObservableObject {
             pushLog.notice("push kind=\(p.kind, privacy: .public) keys=\(Array(p.raw.keys).sorted().joined(separator: ","), privacy: .public)")
             switch p.kind {
             case "people_message":
-                if let cid = p.payload["chat_id"], !isWatching(cid) {
-                    peopleUnread.insert(cid)
-                    let from = p.sender["handle"] ?? p.payload["from_handle"] ?? "someone"
-                    // §7c sender{} first; the chat's member list fills any gap.
-                    let member = peopleChat(cid)?.members.first { $0.handle == from }
-                    let agent = member?.isAgent == true ? member?.project : nil
-                    let kind = p.sender["kind"] ?? (agent != nil ? "agent" : "user")
-                    let info = MessagePush.userInfo(
-                        chatId: cid, projectId: peopleSlot, title: p.sender["name"] ?? member?.displayName ?? "@\(from)",
-                        body: p.payload["preview"] ?? p.payload["text"] ?? "New message",
-                        senderKind: kind, senderId: p.sender["id"] ?? member?.id ?? from,
-                        senderName: p.sender["name"] ?? member?.displayName ?? from, senderHandle: from,
-                        avatar: p.sender["avatar"],
-                        avatarColor: p.sender["avatar_color"],
-                        avatarUrl: p.sender["avatar_url"] ?? member?.avatarUrl)
-                    Task { await PushManager.shared.postMessage(id: p.id, info: info) }
-                    applyBadge()
+                if let cid = p.payload["chat_id"] {
+                    // Agent (or person) reached out in a chat we have not listed yet —
+                    // refresh so open-from-notification can dial the room.
+                    if peopleChat(cid) == nil { needChats = true }
+                    if !isWatching(cid) {
+                        peopleUnread.insert(cid)
+                        let from = p.sender["handle"] ?? p.payload["from_handle"] ?? "someone"
+                        // §7c sender{} first; the chat's member list fills any gap.
+                        let member = peopleChat(cid)?.members.first { $0.handle == from }
+                        let agent = member?.isAgent == true ? member?.project : nil
+                        let kind = p.sender["kind"] ?? (agent != nil ? "agent" : "user")
+                        let info = MessagePush.userInfo(
+                            chatId: cid, projectId: peopleSlot, title: p.sender["name"] ?? member?.displayName ?? "@\(from)",
+                            body: p.payload["preview"] ?? p.payload["text"] ?? "New message",
+                            senderKind: kind, senderId: p.sender["id"] ?? member?.id ?? from,
+                            senderName: p.sender["name"] ?? member?.displayName ?? from, senderHandle: from,
+                            avatar: p.sender["avatar"],
+                            avatarColor: p.sender["avatar_color"],
+                            avatarUrl: p.sender["avatar_url"] ?? member?.avatarUrl)
+                        Task { await PushManager.shared.postMessage(id: p.id, info: info) }
+                        applyBadge()
+                    }
                 }
             case "people_chat_created":
                 needChats = true
