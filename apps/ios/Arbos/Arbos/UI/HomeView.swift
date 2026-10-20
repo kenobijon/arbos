@@ -328,13 +328,13 @@ struct HomeView: View {
                 ),
                 titleVisibility: .visible
             ) {
-                Button("Delete", role: .destructive) {
-                    if let c = deletePeople { model.deletePeopleChat(c.id) }
+                Button(deletePeopleLeaves ? "Leave" : "Delete", role: .destructive) {
+                    if let c = deletePeople { model.deleteOrLeavePeopleChat(c) }
                     deletePeople = nil
                 }
                 Button("Cancel", role: .cancel) { deletePeople = nil }
             } message: {
-                Text("Removes this chat from your list.")
+                Text(deletePeopleNote)
             }
         }
         .task {
@@ -391,6 +391,15 @@ struct HomeView: View {
         guard let c = deletePeople else { return "this chat" }
         if c.isGroup { return c.title.isEmpty ? "this group" : c.title }
         return c.counterpart(me: model.user?.id)?.displayName ?? c.title
+    }
+
+    /// A member of someone else's group leaves it; the owner deletes it (the Mac's rule).
+    private var deletePeopleLeaves: Bool { deletePeople.map { !model.ownsGroup($0) } ?? false }
+    private var deletePeopleNote: String {
+        guard let c = deletePeople else { return "Removes this chat from your list." }
+        if deletePeopleLeaves { return "You leave the group. It stays for everyone else." }
+        if c.isGroup { return "Deletes the group for everyone in it." }
+        return "Removes this chat from your list."
     }
 
     /// Goals section: status, next step, last moved — tap opens the goal.
@@ -1012,19 +1021,28 @@ struct HiddenChatsView: View {
             ),
             titleVisibility: .visible
         ) {
-            Button("Delete", role: .destructive) {
-                if let c = deletePeople { model.deletePeopleChat(c.id) }
+            Button(deletePeopleLeaves ? "Leave" : "Delete", role: .destructive) {
+                if let c = deletePeople { model.deleteOrLeavePeopleChat(c) }
                 deletePeople = nil
             }
             Button("Cancel", role: .cancel) { deletePeople = nil }
         } message: {
-            Text("Removes this chat from your list.")
+            Text(deletePeopleNote)
         }
     }
 
     private var deletePeopleTitle: String {
         guard let c = deletePeople else { return "this chat" }
         return peopleTitle(c)
+    }
+
+    /// A member of someone else's group leaves it; the owner deletes it (the Mac's rule).
+    private var deletePeopleLeaves: Bool { deletePeople.map { !model.ownsGroup($0) } ?? false }
+    private var deletePeopleNote: String {
+        guard let c = deletePeople else { return "Removes this chat from your list." }
+        if deletePeopleLeaves { return "You leave the group. It stays for everyone else." }
+        if c.isGroup { return "Deletes the group for everyone in it." }
+        return "Removes this chat from your list."
     }
 
     private func peopleTitle(_ c: PeopleChat) -> String {

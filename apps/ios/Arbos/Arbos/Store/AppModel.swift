@@ -2210,6 +2210,19 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// The chat list's Delete on a people group, the Mac's rule (2026-10-20):
+    /// the owner deletes it for everyone; a member leaves and the group stays.
+    func ownsGroup(_ c: PeopleChat) -> Bool {
+        guard c.isGroup else { return true }
+        if c.myRole == "owner" || c.myRole == "admin" { return true }
+        if let me = user?.id, c.createdBy == me { return true }
+        return c.humans.first { $0.id == user?.id }?.role == "owner"
+    }
+
+    func deleteOrLeavePeopleChat(_ c: PeopleChat) {
+        if ownsGroup(c) { deletePeopleChat(c.id) } else { leavePeopleChat(c.id) }
+    }
+
     func deletePeopleChat(_ chatId: String) {
         peopleChats.removeAll { $0.id == chatId }
         rooms[chatId]?.stop(); rooms[chatId] = nil; docs[chatId] = nil; messages[chatId] = nil
