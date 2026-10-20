@@ -53,7 +53,7 @@ pub enum ProfilePage {
 }
 
 /// Which agent-settings row on the agent's profile page is expanded into its
-/// dropdown (hover / click to open; see `ui::hoverpick`).
+/// choice list (click to open; see `ui::hoverpick`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AgentPick {
     Model,

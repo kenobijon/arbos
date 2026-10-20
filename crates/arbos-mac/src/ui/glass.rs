@@ -138,10 +138,15 @@ pub fn section_label(text: &str, theme: &Theme) -> Div {
 }
 
 /// A grouped card: rows separated by hairlines, 14 px corners.
+///
+/// `flex_shrink_0` is required: `overflow_hidden` makes the automatic
+/// minimum height zero, so inside a scrolling flex column the card would
+/// otherwise shrink and clip its rows (Settings, New Message, profiles).
 pub fn group(theme: &Theme) -> Div {
     div()
         .flex()
         .flex_col()
+        .flex_shrink_0()
         .rounded(px(PANEL_RADIUS))
         .bg(theme.surface_1)
         .overflow_hidden()
@@ -211,6 +216,7 @@ fn nav_row_with(
     div()
         .id(id)
         .flex()
+        .flex_shrink_0()
         .items_center()
         .gap(px(10.0))
         .min_h(px(44.0))

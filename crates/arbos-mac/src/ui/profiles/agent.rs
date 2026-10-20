@@ -1,7 +1,7 @@
 //! An agent's page: the D79 avatar, name, what it is doing, call / mute /
 //! search / more (quick actions), and the info card (for my own agent —
-//! Model / Reasoning / Voice rows that drop down on hover). Matches the
-//! Grok bot page: no about, camera vision, secrets, or Media / Files /
+//! Model / Reasoning / Voice rows that open a choice list on click). Matches
+//! the Grok bot page: no about, camera vision, secrets, or Media / Files /
 //! Links tabs. Owner and machine stay off this page. Clicking the big
 //! avatar (owned agents) opens the colour picker — there is no separate
 //! photo upload on the Mac yet.
@@ -18,7 +18,10 @@ use crate::ui::shell::Shell;
 use crate::ui::sidebar::machine_dot;
 use crate::ui::theme::{Theme, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
-use super::{action_button, action_row, card, frame, hero, hero_name, info_row, more_menu, Action};
+use super::{
+    action_button, action_row, card, frame, hero, hero_name, info_row, more_menu, Action,
+    SHEET_WIDTH,
+};
 
 /// An agent that is only known as a member of a people chat (someone else's
 /// project) is shown from that member entry.
@@ -135,11 +138,16 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
         )
         .into_any_element();
     let name_el = if renaming {
+        // Full-width under the avatar (same padding as iOS), name text centered
+        // so short names like "Home" line up with the working status below.
         div()
             .id("profile-rename")
-            .w(px(220.0))
+            .w(px(SHEET_WIDTH - 96.0))
             .h(px(36.0))
             .px(px(10.0))
+            .flex()
+            .items_center()
+            .justify_center()
             .rounded(px(10.0))
             .bg(theme.field)
             .border_1()
@@ -282,7 +290,7 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
     let mut info = card(&theme);
     if mine {
         // The agent's own settings: Model (searchable), Reasoning and Voice
-        // drop down on hover (or a click) and apply at once.
+        // open a choice list on click; a pick applies and folds the list.
         let model_open = pick == Some(AgentPick::Model);
         let reasoning_open = pick == Some(AgentPick::Reasoning);
         let voice_open = pick == Some(AgentPick::Voice);

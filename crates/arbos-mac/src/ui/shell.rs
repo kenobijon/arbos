@@ -801,8 +801,10 @@ impl Shell {
         // A pending single-click open of the header name must not land on
         // top of the rename.
         self.name_click_serial = self.name_click_serial.wrapping_add(1);
-        self.agent_name_input
-            .update(cx, |input, cx| input.set_text(name, cx));
+        self.agent_name_input.update(cx, |input, cx| {
+            input.set_text_center(false);
+            input.set_text(name, cx);
+        });
         self.state
             .update(cx, |s, cx| s.start_renaming(project_id, cx));
         let handle = self.agent_name_input.read(cx).focus_handle(cx);
@@ -903,6 +905,8 @@ impl Shell {
             }
         };
         let name = self.agent_name_input.read(cx).text().to_string();
+        self.agent_name_input
+            .update(cx, |input, _| input.set_text_center(false));
         self.state
             .update(cx, |s, cx| s.set_project_name(project_id, name, cx));
         Composer::focus(&self.composer, window, cx);
@@ -910,6 +914,8 @@ impl Shell {
     }
 
     pub(crate) fn cancel_rename_agent(&mut self, cx: &mut Context<Self>) {
+        self.agent_name_input
+            .update(cx, |input, _| input.set_text_center(false));
         self.state.update(cx, |s, cx| s.cancel_renaming(cx));
         cx.notify();
     }
@@ -936,8 +942,10 @@ impl Shell {
         };
         self.menu_open = false;
         self.row_menu = None;
-        self.agent_name_input
-            .update(cx, |input, cx| input.set_text(name, cx));
+        self.agent_name_input.update(cx, |input, cx| {
+            input.set_text_center(true);
+            input.set_text(name, cx);
+        });
         if description {
             self.description_input
                 .update(cx, |input, cx| input.set_text(about, cx));
@@ -996,6 +1004,8 @@ impl Shell {
         };
         if renaming {
             let name = self.agent_name_input.read(cx).text().to_string();
+            self.agent_name_input
+                .update(cx, |input, _| input.set_text_center(false));
             self.state
                 .update(cx, |s, cx| s.set_project_name(project_id.clone(), name, cx));
         }
@@ -2713,6 +2723,7 @@ impl Shell {
                 let mut header = div()
                     .flex()
                     .flex_col()
+                    .flex_shrink_0()
                     .items_center()
                     .gap(px(4.0))
                     .pt(px(6.0))
@@ -2877,6 +2888,7 @@ impl Shell {
                 div()
                     .flex()
                     .flex_col()
+                    .flex_shrink_0()
                     .child(
                         settings_group(&theme).child(
                             glass::nav_row_icon(
@@ -2992,11 +3004,23 @@ impl Shell {
             }
 
             let header = glass::sheet_header("Settings", None, Some(done), &theme);
+            // Prefer a fixed body height so Root and pushed pages share the
+            // same box; shrink with the sheet when the window is shorter so
+            // groups scroll instead of clipping against the card edge.
+            // Done and a click on the dimmed area around the card both close
+            // the sheet; clicks inside stay (glass::sheet stops propagation).
             return glass::sheet(
                 SETTINGS_WIDTH,
                 &theme,
                 header,
-                body.h(px(SETTINGS_BODY_HEIGHT)),
+                body.h(px(SETTINGS_BODY_HEIGHT)).flex_shrink_1().min_h_0(),
+            )
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    this.close_settings(cx);
+                    Composer::focus(&this.composer, window, cx);
+                }),
             );
         }
 
@@ -3032,6 +3056,7 @@ impl Shell {
                 .min_h_0()
                 .overflow_y_scroll()
                 .h(px(SETTINGS_BODY_HEIGHT))
+                .flex_shrink_1()
                 .child(content)
                 .into_any_element()
         } else {
@@ -3059,10 +3084,19 @@ impl Shell {
                 .min_h_0()
                 .overflow_y_scroll()
                 .h(px(SETTINGS_BODY_HEIGHT))
+                .flex_shrink_1()
                 .child(panel)
                 .into_any_element()
         };
-        glass::sheet(page.sheet_width(), &theme, header, page_inner)
+        // Done and a click on the dimmed area around the card both close the
+        // sheet; clicks inside stay.
+        glass::sheet(page.sheet_width(), &theme, header, page_inner).on_mouse_down(
+            gpui::MouseButton::Left,
+            cx.listener(|this, _, window, cx| {
+                this.close_settings(cx);
+                Composer::focus(&this.composer, window, cx);
+            }),
+        )
     }
 
     // ----- sign-in -------------------------------------------------------------------

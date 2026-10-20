@@ -109,7 +109,15 @@ pub(super) fn hero(
         .pt(px(4.0))
         .pb(px(18.0))
         .child(div().size(px(HERO_AVATAR)).child(avatar))
-        .child(div().pt(px(8.0)).max_w(px(SHEET_WIDTH - 80.0)).child(name))
+        .child(
+            div()
+                .pt(px(8.0))
+                .w_full()
+                .max_w(px(SHEET_WIDTH - 80.0))
+                .flex()
+                .justify_center()
+                .child(name),
+        )
         .child(
             div()
                 .text_size(px(TEXT_SMALL))
