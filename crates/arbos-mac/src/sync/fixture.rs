@@ -551,10 +551,24 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             message_id,
             emoji,
         } => {
+            let me = format!("user:{ME_ID}");
             let docs = shared.docs.lock().unwrap();
             if let Some(doc) = docs.get(&chat_id) {
-                let _ = doc.toggle_reaction(&message_id, &emoji, &format!("user:{ME_ID}"));
-                doc.commit();
+                let already = doc
+                    .index_of(&message_id)
+                    .and_then(|ix| doc.read_message(ix))
+                    .map(|m| {
+                        m.reactions
+                            .get(&emoji)
+                            .and_then(|bucket| bucket.get(&me))
+                            .copied()
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
+                let on = !already;
+                let _ = doc
+                    .core
+                    .transact(|d| d.set_reaction(&message_id, &emoji, &me, on));
             }
         }
         ClientCommand::Approve {
@@ -2077,7 +2091,7 @@ fn add_doc(shared: &Arc<Shared>, doc: ChatDoc) {
     let chat_id = doc.chat_id.clone();
     let tx = shared.doc_tx.clone();
     let id_for_cb = chat_id.clone();
-    let sub = doc.doc.subscribe_root(Arc::new(move |event| {
+    let sub = doc.core.doc.subscribe_root(Arc::new(move |event| {
         let touched = ChatDoc::touched(&event);
         if touched.list_changed || !touched.messages.is_empty() {
             let _ = tx.send(DocChanged {
