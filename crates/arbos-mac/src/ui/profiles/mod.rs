@@ -423,7 +423,8 @@ pub(super) fn list_row(
 /// One attachment found in a chat, with where it came from.
 pub(super) struct Found {
     pub attachment: Attachment,
-    pub chat: String,
+    /// Who shared it ("Mira", "@sam", "You", the agent's name).
+    pub by: String,
     pub when: u64,
     pub thumbnail: Option<Arc<RenderImage>>,
 }
@@ -463,7 +464,7 @@ pub(super) fn collect(state: &AppState, chats: &[&Chat]) -> Content {
                             .and_then(|k| state.thumbnails.get(k).cloned());
                         let found = Found {
                             attachment: attachment.clone(),
-                            chat: chat.title.clone(),
+                            by: sender_name(state, m),
                             when: m.created_at,
                             thumbnail,
                         };
@@ -494,6 +495,22 @@ pub(super) fn collect(state: &AppState, chats: &[&Chat]) -> Content {
     out.links.sort_by_key(|a| std::cmp::Reverse(a.when));
     out.links.dedup_by(|a, b| a.url == b.url);
     out
+}
+
+/// The sender's name for a file subline ("Mira"); the handle only when there is no name.
+fn sender_name(state: &AppState, m: &Message) -> String {
+    if let Some(n) = m.sender_name.as_deref().filter(|n| !n.is_empty()) {
+        return n.to_string();
+    }
+    if let Some(p) = m
+        .sender_handle
+        .as_deref()
+        .filter(|h| !h.is_empty())
+        .and_then(|h| state.person_by_handle(h))
+    {
+        return p.display_name();
+    }
+    sender_label(state, m)
 }
 
 fn sender_label(state: &AppState, m: &Message) -> String {
@@ -530,7 +547,7 @@ pub(super) fn urls_in(text: &str) -> Vec<String> {
 pub(super) fn when_text(at: u64) -> String {
     let ago = now_ms().saturating_sub(at);
     if ago < 86_400_000 {
-        "today".into()
+        "Today".into()
     } else {
         crate::app::ago_text(ago)
     }
@@ -601,27 +618,42 @@ pub(super) fn file_list(items: &[Found], glyph: &'static str, none: &str, theme:
     }
     let mut list = card(theme);
     for (i, f) in items.iter().enumerate() {
-        let title = f
-            .attachment
-            .title
-            .clone()
-            .filter(|t| !t.is_empty())
-            .unwrap_or_else(|| f.attachment.name.clone());
-        let mut sub = vec![when_text(f.when), f.chat.clone()];
+        // Redesign mock d: the file name, then "212 kB · Mira · Today" — size,
+        // who shared it, when.
+        let title = if f.attachment.name.is_empty() {
+            f.attachment.title.clone().unwrap_or_default()
+        } else {
+            f.attachment.name.clone()
+        };
+        let mut sub = vec![f.by.clone(), when_text(f.when)];
         if let Some(size) = size_text(f.attachment.bytes) {
             sub.insert(0, size);
         }
+        // The tile names the type (PDF, XLS, ZIP …) when the extension says so.
+        let ext = f
+            .attachment
+            .name
+            .rsplit_once('.')
+            .map(|(_, e)| e.to_ascii_uppercase())
+            .filter(|e| (2..=4).contains(&e.len()) && e.chars().all(|c| c.is_ascii_alphanumeric()));
+        let tile = div()
+            .size(px(kit::AVATAR))
+            .rounded(px(10.0))
+            .bg(theme.surface_2)
+            .flex()
+            .items_center()
+            .justify_center();
+        let tile = match ext {
+            Some(e) => tile
+                .text_size(px(11.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme.text_muted)
+                .child(e),
+            None => tile.child(icon(glyph, 18.0, theme.text_muted)),
+        };
         list = list.child(list_row(
             ElementId::Name(SharedString::from(format!("profile-file-{i}"))),
-            div()
-                .size(px(kit::AVATAR))
-                .rounded(px(10.0))
-                .bg(theme.surface_2)
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(icon(glyph, 18.0, theme.text_muted))
-                .into_any_element(),
+            tile.into_any_element(),
             title,
             sub.join(" · "),
             theme.text_muted,

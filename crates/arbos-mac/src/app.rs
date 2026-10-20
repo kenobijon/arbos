@@ -1287,7 +1287,7 @@ impl AppState {
                     }
                     // select_project() keeps the tab within the visible chats.
                     self.select_project(project_id.clone(), cx);
-                    // Rig: `ARBOS_OPEN_PROFILE=agent[:model|reasoning|voice]|group|user|me`
+                    // Rig: `ARBOS_OPEN_PROFILE=agent[:model|reasoning|voice]|group[:library]|user|me`
                     // opens the right pane for the restored chat (selecting it
                     // closed whatever the shell opened at launch), and
                     // `ARBOS_OPEN_SETTINGS=…` re-opens my pane on its Settings tab.
@@ -1298,13 +1298,16 @@ impl AppState {
                             if self.agent_pick == Some(AgentPick::Voice) {
                                 self.fetch_voices();
                             }
-                        } else if spec == "group" {
+                        } else if let Some(rest) = spec.strip_prefix("group") {
                             self.open_profile(
                                 ProfilePage::Group {
                                     space_id: project_id,
                                 },
                                 cx,
                             );
+                            if rest == ":library" {
+                                self.set_profile_tab(1, cx);
+                            }
                         } else if spec == "user" {
                             if let Some(handle) = self
                                 .projects
