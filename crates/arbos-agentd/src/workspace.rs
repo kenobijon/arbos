@@ -225,6 +225,10 @@ impl Supervisor {
         if let Err(e) = agent.settings_from_relay(project, chats).await {
             tracing::warn!(project = %project_id, error = %e, "settings from relay");
         }
+        // After a restart nothing is mid-flight: clear leftover `running` /
+        // `queued` rows and close their streaming progress messages so the
+        // working indicator and working-set text cannot stick forever.
+        agent.reclaim_orphan_subagents(true).await;
         agent.write_threads_index().await;
         let _ = agent
             .post_timing("workspace_start_ms", t0.elapsed().as_millis() as i64, None)
