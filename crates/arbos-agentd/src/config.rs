@@ -35,21 +35,37 @@ pub fn parse_switch(s: &str) -> Option<bool> {
     }
 }
 
-/// Code mode (D86): the main agent is told to batch and filter tool work in `codemode` scripts, with
-/// the script guardrails on. `ARBOS_CODE_MODE=on|off` from the box environment (the relay passes it
-/// through, so one relay setting switches the fleet); a box-local file (`override`) wins when it holds a
-/// valid value, so one test box can run the other arm. Default **off** until the eval passes.
-pub fn code_mode_on(override_file: &std::path::Path) -> bool {
+/// Box-local override of the stable-prefix flag: `<work_root>/.arbos/stable-prefix` holding `on` or `off`.
+pub const STABLE_PREFIX_FILE: &str = "stable-prefix";
+
+/// A box-wide experiment switch: the box-local `override_file` wins when it holds a valid value (so one
+/// test box can run the other arm), else the environment variable `env` (the relay passes its own
+/// through, so one relay setting switches the fleet), else `false`.
+pub fn switch_on(env: &str, override_file: &std::path::Path) -> bool {
     if let Some(v) = std::fs::read_to_string(override_file)
         .ok()
         .and_then(|s| parse_switch(&s))
     {
         return v;
     }
-    std::env::var("ARBOS_CODE_MODE")
+    std::env::var(env)
         .ok()
         .and_then(|s| parse_switch(&s))
         .unwrap_or(false)
+}
+
+/// Code mode (D86): the main agent is told to batch and filter tool work in `codemode` scripts, with
+/// the script guardrails on. `ARBOS_CODE_MODE=on|off`. Default **off** (the eval showed no win).
+pub fn code_mode_on(override_file: &std::path::Path) -> bool {
+    switch_on("ARBOS_CODE_MODE", override_file)
+}
+
+/// Stable prefix (D87): the system prompt holds only what never changes between turns; project
+/// memory, the working set and the per-turn skills ride at the tail, inside the user turn, so the
+/// cached prefix (tools + system prompt + earlier turns) is reused instead of rewritten.
+/// `ARBOS_STABLE_PREFIX=on|off`. Default **off** until the eval passes.
+pub fn stable_prefix_on(override_file: &std::path::Path) -> bool {
+    switch_on("ARBOS_STABLE_PREFIX", override_file)
 }
 
 /// Box-level settings: what every workspace shares.
@@ -320,8 +336,18 @@ impl Config {
     /// Code mode for this workspace's main agent (D86). Read at every pi (re)spawn, so a toggle
     /// needs a pi respawn, not a box restart.
     pub fn code_mode(&self) -> bool {
+        code_mode_on(&self.box_flag_file(CODE_MODE_FILE))
+    }
+
+    /// Stable prefix for this workspace's main agent (D87); read at every pi (re)spawn.
+    pub fn stable_prefix(&self) -> bool {
+        stable_prefix_on(&self.box_flag_file(STABLE_PREFIX_FILE))
+    }
+
+    /// `<work_root>/.arbos/<name>`: a box-wide flag file an operator can set for one box.
+    fn box_flag_file(&self, name: &str) -> PathBuf {
         let root = self.work_dir.parent().unwrap_or(&self.work_dir);
-        code_mode_on(&root.join(".arbos").join(CODE_MODE_FILE))
+        root.join(".arbos").join(name)
     }
 
     /// Browser settings per workspace: own profile, screenshots, stream port (the image's
@@ -377,6 +403,12 @@ mod tests {
         if std::env::var("ARBOS_CODE_MODE").is_err() {
             assert!(!code_mode_on(&f));
         }
+        let sp = dir.join(STABLE_PREFIX_FILE);
+        if std::env::var("ARBOS_STABLE_PREFIX").is_err() {
+            assert!(!stable_prefix_on(&sp));
+        }
+        std::fs::write(&sp, "on").unwrap();
+        assert!(stable_prefix_on(&sp));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

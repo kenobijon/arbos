@@ -69,6 +69,10 @@ pub(crate) fn box_env(
     if let Ok(m) = std::env::var("ARBOS_CODE_MODE") {
         env.insert("ARBOS_CODE_MODE".into(), m);
     }
+    // Stable prefix (D87): same shape.
+    if let Ok(m) = std::env::var("ARBOS_STABLE_PREFIX") {
+        env.insert("ARBOS_STABLE_PREFIX".into(), m);
+    }
     let _ = state;
     env
 }

@@ -592,6 +592,11 @@ impl PiAdapter {
                 "ARBOS_CODE_MODE".into(),
                 if cfg.code_mode() { "on" } else { "off" }.into(),
             ),
+            // D87: the extension puts the working set, skills and memory in the turn, not the prompt.
+            (
+                "ARBOS_STABLE_PREFIX".into(),
+                if cfg.stable_prefix() { "on" } else { "off" }.into(),
+            ),
         ]);
         // Approved vault grants (F8): placeholders only, usable through the egress tool.
         envs.extend(crate::vault::shell_envs(cfg));

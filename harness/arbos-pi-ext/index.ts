@@ -41,6 +41,12 @@ const CODE_MODE = (process.env.ARBOS_CODE_MODE ?? "off").trim().toLowerCase() ==
 const SCRIPT_TIMEOUT_MS = Number(process.env.ARBOS_SCRIPT_TIMEOUT_MS ?? 15 * 60 * 1000);
 // Tools that talk to the user or to agentd's turn state: direct calls only, never from a script.
 const DIRECT_ONLY_TOOLS = new Set(["route", "ask_user", "send_message", "mcp__arbos__ask_user"]);
+// Stable prefix (D87): with it on, the working set, the per-turn skills and project memory are
+// not system-prompt sections (which rewrite the cached prefix whenever they change) but a block
+// inside the user turn, so the prefix — tools, system prompt, earlier turns — stays byte-stable.
+const STABLE_PREFIX = (process.env.ARBOS_STABLE_PREFIX ?? "off").trim().toLowerCase() === "on";
+const CONTEXT_OPEN = "[Arbos context for this turn — working set, skills, project memory. Not from the user.]";
+const CONTEXT_CLOSE = "[End of Arbos context]";
 
 type ApprovalState = "allowed" | "pending" | "approved" | "rejected" | "expired";
 
@@ -118,12 +124,8 @@ export default function arbosPiExt(pi: ExtensionAPI) {
     }
   });
 
-  // ---- 4b. working-set section, refreshed every run and after compaction -----------------
-  pi.on("before_agent_start", async (event) => {
-    routeAttempts = 0;
-    routed = false;
-    routeCorrections = 0;
-    correcting = false;
+  /** The working-set lines of this chat (handles, notes, agentd's running subagents / goals / summary). */
+  async function workingSet(): Promise<{ lines: string[]; skills: string; memory: string }> {
     const lines: string[] = [];
     for (const h of handles.values()) {
       lines.push(`- ${h.id} (${h.kind}, ${h.chars.toLocaleString()} chars, ${h.lines} lines): ${h.note}`);
@@ -133,16 +135,41 @@ export default function arbosPiExt(pi: ExtensionAPI) {
     }
     const remote = await hook("/hook/working-set", { session_id: sessionId, role: SESSION_ROLE });
     if (remote?.ok && typeof remote.text === "string" && remote.text.trim()) lines.push(remote.text.trim());
-    const capped = lines.slice(0, 40); // ≈ 600 tokens (design §6.6 item 2b)
-    if (capped.length > 0) {
+    const skills = remote?.ok && typeof remote.skills === "string" ? remote.skills.trim() : "";
+    const memory = remote?.ok && typeof remote.memory === "string" ? remote.memory.trim() : "";
+    return { lines: lines.slice(0, 40), skills, memory }; // ≈ 600 tokens of lines (design §6.6 item 2b)
+  }
+
+  // ---- 4b. working-set section, refreshed every run and after compaction -----------------
+  pi.on("before_agent_start", async (event) => {
+    routeAttempts = 0;
+    routed = false;
+    routeCorrections = 0;
+    correcting = false;
+    if (STABLE_PREFIX) return; // D87: the context rides in the user turn (see the `input` hook)
+    const ws = await workingSet();
+    if (ws.lines.length > 0) {
       event.systemPromptOptions.sections["arbos-working-set"] =
-        `Named handles and notes of this chat. Use peek(handle) for slices; never ask to re-run them.\n${capped.join("\n")}`;
+        `Named handles and notes of this chat. Use peek(handle) for slices; never ask to re-run them.\n${ws.lines.join("\n")}`;
     }
     // Relevant skills (F5): a per-turn section after the byte-stable prefix, ≤ 600 tokens, chosen by agentd.
-    if (remote?.ok && typeof remote.skills === "string" && remote.skills.trim()) {
-      event.systemPromptOptions.sections["arbos-skills"] = remote.skills.trim();
+    if (ws.skills) {
+      event.systemPromptOptions.sections["arbos-skills"] = ws.skills;
     }
   });
+
+  /** D87: the per-turn context as one block placed before the user's words in the user turn. */
+  async function turnContextBlock(): Promise<string> {
+    const ws = await workingSet();
+    const parts: string[] = [];
+    if (ws.lines.length > 0) {
+      parts.push(`Working set — named handles and notes of this chat; use peek(handle) for slices, never ask to re-run them:\n${ws.lines.join("\n")}`);
+    }
+    if (ws.skills) parts.push(ws.skills);
+    if (ws.memory) parts.push(`Project memory:\n${ws.memory}`);
+    if (parts.length === 0) return "";
+    return `${CONTEXT_OPEN}\n${parts.join("\n\n")}\n${CONTEXT_CLOSE}\n\n`;
+  }
 
   // ---- 1. deny-list veto + audit before execution ----------------------------------------
   // Calls a `codemode` script makes arrive here too (pi runs nested calls through the same
@@ -493,7 +520,9 @@ export default function arbosPiExt(pi: ExtensionAPI) {
   pi.on("input", async (event) => {
     if (SESSION_ROLE !== "main" || event.source === "extension" || event.text.startsWith("/")) return { action: "continue" };
     if (event.text.startsWith(ROUTE_PREFIX)) return { action: "continue" };
-    return { action: "transform", text: `${ROUTE_PREFIX}${event.text}`, images: event.images };
+    // D87: the per-turn context goes here, after the stable prefix, instead of into the system prompt.
+    const context = STABLE_PREFIX ? await turnContextBlock() : "";
+    return { action: "transform", text: `${ROUTE_PREFIX}${context}${event.text}`, images: event.images };
   });
 
   // Route guard, part 2 (correction): a run that still ends without `route` gets one corrective
@@ -528,5 +557,5 @@ export default function arbosPiExt(pi: ExtensionAPI) {
     void hook("/hook/compacted", { session_id: sessionId });
   });
 
-  audit({ kind: "extension_loaded", rules: DENY_RULES.map((r) => r.name), code_mode: CODE_MODE });
+  audit({ kind: "extension_loaded", rules: DENY_RULES.map((r) => r.name), code_mode: CODE_MODE, stable_prefix: STABLE_PREFIX });
 }

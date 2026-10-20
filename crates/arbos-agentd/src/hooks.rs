@@ -212,7 +212,14 @@ async fn working_set(State(a): State<S>, headers: HeaderMap, Json(b): Json<Value
         .unwrap_or(sid);
     // `skills` is its own prompt section (F5): the working-set line cap must not cut it.
     let skills = a.skills_section_text().await;
-    Json(json!({ "ok": true, "text": a.working_set_text(&chat_id), "skills": skills }))
+    // D87: with the stable prefix on, project memory leaves the system prompt and arrives here,
+    // for the extension to place in the turn.
+    let memory = if a.cfg.stable_prefix() {
+        a.memory.core_memory_text()
+    } else {
+        String::new()
+    };
+    Json(json!({ "ok": true, "text": a.working_set_text(&chat_id), "skills": skills, "memory": memory, "stable_prefix": a.cfg.stable_prefix() }))
         .into_response()
 }
 

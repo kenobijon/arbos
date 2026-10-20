@@ -944,10 +944,15 @@ impl Agent {
             s.push_str(self.cfg.instructions.trim());
             s.push('\n');
         }
-        let core = self.memory.core_memory_text();
-        if !core.trim().is_empty() {
-            s.push_str("\n\n## Project memory\n\n");
-            s.push_str(&core);
+        // D87 stable prefix: project memory changes after every memory pass; inside the system
+        // prompt that rewrites the whole cached prefix (and every later message) on the next turn.
+        // With the flag on it rides in the turn instead (`/hook/working-set` → the extension).
+        if !self.cfg.stable_prefix() {
+            let core = self.memory.core_memory_text();
+            if !core.trim().is_empty() {
+                s.push_str("\n\n## Project memory\n\n");
+                s.push_str(&core);
+            }
         }
         std::fs::create_dir_all(self.system_prompt_path().parent().unwrap())?;
         std::fs::write(self.system_prompt_path(), s)?;
