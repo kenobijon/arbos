@@ -2713,6 +2713,7 @@ impl Shell {
                 let mut header = div()
                     .flex()
                     .flex_col()
+                    .flex_shrink_0()
                     .items_center()
                     .gap(px(4.0))
                     .pt(px(6.0))
@@ -2877,6 +2878,7 @@ impl Shell {
                 div()
                     .flex()
                     .flex_col()
+                    .flex_shrink_0()
                     .child(
                         settings_group(&theme).child(
                             glass::nav_row_icon(
@@ -2992,11 +2994,14 @@ impl Shell {
             }
 
             let header = glass::sheet_header("Settings", None, Some(done), &theme);
+            // Prefer a fixed body height so Root and pushed pages share the
+            // same box; shrink with the sheet when the window is shorter so
+            // groups scroll instead of clipping against the card edge.
             return glass::sheet(
                 SETTINGS_WIDTH,
                 &theme,
                 header,
-                body.h(px(SETTINGS_BODY_HEIGHT)),
+                body.h(px(SETTINGS_BODY_HEIGHT)).flex_shrink_1().min_h_0(),
             );
         }
 
@@ -3032,6 +3037,7 @@ impl Shell {
                 .min_h_0()
                 .overflow_y_scroll()
                 .h(px(SETTINGS_BODY_HEIGHT))
+                .flex_shrink_1()
                 .child(content)
                 .into_any_element()
         } else {
@@ -3059,6 +3065,7 @@ impl Shell {
                 .min_h_0()
                 .overflow_y_scroll()
                 .h(px(SETTINGS_BODY_HEIGHT))
+                .flex_shrink_1()
                 .child(panel)
                 .into_any_element()
         };
