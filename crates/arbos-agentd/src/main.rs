@@ -102,6 +102,9 @@ enum Cmd {
         card_model: String,
         #[arg(long)]
         out: Option<String>,
+        /// Pack with the compact policy (`ARBOS_MEMORY_PACK_COMPACT`) instead of the full one.
+        #[arg(long)]
+        compact: bool,
     },
 }
 
@@ -156,7 +159,8 @@ async fn main() -> Result<()> {
             scorer,
             card_model,
             out,
-        } => eval_tree(db, query, chat, scorer, card_model, out).await,
+            compact,
+        } => eval_tree(db, query, chat, scorer, card_model, out, compact).await,
     }
 }
 
@@ -167,6 +171,7 @@ async fn eval_tree(
     scorer: String,
     card_model: String,
     out: Option<String>,
+    compact: bool,
 ) -> Result<()> {
     let llm = match std::env::var("OPENROUTER_API_KEY")
         .ok()
@@ -195,7 +200,7 @@ async fn eval_tree(
     };
     let store = store::Store::open(std::path::Path::new(&db))?;
     let tree = tree::Tree::with_ids("eval", "eval", &card_model, store, std::sync::Arc::new(llm));
-    let report = tree.eval(&scorer, &chat, &query).await?;
+    let report = tree.eval(&scorer, &chat, &query, compact).await?;
     let text = serde_json::to_string_pretty(&report)?;
     match out {
         Some(p) => std::fs::write(p, text)?,

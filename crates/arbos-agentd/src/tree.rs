@@ -76,10 +76,24 @@ const JEV_CHUNK: usize = 24;
 const BM25_EXTRA: i64 = 20;
 const WALK_DEADLINE_MS: u64 = 2500;
 const JEV_TIMEOUT_MS: u64 = 1500;
-const BUDGET_CHAT: usize = 6000;
-const BUDGET_TOOL: usize = 12000;
+// Pack budgets (estimated tokens). "Full" is the pack as shipped with D77: one budget by content
+// kind, raw leaf text clipped. "Compact" (`ARBOS_MEMORY_PACK_COMPACT`) is the D87 follow-up: with
+// the prompt prefix stable the per-turn block is the largest fresh cache write of a turn, and
+// Haiku writes cost 12.5× reads, so chat and tool leaves each get their own budget, the whole
+// block is capped, a tool output that has a page card is packed as the card + facts only (the raw
+// text is one `context_open` away), exact repeats and leaves the prompt's project-memory block
+// already states are dropped.
+const BUDGET_CHAT_FULL: usize = 6000;
+const BUDGET_TOOL_FULL: usize = 12000;
 const CLIP_CHAT: usize = 2000;
-const CLIP_TOOL: usize = 6000;
+const CLIP_TOOL_FULL: usize = 6000;
+const BUDGET_CHAT: usize = 4000;
+const BUDGET_TOOL: usize = 3000;
+const BUDGET_PACK: usize = 5000;
+const CLIP_TOOL_PACK: usize = 1500;
+/// Leaves shorter than this are never deduplicated against the prompt's project-memory block
+/// (short lines match by accident).
+const DEDUPE_MIN_CHARS: usize = 40;
 const ROOT_ID: &str = "root";
 
 const CARD_SYSTEM: &str = "You write index cards for an agent's memory tree. Given raw events (or child cards), return JSON with keys: \"heading\" (ONE line, <= 110 chars: who did what, and the outcome), \"summary\" (2-3 plain sentences with the concrete facts, names, numbers, decisions, file paths and results that someone searching later would need), \"entities\" (list of <= 10 short strings: people, projects, tools, repos, topics). Never invent facts. Prefer specifics over generalities. Output JSON only.";
@@ -113,7 +127,7 @@ impl TreeMode {
 }
 
 /// Content kind of a thread; picks the walk thresholds and the pack clip (chat vs tool history).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Kind {
     Chat,
     Tool,
@@ -168,10 +182,22 @@ impl Kind {
             Self::Tool => 12,
         }
     }
+    fn clip_full(self) -> usize {
+        match self {
+            Self::Chat => CLIP_CHAT,
+            Self::Tool => CLIP_TOOL_FULL,
+        }
+    }
     fn clip(self) -> usize {
         match self {
             Self::Chat => CLIP_CHAT,
-            Self::Tool => CLIP_TOOL,
+            Self::Tool => CLIP_TOOL_PACK,
+        }
+    }
+    fn budget(self) -> usize {
+        match self {
+            Self::Chat => BUDGET_CHAT,
+            Self::Tool => BUDGET_TOOL,
         }
     }
 }
@@ -231,6 +257,14 @@ fn fmt_ts(ms: i64) -> String {
     chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms)
         .map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string())
         .unwrap_or_default()
+}
+
+/// Lower-cased, whitespace-collapsed text for the pack's repeat / prompt-memory checks.
+fn norm_text(s: &str) -> String {
+    s.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }
 
 fn clip_chars(s: &str, max: usize) -> String {
@@ -592,6 +626,16 @@ impl Tree {
 
     /// One leaf as text: timestamp, role, kind, page card when there is one, the text clipped.
     fn leaf_line(&self, leaf: &T3Row, clip: usize) -> String {
+        self.leaf_line_with(leaf, clip, false)
+    }
+
+    /// `leaf_line` for the per-turn pack: a leaf with a page card is rendered as the card and its
+    /// facts only, plus the `context_open` pointer — the raw output is what made the block large.
+    fn leaf_line_packed(&self, leaf: &T3Row, clip: usize) -> String {
+        self.leaf_line_with(leaf, clip, true)
+    }
+
+    fn leaf_line_with(&self, leaf: &T3Row, clip: usize, card_only: bool) -> String {
         let who = leaf.role.clone().unwrap_or_else(|| leaf.kind.clone());
         let mut s = format!("[{}] {who} ({}): ", fmt_ts(leaf.at), leaf.kind);
         if let Some((page, facts)) = self.page_card(&leaf.id) {
@@ -601,6 +645,13 @@ impl Tree {
             }
             if !facts.is_empty() {
                 s.push_str(&format!("facts: {} — ", facts.join(" | ")));
+            }
+            if card_only && !page.is_empty() {
+                s.push_str(&format!(
+                    "[id {} — context_open for the full output]",
+                    leaf.id
+                ));
+                return s;
             }
         }
         let body = clip_chars(&leaf.text, clip);
@@ -612,6 +663,72 @@ impl Tree {
             ));
         }
         s
+    }
+
+    /// Compact pack: newest first into per-kind budgets and the cap for the whole block. Before
+    /// budgeting, exact repeats (same role and text — the newest stays) and leaves the prompt's
+    /// project-memory block already states verbatim are dropped. `blocks` come back in time order.
+    fn pack_compact(
+        &self,
+        kept: &mut [&T3Row],
+        leaf_kind: &HashMap<String, Kind>,
+        prompt_memory: &str,
+        pack: &mut Pack,
+        blocks: &mut Vec<(i64, String, usize, String)>,
+        total: &mut usize,
+    ) {
+        let memory_norm = norm_text(prompt_memory);
+        // memory items read `- text` (T0) or `- [kind] text` (T1): compare the text only
+        let memory_lines: Vec<String> = prompt_memory
+            .lines()
+            .map(|l| {
+                let l = l.trim().trim_start_matches("- ");
+                let l = match (l.starts_with('['), l.find("] ")) {
+                    (true, Some(i)) => &l[i + 2..],
+                    _ => l,
+                };
+                norm_text(l)
+            })
+            .filter(|l| l.chars().count() >= DEDUPE_MIN_CHARS)
+            .collect();
+        kept.sort_by(|a, b| (b.at, &b.id).cmp(&(a.at, &a.id)));
+        let mut seen: HashSet<(String, String)> = HashSet::new();
+        let mut used: HashMap<Kind, usize> = HashMap::new();
+        for l in kept.iter() {
+            let kind = leaf_kind.get(&l.id).copied().unwrap_or(Kind::Chat);
+            let body = norm_text(&l.text);
+            let key = (
+                l.role.clone().unwrap_or_default(),
+                body.chars().take(400).collect::<String>(),
+            );
+            let long_enough = body.chars().count() >= DEDUPE_MIN_CHARS;
+            let dropped = if !seen.insert(key) {
+                Some("repeat")
+            } else if long_enough
+                && (memory_norm.contains(body.as_str())
+                    || memory_lines.iter().any(|m| body.contains(m.as_str())))
+            {
+                Some("in prompt memory")
+            } else {
+                None
+            };
+            if let Some(why) = dropped {
+                pack.decisions
+                    .push(json!({ "level": "pack", "node_id": l.id, "dropped": why }));
+                continue;
+            }
+            let line = self.leaf_line_packed(l, kind.clip());
+            let tok = est_tokens(&line);
+            let kind_used = used.get(&kind).copied().unwrap_or(0);
+            if kind_used + tok > kind.budget() || *total + tok > BUDGET_PACK {
+                pack.decisions.push(json!({ "level": "pack", "node_id": l.id, "dropped": "budget", "tokens": tok, "kind": kind.as_str() }));
+                continue;
+            }
+            used.insert(kind, kind_used + tok);
+            *total += tok;
+            blocks.push((l.at, line, tok, l.id.clone()));
+        }
+        blocks.sort_by(|a, b| (a.0, &a.3).cmp(&(b.0, &b.3)));
     }
 
     // ---- thread metadata ----------------------------------------------------------------------
@@ -1246,6 +1363,7 @@ impl Tree {
 
     /// The walk proper. `exclude_thread` is the chat the question is asked in (its recent window
     /// is already in the model's session); `restricted` limits the walk to that chat's subtree.
+    #[allow(clippy::too_many_arguments)]
     async fn walk_inner(
         &self,
         scorer: &str,
@@ -1253,6 +1371,8 @@ impl Tree {
         restricted: bool,
         query_text: &str,
         asker: &str,
+        prompt_memory: &str,
+        compact: bool,
     ) -> Pack {
         let t0 = Instant::now();
         let mut pack = Pack::default();
@@ -1421,26 +1541,41 @@ impl Tree {
                 kept.push(l);
             }
         }
-        // pack: time order, grouped by thread, budget by content kind, newest kept when over budget
-        let any_tool = kept
-            .iter()
-            .any(|l| leaf_kind.get(&l.id).copied().unwrap_or(Kind::Chat) == Kind::Tool);
-        let budget = if any_tool { BUDGET_TOOL } else { BUDGET_CHAT };
-        kept.sort_by_key(|l| (l.at, l.id.clone()));
         let mut blocks: Vec<(i64, String, usize, String)> = Vec::new(); // (at, text, tokens, leaf id)
-        for l in &kept {
-            let kind = leaf_kind.get(&l.id).copied().unwrap_or(Kind::Chat);
-            let line = self.leaf_line(l, kind.clip());
-            let tok = est_tokens(&line);
-            blocks.push((l.at, line, tok, l.id.clone()));
-        }
-        let mut total: usize = blocks.iter().map(|b| b.2).sum();
-        // drop oldest first until under budget
-        let mut i = 0;
-        while total > budget && i < blocks.len() {
-            total -= blocks[i].2;
-            blocks[i].1.clear();
-            i += 1;
+        let mut total: usize = 0;
+        if compact {
+            self.pack_compact(
+                &mut kept,
+                &leaf_kind,
+                prompt_memory,
+                &mut pack,
+                &mut blocks,
+                &mut total,
+            );
+        } else {
+            // full: time order, one budget by content kind, oldest dropped when over budget
+            let any_tool = kept
+                .iter()
+                .any(|l| leaf_kind.get(&l.id).copied().unwrap_or(Kind::Chat) == Kind::Tool);
+            let budget = if any_tool {
+                BUDGET_TOOL_FULL
+            } else {
+                BUDGET_CHAT_FULL
+            };
+            kept.sort_by_key(|l| (l.at, l.id.clone()));
+            for l in &kept {
+                let kind = leaf_kind.get(&l.id).copied().unwrap_or(Kind::Chat);
+                let line = self.leaf_line(l, kind.clip_full());
+                let tok = est_tokens(&line);
+                blocks.push((l.at, line, tok, l.id.clone()));
+            }
+            total = blocks.iter().map(|b| b.2).sum();
+            let mut i = 0;
+            while total > budget && i < blocks.len() {
+                total -= blocks[i].2;
+                blocks[i].1.clear();
+                i += 1;
+            }
         }
         let mut out = String::new();
         let mut cur_thread = String::new();
@@ -1509,6 +1644,8 @@ impl Tree {
         query_text: &str,
         asker: &str,
         recent_window: &Value,
+        prompt_memory: &str,
+        compact: bool,
     ) -> Option<String> {
         if mode == TreeMode::Off {
             return None;
@@ -1529,7 +1666,15 @@ impl Tree {
         } else {
             match tokio::time::timeout(
                 Duration::from_millis(WALK_DEADLINE_MS + 600),
-                self.walk_inner(scorer, chat_id, restricted, query_text, asker),
+                self.walk_inner(
+                    scorer,
+                    chat_id,
+                    restricted,
+                    query_text,
+                    asker,
+                    prompt_memory,
+                    compact,
+                ),
             )
             .await
             {
@@ -1575,15 +1720,23 @@ impl Tree {
         if !inject {
             return None;
         }
-        Some(format!(
-            "[Memory retrieved from your earlier chats, tool results and subagent sessions for this message. Raw records, oldest first. Rules: what the user told you about themselves (their name, preferences, facts) is true and outranks anything you said before and any handle or label you see; between two user statements the newer wins; if the records show the question's premise is wrong, say so. Answer from these records directly and say in a few words what you checked. If nothing here answers the question, say you have no record of it rather than guessing. You can read more with context_search / context_open / context_around.]\n{}\n[End of retrieved memory]",
-            pack.text
-        ))
+        let rules = if compact {
+            "[Memory retrieved for this message from earlier chats, tool results and subagent sessions; raw records, oldest first. What the user told you about themselves (name, preferences, facts) is true and outranks anything you said before or any handle you see; between two user statements the newer wins; if the records show the question's premise is wrong, say so. Answer from the records and say briefly what you checked; if nothing here answers it, say you have no record rather than guessing. More via context_search / context_open / context_around.]"
+        } else {
+            "[Memory retrieved from your earlier chats, tool results and subagent sessions for this message. Raw records, oldest first. Rules: what the user told you about themselves (their name, preferences, facts) is true and outranks anything you said before and any handle or label you see; between two user statements the newer wins; if the records show the question's premise is wrong, say so. Answer from these records directly and say in a few words what you checked. If nothing here answers the question, say you have no record of it rather than guessing. You can read more with context_search / context_open / context_around.]"
+        };
+        Some(format!("{rules}\n{}\n[End of retrieved memory]", pack.text))
     }
 
     /// Offline check (`arbos-agentd eval-tree`): build until nothing is left to card, then walk
     /// one query from `chat_id` and print the pack.
-    pub async fn eval(&self, scorer: &str, chat_id: &str, query: &str) -> Result<Value> {
+    pub async fn eval(
+        &self,
+        scorer: &str,
+        chat_id: &str,
+        query: &str,
+        compact: bool,
+    ) -> Result<Value> {
         let mut passes = Vec::new();
         for _ in 0..30 {
             let st = self.build_pass().await?;
@@ -1600,8 +1753,23 @@ impl Tree {
                 break;
             }
         }
+        // the same T0/T1 text the prompt's project-memory block holds (threads omitted)
+        let mut prompt_memory = String::new();
+        for tier in ["T0", "T1"] {
+            for m in self.store.memory_live(tier, None, 80).unwrap_or_default() {
+                prompt_memory.push_str(&format!("- [{}] {}\n", m.kind, m.text));
+            }
+        }
         let pack = self
-            .walk_inner(scorer, chat_id, false, query, "the project owner")
+            .walk_inner(
+                scorer,
+                chat_id,
+                false,
+                query,
+                "the project owner",
+                &prompt_memory,
+                compact,
+            )
             .await;
         Ok(json!({
             "passes": passes,
