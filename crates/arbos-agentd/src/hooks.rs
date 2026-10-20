@@ -210,6 +210,10 @@ async fn working_set(State(a): State<S>, headers: HeaderMap, Json(b): Json<Value
         .as_ref()
         .map(|t| t.chat_id.clone())
         .unwrap_or(sid);
+    // Drop zombie `running` subagents (task gone, status never cleared) before
+    // the model reads the working set — otherwise a terminated pod keeps the
+    // agent thinking work is still in flight and pins the client's indicator.
+    a.reclaim_orphan_subagents(false).await;
     // `skills` is its own prompt section (F5): the working-set line cap must not cut it.
     let skills = a.skills_section_text().await;
     // D87: project memory stays in the (debounced) system prompt; `memory` is reserved for a

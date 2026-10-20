@@ -29,7 +29,7 @@ pub const SEND_BUTTON: f32 = 32.0;
 /// Icon buttons in the header and sheet corners.
 pub const CONTROL: f32 = 32.0;
 /// Bubble corners (Grok Mac ≈ 16 pt; the iPhone uses 20).
-pub const BUBBLE_RADIUS: f32 = 16.0;
+pub const BUBBLE_RADIUS: f32 = 12.0;
 pub const PANEL_RADIUS: f32 = 14.0;
 pub const DRAWER_WIDTH: f32 = 320.0;
 pub const NARROW_WINDOW: f32 = 1000.0;

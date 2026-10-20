@@ -1387,6 +1387,63 @@ impl Message {
         self.status == MessageStatus::Streaming
     }
 
+    /// A streaming row older than this is treated as dead (box died mid-turn).
+    /// Matches the iPhone's 15-minute freshness window so a leftover `streaming`
+    /// status cannot pin the working indicator forever.
+    pub const STREAM_FRESH_MS: u64 = 15 * 60 * 1000;
+
+    /// True while a recent assistant message still streams and no newer user
+    /// line has arrived after it. A message left `streaming` by a dead box
+    /// (or a leftover stream under a later user message) must not pin the
+    /// working indicator forever.
+    pub fn chat_is_actively_streaming(messages: &[Message], now: u64) -> bool {
+        let recent = now.saturating_sub(Self::STREAM_FRESH_MS);
+        let Some(idx) = messages
+            .iter()
+            .rposition(|m| m.role == Role::Assistant && m.is_streaming() && m.created_at >= recent)
+        else {
+            return false;
+        };
+        !messages[idx + 1..].iter().any(|m| m.role == Role::User)
+    }
+
+    /// A subagent hand-off is still open: the brief went out (`handoff_messages`
+    /// still below 2) and the result has not come back. The spawn/wake row may
+    /// already be `done` while the child still runs — show the working line
+    /// until the hand-off closes. Same freshness window as streaming so a dead
+    /// box cannot pin forever.
+    pub fn chat_has_open_subagent(messages: &[Message], now: u64) -> bool {
+        let recent = now.saturating_sub(Self::STREAM_FRESH_MS);
+        messages.iter().any(|m| {
+            if m.role != Role::Assistant {
+                return false;
+            }
+            if m.subagent_id.is_none() && m.subagent_name.is_none() {
+                return false;
+            }
+            if !matches!(
+                m.turn,
+                Some(TurnKind::New | TurnKind::Spawn | TurnKind::Wake)
+            ) {
+                return false;
+            }
+            if m.handoff_messages.unwrap_or(1) >= 2 {
+                return false;
+            }
+            if m.is_streaming() {
+                return m.created_at >= recent;
+            }
+            let t = m.completed_at.unwrap_or(m.created_at);
+            now.saturating_sub(t) < 60_000
+        })
+    }
+
+    /// Working line should show: an active stream, or a brief open hand-off.
+    pub fn chat_is_actively_working(messages: &[Message], now: u64) -> bool {
+        Self::chat_is_actively_streaming(messages, now)
+            || Self::chat_has_open_subagent(messages, now)
+    }
+
     /// The working line's text while this turn streams: the `activity` field,
     /// else the newest `Working` / `Step` status message (visible or hidden).
     pub fn current_activity(&self) -> Option<String> {

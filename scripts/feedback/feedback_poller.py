@@ -1501,25 +1501,17 @@ class Loop:
         head = st["branch_head"]
         if st.get("expects_rust") is None:
             st["expects_rust"] = bool(self.rust_crates(st.get("files") or []))
-        if st.get("expects_rust"):
+        if st.get("expects_rust") or st.get("expects_ios"):
             if not self.cfg.rust_gate_ssh:
-                log(f"[{fid}] RUST_GATE_SSH unset; holding {st['branch']} in gating (Rust changes are not merged ungated)")
+                log(f"[{fid}] RUST_GATE_SSH unset; holding {st['branch']} in gating (gated changes are not merged ungated)")
                 return
             done = st.get("rust_gate") or {}
             if not (done.get("head") == head and done.get("ok")):
-                # The batch scheduler (rust_gate_tick) builds every ready branch together and records the
-                # verdict here; red → gate_followup, conflict → conflict_followup, both from the scheduler.
+                # The batch scheduler (rust_gate_tick) builds every ready branch together WITH current main into one
+                # integration tree and gates that tree: CI on Linux, the arbos-mac release build and the Xcode build on
+                # the Mac — the iOS build runs on the merged tree, never on the branch alone (2026-10-20 19:34: two
+                # branches each compiled alone, their textual merge removed `showMembers`, main was red 25 min).
                 return
-        if st.get("expects_ios") and self.cfg.ios_gate_ssh:
-            ok, output = self.ios_gate(st["branch"], head)
-            st["gate"] = {"head": head, "ok": ok, "at": iso(), "tail": output[-3000:]}
-            self.store.save_state(fid, st)
-            self.store.event(fid, "ios_gate", head=head, ok=ok)
-            if not ok:
-                self.gate_followup(fid, st, "ios", output)
-                return
-        elif st.get("expects_ios"):
-            log(f"[{fid}] IOS_GATE_SSH unset; merging {st['branch']} without the compile gate")
         self.merge_branch(fid, st)
 
     def gate_followup(self, fid: str, st: dict, which: str, output: str) -> None:
@@ -1614,7 +1606,7 @@ class Loop:
         out = []
         for fid in self.store.items():
             st = self.store.state(fid)
-            if st.get("status") != "gating" or not st.get("expects_rust") or not st.get("branch_head"):
+            if st.get("status") != "gating" or not (st.get("expects_rust") or st.get("expects_ios")) or not st.get("branch_head"):
                 continue
             done = st.get("rust_gate") or {}
             if done.get("head") == st["branch_head"] and done.get("ok"):
@@ -1661,7 +1653,9 @@ class Loop:
         if tree:
             # An integration tree prepared by hand (`gate-tree <sha> <fid>…`): gate it as one run, land it whole.
             cur.pop("rust_gate_tree", None)
-            tree.update(started=iso(), warm=False, needs_mac=True, linux="pending", mac="pending", mac_started=None, land_tree=True)
+            tfiles = [f["filename"] for c in self.gh.compare(tree["base"], tree["tree"]).get("commits", []) for f in self.gh.commit(c["sha"]).get("files", [])]
+            tree.update(started=iso(), warm=False, needs_mac=True, linux="pending", mac="pending", mac_started=None, land_tree=True,
+                        needs_ios=any(f.startswith("apps/ios/") for f in tfiles), ios="pending" if any(f.startswith("apps/ios/") for f in tfiles) else "skipped")
             cur["rust_gate"] = tree
             self.store.save_cursor(cur)
             log(f"Rust gate {tree['id']}: integration tree {tree['tree'][:8]} with {len(tree['members'])} fixes (CI on {tree['branch']}; Mac release build)")
@@ -1714,10 +1708,13 @@ class Loop:
             files += self.store.state(fid).get("files") or []
         crates = self.rust_crates(files)
         mac = "arbos-mac" in crates or crates == ["workspace"]
+        ios = any(f.startswith("apps/ios/") or f == ".github/workflows/ios.yml" for f in files)
+        linux = any(not f.startswith("apps/ios/") for f in files)  # ci.yml ignores apps/ios-only pushes
         cur = self.store.cursor()
         cur["rust_gate"] = {"id": run_id, "branch": branch, "base": base, "tree": tree, "members": {fid: members[fid] for fid in merged},
-                            "conflicts": conflicts, "started": iso(), "warm": False, "needs_mac": mac,
-                            "linux": "pending", "mac": "pending" if mac else "skipped", "mac_started": None}
+                            "conflicts": conflicts, "started": iso(), "warm": False, "needs_mac": mac, "needs_ios": ios,
+                            "linux": "pending" if linux else "skipped", "mac": "pending" if mac else "skipped",
+                            "ios": "pending" if ios else "skipped", "mac_started": None}
         self.store.save_cursor(cur)
         for fid, kind in conflicts.items():
             self.rust_gate_conflict(fid, members[fid], kind, run_id)
@@ -1727,8 +1724,8 @@ class Loop:
             return
         for fid in merged:
             self.store.event(fid, "rust_gate_started", run=run_id, members=len(merged), tree=tree, mac=mac)
-        log(f"Rust gate {run_id}: {len(merged)} branch(es) on {branch}@{tree[:8]} (base {base[:8]}; CI on GitHub"
-            + ("; arbos-mac release build on the Mac" if mac else "") + f"; conflicts: {len(conflicts)})")
+        log(f"Gate {run_id}: {len(merged)} branch(es) on {branch}@{tree[:8]} (base {base[:8]}" + ("; CI on GitHub" if linux else "")
+            + ("; arbos-mac release build on the Mac" if mac else "") + ("; Xcode build of the tree on the Mac" if ios else "") + f"; conflicts: {len(conflicts)})")
         if mac:
             self.rust_gate_mac_start(cur)
 
@@ -1792,8 +1789,19 @@ class Loop:
                         active["mac_tail"] = body[-4000:]
                         self.store.save_cursor(cur)
                         log(f"Rust gate {active['id']}: Mac half {verdict}")
-        if active["linux"] == "pending" or active["mac"] == "pending":
-            if active["linux"] == "fail" or active["mac"] == "fail":
+        # iOS half: Xcode build (Release + Debug) of the same integration tree, on the Mac.
+        if active.get("ios", "skipped") == "pending" and active["linux"] != "fail" and active["mac"] != "fail":
+            try:
+                ok, out = self.ios_gate(active["branch"], active["tree"])
+            except RuntimeError as e:
+                log(f"Gate {active['id']}: iOS half infrastructure error, retrying next tick: {str(e)[-300:]}")
+            else:
+                active["ios"] = "ok" if ok else "fail"
+                active["ios_tail"] = out[-5000:]
+                self.store.save_cursor(cur)
+                log(f"Gate {active['id']}: iOS half {active['ios']}")
+        if active["linux"] == "pending" or active["mac"] == "pending" or active.get("ios", "skipped") == "pending":
+            if active["linux"] == "fail" or active["mac"] == "fail" or active.get("ios") == "fail":
                 # One half is already red: settle now; a Mac build still running is for a dead tree.
                 if active["mac"] == "pending" and active.get("mac_started"):
                     self.rust_gate_mac("abort", active["id"])
@@ -1813,14 +1821,16 @@ class Loop:
         owner's call)."""
         tree, members = active["tree"], active["members"]
         commits = self.gh.compare(active["base"], tree).get("commits", [])
-        note = (f"Rust gate ✓ (CI on Linux {active.get('linux_run') or ''}; arbos-mac release build on the Mac)" if ok
-                else f"Rust gate red (linux={active['linux']}, mac={active['mac']})")
+        note = (f"Gate ✓ (CI on Linux {active.get('linux_run') or ''}; arbos-mac release build on the Mac" + ("; Xcode build of the tree" if active.get("ios") == "ok" else "") + ")" if ok
+                else f"Gate red (linux={active['linux']}, mac={active['mac']}, ios={active.get('ios', 'skipped')})")
         if not ok:
             diag = ""
             if active["linux"] == "fail":
                 diag += "\n".join(active.get("linux_errors") or []) + "\n"
             if active["mac"] == "fail":
                 diag += active.get("mac_tail") or ""
+            if active.get("ios") == "fail":
+                diag += active.get("ios_tail") or ""
             for fid in members:
                 st = self.store.state(fid)
                 if st.get("issue"):
@@ -1886,8 +1896,8 @@ class Loop:
     def rust_gate_settle(self, active: dict) -> None:
         members: dict[str, str] = active["members"]
         order = list(members)
-        ok = active["linux"] == "ok" and active["mac"] in ("ok", "skipped")
-        log(f"Rust gate {active['id']}: settle linux={active['linux']} mac={active['mac']} members={len(order)}")
+        ok = active["linux"] in ("ok", "skipped") and active["mac"] in ("ok", "skipped") and active.get("ios", "skipped") in ("ok", "skipped")
+        log(f"Gate {active['id']}: settle linux={active['linux']} mac={active['mac']} ios={active.get('ios', 'skipped')} members={len(order)}")
         if active.get("land_tree"):
             self.land_tree(active, ok)
             return
@@ -1897,7 +1907,9 @@ class Loop:
                 if st.get("status") != "gating" or st.get("branch_head") != members[fid]:
                     continue
                 st["rust_gate"] = {"head": members[fid], "ok": True, "verdict": "ok", "at": iso(), "run": active["id"], "batch": len(order),
-                                   "linux_run": active.get("linux_run"), "mac": active["mac"]}
+                                   "linux_run": active.get("linux_run"), "mac": active["mac"], "ios": active.get("ios", "skipped")}
+                if active.get("ios") == "ok":
+                    st["gate"] = {"head": members[fid], "ok": True, "at": iso(), "tree": active["tree"]}
                 self.store.save_state(fid, st)
                 self.store.event(fid, "rust_gate", head=members[fid], verdict="ok", run=active["id"], batch=len(order))
                 try:
@@ -1913,6 +1925,8 @@ class Loop:
             diagnostics += f"Linux (CI on the integration tree, {active.get('linux_run') or 'no run'}):\n" + "\n".join(active.get("linux_errors") or []) + "\n"
         if active["mac"] == "fail":
             diagnostics += f"Mac (cargo build --release -p arbos-mac on the integration tree):\n{active.get('mac_tail') or ''}\n"
+        if active.get("ios") == "fail":
+            diagnostics += f"iOS (xcodebuild Release + Debug of the integration tree, i.e. your branch merged with current main):\n{active.get('ios_tail') or ''}\n"
         if len(order) == 1:
             fid = order[0]
             st = self.store.state(fid)
@@ -1970,7 +1984,7 @@ class Loop:
                           + (f" {rg['linux_run']}" if rg.get("linux_run") else "")
                           + ("; arbos-mac release build on the Mac" if rg.get("mac") == "ok" else "") + ").")
         if st.get("gate"):
-            gate_note += " iOS gate: compiled on the Mac ✓."
+            gate_note += " iOS gate: Xcode build of the merged tree on the Mac ✓." if (st["gate"] or {}).get("tree") else " iOS gate: compiled on the Mac ✓."
         self.gh.comment(st["issue"], f"Merged to `main`: {merged['html_url']} (fix {fix['html_url']} — `{st['commit_message']}`).{gate_note}\n\n"
                         f"Files: {', '.join(f'`{f}`' for f in st.get('files') or []) or '—'}\n\n"
                         f"Agent summary: {st.get('agent_summary') or '—'}")
@@ -2468,6 +2482,10 @@ class Loop:
         except Exception as e:  # noqa: BLE001
             log(f"track-comment watch failed: {e}")
         try:
+            self.watch_main_red()
+        except Exception as e:  # noqa: BLE001
+            log(f"main-red watch failed: {e}")
+        try:
             self.watch_deploys()
         except Exception as e:  # noqa: BLE001
             log(f"deploy watch failed: {e}")
@@ -2506,6 +2524,56 @@ class Loop:
         self.store.save_state(fid, st)
         self.store.event(fid, "tracked", issue=number, owner=owner)
         return st
+
+    def watch_main_red(self) -> None:
+        """A failed CI / iOS run on main is announced within a tick: a GitHub issue labelled `main-red` ("main is red:
+        <workflow> at <sha>") with the run link and the error lines, one per failing sha; it is closed with a note the
+        moment a later run of that workflow on main is green. The audit reads the events."""
+        cur = self.store.cursor()
+        alerts: dict = cur.get("main_red") or {}
+        changed = False
+        for wf, name in (("ci.yml", "CI"), ("ios.yml", "iOS")):
+            try:
+                runs = self.gh.repo_api("GET", f"/actions/workflows/{wf}/runs?branch=main&per_page=5&event=push").get("workflow_runs", [])
+            except HttpError as e:
+                log(f"main-red: {wf} runs HTTP {e.status}")
+                continue
+            done = [r for r in runs if r["status"] == "completed" and r["conclusion"] in ("success", "failure")]
+            if not done:
+                continue
+            latest = done[0]
+            cur_alert = alerts.get(name)
+            if latest["conclusion"] == "failure":
+                if cur_alert and cur_alert.get("sha") == latest["head_sha"]:
+                    continue
+                errors = self.gh.run_error_lines(latest["id"], limit=30)
+                body = (f"**main is red**: `{name}` failed on `{latest['head_sha'][:8]}` — {latest['html_url']}\n\n```\n"
+                        + "\n".join(errors or ["(no error lines captured; open the run)"]) + "\n```\n\n"
+                        "Every Mac/iPhone release waits on this. The loop keeps gating branches against the current (red) main; "
+                        "whoever lands the repair, tag it or push it through the gate — this issue closes itself when main is green again.")
+                self.gh.ensure_label("main-red", "B60205", "A workflow on main is failing; releases are blocked")
+                if cur_alert and cur_alert.get("issue"):
+                    with contextlib.suppress(HttpError):
+                        self.gh.comment(cur_alert["issue"], f"Still red at a newer commit: `{latest['head_sha'][:8]}` — {latest['html_url']}")
+                    alerts[name] = {"sha": latest["head_sha"], "issue": cur_alert["issue"], "since": cur_alert.get("since") or iso()}
+                else:
+                    issue = self.gh.create_issue(f"main is red: {name} failing at {latest['head_sha'][:8]}", body, ["main-red"])
+                    alerts[name] = {"sha": latest["head_sha"], "issue": issue["number"], "since": iso()}
+                    log(f"main-red: {name} failed at {latest['head_sha'][:8]} → #{issue['number']}")
+                self.store.event("main", "main_red", workflow=name, sha=latest["head_sha"], run=latest["html_url"], issue=alerts[name]["issue"])
+                changed = True
+            elif cur_alert:
+                with contextlib.suppress(HttpError):
+                    self.gh.close_issue(cur_alert["issue"], "completed",
+                                        f"Green again: `{name}` succeeded on `{latest['head_sha'][:8]}` — {latest['html_url']} "
+                                        f"(red for {minutes_between(cur_alert.get('since') or iso(), iso())} min).")
+                self.store.event("main", "main_green", workflow=name, sha=latest["head_sha"], red_min=minutes_between(cur_alert.get("since") or iso(), iso()))
+                log(f"main-red: {name} green again at {latest['head_sha'][:8]}; closed #{cur_alert['issue']}")
+                alerts.pop(name, None)
+                changed = True
+        if changed:
+            cur["main_red"] = alerts
+            self.store.save_cursor(cur)
 
     def watch_track_comments(self) -> None:
         """Non-root registration for workers: a comment `track <feedback-id> bc-<owner>` on any issue (new since the

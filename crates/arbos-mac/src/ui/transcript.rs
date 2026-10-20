@@ -14,7 +14,7 @@ use gpui::{
 
 use crate::app::{AppEvent, AppState, DetailsTarget};
 use crate::model::{
-    Attachment, AttachmentKind, Id, Message, MessageStatus, Part, Person, Role, StatusKind,
+    now_ms, Attachment, AttachmentKind, Id, Message, MessageStatus, Part, Person, Role, StatusKind,
     TurnKind,
 };
 use crate::ui::approve::{approval_card, ApprovalView};
@@ -42,6 +42,18 @@ pub const COLUMN_MAX_WIDTH: f32 = 820.0;
 pub const ASSISTANT_MAX_WIDTH: f32 = 620.0;
 /// A new time stamp line whenever messages are this far apart.
 const STAMP_GAP_MS: u64 = 60 * 60 * 1000;
+/// Vertical rhythm measured from Grok Bot's Mac app (parity it.36, 2 px/pt):
+/// consecutive bubbles of one sender sit 6 pt apart, a change of sender opens
+/// 20 pt, a time stamp has 20 pt above and 24 below, and the last message keeps
+/// 54 pt clear of the composer.
+const ROW_GAP_HALF: f32 = 3.0;
+const TURN_GAP_EXTRA: f32 = 20.0 - 2.0 * ROW_GAP_HALF;
+/// Measured glyph-to-bubble, like the reference: the stamp's 13 pt line box
+/// carries ~4 pt of its own above and ~7 below the glyphs (measured).
+const STAMP_PAD_TOP: f32 = 20.0 - ROW_GAP_HALF - 4.0;
+const STAMP_PAD_BOTTOM: f32 = 24.0 - ROW_GAP_HALF - 7.0;
+/// The composer row above adds 6 pt of its own and the last row 3.
+const BOTTOM_INSET: f32 = 54.0 - ROW_GAP_HALF - 6.0;
 /// Messages for Mac fades a row's hover-only affordances (time, react glyph)
 /// in and out rather than snapping them.
 const HOVER_FADE_MS: f32 = 150.0;
@@ -332,6 +344,9 @@ pub struct Transcript {
     hover: HoverFade,
     /// Text selected in a bubble (drag / double-click / triple-click); ⌘C copies it.
     selection: Entity<TextSelection>,
+    /// Messages whose sender differs from the one before: their first row opens
+    /// the wider turn gap.
+    turn_starts: HashSet<Id>,
 }
 
 impl Transcript {
@@ -370,6 +385,7 @@ impl Transcript {
             activity_shown: None,
             hover: HoverFade::default(),
             selection,
+            turn_starts: HashSet::new(),
         }
     }
 
@@ -495,6 +511,11 @@ impl Transcript {
         let me_id = state.me_id();
         let thumb_keys: HashSet<&str> = state.thumbnails.keys().map(|k| k.as_str()).collect();
         let new_rows = build_rows(&messages, show_details, speech, &me_id, &thumb_keys);
+        self.turn_starts = messages
+            .windows(2)
+            .filter(|w| (w[0].role, &w[0].sender) != (w[1].role, &w[1].sender))
+            .map(|w| w[1].id.clone())
+            .collect();
 
         // Veils: observe text growth of live markdown rows.
         for row in &new_rows {
@@ -797,7 +818,7 @@ impl Transcript {
                         .flex_col()
                         .items_start()
                         .gap(px(3.0))
-                        .py(px(6.0))
+                        .py(px(ROW_GAP_HALF))
                         .child({
                             // Click the caption → the person's profile page.
                             let open_state = self.state.clone();
@@ -859,7 +880,7 @@ impl Transcript {
                         .flex_col()
                         .items_end()
                         .gap(px(3.0))
-                        .py(px(6.0))
+                        .py(px(ROW_GAP_HALF))
                         .when_some(sender_label, |el, label| {
                             el.child(
                                 div()
@@ -972,8 +993,8 @@ impl Transcript {
                     .flatten();
                 row_el
                     .justify_start()
-                    .when(first, |el| el.pt(px(6.0)))
-                    .when(last, |el| el.pb(px(6.0)))
+                    .when(first, |el| el.pt(px(ROW_GAP_HALF)))
+                    .when(last, |el| el.pb(px(ROW_GAP_HALF)))
                     .child(bubble)
                     .children(hover_actions)
                     .children(hover_time)
@@ -983,8 +1004,8 @@ impl Transcript {
                 .w_full()
                 .flex()
                 .justify_center()
-                .pt(px(14.0))
-                .pb(px(8.0))
+                .pt(px(STAMP_PAD_TOP))
+                .pb(px(STAMP_PAD_BOTTOM))
                 .text_size(px(TEXT_SMALL))
                 .text_color(theme.text_muted)
                 .child(label)
@@ -1053,7 +1074,7 @@ impl Transcript {
                     .when(!mine, |el| el.justify_start())
                     .when(indent, |el| el.pl(px(2.0)))
                     .mt(px(-2.0))
-                    .pb(px(6.0))
+                    .pb(px(ROW_GAP_HALF))
                     .child(chips)
                     .into_any_element()
             }
@@ -1216,6 +1237,21 @@ impl Transcript {
                 .into_any_element(),
             RowKind::Indicator { queued, activity } => {
                 PulseClock::request(cx);
+                // Freshness is time-capped (stale streams / open hand-offs). Re-check
+                // on each pulse so a leftover `streaming` row cannot pin forever;
+                // when it expires, rebuild rows without the indicator.
+                let chat_id = self.chat_id.clone().unwrap_or_default();
+                let still = {
+                    let state = self.state.read(cx);
+                    Message::chat_is_actively_working(state.messages_of(&chat_id), now_ms())
+                };
+                if !still {
+                    cx.spawn(async move |this, cx| {
+                        let _ = this.update(cx, |this, cx| this.sync(cx));
+                    })
+                    .detach();
+                    return div().into_any_element();
+                }
                 // A new activity fades in over 260 ms.
                 let key = activity.clone().unwrap_or_default();
                 let since = match &self.activity_shown {
@@ -1230,12 +1266,19 @@ impl Transcript {
                 let state = self.state.read(cx);
                 let (name, picture): (String, Option<gpui::Div>) = match state.selected() {
                     Some(space) if space.is_people() => {
-                        let chat_id = self.chat_id.clone().unwrap_or_default();
-                        let agent = state
-                            .messages_of(&chat_id)
+                        let msgs = state.messages_of(&chat_id);
+                        let recent = now_ms().saturating_sub(Message::STREAM_FRESH_MS);
+                        let agent = msgs
                             .iter()
                             .rev()
-                            .find(|m| m.role == Role::Assistant && m.is_streaming())
+                            .find(|m| {
+                                m.role == Role::Assistant
+                                    && (m.is_streaming() && m.created_at >= recent
+                                        || Message::chat_has_open_subagent(
+                                            std::slice::from_ref(*m),
+                                            now_ms(),
+                                        ))
+                            })
                             .and_then(|m| m.sender_handle.clone().or_else(|| m.sender_name.clone()))
                             .unwrap_or_else(|| "Agent".into());
                         let glyph = space
@@ -1380,7 +1423,7 @@ impl Transcript {
                     .items_center()
                     .gap(px(6.0))
                     .w(px(96.0))
-                    .pb(px(6.0))
+                    .pb(px(ROW_GAP_HALF))
                     .text_size(px(11.0))
                     .text_color(theme.text_faint)
                     .cursor_pointer()
@@ -1395,11 +1438,22 @@ impl Transcript {
         };
         let highlighted =
             self.state.read(cx).highlight_message.as_deref() == Some(row.message_id.as_str());
+        // The first row of a message from a new sender opens the turn gap; a
+        // stamp between them already carries its own spacing.
+        let turn_start = ix
+            .checked_sub(1)
+            .and_then(|i| self.rows.get(i))
+            .is_some_and(|prev| {
+                prev.message_id != row.message_id
+                    && !matches!(prev.kind, RowKind::Stamp { .. })
+                    && self.turn_starts.contains(&row.message_id)
+            });
         div()
             .w_full()
             .flex()
             .justify_center()
             .px(px(COLUMN_MARGIN))
+            .when(turn_start, |el| el.pt(px(TURN_GAP_EXTRA)))
             .when(highlighted, |el| {
                 el.bg(Theme::with_alpha(theme.accent, 0.14))
             })
@@ -1439,12 +1493,12 @@ impl Render for Transcript {
             .track_focus(&focus)
             .on_action(cx.listener(Self::copy_selection))
             .on_scroll_wheel(cx.listener(|this, event, _, cx| this.on_wheel(event, cx)))
-            .child(edge_faded(
+            .child(div().size_full().pb(px(BOTTOM_INSET)).child(edge_faded(
                 24.0,
                 true,
                 false,
                 list(self.list.clone(), cx.processor(Self::render_row)).size_full(),
-            ))
+            )))
             .when(show_jump, |el| {
                 el.child(
                     div()
@@ -1590,7 +1644,10 @@ pub fn build_rows(
         m.sender == "user" || m.sender.is_empty() || m.sender == format!("user:{me_id}")
     };
     let mut rows = Vec::new();
-    let mut running = false;
+    let now = now_ms();
+    // One indicator while a recent stream or open hand-off is live; stale
+    // `streaming` rows (dead box / leftover under a later user line) do not count.
+    let running = Message::chat_is_actively_working(messages, now);
     let mut queued = false;
     let last_reply = messages
         .iter()
@@ -1725,9 +1782,6 @@ pub fn build_rows(
                 }
             }
             Role::Assistant | Role::Project => {
-                if streaming {
-                    running = true;
-                }
                 if matches!(
                     message.turn,
                     Some(TurnKind::New | TurnKind::Spawn | TurnKind::Wake)
@@ -2085,7 +2139,9 @@ pub fn build_rows(
         let activity = messages
             .iter()
             .rev()
-            .find(|m| m.is_streaming())
+            .find(|m| {
+                m.is_streaming() && m.created_at >= now.saturating_sub(Message::STREAM_FRESH_MS)
+            })
             .and_then(Message::current_activity);
         rows.push(Row {
             version: hash_version(&(queued, &activity), true),

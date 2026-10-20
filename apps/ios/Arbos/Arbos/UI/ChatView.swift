@@ -417,7 +417,6 @@ struct ChatView: View {
                     case "edit": showProfile = true
                     case "userprofile": if let c = counterpart { model.showProfile(.user(ProfilePerson(c))) }
                     case "groupprofile": model.showProfile(.group(chatId: chatId, projectId: isPeople ? nil : projectId))
-                    // Add members moved from the chat header to the profile page (1277b09a).
                     case "members", "addperson": openHeaderProfile()
                     case "feedback": FeedbackCenter.shared.open(screen: "chat", chatId: chatId, projectId: isPeople ? nil : projectId)
                     case "call":
