@@ -276,16 +276,14 @@ impl ProseFilter {
             "i should not explain",
             "ack first",
             "clone into the project",
-            // Self-style notes and CoT that leaked into reply/ack bubbles.
-            "don't mention routing",
-            "do not mention routing",
-            "don't mention the route",
-            "do not mention the route",
-            "don't mention tools",
-            "do not mention tools",
+            // Meta-steering echoed from the prompt ("Don't mention routing. Short greeting.").
+            "don't mention",
+            "do not mention",
+            "never mention",
             "short greeting",
             "brief greeting",
             "short reply",
+            // CoT that leaked into reply/ack bubbles.
             "looking at the conversation",
             "looking at the message",
             "that was an internal",
@@ -327,6 +325,7 @@ impl ProseFilter {
 
     /// Split off the first sentence. Treats ".Austin" (period, no space, capital) as a boundary
     /// so a glued thought+answer still separates. Skips `e.g.` / `i.e.`-style abbreviations.
+    /// Closing markdown emphasis after the stop (`greeting.** Hey`) still counts as a boundary.
     fn split_first_sentence(s: &str) -> Option<(&str, &str)> {
         let bytes = s.as_bytes();
         let mut i = 0;
@@ -343,12 +342,20 @@ impl ProseFilter {
                 if after.is_empty() {
                     return None;
                 }
-                if after.starts_with(' ') || after.starts_with('\n') || after.starts_with('\r') {
-                    return Some((&s[..=i], after));
+                // Peek past `*` / `_` so "**Don't…. Short greeting.** Hey" still splits.
+                let after_plain = after.trim_start_matches(['*', '_']);
+                if after_plain.is_empty() {
+                    return None;
                 }
-                if let Some(c) = after.chars().next() {
+                if after_plain.starts_with(' ')
+                    || after_plain.starts_with('\n')
+                    || after_plain.starts_with('\r')
+                {
+                    return Some((&s[..=i], after_plain));
+                }
+                if let Some(c) = after_plain.chars().next() {
                     if c.is_uppercase() {
-                        return Some((&s[..=i], after));
+                        return Some((&s[..=i], after_plain));
                     }
                 }
             }
@@ -468,7 +475,8 @@ impl ProseFilter {
     }
 
     /// Split after the last sentence-ending punctuation (including glued ".Word").
-    /// `None` when no sentence has finished yet.
+    /// `None` when no sentence has finished yet. Peek past closing `*` / `_` the same way
+    /// `split_first_sentence` does.
     fn split_at_last_sentence_end(s: &str) -> Option<(&str, &str)> {
         let bytes = s.as_bytes();
         let mut last: Option<usize> = None;
@@ -482,11 +490,13 @@ impl ProseFilter {
                     continue;
                 }
                 let after = &s[i + 1..];
+                let after_plain = after.trim_start_matches(['*', '_']);
                 if after.is_empty()
-                    || after.starts_with(' ')
-                    || after.starts_with('\n')
-                    || after.starts_with('\r')
-                    || after.chars().next().is_some_and(|c| c.is_uppercase())
+                    || after_plain.is_empty()
+                    || after_plain.starts_with(' ')
+                    || after_plain.starts_with('\n')
+                    || after_plain.starts_with('\r')
+                    || after_plain.chars().next().is_some_and(|c| c.is_uppercase())
                 {
                     last = Some(i + 1);
                 }
@@ -4367,10 +4377,10 @@ mod tests {
         );
     }
 
-    /// Greeting reply that prepended self-style notes ("Don't mention routing…").
+    /// Meta-steering echoed before a greeting (bold-wrapped) leaves only the greeting.
     #[test]
-    fn clean_prose_strips_routing_style_notes() {
-        let raw = "Don't mention routing. Short greeting. Hey. I'm here. What do you need?";
+    fn clean_prose_strips_dont_mention_routing_prefix() {
+        let raw = "**Don't mention routing. Short greeting.** Hey. I'm here. What do you need?";
         assert_eq!(
             ProseFilter::clean_prose(raw).trim(),
             "Hey. I'm here. What do you need?"
