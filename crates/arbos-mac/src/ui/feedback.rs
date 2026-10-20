@@ -258,7 +258,7 @@ impl FeedbackSheet {
             "note": note,
             "app_version": crate::update::current_version(),
             "platform": "mac",
-            "os": os_version(),
+            "os": crate::update::os_version(),
             "project_id": project_id,
         });
         if let Some(shot) = shot {
@@ -572,7 +572,7 @@ pub fn answer_capture(
     let mut body = serde_json::json!({
         "platform": "mac",
         "app_version": crate::update::current_version(),
-        "os": format!("macOS {}", os_version()).trim().to_string(),
+        "os": format!("macOS {}", crate::update::os_version()).trim().to_string(),
         "device": hardware_model(),
         "screen": if active { screen } else { format!("{screen} (app in background)") },
     });
@@ -732,21 +732,6 @@ fn load_file(path: &PathBuf) -> Result<Shot> {
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "image".into());
     Shot::from_bytes(bytes, name)
-}
-
-/// `sw_vers -productVersion` on macOS, `uname -sr` elsewhere; empty when unknown.
-fn os_version() -> String {
-    let (cmd, args): (&str, &[&str]) = if cfg!(target_os = "macos") {
-        ("sw_vers", &["-productVersion"])
-    } else {
-        ("uname", &["-sr"])
-    };
-    std::process::Command::new(cmd)
-        .args(args)
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default()
 }
 
 /// The Arbos window as a PNG: `screencapture -l <window number>` on macOS (exactly this

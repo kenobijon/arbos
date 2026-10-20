@@ -999,10 +999,19 @@ impl Transcript {
                     .into_any_element()
             }
             RowKind::Attachment { attachment, mine } => {
-                let thumbnail = attachment
-                    .blob_ref
-                    .as_ref()
-                    .and_then(|k| self.state.read(cx).thumbnails.get(k).cloned());
+                let preview = match attachment.blob_ref.as_ref() {
+                    None => attachments::Preview::Unavailable,
+                    Some(k) => {
+                        let state = self.state.read(cx);
+                        match state.thumbnails.get(k) {
+                            Some(image) => attachments::Preview::Ready(image.clone()),
+                            None if state.thumbnails_failed.contains(k) => {
+                                attachments::Preview::Unavailable
+                            }
+                            None => attachments::Preview::Loading,
+                        }
+                    }
+                };
                 div()
                     .w_full()
                     .py(px(4.0))
@@ -1011,7 +1020,7 @@ impl Transcript {
                     .child(attachments::card(
                         &row.id,
                         &attachment,
-                        thumbnail,
+                        preview,
                         self.state.clone(),
                         &theme,
                     ))

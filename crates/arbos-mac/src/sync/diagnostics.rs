@@ -1,0 +1,109 @@
+//! App errors nobody asked for — a background fetch that failed, a list that did not refresh —
+//! never surface in the chat (no toast, no bubble, no message). They go to the log, and once per
+//! distinct *signature* per week one silent feedback item goes to the relay so the loop sees the
+//! bug exactly once, not once per launch (`submitted_by: "app"`, `signature`). The relay dedupes
+//! the same signature across devices and users; this side keeps a small on-disk ledger so an
+//! offline or restarted Mac does not re-send what it already reported.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Mutex;
+
+use arbos_core::ids::now_ms;
+
+use super::credentials;
+
+/// One report per signature per week; after that a still-failing path is worth a fresh item.
+pub const REPORT_WINDOW_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+/// Signatures reported per process at most, so a storm of distinct errors cannot flood the loop.
+const MAX_PER_LAUNCH: usize = 20;
+const FILE: &str = "mac-diagnostics.json";
+
+pub struct Diagnostics {
+    /// Signature → when it was last sent (persisted) or first seen this launch (in memory).
+    seen: Mutex<HashMap<String, i64>>,
+    sent_this_launch: Mutex<usize>,
+    path: PathBuf,
+}
+
+impl Diagnostics {
+    pub fn load() -> Self {
+        let path = credentials::config_dir().join(FILE);
+        let seen: HashMap<String, i64> = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        Self {
+            seen: Mutex::new(seen),
+            sent_this_launch: Mutex::new(0),
+            path,
+        }
+    }
+
+    /// `true` once per signature per window and launch: the caller then posts the item. The
+    /// signature is marked at once (one attempt per launch) and persisted by [`Self::sent`].
+    pub fn should_report(&self, signature: &str) -> bool {
+        let now = now_ms();
+        let mut seen = self.seen.lock().unwrap();
+        if let Some(at) = seen.get(signature) {
+            if now.saturating_sub(*at) < REPORT_WINDOW_MS {
+                return false;
+            }
+        }
+        let mut count = self.sent_this_launch.lock().unwrap();
+        if *count >= MAX_PER_LAUNCH {
+            return false;
+        }
+        *count += 1;
+        seen.insert(signature.to_owned(), now);
+        true
+    }
+
+    /// The relay took the report: remember it across launches.
+    pub fn sent(&self, signature: &str) {
+        let now = now_ms();
+        let snapshot = {
+            let mut seen = self.seen.lock().unwrap();
+            seen.retain(|_, at| now.saturating_sub(*at) < REPORT_WINDOW_MS);
+            seen.insert(signature.to_owned(), now);
+            seen.clone()
+        };
+        if let Some(parent) = self.path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(json) = serde_json::to_string(&snapshot) {
+            let _ = std::fs::write(&self.path, json);
+        }
+    }
+}
+
+/// `mac:<kind>:<normalized error>` — stable across launches, files and users: ids, hashes,
+/// file names, URLs and long numbers collapse to `*`, so "Thumbnail att-01m5…-Photo.jpg: HTTP 403
+/// Forbidden" and the same failure for another picture share one signature.
+pub fn signature(kind: &str, detail: &str) -> String {
+    let mut out = String::new();
+    for token in detail.split(|c: char| c.is_whitespace() || c == ':' || c == ',' || c == ';') {
+        let token = token.trim_matches(|c: char| !c.is_alphanumeric());
+        if token.is_empty() {
+            continue;
+        }
+        let noisy = token.contains("://")
+            || token.contains('/')
+            || token.contains('.')
+            || (token.len() >= 8 && token.chars().any(|c| c.is_ascii_digit()))
+            || (token.len() >= 5 && token.chars().all(|c| c.is_ascii_digit()));
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        if noisy {
+            out.push('*');
+        } else {
+            out.extend(token.chars().flat_map(char::to_lowercase));
+        }
+    }
+    let mut normalized: String = out.chars().take(120).collect();
+    if normalized.is_empty() {
+        normalized.push_str("error");
+    }
+    format!("mac:{kind}:{normalized}")
+}

@@ -52,6 +52,22 @@ pub fn client_header() -> String {
     }
 }
 
+/// `sw_vers -productVersion` on macOS, `uname -sr` elsewhere; empty when unknown. Sent with
+/// feedback items and silent diagnostics.
+pub fn os_version() -> String {
+    let (cmd, args): (&str, &[&str]) = if cfg!(target_os = "macos") {
+        ("sw_vers", &["-productVersion"])
+    } else {
+        ("uname", &["-sr"])
+    };
+    std::process::Command::new(cmd)
+        .args(args)
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
 pub const EDGE_FEED_URL: &str =
     "https://github.com/unarbos/arbos/releases/download/edge/appcast.xml";
 pub const STABLE_FEED_URL: &str = arbos_update::DEFAULT_FEED_URL;

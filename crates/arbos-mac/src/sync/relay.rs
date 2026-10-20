@@ -28,6 +28,7 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use super::credentials::{self, DeviceCredentials};
+use super::diagnostics;
 use super::doc::ChatDoc;
 use super::store::{self, Store};
 use super::{ClientCommand, SyncEvent, SyncSource};
@@ -120,7 +121,12 @@ struct Shared {
     store: Mutex<Option<Store>>,
     /// Room keys whose doc or cursor changed since the last save.
     dirty: Mutex<HashSet<Id>>,
+    /// Silent error reports: one per signature per week (see `diagnostics.rs`).
+    diagnostics: diagnostics::Diagnostics,
 }
+
+/// Blob slot prefix of a people chat (`people:<chat_id>`, people-chats API §2).
+const PEOPLE_BLOB_PREFIX: &str = "people:";
 
 fn project_doc_key(project_id: &str) -> String {
     format!("proj:{project_id}")
@@ -279,6 +285,18 @@ impl Shared {
         self.people.lock().unwrap().contains(chat_id)
     }
 
+    /// The `/blob/{slot}/{key}` slot for a chat or project id. People chats keep their blobs
+    /// under `people:<chat_id>` (people-chats API §2) — a people chat's "project id" in this
+    /// client is its chat id, which the relay knows no project for (403). Every blob read and
+    /// write goes through here so uploads and fetches always agree.
+    fn blob_slot(&self, id: &str) -> String {
+        if id.starts_with(PEOPLE_BLOB_PREFIX) || !self.is_people(id) {
+            id.to_owned()
+        } else {
+            format!("{PEOPLE_BLOB_PREFIX}{id}")
+        }
+    }
+
     async fn delete(self: &Arc<Self>, path: &str) -> Result<()> {
         let resp = self
             .http
@@ -358,8 +376,63 @@ impl Shared {
             .unwrap_or_else(|| "mac:unpaired".into())
     }
 
+    /// A short toast for something the user just asked for and did not get (a save, an upload,
+    /// a rename). Never for background work — that is [`Self::diagnostic`].
     fn notice(&self, text: impl Into<String>) {
         let _ = self.events.send(SyncEvent::Notice(text.into()));
+    }
+
+    /// An app error the user did not cause and cannot act on (a thumbnail that did not load, a
+    /// list that did not refresh). Logged, and reported once per signature per week as a silent
+    /// feedback item (`submitted_by: "app"`); nothing is shown in the chat.
+    fn diagnostic(self: &Arc<Self>, kind: &'static str, detail: impl Into<String>) {
+        let detail = detail.into();
+        log::warn!(target: "arbos_mac::diagnostic", "{kind}: {detail}");
+        let signature = diagnostics::signature(kind, &detail);
+        if !self.diagnostics.should_report(&signature) {
+            return;
+        }
+        if self.creds.read().unwrap().is_none() {
+            return;
+        }
+        let shared = self.clone();
+        tokio::spawn(async move {
+            let note = format!(
+                "Automatic report from the Mac app (no user action): {kind} failed — {detail}. \
+                 Signature `{signature}`; the same error is reported once a week, not per launch."
+            );
+            let body = json!({
+                "note": note,
+                "platform": "mac",
+                "app_version": update::current_version(),
+                "os": update::os_version(),
+                "submitted_by": "app",
+                "signature": signature,
+                "context": {
+                    "kind": kind,
+                    "detail": detail,
+                    "signature": signature,
+                    "relay_url": shared.http_url,
+                },
+            });
+            // Failures here only log: a diagnostic about diagnostics would loop.
+            match shared
+                .http
+                .post(format!("{}/feedback", shared.http_url))
+                .bearer_auth(shared.token())
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(r) if r.status().is_success() => shared.diagnostics.sent(&signature),
+                Ok(r) => log::warn!(
+                    target: "arbos_mac::diagnostic",
+                    "report not taken: HTTP {}",
+                    r.status()
+                ),
+                Err(err) => log::warn!(target: "arbos_mac::diagnostic", "report not sent: {err}"),
+            }
+        });
     }
 
     async fn get_json(self: &Arc<Self>, path: &str) -> Result<Value> {
@@ -528,6 +601,7 @@ impl SyncSource for RelaySource {
                 me: Mutex::new(None),
                 store: Mutex::new(None),
                 dirty: Mutex::new(HashSet::new()),
+                diagnostics: diagnostics::Diagnostics::load(),
             });
             let _ = events.send(SyncEvent::Link(Link::Connecting));
 
@@ -588,7 +662,7 @@ async fn refresh_skills(shared: &Arc<Shared>) {
                 .unwrap_or_default();
             let _ = shared.events.send(SyncEvent::Skills(skills));
         }
-        Err(err) => shared.notice(format!("Skills: {err:#}")),
+        Err(err) => shared.diagnostic("skills", format!("{err:#}")),
     }
 }
 
@@ -685,7 +759,7 @@ fn start_token_refresher(shared: &Arc<Shared>) {
                 .unwrap_or(false);
             if due {
                 if let Err(err) = shared.refresh_tokens(None).await {
-                    shared.notice(format!("Session refresh: {err:#}"));
+                    shared.diagnostic("session-refresh", format!("{err:#}"));
                 }
             }
             if shared.creds.read().unwrap().is_none() {
@@ -1406,7 +1480,7 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
     }
     if refresh {
         if let Err(err) = refresh_registry(shared).await {
-            shared.notice(format!("Relay: {err:#}"));
+            shared.diagnostic("refresh", format!("{err:#}"));
         }
     }
 }
@@ -1472,7 +1546,7 @@ async fn fetch_voices(shared: &Arc<Shared>) {
         }
         Err(err) => {
             if !err.to_string().contains("HTTP 404") {
-                shared.notice(format!("Voices: {}", people_error(&err)));
+                shared.diagnostic("voices", people_error(&err));
             }
         }
     }
@@ -1895,7 +1969,7 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
         Err(err) => {
             // Older relays have no /chats; keep whatever we already knew.
             if !format!("{err:#}").contains("HTTP 404") {
-                shared.notice(format!("People chats: {err:#}"));
+                shared.diagnostic("people-chats", format!("{err:#}"));
             }
             let known = shared.people.lock().unwrap().clone();
             let previous = shared.projects.lock().unwrap().clone();
@@ -1983,7 +2057,7 @@ async fn migrate_local_archive(shared: &Arc<Shared>, all_chats: &mut [Chat]) {
                 if err.to_string().contains("HTTP 404") {
                     break;
                 }
-                shared.notice(format!("Archive sync: {}", people_error(&err)));
+                shared.diagnostic("archive-sync", people_error(&err));
             }
         }
     }
@@ -2903,15 +2977,16 @@ pub(crate) fn mime_for(path: &Path) -> &'static str {
     }
 }
 
-/// `GET /blob/{project}/{key}` → (mime, bytes).
-async fn fetch_blob_bytes(
-    shared: &Shared,
-    project_id: &str,
-    key: &str,
-) -> Result<(String, Vec<u8>)> {
+/// `GET /blob/{slot}/{key}` → (mime, bytes); `id` is a project id or a people chat id.
+async fn fetch_blob_bytes(shared: &Shared, id: &str, key: &str) -> Result<(String, Vec<u8>)> {
     let r = shared
         .http
-        .get(format!("{}/blob/{}/{}", shared.http_url, project_id, key))
+        .get(format!(
+            "{}/blob/{}/{}",
+            shared.http_url,
+            shared.blob_slot(id),
+            key
+        ))
         .bearer_auth(shared.token())
         .send()
         .await?;
@@ -2979,11 +3054,7 @@ async fn send_message(
 ) {
     let project_id = project_of(&shared, &chat_id).unwrap_or_default();
     // People chats keep their blobs under `people:<chat_id>` and have no box to wake.
-    let blob_slot = if shared.is_people(&chat_id) {
-        format!("people:{chat_id}")
-    } else {
-        project_id.clone()
-    };
+    let blob_slot = shared.blob_slot(&chat_id);
     let mut parts: Vec<Part> = Vec::new();
     for path in attachments {
         let name = path
@@ -3033,7 +3104,7 @@ async fn send_message(
         });
     }
     if let Some(wav) = voice_wav {
-        parts.push(upload_voice_memo(&shared, &project_id, wav).await);
+        parts.push(upload_voice_memo(&shared, &blob_slot, wav).await);
     }
     parts.push(Part::Text {
         id: new_id(),
@@ -3173,12 +3244,12 @@ async fn send_message(
 
 // ----- voice (F11) ----------------------------------------------------------
 
-/// `PUT /blob/{project}/voice-<ulid>.wav`, then the `attachment` part that keeps the memo.
-async fn upload_voice_memo(shared: &Shared, project_id: &str, wav: Arc<Vec<u8>>) -> Part {
+/// `PUT /blob/{slot}/voice-<ulid>.wav`, then the `attachment` part that keeps the memo.
+async fn upload_voice_memo(shared: &Shared, blob_slot: &str, wav: Arc<Vec<u8>>) -> Part {
     let key = format!("voice-{}.wav", new_id().to_lowercase());
     let put = shared
         .http
-        .put(format!("{}/blob/{}/{}", shared.http_url, project_id, key))
+        .put(format!("{}/blob/{}/{}", shared.http_url, blob_slot, key))
         .bearer_auth(shared.token())
         .header("content-type", "audio/wav")
         .body(wav.as_ref().clone())
@@ -3581,7 +3652,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 {
                     Ok(_) => {
                         if let Err(err) = refresh_registry(&shared).await {
-                            shared.notice(format!("Relay: {err:#}"));
+                            shared.diagnostic("refresh", format!("{err:#}"));
                         }
                     }
                     Err(err) => {
@@ -3628,7 +3699,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                             }
                         }
                         if let Err(err) = refresh_registry(&shared).await {
-                            shared.notice(format!("Relay: {err:#}"));
+                            shared.diagnostic("refresh", format!("{err:#}"));
                         }
                     }
                     Err(err) => {
@@ -3659,7 +3730,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 {
                     Ok(_) => {
                         if let Err(err) = refresh_registry(&shared).await {
-                            shared.notice(format!("Relay: {err:#}"));
+                            shared.diagnostic("refresh", format!("{err:#}"));
                         }
                     }
                     Err(err) => {
@@ -4631,7 +4702,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 match shared.post_json("/projects", body).await {
                     Ok(_) => {
                         if let Err(err) = refresh_registry(&shared).await {
-                            shared.notice(format!("Relay: {err:#}"));
+                            shared.diagnostic("refresh", format!("{err:#}"));
                         }
                     }
                     Err(err) => shared.notice(format!("New project failed: {err:#}")),
@@ -4645,7 +4716,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     shared.notice(format!("Delete failed: {}", people_error(&err)));
                 }
                 if let Err(err) = refresh_registry(&shared).await {
-                    shared.notice(format!("Relay: {err:#}"));
+                    shared.diagnostic("refresh", format!("{err:#}"));
                 }
             });
         }
@@ -4675,7 +4746,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     shared.notice(format!("Delete chat failed: {}", people_error(&err)));
                 }
                 if let Err(err) = refresh_registry(&shared).await {
-                    shared.notice(format!("Relay: {err:#}"));
+                    shared.diagnostic("refresh", format!("{err:#}"));
                 }
             });
         }
@@ -4750,7 +4821,12 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             tokio::spawn(async move {
                 let resp = shared
                     .http
-                    .get(format!("{}/blob/{}/{}", shared.http_url, project_id, key))
+                    .get(format!(
+                        "{}/blob/{}/{}",
+                        shared.http_url,
+                        shared.blob_slot(&project_id),
+                        key
+                    ))
                     .bearer_auth(shared.token())
                     .send()
                     .await;
@@ -4798,7 +4874,12 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                             bytes: Arc::new(bytes),
                         });
                     }
-                    Err(err) => shared.notice(format!("Thumbnail {key}: {err}")),
+                    Err(err) => {
+                        // Nobody asked for this fetch: no toast, no bubble. The card shows
+                        // "No preview"; the error goes to the log and the silent report.
+                        shared.diagnostic("thumbnail", format!("{key}: {err}"));
+                        let _ = shared.events.send(SyncEvent::ThumbnailFailed { key });
+                    }
                 }
             });
         }
@@ -5368,7 +5449,7 @@ async fn refresh_channels(shared: &Arc<Shared>) {
         Err(err) => {
             // Older relays have no channels; stay quiet unless it is a real failure.
             if !format!("{err:#}").contains("HTTP 404") {
-                shared.notice(format!("Channels: {err:#}"));
+                shared.diagnostic("channels", format!("{err:#}"));
             }
             return;
         }
@@ -5404,7 +5485,7 @@ async fn refresh_routines(shared: &Arc<Shared>, project_id: &str) {
                 routines,
             });
         }
-        Err(err) => shared.notice(format!("Routines: {err:#}")),
+        Err(err) => shared.diagnostic("routines", format!("{err:#}")),
     }
 }
 
@@ -5422,7 +5503,7 @@ async fn refresh_routine_runs(shared: &Arc<Shared>, project_id: &str, routine_id
                 runs,
             });
         }
-        Err(err) => shared.notice(format!("Routine runs: {err:#}")),
+        Err(err) => shared.diagnostic("routine-runs", format!("{err:#}")),
     }
 }
 
@@ -5432,7 +5513,7 @@ async fn refresh_local(shared: &Arc<Shared>) {
         Ok(v) => v,
         Err(err) => {
             if !format!("{err:#}").contains("HTTP 404") {
-                shared.notice(format!("This Mac: {err:#}"));
+                shared.diagnostic("local-devices", format!("{err:#}"));
             }
             return;
         }
@@ -5463,7 +5544,7 @@ async fn refresh_connectors(shared: &Arc<Shared>) {
         (Err(err), _) | (_, Err(err)) => {
             // Older relays have no connectors; stay quiet unless it is a real failure.
             if !format!("{err:#}").contains("HTTP 404") {
-                shared.notice(format!("Connectors: {err:#}"));
+                shared.diagnostic("connectors", format!("{err:#}"));
             }
             return;
         }

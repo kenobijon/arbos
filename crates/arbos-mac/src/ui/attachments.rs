@@ -41,11 +41,20 @@ pub fn badge(kind: AttachmentKind, theme: &Theme) -> (&'static str, Hsla) {
     }
 }
 
+/// What the image strip of a card shows.
+pub enum Preview {
+    /// The thumbnail bytes are on their way.
+    Loading,
+    Ready(Arc<RenderImage>),
+    /// No blob, or the fetch failed: the file is still listed and downloadable.
+    Unavailable,
+}
+
 /// The card element for one attachment row.
 pub fn card(
     row_id: &str,
     attachment: &Attachment,
-    thumbnail: Option<Arc<RenderImage>>,
+    preview: Preview,
     state: Entity<AppState>,
     theme: &Theme,
 ) -> AnyElement {
@@ -157,7 +166,7 @@ pub fn card(
         .overflow_hidden();
 
     if kind == AttachmentKind::Image {
-        let preview = div()
+        let strip = div()
             .w_full()
             .h(px(THUMB_HEIGHT))
             .bg(Theme::with_alpha(tint, 0.08))
@@ -166,22 +175,24 @@ pub fn card(
             .justify_center()
             .border_b_1()
             .border_color(theme.border);
-        let preview = match thumbnail {
-            Some(image) => {
-                preview.child(img(image).w_full().h_full().object_fit(ObjectFit::Contain))
+        let strip = match preview {
+            Preview::Ready(image) => {
+                strip.child(img(image).w_full().h_full().object_fit(ObjectFit::Contain))
             }
-            None => preview.child(
+            Preview::Loading => strip.child(
                 div()
                     .text_size(px(11.0))
                     .text_color(theme.text_faint)
-                    .child(if key.is_some() {
-                        "Loading preview…"
-                    } else {
-                        "No preview"
-                    }),
+                    .child("Loading preview…"),
+            ),
+            Preview::Unavailable => strip.child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(theme.text_faint)
+                    .child("No preview"),
             ),
         };
-        card = card.child(preview);
+        card = card.child(strip);
     }
     card.child(header).into_any_element()
 }
