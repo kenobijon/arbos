@@ -75,9 +75,11 @@ pub fn stable_prefix_on(override_file: &std::path::Path) -> bool {
 /// Compact memory pack (D77 follow-up to D87): the per-turn `[Memory retrieved …]` block gets
 /// per-kind budgets and a cap, page-carded tool outputs are packed as card + facts, repeats and
 /// leaves already in the prompt's project-memory block are dropped. `ARBOS_MEMORY_PACK_COMPACT=on|off`.
-/// Default **off** until the eval decides.
+/// Default **on** since the eval of 2026-10-20 (code-mode eval set, 60 single-turn chats: first-call
+/// cache writes −39 %, main-agent cost per turn −16 %; 40 multi-turn turns: −54 % / −26 %; quality
+/// held, block p90 4.7k → 2.0k tokens).
 pub fn memory_pack_compact_on(override_file: &std::path::Path) -> bool {
-    switch_on("ARBOS_MEMORY_PACK_COMPACT", override_file, false)
+    switch_on("ARBOS_MEMORY_PACK_COMPACT", override_file, true)
 }
 
 /// Box-level settings: what every workspace shares.
