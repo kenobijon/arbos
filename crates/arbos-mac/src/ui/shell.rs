@@ -2149,8 +2149,10 @@ impl Shell {
                 .map(|a| (a.name.clone(), a.login.clone()))
                 .unwrap_or_default()
         };
-        self.name_input
-            .update(cx, |input, cx| input.set_text(name, cx));
+        self.name_input.update(cx, |input, cx| {
+            input.set_text_center(true);
+            input.set_text(name, cx);
+        });
         self.handle_input
             .update(cx, |input, cx| input.set_text(handle, cx));
         self.profile_edit_open = true;
