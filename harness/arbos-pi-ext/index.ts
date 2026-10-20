@@ -40,7 +40,7 @@ const CODE_MODE = (process.env.ARBOS_CODE_MODE ?? "off").trim().toLowerCase() ==
 // Default deadline of a `codemode` script when the model sets none (code mode on): the turn deadline.
 const SCRIPT_TIMEOUT_MS = Number(process.env.ARBOS_SCRIPT_TIMEOUT_MS ?? 15 * 60 * 1000);
 // Tools that talk to the user or to agentd's turn state: direct calls only, never from a script.
-const DIRECT_ONLY_TOOLS = new Set(["route", "ask_user", "send_message"]);
+const DIRECT_ONLY_TOOLS = new Set(["route", "ask_user", "send_message", "mcp__arbos__ask_user"]);
 
 type ApprovalState = "allowed" | "pending" | "approved" | "rejected" | "expired";
 
