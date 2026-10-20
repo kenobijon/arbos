@@ -14,11 +14,11 @@ use std::sync::Arc;
 
 use gpui::{
     actions, div, fill, img, point, prelude::*, px, relative, size, App, Bounds, ClipboardItem,
-    Context, CursorStyle, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler,
-    EventEmitter, ExternalPaths, FocusHandle, Focusable, GlobalElementId, InspectorElementId,
-    IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
-    PaintQuad, Pixels, Point, Render, RenderImage, SharedString, Style, TextAlign, TextRun,
-    UTF16Selection, UnderlineStyle, Window, WrappedLine,
+    Context, CursorStyle, Div, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler,
+    EventEmitter, ExternalPaths, FocusHandle, Focusable, FontWeight, GlobalElementId,
+    InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ObjectFit, PaintQuad, Pixels, Point, Render, RenderImage, SharedString, Style,
+    TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -1264,7 +1264,43 @@ pub enum Picker {
 struct StagedAttachment {
     path: PathBuf,
     preview: Option<Arc<RenderImage>>,
+    bytes: u64,
 }
+
+impl StagedAttachment {
+    fn new(path: PathBuf) -> Self {
+        let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        Self {
+            preview: image_preview_for(&path),
+            path,
+            bytes,
+        }
+    }
+
+    fn file_name(&self) -> String {
+        self.path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("attachment")
+            .to_string()
+    }
+
+    /// "156 kB" style size, like the Library's file rows.
+    fn size_label(&self) -> String {
+        let b = self.bytes;
+        if b < 1024 {
+            format!("{b} B")
+        } else if b < 1024 * 1024 {
+            format!("{:.0} kB", b as f64 / 1024.0)
+        } else {
+            format!("{:.1} MB", b as f64 / (1024.0 * 1024.0))
+        }
+    }
+}
+
+/// The composer card while files are pending (redesign mock e): 64 pt tiles.
+const STAGED_TILE: f32 = 64.0;
+const CARD_RADIUS: f32 = 16.0;
 
 pub struct Composer {
     state: Entity<AppState>,
@@ -1325,10 +1361,7 @@ impl Composer {
                 v.split(':')
                     .map(PathBuf::from)
                     .filter(|p| p.is_file())
-                    .map(|path| StagedAttachment {
-                        preview: image_preview_for(&path),
-                        path,
-                    })
+                    .map(StagedAttachment::new)
                     .collect()
             })
             .unwrap_or_default();
@@ -1442,12 +1475,115 @@ impl Composer {
         .detach();
     }
 
+    /// The card's top row while files are pending: 64 pt rounded image tiles
+    /// and file chips (icon tile · name · size); a × appears on hover and
+    /// removes the file (redesign mock e).
+    fn staged_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
+        let mut row = div()
+            .flex()
+            .flex_wrap()
+            .items_start()
+            .gap(px(8.0))
+            .px(px(12.0))
+            .pt(px(12.0));
+        for (i, staged) in self.attachments.iter().enumerate() {
+            let remove = div()
+                .id(ElementId::NamedInteger("staged-remove".into(), i as u64))
+                .absolute()
+                .top(px(4.0))
+                .right(px(4.0))
+                .size(px(18.0))
+                .rounded_full()
+                .bg(Theme::with_alpha(gpui::black(), 0.6))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .opacity(0.0)
+                .group_hover("staged-tile", |s| s.opacity(1.0))
+                .child(icon("xmark", 9.0, gpui::white()))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if i < this.attachments.len() {
+                        this.attachments.remove(i);
+                    }
+                    cx.notify();
+                }));
+            let tile = div()
+                .id(ElementId::NamedInteger("staged".into(), i as u64))
+                .group("staged-tile")
+                .relative()
+                .h(px(STAGED_TILE))
+                .rounded(px(10.0))
+                .overflow_hidden()
+                .bg(theme.surface_2)
+                .flex_shrink_0();
+            let tile = match staged.preview.clone() {
+                Some(image) => tile.w(px(STAGED_TILE)).child(
+                    img(image)
+                        .size(px(STAGED_TILE))
+                        .rounded(px(10.0))
+                        .object_fit(ObjectFit::Cover),
+                ),
+                None => tile
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .pl(px(10.0))
+                    .pr(px(14.0))
+                    .max_w(px(320.0))
+                    .child(
+                        div()
+                            .size(px(40.0))
+                            .flex_shrink_0()
+                            .rounded(px(8.0))
+                            .bg(theme.surface_1)
+                            .border_1()
+                            .border_color(theme.border)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(icon(
+                                if is_image_path(&staged.path) {
+                                    "photo"
+                                } else {
+                                    "doc"
+                                },
+                                16.0,
+                                theme.text_muted,
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .min_w_0()
+                            .gap(px(2.0))
+                            .child(
+                                div()
+                                    .text_size(px(TEXT_BODY))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.text)
+                                    .truncate()
+                                    .child(staged.file_name()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(TEXT_TINY))
+                                    .text_color(theme.text_muted)
+                                    .child(staged.size_label()),
+                            ),
+                    ),
+            };
+            row = row.child(tile.child(remove));
+        }
+        row
+    }
+
     /// Paths from the "+" picker or a drop onto the chat box.
     fn add_paths(&mut self, paths: impl IntoIterator<Item = PathBuf>, cx: &mut Context<Self>) {
         for path in paths {
             if path.is_file() {
-                let preview = image_preview_for(&path);
-                self.attachments.push(StagedAttachment { path, preview });
+                self.attachments.push(StagedAttachment::new(path));
             }
         }
         cx.notify();
@@ -1933,45 +2069,31 @@ impl Render for Composer {
                 .flex()
                 .items_center()
                 .pl(px(10.0))
-                .py(px((COMPOSER_HEIGHT - 2.0 - INPUT_LINE_HEIGHT) / 2.0))
+                // In the card the row above and the buttons below set the rhythm.
+                .py(px(if self.attachments.is_empty() {
+                    (COMPOSER_HEIGHT - 2.0 - INPUT_LINE_HEIGHT) / 2.0
+                } else {
+                    0.0
+                }))
                 .child(self.input.clone())
         };
 
         let drop_border = theme.accent;
         let drop_fill = theme.accent_soft;
-        let mut field = div()
-            .id("composer-field")
-            .flex_1()
-            .min_w_0()
-            .min_h(px(COMPOSER_HEIGHT))
-            .flex()
-            .items_end()
-            .gap(px(4.0))
-            .pl(px((COMPOSER_HEIGHT - 2.0 - PLUS_BUTTON) / 2.0))
-            .pr(px((COMPOSER_HEIGHT - 2.0 - SEND_BUTTON) / 2.0))
-            .rounded(px(COMPOSER_RADIUS))
-            .bg(theme.field)
-            .border_1()
-            .border_color(border_color)
-            .drag_over::<ExternalPaths>(move |style, _, _, _| {
-                style.border_color(drop_border).bg(drop_fill)
-            })
-            .child(
-                div()
-                    .h(px(COMPOSER_HEIGHT - 2.0))
-                    .flex()
-                    .items_center()
-                    .flex_shrink_0()
-                    .child(plus),
-            )
-            .child(field_body);
         // Match the iPhone: mic (transcribe) + phone (call) while the field is
         // idle and empty; send / stop / hang-up replace the phone as needed.
+        let staged = !self.attachments.is_empty();
         let mut trailing = div()
             .flex()
             .items_center()
             .gap(px(2.0))
-            .h(px(COMPOSER_HEIGHT - 2.0))
+            // In the pill the row is the pill's height; in the card the
+            // circles set it and the card's padding does the rest.
+            .h(px(if staged {
+                SEND_BUTTON
+            } else {
+                COMPOSER_HEIGHT - 2.0
+            }))
             .flex_shrink_0();
         if mic_mounted(has_text, recording) {
             trailing = trailing.child(mic_button);
@@ -1979,7 +2101,66 @@ impl Render for Composer {
         // Always show the round button: phone when idle (like the iPhone), else
         // Stop (memo) / send / stop (turn) / hang-up.
         trailing = trailing.child(primary_button);
-        field = field.child(trailing);
+        let field_radius = if staged { CARD_RADIUS } else { COMPOSER_RADIUS };
+        let field_base = div()
+            .id("composer-field")
+            .flex_1()
+            .min_w_0()
+            .rounded(px(field_radius))
+            .bg(theme.field)
+            .border_1()
+            .border_color(border_color)
+            .drag_over::<ExternalPaths>(move |style, _, _, _| {
+                style.border_color(drop_border).bg(drop_fill)
+            });
+        let field = if staged {
+            // Redesign mock e: with files pending the pill opens into a card —
+            // the tiles above the text, "+" bottom-left, mic / send bottom-right.
+            field_base
+                .flex()
+                .flex_col()
+                .child(self.staged_row(&theme, cx))
+                // The body keeps the pill's own vertical centring padding; the
+                // row above / the buttons below supply the rest (mock e: ≈ 13 pt
+                // tile → text, text → buttons).
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .px(px(4.0))
+                        .pt(px(12.0))
+                        .child(field_body),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .px(px(12.0))
+                        .pt(px(8.0))
+                        .pb(px(12.0))
+                        .child(plus)
+                        .child(trailing),
+                )
+        } else {
+            field_base
+                .min_h(px(COMPOSER_HEIGHT))
+                .flex()
+                .items_end()
+                .gap(px(4.0))
+                .pl(px((COMPOSER_HEIGHT - 2.0 - PLUS_BUTTON) / 2.0))
+                .pr(px((COMPOSER_HEIGHT - 2.0 - SEND_BUTTON) / 2.0))
+                .child(
+                    div()
+                        .h(px(COMPOSER_HEIGHT - 2.0))
+                        .flex()
+                        .items_center()
+                        .flex_shrink_0()
+                        .child(plus),
+                )
+                .child(field_body)
+                .child(trailing)
+        };
 
         let mut column = div()
             .id("composer")
@@ -2074,64 +2255,7 @@ impl Render for Composer {
             }
         }
 
-        if !self.attachments.is_empty() {
-            let mut chips = div().flex().flex_wrap().gap(px(6.0)).pl(px(8.0));
-            for (i, staged) in self.attachments.iter().enumerate() {
-                let name_owned = staged
-                    .path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("attachment")
-                    .to_string();
-                let is_image = is_image_path(&staged.path);
-                let leading = match staged.preview.clone() {
-                    Some(image) => div()
-                        .size(px(28.0))
-                        .rounded(px(6.0))
-                        .overflow_hidden()
-                        .flex_shrink_0()
-                        .child(img(image).size(px(28.0)).object_fit(ObjectFit::Cover))
-                        .into_any_element(),
-                    None => icon(if is_image { "photo" } else { "doc" }, 12.0, theme.text)
-                        .into_any_element(),
-                };
-                chips = chips.child(
-                    div()
-                        .id(ElementId::NamedInteger("attachment".into(), i as u64))
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .pl(if staged.preview.is_some() {
-                            px(4.0)
-                        } else {
-                            px(10.0)
-                        })
-                        .pr(px(10.0))
-                        .py(if staged.preview.is_some() {
-                            px(3.0)
-                        } else {
-                            px(5.0)
-                        })
-                        .rounded_full()
-                        .bg(theme.bubble_assistant)
-                        .text_size(px(TEXT_TINY))
-                        .text_color(theme.text)
-                        .cursor_pointer()
-                        .child(leading)
-                        .child(div().max_w(px(220.0)).truncate().child(name_owned))
-                        .child(icon("xmark", 9.0, theme.text_muted))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if i < this.attachments.len() {
-                                this.attachments.remove(i);
-                            }
-                            cx.notify();
-                        })),
-                );
-            }
-            column = column.child(chips);
-        }
-
-        column = column.child(frosted(COMPOSER_RADIUS, PANEL_BLUR, field));
+        column = column.child(frosted(field_radius, PANEL_BLUR, field));
 
         // One muted line about the voice path while it is doing something (or
         // when it had to fall back: no microphone, mock relay), or the link.
