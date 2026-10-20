@@ -2206,8 +2206,8 @@ class Loop:
         kinds = []
         if any(f.startswith("voice/") for f in files):
             kinds.append("voice")
-        if any(f.startswith("crates/arbos-agentd/") for f in files):
-            kinds.append("agentd")
+        if any(f.startswith(("crates/arbos-agentd/", "image/", "harness/")) for f in files):
+            kinds.append("agentd")  # anything baked into the sandbox image rolls with it
         if any(f.startswith("crates/arbos-relay/") for f in files):
             kinds.append("relay")
         return kinds
