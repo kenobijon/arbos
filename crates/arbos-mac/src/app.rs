@@ -37,6 +37,8 @@ const RINGBACK_TIMEOUT_MS: u64 = 60_000;
 const MISSED_PENDING_MS: u64 = 120_000;
 /// Presence frames come every 15 s; three missed = offline (relay §7c uses 45 s too).
 const PRESENCE_ONLINE_MS: u64 = 45_000;
+/// How long the original message stays highlighted after a click on a reply's quote.
+const QUOTE_HIGHLIGHT_MS: u64 = 1_600;
 
 /// Which profile sheet is open.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -327,7 +329,10 @@ pub struct AppState {
     search_chat: Option<Id>,
     /// Scroll the transcript to this `(chat_id, message_id)` once its rows exist.
     pub reveal_message: Option<(Id, Id)>,
-    /// Brief highlight on the message a home-search hit opened.
+    /// Bumped with every new reveal request, so revealing the same message
+    /// twice (two clicks on one quote) scrolls twice.
+    pub reveal_nonce: u64,
+    /// Brief highlight on the message a home-search hit or a quote click opened.
     pub highlight_message: Option<Id>,
     pub link: Link,
     pub rail_collapsed: bool,
@@ -611,6 +616,7 @@ impl AppState {
             archived_chats: HashSet::new(),
             search_chat: None,
             reveal_message: None,
+            reveal_nonce: 0,
             highlight_message: None,
             link: Link::Connecting,
             rail_collapsed: false,
@@ -2033,8 +2039,30 @@ impl AppState {
         });
         self.highlight_message = Some(message_id.clone());
         self.reveal_message = Some((chat_id, message_id));
+        self.reveal_nonce += 1;
         self.sync_focus();
         cx.notify();
+    }
+
+    /// Click on a reply bubble's quote header: scroll to the original in the
+    /// open chat and highlight it for a moment.
+    pub fn reveal_reply(&mut self, chat_id: Id, message_id: Id, cx: &mut Context<Self>) {
+        self.highlight_message = Some(message_id.clone());
+        self.reveal_message = Some((chat_id, message_id.clone()));
+        self.reveal_nonce += 1;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(QUOTE_HIGHLIGHT_MS))
+                .await;
+            let _ = this.update(cx, |state, cx| {
+                if state.highlight_message.as_deref() == Some(message_id.as_str()) {
+                    state.highlight_message = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// Newest user/assistant/project message whose prose contains `query`
