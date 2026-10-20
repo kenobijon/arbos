@@ -83,10 +83,12 @@ commands:  List<Map { id, kind, payload, issuedBy, issuedAt, status }>
 | `activity` | string? | plain-words working line while streaming |
 | `waitingUser` | bool? | open question |
 | `answersQuestionId` | string? | user answer row |
-| `reactions` | Map | `emoji → Map { senderId → true }` (Mac + iOS clients). Core writers create an empty map at message creation. |
+| `reactions` | Map | CRDT: flat `"emoji\|senderId" → true`. Readers project to `emoji → { senderId → true }` via `project_reactions`. Core writers create an empty map at message creation. |
 | `voice` / `callId` / `greeting` | various | voice lines, call system lines, D82 greeting |
 
-**Reactions race fix.** Core client writers (`append_user_message`, `append_system_line`, `append_greeting`) and box `append_done_message` insert an empty `reactions` map when the message row is created. Concurrent first reactions on **different** emojis then merge as map edits instead of racing on reactions-map creation. Concurrent sender inserts into an **existing** emoji bucket also merge. `set_reaction(..., on=false)` is a no-op when the `reactions` map or the emoji bucket is missing — it does not create containers. Remaining edge: messages authored before this change (no `reactions` map), and the first concurrent `on=true` create of the **same** emoji bucket, can still race; readers merge CRDT maps so both emojis usually survive when the collision is at the reactions-map level, but a same-emoji bucket create can drop one sender.
+**Reactions shape.** Writers store flat keys under `reactions` (`"👍|user:ken" → true`) so concurrent first reacts on the **same** emoji merge as map-key inserts. An empty `reactions` map is created with the message (`append_user_message`, `append_system_line`, `append_greeting`, `append_done_message`, `start_assistant_message`, `append_user_answer`, `append_system_note`) so peers do not race on creating that container. `set_reaction(..., on=false)` is a no-op when the `reactions` map is missing. UI / serde still see `emoji → { sender → true }` after `project_reactions` (also folds legacy nested emoji-bucket maps).
+
+**Loro container create race.** When two peers concurrently `insert_container` under the **same** key, one container wins and the **losing container’s contents are dropped**. Do not rely on “usually survive” for nested bucket creates; the flat reaction keys avoid that race for same-emoji first-react.
 
 **`callId` on system lines.** Core and Mac write optional `callId` (never `call_id`) on system lines. The Swift client ignores `callId` and renders the text only. The Mac fixture constructor still seeds `meta` for offline demos; relay-mode Mac does not write `meta` locally.
 
@@ -127,7 +129,7 @@ Unknown `kind` values decode to “unknown” and render as nothing (additive ru
 
 1. **Hidden parts** are inline `hidden: true` on entries in `parts`. `hiddenParts` is a **reader projection** only (`project_hidden_parts` in core; Mac still splits when decoding for the UI). Writers never create a `hiddenParts` list.
 2. **Only the box writes `meta`.** Clients read it from sync (Mac relay mode and iOS). Additive schema changes never bump `schemaVersion`; readers ignore unknown fields and unknown part kinds.
-3. **Client writers** (`append_user_message`, `append_system_line`, `append_greeting`, `set_reaction`, `push_command`, `set_model_settings`) do not commit themselves — wrap them in `ChatDoc::transact` (one commit = one PUSH). `transact` is re-entrant: nested calls share one depth counter and only the outermost commits. They write no null placeholders, `chatId`, `pending`, `hiddenParts`, or `call_id`. New message rows get an empty `reactions` map. System lines use a `text` part and optional `callId` only (Mac and iOS already decode that shape; Swift ignores `callId` when rendering).
+3. **Client writers** (`append_user_message`, `append_system_line`, `append_greeting`, `set_reaction`, `push_command`, `set_model_settings`) do not commit themselves — wrap them in `ChatDoc::transact` (one commit = one PUSH). `transact` is re-entrant: nested calls share one depth counter and only the outermost commits; a drop guard restores depth if `f` panics. `snapshot()` / `export_updates_since()` return empty and do not call Loro `export` while a `transact` is open (Loro treats export as a commit barrier). They write no null placeholders, `chatId`, `pending`, `hiddenParts`, or `call_id`. New message rows get an empty `reactions` map. System lines use a `text` part and optional `callId` only (Mac and iOS already decode that shape; Swift ignores `callId` when rendering).
 4. **`push_command` / `append_command`.** `push_command` is the non-committing writer; object payloads are nested `LoroMap` containers (arrays → `LoroList`), not a single JSON blob value. `append_command` is `push_command` then commit (honors an open `transact`). Box helpers that used to duplicate the command row now call through this path.
 5. **Box helpers** (`append_user_message_from`, `append_command`, `append_system_note`, streaming/tool/question/approval writers, …) still commit inside the helper when no `transact` is open; they honor an outer `transact` (only the outermost commits). `append_system_note` (`status` + `code: "note"`) is unchanged; neither app renders it in the transcript.
 6. **`has_greeting()`** is true when any message has `greeting: true` (D82 canned first line).
@@ -206,6 +208,30 @@ Unknown type bytes: decode returns “skip” (`Ok(None)` / `nil`) so callers ig
 
 `STATE` header fields: `headSeq`, `seqFloor`, `checkpointSeq`, `checkpointSize`, `rowCount`, `rowBytes`, `box` (BoxState). Payload = encoded checkpoint frontier (version vector bytes).
 
+### 7.2a Room session state machine (`arbos-core::room`)
+
+Shared client protocol lives in `RoomSession` (sans-IO: no tokio/tungstenite). The host opens a socket and drives:
+
+| Input | Role |
+| --- | --- |
+| `on_open(now)` | Send `HELLO`; start STATE deadline |
+| `on_frame(bytes)` | Decode wire frames; enqueue actions |
+| `on_local_commit(bytes)` | Queue `PUSH` (`batchId` ULID); persist pending |
+| `on_tick(now)` | STATE timeout; healthy-session clock |
+| `on_close(now)` | Compute backoff; `ScheduleReconnect` |
+| `on_checkpoint_skipped` / `on_checkpoint(seq)` / `on_checkpoint_failed` | Host resolution of §7.3 |
+
+| Output action | Host does |
+| --- | --- |
+| `SendFrame` | Write binary on the socket |
+| `FetchCheckpoint { room, frontier, … }` | Containment check or `GET …/checkpoint` |
+| `ApplyBytes` | `doc.import` |
+| `Cursor` / `Pending` | Persist room cursor and unacked PUSHes |
+| `BoxState` / `LinkLive` / `Presence` / `Ack` | UI / registry events |
+| `ScheduleReconnect { after }` | Sleep, then dial again |
+
+Room naming is in core: `people/{chatId}` for people chats, else `{projectId}/{chatId}` (`room_path`). Mac `relay.rs` keeps only WebSocket + HTTP glue and performs actions. Backoff: min 250 ms, doubling, max 16 s, reset after a connection that stayed live ≥ 30 s (§8.6).
+
 ### 7.3 Checkpoints
 
 After `STATE`, if `checkpointSeq > 0`:
@@ -264,7 +290,7 @@ A sweeper (~5 s) marks the box **asleep** when no box sockets (and no HTTP heart
 
 ### 8.6 Client reconnect
 
-Mac and iOS room loops reconnect forever with exponential backoff (Mac comment: §8.6; iOS: 0.25 s → 16 s, reset after a long healthy session). Pending PUSH batches are persisted and resent after HELLO until ACK’d (§11).
+Clients reconnect forever with exponential backoff (0.25 s → 16 s, reset after a session that stayed live ≥ 30 s). Policy and pending-PUSH resend after catch-up live in `RoomSession` (§7.2a); Mac/iOS only sleep and re-dial. Pending PUSH batches are persisted and resent until ACK’d (§11).
 
 ---
 

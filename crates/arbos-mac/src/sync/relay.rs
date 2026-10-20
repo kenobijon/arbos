@@ -9,22 +9,19 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context as _, Result};
-use arbos_core::doc::{UserAttachment, UserMessageOpts};
-use arbos_core::wire::{
-    Ack, BoxState as WireBox, ErrorHeader, Frame, FrameType, Hello, RowHeader, RowsReq,
-    State as WireState, StatusHeader, WakeHeader, PROJECT_DOC_CHAT_ID,
-};
-use arbos_core::{wire, PROTO_VERSION};
+use arbos_core::doc::{decode_vv, UserAttachment, UserMessageOpts};
+use arbos_core::room::{self, RoomAction, RoomSession};
+use arbos_core::wire::{BoxState as WireBox, PROJECT_DOC_CHAT_ID};
 use futures::future::BoxFuture;
 use futures::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tokio::time::{interval, sleep, timeout, Instant};
+use tokio::time::{interval, sleep, timeout};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
@@ -43,14 +40,11 @@ use crate::model::{
 };
 use crate::update;
 
-const HELLO_DEADLINE: Duration = Duration::from_secs(15);
-const PRESENCE_EVERY: Duration = Duration::from_secs(15);
+const HELLO_DEADLINE: Duration = room::HELLO_DEADLINE;
+const PRESENCE_EVERY: Duration = room::PRESENCE_EVERY;
 const REGISTRY_POLL: Duration = Duration::from_secs(15);
 /// `GET /machine` is the source of truth for the rail indicator and Settings.
 const MACHINE_POLL: Duration = Duration::from_secs(10);
-const BACKOFF_MIN: Duration = Duration::from_millis(250);
-const BACKOFF_MAX: Duration = Duration::from_secs(16);
-const BACKOFF_RESET_AFTER: Duration = Duration::from_secs(30);
 
 pub struct RelaySource {
     http_url: String,
@@ -2494,7 +2488,8 @@ fn set_project_state(shared: &Shared, project_id: &str, state: BoxState, detail:
     });
 }
 
-/// Dial, handshake, backfill, then stream — forever, with backoff (§8.6).
+/// Dial, drive [`RoomSession`], perform actions — forever, with backoff (§8.6).
+/// Protocol (HELLO, catch-up, PUSH/ACK, resend) lives in `arbos_core::room`.
 #[allow(clippy::too_many_arguments)]
 async fn room_loop(
     shared: Arc<Shared>,
@@ -2506,33 +2501,41 @@ async fn room_loop(
     mut local_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     mut cmd_rx: mpsc::UnboundedReceiver<RoomCmd>,
 ) {
-    // Restored from the on-device store: HELLO with this cursor so the relay
-    // only sends rows after it; a fresh room starts at 0.
-    let mut cursor: i64 = saved_cursor;
-    let mut backoff = BACKOFF_MIN;
-    let mut pending: Vec<(String, Vec<u8>)> = saved_pending;
+    let is_people = shared.people.lock().unwrap().contains(&room_chat);
+    let room = room::room_path(&project_id, &room_chat, is_people);
+    let mut session = RoomSession::new(shared.device_id(), room, saved_cursor, saved_pending);
     loop {
-        let connected_at = Instant::now();
         let outcome = run_session(
             &shared,
             &project_id,
             &key,
             &room_chat,
-            &mut cursor,
-            &mut pending,
+            is_people,
+            &mut session,
             &mut local_rx,
             &mut cmd_rx,
         )
         .await;
-        if let Err(err) = outcome {
+        if let Err(err) = &outcome {
             eprintln!("relay room {project_id}/{room_chat}: {err:#}");
         }
         let _ = shared.events.send(SyncEvent::Link(Link::Reconnecting));
-        if connected_at.elapsed() > BACKOFF_RESET_AFTER {
-            backoff = BACKOFF_MIN;
+        // If run_session returned without closing (e.g. dial failure), close now.
+        if !session.is_closed() {
+            session.on_close(now_ms());
         }
-        sleep(backoff).await;
-        backoff = (backoff * 2).min(BACKOFF_MAX);
+        let _ = perform_room_actions(
+            &shared,
+            &project_id,
+            &key,
+            &room_chat,
+            is_people,
+            &mut session,
+            None,
+        )
+        .await;
+        sleep(session.reconnect_after()).await;
+        session.prepare_reconnect();
     }
 }
 
@@ -2542,258 +2545,258 @@ async fn run_session(
     project_id: &str,
     key: &str,
     room_chat: &str,
-    cursor: &mut i64,
-    pending: &mut Vec<(String, Vec<u8>)>,
+    is_people: bool,
+    session: &mut RoomSession,
     local_rx: &mut mpsc::UnboundedReceiver<Vec<u8>>,
     cmd_rx: &mut mpsc::UnboundedReceiver<RoomCmd>,
 ) -> Result<()> {
-    let is_people = shared.people.lock().unwrap().contains(room_chat);
-    let room = if is_people {
-        format!("people/{room_chat}")
-    } else {
-        wire::room_name(project_id, room_chat)
-    };
+    let room = session.room().to_string();
     let url = format!("{}/room/{}?token={}", shared.ws_url, room, shared.token());
     let (ws, _) = timeout(HELLO_DEADLINE, connect_async(&url))
         .await
         .context("dial timed out")??;
     let (mut tx, mut rx) = ws.split();
 
-    let hello = Hello {
-        cursor: *cursor,
-        device: shared.device_id(),
-        room: room.clone(),
-        proto: PROTO_VERSION,
-    };
-    tx.send(binary(Frame::new(
-        FrameType::Hello,
-        serde_json::to_value(&hello)?,
-        Vec::new(),
-    )))
+    session.on_open(now_ms());
+    perform_room_actions(
+        shared,
+        project_id,
+        key,
+        room_chat,
+        is_people,
+        session,
+        Some(&mut tx),
+    )
     .await?;
-
-    let state = timeout(HELLO_DEADLINE, async {
-        while let Some(msg) = rx.next().await {
-            if let WsMessage::Binary(bytes) = msg? {
-                if let Some(frame) = Frame::decode(bytes)? {
-                    if frame.ty == FrameType::State {
-                        let header: WireState = serde_json::from_value(frame.header)?;
-                        return Ok::<_, anyhow::Error>(Some((header, frame.payload)));
-                    }
-                }
-            }
-        }
-        Ok(None)
-    })
-    .await
-    .context("STATE did not arrive")??
-    .context("socket closed before STATE")?;
-    let (state, frontier) = state;
-    set_project_state(shared, project_id, map_box(state.box_state), None);
-    set_machine(shared, machine_from_wire(state.box_state), None, None);
-
-    // Checkpoint-on-connect (§7.3): fetch when our replica does not contain
-    // the checkpoint frontier, or when our cursor is below it.
-    let contained = {
-        let docs = shared.docs.lock().unwrap();
-        match (docs.get(key), arbos_core::doc::decode_vv(&frontier)) {
-            (Some(doc), Some(vv)) => doc.core.doc.oplog_vv().includes_vv(&vv),
-            (Some(_), None) | (None, _) => false,
-        }
-    };
-    // A replica restored from the on-device store usually contains the
-    // frontier already: the rows the relay compacted away are ours, so only
-    // rows after `max(cursor, checkpointSeq)` are needed (§7.3).
-    if state.checkpoint_seq > 0 {
-        if contained {
-            *cursor = (*cursor).max(state.checkpoint_seq);
-        } else {
-            match fetch_checkpoint(shared, &room).await {
-                Ok((seq, bytes)) => {
-                    let docs = shared.docs.lock().unwrap();
-                    if let Some(doc) = docs.get(key) {
-                        match doc.core.doc.import(&bytes) {
-                            Ok(_) => *cursor = (*cursor).max(seq.max(state.checkpoint_seq)),
-                            Err(err) => {
-                                eprintln!("relay room {room}: checkpoint import failed: {err}")
-                            }
-                        }
-                    }
-                }
-                Err(err) => eprintln!("relay room {room}: checkpoint fetch failed: {err:#}"),
-            }
-        }
-        shared
-            .room_seq
-            .lock()
-            .unwrap()
-            .insert(key.to_string(), *cursor);
-        shared.mark_dirty(key);
-    }
-    // Own rows are requested too: a row pushed by this device but saved before
-    // its ACK is only on the relay (the relay's `excludeOwn` filters by device,
-    // not by connection). Loro drops the duplicates.
-    tx.send(binary(Frame::new(
-        FrameType::RowsReq,
-        serde_json::to_value(RowsReq {
-            after: *cursor,
-            exclude_own: false,
-        })?,
-        Vec::new(),
-    )))
-    .await?;
-
-    for (batch_id, bytes) in pending.iter() {
-        tx.send(binary(Frame::new(
-            FrameType::Push,
-            json!({ "batchId": batch_id }),
-            bytes.clone(),
-        )))
-        .await?;
-    }
 
     let mut presence = interval(PRESENCE_EVERY);
+    let mut tick = interval(Duration::from_secs(1));
     loop {
+        if session.is_closed() {
+            anyhow::bail!("session closed");
+        }
         tokio::select! {
             msg = rx.next() => {
-                let Some(msg) = msg else { anyhow::bail!("socket closed") };
+                let Some(msg) = msg else {
+                    session.on_close(now_ms());
+                    perform_room_actions(
+                        shared, project_id, key, room_chat, is_people, session, Some(&mut tx),
+                    ).await?;
+                    anyhow::bail!("socket closed");
+                };
                 let WsMessage::Binary(bytes) = msg? else { continue };
-                let Some(frame) = Frame::decode(bytes)? else { continue };
-                match frame.ty {
-                    FrameType::Row => {
-                        let header: RowHeader = serde_json::from_value(frame.header)?;
-                        let docs = shared.docs.lock().unwrap();
-                        if let Some(doc) = docs.get(key) {
-                            if let Err(err) = doc.core.doc.import(&frame.payload) {
-                                eprintln!("relay room {room}: import seq {} failed: {err}", header.seq);
-                            }
-                        }
-                        *cursor = (*cursor).max(header.seq);
-                        shared.room_seq.lock().unwrap().insert(key.to_string(), *cursor);
-                    }
-                    FrameType::RowsDone => {
-                        let head_seq = frame.header.get("headSeq").and_then(Value::as_i64).unwrap_or(*cursor);
-                        *cursor = (*cursor).max(head_seq);
-                        shared.room_seq.lock().unwrap().insert(key.to_string(), *cursor);
-                        shared.mark_dirty(key);
-                        let _ = shared.events.send(SyncEvent::Link(Link::Live));
-                        if room_chat == PROJECT_DOC_CHAT_ID {
-                            emit_project_doc(shared, project_id);
-                        } else {
-                            emit_snapshot(shared, key);
-                            let _ = shared.events.send(SyncEvent::ChatSynced(key.to_string()));
-                        }
-                    }
-                    FrameType::Ack => {
-                        let header: Ack = serde_json::from_value(frame.header)?;
-                        let before = pending.len();
-                        pending.retain(|(id, _)| *id != header.batch_id);
-                        if pending.len() != before {
-                            shared.with_store(|s| s.save_pending(key, pending));
-                        }
-                        *cursor = (*cursor).max(header.seq);
-                        shared.room_seq.lock().unwrap().insert(key.to_string(), *cursor);
-                        shared.mark_dirty(key);
-                        let had: Vec<Id> = shared.unacked.lock().unwrap().drain().collect();
-                        if !had.is_empty() && room_chat != PROJECT_DOC_CHAT_ID {
-                            emit_snapshot(shared, key);
-                        }
-                    }
-                    FrameType::Status => {
-                        let header: StatusHeader = serde_json::from_value(frame.header)?;
-                        set_project_state(shared, project_id, map_box(header.box_state), header.detail.clone());
-                        set_machine(shared, machine_from_wire(header.box_state), None, header.detail);
-                        let poll = shared.clone();
-                        tokio::spawn(async move { refresh_machine(&poll).await });
-                    }
-                    FrameType::Error => {
-                        let header: ErrorHeader = serde_json::from_value(frame.header)?;
-                        if header.code == "lagging" {
-                            tx.send(binary(Frame::new(
-                                FrameType::RowsReq,
-                                serde_json::to_value(RowsReq { after: *cursor, exclude_own: true })?,
-                                Vec::new(),
-                            ))).await?;
-                        } else {
-                            anyhow::bail!("relay error {}: {}", header.code, header.message);
-                        }
-                    }
-                    FrameType::Presence => {
-                        let h = &frame.header;
-                        let mine = h.get("device").and_then(Value::as_str) == Some(shared.device_id().as_str());
-                        // Calls v1: another device of the chat says it is in a call →
-                        // fetch it so the "On a call · Join" bar can show (§8 presence).
-                        if let Some(call_id) = h.get("in_call").and_then(Value::as_str) {
-                            if !mine && shared.in_call.lock().unwrap().as_deref() != Some(call_id) {
-                                let _ = shared.events.send(SyncEvent::CallSeen {
-                                    chat_id: room_chat.to_string(),
-                                    call_id: call_id.to_string(),
-                                });
-                            }
-                        }
-                        let handle = h.get("handle").and_then(Value::as_str).filter(|s| !s.is_empty());
-                        if let (false, Some(handle)) = (mine, handle) {
-                            let _ = shared.events.send(SyncEvent::Presence { handle: handle.to_string() });
-                            if is_people {
-                                if let Some(typing) = h.get("typing").and_then(Value::as_bool) {
-                                    let _ = shared.events.send(SyncEvent::Typing {
-                                        chat_id: room_chat.to_string(),
-                                        handle: handle.to_string(),
-                                        active: typing,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                    FrameType::ProbeOk | FrameType::State => {}
-                    FrameType::Hello | FrameType::RowsReq | FrameType::Push | FrameType::Probe | FrameType::Wake => {}
-                }
+                session.on_frame(&bytes);
+                perform_room_actions(
+                    shared, project_id, key, room_chat, is_people, session, Some(&mut tx),
+                ).await?;
             }
             bytes = local_rx.recv() => {
                 let Some(bytes) = bytes else { anyhow::bail!("doc dropped") };
-                if bytes.len() > wire::ROW_MAX {
-                    eprintln!("relay room {room}: local update {} bytes exceeds row cap; dropped", bytes.len());
-                    continue;
-                }
-                let batch_id = new_id();
-                pending.push((batch_id.clone(), bytes.clone()));
-                shared.with_store(|s| s.save_pending(key, pending));
-                tx.send(binary(Frame::new(
-                    FrameType::Push,
-                    json!({ "batchId": batch_id }),
-                    bytes,
-                ))).await?;
+                session.on_local_commit(bytes);
+                perform_room_actions(
+                    shared, project_id, key, room_chat, is_people, session, Some(&mut tx),
+                ).await?;
             }
             cmd = cmd_rx.recv() => {
                 let Some(cmd) = cmd else { anyhow::bail!("room closed") };
                 match cmd {
-                    RoomCmd::Wake(reason) => {
-                        tx.send(binary(Frame::new(
-                            FrameType::Wake,
-                            serde_json::to_value(WakeHeader { reason: reason.to_string() })?,
-                            Vec::new(),
-                        ))).await?;
-                    }
+                    RoomCmd::Wake(reason) => session.wake(reason),
                     RoomCmd::Typing(active) => {
-                        let mut header = shared.presence_header();
-                        header["typing"] = json!(active);
-                        tx.send(binary(Frame::new(FrameType::Presence, header, Vec::new()))).await?;
+                        session.typing(shared.presence_header(), active);
                     }
                     RoomCmd::Presence => {
-                        tx.send(binary(Frame::new(
-                            FrameType::Presence,
-                            shared.presence_header(),
-                            Vec::new(),
-                        ))).await?;
+                        session.presence(shared.presence_header());
                     }
                 }
+                perform_room_actions(
+                    shared, project_id, key, room_chat, is_people, session, Some(&mut tx),
+                ).await?;
             }
             _ = presence.tick() => {
-                tx.send(binary(Frame::new(
-                    FrameType::Presence,
-                    shared.presence_header(),
-                    Vec::new(),
-                ))).await?;
+                session.presence(shared.presence_header());
+                perform_room_actions(
+                    shared, project_id, key, room_chat, is_people, session, Some(&mut tx),
+                ).await?;
+            }
+            _ = tick.tick() => {
+                session.on_tick(now_ms());
+                perform_room_actions(
+                    shared, project_id, key, room_chat, is_people, session, Some(&mut tx),
+                ).await?;
+            }
+        }
+    }
+}
+
+type WsSink = futures::stream::SplitSink<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    WsMessage,
+>;
+
+/// Run queued [`RoomAction`]s: send frames, HTTP checkpoint, apply bytes, emit events.
+/// Returns `Some(delay)` when the session asked to reconnect.
+#[allow(clippy::too_many_arguments)]
+async fn perform_room_actions(
+    shared: &Arc<Shared>,
+    project_id: &str,
+    key: &str,
+    room_chat: &str,
+    is_people: bool,
+    session: &mut RoomSession,
+    mut tx: Option<&mut WsSink>,
+) -> Result<Option<Duration>> {
+    let mut reconnect = None;
+    // Checkpoint fetch may enqueue more actions; loop until the queue is empty.
+    loop {
+        let actions = session.drain_actions();
+        if actions.is_empty() {
+            return Ok(reconnect);
+        }
+        for action in actions {
+            match action {
+                RoomAction::SendFrame(bytes) => {
+                    if let Some(tx) = tx.as_mut() {
+                        tx.send(WsMessage::Binary(bytes.into())).await?;
+                    }
+                }
+                RoomAction::FetchCheckpoint {
+                    room,
+                    frontier,
+                    checkpoint_seq: _,
+                } => {
+                    let contained = {
+                        let docs = shared.docs.lock().unwrap();
+                        match (docs.get(key), decode_vv(&frontier)) {
+                            (Some(doc), Some(vv)) => doc.core.doc.oplog_vv().includes_vv(&vv),
+                            (Some(_), None) | (None, _) => false,
+                        }
+                    };
+                    if contained {
+                        session.on_checkpoint_skipped();
+                    } else {
+                        match fetch_checkpoint(shared, &room).await {
+                            Ok((seq, bytes)) => {
+                                let import_ok = {
+                                    let docs = shared.docs.lock().unwrap();
+                                    if let Some(doc) = docs.get(key) {
+                                        match doc.core.doc.import(&bytes) {
+                                            Ok(_) => true,
+                                            Err(err) => {
+                                                eprintln!(
+                                                    "relay room {room}: checkpoint import failed: {err}"
+                                                );
+                                                false
+                                            }
+                                        }
+                                    } else {
+                                        false
+                                    }
+                                };
+                                if import_ok {
+                                    session.on_checkpoint(seq);
+                                } else {
+                                    session.on_checkpoint_failed();
+                                }
+                            }
+                            Err(err) => {
+                                eprintln!("relay room {room}: checkpoint fetch failed: {err:#}");
+                                session.on_checkpoint_failed();
+                            }
+                        }
+                    }
+                }
+                RoomAction::ApplyBytes(bytes) => {
+                    let docs = shared.docs.lock().unwrap();
+                    if let Some(doc) = docs.get(key) {
+                        if let Err(err) = doc.core.doc.import(&bytes) {
+                            eprintln!("relay room {}: import failed: {err}", session.room());
+                        }
+                    }
+                }
+                RoomAction::Cursor(cursor) => {
+                    shared
+                        .room_seq
+                        .lock()
+                        .unwrap()
+                        .insert(key.to_string(), cursor);
+                    shared.mark_dirty(key);
+                }
+                RoomAction::Pending(pending) => {
+                    shared.with_store(|s| s.save_pending(key, &pending));
+                }
+                RoomAction::Ack { .. } => {
+                    let had: Vec<Id> = shared.unacked.lock().unwrap().drain().collect();
+                    if !had.is_empty() && room_chat != PROJECT_DOC_CHAT_ID {
+                        emit_snapshot(shared, key);
+                    }
+                }
+                RoomAction::BoxState {
+                    state,
+                    detail,
+                    poll_machine,
+                } => {
+                    set_project_state(shared, project_id, map_box(state), detail.clone());
+                    set_machine(shared, machine_from_wire(state), None, detail);
+                    if poll_machine {
+                        let poll = shared.clone();
+                        tokio::spawn(async move { refresh_machine(&poll).await });
+                    }
+                }
+                RoomAction::LinkLive => {
+                    let _ = shared.events.send(SyncEvent::Link(Link::Live));
+                    if room_chat == PROJECT_DOC_CHAT_ID {
+                        emit_project_doc(shared, project_id);
+                    } else {
+                        emit_snapshot(shared, key);
+                        let _ = shared.events.send(SyncEvent::ChatSynced(key.to_string()));
+                    }
+                }
+                RoomAction::ScheduleReconnect { after } => {
+                    reconnect = Some(after);
+                }
+                RoomAction::SessionError { code, message } => {
+                    if code != "state_timeout" && code != "lagging" {
+                        eprintln!("relay room {}: error {}: {}", session.room(), code, message);
+                    }
+                }
+                RoomAction::Presence {
+                    device: _,
+                    handle,
+                    typing,
+                    in_call,
+                    mine,
+                } => {
+                    if let Some(call_id) = in_call {
+                        if !mine
+                            && shared.in_call.lock().unwrap().as_deref() != Some(call_id.as_str())
+                        {
+                            let _ = shared.events.send(SyncEvent::CallSeen {
+                                chat_id: room_chat.to_string(),
+                                call_id,
+                            });
+                        }
+                    }
+                    if let (false, Some(handle)) = (mine, handle) {
+                        let _ = shared.events.send(SyncEvent::Presence {
+                            handle: handle.clone(),
+                        });
+                        if is_people {
+                            if let Some(active) = typing {
+                                let _ = shared.events.send(SyncEvent::Typing {
+                                    chat_id: room_chat.to_string(),
+                                    handle,
+                                    active,
+                                });
+                            }
+                        }
+                    }
+                }
+                RoomAction::DroppedOversize { bytes } => {
+                    eprintln!(
+                        "relay room {}: local update {bytes} bytes exceeds row cap; dropped",
+                        session.room()
+                    );
+                }
             }
         }
     }
@@ -2817,10 +2820,6 @@ async fn fetch_checkpoint(shared: &Shared, room: &str) -> Result<(i64, Vec<u8>)>
         .unwrap_or(0);
     let bytes = resp.bytes().await?.to_vec();
     Ok((seq, bytes))
-}
-
-fn binary(frame: Frame) -> WsMessage {
-    WsMessage::Binary(frame.encode())
 }
 
 fn machine_from_wire(state: WireBox) -> MachineState {
