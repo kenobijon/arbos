@@ -209,14 +209,15 @@ struct ChatView: View {
         if !isPeople { return needsAnswer ? "Answer \(name)" : "Ask \(name)" }
         if talkingToEveryone { return "Message everyone" }
         if talkToAgents.count > 1 { return "Message \(talkToAgents.count) agents" }
-        // Bare person or agent name in the draft ("Allan?", "Bob?") overrides a sticky chip.
+        // Bare agent or person name in the draft ("Bob?", "Allan?") overrides a sticky chip.
+        // Agent handle/slug wins over a human display-name collision ("Arbos" → @arbos).
         if let people {
-            let namedPeople = AppModel.namedPeople(in: draft, members: people.members)
-            if let member = people.members.first(where: { namedPeople.contains($0.member) }) {
-                return "Message \(member.displayName)"
-            }
             let namedAgents = AppModel.namedAgents(in: draft, members: people.members)
             if let member = people.members.first(where: { namedAgents.contains($0.member) }) {
+                return "Message \(member.displayName)"
+            }
+            let namedPeople = AppModel.namedPeople(in: draft, members: people.members)
+            if let member = people.members.first(where: { namedPeople.contains($0.member) }) {
                 return "Message \(member.displayName)"
             }
         }
@@ -1429,10 +1430,11 @@ struct ChatView: View {
     }
 
     /// Chip / inferred agent, or `"everyone"` when the draft says so — matches `composerPrompt`.
-    /// A bare person name in the text drops a sticky agent so bob does not answer "Allan?".
-    /// A bare agent name ("Bob?") addresses that agent like `@bob`.
-    /// Several selected agent chips (or "hey agents") address everyone / that combination via
-    /// mentions on the send — see `chipMentions(for:)`.
+    /// A bare person `@handle` in the text drops a sticky agent so bob does not answer that ping.
+    /// A person's display name alone does not drop an agent handle/slug match ("Arbos …" still
+    /// addresses @arbos when a human is also named Arbos). A bare agent name ("Bob?") addresses
+    /// that agent like `@bob`. Several selected agent chips (or "hey agents") address everyone /
+    /// that combination via mentions on the send — see `chipMentions(for:)`.
     private func sendAddress(for text: String) -> String? {
         if talkingToEveryone || AppModel.addressesEveryone(text) { return "everyone" }
         if talkToAgents.count > 1 { return nil }
@@ -1440,11 +1442,15 @@ struct ChatView: View {
         if AppModel.mentions(in: text, members: members).contains(where: { $0.hasPrefix("agent:") }) {
             return effectiveTalkTo
         }
-        if !AppModel.namedPeople(in: text, members: members).isEmpty {
+        // Person @handle wins; display-name-only people matches must not block agent slugs.
+        if !AppModel.namedPeopleByHandle(in: text, members: members).isEmpty {
             return nil
         }
         if let agent = AppModel.namedAgents(in: text, members: members).first {
             return agent
+        }
+        if !AppModel.namedPeople(in: text, members: members).isEmpty {
+            return nil
         }
         return effectiveTalkTo
     }

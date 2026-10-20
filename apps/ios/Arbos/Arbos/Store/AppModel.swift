@@ -1789,18 +1789,22 @@ final class AppModel: ObservableObject {
                     chipMentions: [String] = [], attachments: [PendingAttachment] = []) {
         guard let doc = docs[chatId], let chat = peopleChat(chatId), let me = user else { return }
         var mentions = AppModel.mentions(in: text, members: chat.members)
-        // Leading bare person names ("Allan", "Allan?", "Yo Allan …") count as addressing
-        // that person — so a sticky "Message @bob" chip does not wake the agent. A mid-line
-        // @handle ("can you see @jo?") still keeps the chip target.
-        let leadingPeople = AppModel.namedPeople(in: text, members: chat.members)
-        for person in leadingPeople where !mentions.contains(person) {
-            mentions.append(person)
-        }
-        // Leading bare agent names ("Bob?", "hey Bob …") count as addressing that agent —
-        // same as typing @bob — so the box wakes without requiring the @ handle.
+        // Leading bare agent names ("Bob?", "hey Bob …", "Arbos what is your name") count as
+        // addressing that agent — same as typing @bob — so the box wakes without `@`.
+        // Resolve agents before people so a human display-name collision (e.g. @unarbos
+        // named Arbos vs agent @arbos) does not steal the address.
         let leadingAgents = AppModel.namedAgents(in: text, members: chat.members)
         for agent in leadingAgents where !mentions.contains(agent) {
             mentions.append(agent)
+        }
+        // Leading bare person names ("Allan", "Allan?", "Yo Allan …") count as addressing
+        // that person — so a sticky "Message @bob" chip does not wake the agent. When an
+        // agent handle/slug already matched, only person @handles count (not display names).
+        let leadingPeople = leadingAgents.isEmpty
+            ? AppModel.namedPeople(in: text, members: chat.members)
+            : AppModel.namedPeopleByHandle(in: text, members: chat.members)
+        for person in leadingPeople where !mentions.contains(person) {
+            mentions.append(person)
         }
         // Conversation-selector combinations: every selected agent is mentioned so each box
         // wakes (agentd allows several replies on a shared people `send`).
@@ -1945,6 +1949,16 @@ final class AppModel: ObservableObject {
     /// "Allan. we are…", "Yo Allan …". Mid-line names ("ask Allan later") do not count, so a
     /// sticky agent chip still receives "can you see @jo?".
     static func namedPeople(in text: String, members: [ChatMember]) -> [String] {
+        namedPeople(in: text, members: members, allowDisplayName: true)
+    }
+
+    /// Humans addressed by `@handle` only (not display/first name). A person's display name
+    /// that collides with an agent slug must not block the agent — see `namedAgents`.
+    static func namedPeopleByHandle(in text: String, members: [ChatMember]) -> [String] {
+        namedPeople(in: text, members: members, allowDisplayName: false)
+    }
+
+    private static func namedPeople(in text: String, members: [ChatMember], allowDisplayName: Bool) -> [String] {
         let humans = members.filter { !$0.isAgent }
         guard !humans.isEmpty else { return [] }
         var lower = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -1958,7 +1972,7 @@ final class AppModel: ObservableObject {
         var out: [String] = []
         for h in humans {
             var needles: [String] = [h.handle.lowercased()]
-            if let name = h.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+            if allowDisplayName, let name = h.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
                 let n = name.lowercased()
                 needles.append(n)
                 if let firstName = n.split(whereSeparator: { $0.isWhitespace }).first, firstName.count >= 2 {
@@ -1973,10 +1987,13 @@ final class AppModel: ObservableObject {
     }
 
     /// Agents addressed at the start of the text without `@` — "Bob", "Bob?", "hey Bob …".
-    /// A leading person name wins when the same token could match a human in the chat.
-    /// Mid-line names ("ask Bob later") do not count.
+    /// A leading person `@handle` wins when the same token could match a human; a person's
+    /// display name alone does not beat an agent handle/slug (so "Arbos what is your name"
+    /// wakes @arbos even when a human in the chat is also named Arbos). Mid-line names
+    /// ("ask Bob later") do not count. Sole-agent bare "arbos" matches like `@arbos`.
     static func namedAgents(in text: String, members: [ChatMember]) -> [String] {
-        if !namedPeople(in: text, members: members).isEmpty { return [] }
+        // Person @handle still wins; display-name-only collisions do not suppress the agent.
+        if !namedPeopleByHandle(in: text, members: members).isEmpty { return [] }
         let agents = members.filter(\.isAgent)
         guard !agents.isEmpty else { return [] }
         var lower = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -2009,6 +2026,10 @@ final class AppModel: ObservableObject {
             if Set(needles).contains(token), !out.contains(a.member) {
                 out.append(a.member)
             }
+        }
+        // Sole-agent bare "arbos" — same alias as `@arbos` in `mentions(in:)`.
+        if out.isEmpty, token == "arbos", agents.count == 1, let a = agents.first, !out.contains(a.member) {
+            out.append(a.member)
         }
         return out
     }
