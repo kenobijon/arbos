@@ -4773,6 +4773,34 @@ fn seed_people_docs(shared: &Arc<Shared>) {
         "Done. Slide 4 now reads 1,284 signups this week (+18 %). The chart is in `deck/v3/slide-04.png`.",
     )];
     let _ = group.insert_message(&agent);
+    // Two images and a file, so the group pane's Library and the attachment
+    // composer have something to show (redesign mocks d / e).
+    let mut shared_files = human_message(GROUP_LAUNCH, &samir, "", base + 380_000);
+    shared_files.parts = vec![
+        attachment(
+            "deck-v3-slide-04.png",
+            "image/png",
+            AttachmentKind::Image,
+            "Slide 4 · signups",
+            212_000,
+        ),
+        attachment(
+            "launch-dashboard.png",
+            "image/png",
+            AttachmentKind::Image,
+            "Launch dashboard",
+            348_000,
+        ),
+        attachment(
+            "press-kit-v3.pdf",
+            "application/pdf",
+            AttachmentKind::Pdf,
+            "Press kit v3",
+            1_840_000,
+        ),
+        text_part("Deck, dashboard and the press kit for the run-through."),
+    ];
+    let _ = group.insert_message(&shared_files);
     let _ = group.insert_message(&human_message(
         GROUP_LAUNCH,
         &sara,
