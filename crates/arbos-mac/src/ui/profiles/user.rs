@@ -2,7 +2,9 @@
 //! more, the info card (@handle, Send Message, Block), and the Links /
 //! Groups tabs built from the chats and projects we share with them.
 
-use gpui::{div, prelude::*, px, ClipboardItem, Context, Div, ElementId, Focusable, SharedString};
+use gpui::{
+    div, prelude::*, px, ClipboardItem, Context, Div, ElementId, Focusable, SharedString, Stateful,
+};
 
 use crate::app::{CallTarget, ProfilePage};
 use crate::model::{Person, Project};
@@ -15,7 +17,7 @@ use crate::ui::theme::{Theme, TEXT_SMALL};
 
 use super::{
     action_button, action_row, card, chats_of, collect, empty, frame, hero, hero_name, info_action,
-    info_row, link_list, list_row, more_menu, tab_bar, Action,
+    info_row, link_list, list_row, more_menu, tab_bar, Action, HERO_AVATAR,
 };
 
 const TABS: [&str; 2] = ["Links", "Groups"];
@@ -25,7 +27,7 @@ pub(super) fn page(
     space_id: Option<&str>,
     shell: &Shell,
     cx: &mut Context<Shell>,
-) -> Option<Div> {
+) -> Option<Stateful<Div>> {
     let theme = Theme::of(cx).clone();
     let state = shell.state.read(cx);
     let person: Person = state.person_by_handle(handle).unwrap_or_else(|| Person {
@@ -94,8 +96,8 @@ pub(super) fn page(
     // ----- hero ----------------------------------------------------------------
     let avatar = div()
         .relative()
-        .size(px(112.0))
-        .child(people::avatar(image, &person, 112.0, &theme))
+        .size(px(HERO_AVATAR))
+        .child(people::avatar(image, &person, HERO_AVATAR, &theme))
         .when(online, |el| {
             el.child(
                 div()

@@ -1229,6 +1229,21 @@ fn people_space_from(shared: &Shared, v: &Value) -> Option<(Project, Chat)> {
         vision_enabled: true,
         avatar_color_index: None,
         avatar_color_override: None,
+        // A custom group picture: the blob URL with the device token in the
+        // query (the avatar loader sends no header), as the iPhone builds it.
+        image_url: v
+            .get("image_key")
+            .and_then(Value::as_str)
+            .filter(|k| !k.is_empty())
+            .map(|k| {
+                format!(
+                    "{}/blob/people:{}/{}?token={}",
+                    shared.http_url,
+                    id,
+                    k,
+                    shared.token()
+                )
+            }),
     };
     let previous_unread = shared
         .chats
@@ -1829,6 +1844,7 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
                 .iter()
                 .find_map(|v| v.get("avatar_color_index").and_then(Value::as_u64))
                 .map(|i| (i % 7) as u8),
+            image_url: None,
         });
         let chats: Vec<Chat> = detail
             .get("chats")
@@ -3999,6 +4015,95 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 );
                 doc.commit();
             }
+        }
+        ClientCommand::RenameGroup { chat_id, title } => {
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == chat_id) {
+                    p.name = title.clone();
+                }
+                let snapshot = projects.clone();
+                drop(projects);
+                let _ = shared.events.send(SyncEvent::Projects(snapshot));
+            }
+            {
+                let mut chats = shared.chats.lock().unwrap();
+                if let Some(c) = chats.iter_mut().find(|c| c.id == chat_id) {
+                    c.title = title.clone();
+                }
+            }
+            emit_chats(shared);
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared
+                    .patch_json(&format!("/chats/{chat_id}"), json!({ "title": title }))
+                    .await
+                {
+                    shared.notice(format!("Group name not saved: {}", people_error(&err)));
+                }
+            });
+        }
+        ClientCommand::SetGroupImage { chat_id, path } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let ext = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.to_ascii_lowercase())
+                    .unwrap_or_else(|| "png".into());
+                let key = format!("group-{}.{}", new_id().to_lowercase(), ext);
+                let mime = mime_for(&path);
+                let bytes = match tokio::fs::read(&path).await {
+                    Ok(b) => b,
+                    Err(err) => {
+                        shared.notice(format!("Group picture: {err}"));
+                        return;
+                    }
+                };
+                let put = shared
+                    .http
+                    .put(format!(
+                        "{}/blob/people:{}/{}",
+                        shared.http_url, chat_id, key
+                    ))
+                    .bearer_auth(shared.token())
+                    .header("content-type", mime)
+                    .body(bytes)
+                    .send()
+                    .await;
+                match put {
+                    Ok(r) if r.status().is_success() => {}
+                    Ok(r) => {
+                        shared.notice(format!("Group picture upload failed: HTTP {}", r.status()));
+                        return;
+                    }
+                    Err(err) => {
+                        shared.notice(format!("Group picture upload failed: {err}"));
+                        return;
+                    }
+                }
+                match shared
+                    .patch_json(&format!("/chats/{chat_id}"), json!({ "image_key": key }))
+                    .await
+                {
+                    Ok(v) => {
+                        // The relay returns the chat: re-read it so the new
+                        // picture URL reaches every row at once.
+                        if let Some((space, _)) = people_space_from(&shared, &v) {
+                            let mut projects = shared.projects.lock().unwrap();
+                            if let Some(p) = projects.iter_mut().find(|p| p.id == chat_id) {
+                                p.image_url = space.image_url;
+                            }
+                            let snapshot = projects.clone();
+                            drop(projects);
+                            let _ = shared.events.send(SyncEvent::Projects(snapshot));
+                        }
+                    }
+                    Err(err) => {
+                        shared.notice(format!("Group picture not saved: {}", people_error(&err)));
+                    }
+                }
+            });
         }
         ClientCommand::Retitle {
             project_id,

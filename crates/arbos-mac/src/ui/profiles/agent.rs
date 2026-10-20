@@ -6,7 +6,7 @@
 //! avatar (owned agents) opens the colour picker — there is no separate
 //! photo upload on the Mac yet.
 
-use gpui::{div, prelude::*, px, Context, Div, ElementId, Focusable, SharedString};
+use gpui::{div, prelude::*, px, Context, Div, ElementId, Focusable, SharedString, Stateful};
 
 use crate::app::{AgentPick, CallTarget, ProfilePage};
 use crate::model::{Id, MachineState, Person, Project};
@@ -16,11 +16,11 @@ use crate::ui::hoverpick;
 use crate::ui::motion::PulseClock;
 use crate::ui::shell::Shell;
 use crate::ui::sidebar::machine_dot;
-use crate::ui::theme::{Theme, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
+use crate::ui::theme::{Theme, TEXT_SMALL, TEXT_TINY};
 
 use super::{
-    action_button, action_row, card, frame, hero, hero_name, info_row, more_menu, Action,
-    SHEET_WIDTH,
+    action_button, action_row, card, editable_name, editable_picture, frame, hero, info_row,
+    more_menu, Action, HeroClick, HERO_AVATAR,
 };
 
 /// An agent that is only known as a member of a people chat (someone else's
@@ -47,7 +47,11 @@ fn project_from_member(state: &crate::app::AppState, project_id: &str) -> Option
         })
 }
 
-pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
+pub(super) fn page(
+    project_id: &str,
+    shell: &Shell,
+    cx: &mut Context<Shell>,
+) -> Option<Stateful<Div>> {
     let theme = Theme::of(cx).clone();
     let state = shell.state.read(cx);
     let (project, mine): (Project, bool) = match state.project(project_id) {
@@ -104,26 +108,18 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
     }
 
     // ----- hero ----------------------------------------------------------------
-    // Owned agents: click the picture to open the avatar-colour picker. That
-    // replaces the old header "Edit".
-    let avatar = div()
-        .id("profile-avatar")
+    // The shared pane hero: owned agents get the crayon on the picture (the
+    // avatar-colour picker) and the inline name field; others are read-only.
+    let picture = div()
         .relative()
-        .size(px(112.0))
-        .when(mine, |el| {
-            el.cursor_pointer()
-                .hover(|s| s.opacity(0.9))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.state.update(cx, |s, cx| s.toggle_profile_picker(cx));
-                }))
-        })
-        .child(avatars::project(&project, 112.0, &theme))
+        .size(px(HERO_AVATAR))
+        .child(avatars::project(&project, HERO_AVATAR, &theme))
         .child(
             div()
                 .absolute()
                 .right(px(0.0))
                 .bottom(px(0.0))
-                .size(px(30.0))
+                .size(px(26.0))
                 .rounded_full()
                 .bg(theme.card())
                 .flex()
@@ -131,49 +127,35 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
                 .justify_center()
                 .child(
                     div()
-                        .size(px(20.0))
+                        .size(px(16.0))
                         .rounded_full()
                         .bg(machine_dot(machine_state, &theme)),
                 ),
         )
         .into_any_element();
-    let name_el = if renaming {
-        // Full-width under the avatar (same padding as iOS), name text centered
-        // so short names like "Home" line up with the working status below.
-        div()
-            .id("profile-rename")
-            .w(px(SHEET_WIDTH - 96.0))
-            .h(px(36.0))
-            .px(px(10.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(10.0))
-            .bg(theme.field)
-            .border_1()
-            .border_color(theme.field_border)
-            .text_size(px(TEXT_BODY + 8.0))
-            .font_weight(gpui::FontWeight::SEMIBOLD)
-            .text_color(theme.text)
-            .child(shell.agent_name_input.clone())
-            .into_any_element()
-    } else if mine {
-        let p_rename = pid.clone();
-        hero_name(&project.name, &theme)
-            .id("profile-name")
-            .cursor_pointer()
-            .hover(|s| s.opacity(0.85))
-            .on_click(
-                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
-                    if event.click_count() >= 2 {
-                        this.start_edit_agent(p_rename.clone(), false, window, cx);
-                    }
-                }),
-            )
-            .into_any_element()
-    } else {
-        hero_name(&project.name, &theme).into_any_element()
-    };
+    let pic_click = mine.then(|| {
+        let f = cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+            this.state.update(cx, |s, cx| s.toggle_profile_picker(cx));
+        });
+        Box::new(f) as HeroClick
+    });
+    let avatar = editable_picture("profile-avatar", picture, pic_click).into_any_element();
+    let p_rename = pid.clone();
+    let name_click = mine.then(|| {
+        let f = cx.listener(move |this, _: &gpui::ClickEvent, window, cx| {
+            this.start_edit_agent(p_rename.clone(), false, window, cx);
+        });
+        Box::new(f) as HeroClick
+    });
+    let name_el = editable_name(
+        "profile-name",
+        &project.name,
+        renaming,
+        &shell.agent_name_input,
+        name_click,
+        &theme,
+    )
+    .into_any_element();
     let hero = hero(avatar, name_el, &status, status_color, &theme).child(
         div()
             .text_size(px(TEXT_SMALL))

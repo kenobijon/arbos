@@ -1,8 +1,8 @@
-//! Telegram-style profile pages in the Grok Bot look: a user, a group (people
-//! chat or shared project) or an agent. One glass sheet, the same skeleton
-//! for all three — hero (avatar, name, status line), a row of round action
-//! buttons, an info card, a segmented tab bar and the tab's list. The agent
-//! page keeps the tree + colour picker as its Appearance section.
+//! Profile pages in the right pane (three-pane rule, 2026-10-20): a user, a
+//! group (people chat or shared project) or an agent. One pane beside the
+//! chat — it never covers it — closed by the X at its top right, the same
+//! skeleton for all three: hero (picture, name), tabs, then lists or
+//! settings. Pictures and names are editable only on what you own.
 //!
 //! Everything shown is derived from state the app already holds: members from
 //! the space, media / files / voice / links from the loaded chat docs,
@@ -26,20 +26,16 @@ use crate::ui::icons::icon;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, PANEL_RADIUS, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
-pub const SHEET_WIDTH: f32 = 480.0;
+/// The right pane's width (mockups b, d, g: a quarter of the window).
+pub const SHEET_WIDTH: f32 = 340.0;
 /// "online" text, shared with the iPhone pages.
 pub(super) fn presence_blue() -> Hsla {
     gpui::rgb(0x1084fe).into()
 }
-/// The "owner" capsule.
-pub(super) fn owner_purple() -> Hsla {
-    gpui::rgb(0x8b7cf6).into()
-}
-pub const SHEET_MAX_HEIGHT: f32 = 780.0;
-const HERO_AVATAR: f32 = 112.0;
+pub(super) const HERO_AVATAR: f32 = 96.0;
 
-/// The open page, if any.
-pub fn sheet(page: &ProfilePage, shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
+/// The open page, if any — rendered as the right pane.
+pub fn pane(page: &ProfilePage, shell: &Shell, cx: &mut Context<Shell>) -> Option<Stateful<Div>> {
     match page {
         ProfilePage::User { handle, space_id } => {
             user::page(handle, space_id.as_deref(), shell, cx)
@@ -51,45 +47,56 @@ pub fn sheet(page: &ProfilePage, shell: &Shell, cx: &mut Context<Shell>) -> Opti
 
 // ----- scaffold ----------------------------------------------------------------
 
-/// `[‹ back] (title) [right]` header + scrolling body in the centred glass
-/// sheet; `scroll` tracks the body's scroll when a page needs to move it.
-/// The back button and a click on the backdrop around the card both close
-/// the page; clicks inside the card (pickers, menus, fields) stay inside.
+/// The right pane: an X at the top right (plus the page's `right` control),
+/// then the scrolling body. It sits beside the chat as a flex sibling, so it
+/// never covers it; `scroll` tracks the body's scroll when a page needs to
+/// move it. Clicks inside stay inside (pickers, menus, fields).
 pub(super) fn frame(
     body: Div,
     right: Option<Stateful<Div>>,
     scroll: Option<&ScrollHandle>,
     theme: &Theme,
     cx: &mut Context<Shell>,
-) -> Div {
-    let back = glass::circle("profile-back", 34.0, theme)
-        .child(icon("chevron-left", 15.0, theme.text))
+) -> Stateful<Div> {
+    let close = glass::circle("profile-close", 30.0, theme)
+        .child(icon("xmark", 13.0, theme.text))
         .on_click(cx.listener(|this, _, window, cx| this.close_profile(window, cx)));
-    let header = glass::sheet_header("", Some(back), right, theme);
-    glass::sheet(
-        SHEET_WIDTH,
-        theme,
-        header,
-        body.id("profile-body")
-            .min_h_0()
-            .overflow_y_scroll()
-            .when_some(scroll, |el, h| el.track_scroll(h))
-            .max_h(px(SHEET_MAX_HEIGHT)),
-    )
-    .on_mouse_down(
-        gpui::MouseButton::Left,
-        cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
-            // The second click of a double-click on the header name, when
-            // the first already opened this page: rename instead of closing
-            // (#1068). Stopped here so the root does not refocus the composer
-            // over the rename field.
-            if event.click_count >= 2 && this.rename_from_backdrop(window, cx) {
+    let header = div()
+        .h(px(crate::ui::theme::HEADER_HEIGHT))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_end()
+        .gap(px(6.0))
+        .px(px(10.0))
+        .children(right)
+        .child(close);
+    div()
+        .id("profile-pane")
+        .w(px(SHEET_WIDTH))
+        .flex_shrink_0()
+        .h_full()
+        .flex()
+        .flex_col()
+        .border_l_1()
+        .border_color(theme.border)
+        .bg(theme.card())
+        .child(header)
+        .child(
+            body.id("profile-body")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .when_some(scroll, |el, h| el.track_scroll(h)),
+        )
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            cx.listener(|this, _, _, cx| {
+                // The root would refocus the composer over the pane's fields.
                 cx.stop_propagation();
-                return;
-            }
-            this.close_profile(window, cx)
-        }),
-    )
+                this.close_popovers(cx);
+            }),
+        )
 }
 
 /// Big avatar, name, status line.
@@ -124,6 +131,84 @@ pub(super) fn hero(
                 .text_color(status_color)
                 .child(status.to_string()),
         )
+}
+
+/// A click handler a page hands the shared hero (`cx.listener(..)`, boxed).
+pub(super) type HeroClick = Box<dyn Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App)>;
+
+/// The hero picture of something you own: hover shows a crayon over it,
+/// click runs `on_click` (mockup c). `None` = read-only, just the picture.
+pub(super) fn editable_picture(
+    id: &'static str,
+    picture: AnyElement,
+    on_click: Option<HeroClick>,
+) -> Stateful<Div> {
+    let editable = on_click.is_some();
+    div()
+        .id(id)
+        .group("hero-picture")
+        .relative()
+        .size(px(HERO_AVATAR))
+        .flex_shrink_0()
+        .child(picture)
+        .when(editable, |el| {
+            el.cursor_pointer().child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .rounded_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(Theme::with_alpha(gpui::black(), 0.45))
+                    .opacity(0.0)
+                    .group_hover("hero-picture", |s| s.opacity(1.0))
+                    .child(icon("pencil", 30.0, gpui::white())),
+            )
+        })
+        .when_some(on_click, |el, f| el.on_click(move |e, w, cx| f(e, w, cx)))
+}
+
+/// The hero name of something you own: hover shows it as a field, click
+/// edits it in place (`editing` swaps in the shared name input). `None` for
+/// `on_click` = read-only text.
+pub(super) fn editable_name(
+    id: &'static str,
+    name: &str,
+    editing: bool,
+    input: &gpui::Entity<crate::ui::composer::ComposerInput>,
+    on_click: Option<HeroClick>,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let field = div()
+        .id(id)
+        .h(px(36.0))
+        .px(px(10.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(10.0))
+        .border_1()
+        .text_size(px(TEXT_BODY + 6.0))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(theme.text);
+    if editing {
+        return field
+            .w(px(SHEET_WIDTH - 64.0))
+            .bg(theme.field)
+            .border_color(theme.primary)
+            .child(input.clone());
+    }
+    let editable = on_click.is_some();
+    field
+        .max_w(px(SHEET_WIDTH - 64.0))
+        .border_color(gpui::transparent_black())
+        .when(editable, |el| {
+            el.cursor_text()
+                .hover(|s| s.bg(theme.field).border_color(theme.field_border))
+        })
+        .child(div().truncate().child(name.to_string()))
+        .when_some(on_click, |el, f| el.on_click(move |e, w, cx| f(e, w, cx)))
 }
 
 /// Default hero name label (semibold, truncated).
@@ -376,11 +461,6 @@ pub(super) fn list_row(
                 ),
         )
         .children(trailing)
-}
-
-/// Owner / admin capsule.
-pub(super) fn badge(text: &str, color: Hsla) -> Div {
-    glass::chip(text.to_string(), color)
 }
 
 // ----- content from the chat docs ----------------------------------------------

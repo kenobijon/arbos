@@ -289,6 +289,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::FetchAvatar { .. }
         | ClientCommand::DeleteProject { .. }
         | ClientCommand::DeletePeopleChat { .. }
+        | ClientCommand::RenameGroup { .. }
+        | ClientCommand::SetGroupImage { .. }
         | ClientCommand::CloseChat { .. } => {}
         // The relay keeps archive state; the fixture does the same so a chat
         // brought back from the "+" dropdown stays back when the list is re-sent.
@@ -855,6 +857,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 avatar_color_index: avatar_color_index
                     .map(|i| crate::ui::avatars::index_for(&id, Some(i))),
                 avatar_color_override: avatar_color_index,
+                image_url: None,
             });
             let chat_id = new_id();
             shared.chats.lock().unwrap().push(Chat {
@@ -3426,6 +3429,7 @@ fn seed_projects() -> Vec<Project> {
             vision_enabled: true,
             avatar_color_index: None,
             avatar_color_override: None,
+            image_url: None,
         },
         Project {
             id: PROJECT_COMMS.into(),
@@ -3456,6 +3460,7 @@ fn seed_projects() -> Vec<Project> {
             vision_enabled: true,
             avatar_color_index: None,
             avatar_color_override: None,
+            image_url: None,
         },
         Project {
             id: PROJECT_ARBOS.into(),
@@ -3486,6 +3491,7 @@ fn seed_projects() -> Vec<Project> {
             vision_enabled: true,
             avatar_color_index: None,
             avatar_color_override: None,
+            image_url: None,
         },
     ]
 }
@@ -4460,6 +4466,7 @@ fn people_space(id: &str, other: Person, agents: Vec<AgentMember>) -> Project {
         vision_enabled: true,
         avatar_color_index: None,
         avatar_color_override: None,
+        image_url: None,
     }
 }
 
@@ -4530,6 +4537,7 @@ fn seed_people_projects() -> Vec<Project> {
             vision_enabled: true,
             avatar_color_index: None,
             avatar_color_override: None,
+            image_url: None,
         },
     ]
 }
@@ -5102,6 +5110,41 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
         }
         ClientCommand::FetchAvatar { url } => {
             emit_avatar(shared, url);
+            true
+        }
+        ClientCommand::RenameGroup { chat_id, title } => {
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == *chat_id) {
+                    p.name = title.clone();
+                }
+            }
+            {
+                let mut chats = shared.chats.lock().unwrap();
+                if let Some(c) = chats.iter_mut().find(|c| c.id == *chat_id) {
+                    c.title = title.clone();
+                }
+            }
+            emit_projects(shared);
+            emit_chats(shared);
+            true
+        }
+        ClientCommand::SetGroupImage { chat_id, path } => {
+            // The demo has no blob store: any picked file becomes a seeded picture.
+            let url = format!(
+                "fixture://avatar/group-{}",
+                path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("picture")
+            );
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == *chat_id) {
+                    p.image_url = Some(url.clone());
+                }
+            }
+            emit_avatar(shared, &url);
+            emit_projects(shared);
             true
         }
         _ => false,

@@ -249,6 +249,9 @@ pub struct Transcript {
     chat_id: Option<Id>,
     list: ListState,
     rows: Vec<Row>,
+    /// Whether the right pane was open at the last sync: its opening or
+    /// closing changes the column width, and the cached row layouts must go.
+    pane_open: bool,
     veils: HashMap<String, Veil>,
     /// One stateful card per typed question, keyed by question id; dropped with its row.
     cards: HashMap<String, Entity<QuestionCard>>,
@@ -292,6 +295,7 @@ impl Transcript {
             chat_id: None,
             list,
             rows: Vec::new(),
+            pane_open: false,
             veils: HashMap::new(),
             cards: HashMap::new(),
             pinned_to_bottom: true,
@@ -409,6 +413,9 @@ impl Transcript {
         let state = self.state.read(cx);
         let chat_id = state.active_chat_id();
         let chat_changed = chat_id != self.chat_id;
+        let pane_open = state.profile.is_some();
+        let pane_changed = pane_open != self.pane_open;
+        self.pane_open = pane_open;
         let messages: Vec<Message> = chat_id
             .as_deref()
             .map(|id| state.messages_of(id).to_vec())
@@ -475,6 +482,14 @@ impl Transcript {
             .take_while(|(a, b)| a.id == b.id && a.version == b.version)
             .count();
         if prefix == self.rows.len() && prefix == new_rows.len() {
+            if pane_changed {
+                // Same rows, new column width: measure them again.
+                self.list.reset(self.rows.len());
+                if self.pinned_to_bottom {
+                    self.list.scroll_to_end();
+                }
+                cx.notify();
+            }
             self.reveal_hit(cx);
             return;
         }
@@ -790,6 +805,10 @@ impl Transcript {
                         cx,
                     )
                     .max_w(px(ASSISTANT_MAX_WIDTH))
+                    // A flex item's auto min-width is its content's; without
+                    // this the bubble keeps 620 pt when the right pane opens
+                    // and runs under it instead of re-wrapping.
+                    .min_w_0()
                     .when(fill, |el| el.w_full())
                     .px(px(14.0))
                     .when(first, |el| el.pt(px(11.0)).rounded_t(r))

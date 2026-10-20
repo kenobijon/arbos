@@ -17,6 +17,7 @@ use crate::ui::avatars;
 use crate::ui::composer::{Composer, Picker};
 use crate::ui::frost::edge_faded;
 use crate::ui::glass::{self, WindowDrag};
+use crate::ui::groups;
 use crate::ui::icons::icon;
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
@@ -577,7 +578,12 @@ fn render_row(
             .relative()
             .size(px(AVATAR_ROW))
             .flex_shrink_0()
-            .child(avatars::project(&space, AVATAR_ROW, theme));
+            .child(groups::picture(
+                &space,
+                shell.state.read(cx),
+                AVATAR_ROW,
+                theme,
+            ));
         if !guests.is_empty() {
             pic = pic.child(
                 div()

@@ -1181,6 +1181,9 @@ impl AppState {
                         let url = person.avatar_url.clone();
                         self.want_avatar(url);
                     }
+                    if let Some(url) = p.image_url.clone() {
+                        self.want_avatar(url);
+                    }
                 }
                 if let Some(handle) = self.awaiting_dm.clone() {
                     if let Some(space) = projects
@@ -1907,6 +1910,9 @@ impl AppState {
         let switching = self.selected_project.as_deref() != Some(project_id.as_str());
         if switching {
             self.search_chat = None;
+            // The right pane belongs to the chat it was opened from; a new
+            // chat starts without one.
+            self.close_profile(cx);
         }
         self.reveal_message = None;
         self.highlight_message = None;
@@ -3015,6 +3021,41 @@ impl AppState {
         self.renaming_project = None;
         self.profile_editing_name = false;
         self.command(ClientCommand::SetProjectName { project_id, name });
+        cx.notify();
+    }
+
+    /// Name a people group from its page (any human member may).
+    pub fn set_group_title(&mut self, chat_id: Id, title: String, cx: &mut Context<Self>) {
+        let title = title.trim().chars().take(64).collect::<String>();
+        self.profile_editing_name = false;
+        if title.is_empty() {
+            cx.notify();
+            return;
+        }
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == chat_id) {
+            if p.name == title {
+                cx.notify();
+                return;
+            }
+            p.name = title.clone();
+        }
+        for tabs in self.chats.values_mut() {
+            for c in tabs.iter_mut().filter(|c| c.id == chat_id) {
+                c.title = title.clone();
+            }
+        }
+        self.command(ClientCommand::RenameGroup { chat_id, title });
+        cx.notify();
+    }
+
+    /// A picked file becomes the group's picture.
+    pub fn set_group_image(
+        &mut self,
+        chat_id: Id,
+        path: std::path::PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        self.command(ClientCommand::SetGroupImage { chat_id, path });
         cx.notify();
     }
 

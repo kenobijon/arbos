@@ -441,6 +441,17 @@ pub enum ClientCommand {
     MarkRead {
         chat_id: Id,
     },
+    /// Name a people group (`PATCH /chats/{id} {title}`), any human member may.
+    RenameGroup {
+        chat_id: Id,
+        title: String,
+    },
+    /// Give a people group a picture: the file is uploaded to the chat's blob
+    /// slot, then `PATCH /chats/{id} {image_key}`.
+    SetGroupImage {
+        chat_id: Id,
+        path: std::path::PathBuf,
+    },
     SetModel {
         project_id: Id,
         model: String,
