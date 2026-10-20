@@ -1,9 +1,10 @@
 //! An agent's page: the D79 avatar, name, what it is doing, call / mute /
-//! search / more, the info card (for my own agent — Model / Reasoning / Voice
-//! rows that open a choice list on click, secrets, camera vision, description),
-//! then Media / Files / Links from its chats. Owner and machine stay off this
-//! page. Clicking the big avatar (owned agents) opens the colour picker —
-//! there is no separate photo upload on the Mac yet.
+//! search / more (quick actions), and the info card (for my own agent —
+//! Model / Reasoning / Voice rows that open a choice list on click). Matches
+//! the Grok bot page: no about, camera vision, secrets, or Media / Files /
+//! Links tabs. Owner and machine stay off this page. Clicking the big
+//! avatar (owned agents) opens the colour picker — there is no separate
+//! photo upload on the Mac yet.
 
 use gpui::{div, prelude::*, px, Context, Div, ElementId, Focusable, SharedString};
 
@@ -12,18 +13,15 @@ use crate::model::{Id, MachineState, Person, Project};
 use crate::ui::avatars::{self, AvatarState};
 use crate::ui::glass;
 use crate::ui::hoverpick;
-use crate::ui::icons::icon;
 use crate::ui::motion::PulseClock;
 use crate::ui::shell::Shell;
 use crate::ui::sidebar::machine_dot;
 use crate::ui::theme::{Theme, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
 use super::{
-    action_button, action_row, card, chats_of, collect, file_list, frame, hero, hero_name,
-    info_row, link_list, media_grid, more_menu, tab_bar, Action, SHEET_WIDTH,
+    action_button, action_row, card, frame, hero, hero_name, info_row, more_menu, Action,
+    SHEET_WIDTH,
 };
-
-const TABS: [&str; 3] = ["Media", "Files", "Links"];
 
 /// An agent that is only known as a member of a people chat (someone else's
 /// project) is shown from that member entry.
@@ -56,7 +54,6 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
         Some(p) => (p.clone(), !p.is_guest()),
         None => (project_from_member(state, project_id)?, false),
     };
-    let secrets_data = state.project_secrets.get(&project.id).cloned();
     let avatar_state = state.avatar_state(&project.id);
     let streaming = state.project_is_streaming(&project.id);
     let voice_text = crate::ui::voicepicker::current_label(&project, &state.voices);
@@ -95,14 +92,11 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
     } else {
         project.model.clone()
     };
-    let tab = state.profile_tab;
     let more_open = state.profile_more_open;
     let picker_open = state.profile_picker_open;
     let pick = state.agent_pick;
-    let editing = state.profile_editing_description && mine;
     let renaming = state.profile_editing_name && mine;
     let muted = state.is_muted(&project.id);
-    let content = collect(state, &chats_of(state, &project.id));
     let pid: Id = project.id.clone();
 
     if avatar_state != AvatarState::Idle {
@@ -290,9 +284,9 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
     });
 
     // ----- info card -------------------------------------------------------------
-    // Essentials only: model / reasoning / voice / secrets (plus camera vision
-    // and about for my agents). Owner and machine are gone; avatar colour opens
-    // from a click on the big avatar, not as a settings row.
+    // Grok-bot parity: model / reasoning / voice only. About, camera vision,
+    // secrets, and Media / Files / Links stay off this page. Avatar colour
+    // opens from a click on the big avatar, not as a settings row.
     let mut info = card(&theme);
     if mine {
         // The agent's own settings: Model (searchable), Reasoning and Voice
@@ -347,204 +341,6 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
     } else {
         info = info.child(info_row("model", model_text, &theme));
     }
-    // D83: what this agent may use; opens the agent's Secrets page.
-    let secrets_text = match secrets_data.as_ref() {
-        Some(d) => {
-            let on: Vec<String> = d
-                .items
-                .iter()
-                .filter(|i| i.enabled)
-                .map(|i| i.title())
-                .collect();
-            if on.is_empty() {
-                if d.requests.iter().any(|r| r.is_pending()) {
-                    "waiting for you".to_string()
-                } else {
-                    "none".to_string()
-                }
-            } else {
-                format!("{} · {}", on.len(), on.join(", "))
-            }
-        }
-        None => "—".to_string(),
-    };
-    let p_secrets = pid.clone();
-    info = info.child(
-        div()
-            .id("agent-secrets-row")
-            .flex()
-            .items_center()
-            .gap(px(10.0))
-            .px(px(16.0))
-            .py(px(10.0))
-            .border_b_1()
-            .border_color(theme.border)
-            .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .child(
-                        div()
-                            .text_size(px(TEXT_TINY))
-                            .text_color(theme.text_muted)
-                            .child("secrets"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(TEXT_BODY))
-                            .text_color(theme.text)
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .child(secrets_text),
-                    ),
-            )
-            .child(icon("chevron-right", 14.0, theme.text_faint))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                let pid = p_secrets.clone();
-                this.secrets.update(cx, |p, cx| p.show_agent(pid, cx));
-                cx.notify();
-            })),
-    );
-    if mine {
-        // Camera vision (voice API §11): a switch row, default on.
-        let vision_on = project.vision_enabled;
-        let p_vision = pid.clone();
-        info = info.child(
-            div()
-                .id("agent-vision-row")
-                .flex()
-                .items_center()
-                .gap(px(10.0))
-                .px(px(16.0))
-                .py(px(10.0))
-                .border_b_1()
-                .border_color(theme.border)
-                .cursor_pointer()
-                .hover(|s| s.bg(theme.surface_2))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.0))
-                        .child(
-                            div()
-                                .text_size(px(TEXT_TINY))
-                                .text_color(theme.text_muted)
-                                .child("camera vision"),
-                        )
-                        .child(div().text_size(px(TEXT_BODY)).text_color(theme.text).child(
-                            if vision_on {
-                                "On — the agent can look through your camera on calls"
-                            } else {
-                                "Off"
-                            },
-                        )),
-                )
-                .child(glass::switch(vision_on, &theme))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let p = p_vision.clone();
-                    this.state
-                        .update(cx, |s, cx| s.set_vision_enabled(p, !vision_on, cx));
-                })),
-        );
-    }
-    let description = project.description.clone().filter(|d| !d.trim().is_empty());
-    if editing {
-        // Inline editor: the owner types, Save → PATCH {description}.
-        let p_save = pid.clone();
-        info = info.child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .px(px(16.0))
-                .py(px(10.0))
-                .child(
-                    div()
-                        .text_size(px(TEXT_TINY))
-                        .text_color(theme.text_muted)
-                        .child("about"),
-                )
-                .child(
-                    div()
-                        .min_h(px(60.0))
-                        .px(px(10.0))
-                        .py(px(8.0))
-                        .rounded(px(10.0))
-                        .bg(theme.field)
-                        .border_1()
-                        .border_color(theme.field_border)
-                        .text_size(px(TEXT_BODY))
-                        .child(shell.description_input.clone()),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .justify_end()
-                        .gap(px(8.0))
-                        .child(
-                            glass::quiet_button("profile-desc-cancel", "Cancel", &theme)
-                                .h(px(32.0))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.state.update(cx, |s, cx| {
-                                        s.set_profile_editing_description(false, cx)
-                                    });
-                                })),
-                        )
-                        .child(
-                            glass::primary_button("profile-desc-save", "Save", &theme)
-                                .h(px(32.0))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    let text = this.description_input.read(cx).text().to_string();
-                                    let p = p_save.clone();
-                                    this.state
-                                        .update(cx, |s, cx| s.set_description(p, text, cx));
-                                })),
-                        ),
-                ),
-        );
-    } else {
-        let row = info_row(
-            "about",
-            description.clone().unwrap_or_else(|| {
-                if mine {
-                    "Add a description".into()
-                } else {
-                    "—".into()
-                }
-            }),
-            &theme,
-        );
-        if mine {
-            let current = description.clone().unwrap_or_default();
-            info = info.child(
-                div()
-                    .id("profile-desc-edit")
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.surface_2))
-                    .child(row)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        let current = current.clone();
-                        this.description_input
-                            .update(cx, |input, cx| input.set_text(current, cx));
-                        this.state
-                            .update(cx, |s, cx| s.set_profile_editing_description(true, cx));
-                        let handle = this.description_input.read(cx).focus_handle(cx);
-                        window.focus(&handle, cx);
-                    })),
-            );
-        } else {
-            info = info.child(row);
-        }
-    }
 
     // ----- appearance (avatar click): Automatic + the seven gradients ----------
     // Shown only while the picker is open so Avatar colour is not a permanent
@@ -573,14 +369,6 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
             )
     });
 
-    // ----- tabs -----------------------------------------------------------------
-    let tabs = tab_bar(&TABS, tab, &theme, cx);
-    let body_tab = match tab {
-        0 => media_grid(&content.media, &theme),
-        1 => file_list(&content.files, "doc", "No files shared yet", &theme),
-        _ => link_list(&content.links, &theme, cx),
-    };
-
     let body = div()
         .flex()
         .flex_col()
@@ -589,12 +377,10 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
         .child(actions)
         .children(more)
         .child(info)
-        .children(appearance)
-        .child(tabs)
-        .child(body_tab);
+        .children(appearance);
     // No "Edit" — click the avatar to change its colour; double-click the
-    // name or the about row to edit those. "Done" only while a field is open.
-    let done = (mine && (renaming || editing)).then(|| {
+    // name to rename. "Done" only while renaming.
+    let done = (mine && renaming).then(|| {
         glass::sheet_button("profile-done", "Done", &theme)
             .on_click(cx.listener(|this, _, window, cx| this.finish_edit_agent(window, cx)))
     });

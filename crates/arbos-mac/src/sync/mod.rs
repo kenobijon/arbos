@@ -453,11 +453,6 @@ pub enum ClientCommand {
     },
     /// `GET /voices` → [`SyncEvent::Voices`].
     FetchVoices,
-    /// Voice API §11: `PATCH /projects/{id} {"vision_enabled": bool}`.
-    SetVisionEnabled {
-        project_id: Id,
-        enabled: bool,
-    },
     /// Download (once; cached in the config dir) a voice sample → [`SyncEvent::VoiceSample`].
     FetchVoiceSample {
         url: String,

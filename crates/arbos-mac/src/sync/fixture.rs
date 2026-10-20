@@ -705,18 +705,6 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             }
             let _ = shared.events.send(SyncEvent::VoiceSample { url, path });
         }
-        ClientCommand::SetVisionEnabled {
-            project_id,
-            enabled,
-        } => {
-            {
-                let mut projects = shared.projects.lock().unwrap();
-                if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
-                    p.vision_enabled = enabled;
-                }
-            }
-            emit_projects(shared);
-        }
         ClientCommand::SetVoice { project_id, voice } => {
             {
                 let mut projects = shared.projects.lock().unwrap();
