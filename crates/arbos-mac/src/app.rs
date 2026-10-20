@@ -1313,8 +1313,10 @@ impl AppState {
                     }
                     // select_project() keeps the tab within the visible chats.
                     self.select_project(project_id.clone(), cx);
-                    // Rig: `ARBOS_OPEN_PROFILE=agent[:model|reasoning|voice]` opens
-                    // the agent's page (with one settings row dropped down).
+                    // Rig: `ARBOS_OPEN_PROFILE=agent[:model|reasoning|voice]|group|user|me`
+                    // opens the right pane for the restored chat (selecting it
+                    // closed whatever the shell opened at launch), and
+                    // `ARBOS_OPEN_SETTINGS=…` re-opens my pane on its Settings tab.
                     if let Ok(spec) = std::env::var("ARBOS_OPEN_PROFILE") {
                         if let Some(rest) = spec.strip_prefix("agent") {
                             self.open_profile(ProfilePage::Agent { project_id }, cx);
@@ -1322,7 +1324,35 @@ impl AppState {
                             if self.agent_pick == Some(AgentPick::Voice) {
                                 self.fetch_voices();
                             }
+                        } else if spec == "group" {
+                            self.open_profile(
+                                ProfilePage::Group {
+                                    space_id: project_id,
+                                },
+                                cx,
+                            );
+                        } else if spec == "user" {
+                            if let Some(handle) = self
+                                .projects
+                                .iter()
+                                .find(|p| p.id == project_id)
+                                .and_then(|p| p.person())
+                                .map(|person| person.handle.clone())
+                            {
+                                self.open_profile(
+                                    ProfilePage::User {
+                                        handle,
+                                        space_id: Some(project_id),
+                                    },
+                                    cx,
+                                );
+                            }
+                        } else if spec == "me" {
+                            self.open_profile(ProfilePage::Me, cx);
                         }
+                    } else if std::env::var_os("ARBOS_OPEN_SETTINGS").is_some() {
+                        self.open_profile(ProfilePage::Me, cx);
+                        self.set_profile_tab(1, cx);
                     }
                 }
             }
