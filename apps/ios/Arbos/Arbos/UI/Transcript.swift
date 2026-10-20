@@ -904,7 +904,28 @@ struct AvatarCluster: View {
 
     var body: some View {
         if let imageUrl, !imageUrl.isEmpty {
-            PersonAvatar(url: imageUrl, handle: "group", size: size)
+            // Keep the group silhouette under the picture until it arrives so we
+            // do not flash initials ("G") then flip to the selected image.
+            ZStack {
+                Circle().fill(theme.card)
+                Image(systemName: "person.2.fill")
+                    .font(theme.font(size * 0.4, weight: .medium))
+                    .foregroundStyle(theme.accent)
+                if let u = URL(string: imageUrl) {
+                    AsyncImage(url: u) { phase in
+                        switch phase {
+                        case .success(let img):
+                            img.resizable().scaledToFill()
+                        case .empty, .failure:
+                            Color.clear
+                        @unknown default:
+                            Color.clear
+                        }
+                    }
+                }
+            }
+            .frame(width: size, height: size)
+            .clipShape(Circle())
         } else if shown.isEmpty {
             GlassCircle(size: size) {
                 Image(systemName: "person.2.fill")
