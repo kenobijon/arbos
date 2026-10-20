@@ -420,12 +420,14 @@ impl SecretsPanel {
                     .flex_col()
                     .gap(px(2.0))
                     .child(
+                        // Two lines before the ellipsis (the iPhone's SecretRowLabel):
+                        // "1Password · Arbos — Research" no longer ends in "Resea…"
+                        // at the right pane's width.
                         div()
                             .text_size(px(TEXT_BODY))
                             .text_color(if dim { theme.text_muted } else { theme.text })
                             .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
+                            .line_clamp(2)
                             .child(title.into()),
                     )
                     .when_some(subtitle.filter(|s| !s.is_empty()), |el, s| {
