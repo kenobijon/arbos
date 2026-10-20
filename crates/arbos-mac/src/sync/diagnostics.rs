@@ -77,8 +77,9 @@ impl Diagnostics {
     }
 }
 
-/// Brief network failures (timeout, reset, DNS) are not product bugs — log them, do not file a
-/// weekly feedback item. Real HTTP answers (4xx/5xx) and unexpected client errors still report.
+/// Brief network failures (timeout, reset, DNS, TLS handshake blips) are not product bugs — log
+/// them, do not file a weekly feedback item. Real HTTP answers (4xx/5xx) and unexpected client
+/// errors still report.
 pub fn is_transient(detail: &str) -> bool {
     let d = detail.to_ascii_lowercase();
     d.contains("timed out")
@@ -94,6 +95,12 @@ pub fn is_transient(detail: &str) -> bool {
         || d.contains("name or service not known")
         || d.contains("nodename nor servname")
         || d.contains("no address associated")
+        // rustls mid-handshake / mid-record noise (e.g. GET /connectors over flaky TLS).
+        || d.contains("cannot decrypt")
+        || d.contains("decrypt peer")
+        || d.contains("received fatal alert")
+        || d.contains("tls handshake")
+        || d.contains("connection closed before message completed")
 }
 
 /// `mac:<kind>:<normalized error>` — stable across launches, files and users: ids, hashes,
