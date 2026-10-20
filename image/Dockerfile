@@ -70,8 +70,23 @@ RUN mkdir -p /opt/prime-agent-${PRIME_AGENT_VERSION} \
  && uv pip install --python /opt/prime-venv/bin/python /opt/prime-agent-${PRIME_AGENT_VERSION}/prime-agent-runtime \
       ipykernel dill httpx requests pyyaml tomli python-dotenv pandas numpy scipy beautifulsoup4 lxml \
       python-pptx python-docx openpyxl Pillow reportlab \
+ # Prime's Python skills (edit, websearch, compact, goal, refine, attach-image, agent-message,
+ # agent-observe, rlm-heartbeat) are packages under the tarball's skills/; a kernel venv without
+ # them starts with "Warning: Python skills unavailable … and will be disabled" and Prime runs with
+ # no edit or websearch tool (found on production boxes up to image 0.1.49).
+ && for d in /opt/prime-agent-${PRIME_AGENT_VERSION}/skills/*/; do \
+      if [ -f "$d/pyproject.toml" ]; then uv pip install -q --python /opt/prime-venv/bin/python "$d"; fi; \
+    done \
  && HOME=/tmp/pa-build PRIME_AGENT_KERNEL_VENV=/opt/prime-venv PRIME_AGENT_KERNEL_PYTHON=/opt/prime-venv/bin/python \
       prime-agent --prime-agent-bootstrap \
+ # Build-time check: Prime must start without the skills warning (stderr empty after a short RPC run).
+ && mkdir -p /tmp/pa-check/sessions \
+ && ( (echo '{"type":"ping"}'; sleep 8) | HOME=/tmp/pa-check PRIME_AGENT_CODING_AGENT_DIR=/tmp/pa-check/cfg \
+      PRIME_AGENT_SESSION_DIR=/tmp/pa-check/sessions PRIME_AGENT_KERNEL_VENV=/opt/prime-venv \
+      PRIME_AGENT_KERNEL_PYTHON=/opt/prime-venv/bin/python timeout 30 prime-agent --mode rpc \
+      --session-dir /tmp/pa-check/sessions >/dev/null 2>/tmp/pa-check/err.txt || true ) \
+ && if grep -q "skills unavailable" /tmp/pa-check/err.txt; then cat /tmp/pa-check/err.txt; exit 1; fi \
+ && rm -rf /tmp/pa-check \
  && chmod -R a+rX /opt/prime-venv /opt/prime-agent-${PRIME_AGENT_VERSION}
 
 # --- Subagent harness 2: Claude Code, native binary (no Node), exact version, updates disabled
