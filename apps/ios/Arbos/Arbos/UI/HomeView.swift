@@ -1118,6 +1118,7 @@ struct AgentRow: View {
 /// A people chat in the home list: DMs show the other person; groups show the
 /// chat title (custom name, or member handles from the relay) and a member count.
 struct PeopleRow: View {
+    @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     let chat: PeopleChat
     let preview: String
@@ -1145,15 +1146,25 @@ struct PeopleRow: View {
         return "@\(other?.handle ?? chat.title)"
     }
 
+    /// Tokenised blob URL for the group's custom picture, when one is set.
+    private var groupImageURL: String? {
+        guard chat.isGroup, let key = chat.imageKey, !key.isEmpty else { return nil }
+        return model.blobURL(projectId: "\(peopleSlot):\(chat.id)", key: key)?.absoluteString
+    }
+
     var body: some View {
         HStack(spacing: 15) {
             ZStack(alignment: .bottomTrailing) {
                 if chat.isGroup {
-                    ZStack {
-                        Circle().fill(theme.card).frame(width: Theme.rowAvatar, height: Theme.rowAvatar)
-                        Image(systemName: "person.2.fill")
-                            .font(theme.font(17, weight: .medium))
-                            .foregroundStyle(theme.accent)
+                    if let groupImageURL {
+                        AvatarCluster(members: [], size: Theme.rowAvatar, imageUrl: groupImageURL)
+                    } else {
+                        ZStack {
+                            Circle().fill(theme.card).frame(width: Theme.rowAvatar, height: Theme.rowAvatar)
+                            Image(systemName: "person.2.fill")
+                                .font(theme.font(17, weight: .medium))
+                                .foregroundStyle(theme.accent)
+                        }
                     }
                 } else {
                     PersonAvatar(url: other?.avatarUrl, handle: other?.handle ?? "?", size: Theme.rowAvatar, name: other?.name, id: other?.id, colorIndex: other?.avatarColorIndex)
