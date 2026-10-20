@@ -1,7 +1,7 @@
 //! An agent's page: the D79 avatar, name, what it is doing, call / mute /
 //! search / more, the info card (for my own agent — Model / Reasoning / Voice
-//! rows that drop down on hover, secrets, camera vision, description), then
-//! Media / Files / Links from its chats. Owner and machine stay off this
+//! rows that open a choice list on click, secrets, camera vision, description),
+//! then Media / Files / Links from its chats. Owner and machine stay off this
 //! page. Clicking the big avatar (owned agents) opens the colour picker —
 //! there is no separate photo upload on the Mac yet.
 
@@ -291,7 +291,7 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
     let mut info = card(&theme);
     if mine {
         // The agent's own settings: Model (searchable), Reasoning and Voice
-        // drop down on hover (or a click) and apply at once.
+        // open a choice list on click; a pick applies and folds the list.
         let model_open = pick == Some(AgentPick::Model);
         let reasoning_open = pick == Some(AgentPick::Reasoning);
         let voice_open = pick == Some(AgentPick::Voice);

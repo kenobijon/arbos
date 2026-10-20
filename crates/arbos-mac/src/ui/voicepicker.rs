@@ -25,7 +25,7 @@ pub fn sheet(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
         },
     ));
     let header = glass::sheet_header("Voice", None, Some(done), &theme);
-    let list = list(shell, space, "voice", 520.0, cx);
+    let list = list(shell, space, "voice", 520.0, false, cx);
 
     let body = div()
         .flex()
@@ -51,11 +51,14 @@ pub fn sheet(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
 /// play button and a checkmark on the selected one; a click saves. Shared by
 /// the sheet and the agent page's Voice dropdown (`ui::hoverpick`). `ids`
 /// prefixes the element ids so two lists may be on screen at once.
+/// `fold_agent_pick` closes the agent-page Voice row after a save (the sheet
+/// keeps itself open until Done).
 pub fn list(
     shell: &Shell,
     space: &Project,
     ids: &'static str,
     max_height: f32,
+    fold_agent_pick: bool,
     cx: &mut Context<Shell>,
 ) -> Stateful<Div> {
     let theme = Theme::of(cx).clone();
@@ -194,9 +197,12 @@ pub fn list(
                         ),
                 )
                 .child(check(selected.is_none(), &theme))
-                .on_click(cx.listener(move |this, _, _, cx| {
+                .on_click(cx.listener(move |this, _, window, cx| {
                     this.state
                         .update(cx, |s, cx| s.set_voice(p.clone(), None, cx));
+                    if fold_agent_pick {
+                        this.close_agent_pick(Some(window), cx);
+                    }
                 })),
         );
     }
@@ -255,9 +261,12 @@ pub fn list(
                     ),
             )
             .child(check(on, &theme));
-        row = row.on_click(cx.listener(move |this, _, _, cx| {
+        row = row.on_click(cx.listener(move |this, _, window, cx| {
             this.state
                 .update(cx, |s, cx| s.set_voice(p.clone(), Some(vid.clone()), cx));
+            if fold_agent_pick {
+                this.close_agent_pick(Some(window), cx);
+            }
         }));
         list = list.child(row);
     }

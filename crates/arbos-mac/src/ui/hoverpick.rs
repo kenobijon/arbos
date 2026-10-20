@@ -1,10 +1,8 @@
-//! Hover-to-expand settings rows for the agent's profile page: Model (with a
-//! search field), Reasoning and Voice. Resting the pointer on a row drops its
-//! list down in place; the list folds when the pointer leaves the row and its
-//! list, on Esc, or on a click elsewhere. A click on the row toggles it too
-//! (trackpads). Picking a value applies it at once through the same state
-//! handlers the composer and the voice sheet use; the row stays open so the
-//! checkmark confirms the choice until the pointer moves on.
+//! Click-to-expand settings rows for the agent's profile page: Model (with a
+//! search field), Reasoning and Voice. A click on the row opens its choice
+//! list in place; the list folds on Esc, a click elsewhere, a second click on
+//! the row, or after a value is picked. Picking a value applies it at once
+//! through the same state handlers the composer and the voice sheet use.
 
 use gpui::{
     div, prelude::*, px, AnyElement, Bounds, Context, Div, ElementId, Focusable as _, FontWeight,
@@ -24,7 +22,7 @@ use crate::ui::voicepicker;
 const LIST_MAX_HEIGHT: f32 = 260.0;
 
 /// One info-card row: caption over the current value, a chevron, and —
-/// while `open` — `panel` dropped down under it. Hover opens, leaving closes.
+/// while `open` — `panel` dropped down under it. A click toggles it open.
 pub fn row(
     caption: &str,
     value: impl Into<SharedString>,
@@ -75,7 +73,7 @@ pub fn row(
                 ),
         )
         .child(icon(
-            if open { "chevron-up" } else { "chevron-down" },
+            if open { "chevron-up" } else { "chevron-right" },
             14.0,
             theme.text_faint,
         ))
@@ -86,25 +84,17 @@ pub fn row(
                 this.open_agent_pick(which, window, cx);
             }
         }));
-    // The hover target is the row plus its dropdown, so moving into the list
-    // keeps it open. No click listener here: with one, GPUI drops the hover
-    // while a button is pressed inside and the list would fold mid-click.
+    // Clicks inside stay inside: the window's "click elsewhere" handlers
+    // (popovers, the profile pop-up) must not see them. No hover listener —
+    // the list opens only on a click, so moving the pointer across rows does
+    // not change what is open.
     div()
         .id(id)
         .flex()
         .flex_col()
         .border_b_1()
         .border_color(theme.border)
-        // Clicks inside stay inside: the window's "click elsewhere" handlers
-        // (popovers, the profile pop-up) must not see them.
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
-            if *hovered {
-                this.open_agent_pick(which, window, cx);
-            } else {
-                this.agent_pick_hover_out(which, window, cx);
-            }
-        }))
         .child(header)
         .children(panel)
 }
@@ -195,26 +185,6 @@ impl Shell {
         }
         cx.notify();
         true
-    }
-
-    /// The pointer left `which` (row + list). Folds it — unless a model
-    /// filter is being typed, which Esc, a pick or a click elsewhere ends.
-    pub(crate) fn agent_pick_hover_out(
-        &mut self,
-        which: AgentPick,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.state.read(cx).agent_pick != Some(which) {
-            return;
-        }
-        if which == AgentPick::Model {
-            let search = self.model_search_input.read(cx);
-            if !search.text().trim().is_empty() && search.focus_handle(cx).is_focused(window) {
-                return;
-            }
-        }
-        self.close_agent_pick(Some(window), cx);
     }
 
     /// Enter in the model search field: the first match, if any.
@@ -358,10 +328,11 @@ pub fn model_panel(shell: &Shell, project: &Project, cx: &mut Context<Shell>) ->
                 selected,
                 &theme,
             )
-            .on_click(cx.listener(move |this, _, _, cx| {
+            .on_click(cx.listener(move |this, _, window, cx| {
                 let (p, pick) = (p.clone(), pick.clone());
                 this.state
                     .update(cx, |s, cx| s.set_project_model(p, pick, cx));
+                this.close_agent_pick(Some(window), cx);
             })),
         );
     }
@@ -386,10 +357,11 @@ pub fn reasoning_panel(project: &Project, cx: &mut Context<Shell>) -> AnyElement
                 level == project.effort,
                 &theme,
             )
-            .on_click(cx.listener(move |this, _, _, cx| {
+            .on_click(cx.listener(move |this, _, window, cx| {
                 let p = p.clone();
                 this.state
                     .update(cx, |s, cx| s.set_project_effort(p, level, cx));
+                this.close_agent_pick(Some(window), cx);
             })),
         );
     }
@@ -397,7 +369,7 @@ pub fn reasoning_panel(project: &Project, cx: &mut Context<Shell>) -> AnyElement
 }
 
 /// The Voice dropdown: the voice sheet's list (Default first, play buttons,
-/// checkmark), inline.
+/// checkmark), inline. A pick folds the row.
 pub fn voice_panel(shell: &Shell, project: &Project, cx: &mut Context<Shell>) -> AnyElement {
     let theme = Theme::of(cx).clone();
     div()
@@ -408,6 +380,7 @@ pub fn voice_panel(shell: &Shell, project: &Project, cx: &mut Context<Shell>) ->
             project,
             "agent-voice",
             LIST_MAX_HEIGHT,
+            true,
             cx,
         ))
         .child(
