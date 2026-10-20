@@ -384,10 +384,14 @@ impl Shared {
 
     /// An app error the user did not cause and cannot act on (a thumbnail that did not load, a
     /// list that did not refresh). Logged, and reported once per signature per week as a silent
-    /// feedback item (`submitted_by: "app"`); nothing is shown in the chat.
+    /// feedback item (`submitted_by: "app"`); nothing is shown in the chat. Transient network
+    /// blips (timeout, reset, DNS) only log — they are not product bugs.
     fn diagnostic(self: &Arc<Self>, kind: &'static str, detail: impl Into<String>) {
         let detail = detail.into();
         log::warn!(target: "arbos_mac::diagnostic", "{kind}: {detail}");
+        if diagnostics::is_transient(&detail) {
+            return;
+        }
         let signature = diagnostics::signature(kind, &detail);
         if !self.diagnostics.should_report(&signature) {
             return;
@@ -1954,7 +1958,29 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
         .filter(|p| p.is_people())
         .map(|p| p.id.clone())
         .collect();
-    match shared.get_json("/chats").await {
+    // A brief connection timeout on GET /chats is common on flaky networks; retry twice
+    // before keeping the cached list (and only then file a diagnostic for non-transient errors).
+    let people_list = {
+        let mut attempt = 0u32;
+        loop {
+            match shared.get_json("/chats").await {
+                Ok(list) => break Ok(list),
+                Err(err) => {
+                    let text = format!("{err:#}");
+                    if text.contains("HTTP 404") {
+                        break Err(err);
+                    }
+                    if diagnostics::is_transient(&text) && attempt < 2 {
+                        attempt += 1;
+                        sleep(Duration::from_millis(400 * u64::from(attempt))).await;
+                        continue;
+                    }
+                    break Err(err);
+                }
+            }
+        }
+    };
+    match people_list {
         Ok(list) => {
             let mut ids = shared.people.lock().unwrap();
             for item in list.as_array().cloned().unwrap_or_default() {
