@@ -1971,8 +1971,15 @@ class Loop:
         if merged is None:
             self.conflict_followup(fid, st)
             return
+        if not merged:
+            # 204: main already contains the head — another item on the same branch merged it moments ago (a worker
+            # put a Mac half and an iOS half on one branch). Find the merge commit on main that carries it.
+            carrier = next((c for c in self.gh.commits_since((utcnow() - dt.timedelta(hours=6)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+                            if any(p["sha"] == head for p in c.get("parents", []))), None)
+            merged = carrier or self.gh.commit(head)
         # The fix commit (the one tagged [feedback id]) is what ancestry checks use; the merge is its carrier.
-        tagged = [c for c in self.gh.compare(merged["parents"][0]["sha"], head).get("commits", []) if f"[feedback {fid}]" in c["commit"]["message"]]
+        base = merged["parents"][0]["sha"] if len(merged.get("parents") or []) > 1 else f"{head}~1"
+        tagged = [c for c in self.gh.compare(base, head).get("commits", []) if f"[feedback {fid}]" in c["commit"]["message"]]
         fix = tagged[-1] if tagged else {"sha": head, "html_url": f"https://github.com/{self.cfg.github_repo}/commit/{head}",
                                          "commit": {"message": st.get("agent_summary") or ""}}
         st.update(status="pushed", commit=fix["sha"], commit_url=fix["html_url"],
