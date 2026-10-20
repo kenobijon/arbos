@@ -133,31 +133,6 @@ pub fn tab_glyphs(chat: &Chat, projects: &[Project], theme: &Theme) -> Option<Di
     }
 }
 
-/// The sender chip above another agent's message: its initials disc
-/// (`seed` = the agent's project id) and name.
-pub fn sender_chip_with(
-    name: &str,
-    seed: &str,
-    avatar_color_index: Option<u8>,
-    theme: &Theme,
-) -> Div {
-    let head = crate::ui::avatars::element(seed, name, avatar_color_index, GLYPH + 4.0, theme);
-    div()
-        .w_full()
-        .flex()
-        .items_center()
-        .gap(px(6.0))
-        .pt(px(10.0))
-        .pb(px(2.0))
-        .child(head)
-        .child(
-            div()
-                .text_size(px(11.0))
-                .text_color(theme.text_muted)
-                .child(name.to_owned()),
-        )
-}
-
 pub fn picker(state: &Entity<AppState>, top: f32, right: f32, cx: &mut Context<Shell>) -> Div {
     let theme = Theme::of(cx).clone();
     let s = state.read(cx);

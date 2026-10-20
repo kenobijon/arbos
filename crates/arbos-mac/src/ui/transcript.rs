@@ -19,9 +19,9 @@ use crate::model::{
 };
 use crate::ui::approve::{approval_card, ApprovalView};
 use crate::ui::attachments;
+use crate::ui::avatars;
 use crate::ui::cards;
 use crate::ui::frost::edge_faded;
-use crate::ui::groups;
 use crate::ui::icons::icon;
 use crate::ui::markdown::{inline_spans, polish_assistant_prose, split_blocks, Block};
 use crate::ui::motion::PulseClock;
@@ -55,6 +55,11 @@ const STAMP_PAD_TOP: f32 = 20.0 - ROW_GAP_HALF - 4.0;
 const STAMP_PAD_BOTTOM: f32 = 24.0 - ROW_GAP_HALF - 7.0;
 /// The composer row above adds 6 pt of its own and the last row 3.
 const BOTTOM_INSET: f32 = 54.0 - ROW_GAP_HALF - 6.0;
+/// People chats (redesign mocks a/f): a 24 pt sender disc at the bubble's
+/// bottom-left, 8 pt from it; captions and earlier blocks keep the lane free.
+const SENDER_DISC: f32 = 24.0;
+const SENDER_DISC_GAP: f32 = 8.0;
+const SENDER_LANE: f32 = SENDER_DISC + SENDER_DISC_GAP;
 /// Messages for Mac fades a row's hover-only affordances (time, react glyph)
 /// in and out rather than snapping them.
 const HOVER_FADE_MS: f32 = 150.0;
@@ -204,6 +209,10 @@ pub enum RowKind {
         fill: bool,
         /// "9:41 PM", revealed next to the react glyph on hover.
         time: Option<String>,
+        /// In a people chat the message has a sender row above it: every block
+        /// leaves the avatar lane free and the last one draws the sender's disc
+        /// at the bubble's bottom-left (redesign mocks a/f). The sender seed.
+        lane: Option<String>,
     },
     /// Centered muted time line ("Today 9:39 PM").
     Stamp {
@@ -226,6 +235,9 @@ pub enum RowKind {
     Attachment {
         attachment: Attachment,
         mine: bool,
+        /// Someone else's (person or agent) in a people chat: keep the
+        /// sender's avatar lane free, like the message's bubble.
+        lane: bool,
     },
     /// S8: the agent asked a question.
     AskUser {
@@ -754,6 +766,49 @@ impl Transcript {
             )
     }
 
+    /// A sender row's agent, resolved like the chip: a shared agent's reply may
+    /// carry only its handle, so name, disc seed and colour come from the chat's
+    /// member list or my projects. Returns (name, disc seed, colour index, project id).
+    fn agent_identity(
+        &self,
+        seed: &str,
+        name: &str,
+        cx: &Context<Self>,
+    ) -> (String, String, Option<u8>, Option<Id>) {
+        let state = self.state.read(cx);
+        let agent_pid = seed
+            .strip_prefix("agent:")
+            .or_else(|| seed.strip_prefix("project:"))
+            .map(str::to_string);
+        let member = agent_pid.as_deref().and_then(|pid| {
+            state
+                .selected()
+                .and_then(|space| space.agents.iter().find(|a| a.project_id == pid))
+                .map(|a| (a.name.clone(), a.avatar_color_index))
+                .or_else(|| {
+                    state
+                        .projects
+                        .iter()
+                        .find(|p| p.id == pid)
+                        .map(|p| (p.name.clone(), p.avatar_color_index))
+                })
+        });
+        let resolved_name = match &member {
+            Some((n, _)) if name == "Agent" || name == "Project" => n.clone(),
+            _ => name.to_string(),
+        };
+        let color_index = member.as_ref().and_then(|(_, c)| *c);
+        let disc_seed = agent_pid.clone().unwrap_or_else(|| seed.to_string());
+        (resolved_name, disc_seed, color_index, agent_pid)
+    }
+
+    /// The 24 pt disc for an agent's message in a people chat.
+    fn agent_disc(&self, seed: &str, cx: &Context<Self>) -> Div {
+        let theme = Theme::of(cx).clone();
+        let (name, disc_seed, color_index, _) = self.agent_identity(seed, "Agent", cx);
+        avatars::element(&disc_seed, &name, color_index, SENDER_DISC, &theme)
+    }
+
     fn render_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(row) = self.rows.get(ix).cloned() else {
             return div().into_any_element();
@@ -819,7 +874,7 @@ impl Transcript {
                         .flex()
                         .flex_col()
                         .items_start()
-                        .gap(px(3.0))
+                        .gap(px(6.0))
                         .py(px(ROW_GAP_HALF))
                         .child({
                             // Click the caption → the person's profile page.
@@ -830,14 +885,11 @@ impl Transcript {
                                     tabs.iter().any(|t| &t.id == c).then(|| pid.clone())
                                 })
                             });
+                            // The caption starts where the bubble's text does.
                             div()
                                 .id(SharedString::from(format!("{}#who", row.id)))
-                                .flex()
-                                .items_center()
-                                .gap(px(6.0))
-                                .pl(px(2.0))
+                                .pl(px(SENDER_LANE + BUBBLE_PAD_X))
                                 .cursor_pointer()
-                                .child(people::avatar(image, &person, 20.0, &theme))
                                 .child(
                                     div()
                                         .text_size(px(TEXT_TINY))
@@ -863,14 +915,26 @@ impl Transcript {
                                 self.hover_reply_copy(&row.id, &row.message_id, reveal, &theme, cx);
                             row_el
                                 .justify_start()
+                                .items_end()
+                                .gap(px(SENDER_DISC_GAP))
+                                .child(people::avatar(image, &person, SENDER_DISC, &theme))
                                 .child(
-                                    bubble
-                                        .bg(theme.bubble_assistant)
-                                        .text_color(theme.text)
-                                        .when(pending, |el| el.opacity(0.6)),
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .flex()
+                                        .items_center()
+                                        .child(
+                                            bubble
+                                                .bg(theme.bubble_assistant)
+                                                .text_color(theme.text)
+                                                .when(pending, |el| el.opacity(0.6)),
+                                        )
+                                        .child(actions.ml(px(6.0)))
+                                        .children(
+                                            hover_time(time, reveal, &theme).map(|t| t.ml(px(8.0))),
+                                        ),
                                 )
-                                .child(actions.ml(px(6.0)))
-                                .children(hover_time(time, reveal, &theme).map(|t| t.ml(px(8.0))))
                         })
                         .into_any_element()
                 } else {
@@ -911,6 +975,7 @@ impl Transcript {
                 last,
                 fill,
                 time,
+                lane,
             } => {
                 let veil = if live {
                     self.veils.get(&row.id).cloned()
@@ -991,13 +1056,32 @@ impl Transcript {
                 let hover_time = (last && !live)
                     .then(|| hover_time(time, reveal, &theme).map(|t| t.ml(px(8.0))))
                     .flatten();
+                // People chats: the sender's disc at the bubble's bottom-left on
+                // the last block; earlier blocks keep the lane free (mocks a/f).
+                let disc = lane.as_deref().map(|seed| {
+                    if last {
+                        self.agent_disc(seed, cx)
+                    } else {
+                        div().w(px(SENDER_DISC)).flex_shrink_0()
+                    }
+                });
                 row_el
                     .justify_start()
+                    .items_end()
                     .when(first, |el| el.pt(px(ROW_GAP_HALF)))
                     .when(last, |el| el.pb(px(ROW_GAP_HALF)))
-                    .child(bubble)
-                    .children(hover_actions)
-                    .children(hover_time)
+                    .when(lane.is_some(), |el| el.gap(px(SENDER_DISC_GAP)))
+                    .children(disc)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .child(bubble)
+                            .children(hover_actions)
+                            .children(hover_time),
+                    )
                     .into_any_element()
             }
             RowKind::Stamp { label } => div()
@@ -1124,7 +1208,11 @@ impl Transcript {
                     .child(line)
                     .into_any_element()
             }
-            RowKind::Attachment { attachment, mine } => {
+            RowKind::Attachment {
+                attachment,
+                mine,
+                lane,
+            } => {
                 let preview = match attachment.blob_ref.as_ref() {
                     None => attachments::Preview::Unavailable,
                     Some(k) => {
@@ -1143,6 +1231,7 @@ impl Transcript {
                     .py(px(4.0))
                     .flex()
                     .when(mine, |el| el.justify_end())
+                    .when(lane, |el| el.pl(px(SENDER_LANE)))
                     .child(attachments::card(
                         &row.id,
                         &attachment,
@@ -1306,64 +1395,29 @@ impl Transcript {
                 avatar,
                 avatar_color,
             } => {
-                let state = self.state.read(cx);
-                // A shared agent's reply may carry only its handle: name, glyph
-                // and colour come from the chat's member list or my projects.
-                let agent = seed.strip_prefix("agent:").and_then(|pid| {
-                    state
-                        .selected()
-                        .and_then(|space| space.agents.iter().find(|a| a.project_id == pid))
-                        .map(|a| (a.name.clone(), a.icon.clone(), a.color.clone()))
-                        .or_else(|| {
-                            state
-                                .projects
-                                .iter()
-                                .find(|p| p.id == pid)
-                                .map(|p| (p.name.clone(), p.icon.clone(), p.color.clone()))
-                        })
-                });
-                let (name, icon) = match &agent {
-                    Some((n, i, _)) if name == "Agent" || icon.is_none() => {
-                        (n.clone(), Some(i.clone()))
-                    }
-                    _ => (name, icon),
-                };
-                let color = agent
-                    .as_ref()
-                    .map(|(_, _, c)| groups::project_color(c, theme.accent))
-                    .or_else(|| {
-                        state
-                            .projects
-                            .iter()
-                            .find(|p| format!("project:{}", p.id) == seed)
-                            .map(|p| groups::project_color(&p.color, theme.accent))
-                    })
-                    .unwrap_or_else(|| groups::sender_color(&seed, &theme));
-                // The sender's disc: a shared agent's own gradient, else my project's.
-                let agent_pid_seed = seed
-                    .strip_prefix("agent:")
-                    .or_else(|| seed.strip_prefix("project:"))
-                    .map(str::to_string);
-                let avatar_color_index = agent_pid_seed.as_deref().and_then(|pid| {
-                    state
-                        .selected()
-                        .and_then(|space| space.agents.iter().find(|a| a.project_id == pid))
-                        .and_then(|a| a.avatar_color_index)
-                        .or_else(|| {
-                            state
-                                .projects
-                                .iter()
-                                .find(|p| p.id == pid)
-                                .and_then(|p| p.avatar_color_index)
-                        })
-                });
-                let disc_seed = agent_pid_seed.clone().unwrap_or_else(|| seed.clone());
-                let _ = (&avatar, &avatar_color, &color, &icon);
-                // Click the chip → the agent's profile page.
-                let agent_pid = agent_pid_seed;
+                let _ = (&avatar, &avatar_color, &icon);
+                let (name, _disc_seed, _color_index, agent_pid) =
+                    self.agent_identity(&seed, &name, cx);
+                // The caption starts where the bubble's text does; the disc sits
+                // at the bubble's bottom-left (last Markdown row, mocks a/f).
                 let open_state = self.state.clone();
-                let chip = groups::sender_chip_with(&name, &disc_seed, avatar_color_index, &theme)
+                let caption = div()
                     .id(SharedString::from(format!("{}#chip", row.id)))
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .pl(px(SENDER_LANE + BUBBLE_PAD_X))
+                    // Same rhythm as a person's caption: the row gap above, 6 pt
+                    // to the bubble below (mock a).
+                    .pt(px(ROW_GAP_HALF))
+                    .pb(px(6.0 - ROW_GAP_HALF))
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(theme.text_muted)
+                            .child(name),
+                    )
                     .when(agent_pid.is_some(), |el| {
                         el.cursor_pointer().on_click(move |_, _, cx| {
                             if let Some(pid) = agent_pid.clone() {
@@ -1377,7 +1431,7 @@ impl Transcript {
                         })
                     });
                 match note {
-                    Some(note) => chip
+                    Some(note) => caption
                         .child(
                             div()
                                 .text_size(px(10.5))
@@ -1385,7 +1439,7 @@ impl Transcript {
                                 .child(format!("· {note}")),
                         )
                         .into_any_element(),
-                    None => chip.into_any_element(),
+                    None => caption.into_any_element(),
                 }
             }
             RowKind::Details => {
@@ -1729,6 +1783,7 @@ pub fn build_rows(
                         kind: RowKind::Attachment {
                             attachment: attachment.clone(),
                             mine: is_mine,
+                            lane: !is_mine,
                         },
                     });
                 }
@@ -1824,7 +1879,9 @@ pub fn build_rows(
                         }
                     }
                 }
+                let mut lane: Option<String> = None;
                 if message.role == Role::Project {
+                    lane = Some(message.sender.clone());
                     let name = message
                         .sender_name
                         .clone()
@@ -1846,6 +1903,7 @@ pub fn build_rows(
                 } else if message.sender.starts_with("agent:") && message.asked_by_handle.is_some()
                 {
                     // A shared agent in a people chat: name it and whom it answers.
+                    lane = Some(message.sender.clone());
                     let name = message
                         .sender_name
                         .clone()
@@ -1946,6 +2004,7 @@ pub fn build_rows(
                                         last,
                                         fill,
                                         time: clock_label(message.created_at),
+                                        lane: lane.clone(),
                                     },
                                 });
                                 block_ix += 1;
@@ -1972,6 +2031,7 @@ pub fn build_rows(
                                 kind: RowKind::Attachment {
                                     attachment: attachment.clone(),
                                     mine: false,
+                                    lane: lane.is_some(),
                                 },
                             })
                         }
