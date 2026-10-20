@@ -50,7 +50,22 @@ pub fn render(
         .pl(px(4.0))
         .pr(px(10.0))
         .rounded(px(9.0))
-        .min_w_0();
+        .min_w_0()
+        // The header is a window_drag region: a mouse-down that bubbles to it
+        // arms a window move, and the slightest pointer jitter before the
+        // mouse-up turns the click into a drag that never completes — the
+        // second click of a double-click most of all (#1068, as the chat
+        // tabs). Stop it here and do what the root would have on the way.
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            cx.listener(|this, _, window, cx| {
+                cx.stop_propagation();
+                this.close_popovers(cx);
+                if this.renaming_tab.is_some() {
+                    this.commit_tab_rename(window, cx);
+                }
+            }),
+        );
     if let Some(person) = space
         .person()
         .filter(|_| is_people && !space.is_people_group())
@@ -256,7 +271,9 @@ pub fn render(
         }
         // A group chat or a project with other people: the group page; my
         // own solo agent: its profile (with the tree + colour picker).
-        // Double-click the name to rename (owned agents only).
+        // Double-click the name to rename (owned agents only) — so for those
+        // a single click opens the page only after the double-click window,
+        // or the page's backdrop would swallow the second click (#1068).
         let groupish = space.is_groupish();
         title = title
             .cursor_pointer()
@@ -266,17 +283,13 @@ pub fn render(
                     this.members_open = false;
                     this.add_agent_open = false;
                     let p = pid.clone();
-                    if can_rename && event.click_count() >= 2 {
+                    if !can_rename {
+                        this.open_from_name(p, groupish, cx);
+                    } else if event.click_count() >= 2 {
                         this.start_rename_agent(p, window, cx);
-                        return;
+                    } else {
+                        this.name_clicked(p, groupish, cx);
                     }
-                    this.state.update(cx, |s, cx| {
-                        if groupish {
-                            s.open_profile(ProfilePage::Group { space_id: p }, cx);
-                        } else {
-                            s.toggle_avatar_picker(p, cx);
-                        }
-                    });
                 }),
             );
     }

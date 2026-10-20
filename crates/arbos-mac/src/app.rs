@@ -279,6 +279,10 @@ pub struct AppState {
     pub avatar_reply_until: HashMap<Id, u64>,
     /// Avatar picker open for this project.
     pub avatar_picker: Option<Id>,
+    /// The open profile came from a single click on the header name (#1068):
+    /// a second click of a slow double-click lands on its backdrop and is
+    /// routed to the rename instead of closing it.
+    pub profile_from_name: bool,
     /// Last time we told the room we are typing, per chat.
     typing_sent_at: HashMap<Id, u64>,
     /// Set by a fresh sign-in: with no projects yet, create "Home" and land in it.
@@ -579,6 +583,7 @@ impl AppState {
             invite_target: None,
             avatar_reply_until: HashMap::new(),
             avatar_picker: None,
+            profile_from_name: false,
             typing_sent_at: HashMap::new(),
             device_id: None,
             projects: Vec::new(),
@@ -2920,6 +2925,7 @@ impl AppState {
             _ => None,
         };
         self.profile = Some(page);
+        self.profile_from_name = false;
         self.profile_tab = 0;
         self.profile_picker_open = false;
         self.profile_more_open = false;
@@ -3008,6 +3014,7 @@ impl AppState {
     /// agent page (name, description) is dropped with it.
     pub fn close_profile(&mut self, cx: &mut Context<Self>) -> bool {
         self.avatar_picker = None;
+        self.profile_from_name = false;
         self.profile_more_open = false;
         self.agent_pick = None;
         let was = self.profile.take().is_some();

@@ -78,7 +78,17 @@ pub(super) fn frame(
     )
     .on_mouse_down(
         gpui::MouseButton::Left,
-        cx.listener(|this, _, window, cx| this.close_profile(window, cx)),
+        cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+            // The second click of a double-click on the header name, when
+            // the first already opened this page: rename instead of closing
+            // (#1068). Stopped here so the root does not refocus the composer
+            // over the rename field.
+            if event.click_count >= 2 && this.rename_from_backdrop(window, cx) {
+                cx.stop_propagation();
+                return;
+            }
+            this.close_profile(window, cx)
+        }),
     )
 }
 
