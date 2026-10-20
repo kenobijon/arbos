@@ -73,9 +73,9 @@ impl Session {
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
         let doc = if rep.snapshot.is_empty() {
-            ChatDoc::new(peer_id(cfg), false)
+            ChatDoc::new(Some(peer_id(cfg)), false)
         } else {
-            ChatDoc::from_snapshot(peer_id(cfg), false, &rep.snapshot)?
+            ChatDoc::from_snapshot(Some(peer_id(cfg)), false, &rep.snapshot)?
         };
         let acked_vv = decode_vv(&rep.acked_vv).unwrap_or_default();
         Ok(Self {
@@ -476,7 +476,13 @@ async fn run(
                                     .append_user_answer(&msg_id, &rendered, &qid, value, &s.device);
                             }
                             None => {
-                                s.doc.append_user_message(&msg_id, text, &s.device);
+                                s.doc.append_user_message_from(
+                                    &msg_id,
+                                    text,
+                                    &s.device,
+                                    "user",
+                                    &[],
+                                );
                             }
                         }
                         if let Some(reply_to) = reply_to {

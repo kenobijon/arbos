@@ -401,3 +401,125 @@ fn number_value(n: &serde_json::Number) -> LoroValue {
         LoroValue::Double(n.as_f64().unwrap_or(0.0))
     }
 }
+
+#[cfg(test)]
+mod core_writer_tests {
+    use super::*;
+    use crate::model::{Part, Role};
+    use arbos_core::doc::{ChatDoc as CoreDoc, UserAttachment, UserMessageOpts};
+
+    fn message_from_core_row(row: &serde_json::Value) -> Message {
+        let mut json = row.clone();
+        split_hidden_parts(&mut json);
+        serde_json::from_value(json).expect("core row deserializes as Message")
+    }
+
+    #[test]
+    fn mac_sync_doc_rows_decode_through_core() {
+        let mac = ChatDoc::empty("chat1");
+        let text = "hello from mac";
+        let msg = Message {
+            id: "m1".into(),
+            chat_id: "chat1".into(),
+            role: Role::User,
+            sender: "user".into(),
+            status: MessageStatus::Done,
+            turn: None,
+            decision: None,
+            subagent_id: None,
+            subagent_name: None,
+            handoff_messages: None,
+            reactions: Default::default(),
+            in_reply_to: None,
+            routine_name: None,
+            sender_name: None,
+            sender_icon: None,
+            sender_handle: None,
+            sender_avatar: None,
+            sender_avatar_color: None,
+            mentions: Vec::new(),
+            reply_to: None,
+            asked_by_handle: None,
+            owner_handle: None,
+            usage: None,
+            return_contract: None,
+            waiting_user: false,
+            waiting_approval: false,
+            model: None,
+            effort: None,
+            created_at: now_ms(),
+            completed_at: None,
+            call_id: None,
+            activity: None,
+            pending: false,
+            parts: vec![Part::Text {
+                id: "p1".into(),
+                text: text.into(),
+            }],
+            hidden_parts: Vec::new(),
+            greeting: false,
+        };
+        mac.insert_message(&msg).unwrap();
+        mac.commit();
+
+        let mut core = CoreDoc::new(None, false);
+        core.import(&mac.doc.export(loro::ExportMode::Snapshot).unwrap())
+            .unwrap();
+        let msgs = core.messages();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].text(), text);
+        assert_eq!(msgs[0].role, "user");
+    }
+
+    #[test]
+    fn core_client_writers_deserialize_as_mac_message() {
+        let core = CoreDoc::new(None, false);
+        let plain = "plain text for mac";
+        core.transact(|d| {
+            d.append_user_message(
+                "m1",
+                plain,
+                "dev:mac",
+                &UserMessageOpts {
+                    attachments: &[UserAttachment {
+                        name: "a.png",
+                        mime: "image/png",
+                        kind: Some("image"),
+                        blob_ref: Some("ref1"),
+                    }],
+                    reply_to: Some("other"),
+                    ..UserMessageOpts::default()
+                },
+            );
+            d.append_system_line("m2", "Call ended · 1 min", "dev:mac", Some("call-9"));
+            d.append_greeting("m3", "Hi, I'm Arbos.", "dev:mac", "proj", "Arbos");
+            d.set_reaction("m1", "heart", "user:1", true);
+        });
+
+        let rows = core.to_json()["messages"].as_array().cloned().unwrap();
+        assert_eq!(rows.len(), 3);
+
+        let user = message_from_core_row(&rows[0]);
+        assert_eq!(user.plain_text(), plain);
+        assert_eq!(user.role, Role::User);
+        assert_eq!(user.reply_to.as_deref(), Some("other"));
+        assert!(user
+            .reactions
+            .get("heart")
+            .unwrap()
+            .get("user:1")
+            .copied()
+            .unwrap());
+        assert_eq!(user.parts.len(), 2);
+
+        let sys = message_from_core_row(&rows[1]);
+        assert_eq!(sys.plain_text(), "Call ended · 1 min");
+        assert_eq!(sys.role, Role::System);
+        assert_eq!(sys.call_id.as_deref(), Some("call-9"));
+
+        let greet = message_from_core_row(&rows[2]);
+        assert_eq!(greet.plain_text(), "Hi, I'm Arbos.");
+        assert!(greet.greeting);
+        assert_eq!(greet.sender, "agent:proj");
+    }
+}
