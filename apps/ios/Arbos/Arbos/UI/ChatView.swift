@@ -137,6 +137,8 @@ struct ChatView: View {
         Task { await calls.start(chatId: chatId, projectId: isPeople ? nil : projectId, kind: kind, title: callTitle) }
     }
     @State private var replyTo: Message?
+    /// The original a quote tap scrolled to; tinted until the fade timer clears it.
+    @State private var highlightedMessage: Id?
     @State private var mentionQuery: String?
     /// Chip-picked addressees in a people chat: `agent:…` and/or `user:…` member ids.
     /// Empty means no chip: agent-only DMs may still infer the last agent; human-peer DMs stay
@@ -438,6 +440,18 @@ struct ChatView: View {
                         pending = [.init(name: "Q3 board deck v5.pdf", mime: "application/pdf", data: Data()),
                                    .init(name: "Photo Oct 15.jpg", mime: "image/jpeg", data: Data())]
                         composerFocused = true
+                    case "reply":
+                        // Rig: the composer's reply preview on the newest agent message.
+                        replyTo = messages.last { $0.role == .assistant && !$0.isStreaming }
+                        composerFocused = true
+                    case "replied":
+                        // Rig: a sent bubble quoting the newest agent message (fixture only).
+                        #if DEBUG
+                        if model.isFixture, let m = messages.last(where: { $0.role == .assistant && !$0.isStreaming }) {
+                            model.fixtureAppend(chatId: chatId, text: "Does that cover the #general channel too?",
+                                                attachments: [], replyTo: m.id)
+                        }
+                        #endif
                     default: break
                     }
                 }
@@ -737,7 +751,9 @@ struct ChatView: View {
                         emptyHint
                     }
                     ForEach(Array(visibleRows.enumerated()), id: \.element.id) { i, row in
-                        RowView(row: row, chatId: chatId, width: width, timeReveal: timeReveal)
+                        RowView(row: row, chatId: chatId, width: width, timeReveal: timeReveal,
+                                onQuoteTap: { revealQuoted($0) },
+                                highlighted: highlightedMessage == row.messageId)
                             .padding(.top, gap(before: i))
                             .id(row.id)
                             .contextMenu {
@@ -763,15 +779,15 @@ struct ChatView: View {
                                         }
                                     }
                                 }
-                                if isPeople, let m = messages.first(where: { $0.id == row.messageId }) {
+                                if canReact(to: row), let m = messages.first(where: { $0.id == row.messageId }) {
                                     Button {
                                         replyTo = m
-                                        if let member = agentMember(for: m)?.member {
+                                        if isPeople, let member = agentMember(for: m)?.member {
                                             talkTo = [member]
                                         }
                                         composerFocused = true
                                     } label: { Label("Reply", systemImage: "arrowshape.turn.up.left") }
-                                    if m.role == .assistant, let h = m.senderHandle {
+                                    if isPeople, m.role == .assistant, let h = m.senderHandle {
                                         Button {
                                             draft = "@\(h) " + draft
                                             if let member = agentMember(for: m)?.member {
@@ -868,6 +884,24 @@ struct ChatView: View {
 
     private func m_text(_ row: Row) -> String {
         messages.first { $0.id == row.messageId }?.plainText ?? ""
+    }
+
+    /// "@sam" / "Bob" (the agent of this chat) / "you" for the composer's reply preview.
+    private func replyLabel(for m: Message) -> String {
+        if let h = m.senderHandle, m.sender != "user" { return "@\(h)" }
+        if m.role == .assistant || m.role == .project { return project?.name ?? "the agent" }
+        return "you"
+    }
+
+    /// Tap on a reply bubble's quote: scroll to the original and tint it for a moment.
+    private func revealQuoted(_ messageId: Id) {
+        guard let target = rows.first(where: { $0.messageId == messageId && $0.role != .system }) else { return }
+        withAnimation(.easeInOut(duration: 0.35)) { scroller?.scrollTo(target.id, anchor: .center) }
+        highlightedMessage = messageId
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(1600))
+            if highlightedMessage == messageId { highlightedMessage = nil }
+        }
     }
 
     /// Emoji reactions apply to real chat bubbles, not date / join / system lines.
@@ -1027,8 +1061,8 @@ struct ChatView: View {
             if let r = replyTo {
                 HStack(spacing: 8) {
                     Image(systemName: "arrowshape.turn.up.left").font(.system(size: 12)).foregroundStyle(theme.muted)
-                    Text("Replying to @\(r.senderHandle ?? (r.role == .assistant ? "agent" : "you"))").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
-                    Text(r.plainText).font(theme.font(Theme.tiny)).foregroundStyle(theme.text).lineLimit(1)
+                    Text("Replying to \(replyLabel(for: r))").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+                    Text(Quote.text(of: r)).font(theme.font(Theme.tiny)).foregroundStyle(theme.text).lineLimit(1)
                     Spacer()
                     Button { replyTo = nil } label: { Image(systemName: "xmark").font(.system(size: 11, weight: .bold)).foregroundStyle(theme.muted) }
                         .buttonStyle(.plain)
@@ -1447,7 +1481,7 @@ struct ChatView: View {
             } else if needsAnswer && extras.isEmpty {
                 model.answer(chatId: chatId, text: text)
             } else {
-                model.send(chatId: chatId, text: text, attachments: extras)
+                model.send(chatId: chatId, text: text, attachments: extras, replyTo: reply)
             }
         }
     }
@@ -1491,10 +1525,11 @@ struct ChatView: View {
         if needsAnswer && pending.isEmpty {
             model.answer(chatId: chatId, text: text)
         } else {
-            model.send(chatId: chatId, text: text, attachments: pending)
+            model.send(chatId: chatId, text: text, attachments: pending, replyTo: replyTo?.id)
         }
         pending.removeAll()
         draft = ""
+        replyTo = nil
         sentOnce = true
     }
 
