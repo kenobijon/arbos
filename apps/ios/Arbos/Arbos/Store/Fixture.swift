@@ -128,6 +128,8 @@ extension AppModel {
                     subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 50 * 60_000, completedAt: nil, pending: false,
                     parts: [.text(id: "g3t", text: "And the signup form: https://arbos.life/i/launch")], hiddenCount: 0, senderHandle: "mira-k", senderName: "Mira Kaplan"),
         ]
+        // Mira's second line replies to her first (quote header on another person's bubble).
+        messages["fx-group-launch"]?[2].replyTo = "g1"
         caughtUp.insert("fx-group-launch")
         directory = [
             Person(id: "fx-u1", handle: "alex-rivera", avatarUrl: nil, name: "Alex Rivera", status: "member"),
@@ -217,7 +219,7 @@ extension AppModel {
 
     /// Sends in fixture mode append locally so the composer can be exercised,
     /// then a scripted reply streams in word by word.
-    func fixtureAppend(chatId: Id, text: String, attachments: [Attachment]) {
+    func fixtureAppend(chatId: Id, text: String, attachments: [Attachment], replyTo: Id? = nil) {
         var list = messages[chatId] ?? []
         // Finish the fixture's stuck "working" turn so the demo reads cleanly.
         if let i = list.lastIndex(where: { $0.isStreaming }) {
@@ -225,6 +227,7 @@ extension AppModel {
             list[i].parts = [.text(id: "\(list[i].id)-t", text: "Got it.")]
         }
         var m = user(newId(), chatId, text, at: nowMs())
+        m.replyTo = replyTo
         m.parts = attachments.map { .attachment(id: newId(), attachment: $0) } + (text.isEmpty ? [] : m.parts)
         list.append(m)
         messages[chatId] = list

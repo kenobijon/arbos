@@ -2687,16 +2687,18 @@ final class AppModel: ObservableObject {
         var data: Data
     }
 
-    func send(chatId: Id, text: String, attachments: [PendingAttachment] = []) {
+    /// `replyTo` = the message this send answers (reply-to); it lands on the row as `replyTo`
+    /// so every client draws the quote header and agentd puts the quoted message in the turn.
+    func send(chatId: Id, text: String, attachments: [PendingAttachment] = [], replyTo: Id? = nil) {
         if attachments.isEmpty {
-            write(chatId: chatId, text: text, command: "send", attachments: [])
+            write(chatId: chatId, text: text, command: "send", attachments: [], replyTo: replyTo)
             return
         }
         guard let chat = chat(chatId) else { return }
         if isFixture {
             write(chatId: chatId, text: text, command: "send", attachments: attachments.map {
                 Attachment(name: $0.name, mime: $0.mime, blobRef: nil, kind: Self.attachmentKind(mime: $0.mime, name: $0.name))
-            })
+            }, replyTo: replyTo)
             return
         }
         Task {
@@ -2712,7 +2714,7 @@ final class AppModel: ObservableObject {
                     uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: nil, kind: kind))
                 }
             }
-            write(chatId: chatId, text: text, command: "send", attachments: uploaded)
+            write(chatId: chatId, text: text, command: "send", attachments: uploaded, replyTo: replyTo)
         }
     }
 
@@ -2830,10 +2832,10 @@ final class AppModel: ObservableObject {
     }
 
     private func write(chatId: Id, text: String, command: String, attachments: [Attachment],
-                       extra: [String: Any] = [:], messageId presetId: Id? = nil) {
+                       extra: [String: Any] = [:], messageId presetId: Id? = nil, replyTo: Id? = nil) {
         guard let chat = chat(chatId) else {
             #if DEBUG
-            if isFixture { fixtureAppend(chatId: chatId, text: text, attachments: attachments) }
+            if isFixture { fixtureAppend(chatId: chatId, text: text, attachments: attachments, replyTo: replyTo) }
             #endif
             return
         }
@@ -2841,13 +2843,14 @@ final class AppModel: ObservableObject {
         // Echo the bubble now and flush once `finalizeNewChat` swaps the id.
         guard let doc = docs[chatId] else {
             enqueueOptimisticSend(chatId: chatId, chat: chat, text: text, command: command,
-                                  attachments: attachments, extra: extra)
+                                  attachments: attachments, extra: extra, replyTo: replyTo)
             return
         }
         let messageId = presetId ?? newId()
         markUnacked(chatId: chatId, messageId: messageId)
         do {
-            try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: attachments)
+            try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: attachments,
+                                      replyTo: replyTo)
             try doc.pushCommand(command, payload: extra.merging(["messageId": messageId]) { _, new in new }, device: deviceId)
             if !chat.isPinned && chat.title == "New chat" {
                 let title = AppModel.title(from: text)
@@ -2874,6 +2877,7 @@ final class AppModel: ObservableObject {
         var command: String
         var attachments: [Attachment]
         var extra: [String: Any]
+        var replyTo: Id?
     }
     private var optimisticSends: [Id: [OptimisticSend]] = [:]
     /// Local chat ids still waiting on `POST /projects/{id}/chats`.
@@ -2888,7 +2892,7 @@ final class AppModel: ObservableObject {
     }
 
     private func enqueueOptimisticSend(chatId: Id, chat: Chat, text: String, command: String,
-                                       attachments: [Attachment], extra: [String: Any]) {
+                                       attachments: [Attachment], extra: [String: Any], replyTo: Id? = nil) {
         guard optimisticChatIds.contains(chatId) else {
             notice = Notice(text: "Could not write the message: chat is not ready yet")
             return
@@ -2901,6 +2905,7 @@ final class AppModel: ObservableObject {
                         parts: attachments.map { .attachment(id: newId(), attachment: $0) }
                             + (text.isEmpty ? [] : [.text(id: "\(messageId)-t", text: text)]),
                         hiddenCount: 0)
+        m.replyTo = replyTo
         // Keep attachment-only rows valid when text is empty.
         if m.parts.isEmpty { m.parts = [.text(id: "\(messageId)-t", text: text)] }
         messages[chatId, default: []].append(m)
@@ -2909,7 +2914,7 @@ final class AppModel: ObservableObject {
         }
         optimisticSends[chatId, default: []].append(
             OptimisticSend(messageId: messageId, text: text, command: command,
-                           attachments: attachments, extra: extra)
+                           attachments: attachments, extra: extra, replyTo: replyTo)
         )
         markActivity(chatId: chatId)
         if let p = project(chat.projectId), p.state.isAsleep || p.state == .error {
@@ -3059,7 +3064,7 @@ final class AppModel: ObservableObject {
         // the same ids so emitSnapshot replaces them in place (no flicker).
         for item in queued {
             write(chatId: real.id, text: item.text, command: item.command,
-                  attachments: item.attachments, extra: item.extra, messageId: item.messageId)
+                  attachments: item.attachments, extra: item.extra, messageId: item.messageId, replyTo: item.replyTo)
         }
 
         // Swap the navigation id for the real one, then drop the local mirrors.
