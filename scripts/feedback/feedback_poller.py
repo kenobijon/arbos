@@ -58,6 +58,7 @@ origin.txt (where it came from, shown as the issue's Source). `inject` writes on
 
 CLI:  feedback_poller.py [run] | status | testers | set-cursor <ISO-8601>
       | inject <image|-> "<comment>" [ios|mac] [--handle <login>] [--origin "<text>"] [--email <tester email, grouping only>]
+               [--note "<owner decision / scope>"] [--id <slug used as the feedback id>]
       | requeue <id>… [--allow "<who confirmed>"] | prioritize <id>… | confirm <id> [note] | handoff <id> [label] | deployed <id> [note]
       | track <id> <issue> "<comment>" [--handle <login>] [--owner <label>] [--target ios|mac]   (a hand-filed, handed-off item;
         workers can do the same without root by commenting `track <id> bc-<owner>` on the issue)
@@ -905,6 +906,11 @@ class Loop:
                 continue
             stamp = utcnow().strftime("%Y%m%d%H%M%S")
             fid = f"local-{re.sub(r'[^A-Za-z0-9_-]', '-', entry.name)[:40]}-{stamp}"
+            if (entry / "id.txt").is_file():
+                # A hand-chosen id (`inject --id <slug>`): the tag workers and docs refer to, e.g. popover-scroll-bleed-2026-10-20.
+                chosen = re.sub(r"[^A-Za-z0-9._-]", "-", (entry / "id.txt").read_text().strip())[:80]
+                if chosen and not self.store.item_dir(chosen).exists():
+                    fid = chosen
             d = self.store.item_dir(fid)
             d.mkdir(parents=True)
             shots = []
@@ -927,6 +933,9 @@ class Loop:
                 "build_id": None, "locale": None, "screen_points": None, "screenshots": shots,
                 "forced_target": forced or None, "raw": {},
             }
+            if (entry / "note.txt").is_file():
+                # The owner's decision / scope, relayed by the operator; the prompt shows it as the scope to build.
+                info["operator_note"] = (entry / "note.txt").read_text().strip()
             (d / "submission.json").write_text(json.dumps(info, indent=2, ensure_ascii=False) + "\n")
             shutil.rmtree(entry)
             self.admit(info)
@@ -2793,11 +2802,12 @@ class Loop:
 
 
 def inject(cfg: Config, image: Path | None, comment: str, target: str | None,
-           handle: str | None = None, origin: str | None = None, email: str | None = None) -> None:
+           handle: str | None = None, origin: str | None = None, email: str | None = None,
+           note: str | None = None, name: str | None = None) -> None:
     inbox = cfg.state_dir / "inbox"
     inbox.mkdir(parents=True, exist_ok=True)
     stamp = utcnow().strftime("%Y%m%d%H%M%S%f")[:-3]
-    name = f"{'relay-' + handle.lstrip('@') if handle else 'manual'}-{stamp}"
+    name = name or f"{'relay-' + handle.lstrip('@') if handle else 'manual'}-{stamp}"
     d = inbox / name
     d.mkdir()
     if image is not None:
@@ -2812,6 +2822,10 @@ def inject(cfg: Config, image: Path | None, comment: str, target: str | None,
     if email:
         # Groups the item with the same person's TestFlight items (the key is hashed in the issue, never shown).
         (d / "email.txt").write_text(email.strip().lower() + "\n")
+    if note:
+        (d / "note.txt").write_text(note.strip() + "\n")
+    if name and not name.startswith(("relay-", "manual-")):
+        (d / "id.txt").write_text(name + "\n")
     print(f"placed {d}; the next tick picks it up")
 
 
@@ -2870,8 +2884,8 @@ def main(argv: list[str]) -> int:
         if len(argv) < 4:
             print(__doc__)
             return 2
-        rest, handle, origin, email = list(argv[4:]), None, None, None
-        for flag in ("--handle", "--origin", "--email"):
+        rest, handle, origin, email, note, name = list(argv[4:]), None, None, None, None, None
+        for flag in ("--handle", "--origin", "--email", "--note", "--id"):
             if flag in rest:
                 i = rest.index(flag)
                 value = rest[i + 1] if i + 1 < len(rest) else ""
@@ -2880,13 +2894,17 @@ def main(argv: list[str]) -> int:
                     handle = value
                 elif flag == "--origin":
                     origin = value
+                elif flag == "--note":
+                    note = value
+                elif flag == "--id":
+                    name = value
                 else:
                     email = value
         image = None if argv[2] == "-" else Path(argv[2])
         if image is None and not handle:
             print("inject: a report without an image needs --handle <login>")
             return 2
-        inject(cfg, image, argv[3], rest[0] if rest else None, handle, origin, email)
+        inject(cfg, image, argv[3], rest[0] if rest else None, handle, origin, email, note=note, name=name)
         return 0
     if cmd == "testers":
         print_testers(Store(cfg))
