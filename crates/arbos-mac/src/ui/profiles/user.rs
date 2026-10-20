@@ -9,14 +9,13 @@ use gpui::{div, prelude::*, px, Context, Div, ElementId, SharedString, Stateful}
 use crate::app::ProfilePage;
 use crate::model::{Person, Project};
 use crate::ui::avatars;
-use crate::ui::glass;
 use crate::ui::groups;
 use crate::ui::people;
 use crate::ui::shell::Shell;
-use crate::ui::theme::{Theme, TEXT_BODY, TEXT_SMALL};
+use crate::ui::theme::{Theme, TEXT_SMALL};
 
 use super::{
-    card, chats_of, collect, editable_name, editable_picture, empty, frame, hero, link_list,
+    card, chats_of, collect, editable_name, editable_picture, empty, frame, hero, kit, link_list,
     list_row, tab_bar, HERO_AVATAR,
 };
 
@@ -62,9 +61,9 @@ pub(super) fn page(
         .iter()
         .map(|p| {
             if p.is_people() {
-                groups::picture(p, state, 36.0, &theme).into_any_element()
+                groups::picture(p, state, kit::AVATAR, &theme).into_any_element()
             } else {
-                avatars::project(p, 36.0, &theme).into_any_element()
+                avatars::project(p, kit::AVATAR, &theme).into_any_element()
             }
         })
         .collect();
@@ -135,23 +134,14 @@ pub(super) fn page(
     // ----- the one action: Block user --------------------------------------------
     let h_block = person.handle.clone();
     let block = (!me).then(|| {
-        glass::group(&theme).flex_shrink_0().mx(px(16.0)).child(
-            div()
-                .id("profile-block")
-                .flex()
-                .items_center()
-                .justify_center()
-                .min_h(px(44.0))
-                .text_size(px(TEXT_BODY))
-                .text_color(theme.danger)
-                .cursor_pointer()
-                .hover(|s| s.bg(theme.surface_2))
-                .child("Block user")
-                .on_click(cx.listener(move |this, _, window, cx| {
+        kit::card(&theme).child(
+            kit::danger_row("profile-block", "Block user", &theme).on_click(cx.listener(
+                move |this, _, window, cx| {
                     let h = h_block.clone();
                     this.state.update(cx, |s, cx| s.block_user(h, cx));
                     this.close_profile(window, cx);
-                })),
+                },
+            )),
         )
     });
 

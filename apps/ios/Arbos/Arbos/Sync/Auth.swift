@@ -206,6 +206,12 @@ extension RelayAPI {
         return user
     }
 
+    /// `DELETE /me/avatar`: back to the GitHub picture; then `GET /me` for the fresh user.
+    func deleteMeAvatar() async throws -> AuthUser {
+        _ = try await request("DELETE", "/me/avatar")
+        return try await me().0
+    }
+
     func approvals() async throws -> [PendingDevice] {
         let v = try await json("GET", AuthEndpoints.approvals)
         let list = (v as? [Any]) ?? ((v as? [String: Any])?["approvals"] as? [Any]) ?? []

@@ -1,0 +1,982 @@
+//! My pane: profile + every app setting (mockup g), drawn with the shared
+//! pane kit so it matches the person and group panes row for row.
+
+use gpui::{div, prelude::*, px, Div, IntoElement, Stateful};
+
+use crate::model::{now_ms, MachineState};
+use crate::ui::glass;
+use crate::ui::icons::icon;
+use crate::ui::motion::PulseClock;
+use crate::ui::people;
+use crate::ui::profiles::{self, kit};
+use crate::ui::shell::{fmt_uptime, human_bytes, SettingsPage, Shell};
+use crate::ui::sidebar;
+use crate::ui::theme::{AppearancePref, Surface, Theme, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
+
+/// The open page of my pane.
+pub(super) fn page(shell: &Shell, cx: &mut gpui::Context<Shell>) -> Stateful<Div> {
+    shell.render_me_pane(cx)
+}
+
+impl Shell {
+    // ----- my pane: profile + settings ----------------------------------------------
+
+    /// My profile and every app setting in the right pane (mockup g): picture,
+    /// name, Profile / Settings tabs; a Settings row pushes its page into the
+    /// same pane with `‹` back. This replaced the Settings window (2026-10-20).
+    pub(crate) fn render_me_pane(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let theme = Theme::of(cx).clone();
+        let state = self.state.read(cx);
+        let source = state.source_name;
+        let link = state.link;
+        let device = state.device_id.clone();
+        let show_details = state.show_details;
+        let account = state.account.clone();
+        let account_image = account.as_ref().and_then(|a| state.avatar(&a.avatar_url));
+        let profile_tab = state.profile_tab;
+        let custom_avatar = state.has_custom_avatar();
+        let notify_on = state.notifier.enabled;
+        let skill_count = state.skills.len();
+        let secrets_value = if state.secrets.loaded {
+            state.secrets.row_value()
+        } else {
+            String::new()
+        };
+        let connectors_connected = state
+            .connectors
+            .items
+            .iter()
+            .filter(|c| c.status == crate::model::ConnectorStatus::Connected)
+            .count();
+        let store_usage = state.store_usage;
+        let update = state.update.clone();
+        let update_failed = matches!(update.phase, crate::update::UpdatePhase::Failed { .. });
+        let auto_update = update.auto;
+        let update_action: Option<(&'static str, &'static str, bool)> = match &update.phase {
+            crate::update::UpdatePhase::Available(_)
+            | crate::update::UpdatePhase::Failed {
+                available: Some(_), ..
+            } => Some(("update-install", "Install and relaunch", true)),
+            crate::update::UpdatePhase::Installed { .. } => {
+                Some(("update-restart", "Restart now", true))
+            }
+            crate::update::UpdatePhase::Idle
+            | crate::update::UpdatePhase::UpToDate
+            | crate::update::UpdatePhase::Failed {
+                available: None, ..
+            } => Some(("update-check", "Check now", false)),
+            crate::update::UpdatePhase::Checking
+            | crate::update::UpdatePhase::Downloading { .. }
+            | crate::update::UpdatePhase::Installing(_)
+            | crate::update::UpdatePhase::Restarting(_) => None,
+        };
+        let machine = state.machine.clone();
+        let shown = machine.shown_state();
+        if shown == MachineState::Waking {
+            PulseClock::request(cx);
+        }
+        let glass_ok = Theme::glass_available();
+
+        let value = |text: String, theme: &Theme| {
+            div()
+                .flex_shrink_0()
+                .text_size(px(TEXT_BODY))
+                .text_color(theme.text_muted)
+                .child(text)
+        };
+        let link_button = |id: &'static str, label: &'static str, danger: bool, theme: &Theme| {
+            div()
+                .id(id)
+                .flex_shrink_0()
+                .text_size(px(TEXT_BODY))
+                .text_color(if danger { theme.danger } else { theme.accent })
+                .cursor_pointer()
+                .hover(|s| s.opacity(0.8))
+                .child(label)
+        };
+        let footnote = |text: String, theme: &Theme| {
+            kit::footnote(text, theme)
+                .px(px(kit::INSET))
+                .mt(px(6.0))
+                .mb(px(0.0))
+        };
+        let settings_group = |theme: &Theme| kit::card(theme).mx(px(0.0)).mb(px(0.0));
+        let seg_row = |label: &str, segs: Div, theme: &Theme| {
+            glass::row(label.to_string(), theme).child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(2.0))
+                    .p(px(2.0))
+                    .rounded_full()
+                    .bg(theme.field)
+                    .border_1()
+                    .border_color(theme.field_border)
+                    .child(segs),
+            )
+        };
+        let page_row = |id: &'static str,
+                        glyph: &'static str,
+                        page: SettingsPage,
+                        detail: Option<String>,
+                        _last: bool,
+                        theme: &Theme,
+                        cx: &mut gpui::Context<Self>| {
+            kit::nav_row(id, glyph, page.title(), detail, theme).on_click(
+                cx.listener(move |this, _, window, cx| this.open_settings_page(page, window, cx)),
+            )
+        };
+        let surface_label = match theme.surface {
+            Surface::Matte => "Matte",
+            Surface::Glass => "Glass",
+        };
+        let appearance_summary = format!("{} · {surface_label}", theme.pref.label());
+        let credits_summary = account
+            .as_ref()
+            .filter(|a| a.balance_usd > 0.0 || a.daily_cap_usd.is_some())
+            .map(|a| format!("${:.0} left", a.balance_usd));
+        let connectors_summary = if connectors_connected == 0 {
+            None
+        } else {
+            Some(format!("{connectors_connected} connected"))
+        };
+        let on_this_mac = if store_usage.1 == 0 {
+            "Nothing saved yet".to_string()
+        } else {
+            format!(
+                "{} · {} chat{}",
+                human_bytes(store_usage.0),
+                store_usage.1,
+                if store_usage.1 == 1 { "" } else { "s" }
+            )
+        };
+        let machine_footer = if machine.always_on {
+            "Your one cloud computer, always on. Agents are workspaces on it."
+        } else {
+            "Your one cloud computer. A message to any agent wakes it."
+        };
+
+        // ----- Credits page body -------------------------------------------------
+        let credits_body = {
+            let mut body = div().flex().flex_col().gap(px(22.0));
+            if let Some(account) = account.as_ref() {
+                let mut group = settings_group(&theme).child(
+                    glass::row("Credits", &theme)
+                        .child(value(format!("${:.2} left", account.balance_usd), &theme)),
+                );
+                group = group.child(glass::row("Today", &theme).child(value(
+                    match account.daily_cap_usd {
+                        Some(cap) => {
+                            format!("${:.2} of ${cap:.0} cap", account.spent_today_usd)
+                        }
+                        None => format!("${:.2}", account.spent_today_usd),
+                    },
+                    &theme,
+                )));
+                body = body.child(group).child(footnote(
+                    "Credits pay for your agents' model use. Machine time is billed separately. During the beta, usage credit is included — request a top-up when you run low.".into(),
+                    &theme,
+                ));
+            } else {
+                body = body.child(settings_group(&theme).child(
+                    glass::row("Balance", &theme).child(value("Not available yet".into(), &theme)),
+                ));
+            }
+            body =
+                body.child(settings_group(&theme).child(glass::row("", &theme).child(
+                    link_button("credits-top-up", "Request a top-up", false, &theme).on_click(
+                        cx.listener(|this, _, window, cx| this.request_top_up(window, cx)),
+                    ),
+                )));
+            body
+        };
+
+        // ----- Machine page body -------------------------------------------------
+        let machine_body = {
+            let dot = sidebar::machine_dot(shown, &theme);
+            let uptime = machine
+                .since
+                .filter(|_| shown == MachineState::Awake)
+                .map(|since| fmt_uptime(now_ms().saturating_sub(since)))
+                .unwrap_or_else(|| "—".into());
+            let mut group = settings_group(&theme)
+                .child(
+                    glass::row("State", &theme).child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(7.0))
+                            .child(div().size(px(8.0)).rounded_full().bg(Theme::with_alpha(
+                                dot,
+                                if shown == MachineState::Waking {
+                                    0.4 + 0.6 * PulseClock::phase(cx, 1100)
+                                } else {
+                                    1.0
+                                },
+                            )))
+                            .child(value(shown.label().to_string(), &theme)),
+                    ),
+                )
+                .child(glass::row("Since", &theme).child(value(uptime, &theme)))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .px(px(16.0))
+                        .py(px(10.0))
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .child(
+                            div()
+                                .text_size(px(TEXT_BODY))
+                                .text_color(theme.text)
+                                .child("Spec"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(TEXT_SMALL))
+                                .text_color(theme.text_muted)
+                                .child(format!(
+                                    "{}{}",
+                                    machine
+                                        .spec
+                                        .clone()
+                                        .unwrap_or_else(|| "spec unknown".into()),
+                                    machine
+                                        .class
+                                        .as_deref()
+                                        .map(|c| format!(" · {c}"))
+                                        .unwrap_or_default()
+                                )),
+                        ),
+                )
+                .child(
+                    glass::row(
+                        if machine.always_on {
+                            "Machine time today"
+                        } else {
+                            "Spend today"
+                        },
+                        &theme,
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .items_end()
+                            .child(value(
+                                if machine.always_on {
+                                    format!("${:.2}", machine.spend_today_usd)
+                                } else {
+                                    format!(
+                                        "${:.2} of ${:.0}",
+                                        machine.spend_today_usd, machine.spend_cap_usd
+                                    )
+                                },
+                                &theme,
+                            ))
+                            .when(machine.always_on, |el| {
+                                el.child(
+                                    div()
+                                        .text_size(px(TEXT_TINY))
+                                        .text_color(theme.text_muted)
+                                        .child("Not taken from credits"),
+                                )
+                            }),
+                    ),
+                );
+            if let Some(detail) = machine.detail.clone() {
+                group = group.child(footnote(detail, &theme).pb(px(8.0)));
+            }
+            let mut body = div().flex().flex_col().gap(px(22.0)).child(group);
+            let mut actions = settings_group(&theme);
+            if machine.always_on {
+                actions = actions.child(glass::row("", &theme).child(
+                    link_button("machine-restart", "Restart machine", false, &theme).on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.state.update(cx, |s, cx| s.machine_restart(cx));
+                        }),
+                    ),
+                ));
+            } else if machine.state.is_down() {
+                actions = actions.child(glass::row("", &theme).child(
+                    link_button("machine-start", "Start machine", false, &theme).on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.state.update(cx, |s, cx| s.machine_start(cx));
+                        }),
+                    ),
+                ));
+            } else {
+                actions = actions.child(glass::row("", &theme).child(
+                    link_button("machine-stop", "Stop machine", true, &theme).on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.state.update(cx, |s, cx| s.machine_stop(cx));
+                        }),
+                    ),
+                ));
+            }
+            body = body.child(actions).child(footnote(
+                if machine.always_on {
+                    "Your one cloud computer, always on. Agents are workspaces on it. Machine time \
+                     is billed separately from your credits."
+                        .into()
+                } else {
+                    "Your one cloud computer. Agents are workspaces on it; a message to any agent \
+                     wakes it."
+                        .into()
+                },
+                &theme,
+            ));
+            body
+        };
+
+        // ----- Appearance page body ----------------------------------------------
+        let appearance_body = {
+            let group = settings_group(&theme)
+                .child(seg_row(
+                    "Theme",
+                    div().flex().gap(px(2.0)).children(
+                        [
+                            (AppearancePref::System, "mode-system"),
+                            (AppearancePref::Light, "mode-light"),
+                            (AppearancePref::Dark, "mode-dark"),
+                        ]
+                        .into_iter()
+                        .map(|(pref, id)| {
+                            glass::segment(id, pref.label(), theme.pref == pref, &theme).on_click(
+                                cx.listener(move |this, _, _, cx| {
+                                    let s = Theme::of(cx).surface;
+                                    this.set_theme(pref, s, cx);
+                                }),
+                            )
+                        }),
+                    ),
+                    &theme,
+                ))
+                .child(seg_row(
+                    "Surface",
+                    div()
+                        .flex()
+                        .gap(px(2.0))
+                        .child(
+                            glass::segment(
+                                "surface-matte",
+                                "Matte",
+                                theme.surface == Surface::Matte,
+                                &theme,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let a = Theme::of(cx).pref;
+                                this.set_theme(a, Surface::Matte, cx);
+                            })),
+                        )
+                        .child(
+                            glass::segment(
+                                "surface-glass",
+                                "Glass",
+                                theme.surface == Surface::Glass,
+                                &theme,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let a = Theme::of(cx).pref;
+                                this.set_theme(a, Surface::Glass, cx);
+                            })),
+                        ),
+                    &theme,
+                ));
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(22.0))
+                .child(group)
+                .child(footnote(
+                    if glass_ok {
+                        "Glass: window vibrancy and frosted panels.".into()
+                    } else {
+                        "Glass here: frosted panels only; window vibrancy needs macOS.".into()
+                    },
+                    &theme,
+                ))
+        };
+
+        // ----- Notifications page body -------------------------------------------
+        let notifications_body = {
+            let group = settings_group(&theme).child(seg_row(
+                "Notifications",
+                div()
+                    .flex()
+                    .gap(px(2.0))
+                    .child(
+                        glass::segment("notify-on", "On", notify_on, &theme).on_click(cx.listener(
+                            |this, _, _, cx| {
+                                this.state
+                                    .update(cx, |s, cx| s.set_notifications_enabled(true, cx));
+                            },
+                        )),
+                    )
+                    .child(
+                        glass::segment("notify-off", "Off", !notify_on, &theme).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.state
+                                    .update(cx, |s, cx| s.set_notifications_enabled(false, cx));
+                            }),
+                        ),
+                    ),
+                &theme,
+            ));
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(22.0))
+                .child(group)
+                .child(footnote(
+                "A banner with the sender's picture when an agent finishes or a person writes, \
+                     only while you are not looking."
+                    .into(),
+                &theme,
+            ))
+        };
+
+        // ----- Updates page body -------------------------------------------------
+        let updates_body = {
+            let mut actions = div().flex().items_center().gap(px(14.0));
+            if let Some((id, label, installs)) = update_action {
+                actions = actions.child(link_button(id, label, false, &theme).on_click(
+                    cx.listener(move |this, _, _, cx| {
+                        this.state.update(cx, |s, cx| {
+                            if installs {
+                                s.install_update(cx);
+                            } else {
+                                s.check_for_updates(cx);
+                            }
+                        });
+                    }),
+                ));
+            }
+            if update_failed {
+                actions = actions.child(
+                    link_button("settings-update-download", "Download", false, &theme).on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.state.update(cx, |s, cx| s.open_download_page(cx));
+                        }),
+                    ),
+                );
+            }
+            let group = settings_group(&theme)
+                .child(seg_row(
+                    "Automatic updates",
+                    div()
+                        .flex()
+                        .gap(px(2.0))
+                        .child(
+                            glass::segment("auto-update-on", "On", auto_update, &theme).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.state.update(cx, |s, cx| s.set_auto_update(true, cx));
+                                }),
+                            ),
+                        )
+                        .child(
+                            glass::segment("auto-update-off", "Off", !auto_update, &theme)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.state.update(cx, |s, cx| s.set_auto_update(false, cx));
+                                })),
+                        ),
+                    &theme,
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.0))
+                        .min_h(px(44.0))
+                        .px(px(16.0))
+                        .py(px(10.0))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(px(TEXT_BODY))
+                                .text_color(if update_failed {
+                                    theme.danger
+                                } else {
+                                    theme.text
+                                })
+                                .child(update.status_line()),
+                        )
+                        .child(actions),
+                );
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(22.0))
+                .child(group)
+                .child(footnote(
+                    if auto_update {
+                        "New versions install in the background and Arbos restarts when you pause — \
+                         never during a call or while you type. The open chat comes back."
+                            .into()
+                    } else {
+                        "Arbos only tells you about new versions; press Update in the rail to install."
+                            .into()
+                    },
+                    &theme,
+                ))
+        };
+
+        // ----- About page body ---------------------------------------------------
+        let about_body = {
+            let group = settings_group(&theme)
+                .child(seg_row(
+                    "Turn details",
+                    div()
+                        .flex()
+                        .gap(px(2.0))
+                        .child(
+                            glass::segment("details-off", "Off", !show_details, &theme).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    if this.state.read(cx).show_details {
+                                        this.state.update(cx, |s, cx| s.toggle_show_details(cx));
+                                    }
+                                }),
+                            ),
+                        )
+                        .child(
+                            glass::segment("details-on", "On", show_details, &theme).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    if !this.state.read(cx).show_details {
+                                        this.state.update(cx, |s, cx| s.toggle_show_details(cx));
+                                    }
+                                }),
+                            ),
+                        ),
+                    &theme,
+                ))
+                .child(
+                    glass::row("Version", &theme)
+                        .child(value(update.current_version.to_string(), &theme)),
+                )
+                .child(glass::row("On this Mac", &theme).child(value(on_this_mac.clone(), &theme)))
+                .child(glass::row("Relay", &theme).child(value(
+                    format!(
+                        "{source} · {}{}",
+                        format!("{link:?}").to_lowercase(),
+                        device.map(|d| format!(" · {d}")).unwrap_or_default()
+                    ),
+                    &theme,
+                )));
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(22.0))
+                .child(group)
+                .child(footnote(
+                    "Turn details adds a \"Show details\" line under each reply with the model, \
+                     tools and tokens."
+                        .into(),
+                    &theme,
+                ))
+        };
+
+        let page = self.settings_page;
+        let tab = profile_tab;
+        let pane_width = profiles::SHEET_WIDTH.max(page.sheet_width());
+
+        // ----- a pushed page: `‹ Title` in the header, the page fills the pane ----
+        if page != SettingsPage::Root {
+            let back = glass::circle("settings-back", 30.0, &theme)
+                .child(icon("chevron-left", 14.0, theme.text))
+                .on_click(cx.listener(|this, _, _, cx| this.settings_back(cx)));
+            let body: Div = if page.is_content() {
+                let content = match page {
+                    SettingsPage::Credits => credits_body,
+                    SettingsPage::Machine => machine_body,
+                    SettingsPage::Appearance => appearance_body,
+                    SettingsPage::Notifications => notifications_body,
+                    SettingsPage::Updates => updates_body,
+                    SettingsPage::About => about_body,
+                    SettingsPage::Root
+                    | SettingsPage::Connectors
+                    | SettingsPage::Routines
+                    | SettingsPage::Channels
+                    | SettingsPage::Skills
+                    | SettingsPage::ThisMac
+                    | SettingsPage::Secrets => unreachable!("content pages only"),
+                };
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(22.0))
+                    .px(px(16.0))
+                    .pb(px(20.0))
+                    .child(content)
+            } else {
+                let panel: gpui::AnyElement = match page {
+                    SettingsPage::Root
+                    | SettingsPage::Credits
+                    | SettingsPage::Machine
+                    | SettingsPage::Appearance
+                    | SettingsPage::Notifications
+                    | SettingsPage::Updates
+                    | SettingsPage::About => unreachable!("handled above"),
+                    SettingsPage::Connectors => self.connectors.clone().into_any_element(),
+                    SettingsPage::Routines => self.routines.clone().into_any_element(),
+                    SettingsPage::Channels => self.channels.clone().into_any_element(),
+                    SettingsPage::Skills => self.skills.clone().into_any_element(),
+                    SettingsPage::ThisMac => self.local.clone().into_any_element(),
+                    SettingsPage::Secrets => self.secrets.clone().into_any_element(),
+                };
+                div()
+                    .flex()
+                    .flex_col()
+                    .px(px(6.0))
+                    .pb(px(12.0))
+                    .child(panel)
+            };
+            return profiles::pane_frame(
+                pane_width,
+                Some((page.title(), back)),
+                body,
+                None,
+                Some(&self.settings_scroll),
+                &theme,
+                cx,
+            );
+        }
+
+        // ----- hero: my picture (GitHub) and my name (inline field) ---------------
+        let who = account
+            .as_ref()
+            .filter(|a| !a.login.is_empty())
+            .map(|a| format!("@{}", a.login))
+            .unwrap_or_else(|| "Signed in".to_string());
+        let display_name = account
+            .as_ref()
+            .map(|a| a.name.trim().to_string())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| who.clone());
+        let person = account.as_ref().map(|account| crate::model::Person {
+            id: account.id.clone(),
+            handle: account.login.clone(),
+            name: Some(account.name.clone()),
+            avatar_url: account.avatar_url.clone(),
+            status: String::new(),
+            role: String::new(),
+            last_seen_at: None,
+            online: false,
+            avatar_color_index: None,
+        });
+        let picture = match person.as_ref() {
+            Some(p) => people::avatar(account_image, p, profiles::HERO_AVATAR, &theme),
+            None => div()
+                .size(px(profiles::HERO_AVATAR))
+                .rounded_full()
+                .bg(theme.surface_2),
+        }
+        .into_any_element();
+        // The crayon: pick a picture, it replaces the GitHub one everywhere.
+        let pic_click = account.is_some().then(|| {
+            let f = cx.listener(|this, _: &gpui::ClickEvent, _, cx| this.pick_my_avatar(cx));
+            Box::new(f) as profiles::HeroClick
+        });
+        let avatar = profiles::editable_picture("me-avatar", picture, pic_click).into_any_element();
+        let name_click = account.is_some().then(|| {
+            let f = cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
+                this.start_profile_edit(window, cx);
+            });
+            Box::new(f) as profiles::HeroClick
+        });
+        let name_el = profiles::editable_name(
+            "me-name",
+            &display_name,
+            self.profile_edit_open,
+            &self.name_input,
+            name_click,
+            &theme,
+        )
+        .into_any_element();
+        let mut hero = profiles::hero(avatar, name_el, &who, theme.text_muted, &theme);
+        if self.profile_edit_open {
+            // Editing: the handle under the name, Cancel / Save (Return saves).
+            hero = hero.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(8.0))
+                    .pt(px(4.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(
+                                div()
+                                    .text_size(px(TEXT_BODY))
+                                    .text_color(theme.text_muted)
+                                    .child("@"),
+                            )
+                            .child(
+                                div()
+                                    .w(px(200.0))
+                                    .px(px(10.0))
+                                    .py(px(6.0))
+                                    .rounded(px(10.0))
+                                    .bg(theme.field)
+                                    .border_1()
+                                    .border_color(theme.field_border)
+                                    .text_size(px(TEXT_BODY))
+                                    .child(self.handle_input.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(8.0))
+                            .child(
+                                glass::quiet_button("profile-edit-cancel", "Cancel", &theme)
+                                    .h(px(30.0))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.profile_edit_open = false;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                glass::primary_button("profile-edit-save", "Save", &theme)
+                                    .h(px(30.0))
+                                    .on_click(cx.listener(|this, _, _, cx| this.save_profile(cx))),
+                            ),
+                    ),
+            );
+        }
+        let tabs = profiles::tab_bar(&["Profile", "Settings"], tab, &theme, cx);
+
+        let mut body = div()
+            .flex()
+            .flex_col()
+            .gap(px(22.0))
+            .pb(px(20.0))
+            .child(div().flex().flex_col().child(hero).child(tabs));
+
+        if tab == 0 {
+            // ----- Profile: who I am on the relay -------------------------------------
+            let mut card = settings_group(&theme).mx(px(16.0));
+            card = card
+                .child(
+                    kit::value_row("me-name-row", "Name", display_name.clone(), &theme)
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.surface_2))
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.start_profile_edit(window, cx)),
+                        ),
+                )
+                .child(
+                    kit::value_row("me-handle-row", "Handle", who.clone(), &theme)
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.surface_2))
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.start_profile_edit(window, cx)),
+                        ),
+                );
+            if custom_avatar {
+                card = card.child(
+                    kit::danger_row("me-remove-picture", "Remove picture", &theme).on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.state.update(cx, |s, cx| s.remove_my_avatar(cx));
+                        }),
+                    ),
+                );
+            }
+            body = body.child(card).child(footnote(
+                "Your name, handle and picture are what other people and their agents see, here and on the iPhone. Signed in with GitHub.".into(),
+                &theme,
+            ));
+            return profiles::pane_frame(
+                pane_width,
+                None,
+                body,
+                None,
+                Some(&self.settings_scroll),
+                &theme,
+                cx,
+            );
+        }
+
+        // ----- Settings: D80 cards, mockup g order, every Mac setting kept --------
+        let group = |theme: &Theme| settings_group(theme).mx(px(16.0));
+        // Appearance · Notifications.
+        body = body.child(
+            group(&theme)
+                .child(page_row(
+                    "settings-appearance",
+                    "circle-half",
+                    SettingsPage::Appearance,
+                    Some(appearance_summary),
+                    false,
+                    &theme,
+                    cx,
+                ))
+                .child(page_row(
+                    "settings-notifications",
+                    "bell",
+                    SettingsPage::Notifications,
+                    Some(if notify_on { "On" } else { "Off" }.into()),
+                    true,
+                    &theme,
+                    cx,
+                )),
+        );
+        // Credits · Connected apps · Secrets.
+        let mut account_group = group(&theme);
+        if account.is_some() {
+            account_group = account_group.child(page_row(
+                "settings-credits",
+                "creditcard",
+                SettingsPage::Credits,
+                credits_summary.clone(),
+                false,
+                &theme,
+                cx,
+            ));
+        }
+        account_group = account_group
+            .child(page_row(
+                "settings-connectors",
+                "link",
+                SettingsPage::Connectors,
+                connectors_summary,
+                false,
+                &theme,
+                cx,
+            ))
+            .child(page_row(
+                "settings-secrets",
+                "key",
+                SettingsPage::Secrets,
+                Some(secrets_value),
+                true,
+                &theme,
+                cx,
+            ));
+        body = body.child(account_group);
+        // Routines · Channels · Skills · On this Mac.
+        body = body.child(
+            group(&theme)
+                .child(page_row(
+                    "settings-routines",
+                    "sparkles",
+                    SettingsPage::Routines,
+                    None,
+                    false,
+                    &theme,
+                    cx,
+                ))
+                .child(page_row(
+                    "settings-channels",
+                    "globe",
+                    SettingsPage::Channels,
+                    None,
+                    false,
+                    &theme,
+                    cx,
+                ))
+                .child(page_row(
+                    "settings-skills",
+                    "cpu",
+                    SettingsPage::Skills,
+                    Some(format!("{skill_count} in library")),
+                    false,
+                    &theme,
+                    cx,
+                ))
+                .child(
+                    kit::nav_row(
+                        "settings-local",
+                        "window",
+                        "On this Mac",
+                        Some(on_this_mac),
+                        &theme,
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_settings_page(SettingsPage::ThisMac, window, cx)
+                    })),
+                ),
+        );
+        // Machine · Updates.
+        body = body.child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_shrink_0()
+                .child(
+                    group(&theme)
+                        .child(
+                            kit::nav_row(
+                                "settings-machine",
+                                "desktop",
+                                "Machine",
+                                Some(shown.label().to_string()),
+                                &theme,
+                            )
+                            .on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    this.open_settings_page(SettingsPage::Machine, window, cx)
+                                },
+                            )),
+                        )
+                        .child(page_row(
+                            "settings-updates",
+                            "arrow-down",
+                            SettingsPage::Updates,
+                            Some(if auto_update { "On" } else { "Off" }.into()),
+                            true,
+                            &theme,
+                            cx,
+                        )),
+                )
+                .child(footnote(machine_footer.into(), &theme)),
+        );
+        // Send feedback · About.
+        body = body.child(
+            group(&theme)
+                .child(
+                    kit::nav_row(
+                        "settings-feedback",
+                        "square-pencil",
+                        "Send feedback",
+                        Some("⌘⇧F".into()),
+                        &theme,
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| this.open_feedback(window, cx))),
+                )
+                .child(page_row(
+                    "settings-about",
+                    "info",
+                    SettingsPage::About,
+                    Some(update.current_version.to_string()),
+                    true,
+                    &theme,
+                    cx,
+                )),
+        );
+        if account.is_some() {
+            body = body.child(group(&theme).child(
+                kit::danger_row("sign-out", "Sign out", &theme).on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.close_settings(cx);
+                        this.state.update(cx, |s, cx| s.sign_out(cx));
+                    },
+                )),
+            ));
+        }
+        profiles::pane_frame(
+            pane_width,
+            None,
+            body,
+            None,
+            Some(&self.settings_scroll),
+            &theme,
+            cx,
+        )
+    }
+}

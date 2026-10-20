@@ -18,11 +18,10 @@ use crate::ui::groups;
 use crate::ui::icons::icon;
 use crate::ui::people;
 use crate::ui::shell::Shell;
-use crate::ui::sidebar;
-use crate::ui::theme::{Theme, TEXT_BODY, TEXT_SMALL};
+use crate::ui::theme::Theme;
 
 use super::{
-    card, chats_of, collect, editable_name, editable_picture, empty, file_list, frame, hero,
+    card, chats_of, collect, editable_name, editable_picture, empty, file_list, frame, hero, kit,
     list_row, media_grid, tab_bar, HeroClick, HERO_AVATAR,
 };
 
@@ -119,7 +118,10 @@ pub(super) fn page(
         &theme,
     )
     .into_any_element();
-    let hero = hero(avatar, name, "", theme.text_muted, &theme);
+    // Subtitle: the member count (the person pane shows @handle here).
+    let count = people.len();
+    let subtitle = format!("{count} member{}", if count == 1 { "" } else { "s" });
+    let hero = hero(avatar, name, &subtitle, theme.text_muted, &theme);
 
     // ----- tabs -----------------------------------------------------------------
     let tabs = tab_bar(&TABS, tab, &theme, cx);
@@ -131,41 +133,31 @@ pub(super) fn page(
             let i_own = !space.is_guest();
             if is_people || i_own {
                 list = list.child(
-                    div()
-                        .id("profile-add-members")
-                        .flex()
-                        .items_center()
-                        .gap(px(12.0))
-                        .min_h(px(52.0))
-                        .px(px(14.0))
-                        .border_b_1()
-                        .border_color(theme.border)
-                        .text_size(px(TEXT_BODY))
-                        .text_color(theme.text)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme.surface_2))
-                        .child(
-                            div()
-                                .size(px(36.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(icon("person-plus", 19.0, theme.text_muted)),
-                        )
-                        .child("Add members")
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            let id = sid.clone();
-                            this.state.update(cx, |s, cx| {
-                                if is_people {
-                                    s.select_project(id, cx);
-                                } else {
-                                    s.invite_target = Some(id);
-                                }
-                                s.open_new_chat(cx);
-                            });
-                            let handle = this.people_input.read(cx).focus_handle(cx);
-                            window.focus(&handle, cx);
-                        })),
+                    kit::row(
+                        "profile-add-members",
+                        kit::Leading::Glyph("person-plus"),
+                        "Add members",
+                        None,
+                        None,
+                        None,
+                        false,
+                        &theme,
+                    )
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.surface_2))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        let id = sid.clone();
+                        this.state.update(cx, |s, cx| {
+                            if is_people {
+                                s.select_project(id, cx);
+                            } else {
+                                s.invite_target = Some(id);
+                            }
+                            s.open_new_chat(cx);
+                        });
+                        let handle = this.people_input.read(cx).focus_handle(cx);
+                        window.focus(&handle, cx);
+                    })),
                 );
             }
             for (i, p) in people.iter().enumerate() {
@@ -201,7 +193,8 @@ pub(super) fn page(
                 list = list.child(
                     list_row(
                         ElementId::Name(SharedString::from(format!("profile-member-{}", p.handle))),
-                        people::avatar(images[i].clone(), p, 36.0, &theme).into_any_element(),
+                        people::avatar(images[i].clone(), p, kit::AVATAR, &theme)
+                            .into_any_element(),
                         title,
                         format!("@{}", p.handle),
                         theme.text_muted,
@@ -256,7 +249,7 @@ pub(super) fn page(
                                 "profile-agent-{}",
                                 a.project_id
                             ))),
-                            avatars::agent_member(a, 36.0, &theme).into_any_element(),
+                            avatars::agent_member(a, kit::AVATAR, &theme).into_any_element(),
                             a.name.clone(),
                             sub,
                             theme.text_muted,
@@ -288,7 +281,7 @@ pub(super) fn page(
                 list = list.child(
                     list_row(
                         "profile-agent-self",
-                        avatars::project(&space, 36.0, &theme).into_any_element(),
+                        avatars::project(&space, kit::AVATAR, &theme).into_any_element(),
                         space.name.clone(),
                         sub,
                         theme.text_muted,
@@ -315,16 +308,16 @@ pub(super) fn page(
             } else {
                 if !content.media.is_empty() {
                     lib = lib
-                        .child(section_title(
-                            &format!("Images · {}", content.media.len()),
+                        .child(kit::section_title(
+                            format!("Images · {}", content.media.len()),
                             &theme,
                         ))
                         .child(media_grid(&content.media, &theme));
                 }
                 if !content.files.is_empty() {
                     lib = lib
-                        .child(section_title(
-                            &format!("Files · {}", content.files.len()),
+                        .child(kit::section_title(
+                            format!("Files · {}", content.files.len()),
                             &theme,
                         ))
                         .child(file_list(&content.files, "doc", "", &theme));
@@ -342,18 +335,6 @@ pub(super) fn page(
         .child(tabs)
         .child(body_tab);
     Some(frame(body, None, None, &theme, cx))
-}
-
-/// "Images · 23" above a Library section.
-fn section_title(text: &str, theme: &Theme) -> Div {
-    div()
-        .flex_shrink_0()
-        .px(px(16.0))
-        .pt(px(4.0))
-        .pb(px(8.0))
-        .text_size(px(TEXT_SMALL))
-        .text_color(theme.text_muted)
-        .child(text.to_string())
 }
 
 /// The hover-only ✕ at a member row's trailing edge; click arms the confirm.
@@ -387,41 +368,22 @@ fn remove_confirm(
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(8.0))
-        .px(px(14.0))
-        .py(px(10.0))
-        .border_b_1()
-        .border_color(theme.border)
-        .child(
-            div()
-                .text_size(px(TEXT_SMALL))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(theme.text)
-                .child(question.to_string()),
-        )
-        .child(
-            div()
-                .flex()
-                .justify_end()
-                .gap(px(6.0))
-                .child(
-                    sidebar::confirm_button("member-remove-cancel", "Cancel", false, theme)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.member_remove_armed = None;
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    sidebar::confirm_button("member-remove-go", "Remove", true, theme).on_click(
-                        cx.listener(move |this, _, _, cx| {
-                            this.member_remove_armed = None;
-                            go(this, cx);
-                            cx.notify();
-                        }),
-                    ),
-                ),
-        )
+    kit::confirm_row(
+        question,
+        "Remove",
+        kit::confirm_button("member-remove-cancel", "Cancel", false, theme).on_click(cx.listener(
+            |this, _, _, cx| {
+                this.member_remove_armed = None;
+                cx.notify();
+            },
+        )),
+        kit::confirm_button("member-remove-go", "Remove", true, theme).on_click(cx.listener(
+            move |this, _, _, cx| {
+                this.member_remove_armed = None;
+                go(this, cx);
+                cx.notify();
+            },
+        )),
+        theme,
+    )
 }

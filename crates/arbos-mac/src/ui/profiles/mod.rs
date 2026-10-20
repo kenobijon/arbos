@@ -10,6 +10,8 @@
 
 mod agent;
 mod group;
+pub(crate) mod kit;
+mod me;
 mod user;
 
 use std::sync::Arc;
@@ -38,8 +40,7 @@ pub fn pane(page: &ProfilePage, shell: &Shell, cx: &mut Context<Shell>) -> Optio
         }
         ProfilePage::Group { space_id } => group::page(space_id, shell, cx),
         ProfilePage::Agent { project_id } => agent::page(project_id, shell, cx),
-        // My profile + settings live in the shell (the settings bodies are there).
-        ProfilePage::Me => Some(shell.render_me_pane(cx)),
+        ProfilePage::Me => Some(me::page(shell, cx)),
     }
 }
 
@@ -332,10 +333,7 @@ pub(super) fn info_row(caption: &str, value: impl Into<SharedString>, theme: &Th
 }
 
 pub(super) fn card(theme: &Theme) -> Div {
-    glass::group(theme)
-        .flex_shrink_0()
-        .mx(px(16.0))
-        .mb(px(14.0))
+    kit::card(theme)
 }
 
 /// Segmented tab bar; `tabs[i]` is selected when `i == current`.
@@ -394,61 +392,30 @@ pub(super) fn tab_bar(
 
 /// Centered grey line for an empty tab.
 pub(super) fn empty(text: &str, theme: &Theme) -> Div {
-    div()
-        .flex_shrink_0()
-        .px(px(16.0))
-        .py(px(28.0))
-        .flex()
-        .justify_center()
-        .text_size(px(TEXT_SMALL))
-        .text_color(theme.text_muted)
-        .child(text.to_string())
+    kit::empty(text, theme)
 }
 
-/// A list row: leading element, title, subtitle, optional trailing element.
+/// A list row: 36 pt picture, title, subtitle, optional trailing element —
+/// the kit's row, so members, groups and files share one height and inset.
 pub(super) fn list_row(
     id: impl Into<ElementId>,
     leading: AnyElement,
     title: impl Into<SharedString>,
     subtitle: impl Into<SharedString>,
-    subtitle_color: Hsla,
+    _subtitle_color: Hsla,
     trailing: Option<AnyElement>,
     theme: &Theme,
 ) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .gap(px(12.0))
-        .min_h(px(56.0))
-        .px(px(14.0))
-        .py(px(6.0))
-        .border_b_1()
-        .border_color(theme.border)
-        .child(leading)
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap(px(1.0))
-                .child(
-                    div()
-                        .text_size(px(TEXT_BODY))
-                        .text_color(theme.text)
-                        .truncate()
-                        .child(title.into()),
-                )
-                .child(
-                    div()
-                        .text_size(px(TEXT_SMALL))
-                        .text_color(subtitle_color)
-                        .truncate()
-                        .child(subtitle.into()),
-                ),
-        )
-        .children(trailing)
+    kit::row(
+        id,
+        kit::Leading::Avatar(leading),
+        title,
+        Some(subtitle.into()),
+        None,
+        trailing,
+        false,
+        theme,
+    )
 }
 
 // ----- content from the chat docs ----------------------------------------------
@@ -647,13 +614,13 @@ pub(super) fn file_list(items: &[Found], glyph: &'static str, none: &str, theme:
         list = list.child(list_row(
             ElementId::Name(SharedString::from(format!("profile-file-{i}"))),
             div()
-                .size(px(40.0))
+                .size(px(kit::AVATAR))
                 .rounded(px(10.0))
                 .bg(theme.surface_2)
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(icon(glyph, 18.0, theme.primary))
+                .child(icon(glyph, 18.0, theme.text_muted))
                 .into_any_element(),
             title,
             sub.join(" · "),
@@ -691,7 +658,7 @@ pub(super) fn link_list(items: &[Link], theme: &Theme, cx: &mut Context<Shell>) 
             list_row(
                 ElementId::Name(SharedString::from(format!("profile-link-{i}"))),
                 div()
-                    .size(px(40.0))
+                    .size(px(kit::AVATAR))
                     .rounded(px(10.0))
                     .bg(crate::ui::groups::sender_color(&host, theme))
                     .flex()

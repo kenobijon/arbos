@@ -2192,6 +2192,24 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// A picture uploaded with `setUserAvatar` (the relay serves it under
+    /// `/avatars/`); GitHub pictures come from GitHub's host. Same rule as the Mac.
+    var hasCustomAvatar: Bool {
+        user?.avatarUrl?.contains("/avatars/") == true
+    }
+
+    /// Settings profile picture: `DELETE /me/avatar` — back to the GitHub picture.
+    func removeUserAvatar() async -> Bool {
+        do {
+            user = try await api.deleteMeAvatar()
+            saveAccountCache()
+            return true
+        } catch {
+            notice = Notice(text: "Picture not removed: \(error.localizedDescription)")
+            return false
+        }
+    }
+
     func deletePeopleChat(_ chatId: String) {
         peopleChats.removeAll { $0.id == chatId }
         rooms[chatId]?.stop(); rooms[chatId] = nil; docs[chatId] = nil; messages[chatId] = nil

@@ -1,0 +1,319 @@
+//! The one row/card kit every right pane draws with (Jacob, 2026-10-20:
+//! "make the settings, user and group panels consistent"). Settings cards,
+//! member lists, group lists, file lists, Block user and Sign out all come
+//! from here, so a metric lives in exactly one place:
+//!
+//! * card: `PANEL_RADIUS` corners, `bubble_assistant` fill (the D80 grey, the iPhone's
+//!   `PaneCard`), 16 pt side margins;
+//! * row: 48 pt minimum, 16 pt inset, 12 pt gap, hairline under the label;
+//! * leading: a 30 pt icon tile (settings), a 36 pt avatar (people, agents,
+//!   groups) or nothing;
+//! * detail: `TEXT_SMALL` muted, right-aligned; subtitle: `TEXT_SMALL` muted
+//!   under the title; chevron 13 pt faint when the row pushes a page;
+//! * danger row: centred red label, same height.
+
+use gpui::{div, prelude::*, px, AnyElement, Div, ElementId, FontWeight, SharedString, Stateful};
+
+use crate::ui::glass;
+use crate::ui::icons::icon;
+use crate::ui::theme::{Theme, PANEL_RADIUS, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
+
+/// Row height, side inset, gap between leading and text.
+pub const ROW_MIN_H: f32 = 48.0;
+pub const INSET: f32 = 16.0;
+pub const GAP: f32 = 12.0;
+/// The avatar size on people / agent / group rows.
+pub const AVATAR: f32 = 36.0;
+/// The hairline starts under the label: inset + leading + gap.
+fn separator_inset(leading: &Leading) -> f32 {
+    match leading {
+        Leading::None => INSET,
+        Leading::Tile(_) => INSET + 30.0 + GAP,
+        Leading::Avatar(_) | Leading::Glyph(_) => INSET + AVATAR + GAP,
+    }
+}
+
+/// What sits at a row's leading edge.
+pub enum Leading {
+    None,
+    /// An Apple-style 30 pt icon tile (settings rows).
+    Tile(&'static str),
+    /// A 36 pt picture (people, agents, groups, files).
+    Avatar(AnyElement),
+    /// A 36 pt box with a glyph in it (Add members, files).
+    Glyph(&'static str),
+}
+
+/// The grouped card: one fill, one radius, one margin.
+pub fn card(theme: &Theme) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .flex_shrink_0()
+        .mx(px(INSET))
+        .mb(px(14.0))
+        .rounded(px(PANEL_RADIUS))
+        .bg(theme.bubble_assistant)
+        .overflow_hidden()
+}
+
+fn leading_el(leading: Leading, theme: &Theme) -> Option<AnyElement> {
+    match leading {
+        Leading::None => None,
+        Leading::Tile(glyph) => Some(glass::icon_tile(glyph, theme).into_any_element()),
+        Leading::Avatar(el) => Some(
+            div()
+                .size(px(AVATAR))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(el)
+                .into_any_element(),
+        ),
+        Leading::Glyph(glyph) => Some(
+            div()
+                .size(px(AVATAR))
+                .flex_shrink_0()
+                .rounded(px(10.0))
+                .bg(theme.surface_2)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(icon(glyph, 18.0, theme.text_muted))
+                .into_any_element(),
+        ),
+    }
+}
+
+/// One row: leading, title (+ optional subtitle), optional right detail,
+/// optional trailing element, chevron when it pushes a page. The hairline
+/// sits under the label, the row's last child hides it (`last`).
+#[allow(clippy::too_many_arguments)]
+pub fn row(
+    id: impl Into<ElementId>,
+    leading: Leading,
+    title: impl Into<SharedString>,
+    subtitle: Option<SharedString>,
+    detail: Option<SharedString>,
+    trailing: Option<AnyElement>,
+    chevron: bool,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let sep = separator_inset(&leading);
+    let leading = leading_el(leading, theme);
+    div()
+        .id(id)
+        .relative()
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .gap(px(GAP))
+        .min_h(px(ROW_MIN_H))
+        .px(px(INSET))
+        .py(px(6.0))
+        .text_size(px(TEXT_BODY))
+        .text_color(theme.text)
+        .children(leading)
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(1.0))
+                .child(div().truncate().child(title.into()))
+                .when_some(subtitle, |el, s| {
+                    el.child(
+                        div()
+                            .text_size(px(TEXT_SMALL))
+                            .text_color(theme.text_muted)
+                            .truncate()
+                            .child(s),
+                    )
+                }),
+        )
+        .when_some(detail, |el, d| {
+            el.child(
+                div()
+                    .flex_shrink_0()
+                    .text_size(px(TEXT_SMALL))
+                    .text_color(theme.text_muted)
+                    .child(d),
+            )
+        })
+        .children(trailing)
+        .when(chevron, |el| {
+            el.child(icon("chevron-right", 13.0, theme.text_faint))
+        })
+        .child(
+            div()
+                .absolute()
+                .left(px(sep))
+                .right(px(0.0))
+                .bottom(px(0.0))
+                .h(px(1.0))
+                .bg(theme.border),
+        )
+}
+
+/// A row that pushes a page: tile, label, detail, chevron, hover.
+pub fn nav_row(
+    id: impl Into<ElementId>,
+    glyph: &'static str,
+    title: impl Into<SharedString>,
+    detail: Option<String>,
+    theme: &Theme,
+) -> Stateful<Div> {
+    row(
+        id,
+        Leading::Tile(glyph),
+        title,
+        None,
+        detail.map(SharedString::from),
+        None,
+        true,
+        theme,
+    )
+    .cursor_pointer()
+    .hover(|s| s.bg(theme.surface_2))
+}
+
+/// Label left, value right (not interactive).
+pub fn value_row(
+    id: impl Into<ElementId>,
+    title: impl Into<SharedString>,
+    value: impl Into<SharedString>,
+    theme: &Theme,
+) -> Stateful<Div> {
+    row(
+        id,
+        Leading::None,
+        title,
+        None,
+        Some(value.into()),
+        None,
+        false,
+        theme,
+    )
+}
+
+/// The destructive action at the end of a pane (Block user, Sign out,
+/// Remove picture): a centred red label in its own card.
+pub fn danger_row(id: impl Into<ElementId>, label: &str, theme: &Theme) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_center()
+        .min_h(px(ROW_MIN_H))
+        .px(px(INSET))
+        .text_size(px(TEXT_BODY))
+        .text_color(theme.danger)
+        .cursor_pointer()
+        .hover(|s| s.bg(theme.surface_2))
+        .child(label.to_string())
+}
+
+/// Grey explanatory line under a card.
+pub fn footnote(text: impl Into<SharedString>, theme: &Theme) -> Div {
+    div()
+        .flex_shrink_0()
+        .px(px(INSET * 2.0))
+        .mt(px(-8.0))
+        .mb(px(14.0))
+        .text_size(px(TEXT_TINY))
+        .text_color(theme.text_muted)
+        .child(text.into())
+}
+
+/// "Images · 23" above a section.
+pub fn section_title(text: impl Into<SharedString>, theme: &Theme) -> Div {
+    div()
+        .flex_shrink_0()
+        .px(px(INSET))
+        .pt(px(4.0))
+        .pb(px(8.0))
+        .text_size(px(TEXT_SMALL))
+        .text_color(theme.text_muted)
+        .child(text.into())
+}
+
+/// Centered grey line for an empty list.
+pub fn empty(text: &str, theme: &Theme) -> Div {
+    div()
+        .flex_shrink_0()
+        .px(px(INSET))
+        .py(px(28.0))
+        .flex()
+        .justify_center()
+        .text_size(px(TEXT_SMALL))
+        .text_color(theme.text_muted)
+        .child(text.to_string())
+}
+
+/// A confirm pill: Cancel (quiet) or the red action.
+pub fn confirm_button(
+    id: &'static str,
+    label: &'static str,
+    danger: bool,
+    theme: &Theme,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .h(px(28.0))
+        .px(px(12.0))
+        .rounded_full()
+        .flex()
+        .items_center()
+        .text_size(px(TEXT_SMALL))
+        .font_weight(FontWeight::SEMIBOLD)
+        .cursor_pointer()
+        .when(danger, |el| {
+            el.bg(theme.danger)
+                .text_color(gpui::white())
+                .hover(|s| s.opacity(0.88))
+        })
+        .when(!danger, |el| {
+            el.bg(theme.field)
+                .border_1()
+                .border_color(theme.field_border)
+                .text_color(theme.text)
+                .hover(|s| s.bg(theme.surface_2))
+        })
+        .child(label)
+}
+
+/// "Remove @x from Group?" in a row's place: the question, then Cancel / the action.
+pub fn confirm_row(
+    question: &str,
+    action: &'static str,
+    cancel: Stateful<Div>,
+    go: Stateful<Div>,
+    theme: &Theme,
+) -> Div {
+    let _ = action;
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .px(px(INSET))
+        .py(px(10.0))
+        .border_b_1()
+        .border_color(theme.border)
+        .child(
+            div()
+                .text_size(px(TEXT_SMALL))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.text)
+                .child(question.to_string()),
+        )
+        .child(
+            div()
+                .flex()
+                .justify_end()
+                .gap(px(6.0))
+                .child(cancel)
+                .child(go),
+        )
+}
