@@ -327,7 +327,7 @@ pub fn render(
             },
         ))
     });
-    div()
+    let bar = div()
         .h(px(HEADER_HEIGHT))
         .flex_shrink_0()
         .w_full()
@@ -339,18 +339,42 @@ pub fn render(
         .pr(px(10.0))
         .border_b_1()
         .border_color(theme.border)
-        .window_drag()
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(4.0))
-                .flex_shrink_0()
-                .children(sidebar_toggle)
-                .child(title.flex_shrink_0().max_w(px(300.0))),
-        )
-        .when_some(tabs, |el, t| el.child(t))
-        .child(right.flex_shrink_0())
+        .window_drag();
+    if space.is_people_group() {
+        // A group has no tabs: its pill sits centred at the top of the chat,
+        // like the agent pill Jacob sees (redesign mockups a, b). Equal side
+        // slots keep it centred whether or not the sidebar toggle shows.
+        let side = px(CONTROL + 8.0);
+        return bar
+            .child(
+                div()
+                    .w(side)
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .children(sidebar_toggle),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .justify_center()
+                    .child(title.flex_shrink_0().max_w(px(300.0))),
+            )
+            .child(div().w(side).flex_shrink_0());
+    }
+    bar.child(
+        div()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .flex_shrink_0()
+            .children(sidebar_toggle)
+            .child(title.flex_shrink_0().max_w(px(300.0))),
+    )
+    .when_some(tabs, |el, t| el.child(t))
+    .child(right.flex_shrink_0())
 }
 
 /// The agent's chat tabs, next to its name: every visible chat as a pill
