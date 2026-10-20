@@ -1609,6 +1609,30 @@ impl Db {
         })
     }
 
+    /// Spend of one tagged purpose (`usage.api LIKE '%:<purpose>'`) in a time window, split by
+    /// whether the project's owner is a test user: `(who, api, calls, usd)` — the audit query the
+    /// feedback poller used to run against the SQLite file as root.
+    pub fn usage_by_purpose(
+        &self,
+        purpose: &str,
+        since_ms: i64,
+        until_ms: i64,
+    ) -> Result<Vec<(String, String, i64, f64)>> {
+        let like = format!("%:{purpose}");
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT CASE WHEN us.test = 1 THEN 'test' ELSE 'real' END AS who, u.api, COUNT(*), COALESCE(SUM(u.usd), 0.0)
+                 FROM usage u JOIN projects p ON p.id = u.project_id LEFT JOIN users us ON us.id = p.user_id
+                 WHERE u.api LIKE ?1 AND u.at >= ?2 AND u.at < ?3
+                 GROUP BY who, u.api ORDER BY who, u.api",
+            )?;
+            let rows = st.query_map(params![like, since_ms, until_ms], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?;
+            rows.collect()
+        })
+    }
+
     // ---- wake jobs, push queue, timings -------------------------------------------------------
 
     pub fn upsert_wake_job(&self, user_id: &str, reason: &str) -> Result<()> {

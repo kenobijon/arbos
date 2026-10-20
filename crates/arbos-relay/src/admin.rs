@@ -466,3 +466,118 @@ pub async fn push_test(
     }
     Json(json!({ "sent_to": results.len(), "results": results })).into_response()
 }
+
+#[derive(Deserialize, Default)]
+pub struct UsageDayQuery {
+    /// UTC day `YYYY-MM-DD`; default today.
+    #[serde(default)]
+    pub day: Option<String>,
+}
+
+/// Start of a UTC calendar day in ms, from `YYYY-MM-DD`.
+fn day_start_ms(day: &str) -> Option<i64> {
+    let mut it = day.split('-');
+    let y: i64 = it.next()?.parse().ok()?;
+    let m: i64 = it.next()?.parse().ok()?;
+    let d: i64 = it.next()?.parse().ok()?;
+    if it.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    // Days since 1970-01-01 (proleptic Gregorian), the usual civil-from-days arithmetic.
+    let (y, m) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * m + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days * 86_400_000)
+}
+
+fn today_utc() -> String {
+    let days = now_ms().div_euclid(86_400_000);
+    // Inverse of `day_start_ms`.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// `GET /admin/usage/{purpose}?day=YYYY-MM-DD` — spend of one tagged purpose (`x-arbos-purpose`,
+/// e.g. `memory-tree`) for a UTC day, split real/test by the project owner, with totals: the
+/// audit numbers without reading the relay's SQLite file (which also holds key material).
+pub async fn usage_by_purpose(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(purpose): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<UsageDayQuery>,
+) -> Response {
+    if let Err(r) = admin_only(&principal) {
+        return *r;
+    }
+    let purpose: String = purpose
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(32)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if purpose.is_empty() {
+        return api_error(StatusCode::BAD_REQUEST, "bad_request", "purpose required");
+    }
+    let day = q.day.unwrap_or_else(today_utc);
+    let Some(start) = day_start_ms(&day) else {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "day must be YYYY-MM-DD",
+        );
+    };
+    let rows = match state
+        .db
+        .usage_by_purpose(&purpose, start, start + 86_400_000)
+    {
+        Ok(r) => r,
+        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    };
+    let mut real = 0.0;
+    let mut test = 0.0;
+    for (who, _, _, usd) in &rows {
+        if who == "test" {
+            test += usd;
+        } else {
+            real += usd;
+        }
+    }
+    Json(json!({
+        "purpose": purpose,
+        "day": day,
+        "from_ms": start,
+        "to_ms": start + 86_400_000,
+        "rows": rows.iter().map(|(who, api, calls, usd)| json!({ "who": who, "api": api, "calls": calls, "usd": usd })).collect::<Vec<_>>(),
+        "totals": { "real": real, "test": test, "total": real + test },
+    }))
+    .into_response()
+}
+
+#[cfg(test)]
+mod day_tests {
+    use super::*;
+
+    #[test]
+    fn utc_day_arithmetic_round_trips() {
+        assert_eq!(day_start_ms("1970-01-01"), Some(0));
+        assert_eq!(day_start_ms("2026-10-20"), Some(1_792_454_400_000));
+        assert_eq!(day_start_ms("2026-13-01"), None);
+        assert_eq!(day_start_ms("nope"), None);
+        let today = today_utc();
+        let start = day_start_ms(&today).expect("today parses");
+        let now = now_ms();
+        assert!(start <= now && now < start + 86_400_000);
+    }
+}

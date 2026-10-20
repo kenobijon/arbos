@@ -60,7 +60,7 @@ CLI:  feedback_poller.py [run] | status | testers | set-cursor <ISO-8601>
       | inject <image|-> "<comment>" [ios|mac] [--handle <login>] [--origin "<text>"] [--email <tester email, grouping only>]
       | requeue <id>… [--allow "<who confirmed>"] | prioritize <id>… | confirm <id> [note] | handoff <id> [label] | deployed <id> [note]
       | track <id> <issue> "<comment>" [--handle <login>] [--owner <label>]   (a hand-filed, handed-off item)
-      | leadtime [since-ISO] | memtree-cost [YYYY-MM-DD]   (audit numbers; memtree-cost reads relay.db, root)
+      | leadtime [since-ISO] | memtree-cost [YYYY-MM-DD]   (audit numbers; memtree-cost asks GET /admin/usage/memory-tree, else relay.db as root)
 """
 
 from __future__ import annotations
@@ -2915,16 +2915,28 @@ def main(argv: list[str]) -> int:
                "FROM usage u JOIN projects p ON p.id = u.project_id LEFT JOIN users us ON us.id = p.user_id "
                f"WHERE u.api LIKE '%:memory-tree' AND u.at >= {midnight} AND u.at < {end} GROUP BY who, u.api ORDER BY who, u.api;")
         db = "/var/lib/arbos-relay/relay.db"
-        try:
-            import sqlite3
-            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-            rows = con.execute(sql).fetchall()
-        except Exception:  # noqa: BLE001 — the relay's db is root-only; sudo when the caller may
-            r = subprocess.run(["sudo", "-n", "sqlite3", "-separator", "|", db, sql], capture_output=True, text=True)
-            if r.returncode != 0:
-                print(f"cannot read {db} ({r.stderr.strip()[:120]}); run as root: sudo sqlite3 {db} \"{sql}\"")
-                return 2
-            rows = [tuple(line.split("|")) for line in r.stdout.splitlines() if line]
+        rows = None
+        if cfg.relay_url and cfg.relay_admin_token:
+            # The relay answers the same query over its admin API (GET /admin/usage/memory-tree?day=),
+            # so no read access to relay.db (which also holds key material) is needed.
+            try:
+                doc = http_json("GET", f"{cfg.relay_url}/admin/usage/memory-tree?day={day}",
+                                headers={"Authorization": f"Bearer {cfg.relay_admin_token}"})
+                rows = [(r["who"], r["api"], r["calls"], r["usd"]) for r in doc.get("rows", [])]
+            except Exception as e:  # noqa: BLE001 — an older relay without the route falls back to the file
+                print(f"(relay admin usage unavailable: {str(e)[:100]}; reading {db})")
+        if rows is None:
+            try:
+                import sqlite3
+                con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+                rows = con.execute(sql).fetchall()
+            except Exception:  # noqa: BLE001 — the relay's db is root-only; sudo when the caller may
+                r = subprocess.run(["sudo", "-n", "sqlite3", "-separator", "|", db, sql], capture_output=True, text=True)
+                if r.returncode != 0:
+                    print(f"cannot read {db} ({r.stderr.strip()[:120]}); set ARBOS_RELAY_URL + ARBOS_RELAY_ADMIN_TOKEN "
+                          f"(GET /admin/usage/memory-tree) or run as root: sudo sqlite3 {db} \"{sql}\"")
+                    return 2
+                rows = [tuple(line.split("|")) for line in r.stdout.splitlines() if line]
         totals: dict[str, float] = {"real": 0.0, "test": 0.0}
         print(f"memory-tree {day} UTC (real = projects owned by non-test users; the $5/day rule is judged on real):")
         for who, api, calls, usd in rows:

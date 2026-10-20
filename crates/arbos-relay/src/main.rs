@@ -382,6 +382,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/livekit/webhook", post(calls::livekit_webhook))
         .route("/admin/calls", get(calls::admin_calls))
+        .route("/admin/usage/{purpose}", get(admin::usage_by_purpose))
         .route("/admin/release", post(releases::admin_release))
         .route("/admin/installs", get(releases::admin_installs))
         .route("/releases/current", get(releases::current))
