@@ -1211,6 +1211,9 @@ class Loop:
         if info.get("submitted_by") == "agent":
             src = (f"the user's agent `{info.get('agent_name') or 'agent'}` (submit_feedback tool) on the user's behalf — "
                    "the words are the agent's summary of what the user reported in chat")
+        if info.get("submitted_by") == "app":
+            src = (f"the {info.get('device') or 'app'} app itself: an automatic diagnostic after a background error "
+                   "(no user wrote this; the `context` block carries the error kind and detail)")
         if info.get("screenshots"):
             shot_line = f"{dims or 'unknown size'} (attached)"
         else:
@@ -1263,6 +1266,14 @@ class Loop:
         agent_sent = info.get("submitted_by") == "agent"
         if agent_sent:
             in_app = f"agent `{info.get('agent_name') or 'agent'}` via submit_feedback, on behalf of the user ({info.get('device') or 'app'})"
+        # Automatic app diagnostics (`submitted_by: "app"`): nobody typed this — the app hit an error the
+        # user did not cause (a thumbnail that did not load) and filed it silently; the relay folds repeats
+        # of the same `signature` into this one item and counts them.
+        app_sent = info.get("submitted_by") == "app"
+        if app_sent:
+            raw = info.get("raw") or {}
+            in_app = (f"the {info.get('device') or 'app'} app itself — automatic diagnostic, no user action "
+                      f"(signature `{raw.get('signature') or '?'}`, seen {raw.get('occurrences') or 1}×)")
         source_label = {"testflight": "TestFlight", "mac": in_app, "app": in_app,
                         "inbox": info.get("origin") or "synthetic (poller inbox)"}.get(info["source"], info["source"])
         body_lines = [
@@ -1288,6 +1299,9 @@ class Loop:
         if agent_sent:
             self.gh.ensure_label("agent-submitted", "0075CA", "Filed by the user's agent through submit_feedback, on the user's behalf")
             labels.append("agent-submitted")
+        if app_sent:
+            self.gh.ensure_label("auto-diagnostic", "5319E7", "Filed by the app itself after a background error; one issue per error signature")
+            labels.append("auto-diagnostic")
         if deferral:
             self.gh.ensure_label("deferred", "BFD4F2", "Product area intentionally disabled for now; no automatic fix")
         if st.get("issue"):
@@ -2816,7 +2830,7 @@ def tester_summary(store: Store) -> list[dict]:
         if len(st.get("tester") or "") > len(row["tester"]):
             row["tester"] = st["tester"]
         row["ingested"] += 1
-        row["sources"].add("agent-submitted" if info.get("submitted_by") == "agent" else "relayed chat" if info.get("origin") else info.get("source") or "?")
+        row["sources"].add("agent-submitted" if info.get("submitted_by") == "agent" else "auto-diagnostic" if info.get("submitted_by") == "app" else "relayed chat" if info.get("origin") else info.get("source") or "?")
         if st.get("issue"):
             row["issues"] += 1
         status = st.get("status", "?")
