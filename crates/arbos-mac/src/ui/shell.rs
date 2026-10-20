@@ -2992,11 +2992,20 @@ impl Shell {
             }
 
             let header = glass::sheet_header("Settings", None, Some(done), &theme);
+            // Done and a click on the dimmed area around the card both close
+            // the sheet; clicks inside stay (glass::sheet stops propagation).
             return glass::sheet(
                 SETTINGS_WIDTH,
                 &theme,
                 header,
                 body.h(px(SETTINGS_BODY_HEIGHT)),
+            )
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    this.close_settings(cx);
+                    Composer::focus(&this.composer, window, cx);
+                }),
             );
         }
 
@@ -3062,7 +3071,15 @@ impl Shell {
                 .child(panel)
                 .into_any_element()
         };
-        glass::sheet(page.sheet_width(), &theme, header, page_inner)
+        // Done and a click on the dimmed area around the card both close the
+        // sheet; clicks inside stay.
+        glass::sheet(page.sheet_width(), &theme, header, page_inner).on_mouse_down(
+            gpui::MouseButton::Left,
+            cx.listener(|this, _, window, cx| {
+                this.close_settings(cx);
+                Composer::focus(&this.composer, window, cx);
+            }),
+        )
     }
 
     // ----- sign-in -------------------------------------------------------------------
