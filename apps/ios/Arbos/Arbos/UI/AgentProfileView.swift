@@ -48,32 +48,22 @@ struct AgentEditSheet: View {
                                 row(icon: "cpu", title: "Model", value: "\(project.shortModel) · \(project.effort.label)")
                             }
                             .buttonStyle(.plain)
-                            divider
                             Button { showVoice = true } label: {
                                 row(icon: "waveform", title: "Voice", value: voiceLabel(project))
                             }
                             .buttonStyle(.plain)
-                            divider
-                            HStack(spacing: 14) {
-                                Image(systemName: "eye")
-                                    .font(theme.font(16, weight: .medium))
-                                    .foregroundStyle(theme.text)
-                                    .frame(width: 28)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("Camera vision").font(theme.font(Theme.body)).foregroundStyle(theme.text)
-                                    Text("On video calls \(project.name) can see your camera while it is on.")
-                                        .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
-                                }
-                                Spacer()
-                                Toggle("", isOn: Binding(get: { project.visionEnabled }, set: { model.setVision(projectId, enabled: $0) }))
-                                    .labelsHidden()
-                                    .tint(theme.online)
-                                    .disabled(project.shared)
-                                    .accessibilityLabel("Camera vision")
-                            }
-                            .padding(.horizontal, 14)
-                            .frame(minHeight: 58)
-                            divider
+                            PaneRow(
+                                leading: .tile("eye"),
+                                title: "Camera vision",
+                                subtitle: "On video calls \(project.name) can see your camera while it is on.",
+                                trailing: AnyView(
+                                    Toggle("", isOn: Binding(get: { project.visionEnabled }, set: { model.setVision(projectId, enabled: $0) }))
+                                        .labelsHidden()
+                                        .tint(theme.online)
+                                        .disabled(project.shared)
+                                        .accessibilityLabel("Camera vision")
+                                )
+                            )
                             Button { showShare = true } label: {
                                 row(icon: "person.2", title: project.shared ? "Members" : "Share", value: project.shared ? "Owned by @\(project.ownerHandle ?? "?")" : "Invite by @handle")
                             }
@@ -85,7 +75,6 @@ struct AgentEditSheet: View {
                         card {
                             row(icon: "desktopcomputer", title: "Workspace", value: workspaceLabel(project), chevron: false)
                             if project.spendCapUsd > 0 {
-                                divider
                                 row(icon: "dollarsign.circle", title: "Spend today", value: String(format: "$%.2f of $%.0f", project.spendTodayUsd, project.spendCapUsd), chevron: false)
                             }
                         }
@@ -222,11 +211,9 @@ struct AgentEditSheet: View {
     }
 
     private func card<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
-        PaneCard(separatorInset: PaneKit.separatorInset(.tile(""))) { content() }
+        let rows = content()
+        return PaneCard(separatorInset: PaneKit.separatorInset(.tile(""))) { rows }
     }
-
-    /// Cards draw their own hairlines now; kept as an empty spacer for call sites.
-    private var divider: some View { EmptyView() }
 
     private func workspaceLabel(_ project: Project) -> String {
         switch model.machine.workspaces[project.id] ?? project.workspace {
