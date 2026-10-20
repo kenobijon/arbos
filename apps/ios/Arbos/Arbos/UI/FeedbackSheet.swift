@@ -1,7 +1,6 @@
 // "Send feedback" (Grok Bot styled): the captured screen as a card you can
 // remove or swap for a photo, a note, Send. Opened by shake, screenshot,
-// Settings, or a chat's "…" menu. Posts to the relay's feedback endpoint
-// (the fix loop).
+// or Settings. Posts to the relay's feedback endpoint (the fix loop).
 
 import SwiftUI
 import PhotosUI
