@@ -790,6 +790,10 @@ impl Transcript {
                         cx,
                     )
                     .max_w(px(ASSISTANT_MAX_WIDTH))
+                    // A flex item's auto min-width is its content's; without
+                    // this the bubble keeps 620 pt when the right pane opens
+                    // and runs under it instead of re-wrapping.
+                    .min_w_0()
                     .when(fill, |el| el.w_full())
                     .px(px(14.0))
                     .when(first, |el| el.pt(px(11.0)).rounded_t(r))

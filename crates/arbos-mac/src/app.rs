@@ -1894,6 +1894,9 @@ impl AppState {
     pub fn select_project(&mut self, project_id: Id, cx: &mut Context<Self>) {
         if self.selected_project.as_deref() != Some(project_id.as_str()) {
             self.search_chat = None;
+            // The right pane belongs to the chat it was opened from; a new
+            // chat starts without one.
+            self.close_profile(cx);
         }
         self.reveal_message = None;
         self.highlight_message = None;
