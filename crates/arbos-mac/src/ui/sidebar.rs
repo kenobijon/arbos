@@ -1330,7 +1330,7 @@ pub fn is_control_click(event: &gpui::ClickEvent) -> bool {
 }
 
 /// Cancel / Delete pill for the row menu's delete confirmation.
-fn confirm_button(
+pub(crate) fn confirm_button(
     id: &'static str,
     label: &'static str,
     danger: bool,
