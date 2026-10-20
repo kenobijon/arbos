@@ -209,6 +209,9 @@ pub enum Event {
         tool_name: String,
         #[serde(default)]
         args: Value,
+        /// Set when another tool issued this call (a `codemode` script): the model-issued call's id.
+        #[serde(rename = "parentToolCallId", default)]
+        parent_tool_call_id: Option<String>,
     },
     ToolExecutionUpdate {
         #[serde(rename = "toolCallId")]
@@ -229,6 +232,9 @@ pub enum Event {
         is_error: bool,
         #[serde(rename = "durationMs", default)]
         duration_ms: Option<u64>,
+        /// See `ToolExecutionStart::parent_tool_call_id`.
+        #[serde(rename = "parentToolCallId", default)]
+        parent_tool_call_id: Option<String>,
     },
     QueueUpdate {
         #[serde(default)]
@@ -313,4 +319,41 @@ pub fn encode_line(cmd: &Command) -> String {
     let mut s = serde_json::to_string(cmd).expect("command json");
     s.push('\n');
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// pi 1.2 marks a call made by a `codemode` script with `parentToolCallId` (its id is
+    /// `<parent>/<n>`); a model-issued call has neither.
+    #[test]
+    fn nested_tool_events_carry_their_parent() {
+        let nested: Event = serde_json::from_str(
+            r#"{"type":"tool_execution_start","toolCallId":"toolu_1/2","toolName":"read","args":{"path":"a"},"parentToolCallId":"toolu_1"}"#,
+        )
+        .unwrap();
+        match nested {
+            Event::ToolExecutionStart {
+                parent_tool_call_id,
+                tool_call_id,
+                ..
+            } => {
+                assert_eq!(parent_tool_call_id.as_deref(), Some("toolu_1"));
+                assert_eq!(tool_call_id, "toolu_1/2");
+            }
+            other => panic!("wrong event {other:?}"),
+        }
+        let direct: Event = serde_json::from_str(
+            r#"{"type":"tool_execution_end","toolCallId":"toolu_1","toolName":"codemode","result":{},"isError":false}"#,
+        )
+        .unwrap();
+        match direct {
+            Event::ToolExecutionEnd {
+                parent_tool_call_id,
+                ..
+            } => assert!(parent_tool_call_id.is_none()),
+            other => panic!("wrong event {other:?}"),
+        }
+    }
 }

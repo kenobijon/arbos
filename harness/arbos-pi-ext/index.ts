@@ -35,6 +35,12 @@ const ROUTE_PREFIX = "(Arbos: call `route` first.) ";
 const SHELL_TOOLS = new Set(["bash", "shell", "run_command", "execute_command"]);
 const APPROVAL_POLL_MS = Number(process.env.ARBOS_APPROVAL_POLL_MS ?? 1500);
 const APPROVAL_WAIT_MS = Number(process.env.ARBOS_APPROVAL_WAIT_MS ?? 14 * 60 * 1000); // under the turn deadline
+// Code mode (D86): agentd sets ARBOS_CODE_MODE=on|off per pi spawn (flag file / box env, default off).
+const CODE_MODE = (process.env.ARBOS_CODE_MODE ?? "off").trim().toLowerCase() === "on";
+// Default deadline of a `codemode` script when the model sets none (code mode on): the turn deadline.
+const SCRIPT_TIMEOUT_MS = Number(process.env.ARBOS_SCRIPT_TIMEOUT_MS ?? 15 * 60 * 1000);
+// Tools that talk to the user or to agentd's turn state: direct calls only, never from a script.
+const DIRECT_ONLY_TOOLS = new Set(["route", "ask_user", "send_message"]);
 
 type ApprovalState = "allowed" | "pending" | "approved" | "rejected" | "expired";
 
@@ -139,21 +145,32 @@ export default function arbosPiExt(pi: ExtensionAPI) {
   });
 
   // ---- 1. deny-list veto + audit before execution ----------------------------------------
+  // Calls a `codemode` script makes arrive here too (pi runs nested calls through the same
+  // pipeline, with `parentToolCallId` set): deny-list, audit and approval apply to them unchanged.
   pi.on("tool_call", async (event) => {
+    const parent = event.parentToolCallId ?? null;
     const denied = matchDeny(event.toolName, event.input as Record<string, unknown>);
+    const directOnly = parent !== null && DIRECT_ONLY_TOOLS.has(event.toolName);
     audit({
       kind: "tool_call",
       session: sessionId,
       role: SESSION_ROLE,
       tool: event.toolName,
       call_id: event.toolCallId,
+      parent,
       input_hash: inputHash(event.input),
       input_preview: JSON.stringify(event.input).slice(0, 200),
-      denied: denied?.rule ?? null,
+      denied: denied?.rule ?? (directOnly ? "direct-only-from-script" : null),
     });
     if (denied) {
       void hook("/hook/deny", { session_id: sessionId, tool: event.toolName, rule: denied.rule, call_id: event.toolCallId });
       return { block: true, reason: `Blocked by the Arbos deny-list (${denied.rule}): ${denied.why}` };
+    }
+    if (directOnly) {
+      return { block: true, reason: `${event.toolName} cannot be called from a script: call it directly, after the script.` };
+    }
+    if (event.toolName === "codemode" && parent === null) {
+      ensureScriptDeadline(event.input as { code?: unknown });
     }
     // Risky shell commands wait for an approval card (feature `approve`); agentd's
     // `arbos_core::approval` matcher is the single source of truth for what counts as risky.
@@ -163,6 +180,26 @@ export default function arbosPiExt(pi: ExtensionAPI) {
     }
     return undefined;
   });
+
+  /** Code mode on: a script without its own `// @options:` deadline gets the default one. */
+  function ensureScriptDeadline(input: { code?: unknown }): void {
+    if (!CODE_MODE || typeof input.code !== "string") return;
+    const nl = input.code.indexOf("\n");
+    const first = nl < 0 ? input.code : input.code.slice(0, nl);
+    const m = /^\s*\/\/\s*@options:\s*(\{.*\})\s*$/.exec(first);
+    if (m) {
+      try {
+        const opts = JSON.parse(m[1]) as Record<string, unknown>;
+        if (typeof opts.timeout_ms === "number") return;
+        opts.timeout_ms = SCRIPT_TIMEOUT_MS;
+        input.code = `// @options: ${JSON.stringify(opts)}${nl < 0 ? "" : input.code.slice(nl)}`;
+      } catch {
+        // Malformed options line: pi reports it to the model; nothing to add.
+      }
+      return;
+    }
+    input.code = `// @options: ${JSON.stringify({ timeout_ms: SCRIPT_TIMEOUT_MS })}\n${input.code}`;
+  }
 
   async function awaitApproval(
     tool: string,
@@ -218,6 +255,9 @@ export default function arbosPiExt(pi: ExtensionAPI) {
 
   // ---- 4a. offload hook: big tool results become handles -----------------------------------
   pi.on("tool_result", async (event) => {
+    // A result going back into a script stays whole: the script filters it, and only the script's
+    // own (capped) output reaches the model — that output is offloaded here like any other result.
+    if (event.parentToolCallId) return undefined;
     const textBlocks = event.content.filter((c) => c.type === "text") as { type: "text"; text: string }[];
     const full = textBlocks.map((b) => b.text).join("\n");
     if (full.length <= OFFLOAD_CHARS) return undefined;
@@ -488,5 +528,5 @@ export default function arbosPiExt(pi: ExtensionAPI) {
     void hook("/hook/compacted", { session_id: sessionId });
   });
 
-  audit({ kind: "extension_loaded", rules: DENY_RULES.map((r) => r.name) });
+  audit({ kind: "extension_loaded", rules: DENY_RULES.map((r) => r.name), code_mode: CODE_MODE });
 }
