@@ -2764,23 +2764,6 @@ impl AppState {
         cx.notify();
     }
 
-    /// Voice API §11: may the agent look through my camera on calls. Optimistic, then PATCH.
-    pub fn set_vision_enabled(&mut self, project_id: Id, enabled: bool, cx: &mut Context<Self>) {
-        if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
-            p.vision_enabled = enabled;
-        }
-        if !enabled {
-            if let Some(c) = self.my_call.as_mut() {
-                c.agent_seeing = false;
-            }
-        }
-        self.command(ClientCommand::SetVisionEnabled {
-            project_id,
-            enabled,
-        });
-        cx.notify();
-    }
-
     /// Ask the relay for the voice list (the picker opening).
     pub fn fetch_voices(&mut self) {
         self.command(ClientCommand::FetchVoices);
