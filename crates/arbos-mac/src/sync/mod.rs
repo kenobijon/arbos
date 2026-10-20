@@ -276,6 +276,12 @@ pub enum ClientCommand {
     StartDm {
         handle: String,
     },
+    /// `POST /chats {kind: group, members}`; then optional `POST /chats/{id}/agents`.
+    /// The chat lands in the next `Projects` event.
+    CreatePeopleGroup {
+        handles: Vec<String>,
+        agent_ids: Vec<Id>,
+    },
     /// Presence `typing` for a people chat.
     SetTyping {
         chat_id: Id,

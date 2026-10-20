@@ -277,6 +277,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         // Handled above; listed so a new variant still fails to compile here.
         ClientCommand::SearchPeople { .. }
         | ClientCommand::StartDm { .. }
+        | ClientCommand::CreatePeopleGroup { .. }
         | ClientCommand::SetTyping { .. }
         | ClientCommand::AddAgent { .. }
         | ClientCommand::RemoveAgent { .. }
@@ -4794,6 +4795,86 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                     other.handle
                 )));
             }
+            true
+        }
+        ClientCommand::CreatePeopleGroup { handles, agent_ids } => {
+            let mut members: Vec<Person> = Vec::new();
+            for raw in handles {
+                let handle = raw.trim().trim_start_matches('@').to_lowercase();
+                if handle.is_empty() || handle == ME_HANDLE {
+                    continue;
+                }
+                if members.iter().any(|p| p.handle == handle) {
+                    continue;
+                }
+                let Some(other) = directory().into_iter().find(|p| p.handle == handle) else {
+                    let _ = shared.events.send(SyncEvent::PeopleError(format!(
+                        "No GitHub user named @{handle}."
+                    )));
+                    return true;
+                };
+                members.push(other);
+            }
+            if members.is_empty() {
+                let _ = shared.events.send(SyncEvent::PeopleError(
+                    "Add at least one other person".into(),
+                ));
+                return true;
+            }
+            let agents: Vec<AgentMember> = {
+                let projects = shared.projects.lock().unwrap();
+                agent_ids
+                    .iter()
+                    .filter_map(|pid| {
+                        projects
+                            .iter()
+                            .find(|p| p.id == *pid && !p.is_people())
+                            .map(|p| AgentMember {
+                                project_id: p.id.clone(),
+                                name: p.name.clone(),
+                                icon: p.icon.clone(),
+                                color: p.color.clone(),
+                                handle: Project::mention_slug(&p.name),
+                                owner_id: ME_ID.into(),
+                                owner_handle: ME_HANDLE.into(),
+                                reply_policy: ReplyPolicy::Mention,
+                                avatar: p.avatar.clone(),
+                                avatar_color: p.avatar_color.clone(),
+                                avatar_color_index: p.avatar_color_index,
+                                description: None,
+                                model: None,
+                                owner: None,
+                            })
+                    })
+                    .collect()
+            };
+            let id = new_id();
+            let title = members
+                .iter()
+                .map(|p| p.handle.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let mut space = people_space(&id, members[0].clone(), agents);
+            space.kind = SpaceKind::Group;
+            space.name = title.clone();
+            space.people = members;
+            space.pending = space.people.iter().any(|p| p.status == "invited");
+            shared.projects.lock().unwrap().push(space);
+            shared.chats.lock().unwrap().push(Chat {
+                id: id.clone(),
+                project_id: id.clone(),
+                title,
+                is_pinned: true,
+                is_system: false,
+                kind: ChatKind::Chat,
+                participants: Vec::new(),
+                unread: false,
+                last_message_at: now_ms(),
+                archived_at: None,
+            });
+            add_doc(shared, ChatDoc::new(&id, "people"));
+            emit_projects(shared);
+            emit_chats(shared);
             true
         }
         ClientCommand::SetTyping { .. } => true,
