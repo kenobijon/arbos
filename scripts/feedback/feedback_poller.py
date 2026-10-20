@@ -2224,7 +2224,7 @@ class Loop:
         ios_files = any(f.startswith("apps/ios/") for f in files)
         if st.get("testflight_build") or (ios_files and st.get("status") == "shipped"):
             parts.append(f"TestFlight {st.get('testflight_build') or 'build'}")
-        if mac_files or st.get("edge_release"):
+        if mac_files or (st.get("edge_release") or "").startswith("edge-"):
             tag = None
             if commit:
                 for r in self.gh.releases():
