@@ -2716,7 +2716,14 @@ impl Agent {
                 if tool_name == "route" || tool_name == "send_message" {
                     return Ok(false);
                 }
-                // A tool is about to run: the ack sentence (if any) is complete by now.
+                // Agent-flow §1: never start real work on a bare "Working…" row. If route
+                // omitted `ack`, or tools ran before route posted one, put "On it." up now.
+                let needs_ack = !t.ack_split
+                    && t.ack_text.trim().is_empty()
+                    && !matches!(t.route, Some(ValidRoute::Reply { .. }));
+                if needs_ack {
+                    self.write_ack(host, t, "On it.").await;
+                }
                 self.maybe_split_ack(host, t, true).await;
                 self.set_activity(host, t, crate::activity::label(tool_name, args))
                     .await;
@@ -2918,16 +2925,16 @@ impl Agent {
         // Drop planning / routing thoughts and trailing tool-narration; keep only the
         // user-facing sentence(s), with glued ".Word" spacing fixed.
         let cleaned = ProseFilter::clean_prose(t.ack_text.trim());
-        let cleaned = cleaned.trim().to_owned();
+        let mut cleaned = cleaned.trim().to_owned();
+        // act/new/wake must still show one bubble: a thought-aloud-only ack used to leave
+        // the chat on bare "Working…" until the result (feedback AMus6 / ALYEPIee).
+        if cleaned.is_empty() && action != "reply" {
+            cleaned = "On it.".to_owned();
+            tracing::info!(chat_id = %t.chat_id, action, "ack bubble fallback after thought-aloud strip");
+        }
         if cleaned.is_empty() {
             t.ack_text.clear();
             t.ack_split = true;
-            if action != "reply" && !t.row_closed {
-                self.close_row(host, t, "ack").await;
-            }
-            if action == "act" {
-                self.open_row(host, t, "result").await;
-            }
             tracing::info!(chat_id = %t.chat_id, action, "ack bubble dropped (thought-aloud only)");
             return;
         }

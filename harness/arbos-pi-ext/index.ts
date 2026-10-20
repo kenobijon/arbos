@@ -178,6 +178,10 @@ export default function arbosPiExt(pi: ExtensionAPI) {
     const parent = event.parentToolCallId ?? null;
     const denied = matchDeny(event.toolName, event.input as Record<string, unknown>);
     const directOnly = parent !== null && DIRECT_ONLY_TOOLS.has(event.toolName);
+    // Agent-flow §1: the main turn must `route` (with `ack` for act/new/wake) before any other
+    // tool. Without this, the chat shows only "<name> is working" while work runs.
+    const beforeRoute =
+      SESSION_ROLE === "main" && !routed && event.toolName !== "route" && parent === null;
     audit({
       kind: "tool_call",
       session: sessionId,
@@ -187,7 +191,10 @@ export default function arbosPiExt(pi: ExtensionAPI) {
       parent,
       input_hash: inputHash(event.input),
       input_preview: JSON.stringify(event.input).slice(0, 200),
-      denied: denied?.rule ?? (directOnly ? "direct-only-from-script" : null),
+      denied:
+        denied?.rule ??
+        (directOnly ? "direct-only-from-script" : null) ??
+        (beforeRoute ? "route-first" : null),
     });
     if (denied) {
       void hook("/hook/deny", { session_id: sessionId, tool: event.toolName, rule: denied.rule, call_id: event.toolCallId });
@@ -195,6 +202,13 @@ export default function arbosPiExt(pi: ExtensionAPI) {
     }
     if (directOnly) {
       return { block: true, reason: `${event.toolName} cannot be called from a script: call it directly, after the script.` };
+    }
+    if (beforeRoute) {
+      return {
+        block: true,
+        reason:
+          "Call `route` first (required every turn). For act/new/wake, set `ack` to one short sentence the user sees before any work runs.",
+      };
     }
     if (event.toolName === "codemode" && parent === null) {
       ensureScriptDeadline(event.input as { code?: unknown });
@@ -360,7 +374,7 @@ export default function arbosPiExt(pi: ExtensionAPI) {
                 type: "text",
                 text: acked
                   ? "Route accepted: act. Your acknowledgement is already in the chat. Do the work (send_message only at real milestones), then write only the conversational result — no thinking aloud, no process narration."
-                  : "Route accepted: act. Follow your plan, then write only the conversational result — no thinking aloud.",
+                  : "Route accepted: act. Arbos posted a short acknowledgement for you. Follow your plan, then write only the conversational result — no thinking aloud, no process narration.",
               },
             ],
             details: { action },
