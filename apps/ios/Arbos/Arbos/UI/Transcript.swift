@@ -17,10 +17,51 @@ enum Block: Equatable, Hashable {
     case table([String])
 }
 
+/// Grok Bot's quote header inside a reply bubble: speech-bubble glyph, then the replied-to
+/// message's first words in quotes, one line, truncated with "…". Tapping it reveals the original.
+struct Quote: Equatable, Hashable {
+    /// The message replied to (`replyTo` on the row).
+    var messageId: Id
+    var text: String
+
+    /// The header shows this many characters of the original before "…".
+    static let maxChars = 64
+
+    /// The quote for a message that replies to `replyTo`; an original that is not loaded
+    /// (older than the snapshot) still gets a header so the reference is never lost.
+    static func forReply(_ replyTo: String, in messages: [Message]) -> Quote {
+        let text = messages.first { $0.id == replyTo }.map(Self.text) ?? "Earlier message"
+        return Quote(messageId: replyTo, text: text)
+    }
+
+    /// First words of a message: its first non-empty line, whitespace collapsed, cut on a word
+    /// boundary; an attachment-only message names its file.
+    static func text(of message: Message) -> String {
+        var line = message.plainText
+            .split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { !$0.isEmpty }
+            .map { $0.split(whereSeparator: \.isWhitespace).joined(separator: " ") } ?? ""
+        if line.isEmpty {
+            for part in message.parts {
+                if case .attachment(_, let a) = part { line = a.name; break }
+            }
+        }
+        if line.isEmpty { return "Message" }
+        guard line.count > maxChars else { return line }
+        var cut = String(line.prefix(maxChars))
+        if let space = cut.lastIndex(of: " "), cut.distance(from: cut.startIndex, to: space) > maxChars / 2 {
+            cut = String(cut[..<space])
+        }
+        while let last = cut.last, ",;:.".contains(last) { cut.removeLast() }
+        return cut + "…"
+    }
+}
+
 enum RowKind: Equatable {
-    case user(text: String, pending: Bool)
+    case user(text: String, pending: Bool, quote: Quote?)
     /// Another person's message in a people chat: left bubble with handle + avatar.
-    case other(text: String, handle: String, avatar: String?)
+    case other(text: String, handle: String, avatar: String?, quote: Quote?)
     case assistant(blocks: [Block], live: Bool, caption: String?)
     /// Shared agent in a people chat: same shape as `.other` (avatar + handle + bubble),
     /// with an optional reply chip for the message it answers.
@@ -100,12 +141,13 @@ enum Transcript {
                 // row already carries the media. Showing them as a bubble is noise.
                 if !text.isEmpty, !(hasImage && Self.isGenericMediaLabel(text)) {
                     let mine = !people || me == nil || message.sender == me || message.sender == "user"
+                    let quote = message.replyTo.flatMap { $0.isEmpty ? nil : Quote.forReply($0, in: messages) }
                     if mine {
                         chunk.append(Row(id: "\(message.id)#user", messageId: message.id, role: .user,
-                                         kind: .user(text: text, pending: message.pending)))
+                                         kind: .user(text: text, pending: message.pending, quote: quote)))
                     } else {
                         chunk.append(Row(id: "\(message.id)#other", messageId: message.id, role: .project,
-                                         kind: .other(text: text, handle: message.senderHandle ?? "someone", avatar: message.senderAvatar)))
+                                         kind: .other(text: text, handle: message.senderHandle ?? "someone", avatar: message.senderAvatar, quote: quote)))
                     }
                 }
             case .system:
@@ -567,6 +609,10 @@ struct RowView: View {
     let width: CGFloat
     /// How far the transcript has been dragged left to reveal iMessage-style times (0…`timeRevealWidth`).
     var timeReveal: CGFloat = 0
+    /// A tap on a reply bubble's quote header: the chat scrolls to this message id.
+    var onQuoteTap: ((Id) -> Void)? = nil
+    /// Briefly tinted after a quote tap landed on this row's message.
+    var highlighted: Bool = false
 
     /// Trailing column width for swipe-revealed times (fits "12:59 PM").
     static let timeRevealWidth: CGFloat = 56
@@ -602,6 +648,13 @@ struct RowView: View {
                 reactionChips
             }
         }
+        // Quote tap landed here: a soft accent wash that fades out (Mac parity).
+        .background(
+            RoundedRectangle(cornerRadius: Theme.bubbleRadius + 4, style: .continuous)
+                .fill(theme.accent.opacity(highlighted ? 0.14 : 0))
+                .padding(-4)
+        )
+        .animation(.easeInOut(duration: 0.35), value: highlighted)
         // iMessage: drag left → whole row slides; time sits on the trailing edge.
         .offset(x: -timeReveal)
         .overlay(alignment: .trailing) {
@@ -621,21 +674,26 @@ struct RowView: View {
     @ViewBuilder
     private var bubble: some View {
         switch row.kind {
-        case .user(let text, let pending):
+        case .user(let text, let pending, let quote):
             HStack {
                 Spacer(minLength: 0)
-                Text(Markdown.inline(text, color: theme.userText, link: theme.accent, codeChip: theme.userCodeChip))
-                    .font(theme.font(Theme.body))
-                    .lineSpacing(Theme.bodyLineSpacing)
-                    .tint(theme.accent)
-                    .textSelection(.enabled)
-                    .padding(.horizontal, Theme.bubbleHPad)
-                    .padding(.vertical, Theme.bubbleVPad)
-                    .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleUser))
-                    .frame(maxWidth: maxBubble, alignment: .trailing)
-                    .opacity(pending ? 0.6 : 1)
+                VStack(alignment: .leading, spacing: 6) {
+                    if let quote {
+                        quoteHeader(quote, color: theme.userText)
+                    }
+                    Text(Markdown.inline(text, color: theme.userText, link: theme.accent, codeChip: theme.userCodeChip))
+                        .font(theme.font(Theme.body))
+                        .lineSpacing(Theme.bodyLineSpacing)
+                        .tint(theme.accent)
+                        .textSelection(.enabled)
+                }
+                .padding(.horizontal, Theme.bubbleHPad)
+                .padding(.vertical, Theme.bubbleVPad)
+                .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleUser))
+                .frame(maxWidth: maxBubble, alignment: .trailing)
+                .opacity(pending ? 0.6 : 1)
             }
-        case .other(let text, let handle, let avatar):
+        case .other(let text, let handle, let avatar, let quote):
             HStack(alignment: .bottom, spacing: 8) {
                 Button { model.openPersonProfile(handle: handle, avatarUrl: avatar, chatId: chatId) } label: {
                     PersonAvatar(url: avatar, handle: handle, size: 26, name: model.personName(handle: handle), id: model.personId(handle: handle))
@@ -647,14 +705,19 @@ struct RowView: View {
                         .font(theme.font(Theme.tiny, weight: .medium))
                         .foregroundStyle(theme.muted)
                         .padding(.leading, 4)
-                    Text(Markdown.inline(text, color: theme.text, link: theme.accent, codeChip: theme.codeChip))
-                        .font(theme.font(Theme.body))
-                        .lineSpacing(Theme.bodyLineSpacing)
-                        .tint(theme.accent)
-                        .textSelection(.enabled)
-                        .padding(.horizontal, Theme.bubbleHPad)
-                        .padding(.vertical, Theme.bubbleVPad)
-                        .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
+                    VStack(alignment: .leading, spacing: 6) {
+                        if let quote {
+                            quoteHeader(quote, color: theme.text)
+                        }
+                        Text(Markdown.inline(text, color: theme.text, link: theme.accent, codeChip: theme.codeChip))
+                            .font(theme.font(Theme.body))
+                            .lineSpacing(Theme.bodyLineSpacing)
+                            .tint(theme.accent)
+                            .textSelection(.enabled)
+                    }
+                    .padding(.horizontal, Theme.bubbleHPad)
+                    .padding(.vertical, Theme.bubbleVPad)
+                    .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
                 }
                 .frame(maxWidth: maxBubble - 34, alignment: .leading)
                 Spacer(minLength: 0)
@@ -821,6 +884,27 @@ struct RowView: View {
         } else {
             PersonAvatar(url: nil, handle: handle, size: 26, name: model.personName(handle: handle), id: model.personId(handle: handle))
         }
+    }
+
+    /// Grok Bot's quote header at the top of a reply bubble: speech-bubble glyph, then the
+    /// original's first words in quotes on one line. Tap → the chat scrolls to the original.
+    private func quoteHeader(_ quote: Quote, color: Color) -> some View {
+        Button {
+            onQuoteTap?(quote.messageId)
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "bubble.left")
+                    .font(.system(size: 11, weight: .medium))
+                Text("“\(quote.text)”")
+                    .font(theme.font(Theme.small))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .foregroundStyle(color.opacity(0.72))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Replying to: \(quote.text)")
     }
 
     /// Compact reply reference above the prose (iMessage-style), not inline "@user asked:".

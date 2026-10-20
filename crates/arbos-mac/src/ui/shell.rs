@@ -185,6 +185,9 @@ pub struct Shell {
     /// The row menu's Delete was clicked once: it now shows "Delete …?" with
     /// Cancel / Delete instead of the action list (iPhone confirmationDialog).
     pub(crate) row_delete_armed: bool,
+    /// Group pane › Members: the row whose ✕ was clicked (`user:<id>` or
+    /// `agent:<project>`); it shows "Remove … ?" with Cancel / Remove.
+    pub(crate) member_remove_armed: Option<String>,
     /// Right-click menu on a chat tab or archived chat: the chat and click point.
     pub(crate) chat_menu: Option<(crate::model::Id, gpui::Point<gpui::Pixels>)>,
     /// People chats (D72): the @search field, the header pickers.
@@ -552,6 +555,7 @@ impl Shell {
             settings_scroll,
             row_menu: None,
             row_delete_armed: false,
+            member_remove_armed: None,
             chat_menu: None,
             react_menu: None,
             group_picker_open: false,
@@ -1050,6 +1054,7 @@ impl Shell {
     pub(crate) fn close_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.hide_settings_page(cx);
         self.profile_edit_open = false;
+        self.member_remove_armed = None;
         self.state.update(cx, |s, cx| {
             s.close_profile(cx);
         });

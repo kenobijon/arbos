@@ -18,6 +18,7 @@ use crate::ui::groups;
 use crate::ui::icons::icon;
 use crate::ui::people;
 use crate::ui::shell::Shell;
+use crate::ui::sidebar;
 use crate::ui::theme::{Theme, TEXT_BODY, TEXT_SMALL};
 
 use super::{
@@ -82,6 +83,14 @@ pub(super) fn page(
     // A people group: any member names it or gives it a picture (relay
     // `PATCH /chats/{id}`); a shared project keeps its owner's name.
     let editable = space.is_people_group();
+    // Owners remove members (relay: chat owner for people, the agent's own
+    // owner for agents); the row's ✕ shows on hover, then asks once.
+    let i_own_group = if is_people {
+        space.owner_handle.as_deref().is_none_or(|o| o == me_handle)
+    } else {
+        !space.is_guest()
+    };
+    let armed = shell.member_remove_armed.clone();
     let content = collect(state, &chats_of(state, &space.id));
 
     // ----- hero: picture with the crayon, name as an inline field ----------------
@@ -166,8 +175,29 @@ pub(super) fn page(
                 } else {
                     p.display_name()
                 };
+                let key = format!("user:{}", p.id);
+                if armed.as_deref() == Some(key.as_str()) {
+                    let (sid, uid) = (space.id.clone(), p.id.clone());
+                    list = list.child(remove_confirm(
+                        &format!("Remove @{} from {}?", p.handle, space.name),
+                        move |this, cx| {
+                            let (sid, uid) = (sid.clone(), uid.clone());
+                            this.state.update(cx, |s, cx| {
+                                if is_people {
+                                    s.remove_member(sid, uid, cx);
+                                } else {
+                                    s.remove_project_member(sid, uid, cx);
+                                }
+                            });
+                        },
+                        &theme,
+                        cx,
+                    ));
+                    continue;
+                }
                 let handle = p.handle.clone();
                 let sid = space.id.clone();
+                let removable = i_own_group && !is_me;
                 list = list.child(
                     list_row(
                         ElementId::Name(SharedString::from(format!("profile-member-{}", p.handle))),
@@ -175,9 +205,11 @@ pub(super) fn page(
                         title,
                         format!("@{}", p.handle),
                         theme.text_muted,
-                        None,
+                        removable.then(|| remove_x(key.clone(), &theme, cx).into_any_element()),
                         &theme,
                     )
+                    // One group per row: `group_hover` looks a group up by name.
+                    .group(SharedString::from(format!("member-row-{key}")))
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.surface_2))
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -198,11 +230,26 @@ pub(super) fn page(
             if is_people {
                 for a in space.agents.iter() {
                     let pid = a.project_id.clone();
-                    let sub = if a.owner_handle == me_handle {
+                    let mine = a.owner_handle == me_handle;
+                    let sub = if mine {
                         "Agent · run by you".to_string()
                     } else {
                         format!("Agent · run by @{}", a.owner_handle)
                     };
+                    let key = format!("agent:{}", a.project_id);
+                    if armed.as_deref() == Some(key.as_str()) {
+                        let (sid, pid) = (space.id.clone(), a.project_id.clone());
+                        list = list.child(remove_confirm(
+                            &format!("Remove @{} from {}?", a.handle, space.name),
+                            move |this, cx| {
+                                let (sid, pid) = (sid.clone(), pid.clone());
+                                this.state.update(cx, |s, cx| s.remove_agent(sid, pid, cx));
+                            },
+                            &theme,
+                            cx,
+                        ));
+                        continue;
+                    }
                     list = list.child(
                         list_row(
                             ElementId::Name(SharedString::from(format!(
@@ -213,9 +260,11 @@ pub(super) fn page(
                             a.name.clone(),
                             sub,
                             theme.text_muted,
-                            None,
+                            // The relay lets only the agent's own owner remove it.
+                            mine.then(|| remove_x(key.clone(), &theme, cx).into_any_element()),
                             &theme,
                         )
+                        .group(SharedString::from(format!("member-row-{key}")))
                         .cursor_pointer()
                         .hover(|s| s.bg(theme.surface_2))
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -305,4 +354,74 @@ fn section_title(text: &str, theme: &Theme) -> Div {
         .text_size(px(TEXT_SMALL))
         .text_color(theme.text_muted)
         .child(text.to_string())
+}
+
+/// The hover-only ✕ at a member row's trailing edge; click arms the confirm.
+fn remove_x(key: String, theme: &Theme, cx: &mut Context<Shell>) -> Stateful<Div> {
+    div()
+        .id(ElementId::Name(SharedString::from(format!("remove-{key}"))))
+        .size(px(24.0))
+        .flex_shrink_0()
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .opacity(0.0)
+        .group_hover(SharedString::from(format!("member-row-{key}")), |s| {
+            s.opacity(1.0)
+        })
+        .hover(|s| s.bg(theme.surface_2))
+        .child(icon("xmark", 11.0, theme.text_muted))
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(cx.listener(move |this, _, _, cx| {
+            cx.stop_propagation();
+            this.member_remove_armed = Some(key.clone());
+            cx.notify();
+        }))
+}
+
+/// "Remove @x from Group?" in the row's place: Cancel keeps, Remove runs `go`.
+fn remove_confirm(
+    question: &str,
+    go: impl Fn(&mut Shell, &mut Context<Shell>) + 'static,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .px(px(14.0))
+        .py(px(10.0))
+        .border_b_1()
+        .border_color(theme.border)
+        .child(
+            div()
+                .text_size(px(TEXT_SMALL))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme.text)
+                .child(question.to_string()),
+        )
+        .child(
+            div()
+                .flex()
+                .justify_end()
+                .gap(px(6.0))
+                .child(
+                    sidebar::confirm_button("member-remove-cancel", "Cancel", false, theme)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.member_remove_armed = None;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    sidebar::confirm_button("member-remove-go", "Remove", true, theme).on_click(
+                        cx.listener(move |this, _, _, cx| {
+                            this.member_remove_armed = None;
+                            go(this, cx);
+                            cx.notify();
+                        }),
+                    ),
+                ),
+        )
 }

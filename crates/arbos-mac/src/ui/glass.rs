@@ -297,12 +297,37 @@ pub fn menu_row(
         .child(div().flex_1().min_w_0().truncate().child(label.into()))
 }
 
-/// Wrap a floating popover so clicks inside it never reach the root's
+/// Hitbox behaviour for every floating popover / menu / sheet: block clicks
+/// **and** wheel/trackpad scroll into the view behind it. GPUI's
+/// [`InteractiveElement::occlude`] (`HitboxBehavior::BlockMouse`) — not
+/// `block_mouse_except_scroll`, which would still let the transcript scroll.
+fn floating_layer_hitbox_behavior() -> gpui::HitboxBehavior {
+    gpui::HitboxBehavior::BlockMouse
+}
+
+/// Wrap a floating popover so clicks and wheel/trackpad events inside it
+/// never reach the view behind (e.g. the chat transcript) or the root's
 /// "click elsewhere closes popovers" handler.
 pub fn popover(child: impl IntoElement) -> Div {
+    debug_assert_eq!(
+        floating_layer_hitbox_behavior(),
+        gpui::HitboxBehavior::BlockMouse
+    );
     div()
+        // Occlude: GPUI otherwise delivers scroll to every hitbox under the
+        // pointer, so a wheel over this menu would also move the transcript.
+        .occlude()
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
         .child(child)
+}
+
+/// Shared vertical scroll area for inside a popover, menu, or sheet. Prefer
+/// this over a bare `overflow_y_scroll` so floating layers share one
+/// container. Pair with [`popover`] / [`frosted_menu`] / [`sheet`] (they
+/// occlude so the wheel never chains into the view behind).
+pub fn contained_y_scroll(id: impl Into<ElementId>) -> Stateful<Div> {
+    div().id(id).flex().flex_col().overflow_y_scroll()
 }
 
 pub fn menu_divider(theme: &Theme) -> Div {
@@ -324,8 +349,18 @@ pub fn menu_card(width: f32, theme: &Theme) -> Div {
         .shadow_lg()
 }
 
+/// Frosted dropdown used by the tab "+" menu and sidebar row menus. Occludes
+/// so a wheel over the menu never scrolls the list or transcript behind it,
+/// even when the caller did not wrap with [`popover`].
 pub fn frosted_menu(width: f32, theme: &Theme, body: Div) -> impl IntoElement {
-    frosted(PANEL_RADIUS, MENU_BLUR, menu_card(width, theme).child(body))
+    div()
+        .occlude()
+        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+        .child(frosted(
+            PANEL_RADIUS,
+            MENU_BLUR,
+            menu_card(width, theme).child(body),
+        ))
 }
 
 /// Centered sheet with a dimmed backdrop: the iPhone's `.sheet`. `header`
@@ -350,12 +385,14 @@ pub fn sheet(width: f32, theme: &Theme, header: Div, body: impl IntoElement) -> 
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(header)
         .child(body);
-    // The backdrop is modal: nothing under it is hovered or clicked (GPUI
-    // delivers mouse events to every hitbox under the pointer otherwise).
+    // The backdrop is modal: nothing under it is hovered, clicked, or
+    // scrolled (GPUI delivers mouse/wheel events to every hitbox under the
+    // pointer otherwise — same containment as [`popover`]).
     div()
         .absolute()
         .inset_0()
         .occlude()
+        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
         .flex()
         .items_center()
         .justify_center()
@@ -439,4 +476,56 @@ pub fn switch(on: bool, theme: &Theme) -> Div {
                 .bg(gpui::white())
                 .shadow_sm(),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Front-to-back layers under the pointer. A layer with `contains_scroll`
+    /// (popover / menu / sheet via occlude) consumes the wheel; layers behind
+    /// it are not scroll targets — the same rule GPUI's hit-test applies for
+    /// `BlockMouse`.
+    fn scroll_hit_layers<'a>(
+        front_to_back: impl IntoIterator<Item = (bool /* contains_scroll */, &'a str)>,
+    ) -> Vec<&'a str> {
+        let mut hit = Vec::new();
+        for (contains_scroll, name) in front_to_back {
+            hit.push(name);
+            if contains_scroll {
+                break;
+            }
+        }
+        hit
+    }
+
+    #[test]
+    fn floating_layer_blocks_scroll_not_only_clicks() {
+        // `BlockMouseExceptScroll` would still let the transcript move under
+        // the + tab menu; popovers must use full `BlockMouse` (occlude).
+        assert_eq!(
+            floating_layer_hitbox_behavior(),
+            gpui::HitboxBehavior::BlockMouse
+        );
+        assert_ne!(
+            floating_layer_hitbox_behavior(),
+            gpui::HitboxBehavior::BlockMouseExceptScroll
+        );
+    }
+
+    #[test]
+    fn wheel_over_popover_does_not_move_transcript() {
+        // Regression for popover-scroll-bleed-2026-10-20: a wheel over the
+        // agent chat's + tab menu (New chat + Previous chats) must not scroll
+        // the transcript behind it.
+        let hit = scroll_hit_layers([(true, "popover"), (false, "transcript")]);
+        assert_eq!(hit, vec!["popover"]);
+        assert!(!hit.contains(&"transcript"));
+    }
+
+    #[test]
+    fn wheel_over_menu_does_not_chain_into_underlying_scroll() {
+        let hit = scroll_hit_layers([(true, "frosted_menu"), (false, "sidebar_list")]);
+        assert_eq!(hit, vec!["frosted_menu"]);
+    }
 }

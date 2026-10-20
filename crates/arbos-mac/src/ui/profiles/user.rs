@@ -243,6 +243,28 @@ pub(super) fn page(
                 });
             })),
     );
+    // Opened from a DM: "Add members" turns it into a group (people or
+    // agents through the one picker) — the header's add button is gone.
+    if let Some(dm_id) = dm.map(|p| p.id.clone()).filter(|_| !me) {
+        info = info.child(
+            info_action(
+                "profile-add-members",
+                "Add members",
+                theme.text,
+                Some("person-plus"),
+                &theme,
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                let id = dm_id.clone();
+                this.state.update(cx, |s, cx| {
+                    s.select_project(id, cx);
+                    s.open_new_chat(cx);
+                });
+                let handle = this.people_input.read(cx).focus_handle(cx);
+                window.focus(&handle, cx);
+            })),
+        );
+    }
     if !me {
         info = info
             .child(

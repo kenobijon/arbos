@@ -1587,6 +1587,14 @@ impl Agent {
     /// `steer` / `guide` runs out of band (no turn lock): inject the user's words into the
     /// currently running pi turn via `RpcCommand::Steer`. When nothing is running, fall back to
     /// a normal `send` so a late Guide still lands.
+    /// This agent as the reply-to note names it (own rows vs. another agent's).
+    fn reply_me(&self) -> crate::reply::Me<'_> {
+        crate::reply::Me {
+            name: &self.cfg.project_name,
+            project_id: &self.cfg.project_id,
+        }
+    }
+
     async fn handle_steer(
         self: &Arc<Self>,
         chat_id: &str,
@@ -1599,12 +1607,13 @@ impl Agent {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_owned();
-        let user_text = {
+        let (user_text, reply_note) = {
             let h = host.lock().await;
-            h.doc
-                .message(&user_msg_id)
-                .map(|m| m.text())
-                .unwrap_or_default()
+            let m = h.doc.message(&user_msg_id);
+            let reply_note = m
+                .as_ref()
+                .and_then(|m| crate::reply::quoted_message_note(&h.doc, m, &self.reply_me()));
+            (m.map(|m| m.text()).unwrap_or_default(), reply_note)
         };
         if user_text.trim().is_empty() {
             return Err(anyhow!("steer: message {user_msg_id} not found or empty"));
@@ -1627,10 +1636,14 @@ impl Agent {
             Some(&json!({ "message_id": user_msg_id, "steer": true })),
         );
         let pi = self.pi().await?;
+        let message = match reply_note {
+            Some(note) => format!("{note}{user_text}"),
+            None => user_text,
+        };
         let r = pi
             .call(RpcCommand::Steer {
                 id: pi.next_id("s"),
-                message: user_text,
+                message,
             })
             .await?;
         if !r.success {
@@ -1719,11 +1732,19 @@ impl Agent {
         // A structured answer (`answer { questionId, value }`): render the value to text with the
         // widget the question was asked with, and mark the part answered before the turn runs.
         let structured = self.resolve_structured_answer(host, cmd).await;
-        let (mut user_text, channel_note, message_view) = {
+        let (mut user_text, channel_note, message_view, reply_note) = {
             let h = host.lock().await;
             let m = h.doc.message(&user_msg_id);
             let text = m.as_ref().map(|m| m.text()).unwrap_or_default();
-            (text, m.as_ref().and_then(crate::channels::prompt_note), m)
+            let reply_note = m
+                .as_ref()
+                .and_then(|m| crate::reply::quoted_message_note(&h.doc, m, &self.reply_me()));
+            (
+                text,
+                m.as_ref().and_then(crate::channels::prompt_note),
+                m,
+                reply_note,
+            )
         };
         if user_text.trim().is_empty() {
             if let Some((_, rendered)) = &structured {
@@ -1784,6 +1805,11 @@ impl Agent {
         } else if let Ok(Some((ask_id, _, question))) = self.store.open_ask(chat_id) {
             let _ = self.store.answer_ask(&ask_id);
             prompt_text = format!("Answer to your question \"{question}\": {user_text}");
+        }
+        // Reply-to: the quoted message rides with the user's words (user turn, never the
+        // system prompt — D87 keeps the prefix byte-stable).
+        if let Some(note) = reply_note {
+            prompt_text = format!("{note}{prompt_text}");
         }
         // A message that arrived through a channel (F7): the model learns where it came from and
         // that the reply is read as plain chat text.

@@ -447,9 +447,15 @@ impl ComposerInput {
         let ix = self.index_for_mouse_position(event.position);
         if event.modifiers.shift {
             self.select_to(ix, cx);
-        } else if event.click_count >= 2 {
-            // Double-click (and beyond): select the Unicode word under the
-            // pointer — same word_range the transcript bubbles use.
+        } else if event.click_count >= 3 {
+            // Triple-click: select the entire chat input (macOS text-field
+            // convention; matches ⌘A / select_all_text).
+            self.selected_range = 0..self.content.len();
+            self.selection_reversed = false;
+            cx.notify();
+        } else if event.click_count == 2 {
+            // Double-click: select the Unicode word under the pointer —
+            // same word_range the transcript bubbles use.
             self.selected_range = word_range(&self.content, ix);
             self.selection_reversed = false;
             cx.notify();

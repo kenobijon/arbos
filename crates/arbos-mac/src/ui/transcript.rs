@@ -114,6 +114,68 @@ impl HoverFade {
     }
 }
 
+/// Grok's quote header inside a reply bubble: speech-bubble glyph, then the
+/// replied-to message's first words in quotes. Clicking it reveals the original.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Quote {
+    /// The message replied to (`replyTo` on the row).
+    pub message_id: Id,
+    /// Its first line, cut to [`QUOTE_CHARS`] characters with an ellipsis.
+    pub text: String,
+}
+
+/// The quote header shows this many characters of the original before "…".
+pub const QUOTE_CHARS: usize = 64;
+
+impl Quote {
+    /// The quote for a message that replies to `reply_to`; a reply whose original is not
+    /// loaded (older than the snapshot) still shows a header so the reference is never lost.
+    pub fn for_reply(reply_to: &str, messages: &[Message]) -> Self {
+        let text = messages
+            .iter()
+            .find(|m| m.id == reply_to)
+            .map(quote_text)
+            .unwrap_or_else(|| "Earlier message".to_owned());
+        Self {
+            message_id: reply_to.to_owned(),
+            text,
+        }
+    }
+}
+
+/// First words of a message for its quote header: the first non-empty line,
+/// whitespace collapsed, cut on a word boundary; attachments name their file.
+pub fn quote_text(message: &Message) -> String {
+    let plain = message.plain_text();
+    let line = plain
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+        .unwrap_or_default();
+    let line = if line.is_empty() {
+        match message.parts.iter().find_map(|p| match p {
+            Part::Attachment { attachment, .. } => Some(attachment.name.clone()),
+            _ => None,
+        }) {
+            Some(name) => name,
+            None => return "Message".to_owned(),
+        }
+    } else {
+        line
+    };
+    if line.chars().count() <= QUOTE_CHARS {
+        return line;
+    }
+    let mut cut: String = line.chars().take(QUOTE_CHARS).collect();
+    if let Some(ix) = cut.rfind(' ') {
+        if ix > QUOTE_CHARS / 2 {
+            cut.truncate(ix);
+        }
+    }
+    format!("{}…", cut.trim_end_matches([',', ';', ':', '.']))
+}
+
 #[derive(Clone, Debug)]
 pub enum RowKind {
     User {
@@ -126,6 +188,9 @@ pub enum RowKind {
         from: Option<Person>,
         /// "9:41 PM", revealed at the bubble's outer edge on hover.
         time: Option<String>,
+        /// Set when this message replies to another: Grok's quote header
+        /// sits inside the bubble above the text.
+        quote: Option<Quote>,
     },
     Markdown {
         block: Block,
@@ -268,8 +333,8 @@ pub struct Transcript {
     /// One stateful card per typed question, keyed by question id; dropped with its row.
     cards: HashMap<String, Entity<QuestionCard>>,
     pinned_to_bottom: bool,
-    /// Message id we already scrolled to for the current reveal request.
-    revealed: Option<Id>,
+    /// Reveal request (`AppState::reveal_nonce`) we already scrolled for.
+    revealed: Option<u64>,
     spring: StickSpring,
     /// Set by the scroll callback; the next frame re-pins when the user
     /// stopped within `STICK_THRESHOLD_PX` of the end.
@@ -522,16 +587,19 @@ impl Transcript {
         cx.notify();
     }
 
-    /// A home-search hit asked to land on a message. Scroll once, when its row exists.
+    /// A home-search hit or a quote click asked to land on a message. Scroll
+    /// once per request, when its row exists.
     fn reveal_hit(&mut self, cx: &mut Context<Self>) {
-        let Some((chat, msg)) = self.state.read(cx).reveal_message.clone() else {
+        let state = self.state.read(cx);
+        let Some((chat, msg)) = state.reveal_message.clone() else {
             self.revealed = None;
             return;
         };
+        let nonce = state.reveal_nonce;
         if self.chat_id.as_deref() != Some(chat.as_str()) {
             return;
         }
-        if self.revealed.as_deref() == Some(msg.as_str()) {
+        if self.revealed == Some(nonce) {
             return;
         }
         let Some(ix) = self.rows.iter().position(|r| {
@@ -545,7 +613,7 @@ impl Transcript {
             item_ix: ix,
             offset_in_item: px(0.0),
         });
-        self.revealed = Some(msg);
+        self.revealed = Some(nonce);
         cx.notify();
     }
 
@@ -601,6 +669,40 @@ impl Transcript {
                 this.copy_message(&ctrl_msg, cx);
             }),
         )
+    }
+
+    /// Grok's quote header at the top of a reply bubble: speech-bubble glyph,
+    /// then the original's first words in quotes, one line, truncated. Click
+    /// → scroll to the original and highlight it for a moment.
+    fn quote_header(&self, row_id: &str, quote: Quote, text_color: gpui::Hsla) -> Stateful<Div> {
+        let state = self.state.clone();
+        let chat_id = self.chat_id.clone();
+        let target = quote.message_id.clone();
+        let muted = Theme::with_alpha(text_color, 0.72);
+        div()
+            .id(SharedString::from(format!("{row_id}#quote")))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .min_w_0()
+            .cursor_pointer()
+            .hover(|s| s.opacity(0.8))
+            .child(icon("bubble", 12.0, muted))
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(TEXT_SMALL))
+                    .line_height(px(LINE_HEIGHT - 4.0))
+                    .text_color(muted)
+                    .child(format!("“{}”", quote.text)),
+            )
+            .on_click(move |_, _, cx| {
+                if let Some(chat_id) = chat_id.clone() {
+                    let target = target.clone();
+                    state.update(cx, |s, cx| s.reveal_reply(chat_id, target, cx));
+                }
+            })
     }
 
     /// Hover-only reply + copy glyphs beside a bubble (fade with the row).
@@ -665,6 +767,7 @@ impl Transcript {
                 sender_label,
                 from,
                 time,
+                quote,
             } => {
                 // My bubble is dark in both appearances: white text, a
                 // stronger highlight than the soft one on the grey bubbles.
@@ -676,6 +779,7 @@ impl Transcript {
                         selectable.with_color(Theme::with_alpha(theme.accent, 0.45)),
                     )
                 };
+                let quote_header = quote.map(|q| self.quote_header(&row.id, q, text_color));
                 let text = plain_text(
                     &format!("{}.u", row.id),
                     &text,
@@ -700,6 +804,7 @@ impl Transcript {
                     .text_color(theme.bubble_text())
                     .text_size(px(TEXT_BODY))
                     .line_height(px(LINE_HEIGHT))
+                    .children(quote_header)
                     .child(text);
                 if let Some(person) = from {
                     // Someone else: left-aligned, their avatar and handle above.
@@ -1605,6 +1710,11 @@ pub fn build_rows(
                 // Skip a bare "Image"/"Photo" bubble when the attachment already shows it.
                 let show_text = !text.is_empty() && !(has_image && is_generic_media_label(&text));
                 if show_text || attachment_parts.is_empty() {
+                    let quote = message
+                        .reply_to
+                        .as_deref()
+                        .filter(|id| !id.is_empty())
+                        .map(|id| Quote::for_reply(id, messages));
                     rows.push(Row {
                         version: hash_version(
                             &(
@@ -1612,6 +1722,7 @@ pub fn build_rows(
                                 message.pending,
                                 &sender_label,
                                 from.as_ref().map(|p| &p.handle),
+                                &quote,
                             ),
                             false,
                         ),
@@ -1623,6 +1734,7 @@ pub fn build_rows(
                             sender_label,
                             from,
                             time: clock_label(message.created_at),
+                            quote,
                         },
                     });
                 }
