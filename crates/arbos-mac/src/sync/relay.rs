@@ -385,7 +385,7 @@ impl Shared {
     /// An app error the user did not cause and cannot act on (a thumbnail that did not load, a
     /// list that did not refresh). Logged, and reported once per signature per week as a silent
     /// feedback item (`submitted_by: "app"`); nothing is shown in the chat. Transient network
-    /// blips (timeout, reset, DNS) only log — they are not product bugs.
+    /// blips (timeout, reset, DNS, TLS decrypt) only log — they are not product bugs.
     fn diagnostic(self: &Arc<Self>, kind: &'static str, detail: impl Into<String>) {
         let detail = detail.into();
         log::warn!(target: "arbos_mac::diagnostic", "{kind}: {detail}");

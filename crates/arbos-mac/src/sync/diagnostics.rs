@@ -77,11 +77,12 @@ impl Diagnostics {
     }
 }
 
-/// Brief network failures (timeout, reset, DNS, send) are not product bugs — log them, do not
-/// file a weekly feedback item. Real HTTP answers (4xx/5xx) and unexpected client errors still
-/// report. Reqwest's top-level "error sending request for url …" means the request never got
-/// an HTTP response (connect/TLS/send); the cause may be omitted when the caller formats with
-/// `{err}` instead of `{err:#}`.
+/// Brief network failures (timeout, reset, DNS, send, TLS) are not product bugs — log them, do
+/// not file a weekly feedback item. Real HTTP answers (4xx/5xx) and unexpected client errors
+/// still report. Reqwest's top-level "error sending request for url …" means the request never
+/// got an HTTP response (connect/TLS/send); the cause may be omitted when the caller formats
+/// with `{err}` instead of `{err:#}`. Explicit rustls decrypt/handshake strings still match when
+/// only the cause is present.
 pub fn is_transient(detail: &str) -> bool {
     let d = detail.to_ascii_lowercase();
     d.contains("error sending request")
@@ -98,6 +99,12 @@ pub fn is_transient(detail: &str) -> bool {
         || d.contains("name or service not known")
         || d.contains("nodename nor servname")
         || d.contains("no address associated")
+        // rustls mid-handshake / mid-record noise (e.g. GET /connectors over flaky TLS).
+        || d.contains("cannot decrypt")
+        || d.contains("decrypt peer")
+        || d.contains("received fatal alert")
+        || d.contains("tls handshake")
+        || d.contains("connection closed before message completed")
 }
 
 /// `mac:<kind>:<normalized error>` — stable across launches, files and users: ids, hashes,
