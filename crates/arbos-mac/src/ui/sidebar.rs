@@ -199,7 +199,11 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
             continue;
         }
         let streaming = state.project_is_streaming(&p.id);
-        let shown_people: Vec<_> = if p.is_guest() {
+        // Shared projects badge the disc with the other side; a group is one
+        // plain disc (redesign 2026-10-20).
+        let shown_people: Vec<_> = if p.is_people_group() {
+            Vec::new()
+        } else if p.is_guest() {
             p.owner().cloned().into_iter().collect()
         } else {
             p.guests().cloned().collect()
@@ -544,9 +548,12 @@ fn render_row(
     }
     let phase = PulseClock::phase(cx, 900);
 
-    // The picture: a coloured tree for an agent, the person's photo for a DM
-    // (with a tiny tree badge when one of my agents sits in it).
-    let picture: Div = if let Some(person) = space.person().filter(|_| space.is_people()) {
+    // The picture: the initials disc for an agent or a group, the person's
+    // photo for a DM (with a tiny agent badge when one of my agents sits in it).
+    let picture: Div = if let Some(person) = space
+        .person()
+        .filter(|_| space.is_people() && !space.is_people_group())
+    {
         let mut pic = div()
             .relative()
             .size(px(AVATAR_ROW))
@@ -595,15 +602,11 @@ fn render_row(
     } else {
         space.name.clone()
     };
-    let handle = if space.is_people_group() {
-        let n = space.people.len() + 1;
-        Some(format!("{n} member{}", if n == 1 { "" } else { "s" }))
-    } else {
-        space
-            .person()
-            .filter(|_| space.is_people())
-            .map(|p| format!("@{}", p.handle))
-    };
+    // A group row reads like an agent row: name and preview, no member count.
+    let handle = space
+        .person()
+        .filter(|_| space.is_people() && !space.is_people_group())
+        .map(|p| format!("@{}", p.handle));
     let preview = if typing {
         "typing…".to_string()
     } else {
