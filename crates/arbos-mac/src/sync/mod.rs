@@ -452,6 +452,13 @@ pub enum ClientCommand {
         chat_id: Id,
         path: std::path::PathBuf,
     },
+    /// My own picture (`PUT /me/avatar`, JPEG ≤ 2 MB): overrides the GitHub
+    /// avatar everywhere the relay serves me.
+    SetMyAvatar {
+        path: std::path::PathBuf,
+    },
+    /// Back to the GitHub picture (`DELETE /me/avatar`).
+    RemoveMyAvatar,
     SetModel {
         project_id: Id,
         model: String,

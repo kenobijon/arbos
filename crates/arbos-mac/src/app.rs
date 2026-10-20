@@ -50,6 +50,8 @@ pub enum ProfilePage {
     Group { space_id: Id },
     /// An agent (one of my projects or a shared one).
     Agent { project_id: Id },
+    /// My own profile and every app setting (the Settings window is gone).
+    Me,
 }
 
 /// Which agent-settings row on the agent's profile page is expanded into its
@@ -977,6 +979,9 @@ impl AppState {
                 self.account = account;
                 if self.account.is_some() {
                     self.maybe_prompt_notifications();
+                }
+                if let Some(url) = self.account.as_ref().map(|a| a.avatar_url.clone()) {
+                    self.want_avatar(url);
                 }
                 cx.notify();
             }
@@ -3046,6 +3051,25 @@ impl AppState {
         }
         self.command(ClientCommand::RenameGroup { chat_id, title });
         cx.notify();
+    }
+
+    /// A picked file becomes my picture everywhere (`PUT /me/avatar`).
+    pub fn set_my_avatar(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
+        self.command(ClientCommand::SetMyAvatar { path });
+        cx.notify();
+    }
+
+    /// Back to the GitHub picture.
+    pub fn remove_my_avatar(&mut self, cx: &mut Context<Self>) {
+        self.command(ClientCommand::RemoveMyAvatar);
+        cx.notify();
+    }
+
+    /// My picture is an Arbos override (the relay's `/avatars/…`), not GitHub's.
+    pub fn has_custom_avatar(&self) -> bool {
+        self.account.as_ref().is_some_and(|a| {
+            a.avatar_url.contains("/avatars/") || a.avatar_url.starts_with("fixture://avatar/me-")
+        })
     }
 
     /// A picked file becomes the group's picture.

@@ -750,6 +750,36 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             }
             emit_projects(shared);
         }
+        ClientCommand::SetMyAvatar { .. } => {
+            let url = "fixture://avatar/me-picture".to_string();
+            emit_avatar(shared, &url);
+            let _ = shared
+                .events
+                .send(SyncEvent::Account(Some(crate::model::AccountView {
+                    id: ME_ID.into(),
+                    login: ME_HANDLE.into(),
+                    name: "Jacob Steeves".into(),
+                    avatar_url: url,
+                    device_name: "Fixture".into(),
+                    balance_usd: 84.5,
+                    spent_today_usd: 1.6,
+                    daily_cap_usd: Some(20.0),
+                })));
+        }
+        ClientCommand::RemoveMyAvatar => {
+            let _ = shared
+                .events
+                .send(SyncEvent::Account(Some(crate::model::AccountView {
+                    id: ME_ID.into(),
+                    login: ME_HANDLE.into(),
+                    name: "Jacob Steeves".into(),
+                    avatar_url: String::new(),
+                    device_name: "Fixture".into(),
+                    balance_usd: 84.5,
+                    spent_today_usd: 1.6,
+                    daily_cap_usd: Some(20.0),
+                })));
+        }
         ClientCommand::UpdateProfile { name, handle } => {
             // The fixture keeps it: Settings shows the new name and handle.
             let _ = shared
