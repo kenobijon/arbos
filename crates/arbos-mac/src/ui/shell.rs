@@ -173,6 +173,13 @@ pub struct Shell {
     /// app-01M5ATBWSY9E1HHBKH2QQVDEZX). Nothing renders it; escapes and
     /// click-outside still clear it so leftover true never sticks.
     pub(crate) menu_open: bool,
+    /// The left pane's search field is shown (the magnifier in the top strip
+    /// toggles it; it stays while a query is typed).
+    pub(crate) search_open: bool,
+    /// The left pane slid over to a server's channel list (three-pane rule,
+    /// mockup h). Servers do not exist yet: this is the layout hook only, a
+    /// rig fills it (`ARBOS_SHOW_SERVER=1`).
+    pub(crate) server_pane: Option<crate::ui::sidebar::ServerPane>,
     /// Right-click menu on a sidebar row: the space and where the click landed.
     pub(crate) row_menu: Option<(crate::model::Id, gpui::Point<gpui::Pixels>)>,
     /// The row menu's Delete was clicked once: it now shows "Delete …?" with
@@ -562,6 +569,11 @@ impl Shell {
             shake_started_at: None,
             signing_in: false,
             menu_open: false,
+            search_open: false,
+            server_pane: std::env::var("ARBOS_SHOW_SERVER")
+                .ok()
+                .filter(|v| v == "1")
+                .map(|_| crate::ui::sidebar::ServerPane::demo()),
             people_input,
             description_input,
             agent_name_input,
@@ -1152,6 +1164,20 @@ impl Shell {
         }
         if self.renaming_tab.is_some() {
             self.cancel_tab_rename(window, cx);
+            return;
+        }
+        if self.search_open
+            && self
+                .search_input
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
+        {
+            // Escape in the search field clears and folds it.
+            self.search_input.update(cx, |i, cx| i.clear(cx));
+            self.search_open = false;
+            Composer::focus(&self.composer, window, cx);
+            cx.notify();
             return;
         }
         let editing_agent = {
@@ -2977,7 +3003,7 @@ impl Shell {
                 ));
             }
             body = body.child(card).child(footnote(
-                "Your name, handle and picture are what other people and their agents see. Signed in with GitHub.".into(),
+                "Your name, handle and picture are what other people and their agents see, here and on the iPhone. Signed in with GitHub.".into(),
                 &theme,
             ));
             return profiles::pane_frame(
