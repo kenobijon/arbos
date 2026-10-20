@@ -28,7 +28,8 @@ use crate::ui::motion::PulseClock;
 use crate::ui::people;
 use crate::ui::select::{Selectable, TextSelection};
 use crate::ui::theme::{
-    Theme, BUBBLE_RADIUS, COLUMN_MARGIN, LINE_HEIGHT, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
+    Theme, BUBBLE_PAD_X, BUBBLE_PAD_Y, BUBBLE_RADIUS, CHAT_BODY, CHAT_LINE_HEIGHT, COLUMN_MARGIN,
+    LINE_HEIGHT, TEXT_SMALL, TEXT_TINY,
 };
 use crate::ui::veil::Veil;
 use crate::ui::widgets::QuestionCard;
@@ -797,13 +798,13 @@ impl Transcript {
                     .flex_col()
                     .gap(px(6.0))
                     .max_w(relative_width(0.72))
-                    .px(px(14.0))
-                    .py(px(11.0))
+                    .px(px(BUBBLE_PAD_X))
+                    .py(px(BUBBLE_PAD_Y))
                     .rounded(px(BUBBLE_RADIUS))
                     .bg(theme.bubble)
                     .text_color(theme.bubble_text())
-                    .text_size(px(TEXT_BODY))
-                    .line_height(px(LINE_HEIGHT))
+                    .text_size(px(CHAT_BODY))
+                    .line_height(px(CHAT_LINE_HEIGHT))
                     .children(quote_header)
                     .child(text);
                 if let Some(person) = from {
@@ -936,10 +937,10 @@ impl Transcript {
                     // and runs under it instead of re-wrapping.
                     .min_w_0()
                     .when(fill, |el| el.w_full())
-                    .px(px(14.0))
-                    .when(first, |el| el.pt(px(11.0)).rounded_t(r))
+                    .px(px(BUBBLE_PAD_X))
+                    .when(first, |el| el.pt(px(BUBBLE_PAD_Y)).rounded_t(r))
                     .when(!first, |el| el.pt(px(3.0)))
-                    .when(last, |el| el.pb(px(11.0)).rounded_b(r))
+                    .when(last, |el| el.pb(px(BUBBLE_PAD_Y)).rounded_b(r))
                     .when(!last, |el| el.pb(px(3.0)))
                     .bg(theme.bubble_assistant)
                     .child(render_block(
@@ -2339,8 +2340,8 @@ fn render_block(
         .w_full()
         .min_w_0()
         .text_color(theme.text)
-        .text_size(px(TEXT_BODY))
-        .line_height(px(LINE_HEIGHT));
+        .text_size(px(CHAT_BODY))
+        .line_height(px(CHAT_LINE_HEIGHT));
     match block {
         Block::Paragraph(text) => base
             .child(styled_text(

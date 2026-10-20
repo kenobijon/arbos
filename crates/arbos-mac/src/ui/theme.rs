@@ -21,15 +21,25 @@ pub const HEADER_HEIGHT: f32 = 44.0;
 pub const TAB_BAR_HEIGHT: f32 = HEADER_HEIGHT;
 /// Composer: one pill with the "+" circle inside left and mic / send inside right.
 pub const COMPOSER_WIDTH: f32 = 820.0;
-/// Grok Mac (ref 18, calibrated): 48 pt pill, 22 pt side margins, 14 pt below.
-pub const COMPOSER_HEIGHT: f32 = 48.0;
-pub const COLUMN_MARGIN: f32 = 22.0;
-pub const PLUS_BUTTON: f32 = 32.0;
-pub const SEND_BUTTON: f32 = 32.0;
+/// Grok Mac, measured on the real app (refs 57/58, 2 px/pt): a 44 pt pill with
+/// 28 pt circles inset 8, 16 pt side margins and 16 pt below; bubbles inset 21.
+pub const COMPOSER_HEIGHT: f32 = 44.0;
+pub const COMPOSER_MARGIN: f32 = 16.0;
+pub const COMPOSER_BOTTOM: f32 = 16.0;
+pub const COLUMN_MARGIN: f32 = 21.0;
+pub const PLUS_BUTTON: f32 = 28.0;
+pub const SEND_BUTTON: f32 = 28.0;
 /// Icon buttons in the header and sheet corners.
 pub const CONTROL: f32 = 32.0;
-/// Bubble corners (Grok Mac ≈ 16 pt; the iPhone uses 20).
+/// Bubble corners (Grok Mac, measured: 12 pt; the iPhone uses 20).
 pub const BUBBLE_RADIUS: f32 = 12.0;
+/// Chat bubbles: Grok Mac's body is 13.5 pt on a 20 pt pitch with 15 pt
+/// horizontal and 6 pt vertical padding (refs 57/58); the rest of the app
+/// keeps `TEXT_BODY`.
+pub const CHAT_BODY: f32 = 13.5;
+pub const CHAT_LINE_HEIGHT: f32 = 20.0;
+pub const BUBBLE_PAD_X: f32 = 15.0;
+pub const BUBBLE_PAD_Y: f32 = 6.0;
 pub const PANEL_RADIUS: f32 = 14.0;
 pub const DRAWER_WIDTH: f32 = 320.0;
 pub const NARROW_WINDOW: f32 = 1000.0;

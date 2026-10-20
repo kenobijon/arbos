@@ -35,9 +35,9 @@ use crate::ui::secrets::{SecretsEvent, SecretsPanel};
 use crate::ui::sidebar;
 use crate::ui::skills::{self, SkillsPanel};
 use crate::ui::theme::{
-    reapply_window_background, AppearancePref, Surface, Theme, COLUMN_MARGIN, COMPOSER_WIDTH,
-    DRAWER_WIDTH, HEADER_HEIGHT, LINE_HEIGHT, PANEL_RADIUS, PLUS_BUTTON, SIDEBAR_WIDTH,
-    TAB_BAR_HEIGHT, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
+    reapply_window_background, AppearancePref, Surface, Theme, COLUMN_MARGIN, COMPOSER_BOTTOM,
+    COMPOSER_MARGIN, COMPOSER_WIDTH, DRAWER_WIDTH, HEADER_HEIGHT, LINE_HEIGHT, PANEL_RADIUS,
+    PLUS_BUTTON, SIDEBAR_WIDTH, TAB_BAR_HEIGHT, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
 };
 use crate::ui::transcript::{Transcript, TranscriptEvent, COLUMN_MAX_WIDTH};
 use crate::ui::voice::Voice;
@@ -1835,8 +1835,8 @@ impl Shell {
                 .flex()
                 .flex_col()
                 .items_center()
-                .px(px(COLUMN_MARGIN))
-                .pb(px(14.0))
+                .px(px(COMPOSER_MARGIN))
+                .pb(px(COMPOSER_BOTTOM))
                 .pt(px(6.0))
                 .when_some(typing, |el, handle| {
                     el.child(people::typing_line(&handle, &theme))
