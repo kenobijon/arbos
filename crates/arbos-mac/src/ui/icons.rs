@@ -116,6 +116,11 @@ const ICONS: &[(&str, &str)] = &[
         "reply",
         "<path d=\"M9 14l-5-5 5-5\"/><path d=\"M4 9h9a6 6 0 0 1 6 6v4\"/>"
     ),
+    // Speech bubble (iPhone `bubble.left`): the quote header of a reply bubble.
+    icon!(
+        "bubble",
+        "<path d=\"M12 3.5c5 0 9 3.2 9 7.2s-4 7.2-9 7.2c-.9 0-1.8-.1-2.6-.3L5 20v-3.6c-1.3-1.3-2-2.9-2-4.7 0-4 4-7.2 9-7.2z\"/>"
+    ),
     icon!("crown", "<path d=\"M4 17h16l1-9-5 3.5L12 5l-4 6.5L3 8z\" fill=\"#000\"/>"),
     icon!("photo", "<rect x=\"3\" y=\"5\" width=\"18\" height=\"14\" rx=\"2\"/><circle cx=\"9\" cy=\"10\" r=\"1.5\" fill=\"#000\"/><path d=\"M21 16l-5-5-8 8\"/>"),
     icon!("arrow-down", "<path d=\"M12 5v14M5 12l7 7 7-7\" stroke-width=\"2.6\"/>"),

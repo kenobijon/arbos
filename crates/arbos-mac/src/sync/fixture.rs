@@ -3829,7 +3829,16 @@ impl Seeder<'_> {
     }
 
     /// `extra` parts (attachments) come before the text, as the clients write them.
-    fn user_with_parts(&mut self, text: &str, mut extra: Vec<Part>) {
+    fn user_with_parts(&mut self, text: &str, extra: Vec<Part>) {
+        self.user_row(text, extra, None);
+    }
+
+    /// A reply bubble: `reply_to` is the id of the message it quotes.
+    fn user_replying_to(&mut self, text: &str, reply_to: &str) {
+        self.user_row(text, Vec::new(), Some(reply_to.to_owned()));
+    }
+
+    fn user_row(&mut self, text: &str, mut extra: Vec<Part>, reply_to: Option<String>) {
         self.t += 45_000;
         extra.push(Part::Text {
             id: new_id(),
@@ -3855,7 +3864,7 @@ impl Seeder<'_> {
             sender_avatar: None,
             sender_avatar_color: None,
             mentions: Vec::new(),
-            reply_to: None,
+            reply_to,
             asked_by_handle: None,
             owner_handle: None,
             usage: None,
@@ -3875,10 +3884,12 @@ impl Seeder<'_> {
         });
     }
 
-    fn assistant(&mut self, turn: TurnKind, status: MessageStatus, parts: Vec<Part>) {
+    /// Returns the new row's id so a later user row can reply to it.
+    fn assistant(&mut self, turn: TurnKind, status: MessageStatus, parts: Vec<Part>) -> Id {
         self.t += 20_000;
+        let id = new_id();
         let _ = self.doc.insert_message(&Message {
-            id: new_id(),
+            id: id.clone(),
             chat_id: self.doc.chat_id.clone(),
             role: Role::Assistant,
             sender: "agent".into(),
@@ -3915,6 +3926,7 @@ impl Seeder<'_> {
             hidden_parts: Vec::new(),
             greeting: false,
         });
+        id
     }
 }
 
@@ -4052,13 +4064,17 @@ fn seed_docs(shared: &Arc<Shared>) {
             )],
         );
         s.user("Keep it simple.");
-        s.assistant(
+        let last = s.assistant(
             TurnKind::Reply,
             MessageStatus::Done,
             vec![text(
                 "A compact agent rail, clear chat tabs, and everything else within reach.",
             )],
         );
+        // `ARBOS_FIXTURE_REPLY=1` (screenshot rig): one reply bubble quoting that answer.
+        if std::env::var("ARBOS_FIXTURE_REPLY").is_ok_and(|v| v == "1") {
+            s.user_replying_to("Which tabs do you mean here?", &last);
+        }
         main.commit();
     }
     add_doc(shared, main);
