@@ -1689,8 +1689,9 @@ impl Render for Composer {
                 if p.is_people_group() {
                     p.name.clone()
                 } else if p.is_people() {
+                    // "Message Kenobi", like the pill above (topbar-unify mock c).
                     p.person()
-                        .map(|x| format!("@{}", x.handle))
+                        .map(|x| x.display_name())
                         .unwrap_or_else(|| p.name.clone())
                 } else {
                     p.name.clone()

@@ -808,11 +808,12 @@ impl Transcript {
                     .children(quote_header)
                     .child(text);
                 if let Some(person) = from {
-                    // Someone else: left-aligned, their avatar and handle above.
+                    // Someone else: left-aligned, their avatar and name above —
+                    // the agent-chat format (redesign mock a): no coloured stripe,
+                    // the display name rather than the @handle.
                     // Must not early-return: the match arm still needs the
                     // COLUMN_MARGIN wrapper (same padding as agent bubbles).
                     let image = self.state.read(cx).avatar(&person.avatar_url);
-                    let color = groups::sender_color(&person.handle, &theme);
                     div()
                         .w_full()
                         .flex()
@@ -841,7 +842,7 @@ impl Transcript {
                                     div()
                                         .text_size(px(TEXT_TINY))
                                         .text_color(theme.text_muted)
-                                        .child(format!("@{}", person.handle)),
+                                        .child(person.display_name()),
                                 )
                                 .on_click(move |_, _, cx| {
                                     let (handle, sid) = (handle.clone(), sid.clone());
@@ -866,8 +867,6 @@ impl Transcript {
                                     bubble
                                         .bg(theme.bubble_assistant)
                                         .text_color(theme.text)
-                                        .border_l_2()
-                                        .border_color(Theme::with_alpha(color, 0.7))
                                         .when(pending, |el| el.opacity(0.6)),
                                 )
                                 .child(actions.ml(px(6.0)))
