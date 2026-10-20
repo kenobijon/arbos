@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context as _, Result};
-use arbos_core::doc::{decode_vv, UserAttachment, UserMessageOpts};
-use arbos_core::room::{self, RoomAction, RoomSession};
+use arbos_client::room::{self, RoomAction, RoomSession};
+use arbos_core::doc::{UserAttachment, UserMessageOpts};
 use arbos_core::wire::{BoxState as WireBox, PROJECT_DOC_CHAT_ID};
 use futures::future::BoxFuture;
 use futures::{SinkExt, StreamExt};
@@ -2489,7 +2489,7 @@ fn set_project_state(shared: &Shared, project_id: &str, state: BoxState, detail:
 }
 
 /// Dial, drive [`RoomSession`], perform actions — forever, with backoff (§8.6).
-/// Protocol (HELLO, catch-up, PUSH/ACK, resend) lives in `arbos_core::room`.
+/// Protocol (HELLO, catch-up, PUSH/ACK, resend) lives in `arbos_client::room`.
 #[allow(clippy::too_many_arguments)]
 async fn room_loop(
     shared: Arc<Shared>,
@@ -2666,10 +2666,8 @@ async fn perform_room_actions(
                 } => {
                     let contained = {
                         let docs = shared.docs.lock().unwrap();
-                        match (docs.get(key), decode_vv(&frontier)) {
-                            (Some(doc), Some(vv)) => doc.core.doc.oplog_vv().includes_vv(&vv),
-                            (Some(_), None) | (None, _) => false,
-                        }
+                        docs.get(key)
+                            .is_some_and(|doc| doc.core.contains_frontier(&frontier))
                     };
                     if contained {
                         session.on_checkpoint_skipped();

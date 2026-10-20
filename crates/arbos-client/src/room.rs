@@ -8,14 +8,13 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use serde_json::{json, Value};
-
-use crate::ids::ulid;
-use crate::wire::{
+use arbos_core::ids::ulid;
+use arbos_core::wire::{
     self, Ack, ErrorHeader, Frame, FrameType, Hello, PushHeader, RowHeader, RowsReq, State,
     StatusHeader, WakeHeader, ROW_MAX,
 };
-use crate::PROTO_VERSION;
+use arbos_core::PROTO_VERSION;
+use serde_json::{json, Value};
 
 /// Wait this long after `on_open` for a `STATE` frame before giving up.
 pub const HELLO_DEADLINE: Duration = Duration::from_secs(15);
@@ -115,6 +114,10 @@ pub struct RoomSession {
     reconnect_after: Option<Duration>,
     /// Last host clock seen (`on_open` / `on_tick` / `on_close`).
     last_now_ms: u64,
+    /// Latest wake reason while not Live (kept across close / prepare_reconnect).
+    held_wake: Option<String>,
+    /// Latest outbound presence header while not Live (same retention).
+    held_presence: Option<Value>,
 }
 
 impl RoomSession {
@@ -137,6 +140,8 @@ impl RoomSession {
             checkpoint_seq: 0,
             reconnect_after: None,
             last_now_ms: 0,
+            held_wake: None,
+            held_presence: None,
         }
     }
 
@@ -305,6 +310,23 @@ impl RoomSession {
                 FrameType::Push,
                 header,
                 bytes,
+            )));
+        }
+        // Flush wake / presence held while reconnecting or mid-handshake.
+        // After RowsReq and pending PUSH resend so catch-up stays first.
+        if let Some(reason) = self.held_wake.take() {
+            let header = serde_json::to_value(WakeHeader { reason }).expect("wake");
+            self.push(RoomAction::SendFrame(Self::encode(
+                FrameType::Wake,
+                header,
+                Vec::new(),
+            )));
+        }
+        if let Some(header) = self.held_presence.take() {
+            self.push(RoomAction::SendFrame(Self::encode(
+                FrameType::Presence,
+                header,
+                Vec::new(),
             )));
         }
     }
@@ -484,13 +506,14 @@ impl RoomSession {
     }
 
     pub fn wake(&mut self, reason: impl Into<String>) {
+        let reason = reason.into();
         if self.phase != Phase::Live {
+            // Only the latest wake: the relay uses the reason only to ensure
+            // the box is awake; collapsing several wakes loses nothing.
+            self.held_wake = Some(reason);
             return;
         }
-        let header = serde_json::to_value(WakeHeader {
-            reason: reason.into(),
-        })
-        .expect("wake");
+        let header = serde_json::to_value(WakeHeader { reason }).expect("wake");
         self.push(RoomAction::SendFrame(Self::encode(
             FrameType::Wake,
             header,
@@ -500,6 +523,7 @@ impl RoomSession {
 
     pub fn presence(&mut self, header: Value) {
         if self.phase != Phase::Live {
+            self.held_presence = Some(header);
             return;
         }
         self.push(RoomAction::SendFrame(Self::encode(
@@ -520,7 +544,7 @@ impl RoomSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wire::{BoxState, FrameType};
+    use arbos_core::wire::{BoxState, FrameType};
 
     fn state_frame(checkpoint_seq: i64, frontier: Vec<u8>) -> Vec<u8> {
         let header = json!({
@@ -688,5 +712,63 @@ mod tests {
         assert_eq!(s.cursor(), 5);
         let cont = s.drain_actions();
         assert!(take_sends(&cont).iter().any(|f| f.ty == FrameType::RowsReq));
+    }
+
+    #[test]
+    fn wake_and_presence_held_while_not_live_flush_after_handshake() {
+        let pending = vec![("batch-held".into(), b"pending-bytes".to_vec())];
+        let mut s = RoomSession::new("dev:me", "proj/chat", 0, pending);
+        s.on_open(1_000);
+        let _ = s.drain_actions();
+
+        // Mid-handshake (WaitState): hold, do not send yet.
+        s.wake("msg");
+        s.presence(json!({ "device": "dev:me", "at": 1 }));
+        assert!(s.drain_actions().is_empty());
+
+        // Across close + prepare_reconnect: still held (latest only).
+        s.wake("send");
+        s.on_close(2_000);
+        let _ = s.drain_actions();
+        s.prepare_reconnect();
+        s.presence(json!({ "device": "dev:me", "at": 2, "focused_chat": "c1" }));
+
+        s.on_open(5_000);
+        let _ = s.drain_actions();
+        s.on_frame(&state_frame(0, Vec::new()));
+        let after = s.drain_actions();
+        let sends = take_sends(&after);
+
+        let rows_i = sends.iter().position(|f| f.ty == FrameType::RowsReq);
+        let push_i = sends.iter().position(|f| f.ty == FrameType::Push);
+        let wake_i = sends.iter().position(|f| f.ty == FrameType::Wake);
+        let presence_i = sends.iter().position(|f| f.ty == FrameType::Presence);
+        assert!(rows_i.is_some(), "RowsReq after handshake");
+        assert!(push_i.is_some(), "pending PUSH resent");
+        assert!(wake_i.is_some(), "held wake flushed");
+        assert!(presence_i.is_some(), "held presence flushed");
+        assert!(rows_i < push_i, "PUSH after RowsReq");
+        assert!(push_i < wake_i, "wake after pending PUSH");
+        assert!(wake_i < presence_i, "presence after wake");
+        assert_eq!(
+            sends[wake_i.unwrap()]
+                .header
+                .get("reason")
+                .and_then(Value::as_str),
+            Some("send")
+        );
+        assert_eq!(
+            sends[presence_i.unwrap()]
+                .header
+                .get("at")
+                .and_then(Value::as_i64),
+            Some(2)
+        );
+        // Only one of each (latest held, not a queue).
+        assert_eq!(sends.iter().filter(|f| f.ty == FrameType::Wake).count(), 1);
+        assert_eq!(
+            sends.iter().filter(|f| f.ty == FrameType::Presence).count(),
+            1
+        );
     }
 }

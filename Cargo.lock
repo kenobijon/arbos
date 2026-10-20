@@ -335,6 +335,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "arbos-client"
+version = "0.6.66"
+dependencies = [
+ "arbos-core",
+ "serde_json",
+]
+
+[[package]]
 name = "arbos-core"
 version = "0.6.66"
 dependencies = [
@@ -376,6 +384,7 @@ name = "arbos-mac"
 version = "0.6.66"
 dependencies = [
  "anyhow",
+ "arbos-client",
  "arbos-core",
  "arbos-update",
  "base64 0.22.1",

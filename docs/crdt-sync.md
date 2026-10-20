@@ -7,6 +7,7 @@ This document is drawn from the code as it exists today:
 | Layer | Code |
 | --- | --- |
 | Shared Loro chat writes (box / core) | `crates/arbos-core/src/doc.rs` |
+| App sans-IO room session | `crates/arbos-client/src/room.rs` (`RoomSession`) |
 | Mac Loro replica | `crates/arbos-mac/src/sync/doc.rs` |
 | iOS Loro replica | `apps/ios/Arbos/Arbos/Sync/ChatDoc.swift` |
 | Binary room frames | `crates/arbos-core/src/wire.rs`, `apps/ios/Arbos/Arbos/Sync/Frame.swift` |
@@ -14,6 +15,12 @@ This document is drawn from the code as it exists today:
 | Mac HTTP + room client | `crates/arbos-mac/src/sync/relay.rs` |
 | iOS HTTP + room client | `apps/ios/Arbos/Arbos/Sync/RelayAPI.swift`, `Room.swift` |
 | Relay rooms / REST | `crates/arbos-relay/src/rooms.rs`, `api.rs`, `blobs.rs`, `main.rs` |
+
+### Core vs client crates
+
+- **`arbos-core`** — ids, `wire` (including `wire::room_name`), the Loro chat-doc schema, writers, `project_reactions`, and `touched`. Shared by the box, relay, and every client.
+- **`arbos-client`** — app-only sans-IO `RoomSession` (handshake, catch-up, pending PUSH, reconnect backoff, held wake/presence). Depends on `arbos-core`. No tokio, tungstenite, or HTTP.
+- **Who may depend on `arbos-client`:** device apps only (`arbos-mac` today; Swift/UniFFI later). **`arbos-relay`, `arbos-agentd`, `arbosctl`, and `arbos-local` must not.** CI enforces this with `cargo tree -i arbos-client`.
 
 The relay never parses Loro bytes. It stores opaque **rows** and optional **checkpoints**, and forwards them on WebSocket rooms.
 
@@ -88,7 +95,11 @@ commands:  List<Map { id, kind, payload, issuedBy, issuedAt, status }>
 
 **Reactions shape.** Writers store flat keys under `reactions` (`"👍|user:ken" → true`) so concurrent first reacts on the **same** emoji merge as map-key inserts. An empty `reactions` map is created with the message (`append_user_message`, `append_system_line`, `append_greeting`, `append_done_message`, `start_assistant_message`, `append_user_answer`, `append_system_note`) so peers do not race on creating that container. `set_reaction(..., on=false)` is a no-op when the `reactions` map is missing. UI / serde still see `emoji → { sender → true }` after `project_reactions` (also folds legacy nested emoji-bucket maps).
 
-**Loro container create race.** When two peers concurrently `insert_container` under the **same** key, one container wins and the **losing container’s contents are dropped**. Do not rely on “usually survive” for nested bucket creates; the flat reaction keys avoid that race for same-emoji first-react.
+**Pre-0.6.64 rows.** Message rows written before 0.6.64 have **no** `reactions` map. The first concurrent react on such a row can still lose one side’s container, because `set_reaction(..., on=true)` creates the map when it is missing — the same Loro create race as nested buckets.
+
+**Rollout (flat keys).** Builds before 0.6.64 do not understand flat `"emoji|sender"` keys. An older Mac drops the whole row: `Message.reactions` in `crates/arbos-mac/src/model.rs` is a strict nested map and `read_message` ends in `.ok()`. Older Swift client builds simply do not show those reactions.
+
+**Loro container create race.** When two peers concurrently `insert_container` under the **same** key, one container wins and the **losing container’s contents are dropped**. Do not rely on “usually survive” for nested bucket creates; the flat reaction keys avoid that race for same-emoji first-react on rows that already have an empty `reactions` map.
 
 **`callId` on system lines.** Core and Mac write optional `callId` (never `call_id`) on system lines. The Swift client ignores `callId` and renders the text only. The Mac fixture constructor still seeds `meta` for offline demos; relay-mode Mac does not write `meta` locally.
 
@@ -208,9 +219,9 @@ Unknown type bytes: decode returns “skip” (`Ok(None)` / `nil`) so callers ig
 
 `STATE` header fields: `headSeq`, `seqFloor`, `checkpointSeq`, `checkpointSize`, `rowCount`, `rowBytes`, `box` (BoxState). Payload = encoded checkpoint frontier (version vector bytes).
 
-### 7.2a Room session state machine (`arbos-core::room`)
+### 7.2a Room session state machine (`arbos-client::room`)
 
-Shared client protocol lives in `RoomSession` (sans-IO: no tokio/tungstenite). The host opens a socket and drives:
+Shared **app** client protocol lives in `RoomSession` (sans-IO: no tokio/tungstenite). The host opens a socket and drives:
 
 | Input | Role |
 | --- | --- |
@@ -230,13 +241,13 @@ Shared client protocol lives in `RoomSession` (sans-IO: no tokio/tungstenite). T
 | `BoxState` / `LinkLive` / `Presence` / `Ack` | UI / registry events |
 | `ScheduleReconnect { after }` | Sleep, then dial again |
 
-Room naming is in core: `people/{chatId}` for people chats, else `{projectId}/{chatId}` (`room_path`). Mac `relay.rs` keeps only WebSocket + HTTP glue and performs actions. Backoff: min 250 ms, doubling, max 16 s, reset after a connection that stayed live ≥ 30 s (§8.6).
+Room naming for the app session: `people/{chatId}` for people chats, else `{projectId}/{chatId}` (`arbos_client::room_path`, which calls `wire::room_name`). Mac `relay.rs` keeps only WebSocket + HTTP glue and performs actions. Backoff: min 250 ms, doubling, max 16 s, reset after a connection that stayed live ≥ 30 s (§8.6). Wake and presence issued while not Live are held (latest only) across close / reconnect and flushed from `finish_handshake` after `RowsReq` and pending PUSH resend.
 
 ### 7.3 Checkpoints
 
 After `STATE`, if `checkpointSeq > 0`:
 
-1. If the local doc **contains** the frontier (`contains_vv` / `contains(frontier:)`), advance `cursor = max(cursor, checkpointSeq)` — compacted rows are already in the replica.
+1. If the local doc **contains** the frontier (`ChatDoc::contains_frontier` / `contains_vv` / Swift `contains(frontier:)`), advance `cursor = max(cursor, checkpointSeq)` — compacted rows are already in the replica.
 2. Else **`GET /room/{project}/{chat}/checkpoint`** — body = snapshot bytes; response header `x-arbos-checkpoint-seq`. Import into Loro, then set cursor.
 
 Box (or admin) writes checkpoints: **`POST /room/{project}/{chat}/checkpoint?seqCovered=`** with body = snapshot and header `x-arbos-frontier` = hex-encoded VV. Conflict if `seqCovered` is below the floor.
