@@ -77,12 +77,16 @@ impl Diagnostics {
     }
 }
 
-/// Brief network failures (timeout, reset, DNS, TLS handshake blips) are not product bugs — log
-/// them, do not file a weekly feedback item. Real HTTP answers (4xx/5xx) and unexpected client
-/// errors still report.
+/// Brief network failures (timeout, reset, DNS, send, TLS) are not product bugs — log them, do
+/// not file a weekly feedback item. Real HTTP answers (4xx/5xx) and unexpected client errors
+/// still report. Reqwest's top-level "error sending request for url …" means the request never
+/// got an HTTP response (connect/TLS/send); the cause may be omitted when the caller formats
+/// with `{err}` instead of `{err:#}`. Explicit rustls decrypt/handshake strings still match when
+/// only the cause is present.
 pub fn is_transient(detail: &str) -> bool {
     let d = detail.to_ascii_lowercase();
-    d.contains("timed out")
+    d.contains("error sending request")
+        || d.contains("timed out")
         || d.contains("timeout")
         || d.contains("connection reset")
         || d.contains("connection refused")
