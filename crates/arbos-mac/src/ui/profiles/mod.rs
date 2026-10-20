@@ -606,9 +606,11 @@ pub(super) fn media_grid(items: &[Found], theme: &Theme) -> Div {
             .items_center()
             .justify_center();
         grid = grid.child(match &f.thumbnail {
+            // The tile's overflow clip is rectangular, so the picture rounds itself.
             Some(img) => tile.child(
                 gpui::img(img.clone())
                     .size(px(cell))
+                    .rounded(px(8.0))
                     .object_fit(gpui::ObjectFit::Cover),
             ),
             None => tile.child(icon(
