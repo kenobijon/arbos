@@ -106,6 +106,63 @@ pub fn project_hidden_parts(json: &mut Value) {
     }
 }
 
+/// Separator in flat reaction keys: `"emoji|sender"` under `reactions`.
+pub const REACTION_KEY_SEP: char = '|';
+
+/// Build the CRDT key for one sender's hold of an emoji.
+pub fn reaction_key(emoji: &str, sender: &str) -> String {
+    format!("{emoji}{REACTION_KEY_SEP}{sender}")
+}
+
+/// Reader projection: expand flat `reactions` keys (`"emoji|sender" → true`)
+/// into `emoji → { sender → true }` for UI / serde. Also folds legacy nested
+/// emoji-bucket maps so both shapes read the same. Call before deserializing
+/// a message row.
+pub fn project_reactions(json: &mut Value) {
+    let Some(obj) = json.as_object_mut() else {
+        return;
+    };
+    let Some(Value::Object(raw)) = obj.get("reactions").cloned() else {
+        return;
+    };
+    let mut nested = serde_json::Map::new();
+    for (key, value) in raw {
+        if let Value::Object(bucket) = value {
+            // Legacy: emoji → { sender → true }.
+            if key.contains(REACTION_KEY_SEP) {
+                continue;
+            }
+            let entry = nested
+                .entry(key)
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+            if let Value::Object(dst) = entry {
+                for (sender, flag) in bucket {
+                    if flag.as_bool() == Some(true) {
+                        dst.insert(sender, Value::Bool(true));
+                    }
+                }
+            }
+            continue;
+        }
+        if value.as_bool() != Some(true) {
+            continue;
+        }
+        let Some((emoji, sender)) = key.split_once(REACTION_KEY_SEP) else {
+            continue;
+        };
+        if emoji.is_empty() || sender.is_empty() {
+            continue;
+        }
+        let entry = nested
+            .entry(emoji.to_string())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if let Value::Object(dst) = entry {
+            dst.insert(sender.to_string(), Value::Bool(true));
+        }
+    }
+    obj.insert("reactions".into(), Value::Object(nested));
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageStatus {
@@ -319,10 +376,18 @@ impl ChatDoc {
     /// Run `f`, then commit once when this is the outermost `transact`.
     /// Nested calls only decrement depth; they do not commit.
     /// New client writers do not commit themselves; call them inside `transact`.
+    /// Depth is restored by a drop guard so a panic inside `f` cannot leave it stuck.
     pub fn transact<R>(&self, f: impl FnOnce(&Self) -> R) -> R {
+        struct DepthGuard<'a>(&'a Cell<u32>);
+        impl Drop for DepthGuard<'_> {
+            fn drop(&mut self) {
+                self.0.set(self.0.get().saturating_sub(1));
+            }
+        }
         self.txn_depth.set(self.txn_depth.get() + 1);
+        let guard = DepthGuard(&self.txn_depth);
         let out = f(self);
-        self.txn_depth.set(self.txn_depth.get() - 1);
+        drop(guard);
         self.commit_now();
         out
     }
@@ -363,14 +428,27 @@ impl ChatDoc {
     }
 
     /// Updates since `from`, after committing pending edits.
+    ///
+    /// While a [`Self::transact`] is open this returns empty and does not call
+    /// Loro `export` (export is a commit barrier and would flush the batch).
     pub fn export_updates_since(&self, from: &VersionVector) -> Vec<u8> {
+        if self.txn_depth.get() > 0 {
+            return Vec::new();
+        }
         self.doc.commit();
         self.doc
             .export(ExportMode::updates(from))
             .unwrap_or_default()
     }
 
+    /// Full snapshot after committing pending edits.
+    ///
+    /// While a [`Self::transact`] is open this returns empty and does not call
+    /// Loro `export` (export is a commit barrier and would flush the batch).
     pub fn snapshot(&self) -> Vec<u8> {
+        if self.txn_depth.get() > 0 {
+            return Vec::new();
+        }
         self.doc.commit();
         self.doc.export(ExportMode::Snapshot).unwrap_or_default()
     }
@@ -562,9 +640,13 @@ impl ChatDoc {
     }
 
     /// Client write: set whether `sender` holds `emoji` on a message.
-    /// Shape: `reactions: Map { emoji: Map { sender: true } }`. Does not commit.
-    /// Turning a reaction off is a no-op when the reactions map or emoji bucket
-    /// is missing (does not create containers).
+    ///
+    /// CRDT shape: flat keys under `reactions` — `"emoji|sender" → true` — so
+    /// concurrent first reacts on the same emoji merge as map-key inserts
+    /// instead of racing on nested emoji-bucket creation. Readers call
+    /// [`project_reactions`] to view `emoji → { sender → true }`. Does not
+    /// commit. Turning a reaction off is a no-op when the reactions map is
+    /// missing (does not create containers).
     pub fn set_reaction(
         &self,
         msg_id: &str,
@@ -583,15 +665,17 @@ impl ChatDoc {
             _ if on => loro_err(map.insert_container("reactions", LoroMap::new()))?,
             _ => return Ok(()),
         };
-        let bucket = match reactions.get(emoji) {
-            Some(ValueOrContainer::Container(Container::Map(m))) => m,
-            _ if on => loro_err(reactions.insert_container(emoji, LoroMap::new()))?,
-            _ => return Ok(()),
-        };
+        let key = reaction_key(emoji, sender);
         if on {
-            loro_err(bucket.insert(sender, true))?;
+            loro_err(reactions.insert(key.as_str(), true))?;
         } else {
-            loro_err(bucket.delete(sender))?;
+            // Flat key (current shape). Also clear a legacy nested bucket entry
+            // if one is still present from older writers.
+            let _ = reactions.delete(key.as_str());
+            if let Some(ValueOrContainer::Container(Container::Map(bucket))) = reactions.get(emoji)
+            {
+                let _ = bucket.delete(sender);
+            }
         }
         Ok(())
     }
@@ -741,6 +825,8 @@ impl ChatDoc {
         m.insert("createdAt", now_ms()).ok();
         m.insert("deviceId", device_id).ok();
         m.insert("status", MessageStatus::Done.as_str()).ok();
+        m.insert_container("reactions", LoroMap::new())
+            .expect("reactions");
         let parts = m.insert_container("parts", LoroList::new()).expect("parts");
         let part = parts.push_container(LoroMap::new()).expect("part");
         part.insert("id", ulid()).ok();
@@ -770,6 +856,8 @@ impl ChatDoc {
         m.insert("deviceId", device_id).ok();
         m.insert("status", MessageStatus::Done.as_str()).ok();
         m.insert("answersQuestionId", question_id).ok();
+        m.insert_container("reactions", LoroMap::new())
+            .expect("reactions");
         let parts = m.insert_container("parts", LoroList::new()).expect("parts");
         let part = parts.push_container(LoroMap::new()).expect("part");
         part.insert("id", ulid()).ok();
@@ -845,6 +933,8 @@ impl ChatDoc {
         m.insert("deviceId", device_id).ok();
         m.insert("inReplyTo", in_reply_to).ok();
         m.insert("status", MessageStatus::Streaming.as_str()).ok();
+        m.insert_container("reactions", LoroMap::new())
+            .expect("reactions");
         let parts = m.insert_container("parts", LoroList::new()).expect("parts");
         let part_id = self.add_text_part_inner(&parts, msg_id, "text");
         self.commit_now();
@@ -1741,8 +1831,14 @@ mod tests {
         assert_eq!(b.messages()[1].text(), "Sam started a video call");
         assert_eq!(b.messages()[2].text(), "Hi, I'm Arbos.");
         assert_eq!(b.pending_commands().len(), 1);
-        let reactions = &b.to_json()["messages"][0]["reactions"]["👍"];
-        assert_eq!(reactions["user:ken"], true);
+        let mut row = b.to_json()["messages"][0].clone();
+        project_reactions(&mut row);
+        assert_eq!(row["reactions"]["👍"]["user:ken"], true);
+        // Storage is flat keys under reactions.
+        assert_eq!(
+            b.to_json()["messages"][0]["reactions"][reaction_key("👍", "user:ken").as_str()],
+            true
+        );
         assert_eq!(
             b.to_json()["settings"]["models"]["talking_model"]["id"],
             "gpt-test"
@@ -1772,14 +1868,6 @@ mod tests {
         a.transact(|d| {
             d.append_user_message("shared", "base", "dev:a", &UserMessageOpts::default())
                 .unwrap();
-        });
-        b.import(&a.snapshot()).unwrap();
-
-        // Seed the 👍 bucket on both sides first so concurrent sender inserts
-        // merge as map keys (concurrent first create of the same emoji bucket
-        // can still drop one side — that edge is documented in crdt-sync).
-        a.transact(|d| {
-            d.set_reaction("shared", "👍", "user:seed", true).unwrap();
         });
         b.import(&a.snapshot()).unwrap();
 
@@ -1815,13 +1903,14 @@ mod tests {
 
         for peer in [&a, &b] {
             let json = peer.to_json();
-            let shared = json["messages"]
+            let mut shared = json["messages"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .find(|m| m["id"] == "shared")
+                .cloned()
                 .unwrap();
-            assert_eq!(shared["reactions"]["👍"]["user:seed"], true);
+            project_reactions(&mut shared);
             assert_eq!(shared["reactions"]["👍"]["user:a"], true);
             assert_eq!(shared["reactions"]["👍"]["user:b"], true);
             assert_eq!(shared["reactions"]["🎉"]["user:a"], true);
@@ -1830,6 +1919,31 @@ mod tests {
             assert!(ids.contains(&"from-a".into()));
             assert!(ids.contains(&"from-b".into()));
             assert!(ids.contains(&"shared".into()));
+        }
+    }
+
+    #[test]
+    fn concurrent_same_emoji_first_react_both_survive() {
+        // Pins the flat "emoji|sender" shape: two peers reacting on=true for the
+        // same emoji on a fresh reactions map both keep their sender after merge.
+        let mut a = ChatDoc::new(Some(11), false);
+        let mut b = ChatDoc::new(Some(22), false);
+        a.transact(|d| {
+            d.append_user_message("m", "hi", "dev:a", &UserMessageOpts::default())
+                .unwrap();
+        });
+        b.import(&a.snapshot()).unwrap();
+        let base_a = a.oplog_vv();
+        let base_b = b.oplog_vv();
+        a.transact(|d| d.set_reaction("m", "👍", "user:a", true).unwrap());
+        b.transact(|d| d.set_reaction("m", "👍", "user:b", true).unwrap());
+        a.import(&b.export_updates_since(&base_b)).unwrap();
+        b.import(&a.export_updates_since(&base_a)).unwrap();
+        for peer in [&a, &b] {
+            let mut row = peer.to_json()["messages"][0].clone();
+            project_reactions(&mut row);
+            assert_eq!(row["reactions"]["👍"]["user:a"], true);
+            assert_eq!(row["reactions"]["👍"]["user:b"], true);
         }
     }
 
@@ -1858,6 +1972,40 @@ mod tests {
         doc.set_reaction("legacy", "👍", "user:x", false).unwrap();
         let row = &doc.to_json()["messages"][0];
         assert!(row.get("reactions").is_none());
+    }
+
+    #[test]
+    fn snapshot_and_export_skip_commit_while_transact_open() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let doc = ChatDoc::new(Some(3), false);
+        let commits = Arc::new(AtomicUsize::new(0));
+        let commits_cb = commits.clone();
+        let _sub = doc.doc.subscribe_local_update(Box::new(move |_| {
+            commits_cb.fetch_add(1, Ordering::SeqCst);
+            true
+        }));
+        let before = doc.oplog_vv();
+        doc.transact(|d| {
+            d.append_user_message("m1", "hi", "dev", &UserMessageOpts::default())
+                .unwrap();
+            assert!(
+                d.snapshot().is_empty(),
+                "snapshot must not export (commit) inside transact"
+            );
+            assert!(
+                d.export_updates_since(&before).is_empty(),
+                "export_updates_since must not export (commit) inside transact"
+            );
+            assert_eq!(
+                commits.load(Ordering::SeqCst),
+                0,
+                "snapshot/export must not commit inside transact"
+            );
+        });
+        assert_eq!(commits.load(Ordering::SeqCst), 1);
+        assert!(!doc.snapshot().is_empty());
     }
 
     #[test]

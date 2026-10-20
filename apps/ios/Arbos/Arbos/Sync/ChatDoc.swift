@@ -204,16 +204,17 @@ final class ChatDoc {
     }
 
     /// Toggle one emoji reaction for `sender` on a message. Several emojis may
-    /// sit on the same message. Shape: `reactions: Map { emoji: Map { sender: true } }`.
+    /// sit on the same message. CRDT shape: flat `"emoji|sender" → true` under
+    /// `reactions` (matches arbos-core; survives concurrent same-emoji first-react).
     /// Does not commit.
     func toggleReaction(messageId: Id, emoji: String, sender: String) throws {
         guard !emoji.isEmpty, !sender.isEmpty, let map = findMessage(messageId) else { return }
         let reactions = try map.getOrCreateContainer(key: "reactions", child: LoroMap())
-        let bucket = try reactions.getOrCreateContainer(key: emoji, child: LoroMap())
-        if case .bool(true) = bucket.get(key: sender)?.asValue() {
-            try bucket.delete(key: sender)
+        let key = "\(emoji)|\(sender)"
+        if case .bool(true) = reactions.get(key: key)?.asValue() {
+            try reactions.delete(key: key)
         } else {
-            try bucket.insert(key: sender, v: true)
+            try reactions.insert(key: key, v: true)
         }
     }
 

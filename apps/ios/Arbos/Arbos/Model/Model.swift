@@ -550,21 +550,31 @@ enum DocJSON {
         )
     }
 
-    /// `reactions` is a map of emoji → map of sender id → true (additive; unknown shapes ignored).
+    /// `reactions` is flat `"emoji|sender" → true` (arbos-core) and/or legacy
+    /// emoji → map of sender id → true. Unknown shapes are ignored.
     static func reactions(_ raw: Any?) -> [MessageReaction] {
         guard let map = raw as? [String: Any] else { return [] }
         var byEmoji: [String: [String]] = [:]
-        for (emoji, v) in map {
-            guard !emoji.isEmpty else { continue }
-            var senders: [String] = []
+        for (key, v) in map {
+            guard !key.isEmpty else { continue }
             if let people = v as? [String: Any] {
+                // Legacy nested bucket.
+                var senders: [String] = []
                 for (sid, flag) in people {
                     guard !sid.isEmpty else { continue }
                     if bool(flag) { senders.append(sid) }
                 }
+                if !senders.isEmpty { byEmoji[key] = senders.sorted() }
+                continue
             }
-            if !senders.isEmpty { byEmoji[emoji] = senders.sorted() }
+            // Flat key: "emoji|sender" → true.
+            guard bool(v), let sep = key.firstIndex(of: "|") else { continue }
+            let emoji = String(key[..<sep])
+            let sid = String(key[key.index(after: sep)...])
+            guard !emoji.isEmpty, !sid.isEmpty else { continue }
+            byEmoji[emoji, default: []].append(sid)
         }
+        byEmoji = byEmoji.mapValues { Array(Set($0)).sorted() }
         let ordered = MessageReaction.palette.compactMap { e -> MessageReaction? in
             guard let s = byEmoji[e] else { return nil }
             return MessageReaction(emoji: e, senders: s)
