@@ -1317,11 +1317,26 @@ impl Composer {
             }
         })
         .detach();
+        // Rig: `ARBOS_COMPOSER_ATTACH=/a.png:/b.pdf` stages files at launch,
+        // as the "+" picker or a drop would (screenshots of the pending row).
+        let attachments = std::env::var("ARBOS_COMPOSER_ATTACH")
+            .ok()
+            .map(|v| {
+                v.split(':')
+                    .map(PathBuf::from)
+                    .filter(|p| p.is_file())
+                    .map(|path| StagedAttachment {
+                        preview: image_preview_for(&path),
+                        path,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
             state,
             input,
             voice,
-            attachments: Vec::new(),
+            attachments,
             draft_chat: None,
             drafts: std::collections::HashMap::new(),
             open_picker: None,

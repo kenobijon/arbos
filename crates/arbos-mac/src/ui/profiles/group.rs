@@ -118,7 +118,10 @@ pub(super) fn page(
         &theme,
     )
     .into_any_element();
-    let hero = hero(avatar, name, "", theme.text_muted, &theme);
+    // Subtitle: the member count (the person pane shows @handle here).
+    let count = people.len();
+    let subtitle = format!("{count} member{}", if count == 1 { "" } else { "s" });
+    let hero = hero(avatar, name, &subtitle, theme.text_muted, &theme);
 
     // ----- tabs -----------------------------------------------------------------
     let tabs = tab_bar(&TABS, tab, &theme, cx);
