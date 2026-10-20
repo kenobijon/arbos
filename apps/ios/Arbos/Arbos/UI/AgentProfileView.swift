@@ -242,7 +242,6 @@ struct AgentProfileView: View {
     @State private var showDescription = false
     @State private var descriptionDraft = ""
     @State private var showSecrets = false
-    @State private var muted = false
 
     private var project: Project? { model.project(projectId) ?? fallback }
     private var isMine: Bool { model.project(projectId) != nil && project?.shared != true }
@@ -258,36 +257,62 @@ struct AgentProfileView: View {
                 if let project {
                     VStack(spacing: 18) {
                         Color.clear.frame(height: 80)
-                        ProfileHeader(name: project.name, status: statusLine(project), statusOnline: model.isStreaming(project: project.id)) {
-                            AgentAvatar(project: project, theme: theme, size: 112, working: model.isStreaming(project: project.id))
+                        // The shared pane layout (panels-unify, 2026-10-21): picture
+                        // (crayon for my own agent → the edit sheet), name, status,
+                        // @slug; no quick-action row — call and search live in the chat.
+                        PaneHeader(name: project.name, subtitle: statusLine(project)) {
+                            if isMine {
+                                Button { showEdit = true } label: {
+                                    AgentAvatar(project: project, theme: theme, size: PaneHeader<EmptyView>.avatarSize, working: model.isStreaming(project: project.id))
+                                        .paneCrayon()
+                                        .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Edit agent")
+                            } else {
+                                AgentAvatar(project: project, theme: theme, size: PaneHeader<EmptyView>.avatarSize, working: model.isStreaming(project: project.id))
+                            }
                         }
-                        ProfileActionRow(actions: [
-                            // Calls start audio-only; camera is toggled on the call screen.
-                            ProfileAction(icon: "phone.fill", label: "call") { call(project, .voice) },
-                            ProfileAction(icon: muted ? "bell.slash.fill" : "bell.fill", label: muted ? "unmute" : "mute") { muted.toggle() },
-                            ProfileAction(icon: "magnifyingglass", label: "search") { search(project) },
-                            ProfileAction(icon: "ellipsis", label: "more") { showEdit = true },
-                        ])
+                        .overlay(alignment: .bottom) {
+                            if model.isStreaming(project: project.id) {
+                                Text(statusLine(project)).font(theme.font(Theme.small)).foregroundStyle(Color(hex: "#1084FE")!)
+                                    .background(theme.bg)
+                            }
+                        }
+                        Text("@\(mentionSlug(project.name))")
+                            .font(theme.font(Theme.small))
+                            .foregroundStyle(theme.placeholder)
+                            .padding(.top, -10)
+                            .onTapGesture { UIPasteboard.general.string = "@\(mentionSlug(project.name))" }
                         ProfileCard {
-                            ProfileInfoRow(label: "agent", value: "@\(mentionSlug(project.name))", tint: Color(hex: "#1084FE")!)
-                                .onTapGesture { UIPasteboard.general.string = "@\(mentionSlug(project.name))" }
                             ownerRow(project)
-                            ProfileInfoRow(label: "machine", value: machineLine(project))
-                            ProfileInfoRow(label: "model", value: "\(project.shortModel) · \(project.effort.label)")
-                                .onTapGesture { if isMine { showModel = true } }
-                            ProfileInfoRow(label: "voice", value: voiceLine(project))
-                                .onTapGesture { if isMine { showVoice = true } }
-                            ProfileInfoRow(label: "secrets", value: secretsLine(project), trailingIcon: "chevron.right")
-                                .onTapGesture { showSecrets = true }
+                            PaneRow(title: "Machine", value: machineLine(project))
+                            Button { if isMine { showModel = true } } label: {
+                                PaneRow(title: "Model", value: "\(project.shortModel) · \(project.effort.label)", chevron: isMine)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(!isMine)
+                            Button { if isMine { showVoice = true } } label: {
+                                PaneRow(title: "Voice", value: voiceLine(project), chevron: isMine)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(!isMine)
+                            Button { showSecrets = true } label: {
+                                PaneRow(title: "Secrets", value: secretsLine(project), chevron: true)
+                            }
+                            .buttonStyle(.plain)
                             if project.description.isEmpty {
                                 if isMine {
                                     ProfileLinkRow(title: "Add a description") { descriptionDraft = ""; showDescription = true }
                                 } else {
-                                    ProfileInfoRow(label: "description", value: "—")
+                                    PaneRow(title: "Description", value: "—")
                                 }
                             } else {
-                                ProfileInfoRow(label: "description", value: project.description)
-                                    .onTapGesture { if isMine { descriptionDraft = project.description; showDescription = true } }
+                                Button { if isMine { descriptionDraft = project.description; showDescription = true } } label: {
+                                    PaneRow(title: "Description", value: project.description, chevron: isMine)
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(!isMine)
                             }
                         }
                         ProfileTabs(tabs: ["Media", "Files", "Links"], selected: $tab)
@@ -302,14 +327,7 @@ struct AgentProfileView: View {
                     Text("This agent is gone.").foregroundStyle(theme.muted).padding(.top, 120)
                 }
             }
-            ProfileTopBar {
-                if isMine {
-                    Button("Edit") { showEdit = true }
-                        .font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text)
-                        .padding(.horizontal, 14).frame(height: Theme.control)
-                        .background(Capsule().fill(theme.field))
-                }
-            }
+            ProfileTopBar { EmptyView() }
         }
         .task { await model.loadVoices() }
         .sheet(isPresented: $showModel) {
@@ -333,13 +351,6 @@ struct AgentProfileView: View {
             Button("Save") { model.updateProject(projectId, description: descriptionDraft.trimmingCharacters(in: .whitespacesAndNewlines)) }
             Button("Cancel", role: .cancel) { }
         } message: { Text("Shown to everyone who can see this agent (up to 500 characters).") }
-    }
-
-    /// Calls Phase 2: a call in the agent's chat; the voice worker joins as the agent.
-    private func call(_ project: Project, _ kind: CallKind) {
-        guard let chat = model.primaryChat(of: project.id) ?? model.chats(of: project.id).first else { return }
-        dismiss()
-        Task { await CallManager.shared.start(chatId: chat.id, projectId: project.id, kind: kind, title: project.name) }
     }
 
     private func statusLine(_ p: Project) -> String {
@@ -389,28 +400,14 @@ struct AgentProfileView: View {
                                    lastSeenAt: p.ownerLastSeenAt, online: p.ownerOnline)
         let status = p.ownerHandle == nil ? ("you", false) : lastSeenLine(person.lastSeenAt, online: person.online)
         return Button { if p.ownerHandle != nil { model.showProfile(.user(person)) } } label: {
-            HStack(spacing: 12) {
-                PersonAvatar(url: person.avatarUrl, handle: handle, size: 36, name: person.name, id: person.id, colorIndex: person.avatarColorIndex)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("owner").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
-                    HStack(spacing: 6) {
-                        Text("@\(handle)").font(theme.font(Theme.body)).foregroundStyle(theme.text)
-                        Text(status.0).font(theme.font(Theme.tiny)).foregroundStyle(status.1 ? Color(hex: "#1084FE")! : theme.muted)
-                    }
-                }
-                Spacer()
-                if p.ownerHandle != nil { Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.muted.opacity(0.7)) }
-            }
-            .padding(.horizontal, 16).padding(.vertical, 10).contentShape(Rectangle())
+            PaneRow(
+                leading: .avatar(AnyView(PersonAvatar(url: person.avatarUrl, handle: handle, size: PaneKit.avatar, name: person.name, id: person.id, colorIndex: person.avatarColorIndex))),
+                title: "@\(handle)",
+                subtitle: p.ownerHandle == nil ? "Owner · you" : "Owner · \(status.0)",
+                chevron: p.ownerHandle != nil
+            )
         }
         .buttonStyle(.plain)
-    }
-
-    private func search(_ p: Project) {
-        dismiss()
-        if let chat = model.singleChat(of: p.id) {
-            model.pendingSearchChat = chat.id
-            model.open(chat: chat)
-        }
+        .disabled(p.ownerHandle == nil)
     }
 }
