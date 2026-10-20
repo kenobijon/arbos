@@ -344,12 +344,12 @@ struct PaneTabs: View {
         .padding(3)
         .background(Capsule().fill(theme.bubbleAssistant))
         .overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1))
-        .padding(.horizontal, PaneKit.inset)
     }
 }
 
 /// The hero: 112 pt picture, name, subtitle (@handle, member count, …).
 struct PaneHeader<Avatar: View>: View {
+    static var avatarSize: CGFloat { 112 }
     @Environment(\.theme) private var theme
     let name: String
     let subtitle: String
@@ -357,7 +357,7 @@ struct PaneHeader<Avatar: View>: View {
 
     var body: some View {
         VStack(spacing: 10) {
-            avatar().frame(width: 112, height: 112)
+            avatar().frame(width: Self.avatarSize, height: Self.avatarSize)
             Text(name)
                 .font(theme.font(28, weight: .semibold))
                 .foregroundStyle(theme.text)
@@ -369,6 +369,29 @@ struct PaneHeader<Avatar: View>: View {
         }
         .frame(maxWidth: .infinity)
     }
+}
+
+/// The crayon on an editable hero picture (own profile, people groups): a
+/// small pencil disc at the bottom-right, same on every pane.
+private struct PaneCrayon: ViewModifier {
+    @Environment(\.theme) private var theme
+    let on: Bool
+    func body(content: Content) -> some View {
+        content.overlay(alignment: .bottomTrailing) {
+            if on {
+                Image(systemName: "pencil")
+                    .font(theme.font(13, weight: .semibold))
+                    .foregroundStyle(theme.text)
+                    .frame(width: 30, height: 30)
+                    .background(Circle().fill(theme.field))
+                    .overlay(Circle().strokeBorder(theme.bg, lineWidth: 2))
+            }
+        }
+    }
+}
+
+extension View {
+    func paneCrayon(_ on: Bool = true) -> some View { modifier(PaneCrayon(on: on)) }
 }
 
 // ----- the shared pane kit (PaneKit) and the names the pages use ------------
@@ -439,11 +462,11 @@ struct ProfileLinkRow: View {
     }
 }
 
-/// The tab pill: the kit's.
+/// The tab pill at the pane's insets (profile pages lay out edge to edge).
 struct ProfileTabs: View {
     let tabs: [String]
     @Binding var selected: String
-    var body: some View { PaneTabs(tabs: tabs, selected: $selected) }
+    var body: some View { PaneTabs(tabs: tabs, selected: $selected).padding(.horizontal, PaneKit.inset) }
 }
 
 /// Last-seen text: the relay's `online`/`last_seen_at` (§9) merged with the
@@ -786,22 +809,15 @@ struct GroupProfileView: View {
                         } else {
                             Button { showEdit = true } label: {
                                 AvatarCluster(members: clusterMembers, size: 72, imageUrl: groupImageURL)
-                                    .frame(width: 112, height: 112)
-                                    .overlay(alignment: .bottomTrailing) {
-                                        Image(systemName: "pencil")
-                                            .font(theme.font(13, weight: .semibold))
-                                            .foregroundStyle(theme.text)
-                                            .frame(width: 30, height: 30)
-                                            .background(Circle().fill(theme.field))
-                                            .overlay(Circle().strokeBorder(theme.bg, lineWidth: 2))
-                                    }
+                                    .frame(width: PaneHeader<EmptyView>.avatarSize, height: PaneHeader<EmptyView>.avatarSize)
+                                    .paneCrayon()
                                     .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
                             .accessibilityLabel("Edit group name and picture")
                         }
                     }
-                    PaneTabs(tabs: ["Members", "Library"], selected: $tab)
+                    ProfileTabs(tabs: ["Members", "Library"], selected: $tab)
                     if tab == "Members" {
                         membersList
                     } else {

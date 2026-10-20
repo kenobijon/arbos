@@ -31,6 +31,9 @@ struct SettingsView: View {
     @State private var avatarItem: PhotosPickerItem?
     @State private var avatarBusy = false
     @State private var showProfileEdit = false
+    /// Profile | Settings — the same pill as the person and group panes.
+    /// Settings is the landing tab; `ARBOS_SETTINGS_PAGE=profile` lands on Profile.
+    @State private var tab = DebugHooks.settingsPage == "profile" ? "Profile" : "Settings"
     /// `ARBOS_SETTINGS_PAGE=appearance` lands on that page (screenshot rig).
     @State private var showAppearancePage = DebugHooks.settingsPage == "appearance"
     @State private var showTextSizePage = DebugHooks.settingsPage == "textsize"
@@ -47,68 +50,11 @@ struct SettingsView: View {
         NavigationStack {
             SettingsPage(title: "Settings", onBack: { dismiss() }) {
                 profileHeader
-                SettingsGroup {
-                    NavigationLink { CreditsPage() } label: {
-                        SettingsRow(icon: "creditcard.fill", title: "Credits", value: creditsSummary)
-                    }
-                    if model.credentials != nil {
-                        NavigationLink { ConnectorsPage(connectorError: $connectorError) } label: {
-                            SettingsRow(icon: "link", title: "Connected apps", value: connectorsSummary)
-                        }
-                        // D83: a secret is "an app you connected by key"; it sits right after.
-                        NavigationLink { SecretsPage() } label: {
-                            SettingsRow(icon: "key.fill", title: "Secrets", value: model.secretsRowValue,
-                                        valueTint: model.secrets?.paused == true ? theme.danger : nil)
-                        }
-                    }
-                    if !model.isFixture {
-                        SettingsRow(icon: "iphone", title: "On this iPhone", value: storageLine, chevron: false)
-                    }
-                }
-                SettingsGroup(footer: model.machine.alwaysOn
-                              ? "Your one cloud computer, always on. Agents are workspaces on it."
-                              : "Your one cloud computer. A message to any agent wakes it.") {
-                    NavigationLink { MachinePage() } label: {
-                        SettingsRow(icon: "desktopcomputer", title: "Machine", value: machineSummary, dot: machineDotColor(model.machine.state, theme: theme))
-                    }
-                }
-                SettingsGroup {
-                    NavigationLink { NotificationsPage() } label: {
-                        SettingsRow(icon: "bell.badge.fill", title: "Notifications", value: notificationsSummary)
-                    }
-                    NavigationLink { AppearancePage() } label: {
-                        SettingsRow(icon: "circle.lefthalf.filled", title: "Appearance", value: appearanceSummary)
-                    }
-                    NavigationLink { TextSizePage() } label: {
-                        SettingsRow(icon: "textformat.size", title: "Text Size", value: TextScale.label(model.textScale))
-                    }
-                }
-                SettingsGroup {
-                    Button {
-                        dismiss()
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { FeedbackCenter.shared.open(screen: "settings") }
-                    } label: {
-                        SettingsRow(icon: "exclamationmark.bubble.fill", title: "Send feedback")
-                    }
-                    .buttonStyle(.plain)
-                    NavigationLink { AboutPage() } label: {
-                        SettingsRow(icon: "info.circle.fill", title: "About", value: SettingsView.versionLine)
-                    }
-                    #if DEBUG
-                    NavigationLink { RelayPage() } label: {
-                        SettingsRow(icon: "network", title: "Relay", value: URL(string: model.relayUrl)?.host ?? model.relayUrl)
-                    }
-                    #endif
-                }
-                SettingsGroup {
-                    Button(role: .destructive) { confirmUnpair = true } label: {
-                        Text(model.tokens != nil ? "Sign out" : "Sign out this device")
-                            .font(theme.font(Theme.body))
-                            .foregroundStyle(theme.danger)
-                            .frame(maxWidth: .infinity, minHeight: SettingsRow.height)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
+                PaneTabs(tabs: ["Profile", "Settings"], selected: $tab)
+                if tab == "Profile" {
+                    profileTab
+                } else {
+                    settingsTab
                 }
             }
             .confirmationDialog("Sign out?", isPresented: $confirmUnpair, titleVisibility: .visible) {
@@ -188,53 +134,115 @@ struct SettingsView: View {
         .presentationBackground(theme.bg)
     }
 
+    /// Settings: the grouped cards, then Sign out (the Mac me pane's Settings tab).
+    @ViewBuilder private var settingsTab: some View {
+        SettingsGroup {
+            NavigationLink { CreditsPage() } label: {
+                SettingsRow(icon: "creditcard.fill", title: "Credits", value: creditsSummary)
+            }
+            if model.credentials != nil {
+                NavigationLink { ConnectorsPage(connectorError: $connectorError) } label: {
+                    SettingsRow(icon: "link", title: "Connected apps", value: connectorsSummary)
+                }
+                // D83: a secret is "an app you connected by key"; it sits right after.
+                NavigationLink { SecretsPage() } label: {
+                    SettingsRow(icon: "key.fill", title: "Secrets", value: model.secretsRowValue,
+                                valueTint: model.secrets?.paused == true ? theme.danger : nil)
+                }
+            }
+            if !model.isFixture {
+                SettingsRow(icon: "iphone", title: "On this iPhone", value: storageLine, chevron: false)
+            }
+        }
+        SettingsGroup(footer: model.machine.alwaysOn
+                      ? "Your one cloud computer, always on. Agents are workspaces on it."
+                      : "Your one cloud computer. A message to any agent wakes it.") {
+            NavigationLink { MachinePage() } label: {
+                SettingsRow(icon: "desktopcomputer", title: "Machine", value: machineSummary, dot: machineDotColor(model.machine.state, theme: theme))
+            }
+        }
+        SettingsGroup {
+            NavigationLink { NotificationsPage() } label: {
+                SettingsRow(icon: "bell.badge.fill", title: "Notifications", value: notificationsSummary)
+            }
+            NavigationLink { AppearancePage() } label: {
+                SettingsRow(icon: "circle.lefthalf.filled", title: "Appearance", value: appearanceSummary)
+            }
+            NavigationLink { TextSizePage() } label: {
+                SettingsRow(icon: "textformat.size", title: "Text Size", value: TextScale.label(model.textScale))
+            }
+        }
+        SettingsGroup {
+            Button {
+                dismiss()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { FeedbackCenter.shared.open(screen: "settings") }
+            } label: {
+                SettingsRow(icon: "exclamationmark.bubble.fill", title: "Send feedback")
+            }
+            .buttonStyle(.plain)
+            NavigationLink { AboutPage() } label: {
+                SettingsRow(icon: "info.circle.fill", title: "About", value: SettingsView.versionLine)
+            }
+            #if DEBUG
+            NavigationLink { RelayPage() } label: {
+                SettingsRow(icon: "network", title: "Relay", value: URL(string: model.relayUrl)?.host ?? model.relayUrl)
+            }
+            #endif
+        }
+        SettingsGroup {
+            PaneDangerRow(title: model.tokens != nil ? "Sign out" : "Sign out this device") { confirmUnpair = true }
+        }
+    }
+
+    /// Profile: who I am on the relay — Name and Handle (tap → the edit sheet),
+    /// Remove picture when one was uploaded; the Mac me pane's Profile tab.
+    @ViewBuilder private var profileTab: some View {
+        let who = model.user.map { "@\($0.login)" } ?? (model.relayUrl.isEmpty ? "Not signed in" : model.relayUrl)
+        SettingsGroup(footer: "Your name, handle and picture are what other people and their agents see, here and on the Mac. Signed in with GitHub.") {
+            Button { editProfile() } label: {
+                PaneRow(title: "Name", value: model.user?.name ?? model.user?.login ?? "Arbos", valueTint: theme.text)
+            }
+            .buttonStyle(.plain)
+            .disabled(model.user == nil || model.isFixture)
+            Button { editProfile() } label: {
+                PaneRow(title: "Handle", value: who, valueTint: theme.text)
+            }
+            .buttonStyle(.plain)
+            .disabled(model.user == nil || model.isFixture)
+            if model.hasCustomAvatar {
+                PaneDangerRow(title: "Remove picture") {
+                    avatarBusy = true
+                    Task { _ = await model.removeUserAvatar(); avatarBusy = false }
+                }
+                .disabled(avatarBusy)
+            }
+        }
+    }
+
+    private func editProfile() {
+        guard model.user != nil, !model.isFixture else { return }
+        showProfileEdit = true
+    }
+
     // MARK: Profile header
 
-    /// Large avatar (D79: GitHub picture, else the coloured initials circle), bold
-    /// name, grey handle — Apple's account header. Tap the picture to change it;
-    /// tap the name/handle to edit them.
+    /// The kit's hero: picture with the crayon (tap to change it), name, @handle.
     private var profileHeader: some View {
-        VStack(spacing: 6) {
+        PaneHeader(
+            name: model.user?.name ?? model.user?.login ?? "Arbos",
+            subtitle: model.user.map { "@\($0.login)" } ?? (model.relayUrl.isEmpty ? "Not signed in" : model.relayUrl)
+        ) {
             PhotosPicker(selection: $avatarItem, matching: .images) {
-                PersonAvatar(url: model.user?.avatarUrl, handle: model.user?.login ?? "?", size: 104,
+                PersonAvatar(url: model.user?.avatarUrl, handle: model.user?.login ?? "?", size: PaneHeader<EmptyView>.avatarSize,
                              name: model.user?.name, id: model.user?.id,
                              colorIndex: model.user?.avatarColorIndexEffective)
                     .opacity(avatarBusy ? 0.55 : 1)
+                    .paneCrayon(model.user != nil && !model.isFixture)
             }
             .buttonStyle(.plain)
             .disabled(model.user == nil || avatarBusy || model.isFixture)
             .accessibilityLabel("Change profile picture")
-            .padding(.bottom, 8)
-            Button {
-                guard model.user != nil, !model.isFixture else { return }
-                showProfileEdit = true
-            } label: {
-                VStack(spacing: 6) {
-                    // Same affordance as the agent profile and the Mac header: a pencil after the name.
-                    HStack(spacing: 6) {
-                        Text(model.user?.name ?? model.user?.login ?? "Arbos")
-                            .font(theme.font(28, weight: .bold))
-                            .foregroundStyle(theme.text)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.8)
-                        if model.user != nil, !model.isFixture {
-                            Image(systemName: "pencil").font(.system(size: 14, weight: .semibold)).foregroundStyle(theme.muted)
-                        }
-                    }
-                    Text(model.user.map { "@\($0.login)" } ?? (model.relayUrl.isEmpty ? "Not signed in" : model.relayUrl))
-                        .font(theme.font(Theme.body))
-                        .foregroundStyle(theme.muted)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-            }
-            .buttonStyle(.plain)
-            .disabled(model.user == nil || model.isFixture)
-            .accessibilityLabel("Edit name and handle")
         }
-        .frame(maxWidth: .infinity)
-        .padding(.top, 14)
-        .padding(.bottom, 22)
     }
 
     private func applyAvatarPick(_ item: PhotosPickerItem) async {
@@ -339,7 +347,7 @@ struct SettingsPage<Content: View>: View {
                     content()
                     Color.clear.frame(height: 24)
                 }
-                .padding(.horizontal, 20)
+                .padding(.horizontal, PaneKit.inset)
             }
             // Apple Account pull-down: frosted fade under the title so the
             // avatar softens as it scrolls / rubber-bands into the header.
