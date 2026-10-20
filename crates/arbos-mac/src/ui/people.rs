@@ -201,21 +201,21 @@ pub fn new_chat_sheet(
         .map(|p| (p.id.clone(), p.name.clone()))
         .collect();
 
-    // Match the iPhone field (38 px tall, 12 px corners) and centre the
-    // ComposerInput's line inside the row — without items_center on the
-    // flex_1 wrapper the caret and placeholder sit high in the field.
+    // The app's one search field (the left pane's, `sidebar.rs`): a flat
+    // tinted 32 pt row with 8 pt corners and no rim, flush with the cards'
+    // 16 pt inset below it. The ComposerInput's line is centred explicitly —
+    // without items_center on the flex_1 wrapper the caret sits high.
     let search = div()
         .mx(px(16.0))
-        .h(px(38.0))
-        .px(px(12.0))
+        .h(px(32.0))
+        .px(px(10.0))
         .flex()
         .items_center()
-        .gap(px(8.0))
-        .rounded(px(12.0))
-        .bg(theme.field)
-        .border_1()
-        .border_color(theme.field_border)
-        .child(icon("search", 15.0, theme.text_muted))
+        .gap(px(7.0))
+        .rounded(px(8.0))
+        .bg(theme.surface_2)
+        .cursor_text()
+        .child(icon("search", 14.0, theme.text_muted))
         .child(
             div()
                 .flex_1()
