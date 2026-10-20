@@ -1089,9 +1089,20 @@ struct ChatView: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
                         ForEach(pending) { a in
+                            // Images show a real thumbnail (same 28 pt chip as Mac);
+                            // other files keep the SF Symbol + name pill.
+                            let thumb = a.mime.hasPrefix("image/") ? UIImage(data: a.data) : nil
                             HStack(spacing: 6) {
-                                Image(systemName: a.mime.hasPrefix("image/") ? "photo" : (a.mime.hasPrefix("audio/") ? "waveform" : "doc"))
-                                    .font(theme.font(12))
+                                if let thumb {
+                                    Image(uiImage: thumb)
+                                        .resizable()
+                                        .scaledToFill()
+                                        .frame(width: 28, height: 28)
+                                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                                } else {
+                                    Image(systemName: a.mime.hasPrefix("image/") ? "photo" : (a.mime.hasPrefix("audio/") ? "waveform" : "doc"))
+                                        .font(theme.font(12))
+                                }
                                 Text(a.name).font(theme.font(Theme.tiny)).lineLimit(1)
                                 Button { pending.removeAll { $0.id == a.id } } label: {
                                     Image(systemName: "xmark").font(.system(size: 10, weight: .bold))
@@ -1099,7 +1110,9 @@ struct ChatView: View {
                                 .buttonStyle(.plain)
                             }
                             .foregroundStyle(theme.text)
-                            .padding(.horizontal, 10).padding(.vertical, 6)
+                            .padding(.leading, thumb != nil ? 4 : 10)
+                            .padding(.trailing, 10)
+                            .padding(.vertical, thumb != nil ? 3 : 6)
                             .background(Capsule().fill(theme.bubbleAssistant))
                         }
                     }
