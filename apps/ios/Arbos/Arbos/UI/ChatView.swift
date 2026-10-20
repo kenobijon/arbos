@@ -835,21 +835,12 @@ struct ChatView: View {
                                 Button { UIPasteboard.general.string = m_text(row) } label: { Label("Copy", systemImage: "doc.on.doc") }
                             }
                     }
-                    if model.isStreaming(chatId) {
-                        workingLine.padding(.top, 20)
-                    } else if model.hasOpenSubagent(chatId) {
-                        // Open hand-off: child still running after the spawn row
-                        // finished. Tick so the 60s grace can expire cleanly.
+                    if model.isStreaming(chatId) || model.hasOpenSubagent(chatId) || model.isAwaitingReply(chatId) {
+                        // Tick once a second so time-capped working states
+                        // (stale stream, hand-off grace, awaiting-reply cheat)
+                        // expire without a stuck "<name> is working" line.
                         TimelineView(.periodic(from: .now, by: 1)) { _ in
-                            if model.hasOpenSubagent(chatId) {
-                                workingLine.padding(.top, 20)
-                            }
-                        }
-                    } else if model.isAwaitingReply(chatId) {
-                        // Tick once a second so the awaiting-reply cheat expires
-                        // (isAwaitingReply is time-capped) without a stuck line.
-                        TimelineView(.periodic(from: .now, by: 1)) { _ in
-                            if model.isAwaitingReply(chatId) {
+                            if model.isStreaming(chatId) || model.hasOpenSubagent(chatId) || model.isAwaitingReply(chatId) {
                                 workingLine.padding(.top, 20)
                             }
                         }

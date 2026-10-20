@@ -2554,9 +2554,6 @@ final class AppModel: ObservableObject {
         return last.askUserText != nil
     }
 
-    /// A turn is running: the last assistant message streams, or any recent
-    /// one does. A message left `streaming` by a box that died hours ago
-    /// must not pin the indicator forever.
     /// The running turn's current activity for the working line: the
     /// message's `activity`, else the latest working/step status part with a
     /// real message; nil → "<name> is working".
@@ -2574,11 +2571,19 @@ final class AppModel: ObservableObject {
         return nil
     }
 
+    /// A turn is running when a recent assistant message still streams and
+    /// no newer user line has arrived after it. A message left `streaming`
+    /// by a box that died (or a leftover stream under a later user message)
+    /// must not pin the indicator forever — every streaming row uses the
+    /// same 15-minute freshness window (including the last assistant message).
     func isStreaming(_ chatId: Id) -> Bool {
         let list = messages(of: chatId)
-        if let last = list.last(where: { $0.role == .assistant }), last.isStreaming { return true }
         let recent = nowMs() - 15 * 60 * 1000
-        return list.contains { $0.role == .assistant && $0.isStreaming && $0.createdAt >= recent }
+        guard let idx = list.lastIndex(where: {
+            $0.role == .assistant && $0.isStreaming && $0.createdAt >= recent
+        }) else { return false }
+        // A later user line means this stream is leftover from a prior turn.
+        return !list.suffix(from: idx + 1).contains { $0.role == .user }
     }
 
     func isStreaming(project projectId: Id) -> Bool {
@@ -2590,13 +2595,15 @@ final class AppModel: ObservableObject {
     /// `done` while the child still runs, so `isStreaming` alone misses it —
     /// show the faded working line until the hand-off closes.
     func hasOpenSubagent(_ chatId: Id) -> Bool {
-        messages(of: chatId).contains { m in
+        let recent = nowMs() - 15 * 60 * 1000
+        return messages(of: chatId).contains { m in
             guard m.role == .assistant else { return false }
             guard m.subagentId != nil || m.subagentName != nil else { return false }
             guard m.turn == .new || m.turn == .spawn || m.turn == .wake else { return false }
             guard (m.handoffMessages ?? 1) < 2 else { return false }
             // Streaming hand-off rows (the normal case while the child runs).
-            if m.isStreaming { return true }
+            // Same freshness window as `isStreaming` so a dead box cannot pin forever.
+            if m.isStreaming { return m.createdAt >= recent }
             // Brief race after `finish_message` before `handoffMessages` flips to 2.
             let t = m.completedAt ?? m.createdAt
             return nowMs() - t < 60_000
