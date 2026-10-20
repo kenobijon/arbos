@@ -66,7 +66,7 @@ messages:  List<Map { id, role, sender, status, parts, … }>
 commands:  List<Map { id, kind, payload, issuedBy, issuedAt, status }>
 ```
 
-**`meta`** — written by the box via `ChatDoc::init_meta` in `arbos-core`. Fields: `chatId`, `projectId`, `schemaVersion` (i64 `1`), `epoch` (i64). Mac `ChatDoc::new` also seeds `meta` locally with `epoch: 1`. iOS does not write `meta` on the client; it arrives by sync.
+**`meta`** — written only by the box via `ChatDoc::init_meta` in `arbos-core`. Fields: `chatId`, `projectId`, `schemaVersion` (i64 `1`), `epoch` (i64). In relay mode Mac uses `ChatDoc::empty` and does not write `meta` locally (it arrives by sync); the fixture helper `ChatDoc::new` still seeds `meta` for offline demos. iOS never writes `meta` on the client.
 
 **`messages[]`** — each entry is a map. Common fields:
 
@@ -86,7 +86,7 @@ commands:  List<Map { id, kind, payload, issuedBy, issuedAt, status }>
 | `reactions` | Map? | `emoji → Map { senderId → true }` (Mac + iOS clients) |
 | `voice` / `callId` / `greeting` | various | voice lines, call system lines, D82 greeting |
 
-**Client write rule:** a user message and its `send` command land in **one commit** (core `append_user_message*`; Mac/iOS commit message + `pushCommand("send", …)` together). Streaming text is `LoroText` append-only; the box batches commits on a ~120 ms tick (`STREAM_COMMIT_MS`).
+**Client write rule:** a user message and its `send` command land in **one commit** (core: `transact` around `append_user_message` + `push_command("send", …)`; today's Mac/iOS still commit message + `pushCommand("send", …)` together in the app). Streaming text is `LoroText` append-only; the box batches commits on a ~120 ms tick (`STREAM_COMMIT_MS`).
 
 **`parts[]`** — each part has `id`, `kind`, and kind-specific fields. Known kinds written or decoded today:
 
@@ -96,7 +96,7 @@ commands:  List<Map { id, kind, payload, issuedBy, issuedAt, status }>
 | `reasoning` | `reasoning: LoroText` | box |
 | `tool` | `call { id, name, input }`, `outputSummary` (≤ **160** chars, `TOOL_OUTPUT_SUMMARY_MAX`), optional `outputRef` / `outputBytes`, `isError`, usually `hidden: true` | box |
 | `attachment` | `attachment { name, mime, ref, bytes?, kind?, title? }` | client or box; bytes at blob URL |
-| `status` | `code`, `message` — e.g. `working`, `done`, `failed`, `stopped`, `waiting_user`, `waiting_approval`, `note` | box (core system notes use `status`+`note`) |
+| `status` | `code`, `message` — e.g. `working`, `done`, `failed`, `stopped`, `waiting_user`, `waiting_approval`, `note` | box (`append_system_note` uses `status`+`note`; neither Mac nor iPhone renders that shape) |
 | `error` | `code`, `message` | box |
 | `question` | `questionId`, `question`, optional `widget`, `state` (`open`/`answered`), `answer` | box; client answers via command |
 | `approval` | `approvalId`, title/summary/risk/payload, `state`, timestamps | box (`arbos-core`); Mac model knows the shape |
@@ -117,20 +117,15 @@ Unknown `kind` values decode to “unknown” and render as nothing (additive ru
 | `status` | `pending` → box marks `taken` → `done` / `failed` (mark-before-execute) |
 | `resolution` | optional, set by box |
 
-#### Disagreements between the three chat writers
+#### Writer rules (canonical core path)
 
-Drawn from `arbos-core::doc`, Mac `sync/doc.rs`, and iOS `ChatDoc.swift`:
+`arbos-core::doc` is the single canonical chat-doc writer API. Callers (Mac / iPhone / box / `arbosctl`) migrate onto it over subsequent parts; until then app-local writers remain.
 
-1. **Peer id and timestamps (R7).** Core requires an explicit Loro `peer` id and `record_timestamps` (box `true`, clients `false`). Mac and iOS constructors do **not** set peer id or timestamp recording; they rely on Loro defaults / whatever the imported snapshot carries.
-2. **Who seeds `meta`.** Core and Mac can write it; iOS only reads it from sync.
-3. **User-row richness.** iOS `insertUserMessage` writes many placeholders (`chatId`, `waitingUser`, `pending`, nulls for turn/model/usage, empty `hiddenParts`, optional attachments/mentions/`replyTo`/author fields). Core `append_user_message*` writes a minimal done user row + text part + `send` command. Mac serializes its `Message` model into the map (middle ground).
-4. **System lines.** Core `append_system_note` uses `role: system` and a `status` part with `code: "note"`. iOS `insertSystemLine` uses a `text` part (and optional `callId` / `call_id`).
-5. **Hidden tool parts.** Core leaves `hidden: true` on parts in `parts`. Mac **splits** hidden parts into `hiddenParts` when reading for the UI. iOS creates an empty `hiddenParts` list on insert and counts hidden parts when decoding.
-6. **Reactions.** Mac and iOS implement `reactions` toggle maps. Core has no reaction helper.
-7. **Part enum coverage.** Mac’s `Part` enum is the widest (diff/file/browser/skills/approval). iOS’s is narrower. Core writers cover the box path (text/tool/status/question/approval/attachment/…).
-8. **Commit style.** Core helpers often `commit()` inside the helper. Mac/iOS often mutate without committing and let the room layer commit once per user action.
-
-These still converge over Loro because maps/lists are CRDTs and readers are additive — but a UniFFI shared core should pick one writer path.
+1. **Hidden parts** are inline `hidden: true` on entries in `parts`. `hiddenParts` is a **reader projection** only (Mac splits hidden parts out when decoding for the UI). Writers never create a `hiddenParts` list.
+2. **Only the box writes `meta`.** Clients read it from sync (Mac relay mode and iOS). Additive schema changes never bump `schemaVersion`; readers ignore unknown fields and unknown part kinds.
+3. **Client writers** (`append_user_message`, `append_system_line`, `append_greeting`, `set_reaction`, `push_command`, `set_model_settings`) do not commit themselves — wrap them in `ChatDoc::transact` (one commit = one PUSH). They write no null placeholders, `chatId`, `pending`, `hiddenParts`, or `call_id`. System lines use a `text` part and optional `callId` only (Mac and iOS already decode that shape).
+4. **Box helpers** (`append_user_message_from`, `append_system_note`, streaming/tool/question/approval writers, …) keep committing inside the helper as today. `append_system_note` (`status` + `code: "note"`) is unchanged; neither app renders it in the transcript.
+5. **Mac facts.** Relay-mode Mac does not write `meta` (`ChatDoc::empty`). Mac already uses Loro's random peer, which satisfies R7. Mac system lines are text parts (same as iOS / core `append_system_line`).
 
 ### 6.3 Project document
 
@@ -376,7 +371,13 @@ This is how a message typed offline or across a crash still lands once.
 
 ### R7 — Peer ids and timestamps
 
-Each Loro replica that **writes** must use a **unique peer id** per device/process. The box sets `record_timestamps = true` so wall-clock metadata is recorded for box ops; clients pass `false` in `arbos-core::ChatDoc::new`. Reusing a peer id after a crash that lost unacked ops can fork history — `arbosctl` mints a fresh peer per run for that reason. Mac/iOS should converge on the same rule when the shared UniFFI core lands (see §6.2 disagreements).
+`ChatDoc::new(peer: Option<u64>, record_timestamps)`:
+
+- **`peer: None`** — leave Loro's random peer (today's Mac and iPhone behaviour). Never derive a peer from a device id.
+- **`peer: Some(id)`** — set that peer. The box and `arbosctl` mint a **fresh peer per boot/run** so a crash between PUSH and persist cannot reuse op ids.
+- **`record_timestamps`** — `true` on the box (wall-clock metadata for box ops); `false` on device clients.
+
+Reusing a peer id after a crash that lost unacked ops can fork history. Random peers already satisfy uniqueness for Mac/iOS.
 
 ---
 
