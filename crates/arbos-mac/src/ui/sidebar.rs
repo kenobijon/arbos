@@ -274,7 +274,6 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(cx.listener(|this, _, window, cx| {
             this.menu_open = false;
-            this.settings_open = false;
             this.people_input.update(cx, |i, cx| {
                 i.clear(cx);
                 i.set_placeholder("Search people");
@@ -487,12 +486,22 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
                 .text_color(theme.text)
                 .child(who),
         )
-        .child(icon("gear", 14.0, theme.text_faint))
+        // My avatar opens my profile and every setting in the right pane
+        // (three-pane rule, mockup g); a second click folds it away.
         .on_mouse_down(
             gpui::MouseButton::Left,
-            cx.listener(|this, _, _, cx| {
-                this.settings_open = !this.settings_open;
+            cx.listener(|this, _, window, cx| {
+                cx.stop_propagation();
                 this.menu_open = false;
+                let open = this.state.read(cx).profile == Some(crate::app::ProfilePage::Me);
+                if open {
+                    this.close_profile(window, cx);
+                } else {
+                    this.state.update(cx, |s, cx| {
+                        s.open_profile(crate::app::ProfilePage::Me, cx);
+                        s.set_profile_tab(1, cx);
+                    });
+                }
                 cx.notify();
             }),
         );

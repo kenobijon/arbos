@@ -50,6 +50,8 @@ pub enum ProfilePage {
     Group { space_id: Id },
     /// An agent (one of my projects or a shared one).
     Agent { project_id: Id },
+    /// My own profile and every app setting (the Settings window is gone).
+    Me,
 }
 
 /// Which agent-settings row on the agent's profile page is expanded into its

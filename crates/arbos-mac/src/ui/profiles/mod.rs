@@ -42,6 +42,8 @@ pub fn pane(page: &ProfilePage, shell: &Shell, cx: &mut Context<Shell>) -> Optio
         }
         ProfilePage::Group { space_id } => group::page(space_id, shell, cx),
         ProfilePage::Agent { project_id } => agent::page(project_id, shell, cx),
+        // My profile + settings live in the shell (the settings bodies are there).
+        ProfilePage::Me => Some(shell.render_me_pane(cx)),
     }
 }
 
@@ -58,22 +60,47 @@ pub(super) fn frame(
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> Stateful<Div> {
+    pane_frame(SHEET_WIDTH, None, body, right, scroll, theme, cx)
+}
+
+/// The pane with a pushed page: `‹` back and the page title lead the header.
+pub(crate) fn pane_frame(
+    width: f32,
+    back: Option<(&str, Stateful<Div>)>,
+    body: Div,
+    right: Option<Stateful<Div>>,
+    scroll: Option<&ScrollHandle>,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> Stateful<Div> {
     let close = glass::circle("profile-close", 30.0, theme)
         .child(icon("xmark", 13.0, theme.text))
         .on_click(cx.listener(|this, _, window, cx| this.close_profile(window, cx)));
-    let header = div()
+    let mut header = div()
         .h(px(crate::ui::theme::HEADER_HEIGHT))
         .flex_shrink_0()
         .flex()
         .items_center()
-        .justify_end()
         .gap(px(6.0))
-        .px(px(10.0))
-        .children(right)
-        .child(close);
+        .px(px(10.0));
+    if let Some((title, back)) = back {
+        header = header.child(back).child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(px(TEXT_BODY))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.text)
+                .child(title.to_string()),
+        );
+    } else {
+        header = header.child(div().flex_1());
+    }
+    let header = header.children(right).child(close);
     div()
         .id("profile-pane")
-        .w(px(SHEET_WIDTH))
+        .w(px(width))
         .flex_shrink_0()
         .h_full()
         .flex()

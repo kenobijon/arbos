@@ -55,15 +55,13 @@ const TRAFFIC_LIGHTS_INSET: f32 = 72.0;
 /// backdrop, which hands it to the rename (`rename_from_backdrop`).
 const NAME_CLICK_DELAY: Duration = Duration::from_millis(250);
 
-/// Width of the Settings sheet on its root page.
-const SETTINGS_WIDTH: f32 = 480.0;
-/// Body height shared by the Settings list and its pushed pages, so the box
-/// does not jump when navigating (shrinks with the window).
-const SETTINGS_BODY_HEIGHT: f32 = 720.0;
+/// Width of my pane's Settings pages that fit the pane; the two wider panels
+/// (`sheet_width`) grow the pane for their page.
+const SETTINGS_WIDTH: f32 = crate::ui::profiles::SHEET_WIDTH;
 
-/// What the Settings sheet shows (#1086, D80): the root list, or a pushed
-/// page inside the same box with a back button — the iPhone's `SettingsPage`
-/// navigation, not a separate pop-out. Credits / Machine / Appearance /
+/// What my pane's Settings tab shows (#1086, D80): the card list, or a pushed
+/// page inside the pane with a back button — the iPhone's `SettingsPage`
+/// navigation. Credits / Machine / Appearance /
 /// Notifications / Updates / About are the former inline sections; the rest
 /// are the Apps & tools panels.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -116,7 +114,7 @@ impl SettingsPage {
         )
     }
 
-    /// The sheet grows for the two pages laid out wider than the root list.
+    /// The pane grows for the two pages laid out wider than the card list.
     fn sheet_width(self) -> f32 {
         match self {
             SettingsPage::Root
@@ -152,8 +150,8 @@ pub struct Shell {
     skills: Entity<SkillsPanel>,
     local: Entity<LocalPanel>,
     focus_handle: FocusHandle,
-    pub(crate) settings_open: bool,
-    /// Which page the Settings sheet shows (#1086).
+    /// Which page my pane's Settings tab shows (#1086): the card list, or a
+    /// pushed page with `‹` back.
     settings_page: SettingsPage,
     /// Emoji react menu over a bubble: (chat, message, where it was clicked).
     react_menu: Option<(
@@ -373,7 +371,15 @@ impl Shell {
         cx.observe(&model_search_input, |_, _, cx| cx.notify())
             .detach();
         let name_input = cx.new(ComposerInput::new);
-        name_input.update(cx, |input, _| input.set_placeholder("Display name"));
+        {
+            let weak = cx.weak_entity();
+            name_input.update(cx, |input, _| {
+                input.set_placeholder("Display name");
+                input.on_submit = Some(Rc::new(move |_window, cx| {
+                    let _ = weak.update(cx, |this, cx| this.save_profile(cx));
+                }));
+            });
+        }
         cx.observe(&name_input, |_, _, cx| cx.notify()).detach();
         let handle_input = cx.new(ComposerInput::new);
         {
@@ -449,20 +455,14 @@ impl Shell {
         cx.subscribe(
             &connectors,
             |this, _, event: &ConnectorsEvent, cx| match event {
-                ConnectorsEvent::Back => {
-                    this.settings_open = true;
-                    cx.notify();
-                }
+                ConnectorsEvent::Back => this.settings_back(cx),
             },
         )
         .detach();
         let local = cx.new(|cx| LocalPanel::new(state.clone(), cx));
         cx.observe(&local, |_, _, cx| cx.notify()).detach();
         cx.subscribe(&local, |this, _, event: &LocalEvent, cx| match event {
-            LocalEvent::Back => {
-                this.settings_open = true;
-                cx.notify();
-            }
+            LocalEvent::Back => this.settings_back(cx),
         })
         .detach();
         let secrets = cx.new(|cx| SecretsPanel::new(state.clone(), cx));
@@ -489,10 +489,7 @@ impl Shell {
         }
         cx.observe(&secrets, |_, _, cx| cx.notify()).detach();
         cx.subscribe(&secrets, |this, _, event: &SecretsEvent, cx| match event {
-            SecretsEvent::Back => {
-                this.settings_open = true;
-                cx.notify();
-            }
+            SecretsEvent::Back => this.settings_back(cx),
         })
         .detach();
         let routines = cx.new(|cx| RoutinesPanel::new(state.clone(), cx));
@@ -515,10 +512,7 @@ impl Shell {
         cx.subscribe(
             &channels,
             |this, _, event: &ChannelsEvent, cx| match event {
-                ChannelsEvent::Back => {
-                    this.settings_open = true;
-                    cx.notify();
-                }
+                ChannelsEvent::Back => this.settings_back(cx),
             },
         )
         .detach();
@@ -527,7 +521,7 @@ impl Shell {
         let feedback = cx.new(|cx| FeedbackSheet::new(state.clone(), cx));
         cx.observe(&feedback, |_, _, cx| cx.notify()).detach();
 
-        Self {
+        let shell = Self {
             state,
             transcript,
             composer,
@@ -540,9 +534,9 @@ impl Shell {
             skills,
             local,
             focus_handle: cx.focus_handle(),
-            // `ARBOS_OPEN_SETTINGS=1|bottom|connectors|secrets…` opens the sheet at
-            // launch (`bottom` scrolled to its end, the others on that page) — rig.
-            settings_open: open_settings.is_some(),
+            // `ARBOS_OPEN_SETTINGS=1|bottom|connectors|secrets…` opens my pane's
+            // Settings tab at launch (`bottom` scrolled to its end, the others on
+            // that page) — rig; the pane itself is opened below.
             settings_page: match open_settings.as_deref() {
                 Some("connectors") => SettingsPage::Connectors,
                 Some(v) if v.starts_with("secrets") => SettingsPage::Secrets,
@@ -581,7 +575,14 @@ impl Shell {
             add_agent_open: false,
             members_open: false,
             feedback,
+        };
+        if open_settings.is_some() {
+            shell.state.update(cx, |s, cx| {
+                s.open_profile(ProfilePage::Me, cx);
+                s.set_profile_tab(1, cx);
+            });
         }
+        shell
     }
 
     /// Double-click a chat tab: turn its label into an editable field.
@@ -683,7 +684,12 @@ impl Shell {
             }),
         }
         self.settings_page = page;
-        self.settings_open = true;
+        self.state.update(cx, |s, cx| {
+            if s.profile != Some(ProfilePage::Me) {
+                s.open_profile(ProfilePage::Me, cx);
+            }
+            s.set_profile_tab(1, cx);
+        });
         cx.notify();
     }
 
@@ -710,18 +716,32 @@ impl Shell {
         self.settings_page = SettingsPage::Root;
     }
 
-    /// The sheet's back button: return to the Settings list.
+    /// The pane's `‹` on a pushed page: back to the Settings list.
     fn settings_back(&mut self, cx: &mut Context<Self>) {
         self.hide_settings_page(cx);
-        self.settings_open = true;
+        self.state.update(cx, |s, cx| {
+            if s.profile != Some(ProfilePage::Me) {
+                s.open_profile(ProfilePage::Me, cx);
+            }
+            s.set_profile_tab(1, cx);
+        });
         cx.notify();
     }
 
-    /// "Done" / Escape / sign out: the whole sheet goes, page included.
+    /// Escape / sign out: my pane goes, pushed page included.
     pub(crate) fn close_settings(&mut self, cx: &mut Context<Self>) {
         self.hide_settings_page(cx);
-        self.settings_open = false;
+        self.state.update(cx, |s, cx| {
+            if s.profile == Some(ProfilePage::Me) {
+                s.close_profile(cx);
+            }
+        });
         cx.notify();
+    }
+
+    /// My pane is up (the Settings window's successor).
+    fn settings_pane_open(&self, cx: &App) -> bool {
+        self.state.read(cx).profile == Some(ProfilePage::Me)
     }
 
     /// True while the embedded page's panel is still open; a page that closed
@@ -993,6 +1013,8 @@ impl Shell {
     /// Close the profile page (back button, click outside); the composer takes
     /// the keyboard back.
     pub(crate) fn close_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.hide_settings_page(cx);
+        self.profile_edit_open = false;
         self.state.update(cx, |s, cx| {
             s.close_profile(cx);
         });
@@ -1149,15 +1171,18 @@ impl Shell {
             self.state.update(cx, |s, cx| s.close_sidebar_overlay(cx));
             return;
         }
+        if self.profile_edit_open {
+            // Escape while editing my name/handle drops the edit; the pane stays.
+            self.profile_edit_open = false;
+            Composer::focus(&self.composer, window, cx);
+            cx.notify();
+            return;
+        }
         let mut closed = false;
-        if self.settings_open {
-            if self.settings_page != SettingsPage::Root {
-                // Escape on a pushed page goes back first, like the iPhone's swipe.
-                self.settings_back(cx);
-                return;
-            }
-            self.close_settings(cx);
-            closed = true;
+        if self.settings_pane_open(cx) && self.settings_page != SettingsPage::Root {
+            // Escape on a pushed page goes back first, like the iPhone's swipe.
+            self.settings_back(cx);
+            return;
         }
         self.state.update(cx, |s, cx| {
             if s.new_chat_open {
@@ -2136,9 +2161,12 @@ impl Shell {
         cx.notify();
     }
 
-    // ----- settings sheet -----------------------------------------------------------
+    // ----- my pane: profile + settings ----------------------------------------------
 
-    fn render_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// My profile and every app setting in the right pane (mockup g): picture,
+    /// name, Profile / Settings tabs; a Settings row pushes its page into the
+    /// same pane with `‹` back. This replaced the Settings window (2026-10-20).
+    pub(crate) fn render_me_pane(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let theme = Theme::of(cx).clone();
         let state = self.state.read(cx);
         let source = state.source_name;
@@ -2147,6 +2175,7 @@ impl Shell {
         let show_details = state.show_details;
         let account = state.account.clone();
         let account_image = account.as_ref().and_then(|a| state.avatar(&a.avatar_url));
+        let profile_tab = state.profile_tab;
         let notify_on = state.notifier.enabled;
         let skill_count = state.skills.len();
         let secrets_value = if state.secrets.loaded {
@@ -2709,189 +2738,303 @@ impl Shell {
                 ))
         };
 
-        let done = glass::sheet_button("settings-done", "Done", &theme).on_click(cx.listener(
-            |this, _, window, cx| {
-                this.close_settings(cx);
-                Composer::focus(&this.composer, window, cx);
-            },
-        ));
         let page = self.settings_page;
+        let tab = profile_tab;
+        let pane_width = profiles::SHEET_WIDTH.max(page.sheet_width());
 
-        // ----- Root list (iPhone D80): profile + nav rows into each page ---------
-        if page == SettingsPage::Root {
-            let mut body = div()
-                .id("settings-body")
-                .flex()
-                .flex_col()
-                .gap(px(22.0))
-                .px(px(16.0))
-                .pb(px(20.0))
-                .min_h_0()
-                .overflow_y_scroll()
-                .track_scroll(&self.settings_scroll);
-
-            let mut sign_out: Option<Div> = None;
-            if let Some(account) = account.clone() {
-                let who = if account.login.is_empty() {
-                    "Signed in".to_string()
-                } else {
-                    format!("@{}", account.login)
+        // ----- a pushed page: `‹ Title` in the header, the page fills the pane ----
+        if page != SettingsPage::Root {
+            let back = glass::circle("settings-back", 30.0, &theme)
+                .child(icon("chevron-left", 14.0, theme.text))
+                .on_click(cx.listener(|this, _, _, cx| this.settings_back(cx)));
+            let body: Div = if page.is_content() {
+                let content = match page {
+                    SettingsPage::Credits => credits_body,
+                    SettingsPage::Machine => machine_body,
+                    SettingsPage::Appearance => appearance_body,
+                    SettingsPage::Notifications => notifications_body,
+                    SettingsPage::Updates => updates_body,
+                    SettingsPage::About => about_body,
+                    SettingsPage::Root
+                    | SettingsPage::Connectors
+                    | SettingsPage::Routines
+                    | SettingsPage::Channels
+                    | SettingsPage::Skills
+                    | SettingsPage::ThisMac
+                    | SettingsPage::Secrets => unreachable!("content pages only"),
                 };
-                let person = crate::model::Person {
-                    id: account.id.clone(),
-                    handle: account.login.clone(),
-                    name: Some(account.name.clone()),
-                    avatar_url: account.avatar_url.clone(),
-                    status: String::new(),
-                    role: String::new(),
-                    last_seen_at: None,
-                    online: false,
-                    avatar_color_index: None,
-                };
-                let mut header = div()
+                div()
                     .flex()
                     .flex_col()
-                    .flex_shrink_0()
+                    .gap(px(22.0))
+                    .px(px(16.0))
+                    .pb(px(20.0))
+                    .child(content)
+            } else {
+                let panel: gpui::AnyElement = match page {
+                    SettingsPage::Root
+                    | SettingsPage::Credits
+                    | SettingsPage::Machine
+                    | SettingsPage::Appearance
+                    | SettingsPage::Notifications
+                    | SettingsPage::Updates
+                    | SettingsPage::About => unreachable!("handled above"),
+                    SettingsPage::Connectors => self.connectors.clone().into_any_element(),
+                    SettingsPage::Routines => self.routines.clone().into_any_element(),
+                    SettingsPage::Channels => self.channels.clone().into_any_element(),
+                    SettingsPage::Skills => self.skills.clone().into_any_element(),
+                    SettingsPage::ThisMac => self.local.clone().into_any_element(),
+                    SettingsPage::Secrets => self.secrets.clone().into_any_element(),
+                };
+                div()
+                    .flex()
+                    .flex_col()
+                    .px(px(6.0))
+                    .pb(px(12.0))
+                    .child(panel)
+            };
+            return profiles::pane_frame(
+                pane_width,
+                Some((page.title(), back)),
+                body,
+                None,
+                Some(&self.settings_scroll),
+                &theme,
+                cx,
+            );
+        }
+
+        // ----- hero: my picture (GitHub) and my name (inline field) ---------------
+        let who = account
+            .as_ref()
+            .filter(|a| !a.login.is_empty())
+            .map(|a| format!("@{}", a.login))
+            .unwrap_or_else(|| "Signed in".to_string());
+        let display_name = account
+            .as_ref()
+            .map(|a| a.name.trim().to_string())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| who.clone());
+        let person = account.as_ref().map(|account| crate::model::Person {
+            id: account.id.clone(),
+            handle: account.login.clone(),
+            name: Some(account.name.clone()),
+            avatar_url: account.avatar_url.clone(),
+            status: String::new(),
+            role: String::new(),
+            last_seen_at: None,
+            online: false,
+            avatar_color_index: None,
+        });
+        let picture = match person.as_ref() {
+            Some(p) => people::avatar(account_image, p, profiles::HERO_AVATAR, &theme),
+            None => div()
+                .size(px(profiles::HERO_AVATAR))
+                .rounded_full()
+                .bg(theme.surface_2),
+        }
+        .into_any_element();
+        // The picture follows GitHub until the Arbos override lands (#1135).
+        let avatar = profiles::editable_picture("me-avatar", picture, None).into_any_element();
+        let name_click = account.is_some().then(|| {
+            let f = cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
+                this.start_profile_edit(window, cx);
+            });
+            Box::new(f) as profiles::HeroClick
+        });
+        let name_el = profiles::editable_name(
+            "me-name",
+            &display_name,
+            self.profile_edit_open,
+            &self.name_input,
+            name_click,
+            &theme,
+        )
+        .into_any_element();
+        let mut hero = profiles::hero(avatar, name_el, &who, theme.text_muted, &theme);
+        if self.profile_edit_open {
+            // Editing: the handle under the name, Cancel / Save (Return saves).
+            hero = hero.child(
+                div()
+                    .flex()
+                    .flex_col()
                     .items_center()
-                    .gap(px(4.0))
-                    .pt(px(6.0))
-                    .pb(px(2.0))
-                    .child(div().pb(px(8.0)).child(people::avatar(
-                        account_image,
-                        &person,
-                        88.0,
-                        &theme,
-                    )));
-                if self.profile_edit_open {
-                    let field = |input: Entity<ComposerInput>, theme: &Theme| {
+                    .gap(px(8.0))
+                    .pt(px(4.0))
+                    .child(
                         div()
-                            .w(px(260.0))
-                            .px(px(10.0))
-                            .py(px(7.0))
-                            .rounded(px(10.0))
-                            .bg(theme.field)
-                            .border_1()
-                            .border_color(theme.field_border)
-                            .text_size(px(TEXT_BODY))
-                            .child(input)
-                    };
-                    header = header
-                        .child(field(self.name_input.clone(), &theme))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.0))
-                                .child(
-                                    div()
-                                        .text_size(px(TEXT_BODY))
-                                        .text_color(theme.text_muted)
-                                        .child("@"),
-                                )
-                                .child(field(self.handle_input.clone(), &theme)),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .gap(px(8.0))
-                                .pt(px(6.0))
-                                .child(
-                                    glass::quiet_button("profile-edit-cancel", "Cancel", &theme)
-                                        .h(px(32.0))
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.profile_edit_open = false;
-                                            cx.notify();
-                                        })),
-                                )
-                                .child(
-                                    glass::primary_button("profile-edit-save", "Save", &theme)
-                                        .h(px(32.0))
-                                        .on_click(
-                                            cx.listener(|this, _, _, cx| this.save_profile(cx)),
-                                        ),
-                                ),
-                        );
-                } else {
-                    // Double-click the name to edit (same as the agent profile page).
-                    header = header
-                        .child(
-                            div()
-                                .id("profile-edit")
-                                .text_size(px(22.0))
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(theme.text)
-                                .cursor_pointer()
-                                .hover(|s| s.opacity(0.85))
-                                .child(if account.name.trim().is_empty() {
-                                    who.clone()
-                                } else {
-                                    account.name.clone()
-                                })
-                                .on_click(cx.listener(
-                                    |this, event: &gpui::ClickEvent, window, cx| {
-                                        if event.click_count() >= 2 {
-                                            this.start_profile_edit(window, cx);
-                                        }
-                                    },
-                                )),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(TEXT_BODY))
-                                .text_color(theme.text_muted)
-                                .child(who.clone()),
-                        );
-                }
-                body = body.child(header);
-                sign_out = Some(
-                    settings_group(&theme).child(
-                        div()
-                            .id("sign-out")
                             .flex()
                             .items_center()
-                            .justify_center()
-                            .min_h(px(44.0))
-                            .text_size(px(TEXT_BODY))
-                            .text_color(theme.danger)
-                            .cursor_pointer()
-                            .hover(|s| s.bg(theme.surface_2))
-                            .child("Sign out")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.close_settings(cx);
-                                this.state.update(cx, |s, cx| s.sign_out(cx));
-                            })),
+                            .gap(px(6.0))
+                            .child(
+                                div()
+                                    .text_size(px(TEXT_BODY))
+                                    .text_color(theme.text_muted)
+                                    .child("@"),
+                            )
+                            .child(
+                                div()
+                                    .w(px(200.0))
+                                    .px(px(10.0))
+                                    .py(px(6.0))
+                                    .rounded(px(10.0))
+                                    .bg(theme.field)
+                                    .border_1()
+                                    .border_color(theme.field_border)
+                                    .text_size(px(TEXT_BODY))
+                                    .child(self.handle_input.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(8.0))
+                            .child(
+                                glass::quiet_button("profile-edit-cancel", "Cancel", &theme)
+                                    .h(px(30.0))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.profile_edit_open = false;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                glass::primary_button("profile-edit-save", "Save", &theme)
+                                    .h(px(30.0))
+                                    .on_click(cx.listener(|this, _, _, cx| this.save_profile(cx))),
+                            ),
                     ),
-                );
-            }
+            );
+        }
+        let tabs = profiles::tab_bar(&["Profile", "Settings"], tab, &theme, cx);
 
-            // Account group: Credits · Connected apps · Secrets · This Mac.
-            let mut account_group = settings_group(&theme);
-            if account.is_some() {
-                account_group = account_group.child(page_row(
-                    "settings-credits",
-                    "creditcard",
-                    SettingsPage::Credits,
-                    credits_summary.clone(),
-                    false,
-                    &theme,
-                    cx,
-                ));
-            }
-            account_group = account_group
+        let mut body = div()
+            .flex()
+            .flex_col()
+            .gap(px(22.0))
+            .pb(px(20.0))
+            .child(div().flex().flex_col().child(hero).child(tabs));
+
+        if tab == 0 {
+            // ----- Profile: who I am on the relay -------------------------------------
+            let mut card = settings_group(&theme).mx(px(16.0));
+            card = card
+                .child(
+                    glass::row("Name", &theme)
+                        .id("me-name-row")
+                        .child(value(display_name.clone(), &theme))
+                        .cursor_pointer()
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.start_profile_edit(window, cx)),
+                        ),
+                )
+                .child(
+                    glass::row("Handle", &theme)
+                        .id("me-handle-row")
+                        .border_b_0()
+                        .child(value(who.clone(), &theme))
+                        .cursor_pointer()
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.start_profile_edit(window, cx)),
+                        ),
+                );
+            body = body.child(card).child(footnote(
+                "Your name and handle are what other people and their agents see. Signed in with GitHub.".into(),
+                &theme,
+            ));
+            return profiles::pane_frame(
+                pane_width,
+                None,
+                body,
+                None,
+                Some(&self.settings_scroll),
+                &theme,
+                cx,
+            );
+        }
+
+        // ----- Settings: D80 cards, mockup g order, every Mac setting kept --------
+        let group = |theme: &Theme| settings_group(theme).mx(px(16.0));
+        // Appearance · Notifications.
+        body = body.child(
+            group(&theme)
                 .child(page_row(
-                    "settings-connectors",
-                    "link",
-                    SettingsPage::Connectors,
-                    connectors_summary,
+                    "settings-appearance",
+                    "circle-half",
+                    SettingsPage::Appearance,
+                    Some(appearance_summary),
                     false,
                     &theme,
                     cx,
                 ))
                 .child(page_row(
-                    "settings-secrets",
-                    "key",
-                    SettingsPage::Secrets,
-                    Some(secrets_value),
+                    "settings-notifications",
+                    "bell",
+                    SettingsPage::Notifications,
+                    Some(if notify_on { "On" } else { "Off" }.into()),
+                    true,
+                    &theme,
+                    cx,
+                )),
+        );
+        // Credits · Connected apps · Secrets.
+        let mut account_group = group(&theme);
+        if account.is_some() {
+            account_group = account_group.child(page_row(
+                "settings-credits",
+                "creditcard",
+                SettingsPage::Credits,
+                credits_summary.clone(),
+                false,
+                &theme,
+                cx,
+            ));
+        }
+        account_group = account_group
+            .child(page_row(
+                "settings-connectors",
+                "link",
+                SettingsPage::Connectors,
+                connectors_summary,
+                false,
+                &theme,
+                cx,
+            ))
+            .child(page_row(
+                "settings-secrets",
+                "key",
+                SettingsPage::Secrets,
+                Some(secrets_value),
+                true,
+                &theme,
+                cx,
+            ));
+        body = body.child(account_group);
+        // Routines · Channels · Skills · On this Mac.
+        body = body.child(
+            group(&theme)
+                .child(page_row(
+                    "settings-routines",
+                    "sparkles",
+                    SettingsPage::Routines,
+                    None,
+                    false,
+                    &theme,
+                    cx,
+                ))
+                .child(page_row(
+                    "settings-channels",
+                    "globe",
+                    SettingsPage::Channels,
+                    None,
+                    false,
+                    &theme,
+                    cx,
+                ))
+                .child(page_row(
+                    "settings-skills",
+                    "cpu",
+                    SettingsPage::Skills,
+                    Some(format!("{skill_count} in library")),
                     false,
                     &theme,
                     cx,
@@ -2908,17 +3051,17 @@ impl Shell {
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.open_settings_page(SettingsPage::ThisMac, window, cx)
                     })),
-                );
-            body = body.child(account_group);
-
-            // Machine group.
-            body = body.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_shrink_0()
-                    .child(
-                        settings_group(&theme).child(
+                ),
+        );
+        // Machine · Updates.
+        body = body.child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_shrink_0()
+                .child(
+                    group(&theme)
+                        .child(
                             glass::nav_row_icon(
                                 "settings-machine",
                                 "desktop",
@@ -2926,204 +3069,76 @@ impl Shell {
                                 Some(shown.label().to_string()),
                                 &theme,
                             )
-                            .border_b_0()
                             .on_click(cx.listener(
                                 |this, _, window, cx| {
                                     this.open_settings_page(SettingsPage::Machine, window, cx)
                                 },
                             )),
-                        ),
-                    )
-                    .child(footnote(machine_footer.into(), &theme)),
-            );
-
-            // Appearance · Notifications · Updates.
-            body = body.child(
-                settings_group(&theme)
-                    .child(page_row(
-                        "settings-notifications",
-                        "bell",
-                        SettingsPage::Notifications,
-                        Some(if notify_on { "On" } else { "Off" }.into()),
-                        false,
-                        &theme,
-                        cx,
-                    ))
-                    .child(page_row(
-                        "settings-appearance",
-                        "circle-half",
-                        SettingsPage::Appearance,
-                        Some(appearance_summary),
-                        false,
-                        &theme,
-                        cx,
-                    ))
-                    .child(page_row(
-                        "settings-updates",
-                        "arrow-down",
-                        SettingsPage::Updates,
-                        Some(if auto_update { "On" } else { "Off" }.into()),
-                        true,
-                        &theme,
-                        cx,
-                    )),
-            );
-
-            // Apps & tools (Mac-only extras).
-            body = body.child(
-                settings_group(&theme)
-                    .child(page_row(
-                        "settings-routines",
-                        "sparkles",
-                        SettingsPage::Routines,
-                        None,
-                        false,
-                        &theme,
-                        cx,
-                    ))
-                    .child(page_row(
-                        "settings-channels",
-                        "globe",
-                        SettingsPage::Channels,
-                        None,
-                        false,
-                        &theme,
-                        cx,
-                    ))
-                    .child(page_row(
-                        "settings-skills",
-                        "cpu",
-                        SettingsPage::Skills,
-                        Some(format!("{skill_count} in library")),
-                        true,
-                        &theme,
-                        cx,
-                    )),
-            );
-
-            // Help: Send feedback · About.
-            body = body.child(
-                settings_group(&theme)
-                    .child(
-                        glass::nav_row_icon(
-                            "settings-feedback",
-                            "square-pencil",
-                            "Send feedback",
-                            Some("⌘⇧F".into()),
-                            &theme,
                         )
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.open_feedback(window, cx)),
-                        ),
-                    )
-                    .child(page_row(
-                        "settings-about",
-                        "info",
-                        SettingsPage::About,
-                        Some(update.current_version.to_string()),
-                        true,
+                        .child(page_row(
+                            "settings-updates",
+                            "arrow-down",
+                            SettingsPage::Updates,
+                            Some(if auto_update { "On" } else { "Off" }.into()),
+                            true,
+                            &theme,
+                            cx,
+                        )),
+                )
+                .child(footnote(machine_footer.into(), &theme)),
+        );
+        // Send feedback · About.
+        body = body.child(
+            group(&theme)
+                .child(
+                    glass::nav_row_icon(
+                        "settings-feedback",
+                        "square-pencil",
+                        "Send feedback",
+                        Some("⌘⇧F".into()),
                         &theme,
-                        cx,
-                    )),
-            );
-
-            if let Some(sign_out) = sign_out {
-                body = body.child(sign_out);
-            }
-
-            let header = glass::sheet_header("Settings", None, Some(done), &theme);
-            // Prefer a fixed body height so Root and pushed pages share the
-            // same box; shrink with the sheet when the window is shorter so
-            // groups scroll instead of clipping against the card edge.
-            // Done and a click on the dimmed area around the card both close
-            // the sheet; clicks inside stay (glass::sheet stops propagation).
-            return glass::sheet(
-                SETTINGS_WIDTH,
-                &theme,
-                header,
-                body.h(px(SETTINGS_BODY_HEIGHT)).flex_shrink_1().min_h_0(),
-            )
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
-                    this.close_settings(cx);
-                    Composer::focus(&this.composer, window, cx);
-                }),
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| this.open_feedback(window, cx))),
+                )
+                .child(page_row(
+                    "settings-about",
+                    "info",
+                    SettingsPage::About,
+                    Some(update.current_version.to_string()),
+                    true,
+                    &theme,
+                    cx,
+                )),
+        );
+        if account.is_some() {
+            body = body.child(
+                group(&theme).child(
+                    div()
+                        .id("sign-out")
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .min_h(px(44.0))
+                        .text_size(px(TEXT_BODY))
+                        .text_color(theme.danger)
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.surface_2))
+                        .child("Sign out")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.close_settings(cx);
+                            this.state.update(cx, |s, cx| s.sign_out(cx));
+                        })),
+                ),
             );
         }
-
-        // A pushed page (#1086): the same box at the same height, `‹` back to
-        // the list, content or panel rendered inline instead of a pop-out.
-        let back = glass::circle("settings-back", 34.0, &theme)
-            .child(icon("chevron-left", 15.0, theme.text))
-            .on_click(cx.listener(|this, _, _, cx| this.settings_back(cx)));
-        let header = glass::sheet_header(page.title(), Some(back), Some(done), &theme);
-        let page_inner: gpui::AnyElement = if page.is_content() {
-            let content = match page {
-                SettingsPage::Credits => credits_body,
-                SettingsPage::Machine => machine_body,
-                SettingsPage::Appearance => appearance_body,
-                SettingsPage::Notifications => notifications_body,
-                SettingsPage::Updates => updates_body,
-                SettingsPage::About => about_body,
-                SettingsPage::Root
-                | SettingsPage::Connectors
-                | SettingsPage::Routines
-                | SettingsPage::Channels
-                | SettingsPage::Skills
-                | SettingsPage::ThisMac
-                | SettingsPage::Secrets => unreachable!("content pages only"),
-            };
-            div()
-                .id("settings-page")
-                .flex()
-                .flex_col()
-                .gap(px(22.0))
-                .px(px(16.0))
-                .pb(px(20.0))
-                .min_h_0()
-                .overflow_y_scroll()
-                .h(px(SETTINGS_BODY_HEIGHT))
-                .flex_shrink_1()
-                .child(content)
-                .into_any_element()
-        } else {
-            let panel: gpui::AnyElement = match page {
-                SettingsPage::Root
-                | SettingsPage::Credits
-                | SettingsPage::Machine
-                | SettingsPage::Appearance
-                | SettingsPage::Notifications
-                | SettingsPage::Updates
-                | SettingsPage::About => unreachable!("handled above"),
-                SettingsPage::Connectors => self.connectors.clone().into_any_element(),
-                SettingsPage::Routines => self.routines.clone().into_any_element(),
-                SettingsPage::Channels => self.channels.clone().into_any_element(),
-                SettingsPage::Skills => self.skills.clone().into_any_element(),
-                SettingsPage::ThisMac => self.local.clone().into_any_element(),
-                SettingsPage::Secrets => self.secrets.clone().into_any_element(),
-            };
-            div()
-                .id("settings-page")
-                .flex()
-                .flex_col()
-                .px(px(6.0))
-                .pb(px(12.0))
-                .min_h_0()
-                .overflow_y_scroll()
-                .h(px(SETTINGS_BODY_HEIGHT))
-                .flex_shrink_1()
-                .child(panel)
-                .into_any_element()
-        };
-        // Done and a click on the dimmed area around the card both close the
-        // sheet; clicks inside stay.
-        glass::sheet(page.sheet_width(), &theme, header, page_inner).on_mouse_down(
-            gpui::MouseButton::Left,
-            cx.listener(|this, _, window, cx| {
-                this.close_settings(cx);
-                Composer::focus(&this.composer, window, cx);
-            }),
+        profiles::pane_frame(
+            pane_width,
+            None,
+            body,
+            None,
+            Some(&self.settings_scroll),
+            &theme,
+            cx,
         )
     }
 
@@ -3561,6 +3576,9 @@ impl Render for Shell {
         // it never covers it; the floating menus below paint over both.
         let profile = self.state.read(cx).profile.clone();
         if let Some(page) = profile {
+            if page == ProfilePage::Me && !self.settings_page_alive(cx) {
+                self.settings_page = SettingsPage::Root;
+            }
             if let Some(pane) = profiles::pane(&page, self, cx) {
                 root = root.child(pane);
             }
@@ -3630,12 +3648,6 @@ impl Render for Shell {
         }
         if self.skills.read(cx).is_floating() {
             root = root.child(self.skills.clone());
-        }
-        if self.settings_open {
-            if !self.settings_page_alive(cx) {
-                self.settings_page = SettingsPage::Root;
-            }
-            root = root.child(self.render_settings(cx));
         }
         if self.voice_picker_open {
             if let Some(space) = selected.as_ref().filter(|s| !s.is_people()) {
