@@ -938,7 +938,10 @@ struct ChatView: View {
         switch model.machine.state {
         case .waking: return "Waking your machine…"
         case .error: return model.machineDetail ?? (model.machine.alwaysOn ? "Your agents are safe — their machine just can't be reached right now." : "Could not wake your machine")
-        case .awake, .hibernatedLight, .hibernatedDeep, .stoppedByUser: return model.link == .reconnecting ? "Reconnecting…" : nil
+        case .awake, .hibernatedLight, .hibernatedDeep, .stoppedByUser:
+            // This chat's room only — a sibling room reconnecting must not mark
+            // an agent that just reached out as "erroring" on an empty transcript.
+            return model.roomLink(for: chatId) == .reconnecting ? "Reconnecting…" : nil
         }
     }
 
