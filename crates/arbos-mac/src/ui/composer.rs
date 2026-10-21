@@ -2634,6 +2634,15 @@ mod enter_tests {
         cx: &mut TestAppContext,
     ) -> (Entity<ComposerInput>, &mut VisualTestContext, Rc<Cell<u32>>) {
         let submitted = Rc::new(Cell::new(0u32));
+        cx.update(|cx| {
+            let theme = crate::ui::theme::Theme::for_pref(
+                crate::ui::theme::AppearancePref::Dark,
+                crate::ui::theme::Surface::Matte,
+                cx,
+            );
+            cx.set_global(theme);
+            crate::ui::motion::PulseClock::init(cx);
+        });
         let (input, vcx) = cx.add_window_view(|_, cx| ComposerInput::new(cx));
         let weak = input.downgrade();
         let count = submitted.clone();
