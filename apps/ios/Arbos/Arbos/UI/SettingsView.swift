@@ -290,6 +290,7 @@ struct SettingsView: View {
     }
 
     private var machineSummary: String {
+        if let n = model.waitlistPosition { return "In line · number \(n)" }
         if model.machine.alwaysOn, !model.machine.held, model.machineBusy { return "Restarting…" }
         return model.machine.label
     }
@@ -714,6 +715,10 @@ struct MachinePage: View {
     var body: some View {
         SettingsPage(title: "Machine") {
             SettingsGroup {
+                SettingsValueRow("Where it runs", value: model.machine.whereItRuns)
+                if let n = model.waitlistPosition {
+                    SettingsValueRow("In line", value: "Number \(n) · we'll let you know")
+                }
                 SettingsValueRow("State") {
                     HStack(spacing: 7) {
                         if model.machine.alwaysOn, !model.machine.held, model.machineBusy {

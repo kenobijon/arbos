@@ -545,6 +545,22 @@ enum AdminCmd {
         #[arg(long)]
         reason: Option<String>,
     },
+    /// Host fleet (D89): `status` shows host pressure, capacity, every gvisor sandbox with live
+    /// stats, the waitlist and recent evictions; `cap <n>` sets how many always-on sandboxes the
+    /// host accepts (persisted).
+    Fleet {
+        #[arg(value_parser = ["status", "cap"])]
+        action: String,
+        /// New `max_boxes` for `cap`.
+        n: Option<usize>,
+    },
+    /// Waitlist (D89): `list` shows who is in line; `admit <user>` lets one user through now
+    /// (refused while the host is full).
+    Waitlist {
+        #[arg(value_parser = ["list", "admit"])]
+        action: String,
+        user: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -1054,6 +1070,36 @@ async fn main() -> Result<()> {
                                     &serde_json::json!({ "on": on == "on", "reason": reason }),
                                 )
                                 .await?
+                        }
+                    };
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                AdminCmd::Fleet { action, n } => {
+                    let v = match action.as_str() {
+                        "cap" => {
+                            let n = n.ok_or_else(|| anyhow::anyhow!("cap needs a number"))?;
+                            admin
+                                .put("/admin/fleet", &serde_json::json!({ "max_boxes": n }))
+                                .await?
+                        }
+                        _ => admin.get("/admin/fleet").await?,
+                    };
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                AdminCmd::Waitlist { action, user } => {
+                    let v = match action.as_str() {
+                        "admit" => {
+                            let u = user.ok_or_else(|| anyhow::anyhow!("admit needs a user id"))?;
+                            admin
+                                .post(
+                                    &format!("/admin/waitlist/{u}/admit"),
+                                    &serde_json::json!({}),
+                                )
+                                .await?
+                        }
+                        _ => {
+                            let f = admin.get("/admin/fleet").await?;
+                            serde_json::json!({ "capacity": f.get("capacity"), "waitlist": f.get("waitlist") })
                         }
                     };
                     println!("{}", serde_json::to_string_pretty(&v)?);

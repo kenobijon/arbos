@@ -6,6 +6,19 @@
 # compiler errors; exit 0 = both compile, 1 = one does not, 2 = infrastructure trouble (fetch/checkout).
 set -uo pipefail
 branch=$1; sha=$2
+# xcodebuild boots a simulator to resolve the generic destination and leaves it running; six of them
+# (launchd_sim + assetsd + siriknowledged each) were idling on the EC2 Mac on 2026-10-21 while the
+# release build fought for the 8 cores. Shut down at exit every simulator this run booted — only those,
+# so a rig that keeps its own simulator up (arbos-ios, arbos-parity) is left alone.
+booted_sims() { xcrun simctl list devices booted 2>/dev/null | grep -oE '[0-9A-F-]{36}' | sort -u; }
+SIMS_BEFORE=$(booted_sims)
+teardown_sims() {
+  local u
+  for u in $(booted_sims); do
+    grep -qx "$u" <<< "$SIMS_BEFORE" || { xcrun simctl shutdown "$u" >/dev/null 2>&1 && echo "== simulator $u shut down (booted by this run)"; }
+  done
+}
+trap teardown_sims EXIT
 cd ~/arbos-gate || exit 2
 git fetch -q origin "+refs/heads/${branch}:refs/remotes/origin/${branch}" || { echo "fetch of ${branch} failed"; exit 2; }
 git checkout -q --detach "$sha" || { echo "checkout of ${sha} failed"; exit 2; }

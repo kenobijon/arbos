@@ -1,0 +1,80 @@
+#!/bin/bash
+# Nightly hygiene for the EC2 Mac (runs as root from /Library/LaunchDaemons/sh.arbos.mac-clean.plist, 04:15 UTC).
+# Installed copy: /usr/local/bin/arbos-mac-clean.sh — keep it in step with this file (sudo install -m 755).
+#  - removes cargo target/ dirs not modified for 2 days under the worker checkouts (never the protected trees)
+#  - clears CoreSimulator caches and deletes unavailable simulators
+#  - shuts down the gate user's lingering booted simulators (xcodebuild boots one per gate run and leaves
+#    it; six were idling on 2026-10-21) — only ec2-user's, never the arbosgui GUI session's
+#  - kills orphaned `rust-cache … save.js` processes (parent 1, older than 30 min: a cancelled release
+#    job's post step kept tar'ing at 43 % CPU for 1 h 23 min on 2026-10-21)
+#  - appends an ALERT line to the loop journal when the data volume has < 20 GB free
+# Left alone on purpose: WirelessRadioManagerd (system daemon at ~140 % CPU on this Wi-Fi-less EC2 Mac;
+# shared machine, not ours to disable — see the feedback-loop runbook).
+# Log: /var/log/arbos-mac-clean.log. Journal: /Users/Shared/arbos-run/loop-journal.log (also `logger -t arbos-mac-clean`).
+set -u
+LOG=/var/log/arbos-mac-clean.log
+JOURNAL=/Users/Shared/arbos-run/loop-journal.log
+MIN_FREE_GB=${MIN_FREE_GB:-20}
+TARGET_AGE_DAYS=${TARGET_AGE_DAYS:-2}
+PROTECT='(/Users/Shared/arbos-store-pending|/Users/ec2-user/arbos-parity|/Users/ec2-user/arbos-ios|/Users/ec2-user/arbos-refresh|/Users/arbosgui/actions-runner)'
+ts() { date -u +%FT%TZ; }
+say() { printf '%s %s\n' "$(ts)" "$*" >> "$LOG"; }
+free_gb() { df -g /System/Volumes/Data | awk 'NR==2 {print $4}'; }
+
+say "start free=$(free_gb)G"
+
+# A build in flight owns its target dir: skip cargo targets while cargo/rustc/xcodebuild run.
+if pgrep -qx cargo || pgrep -qx rustc; then
+  say "cargo/rustc running; skipping target/ cleanup this run"
+else
+  find /Users/ec2-user /Users/arbosgui /tmp -maxdepth 4 -type d -name target -not -path '*/node_modules/*' 2>/dev/null \
+    | grep -Ev "$PROTECT" | while read -r t; do
+      [ -f "$(dirname "$t")/Cargo.toml" ] || continue
+      # idle = no file inside touched within TARGET_AGE_DAYS (the dir's own mtime rarely changes)
+      [ -z "$(find "$t" -type f -mtime -"$TARGET_AGE_DAYS" -print -quit 2>/dev/null)" ] || continue
+      mib=$(du -sm "$t" 2>/dev/null | cut -f1)
+      rm -rf "$t" && say "removed $t (${mib} MiB, idle > ${TARGET_AGE_DAYS}d)"
+    done
+fi
+
+rm -rf /Library/Developer/CoreSimulator/Caches/* /Users/ec2-user/Library/Developer/CoreSimulator/Caches/* 2>/dev/null
+sudo -u ec2-user xcrun simctl delete unavailable >/dev/null 2>&1 && say "simctl delete unavailable ok"
+
+# Lingering booted simulators of the gate user. Skipped while an xcodebuild runs (a gate or rig owns them).
+if pgrep -qx xcodebuild; then
+  say "xcodebuild running; leaving booted simulators alone"
+else
+  booted=$(sudo -u ec2-user xcrun simctl list devices booted 2>/dev/null | grep -oE '[0-9A-F-]{36}' | sort -u)
+  n=0
+  for u in $booted; do
+    sudo -u ec2-user xcrun simctl shutdown "$u" >/dev/null 2>&1 && n=$((n + 1))
+  done
+  [ "$n" -gt 0 ] && say "shut down $n lingering booted simulator(s) of ec2-user"
+fi
+
+# Orphaned Actions-cache savers: a cancelled release job's `Post Run Swatinem/rust-cache` keeps running
+# (parent 1) long after the job; kill those older than 30 minutes.
+for pid in $(pgrep -f 'rust-cache/v2/dist/save.js'); do
+  ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+  secs=$(ps -o etime= -p "$pid" 2>/dev/null | awk -F'[-:]' '{ if (NF==4) print $1*86400+$2*3600+$3*60+$4; else if (NF==3) print $1*3600+$2*60+$3; else print $1*60+$2 }')
+  if [ "${ppid:-0}" = "1" ] && [ "${secs:-0}" -gt 1800 ]; then
+    kill "$pid" 2>/dev/null && say "killed orphaned rust-cache save.js pid $pid (running ${secs}s, parent 1)"
+  fi
+done
+# Xcode DerivedData (per-project folders) only when space is short, only folders with no file touched
+# for 7 days, never while xcodebuild runs.
+if [ "$(free_gb)" -lt "$MIN_FREE_GB" ] && ! pgrep -qx xcodebuild; then
+  find /Users/ec2-user/Library/Developer/Xcode/DerivedData -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while read -r d; do
+    [ -z "$(find "$d" -type f -mtime -7 -print -quit 2>/dev/null)" ] || continue
+    rm -rf "$d" && say "removed DerivedData $(basename "$d")"
+  done
+fi
+
+FREE=$(free_gb)
+say "done free=${FREE}G"
+if [ "$FREE" -lt "$MIN_FREE_GB" ]; then
+  msg="ALERT $(ts) EC2 Mac data volume has ${FREE} GB free (< ${MIN_FREE_GB} GB) after nightly cleanup — builds/simctl will start failing; prune /Users/*/arbos*/target, simulators, DerivedData"
+  mkdir -p "$(dirname "$JOURNAL")"; printf '%s\n' "$msg" >> "$JOURNAL"; chmod 666 "$JOURNAL" 2>/dev/null
+  logger -t arbos-mac-clean "$msg"
+  say "$msg"
+fi

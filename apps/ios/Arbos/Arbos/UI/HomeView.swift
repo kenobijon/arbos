@@ -90,6 +90,12 @@ struct HomeView: View {
                                     .listRowSeparator(.hidden)
                                     .listRowBackground(theme.bg)
                             }
+                            if let position = model.waitlistPosition {
+                                WaitlistCard(position: position)
+                                    .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
+                                    .listRowSeparator(.hidden)
+                                    .listRowBackground(theme.bg)
+                            }
                             ForEach(model.approvals) { device in
                                 ApprovalCard(device: device)
                                     .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
@@ -853,6 +859,30 @@ struct UpdateCard: View {
         .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
         .padding(.top, 10)
         .accessibilityIdentifier("home-update-card")
+    }
+}
+
+/// D89: the host that runs everyone's computer is full; this account is in line. Chats and
+/// people work meanwhile; agents start once the machine is ready.
+struct WaitlistCard: View {
+    @Environment(\.theme) private var theme
+    let position: Int
+
+    var body: some View {
+        HStack(spacing: 10) {
+            GlassCircle(size: 36) {
+                Image(systemName: "hourglass").font(.system(size: 16)).foregroundStyle(theme.text)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text("You're number \(position) in line for a computer").font(theme.font(Theme.body, weight: .semibold)).foregroundStyle(theme.text)
+                Text("We'll let you know when it's ready. Chats and people work now; agents start then.").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+            }
+            Spacer()
+        }
+        .padding(14)
+        .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
+        .padding(.top, 10)
+        .accessibilityIdentifier("home-waitlist-card")
     }
 }
 

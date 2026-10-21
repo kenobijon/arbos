@@ -544,6 +544,7 @@ impl Db {
         c.execute_batch(crate::db_calls::CALLS_SCHEMA)?;
         crate::db_calls::migrate_calls(&c);
         c.execute_batch(crate::db_voice::VOICE_SCHEMA)?;
+        c.execute_batch(crate::db_fleet::FLEET_SCHEMA)?;
         crate::db_voice::migrate_voice(&c);
         Self::migrate_vault_items_per_user(&c)?;
         c.execute_batch(crate::db_secrets::SECRETS_SCHEMA)?;

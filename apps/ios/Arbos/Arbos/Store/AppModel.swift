@@ -112,6 +112,9 @@ final class AppModel: ObservableObject {
     /// A newer TestFlight build than the one running (continuous delivery, D85): the Home card
     /// and Settings → About offer one tap into TestFlight. `nil` when up to date or dismissed.
     @Published private(set) var availableUpdate: AvailableBuild?
+    /// D89: the host is full and this account is in line for a machine (`/me` →
+    /// `machine.waitlisted` / `machine.waitlist_position`). nil = not waitlisted.
+    @Published private(set) var waitlistPosition: Int?
     /// People chats (D72): DMs I am a member of, newest activity first.
     @Published var peopleChats: [PeopleChat] = []
     /// Chat ids with unread rows (per device, from head_seq > read_seq and pushes).
@@ -819,6 +822,9 @@ final class AppModel: ObservableObject {
             user = who
             credits = cr
             saveAccountCache()
+            let waitlisted = (summary["waitlisted"] as? NSNumber)?.boolValue ?? false
+            let position = waitlisted ? ((summary["waitlist_position"] as? NSNumber)?.intValue ?? 1) : nil
+            if position != waitlistPosition { waitlistPosition = position }
             if let on = (summary["always_on"] as? NSNumber)?.boolValue {
                 meAlwaysOn = on
                 if let held = (summary["held"] as? NSNumber)?.boolValue { machine.held = held }
@@ -2003,9 +2009,10 @@ final class AppModel: ObservableObject {
 
     /// `@slug` tokens that name a member: agents by their mention slug, people by handle.
     /// `@everyone` / `@all` and a leading "hey everyone" (etc.) address every agent in the chat.
+    /// Soft-deleted agents (no nested `project`) are skipped — they cannot wake or reply.
     static func mentions(in text: String, members: [ChatMember]) -> [String] {
         var out: [String] = []
-        let agents = members.filter(\.isAgent)
+        let agents = members.filter { $0.isAgent && $0.project != nil }
         func appendAgents() {
             for a in agents where !out.contains(a.member) { out.append(a.member) }
         }
@@ -2020,7 +2027,10 @@ final class AppModel: ObservableObject {
                 if !out.contains(a.member) { out.append(a.member) }
                 continue
             }
-            if let m = members.first(where: { $0.handle.lowercased() == slug || ($0.isAgent && mentionSlug($0.project?.name ?? "") == slug) }) {
+            if let m = members.first(where: {
+                $0.handle.lowercased() == slug
+                    || ($0.isAgent && $0.project != nil && mentionSlug($0.project?.name ?? "") == slug)
+            }) {
                 if !out.contains(m.member) { out.append(m.member) }
             }
         }
@@ -2098,7 +2108,7 @@ final class AppModel: ObservableObject {
     static func namedAgents(in text: String, members: [ChatMember]) -> [String] {
         // Person @handle still wins; display-name-only collisions do not suppress the agent.
         if !namedPeopleByHandle(in: text, members: members).isEmpty { return [] }
-        let agents = members.filter(\.isAgent)
+        let agents = members.filter { $0.isAgent && $0.project != nil }
         guard !agents.isEmpty else { return [] }
         var lower = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !lower.isEmpty else { return [] }

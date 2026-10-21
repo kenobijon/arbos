@@ -194,10 +194,9 @@ pub async fn create_project(
     let provider = match b.provider.as_deref() {
         Some(p) => Provider::parse(p).ok_or((
             StatusCode::BAD_REQUEST,
-            "provider must be daytona|process|docker".to_owned(),
+            "provider must be daytona|process|docker|gvisor".to_owned(),
         ))?,
-        None if state.daytona.is_some() => Provider::Daytona,
-        None => Provider::Process,
+        None => boxes::default_provider(&state),
     };
     let now = now_ms();
     let id = ulid();
@@ -867,13 +866,23 @@ pub async fn machine(State(state): State<AppState>, principal: Principal) -> Api
         .and_then(|s| s.snapshot.clone())
         .or(state.db.user_snapshot(&user_id).map_err(internal)?)
         .unwrap_or_else(|| state.cfg.daytona_snapshot.clone());
-    // Class from the snapshot when Daytona answers; the known default otherwise.
-    let (mut cpu, mut mem, mut disk) = (4_i64, 8_i64, 10_i64);
-    if let Some(dt) = &state.daytona {
-        if let Ok(snap) = dt.get_snapshot(&snapshot_name).await {
-            cpu = snap.cpu.unwrap_or(cpu);
-            mem = snap.mem.unwrap_or(mem);
-            disk = snap.disk.unwrap_or(disk);
+    // Class from the snapshot when Daytona answers; the known default otherwise. A host sandbox
+    // (D89) reports the fleet caps.
+    let gvisor = sb.as_ref().is_some_and(|s| s.provider == "gvisor")
+        || (sb.is_none() && boxes::default_provider(&state) == Provider::Gvisor);
+    let (mut cpu, mut mem, mut disk) = if gvisor {
+        let f = &state.cfg.fleet;
+        (f.box_cpus as i64, f.box_mem_gb as i64, f.box_work_gb as i64)
+    } else {
+        (4_i64, 8_i64, 10_i64)
+    };
+    if !gvisor {
+        if let Some(dt) = &state.daytona {
+            if let Ok(snap) = dt.get_snapshot(&snapshot_name).await {
+                cpu = snap.cpu.unwrap_or(cpu);
+                mem = snap.mem.unwrap_or(mem);
+                disk = snap.disk.unwrap_or(disk);
+            }
         }
     }
     let projects = state.db.projects_of_user(&user_id).map_err(internal)?;
@@ -932,14 +941,17 @@ pub async fn machine_start(State(state): State<AppState>, principal: Principal) 
     }
     let _ = state.db.set_box_held(&user_id, false);
     if state.db.user_box(&user_id).map_err(internal)?.is_none() {
-        let provider = if state.daytona.is_some() {
-            Provider::Daytona
-        } else {
-            Provider::Process
-        };
-        boxes::ensure_user_box(&state, &user_id, provider)
-            .await
-            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("box create: {e}")))?;
+        let provider = boxes::default_provider(&state);
+        match boxes::ensure_user_box(&state, &user_id, provider).await {
+            Ok(_) => {}
+            Err(e) if e.to_string() == crate::fleet::WAITLISTED => {
+                return Err((
+                    StatusCode::CONFLICT,
+                    "waitlisted: the host is full; you are in line for a machine".into(),
+                ));
+            }
+            Err(e) => return Err((StatusCode::BAD_GATEWAY, format!("box create: {e}"))),
+        }
     }
     boxes::ensure_awake(&state, &user_id, "api").await;
     let (bs, since) = state.box_state(&user_id).await;
@@ -989,6 +1001,9 @@ pub async fn delete_project(
             "only the owner can delete a project".into(),
         ));
     }
+    // Leave people chats while the project row is still live, then soft-delete. A deleted
+    // agent must not linger as an @mention ghost (no wake, possible leftover "is working").
+    crate::people::detach_agent_from_people_chats(&state, &p.id, &p.user_id);
     if !state.db.soft_delete_project(&p.id).map_err(internal)? {
         return Err((StatusCode::NOT_FOUND, "no such project".to_owned()));
     }
@@ -1035,9 +1050,18 @@ pub async fn admin_delete_user_box(
     if sb.provider != "daytona" {
         let _ = boxes::stop_box(&state, &id, true).await;
     }
+    if sb.provider == "gvisor" {
+        // The container goes; the user's /work image stays on disk (D89: never delete user data).
+        // A re-created box picks the image up again.
+        let name = sb.sandbox_id.clone().unwrap_or_default();
+        let _ = crate::fleet::remove_container(&name).await;
+        let _ = crate::fleet::unmount_work(&state, &id).await;
+        deleted_sandbox = Some(name);
+    }
     state.db.delete_box_row(&id).map_err(internal)?;
     state.box_states.write().await.remove(&id);
     state.box_conns.lock().await.remove(&id);
+    state.evicted.lock().await.remove(&id);
     let _ = state.db.record_audit(
         "relay-admin",
         "box_deleted",
@@ -1405,7 +1429,10 @@ pub async fn box_hello(
     boxes::box_seen_http(&state, user_id).await;
     if let Some(url) = &b.url {
         if let Ok(Some(mut sb)) = state.db.user_box(user_id) {
-            if sb.provider != "daytona" {
+            // Only a process box's own URL is reachable from the relay. Daytona boxes have a
+            // preview URL, container boxes (docker, gvisor) a published host port; the URL a
+            // container reports is its in-namespace address.
+            if sb.provider == "process" {
                 sb.box_url = Some(url.clone());
                 let _ = state.db.upsert_box(&sb);
             }
