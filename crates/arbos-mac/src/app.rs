@@ -3033,16 +3033,22 @@ impl AppState {
     }
 
     /// The agent's profile page (which holds the tree + colour picker).
+    /// A second click on the same agent folds the pane away.
     pub fn toggle_avatar_picker(&mut self, project_id: Id, cx: &mut Context<Self>) {
-        match &self.profile {
-            Some(ProfilePage::Agent { project_id: open }) if *open == project_id => {
-                self.close_profile(cx);
-            }
-            _ => self.open_profile(ProfilePage::Agent { project_id }, cx),
-        }
+        self.toggle_profile(ProfilePage::Agent { project_id }, cx);
     }
 
     // ----- profile pages ------------------------------------------------------
+
+    /// Open `page` in the right pane, or close it when that page is already open
+    /// (header pill / Me avatar: click again to fold away).
+    pub fn toggle_profile(&mut self, page: ProfilePage, cx: &mut Context<Self>) {
+        if self.profile.as_ref() == Some(&page) {
+            self.close_profile(cx);
+        } else {
+            self.open_profile(page, cx);
+        }
+    }
 
     pub fn open_profile(&mut self, page: ProfilePage, cx: &mut Context<Self>) {
         self.avatar_picker = match &page {

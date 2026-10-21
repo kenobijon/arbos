@@ -125,7 +125,7 @@ pub fn render(
                 this.add_agent_open = false;
                 let (handle, sid) = (handle.clone(), sid.clone());
                 this.state.update(cx, |s, cx| {
-                    s.open_profile(
+                    s.toggle_profile(
                         ProfilePage::User {
                             handle,
                             space_id: Some(sid),
@@ -144,7 +144,7 @@ pub fn render(
                 this.add_agent_open = false;
                 let sid = sid.clone();
                 this.state.update(cx, |s, cx| {
-                    s.open_profile(ProfilePage::Group { space_id: sid }, cx)
+                    s.toggle_profile(ProfilePage::Group { space_id: sid }, cx)
                 });
             }));
     } else {
@@ -281,8 +281,8 @@ pub fn render(
         .gap(px(10.0))
         .pl(px(12.0))
         .pr(px(10.0))
-        .border_b_1()
-        .border_color(theme.border)
+        // No hard hairline under the pill — the transcript's top edge fade
+        // (iPhone Settings glass fade) softens the join instead.
         .window_drag()
         .child(
             div()

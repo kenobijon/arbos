@@ -887,7 +887,7 @@ impl Shell {
     ) {
         self.state.update(cx, |s, cx| {
             if groupish {
-                s.open_profile(
+                s.toggle_profile(
                     ProfilePage::Group {
                         space_id: project_id,
                     },
