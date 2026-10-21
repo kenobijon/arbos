@@ -45,6 +45,7 @@ final class CoreChatDocParityTests: XCTestCase {
             XCTAssertEqual(lhs.reactions, rhs.reactions, "\(row) reactions", file: file, line: line)
             XCTAssertEqual(lhs.hiddenCount, rhs.hiddenCount, "\(row) hiddenCount", file: file, line: line)
             XCTAssertEqual(lhs.status, rhs.status, "\(row) status", file: file, line: line)
+            XCTAssertEqual(lhs.greeting, rhs.greeting, "\(row) greeting", file: file, line: line)
         }
     }
 
@@ -59,8 +60,8 @@ final class CoreChatDocParityTests: XCTestCase {
         XCTAssertEqual(at?["effort"] as? String, bt?["effort"] as? String, "models.talking_model.effort", file: file, line: line)
     }
 
-    private func seedWriters(into loro: ChatDoc, core: CoreChatDoc) throws {
-        let author = ChatDoc.Author(sender: "user:ken", handle: "ken", name: "Ken", avatar: nil)
+    private func seedWriters(into loro: Arbos.ChatDoc, core: CoreChatDoc) throws {
+        let author = Arbos.ChatDoc.Author(sender: "user:ken", handle: "ken", name: "Ken", avatar: nil)
         let att = Attachment(name: "photo.png", mime: "image/png", blobRef: "blob-1", kind: "image")
         try loro.insertUserMessage(
             id: "m-user", text: "hello @bob", deviceId: "dev",
@@ -85,6 +86,8 @@ final class CoreChatDocParityTests: XCTestCase {
 
         try loro.toggleReaction(messageId: "m-user", emoji: "👍", sender: "user:ken")
         try core.toggleReaction(messageId: "m-user", emoji: "👍", sender: "user:ken")
+        // While the reaction is on (before the matching toggle-off).
+        assertMessagesEqual(loro.readAll(), core.readAll(), "writers-reaction-on")
         try loro.toggleReaction(messageId: "m-user", emoji: "👍", sender: "user:ken")
         try core.toggleReaction(messageId: "m-user", emoji: "👍", sender: "user:ken")
 
@@ -98,7 +101,7 @@ final class CoreChatDocParityTests: XCTestCase {
     // MARK: - Tests
 
     func testWritersReadAllAndModelsAgree() throws {
-        let loro = ChatDoc(key: "parity-writers")
+        let loro = Arbos.ChatDoc(key: "parity-writers")
         let core = CoreChatDoc(key: "parity-writers")
         try seedWriters(into: loro, core: core)
         assertMessagesEqual(loro.readAll(), core.readAll(), "writers")
@@ -107,7 +110,7 @@ final class CoreChatDocParityTests: XCTestCase {
 
     func testFixtureChatDocBinReadAllAgrees() throws {
         let snap = try fixtureData("chat_doc.bin")
-        let loro = ChatDoc(key: "chat-fixture")
+        let loro = Arbos.ChatDoc(key: "chat-fixture")
         let core = CoreChatDoc(key: "chat-fixture")
         try loro.importUpdate(snap)
         try core.importUpdate(snap)
@@ -115,7 +118,7 @@ final class CoreChatDocParityTests: XCTestCase {
     }
 
     func testCrossImportSnapshotsReadAllAgree() throws {
-        let loro = ChatDoc(key: "cross-loro")
+        let loro = Arbos.ChatDoc(key: "cross-loro")
         let core = CoreChatDoc(key: "cross-core")
         try seedWriters(into: loro, core: core)
 
@@ -125,7 +128,7 @@ final class CoreChatDocParityTests: XCTestCase {
         assertMessagesEqual(loro.readAll(), coreLoaded.readAll(), "loro→core")
 
         let fromCore = try core.exportSnapshot()
-        let loroLoaded = ChatDoc(key: "cross-core")
+        let loroLoaded = Arbos.ChatDoc(key: "cross-core")
         try loroLoaded.importUpdate(fromCore)
         assertMessagesEqual(core.readAll(), loroLoaded.readAll(), "core→loro")
     }
@@ -135,13 +138,13 @@ final class CoreChatDocParityTests: XCTestCase {
         var updates: [Data] = []
         core.onLocalUpdate { updates.append($0) }
 
-        let author = ChatDoc.Author(sender: "user:ken", handle: nil, name: nil, avatar: nil)
+        let author = Arbos.ChatDoc.Author(sender: "user:ken", handle: nil, name: nil, avatar: nil)
         try core.insertUserMessage(id: "m1", text: "ping", deviceId: "dev", author: author)
         try core.insertSystemLine(id: "m2", text: "note", deviceId: "dev")
         core.commit()
 
         XCTAssertFalse(updates.isEmpty, "onLocalUpdate must fire on commit")
-        let loro = ChatDoc(key: "local-upd")
+        let loro = Arbos.ChatDoc(key: "local-upd")
         for u in updates {
             try loro.importUpdate(u)
         }
