@@ -286,6 +286,9 @@ impl Worker {
                 archived,
             } => self.archive(chat_id, user_id, *archived).await,
             Job::CloseRoom { chat_id } => self.close_room(chat_id).await,
+            Job::Pushers { user_id, on } => {
+                super::reads::set_pushers(&self.state, &self.client, user_id, *on).await
+            }
         }
     }
 

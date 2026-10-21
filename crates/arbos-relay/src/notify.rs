@@ -352,6 +352,10 @@ pub async fn announce(
         {
             continue;
         }
+        // Stage B: a flipped user's alerts come from the Matrix push gateway instead.
+        if crate::matrix::reads::reads_on(state, &user) {
+            continue;
+        }
         let tokens = state.db.push_tokens_of_user(&user).unwrap_or_default();
         if tokens.is_empty() {
             continue;
@@ -375,12 +379,65 @@ pub async fn announce(
     Some(event_id)
 }
 
+/// One alert to one device (the Matrix push-gateway path, stage B): same payload, focus and
+/// archive rules as [`announce`], for a message the homeserver told us about.
+pub async fn alert_device(
+    state: &AppState,
+    chat: &ChatRef,
+    sender: &Sender,
+    message_id: &str,
+    text: &str,
+    badge: i64,
+    device_id: &str,
+) {
+    if !state.push.is_on() || device_focused(state, device_id, &chat.chat_id).await {
+        return;
+    }
+    let Some(user_id) = state.db.device_user(device_id).ok().flatten() else {
+        return;
+    };
+    let Some(t) = state
+        .db
+        .push_tokens_of_user(&user_id)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|t| t.device_id == device_id)
+    else {
+        return;
+    };
+    if state
+        .db
+        .chat_archived_at(&user_id, &chat.chat_id)
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return;
+    }
+    let out = Outgoing {
+        device_token: t.token.clone(),
+        environment: t.environment.clone(),
+        push_type: "alert",
+        topic: None,
+        collapse_id: Some(format!("msg:{}", message_id)),
+        payload: alert_payload(
+            chat,
+            sender,
+            message_id,
+            &brief(text),
+            badge,
+            chat_title(state, chat).as_deref(),
+        ),
+    };
+    deliver(state, &t, out).await;
+}
+
 /// The user read something somewhere: every other device gets the new badge count.
 pub async fn badge_refresh(state: &AppState, user_id: &str, except_device: &str) {
     if !state.push.is_on() {
         return;
     }
-    let total = state.db.unread_total(user_id).unwrap_or(0);
+    let total = crate::matrix::reads::unread_total(state, user_id).await;
     for t in state.db.push_tokens_of_user(user_id).unwrap_or_default() {
         if t.device_id == except_device {
             continue;
@@ -539,7 +596,16 @@ pub async fn me_unread(State(state): State<AppState>, principal: Principal) -> R
     let Principal::Device { user_id, .. } = &principal else {
         return api_error(StatusCode::FORBIDDEN, "forbidden", "devices only");
     };
-    match state.db.unread_for_user(user_id) {
+    // Stage B: flipped users are answered from the homeserver (relay counts on a miss).
+    let flipped = if crate::matrix::reads::reads_on(&state, user_id) {
+        crate::matrix::reads::unread_for_user(&state, user_id).await
+    } else {
+        None
+    };
+    match flipped
+        .map(Ok)
+        .unwrap_or_else(|| state.db.unread_for_user(user_id))
+    {
         Ok(chats) => {
             let total: i64 = chats.iter().map(|c| c.unread).sum();
             Json(json!({

@@ -348,6 +348,7 @@ async fn main() -> anyhow::Result<()> {
     secrets::spawn_sweeper(state.clone()).await;
     calls::spawn_sweeper(state.clone()).await;
     matrix::worker::spawn(state.clone());
+    matrix::shadow::spawn_nightly(state.clone());
     boxes::spawn_project_purge(state.clone()).await;
 
     let app = Router::new()
