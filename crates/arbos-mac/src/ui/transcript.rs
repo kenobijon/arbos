@@ -22,6 +22,7 @@ use crate::ui::attachments;
 use crate::ui::avatars;
 use crate::ui::cards;
 use crate::ui::frost::edge_faded;
+use crate::ui::groups;
 use crate::ui::icons::icon;
 use crate::ui::markdown::{
     has_fenced_code, inline_spans, polish_assistant_prose, split_blocks, Block,
@@ -905,12 +906,13 @@ impl Transcript {
                     .children(quote_header)
                     .child(body);
                 if let Some(person) = from {
-                    // Someone else: left-aligned, their avatar and name above —
-                    // the agent-chat format (redesign mock a): no coloured stripe,
-                    // the display name rather than the @handle.
+                    // Someone else: left-aligned, their avatar and name above.
+                    // A small coloured left-edge sliver marks a person message
+                    // so it reads apart from an agent bubble.
                     // Must not early-return: the match arm still needs the
                     // COLUMN_MARGIN wrapper (same padding as agent bubbles).
                     let image = self.state.read(cx).avatar(&person.avatar_url);
+                    let color = groups::sender_color(&person.handle, &theme);
                     div()
                         .w_full()
                         .flex()
@@ -970,6 +972,8 @@ impl Transcript {
                                             bubble
                                                 .bg(theme.bubble_assistant)
                                                 .text_color(theme.text)
+                                                .border_l_2()
+                                                .border_color(Theme::with_alpha(color, 0.7))
                                                 .when(pending, |el| el.opacity(0.6)),
                                         )
                                         .child(actions.ml(px(6.0)))
