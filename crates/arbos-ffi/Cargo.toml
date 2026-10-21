@@ -14,10 +14,13 @@ name = "arbos_ffi"
 [dependencies]
 arbos-core.workspace = true
 arbos-client.workspace = true
+arbos-matrix.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-# Only this crate may depend on uniffi (workspace pin =0.32.2).
-uniffi.workspace = true
+# Only this crate may depend on uniffi (workspace pin =0.32.2). `tokio` runs the async Matrix
+# calls (sliding sync, sends) on a runtime the bindings own.
+uniffi = { workspace = true, features = ["tokio"] }
+tokio.workspace = true
 loro.workspace = true
 
 [dev-dependencies]

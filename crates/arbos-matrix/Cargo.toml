@@ -1,0 +1,28 @@
+[package]
+name = "arbos-matrix"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+description = "Shared Matrix client for the device apps (D88 C1): servers and channels through the relay's homeserver proxy"
+
+[dependencies]
+# matrix-sdk without its defaults: no E2EE until stage D, no SQLite store (the workspace pins
+# another libsqlite3-sys), no bundled TLS — the HTTP client below is injected instead.
+matrix-sdk = { version = "0.19.1", default-features = false }
+tokio.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+
+# TLS for the injected HTTP client: the system stack on Apple (no C build when cross-compiling
+# for iOS), rustls elsewhere. Same reqwest line as matrix-sdk (0.13), separate from the
+# workspace's 0.12.
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+reqwest13 = { package = "reqwest", version = "0.13", default-features = false, features = ["native-tls", "json"] }
+[target.'cfg(not(any(target_os = "macos", target_os = "ios")))'.dependencies]
+reqwest13 = { package = "reqwest", version = "0.13", default-features = false, features = ["rustls", "json"] }

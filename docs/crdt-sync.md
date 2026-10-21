@@ -8,7 +8,8 @@ This document is drawn from the code as it exists today:
 | --- | --- |
 | Shared Loro chat writes (box / core) | `crates/arbos-core/src/doc.rs` |
 | App sans-IO room session | `crates/arbos-client/src/room.rs` (`RoomSession`) |
-| UniFFI / Swift bindings | `crates/arbos-ffi` (wraps client + core; produces xcframework) |
+| Shared Matrix client (D88 C1: servers and channels) | `crates/arbos-matrix` (`MatrixClient`: sliding sync through the relay proxy, channel timelines as chat-doc message rows, send, read) |
+| UniFFI / Swift bindings | `crates/arbos-ffi` (wraps client + core + the Matrix client; produces xcframework) |
 | Golden doc / wire fixtures | `crates/arbos-core/fixtures/` |
 | Mac Loro replica | `crates/arbos-mac/src/sync/doc.rs` |
 | iOS chat doc (arbos-core via ArbosFFI) | `apps/ios/Arbos/Arbos/Sync/CoreChatDoc.swift` |
@@ -22,7 +23,8 @@ This document is drawn from the code as it exists today:
 
 - **`arbos-core`** — ids, `wire` (including `wire::room_name`), the Loro chat-doc schema, writers, `project_reactions`, and `touched`. Shared by the box, relay, and every client.
 - **`arbos-client`** — app-only sans-IO `RoomSession` (handshake, catch-up, pending PUSH, reconnect backoff, held wake/presence). Depends on `arbos-core`. No tokio, tungstenite, or HTTP.
-- **`arbos-ffi`** — UniFFI layer over `arbos-client` and the core pieces Swift needs. The only crate that names Swift or `uniffi`. Builds an xcframework + generated Swift bindings (`scripts/build-xcframework.sh`).
+- **`arbos-matrix`** — the apps' Matrix client (D88 C1): one `matrix-sdk` client per device (no E2EE, memory store, injected HTTP client), sliding sync through `relay/_matrix/client/*`, servers (Spaces) and channels as list rows, channel timelines as the same message rows a chat doc projects, sending with `life.arbos.id` = the app's ULID, read receipts. Depends on tokio and `matrix-sdk`; like `arbos-client`, **only `arbos-mac` and `arbos-ffi` may depend on it** (CI checks). The relay never uses it (it has its own appservice client).
+- **`arbos-ffi`** — UniFFI layer over `arbos-client`, `arbos-matrix` and the core pieces Swift needs. The only crate that names Swift or `uniffi`. Builds an xcframework + generated Swift bindings (`scripts/build-xcframework.sh`).
 - **Who may depend on `arbos-client`:** device apps and the FFI crate (`arbos-mac`, `arbos-ffi`). **`arbos-relay`, `arbos-agentd`, `arbosctl`, and `arbos-local` must not.** CI enforces this with `cargo tree -i arbos-client`.
 
 ### arbos-ffi / xcframework
