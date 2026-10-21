@@ -56,7 +56,10 @@ const TURN_GAP_EXTRA: f32 = 20.0 - 2.0 * ROW_GAP_HALF;
 /// carries ~4 pt of its own above and ~7 below the glyphs (measured).
 const STAMP_PAD_TOP: f32 = 20.0 - ROW_GAP_HALF - 4.0;
 const STAMP_PAD_BOTTOM: f32 = 24.0 - ROW_GAP_HALF - 7.0;
-/// The composer row above adds 6 pt of its own and the last row 3.
+/// Clearance above the composer when pinned (54 pt glyph-to-pill, minus the
+/// composer row's own 6 pt top padding and the last row's half-gap). Kept as a
+/// trailing list row — not as container padding — so scrolling bubbles reach
+/// the real edge of the input instead of hitting an opaque black strip.
 const BOTTOM_INSET: f32 = 54.0 - ROW_GAP_HALF - 6.0;
 /// People chats (redesign mocks a/f): a 24 pt sender disc at the bubble's
 /// bottom-left, 8 pt from it; captions and earlier blocks keep the lane free.
@@ -292,6 +295,10 @@ pub enum RowKind {
         /// The speech is already cached (instant replay) vs. will be synthesised.
         cached: bool,
     },
+    /// Empty height at the end of the list so the last bubble sits clear of
+    /// the composer when pinned; scrolls away so mid-thread bubbles can reach
+    /// the input's real edge (no opaque padding strip).
+    BottomInset,
 }
 
 /// Which replies get a speaker row (F11).
@@ -625,7 +632,10 @@ impl Transcript {
         }
         let Some(ix) = self.rows.iter().position(|r| {
             r.message_id == msg
-                && !matches!(r.kind, RowKind::Stamp { .. } | RowKind::Indicator { .. })
+                && !matches!(
+                    r.kind,
+                    RowKind::Stamp { .. } | RowKind::Indicator { .. } | RowKind::BottomInset
+                )
         }) else {
             return;
         };
@@ -1555,6 +1565,12 @@ impl Transcript {
                     })
                     .into_any_element()
             }
+            RowKind::BottomInset => {
+                // No chrome — just the clearance height. Return early so the
+                // shared column padding / highlight wrapper does not paint a
+                // strip over scrolling bubbles.
+                return div().w_full().h(px(BOTTOM_INSET)).into_any_element();
+            }
         };
         let highlighted =
             self.state.read(cx).highlight_message.as_deref() == Some(row.message_id.as_str());
@@ -1565,7 +1581,7 @@ impl Transcript {
             .and_then(|i| self.rows.get(i))
             .is_some_and(|prev| {
                 prev.message_id != row.message_id
-                    && !matches!(prev.kind, RowKind::Stamp { .. })
+                    && !matches!(prev.kind, RowKind::Stamp { .. } | RowKind::BottomInset)
                     && self.turn_starts.contains(&row.message_id)
             });
         div()
@@ -1613,12 +1629,12 @@ impl Render for Transcript {
             .track_focus(&focus)
             .on_action(cx.listener(Self::copy_selection))
             .on_scroll_wheel(cx.listener(|this, event, _, cx| this.on_wheel(event, cx)))
-            .child(div().size_full().pb(px(BOTTOM_INSET)).child(edge_faded(
+            .child(edge_faded(
                 24.0,
                 true,
                 false,
                 list(self.list.clone(), cx.processor(Self::render_row)).size_full(),
-            )))
+            ))
             .when(show_jump, |el| {
                 el.child(
                     div()
@@ -2274,6 +2290,16 @@ pub fn build_rows(
             id: "chat#indicator".into(),
             message_id: last,
             kind: RowKind::Indicator { queued, activity },
+        });
+    }
+    // Trailing clearance: scrolls with the list so mid-thread bubbles can
+    // reach the composer, while the pinned end still keeps 54 pt above it.
+    if !rows.is_empty() {
+        rows.push(Row {
+            version: 1,
+            id: "chat#bottom-inset".into(),
+            message_id: String::new(),
+            kind: RowKind::BottomInset,
         });
     }
     rows
