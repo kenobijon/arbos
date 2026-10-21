@@ -23,7 +23,9 @@ use crate::ui::avatars;
 use crate::ui::cards;
 use crate::ui::frost::edge_faded;
 use crate::ui::icons::icon;
-use crate::ui::markdown::{inline_spans, polish_assistant_prose, split_blocks, Block};
+use crate::ui::markdown::{
+    has_fenced_code, inline_spans, polish_assistant_prose, split_blocks, Block,
+};
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
 use crate::ui::select::{Selectable, TextSelection};
@@ -878,13 +880,10 @@ impl Transcript {
                     )
                 };
                 let quote_header = quote.map(|q| self.quote_header(&row.id, q, text_color));
-                let text = plain_text(
-                    &format!("{}.u", row.id),
-                    &text,
-                    text_color,
-                    &theme,
-                    &bubble_selectable,
-                );
+                // Triple-backtick fences render as code cards (same as agent
+                // replies); other text stays plain so "# heading" is still literal.
+                let body =
+                    user_message_body(&row.id, &text, text_color, &theme, &bubble_selectable);
                 let bubble = self
                     .react_target(
                         div().id(SharedString::from(format!("{}#bubble", row.id))),
@@ -903,7 +902,7 @@ impl Transcript {
                     .text_size(px(CHAT_BODY))
                     .line_height(px(CHAT_LINE_HEIGHT))
                     .children(quote_header)
-                    .child(text);
+                    .child(body);
                 if let Some(person) = from {
                     // Someone else: left-aligned, their avatar and name above —
                     // the agent-chat format (redesign mock a): no coloured stripe,
@@ -2309,6 +2308,67 @@ fn plain_text(
         .into_any_element()
 }
 
+/// User / people-chat bubble body: plain prose, or prose mixed with fenced
+/// ``` code cards when the message contains triple backticks.
+fn user_message_body(
+    row_id: &str,
+    text: &str,
+    color: gpui::Hsla,
+    theme: &Theme,
+    selectable: &Selectable,
+) -> AnyElement {
+    if !has_fenced_code(text) {
+        return plain_text(&format!("{row_id}.u"), text, color, theme, selectable);
+    }
+    let blocks = split_blocks(text);
+    let mut col = div().flex().flex_col().gap(px(6.0)).w_full().min_w_0();
+    for (i, block) in blocks.into_iter().enumerate() {
+        let id = format!("{row_id}.u{i}");
+        col = match block {
+            Block::Code { lang, code } => col.child(code_fence_card(
+                &id,
+                &lang,
+                &code,
+                color,
+                theme,
+                selectable,
+                None,
+                Instant::now(),
+            )),
+            Block::Paragraph(t) => col.child(plain_text(&id, &t, color, theme, selectable)),
+            Block::Heading { text: t, .. } => {
+                col.child(plain_text(&id, &t, color, theme, selectable))
+            }
+            Block::Bullets(items) => {
+                let t = items
+                    .iter()
+                    .map(|item| format!("• {item}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                col.child(plain_text(&id, &t, color, theme, selectable))
+            }
+            Block::Numbered(items) => {
+                let t = items
+                    .iter()
+                    .enumerate()
+                    .map(|(n, item)| format!("{}. {item}", n + 1))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                col.child(plain_text(&id, &t, color, theme, selectable))
+            }
+            Block::Table { header, rows } => {
+                // Rare in a typed bubble; fall back to a readable plain dump.
+                let mut lines = vec![header.join(" | ")];
+                for row in rows {
+                    lines.push(row.join(" | "));
+                }
+                col.child(plain_text(&id, &lines.join("\n"), color, theme, selectable))
+            }
+        };
+    }
+    col.into_any_element()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn styled_text(
     id: &str,
@@ -2562,76 +2622,89 @@ fn render_block(
             table.into_any_element()
         }
         Block::Code { lang, code } => {
-            let mut card = div()
-                .flex()
-                .flex_col()
-                .w_full()
-                .rounded(px(8.0))
-                .bg(theme.code_bg)
-                .border_1()
-                .border_color(theme.border);
-            card = card.child(
-                div()
-                    .flex()
-                    .justify_between()
-                    .items_center()
-                    .px(px(10.0))
-                    .py(px(4.0))
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .text_size(px(11.0))
-                    .text_color(theme.text_faint)
-                    .child(if lang.is_empty() {
-                        "code".to_string()
-                    } else {
-                        lang.clone()
-                    })
-                    .child({
-                        // Copies the block (Grok's code header); the label is the hit target.
-                        let source = code.clone();
-                        div()
-                            .id(SharedString::from(format!("{row_id}#copy")))
-                            .px(px(6.0))
-                            .py(px(2.0))
-                            .rounded(px(5.0))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(theme.surface_2).text_color(theme.text))
-                            .child("Copy")
-                            .on_click(move |_, _, cx| {
-                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                    source.clone(),
-                                ));
-                            })
-                    }),
-            );
-            let mono = gpui::Font {
-                family: theme.font_mono.into(),
-                features: Default::default(),
-                fallbacks: None,
-                weight: FontWeight::NORMAL,
-                style: gpui::FontStyle::Normal,
-            };
-            let runs = vec![TextRun {
-                len: code.len(),
-                font: mono,
-                color: theme.text,
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            }];
-            let runs = match veil {
-                Some(v) => apply_veil(runs, &v.spans(now), 0),
-                None => runs,
-            };
-            card = card.child(
-                div()
-                    .px(px(10.0))
-                    .py(px(8.0))
-                    .text_size(px(12.5))
-                    .line_height(px(18.0))
-                    .child(selectable.text(format!("{row_id}.code"), code.clone(), runs)),
-            );
-            card.into_any_element()
+            code_fence_card(row_id, lang, code, theme.text, theme, selectable, veil, now)
         }
     }
+}
+
+/// Fenced ``` block: lang label, Copy, mono body on `code_bg` (Grok's code card).
+#[allow(clippy::too_many_arguments)]
+fn code_fence_card(
+    row_id: &str,
+    lang: &str,
+    code: &str,
+    color: gpui::Hsla,
+    theme: &Theme,
+    selectable: &Selectable,
+    veil: Option<&Veil>,
+    now: Instant,
+) -> AnyElement {
+    let mut card = div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .rounded(px(8.0))
+        .bg(theme.code_bg)
+        .border_1()
+        .border_color(theme.border);
+    card = card.child(
+        div()
+            .flex()
+            .justify_between()
+            .items_center()
+            .px(px(10.0))
+            .py(px(4.0))
+            .border_b_1()
+            .border_color(theme.border)
+            .text_size(px(11.0))
+            .text_color(theme.text_faint)
+            .child(if lang.is_empty() {
+                "code".to_string()
+            } else {
+                lang.to_string()
+            })
+            .child({
+                // Copies the block (Grok's code header); the label is the hit target.
+                let source = code.to_string();
+                div()
+                    .id(SharedString::from(format!("{row_id}#copy")))
+                    .px(px(6.0))
+                    .py(px(2.0))
+                    .rounded(px(5.0))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.surface_2).text_color(theme.text))
+                    .child("Copy")
+                    .on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(source.clone()));
+                    })
+            }),
+    );
+    let mono = gpui::Font {
+        family: theme.font_mono.into(),
+        features: Default::default(),
+        fallbacks: None,
+        weight: FontWeight::NORMAL,
+        style: gpui::FontStyle::Normal,
+    };
+    let runs = vec![TextRun {
+        len: code.len(),
+        font: mono,
+        color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    }];
+    let runs = match veil {
+        Some(v) => apply_veil(runs, &v.spans(now), 0),
+        None => runs,
+    };
+    card = card.child(
+        div()
+            .px(px(10.0))
+            .py(px(8.0))
+            .text_size(px(12.5))
+            .line_height(px(18.0))
+            .child(selectable.text(format!("{row_id}.code"), code.to_string(), runs)),
+    );
+    card.into_any_element()
 }
