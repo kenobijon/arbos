@@ -62,6 +62,7 @@ CLI:  feedback_poller.py [run] | status | testers | set-cursor <ISO-8601>
       | inject <image|-> "<comment>" [ios|mac] [--handle <login>] [--origin "<text>"] [--email <tester email, grouping only>]
                [--note "<owner decision / scope>"] [--id <slug used as the feedback id>]
       | requeue <id>… [--allow "<who confirmed>"] | prioritize <id>… | confirm <id> [note] | handoff <id> [label] | deployed <id> [note]
+      | supersede <id> <by-id> [note]   (a shipped fix was reverted/regressed; <by-id> re-lands it and closes both issues when it ships)
       | track <id> <issue> "<comment>" [--handle <login>] [--owner <label>] [--target ios|mac]   (a hand-filed, handed-off item;
         workers can do the same without root by commenting `track <id> bc-<owner>` on the issue)
       | leadtime [since-ISO] | memtree-cost [YYYY-MM-DD]   (audit numbers; memtree-cost asks GET /admin/usage/memory-tree, else relay.db as root)
@@ -2451,9 +2452,14 @@ class Loop:
         with contextlib.suppress(HttpError):
             self.gh.close_issue(st["issue"], "completed", body)
             self.gh.set_labels(st["issue"], [], ["fixed-on-main", "in-progress", "landed-not-shipped"])
+        for extra in st.get("also_closes") or []:
+            # Issues this fix re-lands (`supersede <id> <by-id>`: their first fix was reverted or regressed).
+            with contextlib.suppress(HttpError):
+                self.gh.close_issue(extra, "completed", body + f" Re-landed by #{st['issue']}.")
+                self.gh.set_labels(extra, ["shipped"], ["fixed-on-main", "in-progress", "landed-not-shipped"])
         st["closed"] = {"reason": "completed", "at": iso(), "where": self.fixed_in(st)}
         self.store.save_state(fid, st)
-        self.store.event(fid, "closed", reason="completed", where=st["closed"]["where"])
+        self.store.event(fid, "closed", reason="completed", where=st["closed"]["where"], also=st.get("also_closes") or [])
 
     def close_not_planned(self, fid: str, st: dict, why: str) -> None:
         """Won't-fix / duplicate / no-change / superseded: closed with reason not_planned and one line of why."""
@@ -3173,6 +3179,39 @@ def main(argv: list[str]) -> int:
                         loop.gh.comment(st["issue"], "Requeued by the operator; a new agent run follows.")
                     loop.gh.set_labels(st["issue"], [], ["needs-human", "fixed-on-main", "shipped", "shipped-unverified", "no-change"])
             print(f"{fid}: queued ({tier}, {st['tester']})")
+        return 0
+    if cmd == "supersede":
+        # `supersede <id> <by-id> [note]`: a shipped fix was reverted or regressed and <by-id> re-lands it. The
+        # item becomes `superseded`, its issue is reopened (Jacob's rule: reopen on regression) and closes
+        # again, with the same "Fixed in …" line, when <by-id> ships.
+        if len(argv) < 4:
+            print('supersede <id> <by-id> [note]')
+            return 2
+        store = Store(cfg)
+        loop = Loop(cfg)
+        fid, by = argv[2], argv[3]
+        note = " ".join(argv[4:]) or "the first fix was reverted"
+        st, bst = store.state(fid), store.state(by)
+        if not st or not bst:
+            print(f"{fid if not st else by}: unknown")
+            return 2
+        st.update(status="superseded", superseded_by=by, superseded_at=iso(), superseded_note=note[:300])
+        st["reopened"] = {"at": iso(), "why": note[:300], "by": by}
+        store.save_state(fid, st)
+        store.event(fid, "superseded", by=by, note=note[:300])
+        if st.get("issue") and st["issue"] not in (bst.get("also_closes") or []):
+            bst["also_closes"] = (bst.get("also_closes") or []) + [st["issue"]]
+            store.save_state(by, bst)
+        if st.get("issue"):
+            text = (f"Reopened: {note.rstrip('.')}. Re-landed by #{bst.get('issue')} (`{by}`); this issue closes again "
+                    f"when that fix is in a build.")
+            with contextlib.suppress(HttpError):
+                if loop.gh.issue(st["issue"]).get("state") == "closed":
+                    loop.gh.reopen_issue(st["issue"], text)
+                else:
+                    loop.gh.comment(st["issue"], text)
+                loop.gh.set_labels(st["issue"], ["superseded"], ["shipped", "shipped-unverified", "fixed-on-main"])
+        print(f"{fid}: superseded by {by} (#{st.get('issue')} reopened, closes with #{bst.get('issue')})")
         return 0
     if cmd == "confirm":
         # Device-level evidence arrived (tester / Jacob / a real-device run): shipped-unverified → shipped.
