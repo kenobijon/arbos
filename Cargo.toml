@@ -28,7 +28,7 @@ arbos-core = { path = "crates/arbos-core" }
 arbos-client = { path = "crates/arbos-client" }
 arbos-ffi = { path = "crates/arbos-ffi" }
 arbos-update = { path = "crates/arbos-update" }
-# Pin lockstep with apps/ios loro-swift exactVersion 1.16.2 until loro-swift is removed.
+# Exact pin: arbos-core, the relay box and the Swift client (through ArbosFFI) must agree on the Loro encoding.
 loro = "=1.16.2"
 uniffi = "=0.32.2"
 
