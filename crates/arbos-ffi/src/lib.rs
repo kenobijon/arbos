@@ -436,6 +436,16 @@ pub trait DocChangeListener: Send + Sync {
     fn on_change(&self, touched: Touched);
 }
 
+/// Foreign callback: local commit blobs (same role as Swift
+/// `ChatDoc.onLocalUpdate` / loro-swift `subscribeLocalUpdate`).
+///
+/// Delivered on the caller's thread after the doc lock is released, and
+/// before any [`DocChangeListener`] events from the same flush.
+#[uniffi::export(foreign)]
+pub trait LocalUpdateListener: Send + Sync {
+    fn on_local_update(&self, update: Vec<u8>);
+}
+
 /// Chat doc wrapper: core `ChatDoc` is not `Sync` (`Cell` txn depth), so `Mutex`.
 #[derive(uniffi::Object)]
 pub struct ChatDoc {
@@ -444,6 +454,9 @@ pub struct ChatDoc {
     /// Touched events queued while the doc lock is held; flushed after drop.
     pending: Arc<Mutex<Vec<Touched>>>,
     listener: Arc<Mutex<Option<Arc<dyn DocChangeListener>>>>,
+    /// Local update blobs queued while the doc lock is held; flushed after drop.
+    pending_local_updates: Arc<Mutex<Vec<Vec<u8>>>>,
+    local_update_listener: Arc<Mutex<Option<Arc<dyn LocalUpdateListener>>>>,
 }
 
 impl ChatDoc {
@@ -464,14 +477,35 @@ impl ChatDoc {
         self.listener.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Deliver queued change notifications after the doc lock is dropped.
+    fn lock_pending_local_updates(&self) -> MutexGuard<'_, Vec<Vec<u8>>> {
+        self.pending_local_updates
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn lock_local_update_listener(&self) -> MutexGuard<'_, Option<Arc<dyn LocalUpdateListener>>> {
+        self.local_update_listener
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Deliver queued local updates then change notifications after the doc
+    /// lock is dropped. Local updates first so a host that sends from its
+    /// change handler already has the update blob.
     fn flush_pending(&self) {
+        let queued_updates = std::mem::take(&mut *self.lock_pending_local_updates());
         let queued = std::mem::take(&mut *self.lock_pending());
-        let Some(listener) = self.lock_listener().clone() else {
-            return;
-        };
-        for touched in queued {
-            listener.on_change(touched);
+        let local_listener = self.lock_local_update_listener().clone();
+        let listener = self.lock_listener().clone();
+        if let Some(local_listener) = local_listener {
+            for update in queued_updates {
+                local_listener.on_local_update(update);
+            }
+        }
+        if let Some(listener) = listener {
+            for touched in queued {
+                listener.on_change(touched);
+            }
         }
     }
 
@@ -481,6 +515,8 @@ impl ChatDoc {
             subs: Mutex::new(Vec::new()),
             pending: Arc::new(Mutex::new(Vec::new())),
             listener: Arc::new(Mutex::new(None)),
+            pending_local_updates: Arc::new(Mutex::new(Vec::new())),
+            local_update_listener: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -682,6 +718,27 @@ impl ChatDoc {
                         messages: t.messages.iter().map(|i| *i as u64).collect(),
                         other: t.other,
                     });
+            }))
+        };
+        self.lock_subs().push(sub);
+    }
+
+    /// Subscribe to local commit update blobs (not remote [`Self::apply`] imports).
+    ///
+    /// Loro invokes the handler inside commit while the doc lock is held, so
+    /// updates are queued and delivered in [`Self::flush_pending`] after the
+    /// guard drops — same rule as [`Self::on_change`].
+    pub fn on_local_update(&self, listener: Arc<dyn LocalUpdateListener>) {
+        *self.lock_local_update_listener() = Some(listener);
+        let pending = self.pending_local_updates.clone();
+        let sub = {
+            let doc = self.lock_doc();
+            doc.doc.subscribe_local_update(Box::new(move |bytes| {
+                pending
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(bytes.to_vec());
+                true
             }))
         };
         self.lock_subs().push(sub);
@@ -970,5 +1027,101 @@ mod tests {
         let hits = listener.hits.lock().unwrap();
         assert_eq!(hits.len(), 1, "commit should notify exactly once");
         assert!(hits[0].list_changed, "insert should set list_changed");
+    }
+
+    struct RecordingLocalUpdate {
+        updates: Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl LocalUpdateListener for RecordingLocalUpdate {
+        fn on_local_update(&self, update: Vec<u8>) {
+            self.updates.lock().unwrap().push(update);
+        }
+    }
+
+    #[test]
+    fn local_update_after_commit_applies_to_peer() {
+        let doc = Arc::new(ChatDoc::open());
+        let listener = Arc::new(RecordingLocalUpdate {
+            updates: Mutex::new(Vec::new()),
+        });
+        doc.on_local_update(listener.clone());
+        doc.insert_user_message(
+            "m1".into(),
+            "hi".into(),
+            "dev".into(),
+            UserMessageOptsRecord::default(),
+        )
+        .unwrap();
+        doc.commit();
+        let updates = listener.updates.lock().unwrap().clone();
+        assert_eq!(
+            updates.len(),
+            1,
+            "commit should deliver exactly one local update"
+        );
+        let peer = ChatDoc::open();
+        peer.apply(updates[0].clone()).unwrap();
+        assert_eq!(doc.read_rows_json(), peer.read_rows_json());
+    }
+
+    #[test]
+    fn apply_remote_update_skips_local_update_listener() {
+        let source = ChatDoc::open();
+        source
+            .insert_user_message(
+                "m1".into(),
+                "hi".into(),
+                "dev".into(),
+                UserMessageOptsRecord::default(),
+            )
+            .unwrap();
+        source.commit();
+        let remote = source.export_updates_since(Vec::new());
+
+        let doc = Arc::new(ChatDoc::open());
+        let listener = Arc::new(RecordingLocalUpdate {
+            updates: Mutex::new(Vec::new()),
+        });
+        doc.on_local_update(listener.clone());
+        doc.apply(remote).unwrap();
+        assert!(
+            listener.updates.lock().unwrap().is_empty(),
+            "imported remote rows must not reach the local-update listener"
+        );
+    }
+
+    struct ReentrantLocalUpdate {
+        doc: Arc<ChatDoc>,
+        saw_rows: Mutex<bool>,
+    }
+
+    impl LocalUpdateListener for ReentrantLocalUpdate {
+        fn on_local_update(&self, _update: Vec<u8>) {
+            let _ = self.doc.read_rows_json();
+            *self.saw_rows.lock().unwrap() = true;
+        }
+    }
+
+    #[test]
+    fn local_update_callback_does_not_deadlock_on_reentrant_read() {
+        let doc = Arc::new(ChatDoc::open());
+        let listener = Arc::new(ReentrantLocalUpdate {
+            doc: doc.clone(),
+            saw_rows: Mutex::new(false),
+        });
+        doc.on_local_update(listener.clone());
+        doc.insert_user_message(
+            "m1".into(),
+            "hi".into(),
+            "dev".into(),
+            UserMessageOptsRecord::default(),
+        )
+        .unwrap();
+        doc.commit();
+        assert!(
+            *listener.saw_rows.lock().unwrap(),
+            "listener should have run after commit"
+        );
     }
 }
