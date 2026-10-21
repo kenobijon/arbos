@@ -142,7 +142,7 @@ fi
 # Own the data dir — but never descend into the user sandboxes' /work images mounted under
 # $DATA_DIR/boxes/<user>/mnt (D89): their files belong to the sandbox's own users, and a
 # recursive chown there breaks every workspace at the next start. `-xdev` stays on this fs.
-find "$DATA_DIR" -xdev \( ! -user arbos -o ! -group arbos \) -exec chown arbos:arbos {} + 2>/dev/null || true
+find "$DATA_DIR" -xdev -not -path "$DATA_DIR/boxes/*/mnt" \( ! -user arbos -o ! -group arbos \) -exec chown arbos:arbos {} + 2>/dev/null || true
 chmod 0750 "$DATA_DIR"
 
 # ---- 3. env file (secrets) -------------------------------------------------------------------------
