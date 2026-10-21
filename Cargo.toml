@@ -2,6 +2,10 @@
 resolver = "2"
 members = [
     "crates/arbos-core",
+    # App-only sans-IO room session. Only arbos-mac may depend on it for now
+    # (Swift/UniFFI later). arbos-relay, arbos-agentd, arbosctl, and arbos-local
+    # must not.
+    "crates/arbos-client",
     "crates/arbos-relay",
     "crates/arbos-agentd",
     "crates/arbosctl",
@@ -19,6 +23,7 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 arbos-core = { path = "crates/arbos-core" }
+arbos-client = { path = "crates/arbos-client" }
 arbos-update = { path = "crates/arbos-update" }
 
 anyhow = "1"

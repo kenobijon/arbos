@@ -458,6 +458,15 @@ impl ChatDoc {
         self.doc.oplog_vv().includes_vv(vv)
     }
 
+    /// §7.3 containment on raw STATE frontier bytes (`decode_vv` then [`Self::contains_vv`]).
+    /// False when the frontier does not decode.
+    pub fn contains_frontier(&self, frontier: &[u8]) -> bool {
+        match decode_vv(frontier) {
+            Some(vv) => self.contains_vv(&vv),
+            None => false,
+        }
+    }
+
     pub fn messages_list(&self) -> LoroList {
         self.doc.get_list("messages")
     }
