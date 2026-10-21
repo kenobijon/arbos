@@ -5513,7 +5513,12 @@ async fn refresh_routines(shared: &Arc<Shared>, project_id: &str) {
                 routines,
             });
         }
-        Err(err) => shared.diagnostic("routines", format!("{err:#}")),
+        Err(err) => {
+            // Gone project, people space, or older relay without routines — not a bug.
+            if !format!("{err:#}").contains("HTTP 404") {
+                shared.diagnostic("routines", format!("{err:#}"));
+            }
+        }
     }
 }
 
@@ -5531,7 +5536,11 @@ async fn refresh_routine_runs(shared: &Arc<Shared>, project_id: &str, routine_id
                 runs,
             });
         }
-        Err(err) => shared.diagnostic("routine-runs", format!("{err:#}")),
+        Err(err) => {
+            if !format!("{err:#}").contains("HTTP 404") {
+                shared.diagnostic("routine-runs", format!("{err:#}"));
+            }
+        }
     }
 }
 
