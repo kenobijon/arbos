@@ -26,7 +26,7 @@ use crate::model::{now_ms, Attachment, AttachmentKind, Chat, Message, Part};
 use crate::ui::glass;
 use crate::ui::icons::icon;
 use crate::ui::shell::Shell;
-use crate::ui::theme::{Theme, PANEL_RADIUS, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
+use crate::ui::theme::{Theme, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
 /// The right pane's width (mockups b, d, g: a quarter of the window).
 pub const SHEET_WIDTH: f32 = 340.0;
@@ -234,103 +234,6 @@ pub(super) fn editable_name(
         })
         .child(div().truncate().child(name.to_string()))
         .when_some(on_click, |el, f| el.on_click(move |e, w, cx| f(e, w, cx)))
-}
-
-/// One round action: glyph above a caption, like Telegram's call / mute / search row.
-pub(super) struct Action {
-    pub id: &'static str,
-    pub glyph: &'static str,
-    pub label: String,
-    pub enabled: bool,
-    /// Caption under the label for disabled actions ("soon").
-    pub note: Option<&'static str>,
-}
-
-impl Action {
-    pub fn new(id: &'static str, glyph: &'static str, label: impl Into<String>) -> Self {
-        Self {
-            id,
-            glyph,
-            label: label.into(),
-            enabled: true,
-            note: None,
-        }
-    }
-
-    /// A disabled action with a "soon" caption (none today: voice calls landed with D75).
-    #[allow(dead_code)]
-    pub fn soon(mut self) -> Self {
-        self.enabled = false;
-        self.note = Some("soon");
-        self
-    }
-}
-
-pub(super) fn action_button(a: &Action, theme: &Theme) -> Stateful<Div> {
-    let fg = if a.enabled {
-        theme.primary
-    } else {
-        theme.text_faint
-    };
-    div()
-        .id(a.id)
-        .flex_1()
-        .min_w(px(64.0))
-        .h(px(60.0))
-        .rounded(px(PANEL_RADIUS))
-        .bg(theme.surface_1)
-        .flex()
-        .flex_col()
-        .items_center()
-        .justify_center()
-        .gap(px(4.0))
-        .when(a.enabled, |el| {
-            el.cursor_pointer().hover(|s| s.bg(theme.surface_2))
-        })
-        .child(icon(a.glyph, 19.0, fg))
-        .child(
-            div()
-                .text_size(px(TEXT_TINY))
-                .text_color(fg)
-                .child(match a.note {
-                    Some(n) => format!("{} · {n}", a.label),
-                    None => a.label.clone(),
-                }),
-        )
-}
-
-pub(super) fn action_row(buttons: Vec<Stateful<Div>>) -> Div {
-    div()
-        .flex_shrink_0()
-        .flex()
-        .gap(px(8.0))
-        .px(px(16.0))
-        .pb(px(14.0))
-        .children(buttons)
-}
-
-/// Info card row: small caption over a value (Telegram's "username / @x").
-pub(super) fn info_row(caption: &str, value: impl Into<SharedString>, theme: &Theme) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(2.0))
-        .px(px(16.0))
-        .py(px(10.0))
-        .border_b_1()
-        .border_color(theme.border)
-        .child(
-            div()
-                .text_size(px(TEXT_TINY))
-                .text_color(theme.text_muted)
-                .child(caption.to_string()),
-        )
-        .child(
-            div()
-                .text_size(px(TEXT_BODY))
-                .text_color(theme.text)
-                .child(value.into()),
-        )
 }
 
 pub(super) fn card(theme: &Theme) -> Div {
@@ -725,13 +628,4 @@ pub(super) fn link_list(items: &[Link], theme: &Theme, cx: &mut Context<Shell>) 
 /// The chats of a space, for content tabs (one per agent unless multi-chat is on).
 pub(super) fn chats_of<'a>(state: &'a AppState, space_id: &str) -> Vec<&'a Chat> {
     state.visible_tabs(space_id)
-}
-
-/// A plain pill for the "more" menu.
-pub(super) fn more_menu(rows: Vec<Stateful<Div>>, theme: &Theme) -> Div {
-    div()
-        .flex_shrink_0()
-        .mx(px(16.0))
-        .mb(px(14.0))
-        .child(glass::menu_card(SHEET_WIDTH - 32.0, theme).children(rows))
 }

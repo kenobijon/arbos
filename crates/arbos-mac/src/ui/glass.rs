@@ -186,50 +186,6 @@ pub fn icon_tile(glyph: &str, theme: &Theme) -> Div {
         .child(icon(glyph, 15.0, gpui::white()))
 }
 
-/// A tappable row: label, optional detail, chevron.
-pub fn nav_row(
-    id: impl Into<ElementId>,
-    label: impl Into<SharedString>,
-    detail: Option<String>,
-    theme: &Theme,
-) -> Stateful<Div> {
-    nav_row_with(id, None, label, detail, theme)
-}
-
-fn nav_row_with(
-    id: impl Into<ElementId>,
-    glyph: Option<&str>,
-    label: impl Into<SharedString>,
-    detail: Option<String>,
-    theme: &Theme,
-) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex()
-        .flex_shrink_0()
-        .items_center()
-        .gap(px(10.0))
-        .min_h(px(44.0))
-        .px(px(16.0))
-        .border_b_1()
-        .border_color(theme.border)
-        .text_size(px(TEXT_BODY))
-        .text_color(theme.text)
-        .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
-        .when_some(glyph, |el, g| el.child(icon_tile(g, theme)))
-        .child(div().flex_1().min_w_0().child(label.into()))
-        .when_some(detail, |el, d| {
-            el.child(
-                div()
-                    .text_size(px(TEXT_SMALL))
-                    .text_color(theme.text_muted)
-                    .child(d),
-            )
-        })
-        .child(icon("chevron-right", 13.0, theme.text_faint))
-}
-
 /// Segmented choice inside a row: `[Dark] Light`.
 pub fn segment(id: impl Into<ElementId>, label: &str, on: bool, theme: &Theme) -> Stateful<Div> {
     div()

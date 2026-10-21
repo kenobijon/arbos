@@ -68,52 +68,6 @@ struct ProfileTopBar<Trailing: View>: View {
     }
 }
 
-struct ProfileAction: Identifiable {
-    var id: String { label }
-    let icon: String
-    let label: String
-    var enabled = true
-    var soon = false
-    var destructive = false
-    let action: () -> Void
-}
-
-/// Telegram's row of square tiles (equal widths, blue icon + label).
-struct ProfileActionRow: View {
-    @Environment(\.theme) private var theme
-    let actions: [ProfileAction]
-
-    private var accent: Color { Color(hex: "#1084FE")! }
-
-    var body: some View {
-        HStack(spacing: 10) {
-            ForEach(actions) { a in
-                Button(action: a.action) {
-                    VStack(spacing: 6) {
-                        ZStack(alignment: .topTrailing) {
-                            Image(systemName: a.icon).font(.system(size: 20, weight: .medium))
-                            if a.soon {
-                                Text("soon").font(theme.font(8, weight: .bold)).foregroundStyle(theme.bg)
-                                    .padding(.horizontal, 4).padding(.vertical, 1)
-                                    .background(Capsule().fill(theme.muted))
-                                    .offset(x: 14, y: -8)
-                            }
-                        }
-                        Text(a.label).font(theme.font(12))
-                    }
-                    .foregroundStyle(a.destructive ? theme.danger : (a.enabled ? accent : theme.muted))
-                    .frame(maxWidth: .infinity).frame(height: 64)
-                    .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(theme.card))
-                }
-                .buttonStyle(.plain)
-                .disabled(!a.enabled)
-                .accessibilityLabel(a.label + (a.soon ? ", coming soon" : ""))
-            }
-        }
-        .padding(.horizontal, 16)
-    }
-}
-
 /// The one row/card kit every pane page draws with (Jacob, 2026-10-20:
 /// "make the settings, user and group panels consistent"). Settings groups,
 /// profile cards and the agent editor all build on these, so a metric lives
@@ -396,26 +350,6 @@ extension View {
 
 // ----- the shared pane kit (PaneKit) and the names the pages use ------------
 
-/// Hero: picture, name, subtitle. `statusOnline` is kept for the agent page's
-/// "working" tint; the kit draws the subtitle muted.
-struct ProfileHeader<Avatar: View>: View {
-    @Environment(\.theme) private var theme
-    let name: String
-    let status: String
-    var statusOnline = false
-    @ViewBuilder var avatar: () -> Avatar
-
-    var body: some View {
-        PaneHeader(name: name, subtitle: status, avatar: avatar)
-            .overlay(alignment: .bottom) {
-                if statusOnline {
-                    Text(status).font(theme.font(Theme.small)).foregroundStyle(Color(hex: "#1084FE")!)
-                        .background(theme.bg)
-                }
-            }
-    }
-}
-
 /// A grouped card of rows (the kit's card; hairlines inset to the label).
 struct ProfileCard<Content: View>: View {
     var separatorInset: CGFloat = PaneKit.inset
@@ -423,27 +357,6 @@ struct ProfileCard<Content: View>: View {
     var body: some View {
         PaneCard(separatorInset: separatorInset) { content() }
             .padding(.horizontal, PaneKit.inset)
-    }
-}
-
-/// Label-over-value row ("username" / "@handle"), optional trailing glyph.
-struct ProfileInfoRow: View {
-    @Environment(\.theme) private var theme
-    let label: String
-    let value: String
-    var tint: Color? = nil
-    var trailingIcon: String? = nil
-
-    var body: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(label).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
-                Text(value).font(theme.font(Theme.body)).foregroundStyle(tint ?? theme.text).textSelection(.enabled)
-            }
-            Spacer()
-            if let trailingIcon { Image(systemName: trailingIcon).font(.system(size: 18)).foregroundStyle(Color(hex: "#1084FE")!) }
-        }
-        .padding(.horizontal, PaneKit.inset).frame(minHeight: PaneKit.rowHeight)
     }
 }
 
@@ -644,7 +557,7 @@ struct UserProfileView: View {
                     // The shared read-only layout (2026-10-20, topbar-unify f/g):
                     // picture, name, @handle; no last-seen, no action row, no
                     // username field, no Open chat / Add members.
-                    ProfileHeader(name: person.displayName, status: "@\(person.handle)", statusOnline: false) {
+                    PaneHeader(name: person.displayName, subtitle: "@\(person.handle)") {
                         PersonAvatar(url: person.avatarUrl, handle: person.handle, size: 112, name: person.name, id: person.id, colorIndex: person.avatarColorIndex)
                     }
                     ProfileTabs(tabs: ["Links", "Groups"], selected: $tab)
@@ -728,11 +641,9 @@ struct GroupProfileView: View {
     /// nil for people groups; the project for a shared project chat.
     let projectId: String?
     @State private var tab = "Members"
-    @State private var muted = false
     @State private var projectMembers: [ProjectMember] = []
     @State private var showAdd = false
     @State private var showEdit = false
-    @State private var confirmLeave = false
     @State private var pendingRemoveId: String?
     @State private var pendingRemoveName: String?
 
@@ -823,34 +734,12 @@ struct GroupProfileView: View {
                     } else {
                         library
                     }
-                    if people != nil || project?.shared == true {
-                        ProfileCard(separatorInset: PaneKit.separatorInset(.tile(""))) {
-                            if people != nil {
-                                // Mute is a relay chat setting (`chatSettings`); this
-                                // pane is the only place it lives on iPhone, so it stays.
-                                PaneRow(
-                                    leading: .tile(muted ? "bell.slash.fill" : "bell.fill"),
-                                    title: "Mute notifications",
-                                    trailing: AnyView(
-                                        Toggle("", isOn: Binding(get: { muted }, set: { _ in toggleMute() }))
-                                            .labelsHidden()
-                                            .tint(Color(hex: "#1084FE")!)
-                                    )
-                                )
-                            }
-                            PaneDangerRow(title: "Leave group") { confirmLeave = true }
-                        }
-                    }
+                    // No Mute / Leave here (Jacob, 2026-10-20, same as the Mac): leaving
+                    // or deleting a group is the chat list's Delete; mute is gone.
                     Color.clear.frame(height: 40)
                 }
             }
             ProfileTopBar { EmptyView() }
-        }
-        .confirmationDialog("Leave \(title)?", isPresented: $confirmLeave, titleVisibility: .visible) {
-            Button("Leave", role: .destructive) {
-                if people != nil { model.leavePeopleChat(chatId) }
-                dismiss()
-            }
         }
         .confirmationDialog(
             pendingRemoveName.map { "Remove \($0) from \(title)?" } ?? "Remove from chat?",
@@ -887,7 +776,6 @@ struct GroupProfileView: View {
             GroupEditSheet(chatId: chatId).environmentObject(model).environment(\.theme, theme)
         }
         .task {
-            muted = people?.muted ?? false
             if let projectId { projectMembers = await model.projectMembers(projectId) }
         }
     }
@@ -988,10 +876,6 @@ struct GroupProfileView: View {
         }
     }
 
-    private func toggleMute() {
-        muted.toggle()
-        model.setMuted(chatId: chatId, muted: muted)
-    }
 }
 
 /// Finds the SwiftUI-hosted `UITextField` and makes a double-tap select the
