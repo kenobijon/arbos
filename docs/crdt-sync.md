@@ -11,7 +11,7 @@ This document is drawn from the code as it exists today:
 | UniFFI / Swift bindings | `crates/arbos-ffi` (wraps client + core; produces xcframework) |
 | Golden doc / wire fixtures | `crates/arbos-core/fixtures/` |
 | Mac Loro replica | `crates/arbos-mac/src/sync/doc.rs` |
-| iOS Loro replica | `apps/ios/Arbos/Arbos/Sync/ChatDoc.swift` |
+| iOS chat doc (arbos-core via ArbosFFI) | `apps/ios/Arbos/Arbos/Sync/CoreChatDoc.swift` |
 | Binary room frames | `crates/arbos-core/src/wire.rs`, `apps/ios/Arbos/Arbos/Sync/Frame.swift` |
 | Protocol version | `arbos_core::PROTO_VERSION`, iOS `protoVersion` |
 | Mac HTTP + room client | `crates/arbos-mac/src/sync/relay.rs` |
@@ -35,6 +35,7 @@ This document is drawn from the code as it exists today:
 - **Version tie-in:** ship the xcframework under the **same release tag** as the Mac app (workspace `version`). Bump them together; do not publish an FFI binary from a different commit than the Mac build it pairs with.
 - **Size:** the device `libarbos_ffi.a` is roughly **50–60 MiB** before linking (Loro dominates). The `archive` lane reports the shipped `ArbosFFI.framework` size (prints the measured byte size and writes `apps/ios/Arbos/build/arbosffi-size.txt`); re-check after each release build.
 - **Loro pin:** workspace `loro = "=1.16.2"` stays lockstep with the Xcode `loro-swift` `exactVersion` 1.16.2 until `loro-swift` is removed from the iOS project.
+- **Swift chat docs:** the iPhone app's chat docs are arbos-core docs through ArbosFFI (`CoreChatDoc`); loro-swift is still linked until it is removed.
 
 The relay never parses Loro bytes. It stores opaque **rows** and optional **checkpoints**, and forwards them on WebSocket rooms.
 

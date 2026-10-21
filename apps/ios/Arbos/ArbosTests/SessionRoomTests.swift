@@ -64,7 +64,7 @@ final class SessionRoomTests: XCTestCase {
             projectId: "proj",
             key: "chat",
             roomChat: "chat",
-            doc: Arbos.ChatDoc(key: "chat"),
+            doc: CoreChatDoc(key: "chat"),
             roomURL: { _ in URL(string: "wss://example.test/r")! },
             makeSocket: { sockets.make($0) },
             fetchCheckpoint: { _ in (0, Data()) },
@@ -95,7 +95,7 @@ final class SessionRoomTests: XCTestCase {
         let frontier = other.doc.oplogVv().encode()
         let staleBytes = try other.exportSnapshot()
 
-        let doc = Arbos.ChatDoc(key: "chat")
+        let doc = CoreChatDoc(key: "chat")
         let room = SessionRoom(
             projectId: "proj",
             key: "chat",
