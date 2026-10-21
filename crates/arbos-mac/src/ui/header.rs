@@ -1,12 +1,13 @@
 //! The conversation header (unified top bar, Jacob 2026-10-20, mockups
 //! `topbar-unify/`): one centred pill for every chat — avatar + name, the
 //! same control for agents, people and groups. Click the name → that chat's
-//! right pane. An agent with more than one tab folds them into the pill as a
-//! second hit region, "Name · Tab ⌄": its dropdown lists the tabs (current
-//! checked, last activity, × on hover closes), the previous chats, then
-//! New tab ⌘T. Nothing else lives in the bar: no @handle line, no agent
-//! chips, no add-person button, no member heads or counts. Calls start from
-//! the composer; adding people or agents lives in the right pane's Members.
+//! right pane. An agent's pill also carries a "+" that starts a new chat with
+//! that agent. When the agent has more than one tab, a second hit region
+//! "· Tab ⌄" folds them in: its dropdown lists the tabs (current checked,
+//! last activity, × on hover closes), the previous chats, then New tab ⌘T.
+//! Nothing else lives in the bar: no @handle line, no agent chips, no
+//! add-person button, no member heads or counts. Calls start from the
+//! composer; adding people or agents lives in the right pane's Members.
 
 use gpui::{
     anchored, deferred, div, prelude::*, px, AnyElement, Context, Div, Edges, ElementId,
@@ -57,13 +58,16 @@ pub fn render(
         Some(ProfilePage::Agent { project_id }) => project_id == &space.id,
         Some(ProfilePage::Me) | None => false,
     };
+    // Agents with multi-chat keep a trailing "+" inside the pill, so the right
+    // pad is tighter than the people/group pill's.
+    let show_new_chat = !is_people && state.multi_chat;
     let mut pill = div()
         .id("header-title")
         .flex()
         .items_center()
         .h(px(34.0))
         .pl(px(4.0))
-        .pr(px(10.0))
+        .pr(px(if show_new_chat { 4.0 } else { 10.0 }))
         .rounded_full()
         .bg(theme.bubble_assistant)
         .border_2()
@@ -226,10 +230,13 @@ pub fn render(
     }
     pill = pill.child(name_part);
 
-    // ----- tabs fold into the pill: "· Tab ⌄" with the dropdown ---------------
+    // ----- tabs fold into the pill: "· Tab ⌄" (when several) and "+" -----------
     if !is_people {
         if let Some(segment) = tab_segment(shell, space, cx) {
             pill = pill.child(segment);
+        }
+        if show_new_chat {
+            pill = pill.child(new_chat_plus(cx));
         }
     }
 
@@ -303,8 +310,40 @@ pub fn render(
         .child(div().w(side).flex_shrink_0())
 }
 
-/// "· Tab ⌄" inside the pill for an agent with more than one tab (a single
-/// tab shows the name only). Click toggles the dropdown, which hangs off it.
+/// "+" inside the agent pill: starts a new chat with this agent (same as ⌘T).
+fn new_chat_plus(cx: &mut Context<Shell>) -> Stateful<Div> {
+    let theme = Theme::of(cx).clone();
+    div()
+        .id("header-new-chat")
+        .flex_shrink_0()
+        .size(px(26.0))
+        .ml(px(2.0))
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .hover(|s| s.bg(theme.surface_2))
+        .child(icon("plus", 13.0, theme.text_muted))
+        // Mouse-down stops the header's window-drag region; click creates the chat.
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            cx.listener(|this, _, window, cx| {
+                cx.stop_propagation();
+                this.close_popovers(cx);
+                if this.renaming_tab.is_some() {
+                    this.commit_tab_rename(window, cx);
+                }
+            }),
+        )
+        .on_click(cx.listener(|this, _, window, cx| {
+            cx.stop_propagation();
+            this.open_new_tab(window, cx);
+        }))
+}
+
+/// "· Tab ⌄" inside the pill when an agent has more than one tab (a single tab
+/// shows the name and "+" only). Click toggles the dropdown, which hangs off it.
 fn tab_segment(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option<Stateful<Div>> {
     let theme = Theme::of(cx).clone();
     let state = shell.state.read(cx);
