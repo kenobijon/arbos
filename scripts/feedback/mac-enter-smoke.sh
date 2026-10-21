@@ -16,17 +16,34 @@ TEXT="enter smoke $(date +%s)"
 PID=$!
 sleep 8
 if ! kill -0 "$PID" 2>/dev/null; then echo "== enter smoke: the app did not stay up after launch"; tail -n 20 "$LOG"; exit 2; fi
-key() { osascript -e "tell application \"System Events\" to $1" >/dev/null 2>&1; }
+cannot_drive() {
+  echo "::warning title=enter smoke::could not drive the app ($1: this session lacks Accessibility/Automation for the runner); the GPUI enter_tests remain the gate"
+  echo "== enter smoke: could not drive the app ($1); skipped"
+  kill "$PID" 2>/dev/null; exit 0
+}
+# osascript blocks forever on a TCC prompt nobody can answer (v0.6.96 release, 22:31: `keystroke`
+# hung the job until the process was killed by hand) — every call gets a 10-second cap.
+key() {
+  osascript -e "tell application \"System Events\" to $1" >/dev/null 2>&1 &
+  local p=$! i
+  for ((i = 0; i < 100; i++)); do
+    kill -0 "$p" 2>/dev/null || { wait "$p" 2>/dev/null; return $?; }
+    sleep 0.1
+  done
+  kill "$p" 2>/dev/null; wait "$p" 2>/dev/null
+  return 124
+}
+key "count processes" || cannot_drive "System Events did not answer within 10 s"
 key "tell (first process whose unix id is $PID) to set frontmost to true"; sleep 1
-key 'keystroke "t" using command down'; sleep 1
+key 'keystroke "t" using command down' || cannot_drive "keystroke blocked"
+sleep 1
 printf '' | pbcopy
-key "keystroke \"$TEXT\""; sleep 1
+key "keystroke \"$TEXT\"" || cannot_drive "keystroke blocked"
+sleep 1
 key 'keystroke "a" using command down'; sleep 0.3
 key 'keystroke "c" using command down'; sleep 1
 if [[ "$(pbpaste 2>/dev/null)" != *"$TEXT"* ]]; then
-  echo "::warning title=enter smoke::could not drive the app (keystrokes did not reach the composer: this session lacks Accessibility/Automation for the runner); the GPUI enter_tests remain the gate"
-  echo "== enter smoke: could not drive the app; skipped"
-  kill "$PID" 2>/dev/null; exit 0
+  cannot_drive "keystrokes did not reach the composer"
 fi
 key 'key code 36'   # Enter
 sleep 4
