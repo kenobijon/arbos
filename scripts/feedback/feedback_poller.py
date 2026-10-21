@@ -1451,7 +1451,7 @@ class Loop:
                                     seen.append(f["filename"])
                     files = seen
                 st.update(status="gating", branch=branch, branch_head=head, files=files,
-                          expects_ios=any(f.startswith("apps/ios/") or f == ".github/workflows/ios.yml" for f in files),
+                          expects_ios=any(f.startswith(("apps/ios/", "crates/arbos-core/", "crates/arbos-client/", "crates/arbos-ffi/")) or f == ".github/workflows/ios.yml" for f in files),
                           expects_rust=bool(self.rust_crates(files)),
                           expects_ci=any(not f.startswith("apps/ios/") for f in files),
                           agent_summary=self.summary_line(result))
@@ -2308,8 +2308,10 @@ class Loop:
         parts: list[str] = []
         files = st.get("files") or []
         commit = st.get("commit") or ""
-        mac_files = any(f.startswith("crates/arbos-mac/") or f.startswith("crates/arbos-update/") for f in files)
-        ios_files = any(f.startswith("apps/ios/") for f in files)
+        # Client-core crates are compiled into both apps (arbos-ffi xcframework in the iPhone app since #1169).
+        shared = any(f.startswith(("crates/arbos-core/", "crates/arbos-client/", "crates/arbos-ffi/")) for f in files)
+        mac_files = shared or any(f.startswith("crates/arbos-mac/") or f.startswith("crates/arbos-update/") for f in files)
+        ios_files = shared or any(f.startswith("apps/ios/") for f in files)
         if st.get("testflight_build") or (ios_files and st.get("status") == "shipped"):
             parts.append(f"TestFlight {st.get('testflight_build') or 'build'}")
         if mac_files or (st.get("edge_release") or "").startswith("edge-"):
