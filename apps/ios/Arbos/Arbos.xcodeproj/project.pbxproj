@@ -26,6 +26,7 @@
 		A14BB8E6904C5D3D5CFFCA56 /* Keychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A8BC5FCD045299B0D7D13D /* Keychain.swift */; };
 		A156C11ABF2E8C649148533D /* RelayAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E592B43CC1234959AF2E63 /* RelayAPI.swift */; };
 		A16EA7B171BC56646BAFF4F9 /* Room.swift in Sources */ = {isa = PBXBuildFile; fileRef = A143D937501D0DB6490E379A /* Room.swift */; };
+		A15C00000000000000000009 /* SessionRoom.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15C00000000000000000008 /* SessionRoom.swift */; };
 		A1B0F9F54DB2257BA4BA7B63 /* AgentProfileView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A124D4FA40F4E5025A2B2C9D /* AgentProfileView.swift */; };
 		A143D97A2803EDDA4BEA6B67 /* Avatar.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EE5A7A5FF12E4EF7FE7B27 /* Avatar.swift */; };
 		A11149E871067930CB116885 /* CallView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1686D5A87F44B94E76A8761 /* CallView.swift */; };
@@ -132,6 +133,7 @@
 		A1A8BC5FCD045299B0D7D13D /* Keychain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Keychain.swift; sourceTree = "<group>"; };
 		A1E592B43CC1234959AF2E63 /* RelayAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayAPI.swift; sourceTree = "<group>"; };
 		A143D937501D0DB6490E379A /* Room.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Room.swift; sourceTree = "<group>"; };
+		A15C00000000000000000008 /* SessionRoom.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRoom.swift; sourceTree = "<group>"; };
 		A124D4FA40F4E5025A2B2C9D /* AgentProfileView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentProfileView.swift; sourceTree = "<group>"; };
 		A1EE5A7A5FF12E4EF7FE7B27 /* Avatar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Avatar.swift; sourceTree = "<group>"; };
 		A1686D5A87F44B94E76A8761 /* CallView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallView.swift; sourceTree = "<group>"; };
@@ -301,6 +303,7 @@
 				A1E592B43CC1234959AF2E63,
 				A1112911C0D615A9C335C0EF,
 				A143D937501D0DB6490E379A,
+				A15C00000000000000000008,
 			);
 			path = Sync;
 			sourceTree = "<group>";
@@ -517,6 +520,7 @@
 				A156C11ABF2E8C649148533D /* RelayAPI.swift in Sources */,
 				A115819FE05076AF542EABF0 /* SecretsAPI.swift in Sources */,
 				A16EA7B171BC56646BAFF4F9 /* Room.swift in Sources */,
+				A15C00000000000000000009 /* SessionRoom.swift in Sources */,
 				A1B0F9F54DB2257BA4BA7B63 /* AgentProfileView.swift in Sources */,
 				A143D97A2803EDDA4BEA6B67 /* Avatar.swift in Sources */,
 				A11149E871067930CB116885 /* CallView.swift in Sources */,
