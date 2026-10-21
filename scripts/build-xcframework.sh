@@ -64,6 +64,26 @@ mkdir -p "$UNIVERSAL_SIM_DIR"
 UNIVERSAL_SIM_LIB="$UNIVERSAL_SIM_DIR/lib${LIB_NAME}.a"
 echo "==> lipo simulator (${SIM_TARGET} + ${SIM_X86_TARGET})"
 lipo -create "$SIM_ARM_LIB" "$SIM_X86_LIB" -output "$UNIVERSAL_SIM_LIB"
+SIM_ARCHS="$(lipo -archs "$UNIVERSAL_SIM_LIB")"
+case " $SIM_ARCHS " in
+  *" arm64 "*) ;;
+  *)
+    echo "error: universal simulator library must include arm64 (lipo -archs: ${SIM_ARCHS})" >&2
+    exit 1
+    ;;
+esac
+case " $SIM_ARCHS " in
+  *" x86_64 "*) ;;
+  *)
+    echo "error: universal simulator library must include x86_64 (lipo -archs: ${SIM_ARCHS})" >&2
+    exit 1
+    ;;
+esac
+DEVICE_ARCHS="$(lipo -archs "$DEVICE_LIB")"
+if [[ "$DEVICE_ARCHS" != "arm64" ]]; then
+  echo "error: device library must be only arm64 (lipo -archs: ${DEVICE_ARCHS})" >&2
+  exit 1
+fi
 SIM_LIB="$UNIVERSAL_SIM_LIB"
 
 GEN_DIR="$OUT_DIR/generated"
