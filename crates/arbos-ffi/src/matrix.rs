@@ -153,7 +153,8 @@ impl CoreListener for Bridge {
     }
 
     fn on_timeline(&self, room_id: String, rows: Vec<CoreMessage>) {
-        self.0.on_timeline(room_id, rows.into_iter().map(row).collect());
+        self.0
+            .on_timeline(room_id, rows.into_iter().map(row).collect());
     }
 
     fn on_connection(&self, connected: bool, error: Option<String>) {
@@ -216,7 +217,10 @@ impl MatrixClient {
     }
 
     /// `None` at the beginning of the room.
-    pub async fn load_older(&self, room_id: String) -> Result<Option<Vec<MatrixMessageRow>>, MatrixError> {
+    pub async fn load_older(
+        &self,
+        room_id: String,
+    ) -> Result<Option<Vec<MatrixMessageRow>>, MatrixError> {
         Ok(self
             .inner
             .load_older(&room_id)
@@ -224,7 +228,12 @@ impl MatrixClient {
             .map(|rows| rows.into_iter().map(row).collect()))
     }
 
-    pub async fn send_text(&self, room_id: String, text: String, local_id: String) -> Result<String, MatrixError> {
+    pub async fn send_text(
+        &self,
+        room_id: String,
+        text: String,
+        local_id: String,
+    ) -> Result<String, MatrixError> {
         Ok(self.inner.send_text(&room_id, &text, &local_id).await?)
     }
 
