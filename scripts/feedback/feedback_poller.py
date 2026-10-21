@@ -970,7 +970,7 @@ class Loop:
         return bool(keys & self.cfg.internal)
 
     def tier(self, info: dict) -> str:
-        """priority (Jacob: first in line, no per-tester cap) | tester | blocked."""
+        """priority (Jacob, and Ken since 2026-10-21: first in line, no per-tester cap, owner-grade intent screen) | tester | blocked."""
         keys = {self.tester_key(info)}
         if info.get("handle"):
             keys.add("@" + info["handle"].lower())
@@ -984,10 +984,16 @@ class Loop:
 
     def tester_label(self, info: dict, tier: str) -> str:
         """What the public issue shows: never an email."""
-        if tier == "priority" and info.get("source") != "inbox":
+        keys = {self.tester_key(info).lower(), ("@" + info["handle"].lower()) if info.get("handle") else "", (info.get("email") or "").lower()}
+        if keys & {"jake@bittensor.com", "@unconst", "@unarbos"}:
             return "Jacob (owner)"
         if info.get("handle"):
-            return f"@{info['handle']}"
+            return f"@{info['handle']}" + (" (priority)" if tier == "priority" else "")
+        if tier == "priority" and info.get("source") == "testflight":
+            # A priority tester who is not Jacob (Ken since 2026-10-21): named by the hashed tester tag, never an email.
+            return "tester-" + hashlib.sha256(self.tester_key(info).encode()).hexdigest()[:8] + " (priority)"
+        if tier == "priority" and info.get("source") != "inbox":
+            return "Jacob (owner)"
         if info.get("source") == "inbox":
             return "synthetic (poller inbox)"
         tag = "tester-" + hashlib.sha256(self.tester_key(info).encode()).hexdigest()[:8]
