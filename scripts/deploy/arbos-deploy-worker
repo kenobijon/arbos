@@ -507,8 +507,11 @@ roll_unit_running() {
 
 start_roll_unit() {
   # A finished (failed) transient unit stays loaded until reset; clear it, then start the roll.
+  # --no-block: without it systemd-run waits for the oneshot to finish, so the tick (and with it
+  # the timer and every other queued deploy) sat inside the 15–40 minute roll (22:27–22:58 Oct 21,
+  # relay request f8f5bf3c waited the whole time).
   systemctl reset-failed arbos-deploy-agentd.service 2>/dev/null || true
-  if ! systemd-run --unit=arbos-deploy-agentd --collect --quiet \
+  if ! systemd-run --unit=arbos-deploy-agentd --collect --quiet --no-block \
       --property=Type=oneshot --property=StandardOutput=journal \
       "$0" roll-image "$1"; then
     log "agentd: could not start the roll unit for $1 (still loaded?); next tick retries"
@@ -637,7 +640,7 @@ continue_roll_if_due() {
   at="$(sed -n 's/^at=//p' "$STATE/agentd.rolling" | head -1)"
   (( $(date -u +%s) - ${at:-0} >= ROLL_RETRY_EVERY_S )) || return 0
   systemctl reset-failed arbos-deploy-agentd.service 2>/dev/null || true
-  systemd-run --unit=arbos-deploy-agentd --collect --quiet \
+  systemd-run --unit=arbos-deploy-agentd --collect --quiet --no-block \
     --property=Type=oneshot --property=StandardOutput=journal \
     "$0" roll-continue || { log "agentd: could not start the roll-continue unit; next tick retries"; return 0; }
   log "agentd: another roll pass started for $(sed -n 's/^sha=//p' "$STATE/agentd.rolling" | head -1)"
