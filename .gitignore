@@ -23,3 +23,7 @@ __pycache__/
 voice/.venv/
 voice/**/__pycache__/
 voice/tests/fixtures/judge-results.json
+
+# Local Swift package products from scripts/build-xcframework.sh
+/packages/ArbosFFI/ArbosFFIRust.xcframework
+/packages/ArbosFFI/Sources/ArbosFFI/ArbosFFI.swift

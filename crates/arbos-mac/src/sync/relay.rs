@@ -2763,6 +2763,7 @@ async fn perform_room_actions(
                     typing,
                     in_call,
                     mine,
+                    header: _,
                 } => {
                     if let Some(call_id) = in_call {
                         if !mine

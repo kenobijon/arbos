@@ -62,8 +62,8 @@
 
 		A15A00000000000000000004 /* CoreFixturesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000003 /* CoreFixturesTests.swift */; };
 		A15A00000000000000000013 /* ReactionToggleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000012 /* ReactionToggleTests.swift */; };
-		A15A00000000000000000006 /* ArbosFFI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000005 /* ArbosFFI.swift */; };
-		A15A00000000000000000008 /* ArbosFFI.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000007 /* ArbosFFI.xcframework */; };
+		A15C00000000000000000004 /* ArbosFFI in Frameworks */ = {isa = PBXBuildFile; productRef = A15C00000000000000000002 /* ArbosFFI */; };
+		A15C00000000000000000005 /* ArbosFFI in Frameworks */ = {isa = PBXBuildFile; productRef = A15C00000000000000000003 /* ArbosFFI */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -155,8 +155,7 @@
 		A15A00000000000000000001 /* ArbosTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ArbosTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A15A00000000000000000003 /* CoreFixturesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreFixturesTests.swift; sourceTree = "<group>"; };
 		A15A00000000000000000012 /* ReactionToggleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReactionToggleTests.swift; sourceTree = "<group>"; };
-		A15A00000000000000000005 /* ArbosFFI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ArbosFFI.swift; path = ../../../target/xcframework/ArbosFFI.swift; sourceTree = SOURCE_ROOT; };
-		A15A00000000000000000007 /* ArbosFFI.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = ArbosFFI.xcframework; path = ../../../target/xcframework/ArbosFFI.xcframework; sourceTree = SOURCE_ROOT; };
+		A15C00000000000000000001 /* ArbosFFI */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = ArbosFFI; path = ../../../packages/ArbosFFI; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -166,6 +165,7 @@
 			files = (
 				A1E4BA8C12CCEA3325BE2435 /* Loro in Frameworks */,
 				A142325F91336BDF2882011F /* LiveKit in Frameworks */,
+				A15C00000000000000000004 /* ArbosFFI in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -181,7 +181,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				A15A00000000000000000008 /* ArbosFFI.xcframework in Frameworks */,
+				A15C00000000000000000005 /* ArbosFFI in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -195,6 +195,7 @@
 				A12CE546A1A4EDA93F7ABC69,
 				A15A00000000000000000011,
 				A13B28988372749C80462C3E,
+				A15C00000000000000000001 /* ArbosFFI */,
 				A1CA9DEF8434A85687602C88,
 			);
 			sourceTree = "<group>";
@@ -334,8 +335,6 @@
 			children = (
 				A15A00000000000000000003 /* CoreFixturesTests.swift */,
 				A15A00000000000000000012 /* ReactionToggleTests.swift */,
-				A15A00000000000000000005 /* ArbosFFI.swift */,
-				A15A00000000000000000007 /* ArbosFFI.xcframework */,
 			);
 			path = ArbosTests;
 			sourceTree = "<group>";
@@ -361,6 +360,7 @@
 			packageProductDependencies = (
 				A1636595BB2F59B8CC2A4343 /* Loro */,
 				A192208521894CF66C53FA38 /* LiveKit */,
+				A15C00000000000000000002 /* ArbosFFI */,
 			);
 			productName = Arbos;
 			productReference = A15C30AC29682FF68428C798 /* Arbos.app */;
@@ -401,6 +401,7 @@
 			);
 			name = ArbosTests;
 			packageProductDependencies = (
+				A15C00000000000000000003 /* ArbosFFI */,
 			);
 			productName = ArbosTests;
 			productReference = A15A00000000000000000001 /* ArbosTests.xctest */;
@@ -547,7 +548,6 @@
 			files = (
 				A15A00000000000000000004 /* CoreFixturesTests.swift in Sources */,
 				A15A00000000000000000013 /* ReactionToggleTests.swift in Sources */,
-				A15A00000000000000000006 /* ArbosFFI.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -835,6 +835,14 @@
 			isa = XCSwiftPackageProductDependency;
 			package = A15BB86C523299D91321EF64 /* XCRemoteSwiftPackageReference "client-sdk-swift" */;
 			productName = LiveKit;
+		};
+		A15C00000000000000000002 /* ArbosFFI */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = ArbosFFI;
+		};
+		A15C00000000000000000003 /* ArbosFFI */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = ArbosFFI;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
