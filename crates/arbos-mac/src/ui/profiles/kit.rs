@@ -88,7 +88,9 @@ fn leading_el(leading: Leading, theme: &Theme) -> Option<AnyElement> {
 
 /// One row: leading, title (+ optional subtitle), optional right detail,
 /// optional trailing element, chevron when it pushes a page. The hairline
-/// sits under the label, the row's last child hides it (`last`).
+/// sits under the label, 1 pt below the row: between rows it lands on the
+/// next row's first pixel, under the last row the card's clip swallows it
+/// (D80 / the iPhone's `PaneCardLayout`: no line under the last row).
 #[allow(clippy::too_many_arguments)]
 pub fn row(
     id: impl Into<ElementId>,
@@ -101,6 +103,12 @@ pub fn row(
     theme: &Theme,
 ) -> Stateful<Div> {
     let sep = separator_inset(&leading);
+    // Mock b: names on people / agent / file rows are medium; mock g: settings
+    // labels are regular.
+    let title_weight = match leading {
+        Leading::Avatar(_) | Leading::Glyph(_) => FontWeight::MEDIUM,
+        Leading::None | Leading::Tile(_) => FontWeight::NORMAL,
+    };
     let leading = leading_el(leading, theme);
     div()
         .id(id)
@@ -122,7 +130,12 @@ pub fn row(
                 .flex()
                 .flex_col()
                 .gap(px(1.0))
-                .child(div().truncate().child(title.into()))
+                .child(
+                    div()
+                        .truncate()
+                        .font_weight(title_weight)
+                        .child(title.into()),
+                )
                 .when_some(subtitle, |el, s| {
                     el.child(
                         div()
@@ -151,7 +164,7 @@ pub fn row(
                 .absolute()
                 .left(px(sep))
                 .right(px(0.0))
-                .bottom(px(0.0))
+                .bottom(px(-1.0))
                 .h(px(1.0))
                 .bg(theme.border),
         )
