@@ -640,6 +640,7 @@ pub async fn chats_create_group(
         );
     }
     tracing::info!(chat = %chat.id, %me, members = other_ids.len(), "people group created");
+    state.matrix.touch_chat(&state, &chat.id, None);
     match load_chat(&state, &chat.id) {
         Ok(cm) => Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response(),
         Err(r) => *r,
@@ -729,6 +730,7 @@ pub async fn dm_create(
         Some(&chat.id),
     );
     tracing::info!(chat = %chat.id, %me, other = %other_id, "dm opened");
+    state.matrix.touch_chat(&state, &chat.id, None);
     match load_chat(&state, &chat.id) {
         Ok(cm) => Json(chat_json(&state, &cm, &me, &device)).into_response(),
         Err(r) => *r,
@@ -836,6 +838,7 @@ pub async fn chat_patch(
     // Other members, and this user's other devices (e.g. Mac), refresh the list.
     let payload = json!({ "chat_id": id });
     notify_members(&state, &cm, &me, "people_chat_updated", payload.clone());
+    state.matrix.touch_chat(&state, &id, None);
     let _ = state
         .db
         .push_user_except(&me, &device_of(&principal), "people_chat_updated", &payload);
@@ -884,6 +887,7 @@ pub async fn chat_read(
     if let Err(e) = state.db.mark_chat_read(&me, &id) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
     }
+    state.matrix.read(&state, &id, &me);
     crate::notify::badge_refresh(&state, &me, &device_of(&principal)).await;
     StatusCode::NO_CONTENT.into_response()
 }
@@ -916,6 +920,7 @@ pub async fn chat_leave(
     if let Err(e) = state.db.remove_member(&id, &format!("user:{me}")) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
     }
+    state.matrix.touch_chat(&state, &id, None);
     notify_members(
         &state,
         &cm,
@@ -950,6 +955,7 @@ pub async fn chat_delete(
     if let Err(e) = state.db.delete_people_chat(&id) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
     }
+    state.matrix.close_chat(&state, &id);
     let _ = state.db.delete_room(&room_of(&id));
     let _ = std::fs::remove_dir_all(
         state
@@ -1151,6 +1157,7 @@ pub async fn agent_add(
     if cm.chat.kind == "dm" {
         let _ = state.db.set_people_chat_kind(&id, "group");
     }
+    state.matrix.touch_chat(&state, &id, None);
     let _ = state
         .db
         .enqueue_push(&project.id, "people_agent_added", &json!({ "chat_id": id }));
@@ -1266,6 +1273,7 @@ pub async fn agent_remove(
         }
         Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
     }
+    state.matrix.touch_chat(&state, &id, None);
     let _ = state.db.enqueue_push(
         &project_id,
         "people_agent_removed",
@@ -1351,6 +1359,7 @@ pub async fn member_add(
     if cm.chat.kind == "dm" {
         let _ = state.db.set_people_chat_kind(&id, "group");
     }
+    state.matrix.touch_chat(&state, &id, None);
     let payload = json!({
         "chat_id": id,
         "user_id": other_id,
@@ -1401,6 +1410,7 @@ pub async fn member_remove(
         Ok(false) => return api_error(StatusCode::NOT_FOUND, "not_found", "not a member"),
         Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
     }
+    state.matrix.touch_chat(&state, &id, None);
     let payload = json!({ "chat_id": id, "user_id": user_id, "handle": handle_of(&state, &user_id), "by_handle": handle_of(&state, &me) });
     let _ = state
         .db
@@ -1543,7 +1553,7 @@ pub async fn project_member_add(
         );
     }
     match state.db.add_project_member(&project.id, &other_id, &me) {
-        Ok(true) => {}
+        Ok(true) => state.matrix.touch_project(&state, &project.id),
         Ok(false) => {
             return api_error(
                 StatusCode::CONFLICT,
@@ -1601,7 +1611,7 @@ pub async fn project_member_remove(
         );
     }
     match state.db.remove_project_member(&project.id, &user_id) {
-        Ok(true) => {}
+        Ok(true) => state.matrix.touch_project(&state, &project.id),
         Ok(false) => return api_error(StatusCode::NOT_FOUND, "not_found", "not a member"),
         Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
     }
@@ -1653,6 +1663,7 @@ fn apply_archive(
         "chat_archived",
         &json!({ "chat_id": chat_id, "project_id": project_label, "archived_at": at }),
     );
+    state.matrix.archive(state, chat_id, me, archived);
     Ok(at)
 }
 
@@ -1816,6 +1827,7 @@ pub async fn invite_create(
             );
         }
         let _ = state.db.add_project_member(&project.id, &other_id, &me);
+        state.matrix.touch_project(&state, &project.id);
         ("project", project.id)
     } else if let Some(cid) = b.chat_id.as_deref() {
         let (_, cm) = match member_chat(&state, &principal, cid) {
@@ -1865,6 +1877,7 @@ pub async fn invite_create(
                         &json!({}),
                     );
                 }
+                state.matrix.touch_chat(&state, &chat.id, None);
                 chat
             }
         };

@@ -435,6 +435,39 @@ enum DeviceCmd {
 }
 
 #[derive(Subcommand, Debug)]
+enum MatrixCmd {
+    /// Mode, homeserver reachability, outbox depth, rooms and events mirrored, flipped users.
+    Status {
+        /// Also list parked (failed) jobs.
+        #[arg(long)]
+        failed: bool,
+    },
+    /// Queue existing chats into the homeserver: rooms, members, history with original timestamps.
+    Backfill {
+        #[arg(long)]
+        user: Option<String>,
+        #[arg(long)]
+        chat: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        rooms_only: bool,
+    },
+    /// Shadow-compare the relay against the homeserver (the stage B gate).
+    Shadow {
+        #[arg(long)]
+        chat: Option<String>,
+        /// Also compare per-user unread counts.
+        #[arg(long)]
+        unread: bool,
+    },
+    /// Per-user read flip (`on` serves that user's reads from the homeserver; `off` rolls back).
+    Reads { user: String, state: String },
+    /// Put parked jobs back in the queue and retry everything that is waiting.
+    Retry,
+}
+
+#[derive(Subcommand, Debug)]
 enum AdminCmd {
     /// Every account with balance, caps, today's spend, and machine state.
     Users,
@@ -483,6 +516,12 @@ enum AdminCmd {
     DeleteBox { user: String },
     /// Calls: LiveKit configured?, live calls with participants, the last 20 ended calls.
     Calls,
+    /// Chats on Matrix (D88): `status [--failed]`, `backfill [--user <id>] [--chat <id> [--project <id>]] [--rooms-only]`,
+    /// `shadow [--chat <id>] [--unread]`, `reads <user> on|off`, `retry`.
+    Matrix {
+        #[command(subcommand)]
+        cmd: MatrixCmd,
+    },
     /// iOS push: `status` lists whether APNs is configured and every registered device token;
     /// `test --user <id> | --device <id>` sends one plain alert and prints APNs' answer.
     Push {
@@ -918,6 +957,68 @@ async fn main() -> Result<()> {
                     "{}",
                     serde_json::to_string_pretty(&admin.get("/admin/calls").await?)?
                 ),
+                AdminCmd::Matrix { cmd } => {
+                    let v = match cmd {
+                        MatrixCmd::Status { failed } => {
+                            admin
+                                .get(if failed {
+                                    "/admin/matrix/status?failed=1"
+                                } else {
+                                    "/admin/matrix/status"
+                                })
+                                .await?
+                        }
+                        MatrixCmd::Backfill {
+                            user,
+                            chat,
+                            project,
+                            rooms_only,
+                        } => {
+                            admin
+                                .post(
+                                    "/admin/matrix/backfill",
+                                    &serde_json::json!({
+                                        "user_id": user, "chat_id": chat, "project_id": project, "rooms_only": rooms_only,
+                                    }),
+                                )
+                                .await?
+                        }
+                        MatrixCmd::Shadow { chat, unread } => {
+                            let mut q = Vec::new();
+                            if let Some(c) = chat {
+                                q.push(format!("chat={c}"));
+                            }
+                            if unread {
+                                q.push("unread=1".to_owned());
+                            }
+                            let path = if q.is_empty() {
+                                "/admin/matrix/shadow".to_owned()
+                            } else {
+                                format!("/admin/matrix/shadow?{}", q.join("&"))
+                            };
+                            admin.get(&path).await?
+                        }
+                        MatrixCmd::Reads { user, state } => {
+                            let on = match state.as_str() {
+                                "on" => true,
+                                "off" => false,
+                                other => anyhow::bail!("reads takes on or off, not {other:?}"),
+                            };
+                            admin
+                                .put(
+                                    &format!("/admin/matrix/reads/{user}"),
+                                    &serde_json::json!({ "on": on }),
+                                )
+                                .await?
+                        }
+                        MatrixCmd::Retry => {
+                            admin
+                                .post("/admin/matrix/retry", &serde_json::json!({}))
+                                .await?
+                        }
+                    };
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
                 AdminCmd::Push {
                     action,
                     user,

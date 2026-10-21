@@ -318,6 +318,18 @@ pub async fn announce(
         )
         .ok()
         .flatten()?;
+    let member = match sender.kind {
+        "agent" => format!("agent:{}", sender.id),
+        _ => format!("user:{}", sender.id),
+    };
+    state.matrix.message(
+        state,
+        &chat.chat_id,
+        chat.project_id.as_deref(),
+        message_id,
+        &member,
+        text,
+    );
     let body = brief(text);
     let title = chat_title(state, chat);
     for user in recipients(state, chat) {
