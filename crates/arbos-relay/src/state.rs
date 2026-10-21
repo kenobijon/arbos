@@ -192,6 +192,8 @@ pub struct AppState {
     pub voice_worker: Arc<Mutex<Option<serde_json::Value>>>,
     /// device_id → the app version it last reported (`X-Arbos-Client`), see `releases.rs`.
     pub client_seen: Arc<crate::releases::ClientSeen>,
+    /// Chats on Matrix (D88): mode, homeserver tokens and the outbox wake-up.
+    pub matrix: Arc<crate::matrix::Matrix>,
 }
 
 /// The agent's current activity as the box last reported it.
@@ -447,6 +449,7 @@ pub(crate) mod test_support {
             voice_dispatched: Arc::new(Mutex::new(HashMap::new())),
             voice_worker: Arc::new(Mutex::new(None)),
             client_seen: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            matrix: crate::matrix::Matrix::new(crate::matrix::Config::off()),
         }
     }
 }

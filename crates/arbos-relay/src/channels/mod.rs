@@ -786,6 +786,7 @@ mod tests {
             voice_dispatched: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             voice_worker: Arc::new(tokio::sync::Mutex::new(None)),
             client_seen: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            matrix: crate::matrix::Matrix::new(crate::matrix::Config::off()),
         }
     }
 

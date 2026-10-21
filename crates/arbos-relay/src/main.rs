@@ -24,6 +24,7 @@ mod groups;
 mod images;
 mod livekit;
 mod local;
+mod matrix;
 mod migrate;
 mod notify;
 mod people;
@@ -304,6 +305,7 @@ async fn main() -> anyhow::Result<()> {
         voice_dispatched: Arc::new(Mutex::new(HashMap::new())),
         voice_worker: Arc::new(Mutex::new(None)),
         client_seen: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        matrix: matrix::Matrix::new(matrix::Config::from_env()?),
     };
     tracing::info!(auth_mode = auth_mode.as_str(), public_url = %state.cfg.public_url, "sign-in");
     if state.cfg.connectors_mock {
@@ -345,6 +347,7 @@ async fn main() -> anyhow::Result<()> {
     upgrade::spawn_history_sweeper(state.clone()).await;
     secrets::spawn_sweeper(state.clone()).await;
     calls::spawn_sweeper(state.clone()).await;
+    matrix::worker::spawn(state.clone());
     boxes::spawn_project_purge(state.clone()).await;
 
     let app = Router::new()
@@ -387,6 +390,38 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/calls", get(calls::admin_calls))
         .route("/admin/usage/{purpose}", get(admin::usage_by_purpose))
         .route("/admin/release", post(releases::admin_release))
+        // Chats on Matrix (D88): the relay is Synapse's appservice, push gateway and operator.
+        .route(
+            "/_matrix/app/v1/transactions/{txn}",
+            put(matrix::appservice::transaction),
+        )
+        .route(
+            "/_matrix/app/v1/users/{user}",
+            get(matrix::appservice::user_query),
+        )
+        .route(
+            "/_matrix/app/v1/rooms/{alias}",
+            get(matrix::appservice::room_query),
+        )
+        .route("/_matrix/app/v1/ping", post(matrix::appservice::ping))
+        .route(
+            "/_matrix/push/v1/notify",
+            post(matrix::appservice::push_notify),
+        )
+        .route("/admin/matrix/status", get(matrix::appservice::status))
+        .route("/admin/matrix/backfill", post(matrix::appservice::backfill))
+        .route(
+            "/admin/matrix/shadow",
+            get(matrix::appservice::shadow_compare),
+        )
+        .route(
+            "/admin/matrix/retry",
+            post(matrix::appservice::retry_failed),
+        )
+        .route(
+            "/admin/matrix/reads/{user}",
+            put(matrix::appservice::set_reads),
+        )
         .route("/admin/installs", get(releases::admin_installs))
         .route("/releases/current", get(releases::current))
         .route("/box/voice", get(voice::ws_box_voice))
