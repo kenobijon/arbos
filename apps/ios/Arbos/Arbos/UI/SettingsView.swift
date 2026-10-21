@@ -30,6 +30,8 @@ struct SettingsView: View {
     @State private var connectorError: String?
     @State private var avatarItem: PhotosPickerItem?
     @State private var avatarBusy = false
+    /// Image waiting in Move and Scale before `PUT /me/avatar`.
+    @State private var avatarCrop: AvatarCropPayload?
     @State private var showProfileEdit = false
     /// Profile | Settings — the same pill as the person and group panes.
     /// Settings is the landing tab; `ARBOS_SETTINGS_PAGE=profile` lands on Profile.
@@ -99,7 +101,22 @@ struct SettingsView: View {
             }
             .onChange(of: avatarItem) { _, item in
                 guard let item else { return }
-                Task { await applyAvatarPick(item) }
+                Task { await beginAvatarCrop(item) }
+            }
+            .sheet(item: $avatarCrop) { payload in
+                AvatarCropSheet(
+                    image: payload.image,
+                    onCancel: { avatarCrop = nil },
+                    onUse: { cropped in
+                        avatarCrop = nil
+                        Task { await uploadAvatar(cropped) }
+                    }
+                )
+                .environment(\.theme, theme)
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+                .presentationBackground(theme.bg)
+                .preferredColorScheme(theme.isDark ? .dark : .light)
             }
             .navigationDestination(isPresented: $showAppearancePage) { AppearancePage() }
             .navigationDestination(isPresented: $showTextSizePage) { TextSizePage() }
@@ -245,32 +262,19 @@ struct SettingsView: View {
         }
     }
 
-    private func applyAvatarPick(_ item: PhotosPickerItem) async {
-        avatarBusy = true
-        defer {
-            avatarBusy = false
-            avatarItem = nil
-        }
+    /// Load the pick, then open Move and Scale so the user frames the circle.
+    private func beginAvatarCrop(_ item: PhotosPickerItem) async {
+        defer { avatarItem = nil }
         guard let data = try? await item.loadTransferable(type: Data.self),
               let img = UIImage(data: data) else { return }
-        let square = Self.squareAvatar(img, side: 512)
-        guard let jpeg = square.jpegData(compressionQuality: 0.85) else { return }
-        _ = await model.setUserAvatar(jpeg: jpeg)
+        avatarCrop = AvatarCropPayload(image: img)
     }
 
-    /// Centre-crop to a square and resize (same idea as group edit).
-    private static func squareAvatar(_ image: UIImage, side: CGFloat) -> UIImage {
-        let s = min(image.size.width, image.size.height)
-        let rect = CGRect(x: (image.size.width - s) / 2, y: (image.size.height - s) / 2, width: s, height: s)
-        let renderer = UIGraphicsImageRenderer(size: CGSize(width: side, height: side))
-        return renderer.image { _ in
-            guard let cg = image.cgImage?.cropping(to: rect) else {
-                image.draw(in: CGRect(origin: .zero, size: CGSize(width: side, height: side)))
-                return
-            }
-            UIImage(cgImage: cg, scale: image.scale, orientation: image.imageOrientation)
-                .draw(in: CGRect(origin: .zero, size: CGSize(width: side, height: side)))
-        }
+    private func uploadAvatar(_ image: UIImage) async {
+        avatarBusy = true
+        defer { avatarBusy = false }
+        guard let jpeg = image.jpegData(compressionQuality: 0.85) else { return }
+        _ = await model.setUserAvatar(jpeg: jpeg)
     }
 
     // MARK: Row summaries
@@ -323,6 +327,150 @@ struct SettingsView: View {
         let v = info?["CFBundleShortVersionString"] as? String ?? "?"
         let b = info?["CFBundleVersion"] as? String ?? "?"
         return "\(v) (\(b))"
+    }
+}
+
+/// One picked photo waiting for Move and Scale (sheet `item:` needs `Identifiable`).
+private struct AvatarCropPayload: Identifiable {
+    let id = UUID()
+    let image: UIImage
+}
+
+/// Pinch and drag to frame the picture in the profile circle, then Use.
+private struct AvatarCropSheet: View {
+    let image: UIImage
+    let onCancel: () -> Void
+    let onUse: (UIImage) -> Void
+    @Environment(\.theme) private var theme
+
+    @State private var scale: CGFloat = 1
+    @State private var baseScale: CGFloat = 1
+    @State private var offset: CGSize = .zero
+    @State private var baseOffset: CGSize = .zero
+    @State private var hole: CGFloat = 280
+
+    private let outputSide: CGFloat = 512
+
+    var body: some View {
+        NavigationStack {
+            GeometryReader { geo in
+                let nextHole = min(min(geo.size.width, geo.size.height) - 48, 300)
+                let base = fittedSize(for: hole)
+                ZStack {
+                    theme.bg.ignoresSafeArea()
+                    Image(uiImage: image)
+                        .resizable()
+                        .frame(width: base.width * scale, height: base.height * scale)
+                        .offset(offset)
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .contentShape(Rectangle())
+                        .gesture(panGesture.simultaneously(with: magnifyGesture))
+                        .clipped()
+                    // Dim outside the circle so the profile crop is obvious.
+                    Rectangle()
+                        .fill(Color.black.opacity(0.55))
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .overlay {
+                            Circle()
+                                .frame(width: hole, height: hole)
+                                .blendMode(.destinationOut)
+                        }
+                        .compositingGroup()
+                        .allowsHitTesting(false)
+                    Circle()
+                        .strokeBorder(Color.white.opacity(0.85), lineWidth: 1)
+                        .frame(width: hole, height: hole)
+                        .allowsHitTesting(false)
+                }
+                .onAppear { hole = nextHole }
+                .onChange(of: nextHole) { _, value in hole = value }
+            }
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel", action: onCancel).foregroundStyle(theme.text)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Use") { onUse(render()) }
+                        .font(theme.font(Theme.small, weight: .semibold))
+                        .foregroundStyle(theme.text)
+                }
+            }
+            .navigationTitle("Move and Scale")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(theme.bg, for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
+        }
+    }
+
+    /// At scale 1 the shorter side fills the hole (cover the circle).
+    private func fittedSize(for hole: CGFloat) -> CGSize {
+        let s = image.size
+        guard s.width > 0, s.height > 0 else { return CGSize(width: hole, height: hole) }
+        if s.width >= s.height {
+            return CGSize(width: hole * (s.width / s.height), height: hole)
+        }
+        return CGSize(width: hole, height: hole * (s.height / s.width))
+    }
+
+    private var magnifyGesture: some Gesture {
+        MagnifyGesture()
+            .onChanged { value in
+                scale = max(1, baseScale * value.magnification)
+            }
+            .onEnded { _ in
+                baseScale = scale
+                clampOffset()
+                baseOffset = offset
+            }
+    }
+
+    private var panGesture: some Gesture {
+        DragGesture()
+            .onChanged { value in
+                offset = CGSize(
+                    width: baseOffset.width + value.translation.width,
+                    height: baseOffset.height + value.translation.height
+                )
+            }
+            .onEnded { _ in
+                clampOffset()
+                baseOffset = offset
+            }
+    }
+
+    /// Keep the circle covered: no empty edges inside the hole.
+    private func clampOffset() {
+        let base = fittedSize(for: hole)
+        let w = base.width * scale
+        let h = base.height * scale
+        let maxX = max(0, (w - hole) / 2)
+        let maxY = max(0, (h - hole) / 2)
+        offset.width = min(max(offset.width, -maxX), maxX)
+        offset.height = min(max(offset.height, -maxY), maxY)
+    }
+
+    /// Rasterise the circle's square into a 512×512 upload image.
+    private func render() -> UIImage {
+        let base = fittedSize(for: hole)
+        let display = CGSize(width: base.width * scale, height: base.height * scale)
+        // Crop square centred in the view; image centre sits at `offset` from that centre.
+        let origin = CGPoint(
+            x: display.width / 2 - offset.width - hole / 2,
+            y: display.height / 2 - offset.height - hole / 2
+        )
+        let sx = image.size.width / max(display.width, 1)
+        let sy = image.size.height / max(display.height, 1)
+        let crop = CGRect(x: origin.x * sx, y: origin.y * sy, width: hole * sx, height: hole * sy)
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: outputSide, height: outputSide))
+        return renderer.image { _ in
+            let dest = CGRect(
+                x: -crop.origin.x / max(crop.width, 1) * outputSide,
+                y: -crop.origin.y / max(crop.height, 1) * outputSide,
+                width: image.size.width / max(crop.width, 1) * outputSide,
+                height: image.size.height / max(crop.height, 1) * outputSide
+            )
+            image.draw(in: dest)
+        }
     }
 }
 
