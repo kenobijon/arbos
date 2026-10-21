@@ -50,20 +50,81 @@ pub(crate) fn start_of_utc_day_ms() -> i64 {
     now - now.rem_euclid(86_400_000)
 }
 
-/// Rough USD per million tokens when the upstream does not report cost (Anthropic direct).
-fn price(model: &str) -> (f64, f64) {
-    let m = model.to_ascii_lowercase();
-    if m.contains("opus") {
-        (4.0, 20.0)
-    } else if m.contains("sonnet") {
-        (2.0, 10.0)
-    } else if m.contains("haiku") {
-        (0.1, 0.5)
-    } else if m.contains("mini") || m.contains("nano") || m.contains("flash") {
-        (0.2, 1.25)
-    } else {
-        (1.0, 5.0)
+/// USD per million tokens: input, output, cache read, cache write.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Rate {
+    input: f64,
+    output: f64,
+    cache_read: f64,
+    cache_write: f64,
+}
+
+impl Rate {
+    const fn anthropic(input: f64, output: f64) -> Self {
+        Self {
+            input,
+            output,
+            cache_read: input * 0.1,
+            cache_write: input * 1.25,
+        }
     }
+
+    fn times(self, k: f64) -> Self {
+        Self {
+            input: self.input * k,
+            output: self.output * k,
+            cache_read: self.cache_read * k,
+            cache_write: self.cache_write * k,
+        }
+    }
+}
+
+/// List price when the upstream does not report cost (the Anthropic messages path).
+/// `prompt_tokens` = input + cache read + cache write, for the long-context tiers.
+/// Rates follow OpenRouter's listing (pi's model registry, 2026-10-21). The old family guess
+/// put `claude-fable-5.1` at $1 / $5 — a tenth of its $10 / $50 — so a 242k-token turn was
+/// metered at $0.30 instead of $3 and the spend caps saw a tenth of the money
+/// (feedback relay-model-pricing-2026-10-21).
+fn price(model: &str, prompt_tokens: i64) -> Rate {
+    let m = model.to_ascii_lowercase();
+    if m.contains("fable-5.1") {
+        return Rate {
+            input: 10.0,
+            output: 50.0,
+            cache_read: 0.25,
+            cache_write: 12.5,
+        };
+    }
+    if m.contains("fable") {
+        return Rate {
+            input: 10.0,
+            output: 50.0,
+            cache_read: 1.0,
+            cache_write: 12.5,
+        };
+    }
+    if m.contains("opus") {
+        return Rate::anthropic(4.0, 20.0);
+    }
+    if m.contains("sonnet") {
+        return Rate::anthropic(2.0, 10.0);
+    }
+    if m.contains("haiku-5.5") {
+        // Haiku 5.5 bills 5× past 100k prompt tokens.
+        let base = Rate::anthropic(0.1, 0.5);
+        return if prompt_tokens > 100_000 {
+            base.times(5.0)
+        } else {
+            base
+        };
+    }
+    if m.contains("haiku") {
+        return Rate::anthropic(0.1, 0.5);
+    }
+    if m.contains("mini") || m.contains("nano") || m.contains("flash") {
+        return Rate::anthropic(0.2, 1.25);
+    }
+    Rate::anthropic(1.0, 5.0)
 }
 
 /// Leaf id of an OpenRouter-style `vendor/name` (or the bare id).
@@ -165,11 +226,11 @@ impl Meter {
         if let Some(c) = self.cost {
             return c;
         }
-        let (i, o) = price(&self.model);
-        (self.input as f64 * i
-            + self.output as f64 * o
-            + self.cache_read as f64 * i * 0.1
-            + self.cache_write as f64 * i * 1.25)
+        let r = price(&self.model, self.input + self.cache_read + self.cache_write);
+        (self.input as f64 * r.input
+            + self.output as f64 * r.output
+            + self.cache_read as f64 * r.cache_read
+            + self.cache_write as f64 * r.cache_write)
             / 1_000_000.0
     }
 
