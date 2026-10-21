@@ -113,7 +113,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var availableUpdate: AvailableBuild?
     /// D89: the host is full and this account is in line for a machine (`/me` →
     /// `machine.waitlisted` / `machine.waitlist_position`). nil = not waitlisted.
-    @Published private(set) var waitlistPosition: Int?
+    @Published var waitlistPosition: Int?
     /// People chats (D72): DMs I am a member of, newest activity first.
     @Published var peopleChats: [PeopleChat] = []
     /// Chat ids with unread rows (per device, from head_seq > read_seq and pushes).
