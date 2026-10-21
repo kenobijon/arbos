@@ -22,7 +22,6 @@ use crate::ui::attachments;
 use crate::ui::avatars;
 use crate::ui::cards;
 use crate::ui::frost::edge_faded;
-use crate::ui::groups;
 use crate::ui::icons::icon;
 use crate::ui::markdown::{
     has_fenced_code, inline_spans, polish_assistant_prose, split_blocks, Block,
@@ -918,11 +917,17 @@ impl Transcript {
                 if let Some(person) = from {
                     // Someone else: left-aligned, their avatar and name above.
                     // A small coloured left-edge sliver marks a person message
-                    // so it reads apart from an agent bubble.
+                    // so it reads apart from an agent bubble: the dominant
+                    // colour of their picture, else their D79 disc colour.
                     // Must not early-return: the match arm still needs the
                     // COLUMN_MARGIN wrapper (same padding as agent bubbles).
-                    let image = self.state.read(cx).avatar(&person.avatar_url);
-                    let color = groups::sender_color(&person.handle, &theme);
+                    let (image, color) = {
+                        let state = self.state.read(cx);
+                        (
+                            state.avatar(&person.avatar_url),
+                            state.sender_accent(&person, &theme),
+                        )
+                    };
                     div()
                         .w_full()
                         .flex()
@@ -1045,10 +1050,10 @@ impl Transcript {
                 // One assistant bubble, drawn block by block: the first block
                 // rounds the top, the last the bottom, the rest run straight.
                 // People-chat agent bubbles get the same coloured left-edge
-                // sliver as person messages, from the agent's avatar colour.
+                // sliver as person messages, from the agent's disc colour.
                 let agent_accent = lane.as_deref().map(|seed| {
                     let (_, disc_seed, color_index, _) = self.agent_identity(seed, "Agent", cx);
-                    avatars::gradient(avatars::index_for(&disc_seed, color_index), &theme).0
+                    avatars::accent_fallback(&disc_seed, color_index, &theme)
                 });
                 let r = px(BUBBLE_RADIUS);
                 let bubble = self

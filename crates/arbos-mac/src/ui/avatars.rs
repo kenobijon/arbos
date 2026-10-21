@@ -22,86 +22,10 @@ pub enum AvatarState {
     Reply,
 }
 
-/// One Telegram gradient: light and dark (HSL lightness −7 %, the relay's
-/// `GET /avatar-colors` table) top/bottom pairs, and its name for the picker.
-#[derive(Clone, Copy, Debug)]
-pub struct Gradient {
-    pub name: &'static str,
-    pub top: [u8; 3],
-    pub bottom: [u8; 3],
-    pub dark_top: [u8; 3],
-    pub dark_bottom: [u8; 3],
-}
-
-/// The seven Telegram peer colours, in Telegram's order (indices 0–6).
-pub const GRADIENTS: [Gradient; 7] = [
-    Gradient {
-        name: "Red",
-        top: [0xFF, 0x84, 0x5E],
-        bottom: [0xD4, 0x52, 0x46],
-        dark_top: [0xFF, 0x69, 0x3A],
-        dark_bottom: [0xC8, 0x3B, 0x2E],
-    },
-    Gradient {
-        name: "Orange",
-        top: [0xFE, 0xBB, 0x5B],
-        bottom: [0xF6, 0x81, 0x36],
-        dark_top: [0xFE, 0xAC, 0x38],
-        dark_bottom: [0xF4, 0x6C, 0x14],
-    },
-    Gradient {
-        name: "Violet",
-        top: [0xB6, 0x94, 0xF9],
-        bottom: [0x6C, 0x61, 0xDF],
-        dark_top: [0x9F, 0x72, 0xF7],
-        dark_bottom: [0x50, 0x43, 0xD9],
-    },
-    Gradient {
-        name: "Green",
-        top: [0x9A, 0xD1, 0x64],
-        bottom: [0x46, 0xBA, 0x43],
-        dark_top: [0x88, 0xC9, 0x48],
-        dark_bottom: [0x3C, 0xA0, 0x3A],
-    },
-    Gradient {
-        name: "Cyan",
-        top: [0x53, 0xED, 0xD6],
-        bottom: [0x28, 0xC9, 0xB7],
-        dark_top: [0x33, 0xEA, 0xCE],
-        dark_bottom: [0x22, 0xAB, 0x9C],
-    },
-    Gradient {
-        name: "Blue",
-        top: [0x5C, 0xAF, 0xFA],
-        bottom: [0x40, 0x8A, 0xCF],
-        dark_top: [0x39, 0x9E, 0xF9],
-        dark_bottom: [0x2F, 0x78, 0xBC],
-    },
-    Gradient {
-        name: "Pink",
-        top: [0xFF, 0x8A, 0xA5],
-        bottom: [0xE0, 0x5F, 0x8E],
-        dark_top: [0xFF, 0x66, 0x8A],
-        dark_bottom: [0xDA, 0x41, 0x79],
-    },
-];
-
-/// Initials size as a fraction of the disc (Telegram: SF Semibold at 44.5 %,
-/// one and two letters alike); the iPhone shares this constant.
-pub const INITIALS_SCALE: f32 = 0.445;
-
-/// `(sum of the id's UTF-8 bytes) mod 7` — the same rule on every client.
-pub fn color_index(seed: &str) -> u8 {
-    (seed.bytes().map(u32::from).sum::<u32>() % 7) as u8
-}
-
-/// The gradient for a seed, or the owner's override when there is one.
-pub fn index_for(seed: &str, override_index: Option<u8>) -> u8 {
-    match override_index {
-        Some(i) if i < 7 => i,
-        _ => color_index(seed),
-    }
-}
+/// The palette, the index rule and the sender accent live in `arbos-core`
+/// (`avatar.rs`) so the iPhone draws the same colours through arbos-ffi.
+pub use arbos_core::avatar::{color_index, index_for, GRADIENTS, INITIALS_SCALE};
+use arbos_core::avatar::{Accent, Rgb};
 
 fn rgb(c: [u8; 3]) -> Hsla {
     gpui::Rgba {
@@ -119,6 +43,30 @@ pub fn gradient(index: u8, theme: &Theme) -> (Hsla, Hsla) {
     match theme.appearance {
         Appearance::Light => (rgb(g.top), rgb(g.bottom)),
         Appearance::Dark => (rgb(g.dark_top), rgb(g.dark_bottom)),
+    }
+}
+
+/// An `arbos-core` accent in the current appearance.
+pub fn accent_color(accent: Accent, theme: &Theme) -> Hsla {
+    let Rgb(r, g, b) = accent.for_appearance(matches!(theme.appearance, Appearance::Dark));
+    rgb([r, g, b])
+}
+
+/// The bubble bar colour for a sender without a usable picture: the midpoint
+/// of their D79 gradient, i.e. the disc's middle row.
+pub fn accent_fallback(seed: &str, override_index: Option<u8>, theme: &Theme) -> Hsla {
+    accent_color(
+        arbos_core::avatar::fallback_accent(seed, override_index),
+        theme,
+    )
+}
+
+/// The seed that colours a person's disc: their id, the handle when it is empty.
+pub fn person_seed(p: &Person) -> &str {
+    if p.id.is_empty() {
+        &p.handle
+    } else {
+        &p.id
     }
 }
 
@@ -188,8 +136,7 @@ pub fn sender(s: &Sender, size: f32, theme: &Theme) -> Div {
 
 /// A person without a photo.
 pub fn person(p: &Person, size: f32, theme: &Theme) -> Div {
-    let seed = if p.id.is_empty() { &p.handle } else { &p.id };
-    element(seed, &p.display_name(), None, size, theme)
+    element(person_seed(p), &p.display_name(), None, size, theme)
 }
 
 /// A picker swatch: the plain gradient disc, no letters.
