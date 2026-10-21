@@ -3140,6 +3140,15 @@ impl AppState {
         let mut m: Message = serde_json::from_str(&row.json).ok()?;
         m.chat_id = room_id.to_string();
         m.pending = false;
+        if m.sender.is_empty() {
+            m.sender = row.sender.clone();
+        }
+        if m.sender_name.as_deref().is_none_or(str::is_empty) && !row.sender_name.is_empty() {
+            m.sender_name = Some(row.sender_name.clone());
+        }
+        if m.created_at == 0 && row.created_at > 0 {
+            m.created_at = row.created_at as u64;
+        }
         if m.sender_handle.as_deref().is_some_and(str::is_empty) {
             m.sender_handle = None;
         }

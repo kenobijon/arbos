@@ -1869,6 +1869,11 @@ impl Render for Composer {
                     p.name.clone()
                 }
             })
+            .or_else(|| {
+                state
+                    .selected_channel_info()
+                    .map(|(_, channel)| format!("#{}", channel.name))
+            })
             .unwrap_or_else(|| "Arbos".into());
         let (recording, transcribing, in_call, voice_notice) = {
             let v = self.voice.read(cx);
