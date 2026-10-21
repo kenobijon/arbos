@@ -1716,11 +1716,14 @@ class Loop:
         if active and active.get("fid"):
             # A run from the one-at-a-time scheduler (before batch mode): nothing to resume, re-batch it.
             cur.pop("rust_gate", None); self.store.save_cursor(cur); active = None
-        if active and self.gate_abort_marker(active["id"]).exists():
-            # `gate-abort` arrived while a tick was in flight (that tick would have written its stale cursor
-            # back over the abort); the marker survives cursor saves, so the abort happens here.
-            self.gate_abort(active, cur, by="operator")
-            active = None
+        for marker in self.cfg.state_dir.glob("gate-abort.*"):
+            if active and marker.name == f"gate-abort.{active['id']}":
+                # `gate-abort` arrived while a tick was in flight (that tick would have written its stale
+                # cursor back over the abort); the marker survives cursor saves, so the abort happens here.
+                self.gate_abort(active, cur, by="operator")
+                active = None
+            else:
+                marker.unlink(missing_ok=True)  # names a run that already settled
         if active and active.get("warm"):
             out = self.rust_gate_mac("status", active["id"])
             verdict = (out or "running\n").partition("\n")[0].strip()
