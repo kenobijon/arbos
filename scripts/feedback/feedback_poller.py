@@ -1543,7 +1543,7 @@ class Loop:
         commit on main → `pushed`. Red → the diagnostics go back to the agent as a follow-up (new commit on
         the same branch), at most 2 retries. Rust-touching branches are never merged without the gate
         (2026-10-19: #1058 merged with header.rs not compiling and blocked every Mac release)."""
-        head = st["branch_head"]
+        head = self.refresh_branch_head(fid, st)
         if st.get("expects_rust") is None:
             st["expects_rust"] = bool(self.rust_crates(st.get("files") or []))
         if st.get("expects_rust") or st.get("expects_ios"):
@@ -1558,6 +1558,43 @@ class Loop:
                 # branches each compiled alone, their textual merge removed `showMembers`, main was red 25 min).
                 return
         self.merge_branch(fid, st)
+
+    def branch_files(self, fid: str, cmp: dict) -> list[str]:
+        """Files a branch changes against main; when the head is a merge of main the compare lists none,
+        so take them from the tagged commits themselves."""
+        files = [f["filename"] for f in cmp.get("files", [])]
+        if files:
+            return files
+        seen: list[str] = []
+        for c in cmp.get("commits", []):
+            if f"[feedback {fid}]" in c["commit"]["message"]:
+                for f in self.gh.commit(c["sha"]).get("files", []):
+                    if f["filename"] not in seen:
+                        seen.append(f["filename"])
+        return seen
+
+    def refresh_branch_head(self, fid: str, st: dict) -> str:
+        """`gating` gates the branch at its CURRENT head. A worker who pushes a repair, or the rest of the fix,
+        while the batch is still building must not end up with only the first commit gated and merged
+        (P0 #1215, 21:30: the fmt repair and the release.yml steps sat behind the first push, unseen)."""
+        recorded = st["branch_head"]
+        if not st.get("branch"):
+            return recorded
+        head = self.gh.branch_head(st["branch"])
+        if not head or head == recorded:
+            return recorded
+        cmp = self.gh.compare("main", head)
+        if cmp.get("status") not in ("ahead", "diverged"):
+            return recorded
+        files = self.branch_files(fid, cmp) or st.get("files") or []
+        st.update(branch_head=head, files=files,
+                  expects_ios=any(f.startswith(("apps/ios/", "crates/arbos-core/", "crates/arbos-client/", "crates/arbos-ffi/")) or f == ".github/workflows/ios.yml" for f in files),
+                  expects_rust=bool(self.rust_crates(files)),
+                  expects_ci=any(not f.startswith("apps/ios/") for f in files))
+        self.store.save_state(fid, st)
+        self.store.event(fid, "branch_moved", branch=st["branch"], previous=recorded, head=head, files=files)
+        log(f"[{fid}] {st['branch']} moved {recorded[:8]} → {head[:8]} while gating; the gate takes the new head")
+        return head
 
     def gate_followup(self, fid: str, st: dict, which: str, output: str) -> None:
         """A gate went red: send the diagnostics back to the agent (at most 2 retries), never merge."""
