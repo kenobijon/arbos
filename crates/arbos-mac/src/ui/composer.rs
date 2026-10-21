@@ -2627,7 +2627,7 @@ mod enter_tests {
     //! run deferred. These tests install callbacks of exactly that shape and press the keys in a real
     //! (headless) window.
     use super::*;
-    use gpui::{Action, Focusable as _, TestAppContext, VisualTestContext};
+    use gpui::{Action, TestAppContext, VisualTestContext};
     use std::cell::Cell;
 
     fn input_with_owner_callbacks(
