@@ -1,6 +1,5 @@
-// RoomSync driven by ArbosFFI.RoomSession over URLSession (crdt-sync §7.2a).
-// Nothing constructs this yet — a later step adds the feature flag. The Loro
-// doc stays in loro-swift (`ChatDoc`); this type only moves bytes and actions.
+// Driven by ArbosFFI.RoomSession over URLSession (crdt-sync §7.2a).
+// The Loro doc stays in loro-swift (`ChatDoc`); this type only moves bytes and actions.
 
 import Foundation
 import ArbosFFI
@@ -15,7 +14,7 @@ protocol RoomSocket: AnyObject {
 }
 
 @MainActor
-final class SessionRoom: RoomSync {
+final class SessionRoom {
     let projectId: Id
     let key: Id
     let roomChat: String
@@ -70,8 +69,8 @@ final class SessionRoom: RoomSync {
     private var checkpointTask: Task<Void, Never>?
     private var sendChain: Task<Void, Never>?
 
-    /// Production path: same arguments as `Room`, wiring `RelayAPI` into the
-    /// three closures the designated init uses for tests.
+    /// Production path: wiring `RelayAPI` into the three closures the
+    /// designated init uses for tests.
     convenience init(
         projectId: Id, key: Id, roomChat: String, doc: ChatDoc, api: RelayAPI,
         cursor: Int64 = 0, pending: [(String, Data)] = [], deviceId: @escaping () -> String
