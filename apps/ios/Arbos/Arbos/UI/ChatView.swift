@@ -72,9 +72,12 @@ struct ChatView: View {
         return project?.name ?? people?.title ?? name
     }
 
-    /// Header tap: DM → the other person; group / shared project → the group page; own agent → its page.
+    /// Header tap: DM → the other person; group / shared project → the group page; own agent → its page;
+    /// server channel → the server's details (rule 5).
     private func openHeaderProfile() {
-        if let people {
+        if let channel {
+            model.showProfile(.server(serverId: channel.serverId))
+        } else if let people {
             if !people.isGroup, let other = counterpart {
                 model.showProfile(.user(ProfilePerson(other)))
             } else {
@@ -129,9 +132,13 @@ struct ChatView: View {
     private var chat: Chat? { model.chat(chatId) }
     private var people: PeopleChat? { model.peopleChat(chatId) }
     private var isPeople: Bool { people != nil }
+    /// D88: a server channel rendered with this same view (`projectId == channelSlot`).
+    private var channel: ServerChannel? { projectId == channelSlot ? model.channel(chatId) : nil }
+    private var isChannel: Bool { projectId == channelSlot }
+    private var channelServer: Server? { channel.flatMap { model.server($0.serverId) } }
     private var counterpart: ChatMember? { people?.counterpart(me: model.user?.id) }
     private var messages: [Message] { model.messages(of: chatId) }
-    private var needsAnswer: Bool { model.chatNeedsAnswer(chatId) }
+    private var needsAnswer: Bool { !isChannel && model.chatNeedsAnswer(chatId) }
     /// True while a turn runs, a subagent hand-off is still open, or right
     /// after the user sends (before the agent opens a streaming row) — visual
     /// cheat so a simple first reply does not sit on a dead transcript.
@@ -139,6 +146,7 @@ struct ChatView: View {
         model.isStreaming(chatId) || model.hasOpenSubagent(chatId) || model.isAwaitingReply(chatId)
     }
     private var name: String {
+        if let channel { return "# \(channel.name)" }
         if let people { return counterpart.map { "@\($0.handle)" } ?? people.title }
         if let chat, chat.isGroup, !chat.title.isEmpty { return chat.title }
         if let chat, chat.isSystem { return "\(project?.name ?? "Arbos") · Projects" }
@@ -187,6 +195,7 @@ struct ChatView: View {
     /// Composer prompt that names the addressee so it is obvious who will answer.
     private var composerPrompt: String {
         if transcribing { return "Transcribing…" }
+        if let channel { return "Message #\(channel.name)" }
         if !isPeople { return needsAnswer ? "Answer \(name)" : "Ask \(name)" }
         if talkingToEveryone { return "Message everyone" }
         if talkToAgents.count > 1 { return "Message \(talkToAgents.count) agents" }
@@ -233,8 +242,11 @@ struct ChatView: View {
             guard !handle.isEmpty else { return nil }
             return Transcript.Join(id: m.id, handle: handle, at: m.joinedAt)
         }
-        rows = Transcript.rows(messages, projectId: isPeople ? "\(peopleSlot):\(chatId)" : projectId,
-                               me: model.myUserId, people: isPeople, joins: joins)
+        // A channel is a people-style transcript: my lines right, everyone else by name.
+        let slot = isPeople ? "\(peopleSlot):\(chatId)" : isChannel ? "\(channelSlot):\(chatId)" : projectId
+        rows = Transcript.rows(messages, projectId: slot,
+                               me: isChannel ? model.channelMe : model.myUserId,
+                               people: isPeople || isChannel, joins: joins)
     }
 
     var body: some View {
@@ -286,18 +298,30 @@ struct ChatView: View {
         }
         .animation(.easeOut(duration: 0.2), value: awayFromBottom)
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            composer
-                // Grok: 31 pt side inset with the keyboard down, 19 pt with it up.
-                .padding(.horizontal, composerSideInset)
-                .animation(.easeOut(duration: 0.25), value: composerFocused)
-                .padding(.top, 8)
-                .padding(.bottom, composerFocused ? 8 : 2)
-                .background(alignment: .top) {
-                    LinearGradient(colors: [theme.bg.opacity(0), theme.bg], startPoint: .top, endPoint: .bottom)
-                        .frame(height: 24)
-                        .offset(y: -24)
+            Group {
+                if isChannel, !model.channelCanPost(chatId) {
+                    // Rule 9: a restricted channel I cannot post in — one quiet line, no composer.
+                    Text("Only admins post here")
+                        .font(theme.font(Theme.small))
+                        .foregroundStyle(theme.muted)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: Theme.fieldHeight)
+                        .accessibilityIdentifier("channel-read-only")
+                } else {
+                    composer
                 }
-                .background(theme.bg)
+            }
+            // Grok: 31 pt side inset with the keyboard down, 19 pt with it up.
+            .padding(.horizontal, composerSideInset)
+            .animation(.easeOut(duration: 0.25), value: composerFocused)
+            .padding(.top, 8)
+            .padding(.bottom, composerFocused ? 8 : 2)
+            .background(alignment: .top) {
+                LinearGradient(colors: [theme.bg.opacity(0), theme.bg], startPoint: .top, endPoint: .bottom)
+                    .frame(height: 24)
+                    .offset(y: -24)
+            }
+            .background(theme.bg)
         }
         .toolbar(.hidden, for: .navigationBar)
         .navigationBarBackButtonHidden(true)
@@ -372,7 +396,7 @@ struct ChatView: View {
         }
         .task(id: calls.activeByChat[chatId]?.callId) {
             // While the Join bar is up, re-check the relay so an ended call does not stick.
-            guard calls.activeByChat[chatId] != nil else { return }
+            guard !isChannel, calls.activeByChat[chatId] != nil else { return }
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 4_000_000_000)
                 guard !Task.isCancelled, calls.activeByChat[chatId] != nil else { return }
@@ -383,8 +407,13 @@ struct ChatView: View {
             model.markRead(chatId: chatId)
             model.visibleChatId = chatId
             if isPeople { model.markPeopleRead(chatId) }
+            if isChannel {
+                // The newest page now, live rows through the listener from here on.
+                model.openChannel(chatId)
+            } else {
+                Task { await model.refreshActiveCall(chatId: chatId, projectId: isPeople ? nil : projectId) }
+            }
             openPendingSearchIfNeeded()
-            Task { await model.refreshActiveCall(chatId: chatId, projectId: isPeople ? nil : projectId) }
             if let show = DebugHooks.show {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
                     switch show {
@@ -444,10 +473,12 @@ struct ChatView: View {
         // Profile "search" sets pendingSearchChat while this chat is already on screen
         // (sheet over us), so onAppear alone never sees it — watch the published flag.
         .onChange(of: model.pendingSearchChat) { _, _ in openPendingSearchIfNeeded() }
-        .onChange(of: messages, initial: true) { _, _ in
+        .onChange(of: messages, initial: true) { old, new in
             refreshRows()
             model.markRead(chatId: chatId)
             if isPeople { model.markPeopleRead(chatId) }
+            // A channel's read marker moves when a new row lands while it is on screen.
+            if isChannel, old.last?.id != new.last?.id { model.markChannelRead(chatId) }
         }
         // Adding a person or agent updates membership without a new message — rebuild so "@handle joined" appears.
         .onChange(of: people?.members.map { "\($0.id):\($0.joinedAt)" } ?? []) { _, _ in
@@ -531,7 +562,22 @@ struct ChatView: View {
             Spacer()
             GlassPill {
                 HStack(spacing: 6) {
-                    if let people {
+                    if let channel {
+                        // Rule 3: the unified pill — the server's disc + "# general".
+                        HStack(spacing: 8) {
+                            if let s = channelServer {
+                                InitialsAvatar(name: s.name, handle: nil, id: s.id, override: s.avatarColorIndex, size: Theme.avatar)
+                            }
+                            Text("# \(channel.name)")
+                                .font(.system(size: Theme.body, weight: .semibold))
+                                .foregroundStyle(theme.text)
+                                .lineLimit(1)
+                        }
+                        .contentShape(Rectangle())
+                        .onTapGesture { openHeaderProfile() }
+                        .accessibilityAddTraits(.isButton)
+                        .accessibilityHint("Opens the server details")
+                    } else if let people {
                         // One pill for every chat (2026-10-20): avatar + name,
                         // no member cluster, counts or agent lines.
                         HStack(spacing: 8) {
@@ -678,17 +724,20 @@ struct ChatView: View {
                     if let banner = machineBannerText {
                         // Grok (Mac refs 69/70): a quiet notice, not a red strip — the
                         // title in the text colour, the reason muted.
+                        // A channel's banner is about its own link, never the machine.
+                        let machineError = !isChannel && model.machine.state == .error
+                        let machineWaking = !isChannel && model.machine.state == .waking
                         VStack(spacing: 3) {
                             HStack(spacing: 6) {
-                                if model.machine.state == .waking { ProgressView().controlSize(.mini).tint(theme.muted) }
-                                if model.machine.state == .error {
+                                if machineWaking { ProgressView().controlSize(.mini).tint(theme.muted) }
+                                if machineError {
                                     Image(systemName: "desktopcomputer").font(.system(size: 12))
                                 }
-                                Text(model.machine.state == .error ? "Can't reach your machine" : banner)
+                                Text(machineError ? "Can't reach your machine" : banner)
                             }
-                            .font(theme.font(Theme.small, weight: model.machine.state == .error ? .semibold : .regular))
-                            .foregroundStyle(model.machine.state == .error ? theme.text : theme.muted)
-                            if model.machine.state == .error {
+                            .font(theme.font(Theme.small, weight: machineError ? .semibold : .regular))
+                            .foregroundStyle(machineError ? theme.text : theme.muted)
+                            if machineError {
                                 Text(banner)
                                     .font(theme.font(Theme.tiny))
                                     .foregroundStyle(theme.muted)
@@ -703,13 +752,13 @@ struct ChatView: View {
                         // show the empty hint at once — no spinner flash while the
                         // room catches up on a thread we already know has no rows.
                         if model.hasKnownEmptyTranscript(chatId) {
-                            if !isPeople { emptyHint }
+                            if !isPeople, !isChannel { emptyHint }
                         } else {
                             HStack { Spacer(); ProgressView().tint(theme.muted); Spacer() }.padding(.top, 60)
                         }
-                    } else if rows.isEmpty, !isPeople {
-                        // People chats stay blank (iMessage-style); the agent empty
-                        // copy would say "Ask @handle anything…" which is wrong here.
+                    } else if rows.isEmpty, !isPeople, !isChannel {
+                        // People chats and channels stay blank (iMessage-style); the agent
+                        // empty copy would say "Ask @handle anything…" which is wrong here.
                         emptyHint
                     }
                     ForEach(Array(visibleRows.enumerated()), id: \.element.id) { i, row in
@@ -798,6 +847,8 @@ struct ChatView: View {
                 searchFocused = false
             }
             .modifier(AwayFromBottomReporter(away: $awayFromBottom))
+            // Channels: one older page each time the transcript nears its top.
+            .modifier(NearTopReporter(enabled: isChannel) { model.loadOlderChannel(chatId) })
             // Mask stays in the scroll view's bounds — `ignoresSafeArea` on the
             // mask mis-samples the fade when the composer/keyboard inset changes
             // and can blank the whole transcript (white screen mid-type).
@@ -867,7 +918,9 @@ struct ChatView: View {
     }
 
     /// Emoji reactions apply to real chat bubbles, not date / join / system lines.
+    /// Channels carry no reactions or replies yet (C1 scope): Copy only.
     private func canReact(to row: Row) -> Bool {
+        if isChannel { return false }
         switch row.kind {
         case .system, .question, .error:
             return false
@@ -887,6 +940,8 @@ struct ChatView: View {
     }
 
     private var machineBannerText: String? {
+        // A channel lives on the servers' link, not the machine.
+        if isChannel { return model.matrixConnected ? nil : "Reconnecting…" }
         switch model.machine.state {
         case .waking: return "Waking your machine…"
         case .error: return model.machineDetail ?? (model.machine.alwaysOn ? "Your agents are safe — their machine just can't be reached right now." : "Could not wake your machine")
@@ -1061,54 +1116,60 @@ struct ChatView: View {
             }
             // Bottom-align the "+" with a multi-line field so growth expands upward.
             HStack(alignment: .bottom, spacing: 12) {
-                Button { showAttach = true } label: {
-                    ZStack {
-                        Circle().fill(theme.field)
-                        Circle().strokeBorder(theme.fieldBorder.opacity(0.6), lineWidth: 1)
-                        Image(systemName: "plus")
-                            .font(theme.font(21, weight: .regular))
-                            .foregroundStyle(theme.text)
-                    }
-                    .frame(width: Theme.plusButton, height: Theme.plusButton)
-                    .contentShape(Circle().inset(by: -(44 - Theme.plusButton) / 2))
+                if !isChannel {
+                    attachButton
                 }
-                .buttonStyle(.plain)
-                .sheet(isPresented: $showAttach, onDismiss: demoDismissed) {
-                    AttachSheet {
-                        showAttach = false
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showPhotos = true }
-                    } onFile: {
-                        showAttach = false
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showFiles = true }
-                    }
-                    .environment(\.theme, theme)
-                }
-                .photosPicker(isPresented: $showPhotos, selection: $photoItem, matching: .any(of: [.images, .videos]))
-                .fileImporter(isPresented: $showFiles, allowedContentTypes: [.item], allowsMultipleSelection: false) { result in
-                    if case .success(let urls) = result, let url = urls.first {
-                        let ok = url.startAccessingSecurityScopedResource()
-                        defer { if ok { url.stopAccessingSecurityScopedResource() } }
-                        if let data = try? Data(contentsOf: url) {
-                            let mime = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
-                            pending.append(.init(name: url.lastPathComponent, mime: mime, data: data))
-                        }
-                    }
-                }
-                .onChange(of: photoItem) { _, item in
-                    guard let item else { return }
-                    Task {
-                        if let data = try? await item.loadTransferable(type: Data.self) {
-                            let type = item.supportedContentTypes.first
-                            let picked = ChatView.imageForUpload(data, type: type)
-                            // POSIX stamp (no locale letters, no `:` — voice memos use the same idea).
-                            let stamp = ChatView.photoStamp.string(from: Date())
-                            pending.append(.init(name: "Photo \(stamp).\(picked.ext)", mime: picked.mime, data: picked.data))
-                        }
-                        photoItem = nil
-                    }
-                }
-
                 textField
+            }
+        }
+    }
+
+    /// The "+" before the field: photos and files. Channels send text only (C1), so none there.
+    private var attachButton: some View {
+        Button { showAttach = true } label: {
+            ZStack {
+                Circle().fill(theme.field)
+                Circle().strokeBorder(theme.fieldBorder.opacity(0.6), lineWidth: 1)
+                Image(systemName: "plus")
+                    .font(theme.font(21, weight: .regular))
+                    .foregroundStyle(theme.text)
+            }
+            .frame(width: Theme.plusButton, height: Theme.plusButton)
+            .contentShape(Circle().inset(by: -(44 - Theme.plusButton) / 2))
+        }
+        .buttonStyle(.plain)
+        .sheet(isPresented: $showAttach, onDismiss: demoDismissed) {
+            AttachSheet {
+                showAttach = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showPhotos = true }
+            } onFile: {
+                showAttach = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showFiles = true }
+            }
+            .environment(\.theme, theme)
+        }
+        .photosPicker(isPresented: $showPhotos, selection: $photoItem, matching: .any(of: [.images, .videos]))
+        .fileImporter(isPresented: $showFiles, allowedContentTypes: [.item], allowsMultipleSelection: false) { result in
+            if case .success(let urls) = result, let url = urls.first {
+                let ok = url.startAccessingSecurityScopedResource()
+                defer { if ok { url.stopAccessingSecurityScopedResource() } }
+                if let data = try? Data(contentsOf: url) {
+                    let mime = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
+                    pending.append(.init(name: url.lastPathComponent, mime: mime, data: data))
+                }
+            }
+        }
+        .onChange(of: photoItem) { _, item in
+            guard let item else { return }
+            Task {
+                if let data = try? await item.loadTransferable(type: Data.self) {
+                    let type = item.supportedContentTypes.first
+                    let picked = ChatView.imageForUpload(data, type: type)
+                    // POSIX stamp (no locale letters, no `:` — voice memos use the same idea).
+                    let stamp = ChatView.photoStamp.string(from: Date())
+                    pending.append(.init(name: "Photo \(stamp).\(picked.ext)", mime: picked.mime, data: picked.data))
+                }
+                photoItem = nil
             }
         }
     }
@@ -1239,7 +1300,7 @@ struct ChatView: View {
                     finishMemoHold()
                 } else if canSend {
                     send()
-                } else {
+                } else if !isChannel {
                     startCall(.voice)
                 }
             }) {
@@ -1254,7 +1315,8 @@ struct ChatView: View {
                     .contentShape(Circle().inset(by: -(44 - Theme.voiceButton) / 2))
             }
             .buttonStyle(.plain)
-            .accessibilityLabel((canSend || recorder.recording) ? "Send" : "Call")
+            .opacity(isChannel && !canSend && !recorder.recording ? 0.45 : 1)
+            .accessibilityLabel((canSend || recorder.recording) ? "Send" : (isChannel ? "Send" : "Call"))
             .padding(.trailing, 3)
         }
         // Hard max so a TextField layout glitch cannot paint over the transcript.
@@ -1297,7 +1359,8 @@ struct ChatView: View {
     }
 
     /// Idle round button: phone — starts a voice call (agent or people chat).
-    private var idleButtonGlyph: String { "phone.fill" }
+    /// Channels have no calls (C1): the arrow stays, dimmed until there is text.
+    private var idleButtonGlyph: String { isChannel ? "arrow.up" : "phone.fill" }
 
     /// Members whose handle/slug starts with the typed `@` prefix; agents first.
     private func mentionList(_ people: PeopleChat, query: String) -> some View {
@@ -1429,7 +1492,9 @@ struct ChatView: View {
             transcribing = false
             let text = [typed, transcript ?? ""].filter { !$0.isEmpty }.joined(separator: "\n\n")
             guard !text.isEmpty || !extras.isEmpty else { return }
-            if isPeople {
+            if isChannel {
+                if !text.isEmpty { model.sendChannel(chatId: chatId, text: text) }
+            } else if isPeople {
                 model.sendPeople(chatId: chatId, text: text, replyTo: reply, address: address,
                                  chipMentions: chips, attachments: extras)
             } else if needsAnswer && extras.isEmpty {
@@ -1463,6 +1528,16 @@ struct ChatView: View {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !pending.isEmpty else { return }
         Haptics.send()
+        if isChannel {
+            // Rule 3/9: the composer sends through the shared client's `sendText`.
+            guard !text.isEmpty else { return }
+            model.sendChannel(chatId: chatId, text: text)
+            pending.removeAll()
+            draft = ""
+            replyTo = nil
+            sentOnce = true
+            return
+        }
         if isPeople {
             let address = sendAddress(for: text)
             let chips = chipMentions(for: text)
@@ -1711,6 +1786,25 @@ struct ModelPickerView: View {
             .onAppear { effort = current.effort }
         }
         .presentationDetents([.medium, .large])
+    }
+}
+
+/// Fires once each time the scroll view comes within 240 pt of its top (iOS 18+;
+/// a channel loads one older page then). Earlier systems keep the newest page.
+private struct NearTopReporter: ViewModifier {
+    let enabled: Bool
+    let onNear: () -> Void
+
+    func body(content: Content) -> some View {
+        if #available(iOS 18, *), enabled {
+            content.onScrollGeometryChange(for: Bool.self) { g in
+                g.contentSize.height > g.containerSize.height && g.contentOffset.y < 240
+            } action: { _, near in
+                if near { onNear() }
+            }
+        } else {
+            content
+        }
     }
 }
 

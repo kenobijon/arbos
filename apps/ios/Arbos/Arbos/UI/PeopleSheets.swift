@@ -72,6 +72,19 @@ struct NewChatSheet: View {
                                 actionRow(icon: "person.2.fill", title: "New group", subtitle: "People and agents in one chat")
                             }
                             .buttonStyle(.plain)
+                            if model.serversAvailable {
+                                // D88 rule 8: a server of your own, or one you were invited to.
+                                rowDivider
+                                NavigationLink { NewServerView(onDone: { dismiss() }) } label: {
+                                    actionRow(icon: "number", title: "Server", subtitle: "Channels for a group of people")
+                                }
+                                .buttonStyle(.plain)
+                                rowDivider
+                                NavigationLink { JoinServerView(onDone: { dismiss() }) } label: {
+                                    actionRow(icon: "link", title: "Join a server", subtitle: "Paste an invite link")
+                                }
+                                .buttonStyle(.plain)
+                            }
                         }
                         .padding(.horizontal, 16)
                         .padding(.bottom, 22)

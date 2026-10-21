@@ -67,7 +67,7 @@ struct HomeView: View {
                         .listRowSeparator(.hidden)
                         .listRowBackground(Color.clear)
                         .accessibilityHidden(true)
-                    if model.projects.isEmpty && model.peopleChats.isEmpty {
+                    if model.projects.isEmpty && model.peopleChats.isEmpty && model.servers.isEmpty {
                         emptyState
                             .listRowInsets(EdgeInsets())
                             .listRowSeparator(.hidden)
@@ -229,6 +229,24 @@ struct HomeView: View {
                                     }
                                     .tint(Color(hex: "#636366")!)
                                 }
+                            case .server(let server):
+                                // D88 rule 1: a server row is a chat row — avatar, name, preview,
+                                // time, unread dot; no counts, badges or disclosure. Tap → its
+                                // channel list, landing on #general.
+                                Button { model.open(server: server) } label: {
+                                    ServerRow(server: server, preview: model.serverPreview(server),
+                                              time: timeLabel(ms: model.serverActivity(server)),
+                                              unread: model.serverUnread(server))
+                                }
+                                .buttonStyle(.borderless)
+                                .contextMenu {
+                                    Button { model.showProfile(.server(serverId: server.id)) } label: {
+                                        Label("Server info", systemImage: "person.2")
+                                    }
+                                }
+                                .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
+                                .listRowSeparator(.hidden)
+                                .listRowBackground(theme.bg)
                             }
                         }
                         if searchQuery.isEmpty, hiddenCount > 0 {
@@ -279,6 +297,10 @@ struct HomeView: View {
                     // the destination and the tap looks like it does nothing.
                     ChatView(chatId: chatId, projectId: projectId)
                         .id(chatId)
+                case .server(let serverId):
+                    // D88: the server's channel list (the slid-in left pane).
+                    ServerChannelsView(serverId: serverId)
+                        .id(serverId)
                 }
             }
             .navigationDestination(isPresented: $showHidden) {
@@ -627,16 +649,18 @@ struct HomeView: View {
     enum HomeRow: Identifiable {
         case project(Project)
         case people(PeopleChat)
+        case server(Server)
         var id: String {
             switch self {
             case .project(let p): return "p:" + p.id
             case .people(let c): return "c:" + c.id
+            case .server(let s): return "s:" + s.id
             }
         }
         var activity: Int64 { 0 }
     }
 
-    /// Projects and DMs in one list: pinned first, then newest activity.
+    /// Projects, DMs and servers in one list: pinned first, then newest activity.
     private var homeRows: [HomeRow] {
         let q = searchQuery
         var rows: [(Bool, Int64, HomeRow)] = projects.map {
@@ -646,6 +670,10 @@ struct HomeView: View {
             // Archived people stay out of the home list until search (or open).
             if q.isEmpty && model.isArchived(peopleChatId: c.id) { continue }
             rows.append((model.isHomePinned(peopleChatId: c.id), peopleActivity(c), .people(c)))
+        }
+        // D88: servers sort among the chats by last activity (rule 1).
+        for s in model.servers where matchesServer(s, q: q) {
+            rows.append((false, model.serverActivity(s), .server(s)))
         }
         return rows.sorted {
             if $0.0 != $1.0 { return $0.0 && !$1.0 }
@@ -673,6 +701,13 @@ struct HomeView: View {
             ($0.project?.name ?? $0.handle).lowercased().contains(q)
         }) { return true }
         return messagesMatch(c.id, q: q)
+    }
+
+    /// Server name or any of its channel names (`#general`).
+    private func matchesServer(_ s: Server, q: String) -> Bool {
+        if q.isEmpty { return true }
+        if s.name.lowercased().contains(q) { return true }
+        return s.channels.contains { $0.name.lowercased().contains(q) }
     }
 
     private func messagesMatch(_ chatId: Id, q: String) -> Bool {
@@ -763,7 +798,10 @@ struct HomeView: View {
 
     private func timeLabel(_ p: Project) -> String { timeLabel(ms: lastActivity(p)) }
 
-    private func timeLabel(ms: Int64) -> String {
+    private func timeLabel(ms: Int64) -> String { HomeView.timeLabel(ms: ms) }
+
+    /// The home row's time column; the server channel list uses the same rule.
+    static func timeLabel(ms: Int64) -> String {
         guard ms > 0 else { return "" }
         let date = Date(timeIntervalSince1970: Double(ms) / 1000)
         let cal = Calendar.current
