@@ -393,6 +393,52 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         .pt(px(6.0))
         .pb(px(12.0))
         .overflow_y_scroll();
+    // D89: the host that runs everyone's computer is full; this account is in line. Chats and
+    // people work meanwhile; agents start once the machine is ready.
+    if let Some(n) = state.machine.waitlist_position {
+        list = list.child(
+            div()
+                .id("sidebar-waitlist-card")
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .mx(px(4.0))
+                .mb(px(8.0))
+                .p(px(12.0))
+                .rounded(px(14.0))
+                .bg(theme.bubble_assistant)
+                .child(
+                    div()
+                        .size(px(32.0))
+                        .rounded_full()
+                        .bg(theme.surface_2)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(icon("hourglass", 14.0, theme.text)),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .min_w_0()
+                        .child(
+                            div()
+                                .text_size(px(TEXT_BODY))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme.text)
+                                .child(format!("You're number {n} in line for a computer")),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(TEXT_SMALL))
+                                .text_color(theme.text_muted)
+                                .child("We'll let you know when it's ready. Chats work now."),
+                        ),
+                ),
+        );
+    }
     if empty {
         let (title, line) = if link_connecting {
             ("Loading your agents…", "Connecting to the relay.")
