@@ -30,7 +30,8 @@ use crate::ui::theme::{Theme, PANEL_RADIUS, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
 /// The right pane's width (mockups b, d, g: a quarter of the window).
 pub const SHEET_WIDTH: f32 = 340.0;
-pub(super) const HERO_AVATAR: f32 = 96.0;
+/// Mocks b/d/g: the picture is about a fifth of the pane's width.
+pub(super) const HERO_AVATAR: f32 = 72.0;
 
 /// The open page, if any — rendered as the right pane.
 pub fn pane(page: &ProfilePage, shell: &Shell, cx: &mut Context<Shell>) -> Option<Stateful<Div>> {
@@ -343,17 +344,15 @@ pub(super) fn tab_bar(
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> Div {
+    // Mocks b/g: two bare labels, the current one on a capsule, centred —
+    // no track, no border; 18 pt down to the first card.
     let mut bar = div()
         .flex_shrink_0()
         .mx(px(16.0))
-        .mb(px(10.0))
-        .p(px(3.0))
-        .rounded_full()
-        .bg(theme.surface_1)
-        .border_1()
-        .border_color(theme.border)
+        .mb(px(18.0))
         .flex()
-        .gap(px(2.0));
+        .justify_center()
+        .gap(px(4.0));
     for (i, name) in tabs.iter().enumerate() {
         let on = i == current;
         bar = bar.child(
@@ -361,13 +360,13 @@ pub(super) fn tab_bar(
                 .id(ElementId::Name(SharedString::from(format!(
                     "profile-tab-{name}"
                 ))))
-                .flex_1()
                 .h(px(30.0))
+                .px(px(14.0))
                 .rounded_full()
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(px(TEXT_SMALL))
+                .text_size(px(TEXT_BODY))
                 .font_weight(if on {
                     FontWeight::SEMIBOLD
                 } else {
