@@ -1034,6 +1034,12 @@ impl Transcript {
                 }
                 // One assistant bubble, drawn block by block: the first block
                 // rounds the top, the last the bottom, the rest run straight.
+                // People-chat agent bubbles get the same coloured left-edge
+                // sliver as person messages, from the agent's avatar colour.
+                let agent_accent = lane.as_deref().map(|seed| {
+                    let (_, disc_seed, color_index, _) = self.agent_identity(seed, "Agent", cx);
+                    avatars::gradient(avatars::index_for(&disc_seed, color_index), &theme).0
+                });
                 let r = px(BUBBLE_RADIUS);
                 let bubble = self
                     .react_target(
@@ -1053,6 +1059,9 @@ impl Transcript {
                     .when(last, |el| el.pb(px(BUBBLE_PAD_Y)).rounded_b(r))
                     .when(!last, |el| el.pb(px(3.0)))
                     .bg(theme.bubble_assistant)
+                    .when_some(agent_accent, |el, color| {
+                        el.border_l_2().border_color(Theme::with_alpha(color, 0.7))
+                    })
                     .child(render_block(
                         &row.id,
                         &block,
