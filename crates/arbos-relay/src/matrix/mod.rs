@@ -19,7 +19,10 @@ pub mod backfill;
 pub mod client;
 pub mod db;
 pub mod reads;
+pub mod servers;
+pub mod servers_db;
 pub mod shadow;
+pub mod spaces;
 pub mod worker;
 
 use std::path::{Path, PathBuf};
@@ -269,6 +272,10 @@ pub enum Job {
     CloseRoom { chat_id: String },
     /// Stage B: register (on) or remove (off) the relay push gateway on a user's devices.
     Pushers { user_id: String, on: bool },
+    /// C1: make the Space match the server row (members, name, children).
+    SyncServer { server_id: String },
+    /// C1: make a channel room match its row (members, name, posting rule, parent).
+    SyncChannel { channel_id: String },
 }
 
 impl Job {
@@ -281,6 +288,8 @@ impl Job {
             | Job::Archive { chat_id, .. }
             | Job::CloseRoom { chat_id } => chat_id,
             Job::Pushers { user_id, .. } => user_id,
+            Job::SyncServer { server_id } => server_id,
+            Job::SyncChannel { channel_id } => channel_id,
         }
     }
 }
@@ -391,6 +400,26 @@ impl Matrix {
             Job::Pushers {
                 user_id: user_id.to_owned(),
                 on,
+            },
+        );
+    }
+
+    /// C1: a server's name, members or channel list changed.
+    pub fn touch_server(&self, state: &AppState, server_id: &str) {
+        self.enqueue(
+            state,
+            Job::SyncServer {
+                server_id: server_id.to_owned(),
+            },
+        );
+    }
+
+    /// C1: a channel was made or changed (name, posting rule).
+    pub fn touch_channel(&self, state: &AppState, channel_id: &str) {
+        self.enqueue(
+            state,
+            Job::SyncChannel {
+                channel_id: channel_id.to_owned(),
             },
         );
     }

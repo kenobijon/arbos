@@ -409,6 +409,41 @@ async fn main() -> anyhow::Result<()> {
             "/_matrix/push/v1/notify",
             post(matrix::appservice::push_notify),
         )
+        .route("/me/matrix", get(matrix::servers::me_matrix))
+        .route(
+            "/_matrix/client/{*rest}",
+            axum::routing::any(matrix::servers::proxy),
+        )
+        .route(
+            "/servers",
+            get(matrix::servers::list).post(matrix::servers::create),
+        )
+        .route("/servers/join", post(matrix::servers::join))
+        .route(
+            "/servers/{id}",
+            get(matrix::servers::get)
+                .patch(matrix::servers::patch)
+                .delete(matrix::servers::delete),
+        )
+        .route(
+            "/servers/{id}/channels",
+            post(matrix::servers::channel_create),
+        )
+        .route(
+            "/servers/{id}/channels/{cid}",
+            axum::routing::patch(matrix::servers::channel_patch)
+                .delete(matrix::servers::channel_delete),
+        )
+        .route(
+            "/servers/{id}/invite/reset",
+            post(matrix::servers::invite_reset),
+        )
+        .route(
+            "/servers/{id}/members/{uid}",
+            put(matrix::servers::member_role).delete(matrix::servers::member_remove),
+        )
+        .route("/servers/{id}/leave", post(matrix::servers::leave))
+        .route("/s/{code}", get(matrix::servers::landing))
         .route("/admin/matrix/status", get(matrix::appservice::status))
         .route("/admin/matrix/backfill", post(matrix::appservice::backfill))
         .route(

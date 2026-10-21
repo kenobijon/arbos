@@ -385,6 +385,55 @@ impl Db {
         })
     }
 
+    // ---- devices (stage C) --------------------------------------------------------------------
+
+    /// `(matrix device id, encrypted access token)` of an app device.
+    pub fn matrix_device(&self, device_id: &str) -> Result<Option<(String, String)>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT mx_device_id, mx_token_enc FROM matrix_devices WHERE device_id = ?1",
+                params![device_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+        })
+    }
+
+    pub fn matrix_insert_device(
+        &self,
+        device_id: &str,
+        user_id: &str,
+        mxid: &str,
+        mx_device_id: &str,
+        enc: &str,
+    ) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO matrix_devices(device_id, user_id, mxid, mx_device_id, mx_token_enc, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(device_id) DO UPDATE SET mx_device_id = excluded.mx_device_id, mx_token_enc = excluded.mx_token_enc",
+                params![device_id, user_id, mxid, mx_device_id, enc, now_ms()],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn matrix_delete_device(&self, device_id: &str) -> Result<Option<(String, String)>> {
+        self.with(|c| {
+            let row = c
+                .query_row(
+                    "SELECT mxid, mx_device_id FROM matrix_devices WHERE device_id = ?1",
+                    params![device_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            c.execute(
+                "DELETE FROM matrix_devices WHERE device_id = ?1",
+                params![device_id],
+            )?;
+            Ok(row)
+        })
+    }
+
     // ---- inbound transactions -----------------------------------------------------------------
 
     /// Remember an acknowledged transaction; `false` when it was seen before (Synapse retried).

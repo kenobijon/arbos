@@ -596,7 +596,10 @@ pub async fn refresh(State(state): State<AppState>, Json(b): Json<RefreshBody>) 
 pub async fn logout(State(state): State<AppState>, principal: Principal) -> Response {
     match principal {
         Principal::Device { id, .. } => match state.db.revoke_device_fully(&id) {
-            Ok(_) => StatusCode::NO_CONTENT.into_response(),
+            Ok(_) => {
+                crate::matrix::servers::revoke_device(&state, &id).await;
+                StatusCode::NO_CONTENT.into_response()
+            }
             Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
         },
         Principal::Box { .. } | Principal::Admin => {
@@ -647,7 +650,10 @@ pub async fn device_revoke(
         return api_error(StatusCode::FORBIDDEN, "forbidden", "not your device");
     }
     match state.db.revoke_device_fully(&target) {
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Ok(_) => {
+            crate::matrix::servers::revoke_device(&state, &target).await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
     }
 }

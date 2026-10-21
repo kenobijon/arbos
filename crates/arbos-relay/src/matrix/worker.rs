@@ -175,8 +175,8 @@ fn display_name(state: &AppState, member: &str) -> Option<String> {
 }
 
 pub struct Worker {
-    state: AppState,
-    client: Client,
+    pub(super) state: AppState,
+    pub(super) client: Client,
 }
 
 impl Worker {
@@ -289,13 +289,15 @@ impl Worker {
             Job::Pushers { user_id, on } => {
                 super::reads::set_pushers(&self.state, &self.client, user_id, *on).await
             }
+            Job::SyncServer { server_id } => self.sync_server(server_id).await,
+            Job::SyncChannel { channel_id } => self.sync_channel(channel_id).await,
         }
     }
 
     // ---- users ----------------------------------------------------------------------------------
 
     /// Register the user on first sight and keep its display name current.
-    async fn ensure_user(&self, m: &Member) -> MxResult<()> {
+    pub(super) async fn ensure_user(&self, m: &Member) -> MxResult<()> {
         let wanted = display_name(&self.state, &m.member);
         if let Some((_, have)) = self.state.db.matrix_user(&m.member).ok().flatten() {
             if have == wanted {
@@ -402,35 +404,51 @@ impl Worker {
     }
 
     async fn reconcile_members(&self, room_id: &str, spec: &RoomSpec) -> MxResult<()> {
-        let joined = self.client.joined_members(room_id, &spec.creator).await?;
-        for m in spec.member_mxids() {
-            if !joined.iter().any(|j| j == m) {
-                self.client.invite(room_id, &spec.creator, m).await?;
-                self.client.join(room_id, m).await?;
+        self.reconcile_room_members(
+            room_id,
+            &spec.creator,
+            &spec.members,
+            spec.promoted_owners(),
+        )
+        .await
+    }
+
+    /// Invite + join missing members, kick relay-minted members who left, and keep the
+    /// `users` power-level map equal to `users_pl` (everyone else stays at the default).
+    pub(super) async fn reconcile_room_members(
+        &self,
+        room_id: &str,
+        creator: &str,
+        members: &[Member],
+        users_pl: serde_json::Map<String, Value>,
+    ) -> MxResult<()> {
+        let joined = self.client.joined_members(room_id, creator).await?;
+        for m in members {
+            if !joined.contains(&m.mxid) {
+                self.client.invite(room_id, creator, &m.mxid).await?;
+                self.client.join(room_id, &m.mxid).await?;
             }
         }
         let cfg = &self.state.matrix.cfg;
         for j in &joined {
             // Only relay-minted members are managed; appservice senders and future outside
             // agents are left alone.
-            if cfg.member_of_mxid(j).is_some() && !spec.member_mxids().any(|m| m == j) {
+            if cfg.member_of_mxid(j).is_some() && !members.iter().any(|m| m.mxid == *j) {
                 self.client
-                    .kick(room_id, &spec.creator, j, "left the chat")
+                    .kick(room_id, creator, j, "left the chat")
                     .await?;
             }
         }
-        // Power levels follow roles: promoted owners 100, everyone else 0.
         if let Some(mut pl) = self
             .client
-            .state(room_id, &spec.creator, "m.room.power_levels", "")
+            .state(room_id, creator, "m.room.power_levels", "")
             .await?
         {
-            let users = spec.promoted_owners();
             let current = pl["users"].as_object().cloned().unwrap_or_default();
-            if current != users {
-                pl["users"] = Value::Object(users);
+            if current != users_pl {
+                pl["users"] = Value::Object(users_pl);
                 self.client
-                    .send_state(room_id, &spec.creator, "m.room.power_levels", "", &pl)
+                    .send_state(room_id, creator, "m.room.power_levels", "", &pl)
                     .await?;
             }
         }
@@ -438,17 +456,8 @@ impl Worker {
     }
 
     async fn reconcile_name(&self, room_id: &str, spec: &RoomSpec) -> MxResult<()> {
-        let have = self
-            .client
-            .state(room_id, &spec.creator, "m.room.name", "")
-            .await?
-            .and_then(|v| v["name"].as_str().map(str::to_owned));
-        if spec.name != have {
-            let content = json!({ "name": spec.name.clone().unwrap_or_default() });
-            self.client
-                .send_state(room_id, &spec.creator, "m.room.name", "", &content)
-                .await?;
-        }
+        self.reconcile_room_name(room_id, &spec.creator, spec.name.as_deref())
+            .await?;
         let chat_state = self
             .client
             .state(room_id, &spec.creator, "life.arbos.chat", "")
@@ -462,6 +471,27 @@ impl Worker {
                     "",
                     &Self::chat_state(spec),
                 )
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// `m.room.name` equal to `name` (unset when `None`).
+    pub(super) async fn reconcile_room_name(
+        &self,
+        room_id: &str,
+        creator: &str,
+        name: Option<&str>,
+    ) -> MxResult<()> {
+        let have = self
+            .client
+            .state(room_id, creator, "m.room.name", "")
+            .await?
+            .and_then(|v| v["name"].as_str().map(str::to_owned));
+        if name != have.as_deref() {
+            let content = json!({ "name": name.unwrap_or_default() });
+            self.client
+                .send_state(room_id, creator, "m.room.name", "", &content)
                 .await?;
         }
         Ok(())
