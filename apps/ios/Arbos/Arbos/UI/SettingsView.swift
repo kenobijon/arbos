@@ -991,11 +991,25 @@ struct AboutPage: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
 
+    private var protocolValue: String {
+        var s = "room proto \(protoVersion) · Loro"
+        if model.sharedRoomSession {
+            let st = model.sharedRoomStats
+            s += " · core session · \(st.reconnects) reconnects · \(st.timeouts) timeouts"
+        }
+        return s
+    }
+
     var body: some View {
         SettingsPage(title: "About") {
             SettingsGroup {
                 SettingsValueRow("Version", value: SettingsView.versionLine)
-                SettingsValueRow("Protocol", value: "room proto \(protoVersion) · Loro")
+                SettingsValueRow("Protocol", value: protocolValue)
+            }
+            SettingsGroup(footer: "Applies after you quit and reopen the app.") {
+                SettingsValueRow("Shared room sync (test)") {
+                    Toggle("", isOn: $model.sharedRoomSessionSetting).labelsHidden()
+                }
             }
             // Continuous delivery (D85): every fix ships as a TestFlight build; the newest one is
             // one tap away, and TestFlight can install it by itself.
