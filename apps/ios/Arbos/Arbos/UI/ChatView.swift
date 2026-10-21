@@ -535,16 +535,24 @@ struct ChatView: View {
                         // One pill for every chat (2026-10-20): avatar + name,
                         // no member cluster, counts or agent lines.
                         HStack(spacing: 8) {
-                            if people.isGroup {
-                                // The group's picture, else its D79 initials disc (as the Mac).
-                                PersonAvatar(url: groupImageURL(people), handle: people.title, size: Theme.avatar, name: people.title, id: people.id)
+                            if people.isGroup, let url = groupImageURL(people) {
+                                // Custom group picture.
+                                PersonAvatar(url: url, handle: people.title, size: Theme.avatar, name: people.title, id: people.id)
                                 Text(people.title)
                                     .font(.system(size: Theme.body, weight: .semibold))
                                     .foregroundStyle(theme.text)
                                     .lineLimit(1)
+                            } else if let other = counterpart, !people.isGroup || people.kind == "dm" {
+                                // DM peer (including a DM that gained agents — still their face).
+                                PersonAvatar(url: other.avatarUrl, handle: other.handle, size: Theme.avatar, name: other.name, id: other.id, colorIndex: other.avatarColorIndex)
+                                Text(other.displayName)
+                                    .font(.system(size: Theme.body, weight: .semibold))
+                                    .foregroundStyle(theme.text)
+                                    .lineLimit(1)
                             } else {
-                                PersonAvatar(url: counterpart?.avatarUrl, handle: counterpart?.handle ?? "?", size: Theme.avatar, name: counterpart?.name, id: counterpart?.id, colorIndex: counterpart?.avatarColorIndex)
-                                Text(counterpart?.displayName ?? people.title)
+                                // Named multi-human group with no picture: title initials.
+                                PersonAvatar(url: nil, handle: people.title, size: Theme.avatar, name: people.title, id: people.id)
+                                Text(people.title)
                                     .font(.system(size: Theme.body, weight: .semibold))
                                     .foregroundStyle(theme.text)
                                     .lineLimit(1)
@@ -576,8 +584,9 @@ struct ChatView: View {
                 .contentShape(Capsule())
             }
             Spacer()
-            // The add-person button is gone (Jacob, 2026-10-20): adding people
-            // and agents lives in the profile page's Members / Add members.
+            // Balance the back circle so the title pill sits on the true centre
+            // (same trick as Hidden chats). Add-person left in 2026-10-20.
+            Color.clear.frame(width: Theme.control, height: Theme.control)
         }
         .padding(.horizontal, 16)
         .padding(.top, 6)
