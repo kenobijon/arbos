@@ -1,17 +1,19 @@
 //! Attachment cards (F10, D38): a file the agent produced, blob-backed. Icon by kind, title,
 //! size, an inline thumbnail for images, and Download → `~/Downloads/<name>` then reveal.
+//! Click an image strip to open an expanded in-app preview (no download required).
 
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 
 use gpui::{
-    div, img, prelude::*, px, AnyElement, Entity, FontWeight, Hsla, ObjectFit, RenderImage,
-    SharedString,
+    div, img, prelude::*, px, AnyElement, Entity, FontWeight, Hsla, MouseButton, ObjectFit,
+    RenderImage, SharedString,
 };
 
 use crate::app::AppState;
 use crate::model::{Attachment, AttachmentKind};
+use crate::ui::icons::icon;
 use crate::ui::theme::{Appearance, Theme};
 
 pub const CARD_WIDTH: f32 = 360.0;
@@ -167,6 +169,7 @@ pub fn card(
 
     if kind == AttachmentKind::Image {
         let strip = div()
+            .id(SharedString::from(format!("{row_id}-preview")))
             .w_full()
             .h(px(THUMB_HEIGHT))
             .bg(Theme::with_alpha(tint, 0.08))
@@ -177,7 +180,19 @@ pub fn card(
             .border_color(theme.border);
         let strip = match preview {
             Preview::Ready(image) => {
-                strip.child(img(image).w_full().h_full().object_fit(ObjectFit::Contain))
+                let state = state.clone();
+                let key = key.clone();
+                let open = image.clone();
+                strip
+                    .cursor_pointer()
+                    .child(img(image).w_full().h_full().object_fit(ObjectFit::Contain))
+                    .on_click(move |_, _, cx| {
+                        if let Some(key) = key.clone() {
+                            state.update(cx, |s, cx| s.preview_attachment_image(key, cx));
+                        } else {
+                            state.update(cx, |s, cx| s.open_image_preview(open.clone(), cx));
+                        }
+                    })
             }
             Preview::Loading => strip.child(
                 div()
@@ -185,16 +200,101 @@ pub fn card(
                     .text_color(theme.text_faint)
                     .child("Loading preview…"),
             ),
-            Preview::Unavailable => strip.child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(theme.text_faint)
-                    .child("No preview"),
-            ),
+            Preview::Unavailable => {
+                let strip = strip.child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme.text_faint)
+                        .child("No preview"),
+                );
+                if let Some(key) = key.clone() {
+                    let state = state.clone();
+                    strip.cursor_pointer().on_click(move |_, _, cx| {
+                        state.update(cx, |s, cx| s.preview_attachment_image(key.clone(), cx));
+                    })
+                } else {
+                    strip
+                }
+            }
         };
         card = card.child(strip);
     }
     card.child(header).into_any_element()
+}
+
+/// Full-window image lightbox: dimmed backdrop, contained picture, × to dismiss.
+/// `image` is `None` while a missing thumbnail is still fetching.
+pub fn preview_overlay(
+    image: Option<Arc<RenderImage>>,
+    state: Entity<AppState>,
+    theme: &Theme,
+) -> impl IntoElement {
+    let close = state.clone();
+    let close_btn = state;
+    let body: AnyElement = match image {
+        Some(image) => div()
+            .id("image-preview-frame")
+            .w_full()
+            .h_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(img(image).w_full().h_full().object_fit(ObjectFit::Contain))
+            .into_any_element(),
+        None => div()
+            .id("image-preview-loading")
+            .text_size(px(13.0))
+            .text_color(theme.text_muted)
+            .child("Loading preview…")
+            .into_any_element(),
+    };
+    div()
+        .id("image-preview")
+        .absolute()
+        .inset_0()
+        .occlude()
+        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+        .flex()
+        .items_center()
+        .justify_center()
+        .p(px(28.0))
+        .bg(Theme::with_alpha(theme.bg, 0.82))
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            close.update(cx, |s, cx| s.close_image_preview(cx));
+        })
+        .child(
+            div()
+                .id("image-preview-body")
+                .relative()
+                .w_full()
+                .h_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(body)
+                .child(
+                    div()
+                        .id("image-preview-close")
+                        .absolute()
+                        .top(px(4.0))
+                        .right(px(4.0))
+                        .size(px(36.0))
+                        .rounded_full()
+                        .bg(Theme::with_alpha(theme.surface_2, 0.92))
+                        .border_1()
+                        .border_color(theme.border_strong)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.surface_1))
+                        .child(icon("xmark", 14.0, theme.text))
+                        .on_click(move |_, _, cx| {
+                            close_btn.update(cx, |s, cx| s.close_image_preview(cx));
+                        }),
+                ),
+        )
 }
 
 /// Reveal the saved file: Finder on macOS, the file manager (or the default app) elsewhere.

@@ -280,8 +280,10 @@ impl Shared {
         if self.people.lock().unwrap().contains(chat_id) {
             return true;
         }
-        // Cold-store / registry races: the people HashSet can lag the rail.
-        // A Dm/Group space is always a people room (`/room/people/{id}`).
+        // Cold start can restore people spaces from KEY_PROJECTS before KEY_PEOPLE
+        // is populated (or when that key is empty). Project kind is the source of
+        // truth for Dm/Group — without this, room_loop dials `{chat}/{chat}` instead
+        // of `people/{chat}` and never joins the room iOS uses.
         self.projects
             .lock()
             .unwrap()
@@ -289,10 +291,11 @@ impl Shared {
             .any(|p| p.id == chat_id && p.is_people())
     }
 
-    /// The `/blob/{slot}/{key}` slot for a chat or project id. People chats keep their blobs
-    /// under `people:<chat_id>` (people-chats API §2) — a people chat's "project id" in this
-    /// client is its chat id, which the relay knows no project for (403). Every blob read and
-    /// write goes through here so uploads and fetches always agree.
+    /// The `/blob/{slot}/{key}` slot for a **project id** or a **people chat id**.
+    /// People chats keep their blobs under `people:<chat_id>` (people-chats API §2).
+    /// Project chats use the project id — pass that, not the chat id (a chat id is not a
+    /// project the relay knows, so PUT/GET would 403). Every blob read and write goes
+    /// through here so uploads and fetches always agree.
     fn blob_slot(&self, id: &str) -> String {
         if id.starts_with(PEOPLE_BLOB_PREFIX) || !self.is_people(id) {
             id.to_owned()
@@ -939,11 +942,13 @@ fn load_store(shared: &Arc<Shared>) {
     if projects.is_empty() {
         return;
     }
+    // Seed the people-id set from both KEY_PEOPLE and project kinds *before*
+    // ensure_room / room_loop. room_loop used to re-check is_people on every
+    // dial; after RoomSession it bakes the path once — an empty HashSet on
+    // cold start left Mac on the wrong room forever (iOS always dials people/).
     {
         let mut ids = shared.people.lock().unwrap();
         ids.extend(people);
-        // People spaces in the rail are people rooms even when KEY_PEOPLE
-        // was empty or stale — otherwise room_loop dials `{id}/{id}` (403).
         for p in &projects {
             if p.is_people() {
                 ids.insert(p.id.clone());
@@ -2509,10 +2514,6 @@ fn set_project_state(shared: &Shared, project_id: &str, state: BoxState, detail:
 
 /// Dial, drive [`RoomSession`], perform actions — forever, with backoff (§8.6).
 /// Protocol (HELLO, catch-up, PUSH/ACK, resend) lives in `arbos_client::room`.
-///
-/// Re-resolve the people-room path on every reconnect: a room task may start
-/// before the people registry lands, and a frozen `{chat}/{chat}` dial never
-/// joins `people/{chat}` (local sends stay optimistic; other devices see nothing).
 #[allow(clippy::too_many_arguments)]
 async fn room_loop(
     shared: Arc<Shared>,
@@ -2524,22 +2525,23 @@ async fn room_loop(
     mut local_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     mut cmd_rx: mpsc::UnboundedReceiver<RoomCmd>,
 ) {
-    let mut is_people = shared.is_people(&room_chat);
+    let is_people = shared.is_people(&room_chat);
     let room = room::room_path(&project_id, &room_chat, is_people);
     let mut session = RoomSession::new(shared.device_id(), room, saved_cursor, saved_pending);
     loop {
-        let next_people = shared.is_people(&room_chat);
-        let next_room = room::room_path(&project_id, &room_chat, next_people);
-        if next_room != session.room() {
-            is_people = next_people;
+        // Re-resolve on every dial. Before RoomSession, run_session re-checked
+        // the people HashSet each attempt; baking the path once meant a cold
+        // start with an empty set dialed `{id}/{id}` forever while iOS used
+        // `people/{id}` — Mac and mobile never shared a CRDT room.
+        let is_people = shared.is_people(&room_chat);
+        let want = room::room_path(&project_id, &room_chat, is_people);
+        if session.room() != want {
             session = RoomSession::new(
                 shared.device_id(),
-                next_room,
+                want,
                 session.cursor(),
                 session.pending().to_vec(),
             );
-        } else {
-            is_people = next_people;
         }
         let outcome = run_session(
             &shared,
@@ -3063,8 +3065,15 @@ async fn send_message(
     reply_to: Option<String>,
 ) {
     let project_id = project_of(&shared, &chat_id).unwrap_or_default();
-    // People chats keep their blobs under `people:<chat_id>` and have no box to wake.
-    let blob_slot = shared.blob_slot(&chat_id);
+    // People chats keep their blobs under `people:<chat_id>`; project chats under the
+    // project id (same slot agentd and the thumbnail fetch use). `blob_slot` expects a
+    // project id or a people chat id — never a project chat's own id (the relay would
+    // 403 the PUT and the attachment would land with no `ref`).
+    let blob_slot = shared.blob_slot(if shared.is_people(&chat_id) {
+        &chat_id
+    } else {
+        &project_id
+    });
     let mut user_attachments: Vec<UserAttachment> = Vec::new();
     for path in attachments {
         let name = path
