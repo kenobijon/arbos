@@ -93,6 +93,12 @@ jobs:
           set -euo pipefail
           deps=$(cargo tree -i arbos-client --prefix none --depth 1 | awk '/^arbos-/ {print $1}' | grep -v '^arbos-client$' | sort -u)
           test "$deps" = $'arbos-ffi\narbos-mac'
+      # arbos-matrix (D88 C1) is app-only too: the relay has its own appservice client.
+      - name: arbos-matrix dependents
+        run: |
+          set -euo pipefail
+          deps=$(cargo tree -i arbos-matrix --prefix none --depth 1 | awk '/^arbos-/ {print $1}' | grep -v '^arbos-matrix$' | sort -u)
+          test "$deps" = $'arbos-ffi' || test "$deps" = $'arbos-ffi\narbos-mac'
 
   harness:
     name: harness (arbos-pi-ext typecheck + build)

@@ -16,6 +16,8 @@ use serde_json::Value;
 
 uniffi::setup_scaffolding!();
 
+pub mod matrix;
+
 /// Frame decode, doc import, or writer failure. Sans-IO session has no transport errors.
 #[derive(Debug, Clone, thiserror::Error, uniffi::Error)]
 pub enum FfiError {
