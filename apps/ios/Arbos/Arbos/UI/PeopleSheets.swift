@@ -76,7 +76,7 @@ struct NewChatSheet: View {
                                 // D88 rule 8: a server of your own, or one you were invited to.
                                 rowDivider
                                 NavigationLink { NewServerView(onDone: { dismiss() }) } label: {
-                                    actionRow(icon: "number", title: "Server", subtitle: "Channels for a group of people")
+                                    actionRow(icon: "number", title: "New server", subtitle: "Channels for a group of people")
                                 }
                                 .buttonStyle(.plain)
                                 rowDivider
