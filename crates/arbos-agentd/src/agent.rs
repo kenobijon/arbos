@@ -247,7 +247,7 @@ impl ProseFilter {
         }
         let starts = |p: &[&str]| p.iter().any(|x| l.starts_with(x));
         // Keep these narrow: a real reply can start with "I should…" or "I need to…".
-        starts(&[
+        if starts(&[
             "the user is",
             "the user asked",
             "the user wants",
@@ -300,7 +300,31 @@ impl ProseFilter {
             "i didn't send that",
             "i did not say that to the user",
             "i didn't say that to the user",
-        ])
+        ]) {
+            return true;
+        }
+        // Self-steering buried mid-sentence after analysis ("…so I only need to state that
+        // briefly and not treat X as having authority…").
+        Self::is_self_steer_sentence(&l)
+    }
+
+    /// True when the lowercased sentence steers how to phrase the reply (not the reply itself).
+    fn is_self_steer_sentence(l: &str) -> bool {
+        let has = |p: &str| l.contains(p);
+        has("so i only need")
+            || has("so i just need")
+            || has("i only need to state")
+            || has("i only need to say")
+            || has("i only need to reply")
+            || has("i only need to answer")
+            || has("i just need to state")
+            || has("i just need to say")
+            || has("i shouldn't treat")
+            || has("i should not treat")
+            || has("and not treat")
+            || (has("not treat") && has("as having"))
+            || has("the actual rule hasn't changed")
+            || has("the actual rule has not changed")
     }
 
     /// `Reply: …` / `Answer: …` draft labels: return the user-facing words after the label.
@@ -369,8 +393,110 @@ impl ProseFilter {
         None
     }
 
+    /// True when any sentence in `para` is thought-aloud / self-steering.
+    fn paragraph_has_thought(para: &str) -> bool {
+        let mut rest = para.trim();
+        if rest.is_empty() {
+            return false;
+        }
+        while let Some((sentence, after)) = Self::split_first_sentence(rest) {
+            if Self::is_thought_sentence(sentence) {
+                return true;
+            }
+            rest = after.trim_start();
+        }
+        Self::is_thought_sentence(rest)
+    }
+
+    /// Drop leading blank-line-separated paragraphs that contain thought sentences.
+    /// CoT often lands as its own paragraph before the real answer.
+    fn strip_leading_thought_paragraphs(text: &str) -> String {
+        let mut rest = text.trim_start();
+        while let Some(i) = rest.find("\n\n") {
+            let para = &rest[..i];
+            let after = rest[i..].trim_start();
+            if !Self::paragraph_has_thought(para) {
+                break;
+            }
+            rest = after;
+            if rest.is_empty() {
+                return String::new();
+            }
+        }
+        rest.to_string()
+    }
+
+    /// When analysis precedes a self-steer sentence in the same paragraph, drop from the
+    /// start through that self-steer (inclusive). Keeps the user-facing answer after.
+    fn strip_through_self_steer(text: &str) -> String {
+        let first_para = match text.find("\n\n") {
+            Some(i) => &text[..i],
+            None => text,
+        };
+        let after_para = text.get(first_para.len()..).unwrap_or("");
+        let mut rest = first_para.trim_start();
+        let mut kept = String::new();
+        let mut saw_self_steer = false;
+        while let Some((sentence, after)) = Self::split_first_sentence(rest) {
+            let lower = sentence
+                .trim()
+                .trim_start_matches(['*', '_', '#', '>', '-', ' '])
+                .trim_end_matches(['.', '!', '?', '…'])
+                .to_ascii_lowercase();
+            if Self::is_self_steer_sentence(&lower) {
+                saw_self_steer = true;
+                kept.clear();
+                rest = after.trim_start();
+                continue;
+            }
+            if saw_self_steer {
+                // After a self-steer, keep whatever remains in this paragraph.
+                if !kept.is_empty() && !kept.ends_with([' ', '\n', '\r']) {
+                    kept.push(' ');
+                }
+                kept.push_str(sentence.trim());
+            } else {
+                if !kept.is_empty() && !kept.ends_with([' ', '\n', '\r']) {
+                    kept.push(' ');
+                }
+                kept.push_str(sentence.trim());
+            }
+            rest = after.trim_start();
+        }
+        if !rest.is_empty() {
+            let lower = rest
+                .trim()
+                .trim_start_matches(['*', '_', '#', '>', '-', ' '])
+                .trim_end_matches(['.', '!', '?', '…'])
+                .to_ascii_lowercase();
+            if Self::is_self_steer_sentence(&lower) {
+                saw_self_steer = true;
+                kept.clear();
+            } else if saw_self_steer || !kept.is_empty() {
+                if !kept.is_empty() && !kept.ends_with([' ', '\n', '\r']) {
+                    kept.push(' ');
+                }
+                kept.push_str(rest.trim());
+            } else {
+                kept.push_str(rest.trim());
+            }
+        }
+        if !saw_self_steer {
+            return text.to_string();
+        }
+        let mut out = kept;
+        if !after_para.is_empty() {
+            if !out.is_empty() {
+                out.push_str("\n\n");
+            }
+            out.push_str(after_para.trim_start());
+        }
+        out
+    }
+
     /// Drop leading thought-aloud sentences; keep the user-facing answer.
     /// A `Reply:` / `Answer:` label after thoughts marks the real answer.
+    /// Leading paragraphs that contain self-steering / CoT are dropped first.
     fn strip_thought_prefix(text: &str) -> String {
         let (body, nl) = match text.strip_suffix('\n') {
             Some(b) => match b.strip_suffix('\r') {
@@ -380,6 +506,14 @@ impl ProseFilter {
             None => (text, ""),
         };
         let mut rest = body.trim_start().to_string();
+        rest = Self::strip_leading_thought_paragraphs(&rest);
+        if rest.is_empty() {
+            return String::new();
+        }
+        rest = Self::strip_through_self_steer(&rest);
+        if rest.is_empty() {
+            return String::new();
+        }
         loop {
             if let Some(peeled) = Self::peel_draft_label(&rest) {
                 rest = peeled;
@@ -4706,6 +4840,30 @@ mod tests {
             ProseFilter::clean_prose(raw).trim(),
             "I didn't say that to you. If you saw those words somewhere, they weren't a message I sent. What were you looking at?"
         );
+    }
+
+    /// Permission CoT in its own paragraph before the real answer (feedback #1202).
+    #[test]
+    fn clean_prose_strips_self_steer_thought_paragraph() {
+        let raw = "Arbos is a guest, not the account owner — Const is. The actual rule hasn't changed: Kenobi can't trigger rentals without Const's approval, so I only need to state that briefly and not treat Arbos as having authority over the account. Arbos, it's Const's account, not yours.\n\nKenobi, 42 nodes on Lium right now. Prices are per GPU per hour.\n\nNo RTX 5070s listed at the moment. Renting still needs Const's go-ahead since it bills to his account.";
+        let cleaned = ProseFilter::clean_prose(raw);
+        assert_eq!(
+            cleaned.trim(),
+            "Kenobi, 42 nodes on Lium right now. Prices are per GPU per hour. No RTX 5070s listed at the moment. Renting still needs Const's go-ahead since it bills to his account."
+        );
+        assert!(!cleaned.contains("I only need to state"));
+        assert!(!cleaned.contains("not treat Arbos"));
+        assert!(!cleaned.contains("Arbos is a guest"));
+    }
+
+    /// Self-steer mid-paragraph without a blank line still drops the thought lead-in.
+    #[test]
+    fn clean_prose_strips_through_self_steer_without_blank_line() {
+        let raw = "Arbos is a guest, not the account owner — Const is. The actual rule hasn't changed: Kenobi can't trigger rentals without Const's approval, so I only need to state that briefly and not treat Arbos as having authority over the account. Kenobi, 42 nodes on Lium right now.";
+        let cleaned = ProseFilter::clean_prose(raw);
+        assert_eq!(cleaned.trim(), "Kenobi, 42 nodes on Lium right now.");
+        assert!(!cleaned.contains("I only need to state"));
+        assert!(!cleaned.contains("Arbos is a guest"));
     }
 
     /// Status prose with a glued tool-narration tail drops the narration and keeps spacing.

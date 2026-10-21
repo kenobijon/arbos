@@ -4172,7 +4172,7 @@ impl AppState {
         self.avatars.get(url).cloned().flatten()
     }
 
-    fn want_avatar(&mut self, url: String) {
+    pub(crate) fn want_avatar(&mut self, url: String) {
         if url.is_empty() || self.avatars.contains_key(&url) {
             return;
         }

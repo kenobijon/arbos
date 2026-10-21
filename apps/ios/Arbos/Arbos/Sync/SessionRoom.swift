@@ -7,6 +7,8 @@ import ArbosFFI
 /// Test seam for the WebSocket: production uses `URLSessionWebSocketTask`.
 protocol RoomSocket: AnyObject {
     var onOpen: (() -> Void)? { get set }
+    /// HTTP status from the upgrade response, set when `receive()` throws.
+    var httpStatus: Int? { get }
     func resume()
     func send(_ data: Data) async throws
     func receive() async throws -> Data
@@ -26,6 +28,8 @@ final class SessionRoom {
     var onAcked: (() -> Void)?
     var onDocPaint: (() -> Void)?
     var onPresence: (([String: Any]) -> Void)?
+    /// Relay rejected this room (HTTP 403/404); caller should refresh membership.
+    var onUnavailable: (() -> Void)?
     var presenceUser: () -> (id: String, handle: String)? = { nil }
     var inCall: String? {
         didSet {
@@ -39,6 +43,8 @@ final class SessionRoom {
     private(set) var reconnects = 0
     /// How many `state_timeout` session errors we saw (test surface).
     private(set) var stateTimeouts = 0
+    /// Last terminal room error shown on About (e.g. "chat: HTTP 403").
+    private(set) var lastError: String?
     var onPendingChanged: (([(String, Data)]) -> Void)?
     var onCursorMoved: (() -> Void)?
 
@@ -216,6 +222,17 @@ final class SessionRoom {
                     self.drain()
                 } catch {
                     guard let self, self.generation == gen else { return }
+                    if let status = socket.httpStatus, status == 403 || status == 404 {
+                        // Chat unknown or not a member: do not reconnect.
+                        self.stopped = true
+                        self.cancelTasks()
+                        self.socket?.cancel()
+                        self.socket = nil
+                        NSLog("relay room \(self.roomChat): HTTP \(status), not retrying")
+                        self.lastError = "\(self.roomChat): HTTP \(status)"
+                        self.onUnavailable?()
+                        return
+                    }
                     self.session.onClose(nowMs: self.sessionNowMs())
                     self.drain()
                     return
@@ -411,6 +428,7 @@ private final class RoomSocketOpenDelegate: NSObject, URLSessionWebSocketDelegat
 
 private final class URLSessionRoomSocket: RoomSocket {
     var onOpen: (() -> Void)?
+    private(set) var httpStatus: Int?
     fileprivate let task: URLSessionWebSocketTask
 
     init(task: URLSessionWebSocketTask) {
@@ -431,14 +449,19 @@ private final class URLSessionRoomSocket: RoomSocket {
 
     func receive() async throws -> Data {
         while true {
-            let message = try await task.receive()
-            switch message {
-            case .data(let data):
-                return data
-            case .string(let s):
-                if let data = Data(base64Encoded: s) { return data }
-            @unknown default:
-                continue
+            do {
+                let message = try await task.receive()
+                switch message {
+                case .data(let data):
+                    return data
+                case .string(let s):
+                    if let data = Data(base64Encoded: s) { return data }
+                @unknown default:
+                    continue
+                }
+            } catch {
+                httpStatus = (task.response as? HTTPURLResponse)?.statusCode
+                throw error
             }
         }
     }

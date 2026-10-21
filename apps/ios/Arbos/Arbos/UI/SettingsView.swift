@@ -993,7 +993,9 @@ struct AboutPage: View {
 
     private var protocolValue: String {
         let st = model.sharedRoomStats
-        return "room proto \(protoVersion) · Loro · core session · \(st.reconnects) reconnects · \(st.timeouts) timeouts"
+        var line = "room proto \(protoVersion) · Loro · core session · \(st.reconnects) reconnects · \(st.timeouts) timeouts"
+        if let err = st.lastError { line += " · last error: \(err)" }
+        return line
     }
 
     var body: some View {
