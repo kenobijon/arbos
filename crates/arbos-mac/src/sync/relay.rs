@@ -277,7 +277,16 @@ impl Shared {
     }
 
     fn is_people(&self, chat_id: &str) -> bool {
-        self.people.lock().unwrap().contains(chat_id)
+        if self.people.lock().unwrap().contains(chat_id) {
+            return true;
+        }
+        // Cold-store / registry races: the people HashSet can lag the rail.
+        // A Dm/Group space is always a people room (`/room/people/{id}`).
+        self.projects
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| p.id == chat_id && p.is_people())
     }
 
     /// The `/blob/{slot}/{key}` slot for a chat or project id. People chats keep their blobs
@@ -930,7 +939,17 @@ fn load_store(shared: &Arc<Shared>) {
     if projects.is_empty() {
         return;
     }
-    shared.people.lock().unwrap().extend(people);
+    {
+        let mut ids = shared.people.lock().unwrap();
+        ids.extend(people);
+        // People spaces in the rail are people rooms even when KEY_PEOPLE
+        // was empty or stale — otherwise room_loop dials `{id}/{id}` (403).
+        for p in &projects {
+            if p.is_people() {
+                ids.insert(p.id.clone());
+            }
+        }
+    }
     *shared.projects.lock().unwrap() = projects.clone();
     *shared.chats.lock().unwrap() = chats;
     let _ = shared.events.send(SyncEvent::Projects(projects.clone()));
@@ -2490,6 +2509,10 @@ fn set_project_state(shared: &Shared, project_id: &str, state: BoxState, detail:
 
 /// Dial, drive [`RoomSession`], perform actions — forever, with backoff (§8.6).
 /// Protocol (HELLO, catch-up, PUSH/ACK, resend) lives in `arbos_client::room`.
+///
+/// Re-resolve the people-room path on every reconnect: a room task may start
+/// before the people registry lands, and a frozen `{chat}/{chat}` dial never
+/// joins `people/{chat}` (local sends stay optimistic; other devices see nothing).
 #[allow(clippy::too_many_arguments)]
 async fn room_loop(
     shared: Arc<Shared>,
@@ -2501,10 +2524,23 @@ async fn room_loop(
     mut local_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     mut cmd_rx: mpsc::UnboundedReceiver<RoomCmd>,
 ) {
-    let is_people = shared.people.lock().unwrap().contains(&room_chat);
+    let mut is_people = shared.is_people(&room_chat);
     let room = room::room_path(&project_id, &room_chat, is_people);
     let mut session = RoomSession::new(shared.device_id(), room, saved_cursor, saved_pending);
     loop {
+        let next_people = shared.is_people(&room_chat);
+        let next_room = room::room_path(&project_id, &room_chat, next_people);
+        if next_room != session.room() {
+            is_people = next_people;
+            session = RoomSession::new(
+                shared.device_id(),
+                next_room,
+                session.cursor(),
+                session.pending().to_vec(),
+            );
+        } else {
+            is_people = next_people;
+        }
         let outcome = run_session(
             &shared,
             &project_id,
