@@ -68,6 +68,14 @@ for config in Release Debug; do
     tail -30 "$log" | sed 's#/Users/[^/]*/arbos-gate/##'
   fi
   rm -f "$log"
-  [ "$crc" -eq 0 ] || rc=1
+  if [[ "$crc" -eq 0 ]]; then
+    fw="$HOME/arbos-gate-dd-$config/Build/Products/$config-iphonesimulator/Arbos.app/Frameworks/ArbosFFI.framework"
+    if [[ ! -d "$fw" ]]; then
+      echo "== $config: ArbosFFI.framework not embedded"
+      rc=1
+    fi
+  else
+    rc=1
+  fi
 done
 exit $rc
