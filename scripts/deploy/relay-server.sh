@@ -161,10 +161,20 @@ if command -v op >/dev/null 2>&1 && [[ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; th
   : "${LIVEKIT_API_KEY:=$(opread 'op://Arbos/ypyfs6fm7dtkzphirv6ep7lfjq/LIVEKIT_API_KEY')}"
   : "${LIVEKIT_API_SECRET:=$(opread 'op://Arbos/ypyfs6fm7dtkzphirv6ep7lfjq/LIVEKIT_API_SECRET')}"
 fi
+# Chats on Matrix (D88, scripts/deploy/matrix): the homeserver next to the relay and the three
+# appservice token pairs. ARBOS_MATRIX itself (off|dual|on) is an operator switch, never read from
+# the vault: it is kept from the env file and defaults to off.
+MATRIX_KEYS=(ARBOS_MATRIX ARBOS_MATRIX_HS_URL ARBOS_MATRIX_SERVER_NAME ARBOS_MATRIX_AS_TOKEN_USERS ARBOS_MATRIX_HS_TOKEN_USERS
+  ARBOS_MATRIX_AS_TOKEN_AGENTS ARBOS_MATRIX_HS_TOKEN_AGENTS ARBOS_MATRIX_AS_TOKEN_BRIDGES ARBOS_MATRIX_HS_TOKEN_BRIDGES)
+if command -v op >/dev/null 2>&1 && [[ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; then
+  for k in "${MATRIX_KEYS[@]:1}"; do
+    [[ -n "${!k:-}" ]] || printf -v "$k" '%s' "$(opread "op://Arbos/Arbos Matrix/$k")"
+  done
+fi
 # keep values already in the env file when nothing new was supplied
 if [[ -f "$ENV_FILE" ]]; then
   keep() { local k=$1; [[ -n "${!k:-}" ]] || printf -v "$k" '%s' "$(sed -n "s/^$k=//p" "$ENV_FILE" | head -1)"; }
-  for k in OPENROUTER_API_KEY OPENAI_API_KEY DAYTONA_API_KEY ARBOS_RELAY_ADMIN_TOKEN ARBOS_RELAY_KEY ARBOS_JWT_KEY ARBOS_GITHUB_CLIENT_ID ARBOS_GITHUB_CLIENT_SECRET ARBOS_DAYTONA_SNAPSHOT LIVEKIT_URL LIVEKIT_API_KEY LIVEKIT_API_SECRET; do keep "$k"; done
+  for k in OPENROUTER_API_KEY OPENAI_API_KEY DAYTONA_API_KEY ARBOS_RELAY_ADMIN_TOKEN ARBOS_RELAY_KEY ARBOS_JWT_KEY ARBOS_GITHUB_CLIENT_ID ARBOS_GITHUB_CLIENT_SECRET ARBOS_DAYTONA_SNAPSHOT LIVEKIT_URL LIVEKIT_API_KEY LIVEKIT_API_SECRET "${MATRIX_KEYS[@]}"; do keep "$k"; done
 fi
 [[ -n "${DAYTONA_API_KEY:-}" ]] || echo "WARNING: DAYTONA_API_KEY is empty — new projects will get process boxes"
 [[ -n "${OPENROUTER_API_KEY:-}${OPENAI_API_KEY:-}" ]] || echo "WARNING: no model provider key"
@@ -200,6 +210,10 @@ EOF
 if [[ -n "${LIVEKIT_API_KEY:-}" && -n "${LIVEKIT_API_SECRET:-}" ]]; then
   printf 'LIVEKIT_URL=%s\nLIVEKIT_API_KEY=%s\nLIVEKIT_API_SECRET=%s\n' "${LIVEKIT_URL:-wss://livekit.arbos.life}" "$LIVEKIT_API_KEY" "$LIVEKIT_API_SECRET" >> "$ENV_FILE"
 fi
+# Matrix (D88): only the keys that have a value; ARBOS_MATRIX unset means off.
+for k in "${MATRIX_KEYS[@]}"; do
+  [[ -z "${!k:-}" ]] || printf '%s=%s\n' "$k" "${!k}" >> "$ENV_FILE"
+done
 chmod 0600 "$ENV_FILE"; chown root:root "$ENV_FILE"
 umask 022
 
