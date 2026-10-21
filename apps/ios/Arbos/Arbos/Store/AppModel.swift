@@ -1185,6 +1185,10 @@ final class AppModel: ObservableObject {
                     }
                 } else if !touched.messages.isEmpty {
                     self.emitMessages(key, indexes: touched.messages)
+                    // Same kick project chats get via `chats` in markActivity — people
+                    // chats need it too so ChatView rebuilds while the thread is open
+                    // (streaming agent replies only touch message indexes).
+                    self.markActivity(chatId: key)
                 } else if self.messages[key] == nil, let doc = self.docs[key], doc.count > 0 {
                     // Checkpoint / bulk import sometimes reports no list path —
                     // still paint so home search can see the transcript.
@@ -1259,7 +1263,12 @@ final class AppModel: ObservableObject {
         for i in list.indices where list[i].role == .user {
             list[i].pending = pendingIds.contains(list[i].id)
         }
-        messages[chatId] = list
+        // Reassign the whole dictionary so `@Published` always fires. Subscript
+        // writes alone have left ChatView's `@State` rows stale for live inbound
+        // agent replies in an open people chat (desktop had the line; iPhone did not).
+        var next = messages
+        next[chatId] = list
+        messages = next
     }
 
     private func emitMessages(_ chatId: Id, indexes: Set<Int>) {
@@ -1281,7 +1290,9 @@ final class AppModel: ObservableObject {
         if needSnapshot {
             emitSnapshot(chatId)
         } else {
-            messages[chatId] = list
+            var next = messages
+            next[chatId] = list
+            messages = next
         }
     }
 
@@ -1303,6 +1314,16 @@ final class AppModel: ObservableObject {
                 chats[pid] = AppModel.sorted(updated)
                 return
             }
+        }
+        // People chats: mirror the project-chat `chats` write. Without this,
+        // live inbound rows while watching only touch `messages` — and when that
+        // publish is missed, ChatView keeps stale `@State` rows (`noteLiveUnread`
+        // no-ops while watching). Same bump local sends already do in commitPeople.
+        if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
+            var next = peopleChats
+            next[i].lastActivityAt = nowMs()
+            next.sort { $0.lastActivityAt > $1.lastActivityAt }
+            peopleChats = next
         }
     }
 
